@@ -229,6 +229,22 @@ old card is frozen with its own final content and a new one is opened. Cheap to 
 other direction too: inferring "new turn" from "already finished" misses the coalesced render that
 carries one turn's terminal and the next turn's first chunk together.
 
+**The body is bounded, but not yet bounded the way a live view should be.** A render is capped at
+20,000 characters — well under cardkit's 30,000-character element limit, and far under the ~109 KB
+message ceiling, because neither has been measured against a real tenant (§11) and a card that
+fails to render loses the whole answer rather than its tail.
+
+The cap currently keeps the **head**: the first 20,000 characters, then a truncation marker. That is
+right for a document and wrong for this surface. Past the bound, every later render of the same turn
+produces the same string, so the card stops changing while the agent is still writing — and the
+newest text is precisely what is discarded. A user cannot distinguish that from the two defects
+above, both of which presented as a card that had stopped moving. It is not a distant edge either: a
+measured 114-second turn ended at 15,606 characters, 78% of the bound.
+
+A live card should keep the newest text and elide the middle instead, since the log is the permanent
+record and the card is only a view of it. Recorded here rather than fixed, so it is not mistaken for
+a regression in the meantime.
+
 ### 4.2 Send idempotency
 
 Every IM send carries `uuid = truncate(sha256(canonical), 50)` where `canonical` includes
@@ -419,7 +435,9 @@ consult:
 
 1. **The real card size ceiling.** Field reports put the message-content limit near 109 KB (error
    `230025`), while the SDK's 30,000-char rollover is a cardkit *element* limit. Different paths,
-   different ceilings, and the answer changes the rollover math.
+   different ceilings, and the answer changes the rollover math. Until it is settled the render is
+   capped at 20,000 characters (§4.1) — a margin chosen to stay clear of the lower figure, not an
+   answer to which figure applies.
 2. **cardkit expiry at the 14-day edge.** The comparable implementation avoided cardkit entirely, so
    this path has no prior art at all.
 
