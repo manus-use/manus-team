@@ -39,6 +39,20 @@ import { systemClock } from '../time.js';
 export const CARD_COALESCE_MS = 1000;
 
 /**
+ * Consecutive card-write failures before the answer is delivered some other way.
+ *
+ * Retrying is right: most card failures are throttles, and the pending target is
+ * retained so a retry renders the newest state. Retrying *forever* is not. A card
+ * can fail permanently -- an entity the platform will not accept, a payload it
+ * rejects -- and the old behaviour was to re-attempt every second for the life of
+ * the process, silently, while the user watched a card that had stopped moving.
+ * The bound is small because the coalescing window is a second: five attempts is
+ * long enough to ride out a throttle and short enough that a real answer is not
+ * held hostage to a broken card.
+ */
+export const CARD_FAILURE_LIMIT = 5;
+
+/**
  * Card entities expire after 14 days. We rotate before the edge rather than at
  * it, because the failure at the edge is an update that silently stops landing.
  */
@@ -56,11 +70,20 @@ export interface CardWriterDeps {
   /** Derive the idempotency uuid for opening a card. */
   sendUuid: (eventSeq: number) => string;
   clock?: Clock;
+  /**
+   * Metadata-only progress hook. Never given agent text or user content.
+   *
+   * The card path had no voice at all until it had already lost two answers in
+   * production, both times looking exactly like an idle agent. Everything the
+   * writer swallows is reported here.
+   */
+  note?: (line: string) => void;
 }
 
 export class CardWriter {
   readonly #deps: CardWriterDeps;
   readonly #clock: Clock;
+  readonly #note: (line: string) => void;
   #session: CardSession | undefined;
   /** Highest seq we have been asked to render. The queue, as an integer. */
   #wanted = 0;
@@ -73,10 +96,13 @@ export class CardWriter {
   #finished = false;
   /** The `turnStartSeq` the open card belongs to. Meaningless while `#session` is unset. */
   #cardTurn = 0;
+  /** Consecutive failed writes. Reset by any success, checked against `CARD_FAILURE_LIMIT`. */
+  #failures = 0;
 
   constructor(deps: CardWriterDeps) {
     this.#deps = deps;
     this.#clock = deps.clock ?? systemClock;
+    this.#note = deps.note ?? (() => undefined);
   }
 
   /**
@@ -131,20 +157,75 @@ export class CardWriter {
       await this.#write(target);
       this.#rendered = target;
       this.#lastWriteAt = this.#clock.now();
+      this.#failures = 0;
       this.#deps.onRendered(target);
     } catch (err) {
+      this.#failures += 1;
+      this.#note(`card write through ${target} failed (${this.#failures}): ${describe(err)}`);
+
       if (err instanceof ChannelError && CARD_GONE_CODES.has(err.code)) {
         // The card is gone. Drop the session and let the next pass open a fresh
         // one, continuing from the cursor -- the log still has everything.
         this.#session = undefined;
         this.#deps.onCardChanged(null);
       }
-      // `#rendered` is deliberately not advanced, so `#wanted > #rendered` still
-      // holds and the retry renders the newest state rather than this stale one.
+
+      if (this.#failures >= CARD_FAILURE_LIMIT) {
+        // Out of patience with this card. The answer still has to arrive, so it
+        // goes out over the plain message path -- a different endpoint, which is
+        // the point: it does not share whatever the card is failing on.
+        // Guarded: `#drain` is called from a timer with no one to catch it, and
+        // the last thing a failing card path should do is become an unhandled
+        // rejection.
+        await this.#fallback(target).catch((e: unknown) =>
+          this.#note(`giving up on the card through ${target} failed: ${describe(e)}`),
+        );
+      }
+      // Short of that, `#rendered` is deliberately not advanced, so
+      // `#wanted > #rendered` still holds and the retry renders the newest state
+      // rather than this stale one.
     } finally {
       this.#inFlight = false;
       if (this.#wanted > this.#rendered && !this.#closed) this.#schedule();
     }
+  }
+
+  /**
+   * Deliver a render as an ordinary message, the card having refused enough times.
+   *
+   * The cursor advances either way. If the plain path fails too there is nothing
+   * left to try, and holding the cursor back would only re-attempt both failures
+   * every second for the life of the process -- the behaviour this exists to end.
+   * The content is in the log regardless; what is lost is a delivery, and that is
+   * said out loud rather than retried into silence.
+   */
+  async #fallback(target: number): Promise<void> {
+    // The state is settled *first*, and the reads and writes that can throw come
+    // after. This runs on the path where something is already failing, so it has
+    // to terminate the retry loop even if it cannot do anything else -- including
+    // when the render itself throws, which is what a closed database looks like.
+    const had = this.#session;
+    this.#session = undefined;
+    this.#failures = 0;
+    this.#rendered = target;
+    this.#lastWriteAt = this.#clock.now();
+
+    try {
+      const view = renderCard(this.#deps.readEvents(0, target));
+      await this.#deps.channel.sendText(
+        this.#deps.target,
+        view.text,
+        this.#deps.sendUuid(target),
+      );
+      this.#note(`gave up on the card through ${target}; sent it as a plain message`);
+    } catch (err) {
+      this.#note(`card and plain message both failed through ${target}: ${describe(err)}`);
+    }
+
+    // Done with this card whichever way that went. The next turn opens a new one;
+    // this one is not coming back.
+    if (had !== undefined) this.#deps.onCardChanged(null);
+    this.#deps.onRendered(target);
   }
 
   async #write(target: number): Promise<void> {
@@ -251,4 +332,18 @@ export class CardWriter {
   get renderedThrough(): number {
     return this.#rendered;
   }
+}
+
+/**
+ * One line of operational detail about a failure.
+ *
+ * Platform metadata only -- a code, a retry hint, the platform's own wording. The
+ * render is never in here: a log that quotes the card body is a second copy of the
+ * conversation with none of the retention rules that apply to the first.
+ */
+function describe(err: unknown): string {
+  if (err instanceof ChannelError) {
+    return err.retryable ? `${err.message}, retryable` : err.message;
+  }
+  return err instanceof Error ? err.message : String(err);
 }

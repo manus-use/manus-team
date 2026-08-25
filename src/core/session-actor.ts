@@ -193,6 +193,9 @@ export class SessionActor {
         }),
       sendUuid: (seq) => sendUuid(key.appId, sessionId, seq),
       clock,
+      // Prefixed, because a card failure is otherwise indistinguishable in the log
+      // from a session failure -- and they are fixed in different places.
+      note: (line) => this.#note(`card ${sessionId}: ${line}`),
     });
 
     // Adopt the persisted render cursor, so a restart re-renders from where the
@@ -711,7 +714,14 @@ export class SessionActor {
     // Card first. Its close awaits the final write and freezes the typing
     // indicator; doing it after the runtime teardown would leave a card claiming
     // work is in progress for however long shutdown takes.
-    await this.#cardWriter.close().catch(() => undefined);
+    // Reported, not just swallowed: the last write of the session is the one the
+    // user is left looking at, so losing it is worth a line even though shutdown
+    // carries on regardless.
+    await this.#cardWriter
+      .close()
+      .catch((err: unknown) =>
+        this.#note(`final card write failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
     await this.#teardownRuntime();
 
     // No broker sidecar in this slice: the runtime dies with the gateway. Saying

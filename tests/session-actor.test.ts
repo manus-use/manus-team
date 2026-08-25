@@ -142,6 +142,21 @@ describe('a turn that goes well', () => {
     expect(resolveBinding(h.db.db, KEY)?.cursorSeq).toBe(lastSeq(h.db.db, 's_1'));
   });
 
+  it('says which session a failing card belongs to', async () => {
+    // The card path had no voice at all until it had already lost two answers in
+    // production, both times looking exactly like an idle agent. A card failure
+    // and a session failure are also fixed in different places, so the line has to
+    // distinguish them.
+    const h = harness();
+    h.channel.failNext('openCard', new ChannelError(99991400, 'throttled', true));
+    await h.submit();
+    await h.actor.flushCard();
+
+    const line = h.notes.find((n) => n.includes('card write'));
+    expect(line).toContain('card s_1');
+    expect(line).toContain('99991400');
+  });
+
   it('reuses one runtime across turns', async () => {
     const h = harness();
     await h.submit('one', 'om_1');

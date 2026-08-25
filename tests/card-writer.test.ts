@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CARD_MAX_AGE_MS, CardWriter } from '../src/channel/card-writer.js';
+import { CARD_FAILURE_LIMIT, CARD_MAX_AGE_MS, CardWriter } from '../src/channel/card-writer.js';
 import { ChannelError } from '../src/channel/types.js';
 import type { Event, EventType } from '../src/types.js';
 import { FakeChannel } from './helpers/channel.js';
@@ -33,6 +33,7 @@ interface Harness {
   submit(text: string): number;
   rendered: number[];
   cardChanges: Array<string | null>;
+  notes: string[];
 }
 
 function harness(): Harness {
@@ -41,6 +42,7 @@ function harness(): Harness {
   const log: Event[] = [];
   const rendered: number[] = [];
   const cardChanges: Array<string | null> = [];
+  const notes: string[] = [];
 
   const writer = new CardWriter({
     channel,
@@ -51,6 +53,7 @@ function harness(): Harness {
     onCardChanged: (id) => cardChanges.push(id),
     sendUuid: (seq) => `uuid_${seq}`,
     clock,
+    note: (line) => notes.push(line),
   });
 
   return {
@@ -60,6 +63,7 @@ function harness(): Harness {
     log,
     rendered,
     cardChanges,
+    notes,
     chunk(text: string): number {
       const seq = log.length + 1;
       log.push(ev(seq, 'agent_message_chunk', { text }));
@@ -351,6 +355,101 @@ describe('CardWriter', () => {
 
     expect(h.channel.cards).toHaveLength(1);
     expect(h.channel.calls).toEqual(['openCard', 'set', 'finish']);
+  });
+
+  it('reports a swallowed failure instead of retrying in silence', async () => {
+    const h = harness();
+    h.writer.want(h.chunk('an answer nobody should log'));
+    h.channel.failNext('openCard', new ChannelError(99991400, 'throttled', true));
+    await h.writer.flushNow();
+
+    expect(h.notes).toHaveLength(1);
+    expect(h.notes[0]).toContain('99991400');
+    expect(h.notes[0]).toContain('retryable');
+    // Operational metadata only: the log must not become a second copy of the
+    // conversation, with none of the retention rules that apply to the first.
+    expect(h.notes[0]).not.toContain('an answer nobody should log');
+  });
+
+  it('sends the answer as a plain message once the card is hopeless', async () => {
+    // A card can fail permanently -- an entity the platform will not accept, a
+    // payload it rejects. Retrying that every second forever is how a real answer
+    // ends up hostage to a broken card.
+    const h = harness();
+    h.writer.want(h.chunk('the answer'));
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) {
+      h.channel.failNext('openCard', new ChannelError(230025, 'card too large', false));
+    }
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) await h.writer.flushNow();
+
+    expect(h.channel.texts).toHaveLength(1);
+    expect(h.channel.texts[0]?.text).toContain('the answer');
+    expect(h.notes.at(-1)).toContain('plain message');
+  });
+
+  it('stops attempting the card it gave up on', async () => {
+    const h = harness();
+    h.writer.want(h.chunk('a'));
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) {
+      h.channel.failNext('openCard', new ChannelError(230025, 'card too large', false));
+    }
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) await h.writer.flushNow();
+    const after = h.channel.calls.length;
+
+    await h.writer.flushNow();
+    await h.writer.flushNow();
+    expect(h.channel.calls).toHaveLength(after);
+    // The cursor moves, because the content was delivered -- by another route.
+    expect(h.rendered).toEqual([1]);
+  });
+
+  it('tries a card again on the next turn', async () => {
+    // Giving up is about one card, not about cards. The next prompt gets the
+    // normal treatment.
+    const h = harness();
+    h.writer.want(h.chunk('a'));
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) {
+      h.channel.failNext('openCard', new ChannelError(230025, 'card too large', false));
+    }
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) await h.writer.flushNow();
+
+    h.submit('next ask');
+    h.writer.want(h.chunk('b'));
+    await h.writer.flushNow();
+
+    expect(h.channel.cards).toHaveLength(1);
+    expect(h.channel.lastCard?.text).toContain('b');
+    expect(h.cardChanges.at(-1)).toBe(h.channel.lastCard?.messageId);
+  });
+
+  it('keeps its patience for the card while writes are still landing', async () => {
+    // The bound is on *consecutive* failures. A throttle every other second is a
+    // working card, not a hopeless one.
+    const h = harness();
+    for (let i = 0; i < CARD_FAILURE_LIMIT * 2; i += 1) {
+      h.writer.want(h.chunk('x'));
+      if (i % 2 === 0) h.channel.failNext('set', new ChannelError(99991400, 'throttled', true));
+      await h.writer.flushNow();
+    }
+    expect(h.channel.texts).toEqual([]);
+  });
+
+  it('gives up rather than loop when the plain path fails too', async () => {
+    // Nothing left to try. Holding the cursor back would re-attempt both failures
+    // every second for the life of the process, which is the behaviour being fixed.
+    const h = harness();
+    h.writer.want(h.chunk('a'));
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) {
+      h.channel.failNext('openCard', new ChannelError(230025, 'card too large', false));
+    }
+    h.channel.failNext('sendText', new ChannelError(230025, 'too large either way', false));
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) await h.writer.flushNow();
+
+    expect(h.notes.at(-1)).toContain('both failed');
+    expect(h.rendered).toEqual([1]);
+    const after = h.channel.calls.length;
+    await h.writer.flushNow();
+    expect(h.channel.calls).toHaveLength(after);
   });
 
   it('flushes what is outstanding before closing', async () => {

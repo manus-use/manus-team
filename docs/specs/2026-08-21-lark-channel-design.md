@@ -209,6 +209,17 @@ the result of a user's click.
 Card rebuilds are coalesced to ~1/s/session. Updates are last-write-wins, so intermediates are
 droppable by construction.
 
+**Retry is bounded, and every swallowed failure is reported.** The pending target surviving a
+failure is what makes retry safe, and it also made it endless: a card that fails permanently — an
+entity the platform will not accept, a payload it rejects — was re-attempted every second for the
+life of the process, silently, while the user watched a card that had stopped moving. Both card
+defects found in production were invisible for this reason. So: every failure goes to the
+metadata-only `note` hook with the platform's code, and after five consecutive failures the render
+is delivered over the plain message endpoint instead — a different API path, which is the point.
+The cursor then advances, because the content did arrive. If the plain path fails too, that is said
+out loud and the cursor advances anyway; holding it back would only re-attempt both failures
+forever, and the content is in the log regardless.
+
 **One card per turn, and the render is scoped to that turn.** A streaming card is one stream, and
 the terminal that stops its typing indicator closes it: an update afterwards is *accepted and
 discarded* — no change, no error. Reusing one card for a whole session therefore answered the first
