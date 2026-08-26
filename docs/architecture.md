@@ -1,8 +1,39 @@
 # prime-gateway — Architecture Design
 
-**Version:** 0.1 (design draft)
+**Version:** 0.2 — design, reconciled against the code
 **Primary constraint:** long-lived durable sessions
-**Primary protocol:** ACP (Agent Client Protocol), structured CLI and PTY as fallbacks
+**Primary protocol:** ACP by design; **structured CLI is the only one that currently works**
+
+---
+
+## Status, and the order things actually got built
+
+§15 prescribes a build order that begins with the broker and reaches channels at step 8. That
+order was **inverted in practice**, and the doc reads as though it wasn't. What exists:
+
+| Built | Designed, not built |
+|---|---|
+| Event log, sessions, bindings, turns, approvals, workspaces, snapshots *tables* (`schema/001`) | Broker sidecar and spool (§4) — nothing |
+| Per-session actor, single writer, generations (§11) | `ExecutionBackend` (§7) — no interface; only the `execution_backend` column |
+| Lark channel end to end (§12, and `docs/specs/2026-08-21-lark-channel-design.md`) | Two-phase start, boot reconciliation (§8) |
+| Structured-CLI driver (§6.3) | Worktrees, checkpoints (§9) |
+| Approvals schema + card surface | Snapshot *writer* (§3.6) — table only |
+| Policy/auth tiers (§13) | PTY driver (§6.4) |
+| ACP driver, written but unusable against the available agent | Cold/rehydrate tiering (§5) as a real tier |
+
+Two reasons for the inversion, both worth keeping in view because they are still true:
+
+1. **Nothing could be used without a channel.** A durable log with no way to send it a prompt
+   cannot be exercised by real work, so the failure modes it exists to survive never occur.
+2. **ACP was not available.** The one agent to hand speaks ACP only in a beta build that
+   authenticates separately and never streams its answer, which forced §6.3 — listed at
+   milestone 11 — to become the first driver.
+
+What the inversion costs, stated plainly: **there is no reattachment.** The gateway owns agent
+stdio directly, which Appendix B lists as a rejected alternative. A gateway restart kills the
+running turn. We are running the bare `process` backend that §7 calls "never the default". The
+log survives; the turn does not. That is the gap between this document and this build, and it is
+the whole of milestones 2–4.
 
 ---
 
@@ -118,7 +149,10 @@ Most combinations are legal. The illegal ones are declared as compatibility cons
 
 ## 3. Core data model
 
-SQLite, WAL mode, single file at `$PGW_HOME/prime.db`.
+SQLite, WAL mode, single file at `$PGW_HOME/gateway.db` (`PGW_DB` or `db:` overrides it).
+
+`schema/001_initial.sql` and `schema/002_lark_channel.sql` are the authority for everything in
+this section; where the DDL below differs, the migrations win.
 
 ### 3.1 The event log
 
@@ -154,48 +188,54 @@ CREATE INDEX idx_events_type ON events(session_id, type, seq);
 
 ### 3.2 Event taxonomy
 
+`EventType` in `src/types.ts` is the authority. Names are `snake_case`, not dotted — an earlier
+revision of this section used dotted names that were never implemented.
+
 ```
-session.created            { agent_id, workspace_id, created_by }
-session.state_changed      { from, to, reason }
-session.title_set          { title }
+inbound_message            a message arrived and was accepted
+policy_rejected            it was refused, and why
+binding_resolved           which session a conversation resolved to
+command_invoked            a control command was recognised
 
-runtime.start_requested    { generation, handle, spec }      ← phase 1 of two-phase start
-runtime.started            { generation, handle, pid, backend }
-runtime.attached           { generation, from_offset }
-runtime.detached           { generation, reason }
-runtime.exited             { generation, code, signal }
-runtime.lost               { generation }                    ← probe returned Gone
-runtime.start_failed       { generation, error }
+turn_submitted             a prompt became a turn
+turn_delivery_ambiguous    delivery could not be established; carries the fence
+turn_ended                 { terminal }  -- see below
 
-provider.session_observed  { provider_session_id, source }   ← may fire repeatedly; last wins
-provider.auth_required     { scope, message }
+agent_message_chunk        streamed answer text
+agent_thought_chunk        streamed reasoning
+tool_call                  a tool started
+tool_call_update           its status changed
+plan                       the agent's own plan, raw
+usage                      token/cost report, raw
 
-turn.submitted             { turn_id, content, idempotency_key }
-turn.delivery              { turn_id, state: confirmed|rejected|ambiguous }
-turn.started               { turn_id }
-turn.completed             { turn_id, stop_reason }
-turn.failed                { turn_id, error }
-turn.cancelled             { turn_id, by }
-turn.indeterminate         { turn_id, reason }
+approval_requested
+approval_resolved
 
-msg.delta                  { turn_id, text }
-msg.thought                { turn_id, text }
-tool.started               { turn_id, tool_call_id, kind, input }
-tool.output                { turn_id, tool_call_id, chunk_ref }
-tool.completed             { turn_id, tool_call_id, status, output_ref }
-file.changed               { turn_id, path, change_kind }
-terminal.output            { turn_id, terminal_id, chunk_ref }
-
-approval.requested         { approval_id, turn_id, action, description, expires_at }
-approval.auto_resolved     { approval_id, outcome, rule_id }
-approval.resolved          { approval_id, outcome, by, channel }
-approval.parked            { approval_id }
-
-workspace.checkpoint       { commit_sha, label }
-usage.reported             { input, output, cache_read, cache_write, cost_usd }
-channel.bound              { channel, account_id, conversation_id }
-channel.unbound            { channel, conversation_id }
+session_created
+session_state_changed
+generation_bumped          a new runtime incarnation
+agent_error
 ```
+
+**One `turn_ended`, not four event types.** An earlier revision had
+`turn.completed | failed | cancelled | indeterminate` as separate types. They are one event with
+a graded terminal — `completed | failed | cancelled | ambiguous` — mirrored in `turns.terminal`
+(migration 002). The reason is that the *evidence* differs, not the shape: non-empty final text
+is not a completion contract, empty output is still a terminal, and cancellation is a terminal
+rather than a deletion. Four types invite four code paths where one decision belongs.
+
+**Tool events mirror ACP, and do not split output.** `tool_call` / `tool_call_update` carry the
+vendor payload raw. The earlier `tool.output { chunk_ref }` presumed the broker spool, which does
+not exist yet — until it does, tool output rides inside the update payload.
+
+**Not implemented, and their absence is load-bearing.** There are no `runtime.*` events
+(start_requested, started, attached, detached, exited, lost, start_failed): those are the
+two-phase start of §8, and without them a crash between spawn and record is exactly the invisible
+orphan §8.1 describes. `generation_bumped` is the only runtime-lifecycle event that exists. There
+is likewise no `provider.session_observed` — §6.3 still says the provider session id is observed
+continuously, and nothing writes `sessions.provider_session_id`. No `workspace.checkpoint`
+(milestone 9), no `file.changed`, no `terminal.output`, no `approval.parked` or
+`approval.auto_resolved` (parking and the policy engine of §10 are schema-only).
 
 ### 3.3 Sessions
 
@@ -207,7 +247,8 @@ CREATE TABLE sessions (
   agent_id             TEXT NOT NULL,
   workspace_id         TEXT NOT NULL,
   owner_principal      TEXT NOT NULL,
-  state                TEXT NOT NULL,      -- see §5
+  state                TEXT NOT NULL,      -- see §5; the migration also allows
+                                           -- 'unknown' and 'terminated'
   title                TEXT,
 
   generation           INTEGER NOT NULL DEFAULT 0,
@@ -219,6 +260,7 @@ CREATE TABLE sessions (
   fork_of_session_id   TEXT REFERENCES sessions(id),
 
   last_seq             INTEGER NOT NULL DEFAULT 0,
+  last_ingested_offset INTEGER NOT NULL DEFAULT 0,   -- byte offset into the spool; §4.6.3
   snapshot_seq         INTEGER NOT NULL DEFAULT 0,
   created_at           INTEGER NOT NULL,
   last_activity_at     INTEGER NOT NULL,
@@ -332,6 +374,33 @@ wal_checkpoint(PASSIVE) every 50 writes
 ```
 
 The short timeout plus jitter avoids the convoy effect where SQLite's deterministic internal backoff makes all writers retry in lockstep.
+
+### 3.8 What migration 002 added, and why some of it is core
+
+`schema/002_lark_channel.sql` arrived with the Lark channel, but three of its additions are not
+channel-specific and belong to this section rather than to a channel spec. Details and reasoning
+are in [`specs/2026-08-21-lark-channel-design.md`](specs/2026-08-21-lark-channel-design.md).
+
+- **`seen_messages` — durable inbound dedup.** §3 had no dedup table at all. Any at-least-once
+  inbound transport needs one, and it must be durable rather than in-memory: an SDK that ACKs on
+  receipt never redelivers what we drop, so a restart that forgets what it saw is a lost message
+  rather than a duplicated one. Keyed on the platform's stable message id, never on a re-minted
+  event id and never on a payload hash — the same delivery is deduped, the same *intent* is not,
+  because two identical button clicks are two decisions.
+- **Outbound idempotency, which G6 has no twin for.** G6 says no turn is silently executed twice;
+  the outbound equivalent — no answer is silently *sent* twice — was missing. Every send carries
+  `uuid = truncate(sha256(canonical), 50)` over `(app_id, session_id, event_seq)`, so a
+  crash-replay reuses the message instead of posting the answer again. `app_id` is in there because
+  two bots writing the same text to the same chat are distinct effects, not a duplicate.
+- **`channel_bindings.revoked_at` — revoke, never delete.** Rotating a session leaves the old
+  binding in place, revoked. A late redelivery then resolves to a revoked binding and is discarded,
+  instead of resurrecting the session that was rotated away. The lookup index is partial on
+  `revoked_at IS NULL`.
+
+Also added, and genuinely channel-specific: `active_card_id` / `active_message_id` /
+`card_created_at` on bindings, and `option_id` / `options` / `card_message_id` on approvals. The
+`options` column matters beyond Lark, though — it stores the option set **as the agent offered
+it**, which is what §6.1's permission callback requires.
 
 ---
 
@@ -556,28 +625,62 @@ This is the single highest-leverage decision in the design. Do not make `cold` a
 
 ### 6.1 Interface
 
+As built (`src/driver/types.ts`). It differs from the sketch an earlier revision carried in three
+ways that are worth stating, because each was a decision rather than a shortcut.
+
 ```ts
-interface AgentDriver {
-  readonly transport: 'acp' | 'structured-cli' | 'pty';
-
-  // Broker-side. Runs inside the broker, not the gateway.
-  handshake(proc: AgentProcess): Promise<NegotiatedCaps>;
-  openSession(spec: SessionSpec): Promise<ProviderSessionId>;
-  loadSession(id: ProviderSessionId, onReplay: (e: Event) => void): Promise<void>;
-  resumeSession?(id: ProviderSessionId): Promise<void>;   // only if caps.resume === 'native'
-
-  prompt(turnId: string, content: Content[]): Promise<DeliveryResult>;
-  cancel(turnId: string): Promise<void>;
-  resolvePermission(reqId: string, outcome: Outcome): Promise<void>;
-
-  events(): AsyncIterable<NormalizedEvent>;
+interface Driver {
+  readonly id: string;
+  start(opts: StartOptions): Promise<{ runtime: AgentRuntime; result: StartResult }>;
 }
 
-type DeliveryResult =
-  | { state: 'confirmed' }
-  | { state: 'rejected'; error: string }
-  | { state: 'ambiguous'; fence: string };   // NEVER auto-retry on this
+interface StartResult {
+  providerSessionId: string;
+  mode: 'fresh' | 'resumed' | 'replayed';
+}
+
+interface AgentRuntime {
+  readonly providerSessionId: string;
+  prompt(input: PromptInput): AsyncIterable<DriverEvent>;
+  cancel(): Promise<void>;
+  close(): Promise<void>;      // idempotent, must not throw, never a durability boundary
+}
 ```
+
+1. **It runs in the gateway, not the broker.** The sketch said "broker-side"; there is no broker.
+   This is the durability gap, recorded at the top of this document, not a change of mind.
+2. **`fresh | resumed | replayed` is a *result*, not three methods.** `openSession`,
+   `loadSession` and `resumeSession?` collapse into one `start` that reports which of the three
+   happened. The caller almost never wants to choose — it wants the session usable and wants to
+   know what it got, because "resumed" and "replayed" differ in what the agent remembers. The
+   automatic `native → replay` degrade of §6.5 lives inside `start`.
+3. **Streaming is per-turn, not a session-wide `events()`.** `prompt` returns an
+   `AsyncIterable<DriverEvent>` that ends at `turn-ended` or a terminal `error`. A single global
+   stream makes "which turn is this chunk for" a correlation problem; an iterator per turn makes
+   it structural. The cost is that abandoning the iterator mid-turn leaks the underlying RPC, so
+   consuming it fully is the caller's contract.
+
+**Permission resolution is a callback on the event, not a method on the driver.** There is no
+`resolvePermission(reqId, outcome)`. The `permission-request` event carries its own
+`resolve: (outcome) => void`, which must be called exactly once:
+
+```ts
+| { kind: 'permission-request'; requestId: string; action: string;
+    options: PermissionOption[]; raw: unknown;
+    resolve: (outcome: { kind: 'selected'; optionId: string }
+                     | { kind: 'cancelled' }) => void }
+```
+
+The reason is the failure mode. A request id resolved through a separate method can be dropped by
+any code path that throws in between, and dropping it does not fail the turn — it blocks the
+agent forever, which is both worse and far harder to notice. Carrying `resolve` on the event puts
+the obligation where the compiler and the reader can both see it. `options` come from the agent,
+never from us: hardcoding allow/deny invents outcomes the agent did not offer and discards ones it
+did.
+
+`DeliveryResult` as a driver return type does not exist. Delivery grading survives as the
+`turn_delivery_ambiguous` event and `turns.fence`; over a JSON-RPC transport delivery is confirmed
+by the protocol, so the fence is a PTY concern (§6.4) that never needed to reach this interface.
 
 ### 6.2 ACP driver — the default, covers ~everything
 
@@ -607,7 +710,29 @@ ACP is not just one option among three. It already specifies most of what the ga
 
 ### 6.3 Structured-CLI driver
 
-For agents with a JSON/JSONL mode but no ACP path. `claude -p --output-format stream-json --input-format stream-json` is the reference case.
+**This is the driver in production, not a fallback.** Listed at milestone 11 and reached first,
+because the available agent's ACP build does not stream. The reference case is now `bytesec run
+--format json`, and what follows is measured against it rather than inferred.
+
+**It streams, and the channel is therefore genuinely interactive.** Over a 114-second turn:
+`text_delta`, `tool_running` and `tool_completed` arrived continuously from +6.7 s, 384 message
+chunks and 15 tool calls, spanning 107.5 s of the turn. The card writer's ~1/s coalescing is the
+rate limit, not the agent.
+
+**One process per turn, and no resume.** The driver spawns per turn and cannot continue a
+conversation, so each turn re-sends the prior conversation as a fenced transcript in the prompt —
+the agent recovers what was *said*, not the tool state behind it. This is not a gap in the
+implementation: the CLI has no resume. `--session <id>` was measured and does **not** continue a
+conversation (identical input-token count, `turn: 1` again, no memory of the prior turn, and a new
+session id in `bytesec session list`); its help text scopes it to `/goal` lifecycle operations.
+`--session-id-file` writes the id the agent chose, which is worth capturing for cost attribution
+(§16.4), tracing, and deleting the orphan session each turn leaves behind — but not for resume.
+
+**A misconfiguration can be silent, because the failure text goes to stdout.** A bad argv makes
+the CLI print its usage banner to *stdout* and exit 1, leaving stderr empty. The driver's error
+message quotes stderr, so the user sees "agent process exited (code 1) without finishing the turn"
+with no reason attached. Anything that diagnoses a failed spawn must consider stdout, not just the
+exit code and stderr.
 
 **Provider session ID is observed, never assumed.** Two independent confirmations that it can diverge from what you passed in: the CLI's interactive mode generates its own internal UUID for persistence separate from `--session-id`, and existing bridges report the native ID rotating mid-process, forcing them to watch transcripts and update the mapping continuously. Therefore:
 
@@ -892,26 +1017,38 @@ Do not let these become three separate mechanisms.
 
 ## 12. Channels
 
+An earlier revision had one `ChannelAdapter` interface owning transport, rendering and pacing,
+with a `caps` object. It came apart into three pieces in the build, and the split is worth keeping:
+
 ```ts
-interface ChannelAdapter {
-  connect(): Promise<void>;
-  disconnect(): Promise<void>;
-
-  // inbound
-  onEvent(cb: (e: InboundEvent) => void): void;   // normalized, principal-resolved
-
-  // outbound: render a slice of the event log
-  render(sessionId: string, events: Event[], cursor: number): Promise<number>;
-
-  readonly caps: {
-    streaming: boolean;        // token-level SSE vs whole messages
-    editMessages: boolean;     // Telegram edits vs SMS append-only
-    interactiveButtons: boolean;
-    maxMessageLen: number;
-    rateLimit: RateLimit;
-  };
+// 1. Transport. Vendor-shaped effects only. Every send is uuid-idempotent.
+interface Channel {
+  readonly id: string;
+  sendText(target: SendTarget, text: string, uuid: string): Promise<SendResult>;
+  openCard(target: SendTarget, initialText: string, uuid: string): Promise<CardSession>;
+  sendApprovalCard(target: SendTarget, spec: ApprovalCardSpec, uuid: string): Promise<SendResult>;
 }
+
+// 2. Projection. Pure: events in, text out. No I/O, no clock.
+renderCard(events: readonly Event[]): RenderedCard
+
+// 3. Pacing. Single-flight, latest-wins, coalescing, cursor-advancing.
+class CardWriter { want(seq): void; close(): Promise<void> }
 ```
+
+Why not one interface: `render(sessionId, events, cursor)` returning a cursor makes the *pure*
+part — the part with all the escaping, truncation and turn-scoping decisions in it — reachable
+only through a network call. Splitting it means the projection is tested exhaustively with no
+transport at all, and the pacing logic (single-flight, coalescing, bounded retry, fallback to a
+different endpoint) is tested with a fake card that models the platform's freeze semantics. Both
+production defects found in this layer lived in the *seam* between them, and neither would have
+been reachable in a test if the seam had not existed.
+
+`caps` never got built. With one channel it would have been speculative, and the two capabilities
+that actually mattered — that a card is a single stream which freezes on finish, and that
+`sendText` is a separate endpoint from card updates — are expressed as types (`CardSession`) and
+as the writer's fallback path rather than as booleans. Reintroduce `caps` when the second channel
+demands it, and expect it to be a different set than the one guessed above.
 
 ### Channels are projections over the event log
 
@@ -985,22 +1122,27 @@ Also verify current billing behaviour for third-party agent paths (ACP, Agent SD
 
 Steps 1–4 are unglamorous and *are* the durability guarantee. Building channels and routing first means retrofitting reattachment later, which means rewriting the session manager.
 
-| # | Milestone | Done when |
-|---|---|---|
-| 1 | Event log + snapshots + write-contention tuning | can replay a session's state from `events` alone |
-| 2 | Fake-agent harness + broker + tmux backend: `start`/`attach`/`probe`/`discover` + spool | `docs/testing/durability.md` T-00 through T-06 pass in CI |
-| 3 | Two-phase start + boot reconciliation | T-07 through T-15 pass; crash between phases, orphan is adopted not lost |
-| 4 | Cold / rehydrate tiering | idle timeout exercises recovery continuously |
-| 5 | ACP driver, one agent end-to-end, resume declared in registry | resume works and falls back when the ID expires |
-| 6 | Approvals with policy engine + parking + cross-channel resolution | approve from web what Telegram asked |
-| 7 | Second ACP agent | **audits your abstractions** — expect to find leaks here |
-| 8 | Channel adapters (web SSE first, then Telegram) | cursor-based reconnect works |
-| 9 | Workspaces: worktree + checkpoints | can diff what the agent did overnight |
-| 10 | Container backend | isolation for untrusted work |
-| 11 | Structured-CLI driver | for agents without ACP |
-| 12 | PTY driver + delivery fence | only if genuinely required |
+| # | Milestone | Done when | Status |
+|---|---|---|---|
+| 1 | Event log + snapshots + write-contention tuning | can replay a session's state from `events` alone | log and tuning done; **snapshots are a table with no writer** |
+| 2 | Fake-agent harness + broker + tmux backend: `start`/`attach`/`probe`/`discover` + spool | `docs/testing/durability.md` T-00 through T-06 pass in CI | not started |
+| 3 | Two-phase start + boot reconciliation | T-07 through T-15 pass; crash between phases, orphan is adopted not lost | not started |
+| 4 | Cold / rehydrate tiering | idle timeout exercises recovery continuously | partial — the registry retires idle actors; there is no cold tier to rehydrate *from* |
+| 5 | ACP driver, one agent end-to-end, resume declared in registry | resume works and falls back when the ID expires | driver written, **no working ACP agent to run it against** |
+| 6 | Approvals with policy engine + parking + cross-channel resolution | approve from web what Telegram asked | schema and card surface done; **no policy engine, no parking**, and unreachable on the CLI driver |
+| 7 | Second ACP agent | **audits your abstractions** — expect to find leaks here | not started |
+| 8 | Channel adapters (web SSE first, then Telegram) | cursor-based reconnect works | **done first**, and it is Lark rather than web or Telegram |
+| 9 | Workspaces: worktree + checkpoints | can diff what the agent did overnight | not started — `plain-dir` only, one shared directory for every session |
+| 10 | Container backend | isolation for untrusted work | not started |
+| 11 | Structured-CLI driver | for agents without ACP | **done second, and it is the only driver that runs** |
+| 12 | PTY driver + delivery fence | only if genuinely required | not started, and no longer expected to be |
 
 Milestone 7 is the real test. If adding the second agent requires touching the gateway core, the driver abstraction is wrong and it's cheap to fix now.
+
+**Where to resume.** The order above is still the right order for the *remaining* work: 2 → 3 → 4
+buy reattachment, which is the primary constraint and the one thing this build does not have. The
+cheapest thing that increases durability before then is milestone 9's checkpoints, because a turn
+killed by a restart at least becomes diffable.
 
 ---
 
