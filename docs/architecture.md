@@ -1,6 +1,6 @@
 # manus-team — Architecture Design
 
-*Formerly `prime-gateway`. The old `PGW_*` variables and the `~/.prime-gateway` home are still read during the transition (kanban spec §13).*
+*Formerly `prime-gateway`, with `PGW_*` variables and a `~/.prime-gateway` home; renamed in full (kanban spec §13).*
 
 **Version:** 0.2 — design, reconciled against the code
 **Primary constraint:** long-lived durable sessions
