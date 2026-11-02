@@ -221,7 +221,7 @@ function locate(env: Env, readFile: FileReader): Located {
   return { home, path, text, file };
 }
 
-function teamSettingsFrom(env: Env, { home, path, text, file }: Located): TeamSettings {
+function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: LoadOptions = {}): TeamSettings {
   const single = envString(env, 'MT_WORKSPACE') ?? file.workspace;
   if (single !== undefined && file.workspaces['default'] !== undefined) {
     throw new ConfigError(
@@ -264,7 +264,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located): TeamSe
         'unset them; otherwise also set MT_AGENT_COMMAND',
     );
   }
-  const agent = file.agentPresent || agentVariables.length > 0 ? legacyAgent(env, file) : undefined;
+  const agent = file.agentPresent || agentVariables.length > 0 ? legacyAgent(env, file, opts) : undefined;
   return {
     home,
     configPath: text === undefined ? undefined : path,
@@ -275,12 +275,16 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located): TeamSe
 }
 
 /** The team half of the configuration, for `loadTeam` and the `mt` commands. */
-export function loadTeamSettings(env: Env = process.env, readFile: FileReader = readIfPresent): TeamSettings {
-  return teamSettingsFrom(env, locate(env, readFile));
+export function loadTeamSettings(
+  env: Env = process.env,
+  readFile: FileReader = readIfPresent,
+  opts: LoadOptions = {},
+): TeamSettings {
+  return teamSettingsFrom(env, locate(env, readFile), opts);
 }
 
 /** The legacy `agent:` block, with its `MT_AGENT_*` overrides applied. */
-function legacyAgent(env: Env, file: FileConfig): AgentConfig {
+function legacyAgent(env: Env, file: FileConfig, opts: LoadOptions = {}): AgentConfig {
   const command =
     envString(env, 'MT_AGENT_COMMAND') ??
     file.agent.command ??
@@ -295,7 +299,13 @@ function legacyAgent(env: Env, file: FileConfig): AgentConfig {
     driver,
     command,
     args,
-    env: agentEnv(env, file.agent.passEnv),
+    // The MT_/LARK_ refusal still applies to every name: passEnvValues checks it first.
+    env: agentEnv(
+      opts.unsetPassEnv === undefined
+        ? env
+        : withUnsetRecorded('default', env, file.agent.passEnv, opts.unsetPassEnv),
+      file.agent.passEnv,
+    ),
     unsupervised,
     passEnv: file.agent.passEnv,
     readOnlyTools: file.agent.readOnlyTools,
@@ -401,6 +411,30 @@ export function passEnvValues(
     out[name] = value;
   }
   return out;
+}
+
+/** How strictly the team is loaded. */
+export interface LoadOptions {
+  /**
+   * When given, a `passEnv` name that is not set is recorded here as `role: NAME`
+   * instead of failing. `mt role check` reports this shell's environment apart
+   * from the files (spec §2.6); the other `mt` commands need only names and paths.
+   * The gateway itself never passes it.
+   */
+  unsetPassEnv?: string[];
+}
+
+/** `env`, with each unset `passEnv` name recorded in `unset` and given a placeholder. */
+export function withUnsetRecorded(role: string, env: Env, passEnv: readonly string[], unset: string[]): Env {
+  const filled: Record<string, string | undefined> = { ...env };
+  for (const key of passEnv) {
+    const value = env[key];
+    if (value === undefined || value === '') {
+      unset.push(`${role}: ${key}`);
+      filled[key] = '(unset)';
+    }
+  }
+  return filled;
 }
 
 /**

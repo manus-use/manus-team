@@ -5,6 +5,7 @@ import {
   type AgentConfig,
   ConfigError,
   type Env,
+  type LoadOptions,
   agentArgs,
   bool,
   checkCommand,
@@ -16,6 +17,7 @@ import {
   str,
   strings,
   subsection,
+  withUnsetRecorded,
 } from './config.js';
 import type { KnownDriver } from './driver/registry.js';
 import { parseEnvFile } from './dotenv.js';
@@ -124,6 +126,7 @@ export function loadRoleDir(
   dir: string,
   env: Env,
   workspaceNames: ReadonlySet<string>,
+  opts: LoadOptions = {},
 ): { role: Role; notes: string[] } {
   const configPath = join(dir, 'config.yaml');
   let text: string;
@@ -175,7 +178,9 @@ export function loadRoleDir(
   requireSupervisionMatch(driver, unsupervised);
 
   const passEnv = strings(configPath, 'agent.passEnv', agentRaw['passEnv']);
-  const fromGateway = passEnvValues(env, passEnv, `${configPath}: agent.passEnv`);
+  // The MT_/LARK_ refusal still applies to every name: passEnvValues checks it first.
+  const lookup = opts.unsetPassEnv === undefined ? env : withUnsetRecorded(name, env, passEnv, opts.unsetPassEnv);
+  const fromGateway = passEnvValues(lookup, passEnv, `${configPath}: agent.passEnv`);
   const fromFile = readRoleEnv(dir);
   for (const key of Object.keys(fromFile)) {
     if (passEnv.includes(key)) {

@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { type AgentConfig, ConfigError, type Env, type TeamSettings } from './config.js';
+import { type AgentConfig, ConfigError, type Env, type LoadOptions, type TeamSettings } from './config.js';
 import { discoverRoles, loadRoleDir, type Role } from './roles.js';
 import { resolveWorkspaces } from './workspaces.js';
 
@@ -19,7 +19,7 @@ export interface Team {
   notes: readonly string[];
 }
 
-export function loadTeam(config: TeamSettings, env: Env): Team {
+export function loadTeam(config: TeamSettings, env: Env, opts: LoadOptions = {}): Team {
   const resolved = resolveWorkspaces(config.workspaces, config.home, config.dbPath);
   if ('error' in resolved) throw new ConfigError(resolved.error);
   const workspaceNames = new Set(resolved.workspaces.keys());
@@ -29,7 +29,7 @@ export function loadTeam(config: TeamSettings, env: Env): Team {
   const notes = [...found.notes];
   const roles = new Map<string, Role>();
   for (const name of found.names) {
-    const loaded = loadRoleDir(name, join(rolesDir, name), env, workspaceNames);
+    const loaded = loadRoleDir(name, join(rolesDir, name), env, workspaceNames, opts);
     roles.set(name, loaded.role);
     notes.push(...loaded.notes);
   }

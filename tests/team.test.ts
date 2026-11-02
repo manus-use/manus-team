@@ -85,4 +85,14 @@ describe('loadTeam', () => {
   it('refuses a workspace that breaks the rules, before reading any role', () => {
     expect(() => teamFor(env({ MT_WORKSPACE: home }))).toThrow(/contains the gateway's home/);
   });
+
+  it('can record unset passEnv names instead of failing, for mt role check', () => {
+    roleDir('reviewer', `${ROLE_AGENT}  passEnv: [REVIEW_TOKEN]\n`);
+    const e = env();
+    expect(() => teamFor(e)).toThrow(/REVIEW_TOKEN, which is not set/);
+    const unset: string[] = [];
+    const team = loadTeam(loadConfig(e, () => undefined), e, { unsetPassEnv: unset });
+    expect(unset).toEqual(['reviewer: REVIEW_TOKEN']);
+    expect(team.roles.has('reviewer')).toBe(true);
+  });
 });
