@@ -1,3 +1,4 @@
+import { redactKnownSecrets, withholdSecretPrefix } from '../secrets.js';
 import type { Event } from '../types.js';
 import { forDisplay, forMarkdown, truncate } from './escape.js';
 
@@ -170,7 +171,11 @@ export function renderCard(events: readonly Event[]): RenderedCard {
   const toolLines = [...tools.values()].map((t) => `${statusIcon(t.status)} ${forDisplay(t.title)}`);
   if (toolLines.length > 0) parts.push(toolLines.join('\n'));
 
-  const body = message.trim();
+  // Masked whole, then cut: the joined answer is the only text guaranteed to hold
+  // a streamed secret whole. A trailing fragment of one is dropped, because this
+  // render may be mid-stream (spec §10.1). Masking first means the tail of a
+  // complete secret can never be mistaken for a fragment.
+  const body = withholdSecretPrefix(redactKnownSecrets(message)).trim();
   // Markdown is kept for the answer and nowhere else: see `forMarkdown`.
   if (body !== '') parts.push(forMarkdown(body));
 

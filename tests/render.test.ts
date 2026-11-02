@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   CARD_TEXT_BUDGET,
   RETRY_AFTER_TOOLS_HINT,
   RETRY_HINT,
   renderCard,
 } from '../src/channel/render.js';
+import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import type { Event, EventType } from '../src/types.js';
 
 let seq = 0;
@@ -310,5 +311,32 @@ describe('renderCard', () => {
     const view = renderCard([ev('agent_message_chunk', { text: 'x'.repeat(CARD_TEXT_BUDGET * 2) })]);
     expect(view.text.length).toBeLessThanOrEqual(CARD_TEXT_BUDGET);
     expect(view.text).toContain('truncated');
+  });
+});
+
+describe('renderCard: known secrets', () => {
+  beforeEach(() => {
+    clearSecrets();
+    addSecrets(['sk-test-123456']);
+  });
+
+  it('masks a secret split across two chunks', () => {
+    const view = renderCard([
+      ev('turn_submitted', { text: 'hi' }),
+      ev('agent_message_chunk', { text: 'the key is sk-te' }),
+      ev('agent_message_chunk', { text: 'st-123456 ok' }),
+      ev('turn_ended', { terminal: 'completed' }),
+    ]);
+    expect(view.text).toContain(`the key is ${MASK} ok`);
+    expect(view.text).not.toContain('sk-te');
+  });
+
+  it('does not show the start of a secret while the rest has not arrived', () => {
+    const view = renderCard([
+      ev('turn_submitted', { text: 'hi' }),
+      ev('agent_message_chunk', { text: 'the key is sk-te' }),
+    ]);
+    expect(view.text).toContain('the key is');
+    expect(view.text).not.toContain('sk-te');
   });
 });
