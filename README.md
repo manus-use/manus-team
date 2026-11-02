@@ -1,4 +1,4 @@
-# prime-gateway
+# manus-team
 
 A vendor-neutral gateway for driving coding agents (Claude Code, Gemini CLI, Codex, and any
 other ACP-compatible agent) from any channel — Feishu/Lark, Telegram, web, Slack, REST.
@@ -14,7 +14,7 @@ Design: [`docs/architecture.md`](docs/architecture.md) (whole system),
 
 ## What it is
 
-prime-gateway does not implement an agent loop. It launches real vendor agent runtimes and
+manus-team does not implement an agent loop. It launches real vendor agent runtimes and
 speaks a structured protocol to them, while owning the things the vendors don't:
 
 - **Durable sessions** that survive gateway restart, agent crash, and weeks of idleness

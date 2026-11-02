@@ -1,4 +1,4 @@
--- prime-gateway initial schema
+-- manus-team initial schema
 -- SQLite, WAL mode. See docs/architecture.md §3.
 --
 -- PRAGMAs to set on every connection:

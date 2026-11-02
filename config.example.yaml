@@ -1,4 +1,4 @@
-# prime-gateway configuration.
+# manus-team configuration.
 #
 # Copy to $PGW_HOME/config.yaml (default ~/.prime-gateway/config.yaml), or point
 # PGW_CONFIG at it. Every setting here is also settable by environment variable,
@@ -21,8 +21,8 @@ workspace: /srv/repo
 maxLiveSessions: 8
 
 # SQLite file and the inbound attachment directory. Both default under $PGW_HOME.
-# db: /var/lib/prime/gateway.db
-# downloads: /var/lib/prime/downloads
+# db: /var/lib/manus-team/gateway.db
+# downloads: /var/lib/manus-team/downloads
 
 lark:
   appId: cli_xxxxxxxxxxxxxxxx

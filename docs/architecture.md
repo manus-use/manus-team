@@ -1,4 +1,6 @@
-# prime-gateway — Architecture Design
+# manus-team — Architecture Design
+
+*Formerly `prime-gateway`. The `PGW_*` variables, `PGW_HOME` and the `~/.prime-gateway` home keep their names.*
 
 **Version:** 0.2 — design, reconciled against the code
 **Primary constraint:** long-lived durable sessions
@@ -689,7 +691,7 @@ by the protocol, so the fence is a PTY concern (§6.4) that never needed to reac
 
 ACP is not just one option among three. It already specifies most of what the gateway would otherwise hand-roll:
 
-| prime concept | ACP mechanism |
+| gateway concept | ACP mechanism |
 |---|---|
 | capability negotiation | `initialize` |
 | session create | `session/new` |
@@ -829,12 +831,12 @@ interface ExecutionBackend {
 ### Handle is deterministic and reconstructible from persisted state alone
 
 ```
-handle = "prime/" + session_id + "/" + generation
+handle = "pgw/" + session_id + "/" + generation
 ```
 
-- **tmux** → session name `prime/ses_8f72/42`
-- **container** → container name `prime-ses_8f72-42`
-- **systemd scope** → `prime-ses_8f72-42.scope`
+- **tmux** → session name `pgw/ses_8f72/42`
+- **container** → container name `pgw-ses_8f72-42`
+- **systemd scope** → `pgw-ses_8f72-42.scope`
 
 **Never a PID.** PIDs get reused; a stale PID probe can return `running` for an unrelated process.
 
@@ -934,7 +936,7 @@ Do **not** guess. For filesystem effects, the workspace checkpoint (§9) lets yo
 
 ```
 repo/                              # bare or primary clone
-$PGW_HOME/workspaces/ws_42/      # worktree, branch prime/ses_8f72
+$PGW_HOME/workspaces/ws_42/      # worktree, branch pgw/ses_8f72
 ```
 
 - **`root_path` is immutable for the workspace's lifetime.** Claude Code's session lookup is project-directory-scoped, so relocating a worktree orphans the provider session. Record it once, never move it.
@@ -945,7 +947,7 @@ $PGW_HOME/workspaces/ws_42/      # worktree, branch prime/ses_8f72
 
 Auto-commit at turn boundaries and before/after approved destructive ops. Record `commit_sha` in the event log.
 
-**Use a separate ref namespace** — `refs/prime/checkpoints/<session_id>` — so you don't fight agents that run `git` themselves. This is the safer default and costs nothing.
+**Use a separate ref namespace** — `refs/pgw/checkpoints/<session_id>` — so you don't fight agents that run `git` themselves. This is the safer default and costs nothing.
 
 Buys you: diffing what the agent did while you were away, rollback, and a concrete answer to indeterminate tool calls.
 
@@ -1235,7 +1237,7 @@ parts that bear on the rest of this document:
 
 | Term | Means | Never |
 |---|---|---|
-| `session_id` | prime's opaque durable ID | encodes channel or provider |
+| `session_id` | the gateway's opaque durable ID | encodes channel or provider |
 | `provider_session_id` | vendor's ID, **observed** | canonical, or persisted-as-sent |
 | `handle` | derived durable runtime address | a PID |
 | `generation` | runtime incarnation counter | reset, reused |

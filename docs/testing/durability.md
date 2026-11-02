@@ -6,7 +6,7 @@ These run against a **fake agent** — a process that emits a scripted, determin
 stream on demand. No ACP, no vendor binary, no network. Everything here should run in CI in
 under a minute.
 
-If these pass reliably, the hardest and most differentiating part of prime-gateway works.
+If these pass reliably, the hardest and most differentiating part of manus-team works.
 Everything downstream is conventional.
 
 ---

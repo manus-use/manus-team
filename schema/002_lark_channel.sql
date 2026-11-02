@@ -1,4 +1,4 @@
--- prime-gateway migration 002: Lark channel
+-- manus-team migration 002: Lark channel
 -- See docs/specs/2026-08-21-lark-channel-design.md §2.
 
 -- ---------------------------------------------------------------------------
