@@ -731,7 +731,7 @@ export interface WorkspaceProvider {
 }
 ```
 
-  - **The class:** replace `PlainDirWorkspaces` with `NamedWorkspaces`, keeping its "shared working tree" doc paragraph but saying "every session in one named directory", and keeping `release`'s comment as it is:
+  - **The class:** replace `PlainDirWorkspaces` with `NamedWorkspaces`, keeping its "shared working tree" doc paragraph but saying "each session works in the named workspace it records, and a workspace is one configured directory", and keeping `release`'s comment as it is:
 
 ```ts
 export class NamedWorkspaces implements WorkspaceProvider {
