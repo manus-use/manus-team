@@ -87,7 +87,7 @@ function harness(
     opts.authorizer ?? new Authorizer({ ...defaultAuthConfig(OWNER.openId), ...opts.auth });
   const registry = new SessionRegistry({
     db: t.db,
-    driver,
+    drivers: new Map([['default', driver]]),
     channel,
     workspaces: new FakeWorkspaces(),
     channelId: CHANNEL,

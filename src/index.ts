@@ -6,7 +6,7 @@ import { migrate, openDb, type Db } from './db/open.js';
 import { sweepSeen } from './db/dedup.js';
 import { LarkAdapter } from './channel/lark/adapter.js';
 import { LarkInbound } from './channel/lark/inbound.js';
-import { buildDriver } from './driver/build.js';
+import { buildRoleDrivers } from './driver/build.js';
 import { Authorizer } from './policy/auth.js';
 import { Router } from './core/router.js';
 import { SessionRegistry } from './core/registry.js';
@@ -56,14 +56,12 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   );
 
   for (const line of team.notes) note(line);
-  // Until plan B2 gives each session its own role and workspace, every session
-  // runs the role default's agent in the workspace named default.
+  // Chat sessions run the role default in the workspace default; loadTeam guarantees both exist.
   const defaultRole = team.roles.get('default');
   const defaultWorkspace = team.workspaces.get('default');
   if (defaultRole === undefined || defaultWorkspace === undefined) {
     throw new Error('loadTeam returned no role or workspace named default');
   }
-  const agent = defaultRole.agent;
   note(
     `roles: ${[...team.roles.keys()].sort().join(', ')}; ` +
       `workspaces: ${[...team.workspaces.keys()].sort().join(', ')}`,
@@ -76,16 +74,14 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   const version = migrate(db, config.schemaDir);
   note(`schema at version ${version}`);
 
-  const driver = buildDriver(agent);
-  if (agent.unsupervised) {
+  const drivers = buildRoleDrivers(team.roles);
+  for (const [name, role] of [...team.roles].sort(([a], [b]) => a.localeCompare(b))) {
+    if (!role.agent.unsupervised) continue;
     // Loud, and every boot. The gateway's whole security story is that operating
     // on the workspace requires a click, and under this driver it does not; an
     // operator reading the log should not have to remember which driver implies
     // that.
-    note(
-      `driver ${driver.id}: the agent acts without approval cards ` +
-        '(agent.unsupervised is set)',
-    );
+    note(`role ${name} (${role.agent.driver}): the agent acts without approval cards (agent.unsupervised is set)`);
   }
 
   const adapter = new LarkAdapter({
@@ -109,7 +105,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
 
   const registry = new SessionRegistry({
     db,
-    driver,
+    drivers,
     channel: adapter,
     workspaces: new NamedWorkspaces(team.workspaces),
     channelId: adapter.id,

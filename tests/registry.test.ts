@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_MAX_LIVE, SessionRegistry } from '../src/core/registry.js';
+import { DEFAULT_MAX_LIVE, SessionRegistry, roleOfSession } from '../src/core/registry.js';
 import { BOOT_ID } from '../src/core/ids.js';
 import type { Workspace, WorkspaceProvider } from '../src/core/workspace.js';
 import { createSession, getSession, setExecution, setState } from '../src/db/sessions.js';
@@ -69,7 +69,7 @@ afterEach(() => {
   while (open.length > 0) open.pop()?.close();
 });
 
-function harness(maxLive = DEFAULT_MAX_LIVE): Harness {
+function harness(maxLive = DEFAULT_MAX_LIVE, extra: { drivers?: Record<string, FakeDriver> } = {}): Harness {
   const db = testDb();
   open.push(db);
   const clock = new ManualClock(NOW);
@@ -80,7 +80,7 @@ function harness(maxLive = DEFAULT_MAX_LIVE): Harness {
 
   const registry = new SessionRegistry({
     db: db.db,
-    driver,
+    drivers: new Map<string, FakeDriver>([['default', driver], ...Object.entries(extra.drivers ?? {})]),
     channel,
     workspaces,
     channelId: 'lark',
@@ -242,6 +242,45 @@ describe('attach', () => {
 });
 
 describe('actors', () => {
+  it('records a chat session as the role default', () => {
+    const h = harness();
+    expect(h.registry.bindOrCreate(key(), OWNER).session.agentId).toBe('default');
+  });
+
+  it('runs a session written before roles, under a driver id or none, as the role default', async () => {
+    // The live database's one session says `acp` while the default role now runs
+    // bytesec: a driver id means the role default, whatever that role runs today.
+    expect(['acp', 'structured-cli', ''].map(roleOfSession)).toEqual(['default', 'default', 'default']);
+    const h = harness();
+    createSession(h.db.db, { id: 's_acp', agentId: 'acp', workspaceId: '', ownerPrincipal: 'on_owner' }, NOW);
+    const actor = await h.registry.actorFor('s_acp', key({ conversationId: 'oc_acp' }));
+    await actor.submit({ messageId: 'om_acp', appId: 'cli_app', input: { text: 'hi', paths: [] } });
+    expect(h.driver.starts).toHaveLength(1);
+  });
+
+  it("starts a session with its own role's driver", async () => {
+    const reviewer = new FakeDriver('reviewer');
+    const h = harness(DEFAULT_MAX_LIVE, { drivers: { reviewer } });
+    createSession(h.db.db, { id: 's_rev', agentId: 'reviewer', workspaceId: 'docs', ownerPrincipal: 'on_owner' }, NOW);
+    const actor = await h.registry.actorFor('s_rev', key({ conversationId: 'oc_rev' }));
+    await actor.submit({ messageId: 'om_rev', appId: 'cli_app', input: { text: 'hi', paths: [] } });
+    expect(reviewer.starts.map((s) => s.cwd)).toEqual(['/tmp/docs']);
+    expect(h.driver.starts).toHaveLength(0);
+  });
+
+  it('refuses a role that is not configured, without retiring anything to make room', async () => {
+    // A role removed from config strands its sessions; running them as default
+    // would hand one role's work to another role's agent and credentials.
+    const h = harness(1);
+    const live = h.registry.bindOrCreate(key({ conversationId: 'oc_live' }), OWNER).session;
+    await h.registry.actorFor(live.id, key({ conversationId: 'oc_live' }));
+    createSession(h.db.db, { id: 's_gone', agentId: 'gone', workspaceId: '', ownerPrincipal: 'on_owner' }, NOW);
+    await expect(h.registry.actorFor('s_gone', key({ conversationId: 'oc_gone' }))).rejects.toThrow(
+      /session s_gone runs as role gone, which is not configured/,
+    );
+    expect(h.registry.liveActor(live.id)).toBeDefined();
+  });
+
   it('records a chat session in the workspace default, and works there', async () => {
     const h = harness();
     const session = h.registry.bindOrCreate(key(), OWNER).session;

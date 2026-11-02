@@ -79,7 +79,8 @@ export interface BootFinding {
 
 export interface SessionRegistryDeps {
   db: Db;
-  driver: Driver;
+  /** Role name → that role's driver. Must hold `default` (spec §2.4 item 1). */
+  drivers: ReadonlyMap<string, Driver>;
   channel: Channel;
   workspaces: WorkspaceProvider;
   /** The channel id used in binding keys. */
@@ -134,6 +135,11 @@ export class SessionRegistry {
     if (!this.#deps.workspaces.has(workspaceId)) {
       throw new Error(`session ${sessionId} works in workspace ${workspaceId}, which is not configured`);
     }
+    const role = roleOfSession(session.agentId);
+    const driver = this.#deps.drivers.get(role);
+    if (driver === undefined) {
+      throw new Error(`session ${sessionId} runs as role ${role}, which is not configured`);
+    }
 
     await this.#makeRoom();
 
@@ -142,7 +148,7 @@ export class SessionRegistry {
     const actor = new SessionActor({
       db: this.#deps.db,
       sessionId,
-      driver: this.#deps.driver,
+      driver,
       channel: this.#deps.channel,
       key,
       target,
@@ -328,7 +334,9 @@ export class SessionRegistry {
       this.#deps.db,
       {
         id: newSessionId(),
-        agentId: this.#deps.driver.id,
+        // The role, not the driver: the registry rebuilds this session's driver
+        // from it (spec §2.4 item 1).
+        agentId: DEFAULT_ROLE,
         // The name, recorded now: the provider is asked again on every actor
         // build, so the session must remember where it works (spec §2.4 item 2).
         workspaceId: DEFAULT_WORKSPACE,
