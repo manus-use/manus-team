@@ -23,7 +23,7 @@ export interface MtIo {
   git?: Git;
 }
 
-export const USAGE = [
+const USAGE = [
   'usage:',
   '  mt role create <name> [--clone-from <role>] [--description "..."]',
   '  mt role list',
@@ -33,10 +33,10 @@ export const USAGE = [
   '  mt workspace list',
 ].join('\n');
 
-export class UsageError extends Error {}
+class UsageError extends Error {}
 
 /** Strict: an unknown option is a usage error, not something to guess at. */
-export function parse<T extends NonNullable<ParseArgsConfig['options']>>(args: readonly string[], options: T) {
+function parse<T extends NonNullable<ParseArgsConfig['options']>>(args: readonly string[], options: T) {
   try {
     return parseArgs({ args: [...args], options, allowPositionals: true, strict: true });
   } catch (err) {

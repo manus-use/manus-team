@@ -1,5 +1,15 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
@@ -20,6 +30,13 @@ function roleDir(name: string, config: string): string {
 }
 
 const ACP_AGENT = 'agent:\n  driver: acp\n  command: claude-agent-acp\n';
+
+/** Every regular file under `dir`, not following symlinks. */
+function filesUnder(dir: string): string[] {
+  return readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile())
+    .map((e) => join(e.parentPath, e.name));
+}
 
 describe('mt role list', () => {
   it('lists the role default from the agent: block, and each role directory', async () => {
@@ -170,6 +187,53 @@ describe('mt role create', () => {
     expect(r.code).toBe(0);
     expect(existsSync(join(fx.home, 'roles', 'x', 'skills', 'tdd', 'SKILL.md'))).toBe(true);
     expect(existsSync(join(fx.home, 'roles', 'x', 'skills', 'tdd', 'pipe'))).toBe(false);
+  });
+
+  it('copies no symlink and no nested .env with --clone-from, and prints nothing a link points at', async () => {
+    fx = mtFixture();
+    const secret = 'linked-secret-not-for-copying';
+    const outside = join(fx.root, 'outside');
+    mkdirSync(join(outside, 'dir'), { recursive: true });
+    writeFileSync(join(outside, 'secret'), `TOKEN=${secret}\n`);
+    writeFileSync(join(outside, 'dir', 'inner'), `TOKEN=${secret}\n`);
+    const source = roleDir('impl', ACP_AGENT);
+    symlinkSync(join(outside, 'secret'), join(source, 'role.md'));
+    mkdirSync(join(source, 'skills', 'x'), { recursive: true });
+    writeFileSync(join(source, 'skills', 'x', 'SKILL.md'), '---\nname: x\ndescription: X\n---\n');
+    symlinkSync(join(outside, 'secret'), join(source, 'skills', 'x', 'f'));
+    symlinkSync(join(outside, 'dir'), join(source, 'skills', 'link'));
+    writeFileSync(join(source, 'skills', 'x', '.env'), `TOKEN=${secret}\n`);
+
+    const r = await fx.run(['role', 'create', 'reviewer', '--clone-from', 'impl']);
+    expect(r.code, r.err).toBe(0);
+    const dir = join(fx.home, 'roles', 'reviewer');
+    expect(readFileSync(join(dir, 'role.md'), 'utf8')).toContain('Standing instructions for the reviewer role');
+    expect(existsSync(join(dir, 'skills', 'x', 'SKILL.md'))).toBe(true);
+    expect(lstatSync(join(dir, 'skills', 'x', 'f'), { throwIfNoEntry: false })).toBeUndefined();
+    expect(lstatSync(join(dir, 'skills', 'link'), { throwIfNoEntry: false })).toBeUndefined();
+    expect(lstatSync(join(dir, 'skills', 'x', '.env'), { throwIfNoEntry: false })).toBeUndefined();
+    expect(`${r.out}${r.err}`).not.toContain(secret);
+    for (const file of filesUnder(dir)) expect(readFileSync(file, 'utf8'), file).not.toContain(secret);
+  });
+
+  it('drops the default role\'s description when copying from it without --description', async () => {
+    fx = mtFixture((ws) => `workspace: ${ws}\n`);
+    roleDir('default', `description: The default role\n${ACP_AGENT}`);
+    const plain = await fx.run(['role', 'create', 'reviewer']);
+    expect(plain.code, plain.err).toBe(0);
+    const config = parseYaml(readFileSync(join(fx.home, 'roles', 'reviewer', 'config.yaml'), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(config).not.toHaveProperty('description');
+    expect(config['agent']).toMatchObject({ command: 'claude-agent-acp' });
+
+    const cloned = await fx.run(['role', 'create', 'tester', '--clone-from', 'default']);
+    expect(cloned.code, cloned.err).toBe(0);
+    const kept = parseYaml(readFileSync(join(fx.home, 'roles', 'tester', 'config.yaml'), 'utf8')) as {
+      description?: string;
+    };
+    expect(kept.description).toBe('The default role');
   });
 
   it("says a gateway variable cannot go in a role's .env, rather than how to put it there", async () => {

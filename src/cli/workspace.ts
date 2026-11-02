@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import {
   chmodSync,
   closeSync,
-  existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -24,12 +24,14 @@ export type AddTarget = { path: string } | { cloneUrl: string };
 
 /** `mt workspace add` (spec §2.6). Refuses anything the next start would refuse. */
 export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): Promise<number> {
-  // Names and paths only, so an unset agent.passEnv name is no reason to fail (Task 3).
+  // Names and paths only, so an unset agent.passEnv name is no reason to fail
+  // (see LoadOptions.unsetPassEnv).
   const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
   if (settings.configPath === undefined) {
+    const named = io.env['MT_CONFIG']?.trim() ?? '';
     return refuse(
       io,
-      `there is no config file (looked for ${io.env['MT_CONFIG'] ?? join(settings.home, 'config.yaml')}); ` +
+      `there is no config file (looked for ${named === '' ? join(settings.home, 'config.yaml') : named}); ` +
         'create one, then add workspaces to it',
     );
   }
@@ -57,7 +59,8 @@ export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): P
     const parent = join(settings.home, 'workspaces');
     mkdirSync(parent, { recursive: true, mode: 0o700 });
     path = join(realpathSync(parent), name);
-    if (existsSync(path)) return refuse(io, `${path} already exists`);
+    // lstat, so a symlink -- even a dangling one -- counts as being there.
+    if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) return refuse(io, `${path} already exists`);
     if (recorded !== undefined && recorded !== path) return refuse(io, movedMessage(name, recorded, path));
     // `--` so a URL starting with `-` cannot be read as an option. Any URL git
     // accepts is allowed: this runs as the operator, who could run git directly.
@@ -109,7 +112,8 @@ export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): P
 
 /** `mt workspace list`: each workspace, and whether the gateway has registered it. */
 export function workspaceList(io: MtIo): number {
-  // Names and paths only, so an unset agent.passEnv name is no reason to fail (Task 3).
+  // Names and paths only, so an unset agent.passEnv name is no reason to fail
+  // (see LoadOptions.unsetPassEnv).
   const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
   const recorded = registrationsAt(settings.dbPath);
   const rows: string[][] = [];

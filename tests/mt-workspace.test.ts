@@ -1,5 +1,17 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
@@ -37,6 +49,14 @@ describe('mt workspace add', () => {
     const r = await fx.run(['workspace', 'add', 'docs', docsDir()], { env: { MT_WORKSPACE: fx.workspace } });
     expect(r.code).toBe(1);
     expect(r.err).toMatch(/no config file/);
+  });
+
+  it('names the file it looked for when MT_CONFIG is set but empty', async () => {
+    fx = mtFixture();
+    rmSync(fx.configPath);
+    const r = await fx.run(['workspace', 'add', 'docs', docsDir()], { env: { MT_CONFIG: ' ', MT_WORKSPACE: fx.workspace } });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain(`(looked for ${fx.configPath})`);
   });
 
   it('refuses a name already in the workspaces, and default while workspace: sets it', async () => {
@@ -174,6 +194,24 @@ describe('mt workspace add --clone', () => {
     expect(r.code).toBe(1);
     expect(r.err).toMatch(/already exists/);
     expect(ran).toBe(false);
+  });
+
+  it('refuses a dangling symlink at the clone directory, without running git, and leaves it', async () => {
+    fx = mtFixture();
+    const parent = join(fx.home, 'workspaces');
+    mkdirSync(parent, { recursive: true });
+    const link = join(parent, 'docs');
+    symlinkSync(join(fx.root, 'nowhere'), link);
+    const calls: (readonly string[])[] = [];
+    const git: Git = async (args) => {
+      calls.push(args);
+      return { code: 128, stderr: 'fatal: no' };
+    };
+    const r = await fx.run(['workspace', 'add', 'docs', '--clone', 'https://example.invalid/x.git'], { git });
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/already exists/);
+    expect(calls).toEqual([]);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
   });
 });
 

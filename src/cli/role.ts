@@ -8,18 +8,26 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { isMap, parseDocument, parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { ConfigError, loadTeamSettings, type AgentConfig, type Env } from '../config.js';
+import {
+  AGENT_ENV_PREFIX,
+  AGENT_OVERRIDES,
+  ConfigError,
+  loadTeamSettings,
+  type AgentConfig,
+  type Env,
+} from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { isReservedRoleName, nameProblem } from '../names.js';
-import { discoverRoles } from '../roles.js';
+import { discoverRoles, gatewayOwnsVariable } from '../roles.js';
 import { loadTeam } from '../team.js';
 import { refuse, table, type MtIo } from './mt.js';
 
 /** `mt role list`: every role, its driver, where it comes from, and its description. */
 export function roleList(io: MtIo): number {
-  // Names only, so an unset agent.passEnv name is no reason to fail (Task 3).
+  // Names only, so an unset agent.passEnv name is no reason to fail (see
+  // LoadOptions.unsetPassEnv).
   const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
   const rolesDir = join(settings.home, 'roles');
   const found = discoverRoles(rolesDir);
@@ -54,8 +62,6 @@ function summarize(path: string): { driver: string; description: string } {
 }
 
 const DEFAULT_ROLE = 'default';
-const AGENT_OVERRIDES = ['MT_AGENT_COMMAND', 'MT_AGENT_ARGS', 'MT_AGENT_DRIVER', 'MT_AGENT_UNSUPERVISED'] as const;
-const AGENT_ENV_PREFIX = 'MT_AGENT_ENV_';
 
 function starterRoleMd(name: string): string {
   return (
@@ -83,7 +89,8 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
     if (sourceProblem !== undefined) return refuse(io, sourceProblem);
   }
 
-  // Names and paths only; the agent's environment is never copied (Task 3).
+  // The collector is there so an unset agent.passEnv name does not stop a command
+  // that only needs names (see LoadOptions.unsetPassEnv).
   const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
   const rolesDir = join(settings.home, 'roles');
   const dir = join(rolesDir, name);
@@ -122,6 +129,15 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
     }
     doc.set('description', opts.description);
     configText = String(doc);
+  } else if (opts.cloneFrom === undefined && !legacy) {
+    // A description says what one role is for, so a role made from default does
+    // not take default's; --clone-from keeps the source's. A config that is not a
+    // map is copied as it is, as before, for mt role check to report.
+    const doc = parseDocument(configText);
+    if (doc.errors.length === 0 && isMap(doc.contents) && doc.has('description')) {
+      doc.delete('description');
+      configText = String(doc);
+    }
   }
   // role.md and skills/ come with --clone-from; copying from default takes config.yaml only.
   const copyDir = opts.cloneFrom === undefined ? undefined : sourceDir;
@@ -146,8 +162,10 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
       cpSync(skills, join(staging, 'skills'), {
         recursive: true,
         // Files and directories only: no symlink, and no FIFO or socket, which
-        // cpSync cannot copy.
+        // cpSync cannot copy. No .env either, wherever it is: a credential is never
+        // cloned (spec §2.5).
         filter: (src) => {
+          if (basename(src) === '.env') return false;
           const s = lstatSync(src);
           return s.isFile() || s.isDirectory();
         },
@@ -202,7 +220,7 @@ function reportLegacyCopy(dir: string, io: MtIo): void {
     for (const key of secrets) {
       const secret = key.slice(AGENT_ENV_PREFIX.length);
       io.out(
-        gatewayOwned(secret)
+        gatewayOwnsVariable(secret)
           ? `  ${secret} cannot go in a role's .env (it belongs to the gateway); this role will not get it`
           : `  ${secret}=...`,
       );
@@ -210,11 +228,6 @@ function reportLegacyCopy(dir: string, io: MtIo): void {
   }
   // Always, even when this shell holds none: the service may hold some this shell does not.
   io.out("  (only this shell's MT_AGENT_ENV_* names are listed; check the service's environment for others)");
-}
-
-/** Names a role's .env cannot set: the gateway's own. */
-function gatewayOwned(name: string): boolean {
-  return name === 'PATH' || name.startsWith('MT_') || name.startsWith('LARK_');
 }
 
 function reportCutover(dir: string, configPath: string | undefined, io: MtIo): void {

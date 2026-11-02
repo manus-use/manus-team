@@ -244,7 +244,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
   // The agent block is optional: a role directory may define the role default
   // instead (team.ts). An MT_AGENT_* variable alone counts as configuring it.
   const agentVariables = [
-    ...['MT_AGENT_COMMAND', 'MT_AGENT_ARGS', 'MT_AGENT_DRIVER', 'MT_AGENT_UNSUPERVISED'].filter(
+    ...AGENT_OVERRIDES.filter(
       (key) => envString(env, key) !== undefined,
     ),
     ...Object.keys(env)
@@ -389,7 +389,10 @@ export function requireSupervisionMatch(driver: KnownDriver, unsupervised: boole
  * credential it must never hold, since an agent with it can post as the bot and
  * answer its own approval requests.
  */
-const AGENT_ENV_PREFIX = 'MT_AGENT_ENV_';
+export const AGENT_ENV_PREFIX = 'MT_AGENT_ENV_';
+
+/** The `MT_AGENT_*` variables that override a field of the `agent:` block. */
+export const AGENT_OVERRIDES = ['MT_AGENT_COMMAND', 'MT_AGENT_ARGS', 'MT_AGENT_DRIVER', 'MT_AGENT_UNSUPERVISED'] as const;
 
 /** Values for `passEnv` names, from the gateway's environment. `where` prefixes the errors. */
 export function passEnvValues(

@@ -1740,8 +1740,18 @@ Fixed in `mt workspace add` and `mt role check` after a second review, each test
 - A failed write removes the temporary file only if this run created it: an EEXIST from the `wx` open leaves another run's file alone.
 - `mt role check <name>` applies the name filter on every path, error or not, so `mt role check nobody` no longer lists other roles' unset `passEnv` names.
 
+Fixed after the final review, each test-first (two tests in `tests/mt-workspace.test.ts`, two in `tests/mt-role.test.ts`):
+
+- `mt workspace add --clone` checks the clone path with `lstat`, so a dangling symlink there is refused as existing before git runs, and is left in place rather than removed by the failed-clone cleanup.
+- A test covers `--clone-from` with a symlinked `role.md`, a symlinked file and a symlinked directory in `skills/`: the starter `role.md` is written, neither link is copied, the real `SKILL.md` is, and what the links point at appears in no output and no file of the new role.
+- `--clone-from` skips any `.env` inside `skills/`, wherever it is nested, as it never copies the top-level one.
+- `AGENT_OVERRIDES` and `AGENT_ENV_PREFIX` are exported from `src/config.ts`, and `gatewayOwnsVariable` from `src/roles.ts`; `readRoleEnv` (keeping its two messages) and `mt role create` use them, and `src/cli/role.ts` keeps no copies.
+- With `MT_CONFIG` set but empty, the missing-config message names `$MT_HOME/config.yaml` instead of an empty path.
+- A role made from `roles/default` without `--clone-from` or `--description` no longer takes default's `description`; `--clone-from default` keeps it. A source config that is not a map is copied as it is, for `mt role check` to report.
+- The source comments point at `LoadOptions.unsetPassEnv` instead of a plan task, and `USAGE`, `UsageError` and `parse` are no longer exported from `src/cli/mt.ts`.
+
 ## Done when
 
-- `npm test` → `Tests  537 passed (537)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
+- `npm test` → `Tests  541 passed (541)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` → no output.
 - Task 11.2 prints what it expects.

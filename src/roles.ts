@@ -264,14 +264,19 @@ function readRoleEnv(dir: string): Record<string, string> {
   const parsed = parseEnvFile(text, path);
   if ('error' in parsed) throw new ConfigError(parsed.error);
   for (const key of Object.keys(parsed.values)) {
-    if (key.startsWith('MT_') || key.startsWith('LARK_')) {
-      throw new ConfigError(`${path}: ${key} may not be set in a role's .env: it belongs to the gateway`);
-    }
-    if (key === 'PATH') {
-      throw new ConfigError(`${path}: PATH may not be set in a role's .env: the gateway sets it for every run`);
-    }
+    if (!gatewayOwnsVariable(key)) continue;
+    throw new ConfigError(
+      key === 'PATH'
+        ? `${path}: PATH may not be set in a role's .env: the gateway sets it for every run`
+        : `${path}: ${key} may not be set in a role's .env: it belongs to the gateway`,
+    );
   }
   return parsed.values;
+}
+
+/** Names a role's .env cannot set: the gateway's own. */
+export function gatewayOwnsVariable(name: string): boolean {
+  return name === 'PATH' || name.startsWith('MT_') || name.startsWith('LARK_');
 }
 
 /** `role.md` is optional; present, it must be a readable regular file. */
