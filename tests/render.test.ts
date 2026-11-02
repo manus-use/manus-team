@@ -131,6 +131,22 @@ describe('renderCard', () => {
     expect(view.text).toContain('Hello, world');
   });
 
+  it("renders the agent's markdown rather than showing its syntax", () => {
+    // Every answer used to arrive with its markdown escaped: bold as literal
+    // asterisks, code blocks as raw backticks.
+    const view = renderCard([
+      ev('agent_message_chunk', { text: 'validate **DAG-based pipelines**, including' }),
+    ]);
+    expect(view.text).toContain('**DAG-based pipelines**');
+  });
+
+  it('still escapes a tool title, which is a label and not markdown', () => {
+    const view = renderCard([
+      ev('tool_call', { toolCallId: 'c1', title: 'Read **secret**.md', status: 'completed' }),
+    ]);
+    expect(view.text).toContain('\\*\\*secret\\*\\*');
+  });
+
   it('escapes agent text', () => {
     const view = renderCard([ev('agent_message_chunk', { text: '<at id=all></at>' })]);
     // Every `<` is preceded by a backslash; the substring `<at` still appears in

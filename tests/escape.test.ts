@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   escapeMd,
   forDisplay,
+  forMarkdown,
   forPlainText,
   mask,
   stripControl,
@@ -12,6 +13,57 @@ const NUL = '\u0000';
 const BEL = '\u0007';
 const C1 = '\u009f';
 const NONCHAR = '\ufffe';
+
+/**
+ * True when every `<` and `>` is escaped -- preceded by an odd-length run of
+ * backslashes. An even run (including zero) is a literal backslash, or none,
+ * followed by a live tag bracket.
+ */
+function bracketsInert(text: string): boolean {
+  for (const m of text.matchAll(/(\\*)[<>]/g)) {
+    if ((m[1] ?? '').length % 2 === 0) return false;
+  }
+  return true;
+}
+
+describe('forMarkdown', () => {
+  // The agent's answer is markdown and should render as markdown. What it must
+  // not do is open a Feishu tag, which is how a mention is spoofed.
+  it('leaves the agent its markdown', () => {
+    const text = 'validate **DAG-based pipelines**, _carefully_, with `code` and [docs](https://example.com)';
+    expect(forMarkdown(text)).toBe(text);
+  });
+
+  it('leaves a fenced code block intact', () => {
+    const text = '```ts\nconst x = a * b;\n```';
+    expect(forMarkdown(text)).toBe(text);
+  });
+
+  it('neutralizes a mention tag', () => {
+    expect(bracketsInert(forMarkdown('<at id=all></at>'))).toBe(true);
+  });
+
+  it('neutralizes the other tags too, not just mentions', () => {
+    const out = forMarkdown('<font color="red">x</font> <text_tag>y</text_tag>');
+    expect(bracketsInert(out)).toBe(true);
+  });
+
+  it('does not let a backslash in front of a bracket cancel its escape', () => {
+    // `\<` naively escaped becomes `\\<`: an escaped backslash, then a live `<`.
+    for (const input of ['\\<at id=all></at>', '\\\\<at id=all>', 'a\\>b']) {
+      expect(bracketsInert(forMarkdown(input))).toBe(true);
+    }
+  });
+
+  it('leaves backslashes that are not next to a bracket alone', () => {
+    // The agent's own markdown escapes, like a literal asterisk, keep working.
+    expect(forMarkdown('2 \\* 3 = 6')).toBe('2 \\* 3 = 6');
+  });
+
+  it('strips control characters, like the full escaper', () => {
+    expect(forMarkdown(`a${NUL}b${BEL}c`)).toBe('abc');
+  });
+});
 
 describe('escapeMd', () => {
   it('escapes angle brackets, which is the mention-injection vector', () => {

@@ -57,6 +57,27 @@ export function forDisplay(text: string): string {
 }
 
 /**
+ * Prepare the agent's answer for a card, keeping its markdown.
+ *
+ * `forDisplay` escapes every markdown character, which is right for a label -- a
+ * tool title, an error, a file name -- and wrong for an answer: bold arrived as
+ * literal asterisks and every code block as raw backticks. None of that syntax can
+ * notify anyone. What can is a Feishu tag (`<at>`, `<font>`, ...), so `<` and `>`
+ * are the only characters neutralized here.
+ *
+ * A bracket is escaped together with the run of backslashes in front of it, each
+ * of which is doubled. Escaping the bracket alone turns an agent's `\<at ...>`
+ * into `\\<at ...>`: an escaped backslash followed by a live tag. Backslashes
+ * anywhere else are left alone, so the agent's own escapes keep their meaning.
+ */
+export function forMarkdown(text: string): string {
+  return stripControl(text).replace(
+    /(\\*)([<>])/g,
+    (_match, slashes: string, bracket: string) => `${slashes}${slashes}\\${bracket}`,
+  );
+}
+
+/**
  * Prepare text for a `plain_text` element.
  *
  * `plain_text` needs no markdown escaping by definition -- the element type is

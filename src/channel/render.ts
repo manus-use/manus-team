@@ -1,5 +1,5 @@
 import type { Event } from '../types.js';
-import { forDisplay, truncate } from './escape.js';
+import { forDisplay, forMarkdown, truncate } from './escape.js';
 
 /**
  * Project a slice of the event log into card text.
@@ -171,7 +171,8 @@ export function renderCard(events: readonly Event[]): RenderedCard {
   if (toolLines.length > 0) parts.push(toolLines.join('\n'));
 
   const body = message.trim();
-  if (body !== '') parts.push(forDisplay(body));
+  // Markdown is kept for the answer and nowhere else: see `forMarkdown`.
+  if (body !== '') parts.push(forMarkdown(body));
 
   if (error !== undefined) parts.push(`**Error:** ${forDisplay(error)}`);
 
