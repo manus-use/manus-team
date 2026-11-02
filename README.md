@@ -68,14 +68,18 @@ Settings live in a YAML file; credentials live in the environment. Start from
 [`config.example.yaml`](config.example.yaml):
 
 ```bash
-cp config.example.yaml ~/.prime-gateway/config.yaml
+cp config.example.yaml ~/.manus-team/config.yaml
 export LARK_APP_SECRET=...
 ```
 
-`PGW_CONFIG` names the file if you keep it elsewhere; otherwise it is
-`$PGW_HOME/config.yaml`, default `~/.prime-gateway/config.yaml`. A file that is named but
+`MT_CONFIG` names the file if you keep it elsewhere; otherwise it is
+`$MT_HOME/config.yaml`, default `~/.manus-team/config.yaml`. A file that is named but
 missing is an error, while the default location being absent is an ordinary
 environment-only deploy.
+
+Renamed from prime-gateway: the variables were `PGW_*` and are now `MT_*`, and the home moved
+from `~/.prime-gateway` to `~/.manus-team`. The old names are not read; one left set stops the
+gateway at startup with a message naming it.
 
 **Credentials never go in the file.** The agent runs as the same user and is not sandboxed
 in this build, so anything on disk it can read. The environment is not airtight either — a
@@ -90,28 +94,28 @@ file rather than names.
 | — | `LARK_APP_SECRET` **(required)** | The app secret. Environment only; never written to disk or the event log. |
 | `lark.appId` | `LARK_APP_ID` | App id. Required from one source or the other. |
 | `lark.domain` | `LARK_DOMAIN` | Set for Lark (`https://open.larksuite.com`); omitted means Feishu. |
-| `auth.owner` | `PGW_OWNER_OPEN_ID` | Your `open_id`. Required. Always in both allowlists — an allowlist that excludes the owner locks out the only person who can fix it. |
-| `auth.talk` | `PGW_ALLOW_TALK` | `open_id`s that may prompt the agent. |
-| `auth.operate` | `PGW_ALLOW_OPERATE` | `open_id`s that may answer approvals and run mutating commands. |
-| `auth.chats` | `PGW_ALLOW_CHATS` | `chat_id`s the bot will work in. Empty means any chat it was added to. |
-| `auth.directMessages` | `PGW_ALLOW_DM` | Answer direct messages without a mention. Default on. |
-| `auth.mentionAll` | `PGW_ALLOW_MENTION_ALL` | Treat `@all` as addressing the bot. Default **off**: `@all` is a room-wide notification, not an instruction. |
-| `workspace` | `PGW_WORKSPACE` | Absolute path the agent works in. Required. |
-| `agent.driver` | `PGW_AGENT_DRIVER` | `acp` (default) or `structured-cli`. See [Protocol strategy](#protocol-strategy) — the CLI driver cannot ask before acting. |
-| `agent.command` | `PGW_AGENT_COMMAND` | The agent binary, e.g. `claude-agent-acp`. Required. |
-| `agent.args` | `PGW_AGENT_ARGS` | A list, or one string split on whitespace with quotes honoured. Not a shell: `$HOME` is not expanded, because the agent is spawned with `shell: false`. |
-| `agent.unsupervised` | `PGW_AGENT_UNSUPERVISED` | Required by, and only by, `structured-cli`: a written acknowledgement that the agent acts with no approval card and no gate from `auth.operate`. Setting it alongside the `acp` driver is an error — a config must not claim a posture the gateway is not in. |
+| `auth.owner` | `MT_OWNER_OPEN_ID` | Your `open_id`. Required. Always in both allowlists — an allowlist that excludes the owner locks out the only person who can fix it. |
+| `auth.talk` | `MT_ALLOW_TALK` | `open_id`s that may prompt the agent. |
+| `auth.operate` | `MT_ALLOW_OPERATE` | `open_id`s that may answer approvals and run mutating commands. |
+| `auth.chats` | `MT_ALLOW_CHATS` | `chat_id`s the bot will work in. Empty means any chat it was added to. |
+| `auth.directMessages` | `MT_ALLOW_DM` | Answer direct messages without a mention. Default on. |
+| `auth.mentionAll` | `MT_ALLOW_MENTION_ALL` | Treat `@all` as addressing the bot. Default **off**: `@all` is a room-wide notification, not an instruction. |
+| `workspace` | `MT_WORKSPACE` | Absolute path the agent works in. Required. |
+| `agent.driver` | `MT_AGENT_DRIVER` | `acp` (default) or `structured-cli`. See [Protocol strategy](#protocol-strategy) — the CLI driver cannot ask before acting. |
+| `agent.command` | `MT_AGENT_COMMAND` | The agent binary, e.g. `claude-agent-acp`. Required. |
+| `agent.args` | `MT_AGENT_ARGS` | A list, or one string split on whitespace with quotes honoured. Not a shell: `$HOME` is not expanded, because the agent is spawned with `shell: false`. |
+| `agent.unsupervised` | `MT_AGENT_UNSUPERVISED` | Required by, and only by, `structured-cli`: a written acknowledgement that the agent acts with no approval card and no gate from `auth.operate`. Setting it alongside the `acp` driver is an error — a config must not claim a posture the gateway is not in. |
 | `agent.passEnv` | — | Variable **names** forwarded to the agent from the gateway's own environment. A name that is not set is an error, because forwarding nothing surfaces later as the agent failing to authenticate. Leave it empty for a subscription-authenticated agent: its credentials are under `$HOME`, which is forwarded already. |
-| — | `PGW_AGENT_ENV_*` | Forwarded with the prefix stripped: `PGW_AGENT_ENV_ANTHROPIC_API_KEY` becomes `ANTHROPIC_API_KEY`. Wins over `passEnv`. Opt-in by prefix, because an agent holding the Feishu secret could post as the bot and answer its own approvals. |
-| `maxLiveSessions` | `PGW_MAX_LIVE_SESSIONS` | Concurrent agent processes. Default 8. |
-| `db`, `downloads` | `PGW_DB`, `PGW_DOWNLOAD_DIR` | Derived from `PGW_HOME` unless set. |
-| — | `PGW_HOME` | State directory, and where the config file is looked for. Default `~/.prime-gateway`. |
+| — | `MT_AGENT_ENV_*` | Forwarded with the prefix stripped: `MT_AGENT_ENV_ANTHROPIC_API_KEY` becomes `ANTHROPIC_API_KEY`. Wins over `passEnv`. Opt-in by prefix, because an agent holding the Feishu secret could post as the bot and answer its own approvals. |
+| `maxLiveSessions` | `MT_MAX_LIVE_SESSIONS` | Concurrent agent processes. Default 8. |
+| `db`, `downloads` | `MT_DB`, `MT_DOWNLOAD_DIR` | Derived from `MT_HOME` unless set. |
+| — | `MT_HOME` | State directory, and where the config file is looked for. Default `~/.manus-team`. |
 
 Three rules make a mistake fail loudly instead of silently:
 
 - **The environment wins.** Every file setting has an override, so a container needs no
   file and an emergency lockdown needs no edit. Lists are *replaced*, not merged — merging
-  would leave no way to revoke. `PGW_ALLOW_TALK=` set-but-empty means the owner alone.
+  would leave no way to revoke. `MT_ALLOW_TALK=` set-but-empty means the owner alone.
 - **Empty means closed.** An unset allowlist is everyone-except-the-owner, not
   no-restrictions.
 - **An unknown key is an error.** A typo'd setting silently taking its default is how a

@@ -1,7 +1,7 @@
 # manus-team configuration.
 #
-# Copy to $PGW_HOME/config.yaml (default ~/.prime-gateway/config.yaml), or point
-# PGW_CONFIG at it. Every setting here is also settable by environment variable,
+# Copy to $MT_HOME/config.yaml (default ~/.manus-team/config.yaml), or point
+# MT_CONFIG at it. Every setting here is also settable by environment variable,
 # and the environment wins -- so an emergency override never needs a file edit.
 #
 # CREDENTIALS DO NOT GO IN THIS FILE. The agent runs as the same user as the
@@ -10,7 +10,7 @@
 # refused at boot rather than quietly accepted. Secrets live in the environment:
 #
 #   LARK_APP_SECRET=...            the Feishu app secret. Required.
-#   PGW_AGENT_ENV_<NAME>=...       passed to the agent as <NAME>.
+#   MT_AGENT_ENV_<NAME>=...       passed to the agent as <NAME>.
 #
 # An unknown or misspelled key is an error, not a default.
 
@@ -20,7 +20,7 @@ workspace: /srv/repo
 # Concurrent agent processes. Sessions beyond this stay cold until one frees up.
 maxLiveSessions: 8
 
-# SQLite file and the inbound attachment directory. Both default under $PGW_HOME.
+# SQLite file and the inbound attachment directory. Both default under $MT_HOME.
 # db: /var/lib/manus-team/gateway.db
 # downloads: /var/lib/manus-team/downloads
 
