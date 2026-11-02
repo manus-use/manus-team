@@ -20,6 +20,7 @@ order was **inverted in practice**, and the doc reads as though it wasn't. What 
 | Approvals schema + card surface | Snapshot *writer* (§3.6) — table only |
 | Policy/auth tiers (§13) | PTY driver (§6.4) |
 | ACP driver, written but unusable against the available agent | Cold/rehydrate tiering (§5) as a real tier |
+| | Kanban task board (§17, `docs/specs/2026-11-02-kanban-design.md`) |
 
 Two reasons for the inversion, both worth keeping in view because they are still true:
 
@@ -80,7 +81,9 @@ routine outcome.
 - Multi-node horizontal scaling. Single gateway node; design so migration is mechanical.
 - Reimplementing agent loops. We drive vendor runtimes; we never model tools ourselves.
 - A2A / remote agent federation. Leave a seam; do not build it.
-- Sub-agent orchestration policy. Agents fan out internally; we record, we don't schedule.
+- Sub-agent orchestration policy. Agents fan out *internally*; we record that, and do not schedule
+  it. Work assigned on the Kanban board (§17) is a different thing and *is* scheduled: a task is a
+  card a person or a role was given, not an agent's private decomposition of its own turn.
 
 ### The forcing constraint
 
@@ -719,14 +722,20 @@ because the available agent's ACP build does not stream. The reference case is n
 chunks and 15 tool calls, spanning 107.5 s of the turn. The card writer's ~1/s coalescing is the
 rate limit, not the agent.
 
-**One process per turn, and no resume.** The driver spawns per turn and cannot continue a
-conversation, so each turn re-sends the prior conversation as a fenced transcript in the prompt —
-the agent recovers what was *said*, not the tool state behind it. This is not a gap in the
-implementation: the CLI has no resume. `--session <id>` was measured and does **not** continue a
-conversation (identical input-token count, `turn: 1` again, no memory of the prior turn, and a new
-session id in `bytesec session list`); its help text scopes it to `/goal` lifecycle operations.
-`--session-id-file` writes the id the agent chose, which is worth capturing for cost attribution
-(§16.4), tracing, and deleting the orphan session each turn leaves behind — but not for resume.
+**One process per turn, and — as built — no resume.** The driver spawns per turn and re-sends the
+prior conversation as a fenced transcript in the prompt, so the agent recovers what was *said*, not
+the tool state behind it, and after a gateway restart only the prompts are replayed.
+
+**Correction (2026-11-02): resume now works.** On bytesec 0.7.2, `--session <id>` was measured and
+did **not** continue a conversation (identical input-token count, `turn: 1` again, a new session id
+in `bytesec session list`). On **0.7.4** it does: a run started with `--session <id>` from
+`--session-id-file` recalled a fact given only to the earlier run, and the help text now describes
+it as "existing local session ID to continue". Measured once, against one model; re-measure on the
+next version change. The driver should capture the id with `--session-id-file`, store it as the
+observed `provider_session_id`, and pass `--session` on the next turn, keeping transcript replay as
+the fallback when the id is rejected (`resume: native → replay`). Kanban uses it to make stop nudges
+cheaper and to let review rework continue the implementer's conversation (spec §7.5, §5.3); both
+still work without it.
 
 **A misconfiguration can be silent, because the failure text goes to stdout.** A bad argv makes
 the CLI print its usage banner to *stdout* and exit 1, leaving stderr empty. The driver's error
@@ -762,6 +771,10 @@ Duplicate turns mean duplicate commits, deploys, migrations, API calls. `ambiguo
 **Note this problem is an artifact of PTY.** Over ACP, `session/prompt` is a JSON-RPC request with an ID and a response — delivery is confirmed by the protocol. Build the fence in the PTY driver only; keep it out of the core.
 
 ### 6.5 Registry
+
+> **Superseded for configuration** by role directories (kanban spec §2): each role's `config.yaml`
+> carries its own `agent` block, and there is no top-level `agents:` map. The capability fields
+> below remain the driver's declaration of what it can do.
 
 ```yaml
 agents:
@@ -1029,7 +1042,8 @@ interface Channel {
   sendApprovalCard(target: SendTarget, spec: ApprovalCardSpec, uuid: string): Promise<SendResult>;
 }
 
-// 2. Projection. Pure: events in, text out. No I/O, no clock.
+// 2. Projection. Pure: events in, text out. No I/O, no clock. Pure *given the secret set*: the
+//    escapers mask known secrets from a process-wide registry (kanban spec §10.1).
 renderCard(events: readonly Event[]): RenderedCard
 
 // 3. Pacing. Single-flight, latest-wins, coalescing, cursor-advancing.
@@ -1090,8 +1104,13 @@ Also verify current billing behaviour for third-party agent paths (ACP, Agent SD
 
 ### Secrets must not land in the workspace or the event log
 
-- Inject via broker environment at spawn, never via files in the workspace
-- Redact on ingest: the spool ingester runs a redaction pass before events hit the DB
+- Inject via broker environment at spawn, never via files in the workspace. The one file the gateway
+  reads secrets from is a role's `.env`, kept outside every workspace — a workspace containing the
+  gateway's home is a startup error (kanban spec §2.3, §2.5)
+- Redact on ingest: the spool ingester runs a redaction pass before events hit the DB. **First part
+  designed** (kanban spec §10.1, plan F): exact-value masking of every secret the gateway itself
+  holds, applied on log writes and on sends, before escaping. Pattern-based detection is not yet
+  designed.
 - Container backend: mount as tmpfs, never bake into the image
 
 ---
@@ -1115,6 +1134,11 @@ Also verify current billing behaviour for third-party agent paths (ACP, Agent SD
 | Channel down | circuit breaker | backoff + retry, expose breaker state |
 | Context window full | agent-signalled compaction | lineage split via `parent_session_id` |
 | Log growth | seq − snapshot_seq > N | snapshot |
+| Kanban run's turn completes without a report | turn terminal `completed`, no report on the run | nudge in the same session, at most twice; then `protocol_violation` |
+| Kanban run fails or crashes | turn terminal `failed` / `ambiguous` | classify; counted failures retry in a **fresh** session told what the last attempt did, until `failure_limit`, then `gave_up` and block |
+| Provider throttling | 429 / 5xx / reset | requeue after a doubling cooldown, not counted; block as `transient` after `transient_limit` |
+| Provider rejects credentials | 401 / 403 / model not found | block at once; every retry would fail the same way |
+| Gateway restart mid-run | boot | undecided agent runs end `interrupted`, requeued per `retry_on_crash`; runs that had already reported keep their outcome and are only closed |
 
 ---
 
@@ -1136,6 +1160,7 @@ Steps 1–4 are unglamorous and *are* the durability guarantee. Building channel
 | 10 | Container backend | isolation for untrusted work | not started |
 | 11 | Structured-CLI driver | for agents without ACP | **done second, and it is the only driver that runs** |
 | 12 | PTY driver + delivery fence | only if genuinely required | not started, and no longer expected to be |
+| 13 | Kanban v1 (§17) | a task assigned to a role runs, reports through `pgw kanban`, and releases its children; a human task is completed from a Lark card | designed — `docs/specs/2026-11-02-kanban-design.md` |
 
 Milestone 7 is the real test. If adding the second agent requires touching the gateway core, the driver abstraction is wrong and it's cheap to fix now.
 
@@ -1143,6 +1168,12 @@ Milestone 7 is the real test. If adding the second agent requires touching the g
 buy reattachment, which is the primary constraint and the one thing this build does not have. The
 cheapest thing that increases durability before then is milestone 9's checkpoints, because a turn
 killed by a restart at least becomes diffable.
+
+**Milestone 13 goes ahead of 2–4 anyway**, for the same reason channels did: the durability work
+needs real long-running work to exercise it, and a board of tasks is that work. The cost is stated
+in the spec (§8.4): until the broker exists, a restart interrupts every running task, and they are
+requeued rather than reattached. Milestone 9 (worktrees) should follow 13 directly — until then
+the board runs one agent per workspace at a time.
 
 ---
 
@@ -1160,6 +1191,46 @@ killed by a restart at least becomes diffable.
 
 ---
 
+## 17. Kanban: work assigned to people and roles
+
+Full design: [`docs/specs/2026-11-02-kanban-design.md`](specs/2026-11-02-kanban-design.md). The
+parts that bear on the rest of this document:
+
+- **A layer above sessions, not inside them.** A task is a card; an attempt at it is a *run*; an
+  agent run *is* a gateway session, created for that run and bound to a `kanban` binding. The
+  dispatcher submits the run's prompts through the actor like any channel would, one idempotency
+  key per submission (`kanban:<run_id>:<n>`). Underneath, it needs five changes (spec §2.4): a
+  driver per role, with the role recorded in `sessions.agent_id`; a workspace per session, chosen
+  by name; per-session environment in `StartOptions`, which the actor receives through its deps and
+  passes to every start; a channel per binding; and seeding a new session from another's provider
+  session. The event log's schema
+  is unchanged (its text is now masked for known secrets, spec §10.1), and the actor's only change
+  is that environment.
+- **The board owns lifecycle truth.** A worker moves its card only by reporting — `pgw kanban
+  complete | review | block` over a local socket, authorized by a run-scoped token. A turn ending is
+  not a report.
+- **One stored phase, one writer; display status derived.** The same rule as session status
+  (`core/status.ts`, channel spec §7), for the same reason: status assigned from many code paths
+  drifts from the rows it describes.
+- **Supervision stays with the actor.** The dispatcher does not watch processes: the actor already
+  knows when a turn ends and how. The dispatcher acts on time only to cancel a run past its runtime
+  limit, end a cooldown, and flag a stranded task.
+- **A run is decided when it reports, and closed when its process is gone.** The one-agent-per-
+  workspace limit and the one-open-run-per-task rule count open runs, so an agent still writing
+  after its report cannot have the next agent start in the same checkout.
+- **Retries and G6.** A retry after a failure is a *new run in a new session*, recorded and
+  announced, whose prompt lists what the failed attempt did (its tool calls, from its own session
+  log). It is not a resend of a turn, so G6 is unaffected; an ambiguous turn in a chat session is
+  still held, never resent.
+- **Roles and workspaces** are configured separately. A *role* is a self-contained directory —
+  `config.yaml` naming its coding agent (§6.5's registry entries), `role.md`, `skills/`, and a `.env`
+  for its own secrets — created with `pgw role create`; the single `agent:` block becomes the role
+  `default`. A *workspace* is a named directory (`workspace:` becomes `default`). Tool policy is
+  enforced by the coding agent or refused at startup, never silently ignored. A role's `.env` is the
+  one exception to "secrets only in the environment" (§13): `0600`, never cloned, masked.
+
+---
+
 ## Appendix A — Naming discipline
 
 | Term | Means | Never |
@@ -1169,7 +1240,10 @@ killed by a restart at least becomes diffable.
 | `handle` | derived durable runtime address | a PID |
 | `generation` | runtime incarnation counter | reset, reused |
 | `turn_id` | one prompt→completion unit | reused across retries |
-| `workspace_id` | durable filesystem identity | relocated |
+| `workspace_id` | durable filesystem identity: a configured workspace's name, registered with its realpath on first sight (kanban spec §2.3) | relocated — repointing a known name at another directory fails startup |
+| `task_id` | a Kanban card, across all its attempts | a session, or a turn |
+| `run_id` | one attempt at a task; for an agent, exactly one session | reused by a retry |
+| `role` | who does a kind of work, and how it is run: a directory with its coding agent, `role.md`, skills, tool policy, `.env` and default workspace | a task, or a person |
 
 ## Appendix B — Rejected alternatives
 
