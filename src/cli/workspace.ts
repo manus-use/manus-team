@@ -6,7 +6,7 @@ import { loadTeamSettings } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { nameProblem } from '../names.js';
 import { resolveWorkspaces } from '../workspaces.js';
-import { refuse, type Git, type MtIo } from './mt.js';
+import { refuse, table, type Git, type MtIo } from './mt.js';
 
 export type AddTarget = { path: string } | { cloneUrl: string };
 
@@ -84,6 +84,36 @@ export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): P
     throw err;
   }
   io.out(`added workspace ${name} (${real}) to ${configPath}; the gateway uses it from its next start`);
+  return 0;
+}
+
+/** `mt workspace list`: each workspace, and whether the gateway has registered it. */
+export function workspaceList(io: MtIo): number {
+  // Names and paths only, so an unset agent.passEnv name is no reason to fail (Task 3).
+  const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
+  const recorded = registrationsAt(settings.dbPath);
+  const rows: string[][] = [];
+  for (const name of Object.keys(settings.workspaces).sort()) {
+    const declared = settings.workspaces[name] ?? '';
+    const was = recorded.get(name);
+    let real: string | undefined;
+    try {
+      real = realpathSync(declared);
+    } catch {
+      real = undefined;
+    }
+    const status =
+      was === undefined
+        ? 'not registered yet'
+        : was === real
+          ? 'registered'
+          : `registered at ${was}: the gateway will refuse to start`;
+    rows.push([name, declared, status]);
+  }
+  for (const [name, path] of [...recorded].sort(([a], [b]) => a.localeCompare(b))) {
+    if (settings.workspaces[name] === undefined) rows.push([name, path, 'registered, not in the config']);
+  }
+  for (const line of table(rows)) io.out(line);
   return 0;
 }
 

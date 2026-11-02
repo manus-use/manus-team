@@ -1,7 +1,7 @@
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { ConfigError, type Env } from '../config.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
-import { workspaceAdd } from './workspace.js';
+import { workspaceAdd, workspaceList } from './workspace.js';
 
 /**
  * `mt`: commands that create and check roles and workspaces (spec §2.6).
@@ -102,6 +102,10 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       // `await`, so a ConfigError from the async command is caught below and
       // reported as `mt: …` rather than escaping as a stack trace.
       return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, io);
+    }
+    if (group === 'workspace' && command === 'list') {
+      expectNothing(parse(rest, {}).positionals, 'workspace list');
+      return workspaceList(io);
     }
     throw new UsageError(`unknown command: ${[group, command].filter((s) => s !== undefined).join(' ')}`);
   } catch (err) {

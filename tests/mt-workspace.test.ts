@@ -128,3 +128,17 @@ describe('mt workspace add --clone', () => {
     expect(ran).toBe(false);
   });
 });
+
+describe('mt workspace list', () => {
+  it('lists each workspace and whether the gateway has registered it', async () => {
+    fx = mtFixture();
+    const db = openDb(join(fx.home, 'gateway.db'));
+    migrate(db, SCHEMA_DIR);
+    registerWorkspaces(db, new Map([['default', fx.workspace], ['old', '/srv/old']]), 0);
+    db.close();
+    const r = await fx.run(['workspace', 'list']);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(new RegExp(`^default\\s+${fx.workspace}\\s+registered$`, 'm'));
+    expect(r.out).toMatch(/^old\s+\/srv\/old\s+registered, not in the config$/m);
+  });
+});
