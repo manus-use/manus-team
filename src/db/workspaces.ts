@@ -16,6 +16,10 @@ import { txImmediate } from './open.js';
 
 export type RegisterResult = { ok: true; added: string[] } | { error: string };
 
+/**
+ * @param workspaces Each name → its realpath, as `resolveWorkspaces` returns them.
+ *   A declared path would be compared against a recorded realpath and read as moved.
+ */
 export function registerWorkspaces(
   db: Db,
   workspaces: ReadonlyMap<string, string>,
@@ -23,20 +27,19 @@ export function registerWorkspaces(
 ): RegisterResult {
   return txImmediate(db, (d) => {
     const find = d.prepare<[string], { root_path: string }>('SELECT root_path FROM workspaces WHERE id = ?');
-    const names = [...workspaces.keys()].sort();
+    const entries = [...workspaces].sort(([a], [b]) => a.localeCompare(b));
 
     // Every name is checked before any is written, so a refused start changes nothing.
-    const fresh: string[] = [];
-    for (const name of names) {
-      const path = workspaces.get(name) ?? '';
+    const fresh: Array<[string, string]> = [];
+    for (const [name, path] of entries) {
       const row = find.get(name);
       if (row === undefined) {
-        fresh.push(name);
+        fresh.push([name, path]);
       } else if (row.root_path !== path) {
         return {
           error:
             `workspace ${name} is ${row.root_path} (recorded when the name was first used), but the config ` +
-            `now says ${path}. A workspace's directory never moves: the sessions opened in it would be ` +
+            `now resolves to ${path}. A workspace's directory never moves: the sessions opened in it would be ` +
             'orphaned. Give the new directory a new name.',
         };
       }
@@ -45,7 +48,7 @@ export function registerWorkspaces(
     const insert = d.prepare(
       "INSERT INTO workspaces (id, kind, root_path, created_at) VALUES (?, 'plain-dir', ?, ?)",
     );
-    for (const name of fresh) insert.run(name, workspaces.get(name) ?? '', now);
-    return { ok: true, added: fresh };
+    for (const [name, path] of fresh) insert.run(name, path, now);
+    return { ok: true, added: fresh.map(([name]) => name) };
   });
 }

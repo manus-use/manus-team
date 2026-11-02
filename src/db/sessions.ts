@@ -69,7 +69,7 @@ export function createSession(
          (id, agent_id, workspace_id, owner_principal, state, title, generation,
           provider_session_id, last_seq, created_at, last_activity_at)
        VALUES (?, ?, ?, ?, 'initializing', ?, 0, ?, 0, ?, ?)`,
-    ).run(s.id, s.agentId, s.workspaceId, s.ownerPrincipal, s.title ?? null, s.providerSessionId ?? null, now, now);
+    ).run(s.id, s.agentId, s.workspaceId, s.ownerPrincipal, s.title ?? null, s.providerSessionId || null, now, now);
     const row = d.prepare<[string], SessionRaw>(`SELECT ${COLS} FROM sessions WHERE id = ?`).get(s.id);
     if (row === undefined) throw new Error('createSession wrote no row');
     return decode(row);
@@ -91,7 +91,9 @@ export function setState(db: Db, id: string, state: SessionState, now: number): 
  *
  * Agents generate their own internal id for persistence, and it can rotate
  * mid-process. So this is called on every sighting and always stores what the
- * agent just told us -- never the value we sent it.
+ * agent just told us -- never the value we sent it. The one exception is a seed,
+ * written by `createSession` (spec §2.4 item 5): another session's observed id,
+ * passed as a hint and replaced here by whatever the agent then reports.
  */
 export function observeProviderSessionId(db: Db, id: string, providerSessionId: string): void {
   txImmediate(db, (d) => {
