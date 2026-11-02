@@ -30,8 +30,8 @@ changes underneath it, listed in §2.4.
 ## 1. Boundaries
 
 **In:** tasks, dependency links, comments, quality gates, attempts (runs), subscriptions; an
-in-process dispatcher; role directories and named workspaces, and the `pgw role` / `pgw workspace`
-commands that create them; the `pgw kanban` worker CLI;
+in-process dispatcher; role directories and named workspaces, and the `mt role` / `mt workspace`
+commands that create them; the `mt kanban` worker CLI;
 `/kanban` chat commands and cards in Lark.
 
 **Out, each with the seam that keeps it cheap later:**
@@ -39,7 +39,7 @@ commands that create them; the `pgw kanban` worker CLI;
 | Deferred | Seam |
 |---|---|
 | Templates and workflow definitions | A template is a function that creates tasks and links. Nothing in the kernel knows about templates, so adding them touches no table |
-| Automatic decomposition by an agent | A decomposer is just a task assigned to a role that calls `pgw kanban create`. The CLI already allows it |
+| Automatic decomposition by an agent | A decomposer is just a task assigned to a role that calls `mt kanban create`. The CLI already allows it |
 | A judge model ("is this really done?") | Completion contracts and gates (§4.3, §7.7) carry the acceptance criteria; a judge would read the same fields |
 | Multiple boards, tenants | One board. A `board` column can be added with a default |
 | A web board | Lark is the v1 interface. The board is a projection over `kanban_events`, so a web view is a second renderer |
@@ -65,7 +65,7 @@ put under version control and shared. Moving a role from bytesec to Claude Code 
 role's `config.yaml`; its instructions and skills do not change with it.
 
 ```
-$PGW_HOME/roles/                 # default ~/.prime-gateway/roles
+$MT_HOME/roles/                 # default ~/.manus-team/roles
   implementer/
     config.yaml                  # the coding agent, workspace, tools, description
     role.md                      # standing instructions
@@ -113,7 +113,7 @@ workspaces:
 
 ### 2.1 A role's `config.yaml`
 
-**Which entries are roles.** A role is a directory under `$PGW_HOME/roles/` whose name matches the
+**Which entries are roles.** A role is a directory under `$MT_HOME/roles/` whose name matches the
 role grammar: `^[a-z][a-z0-9-]{0,39}$` — lowercase, so `Reviewer` and `reviewer` cannot both
 exist; no `/`, `.` or `..`, so a name can never leave the roles directory; no `:`, so a role can
 never be mistaken for a person's principal (`lark:…`). Entries starting with `.` (`.git`,
@@ -149,12 +149,12 @@ The gateway's legacy `agent:` block accepts both keys too, so a deployment that 
 **The role `default`, and the existing `agent:` block.** Chat sessions use the role `default`, and
 so does a task assigned to `default`. It is either a directory `roles/default/`, or — when there is
 none — a role made from the gateway's existing `agent:` block: its agent is that block, with the
-environment overrides that apply to it today (`PGW_AGENT_COMMAND`, `PGW_AGENT_ARGS`,
-`PGW_AGENT_DRIVER`, `PGW_AGENT_UNSUPERVISED`, and the `PGW_AGENT_ENV_*` variables passed to the
+environment overrides that apply to it today (`MT_AGENT_COMMAND`, `MT_AGENT_ARGS`,
+`MT_AGENT_DRIVER`, `MT_AGENT_UNSUPERVISED`, and the `MT_AGENT_ENV_*` variables passed to the
 agent); it has no workspace of its own, no `role.md`, no skills and no `.env`. Existing deployments
 keep working unchanged. Each of these is a startup error:
 
-- **both** a `roles/default/` directory **and** an `agent:` block or `PGW_AGENT_*` overrides — a
+- **both** a `roles/default/` directory **and** an `agent:` block or `MT_AGENT_*` overrides — a
   silent override is how a deployment ends up running a command nobody can find in its config;
 - **neither** — chat sessions need a `default` role;
 - a role directory whose `config.yaml` is missing or invalid, or which names an unknown workspace;
@@ -165,11 +165,11 @@ keep working unchanged. Each of these is a startup error:
 A mistake found only when a task is claimed would strand that task; found at startup, it is a line
 to fix.
 
-`PGW_AGENT_*` overrides apply to the role `default`, and only while it comes from the `agent:` block.
+`MT_AGENT_*` overrides apply to the role `default`, and only while it comes from the `agent:` block.
 Other roles get exactly the environment their own `config.yaml` and `.env` give them.
 
 **When changes take effect.** A role's `config.yaml` and `.env` are read at startup: changing its
-agent or its secrets needs a restart, and `pgw role check` (§2.6) validates the change first.
+agent or its secrets needs a restart, and `mt role check` (§2.6) validates the change first.
 `role.md` and skills are optional. **Which of them a role has is decided at startup**; their
 *contents* are read again at each claim, so editing a role's instructions takes effect from the next
 run, and a file added after startup is picked up at the next start. A run records
@@ -214,25 +214,25 @@ enforce them.
   directory — a change from today, where the one directory is resolved on first use; a typo now
   fails the start instead of the first task.
 - **Workspace names follow the role grammar** (§2.1): `^[a-z][a-z0-9-]{0,39}$`. A name becomes a
-  path (`pgw workspace add --clone` writes to `$PGW_HOME/workspaces/<name>`), so `../roles` must be
+  path (`mt workspace add --clone` writes to `$MT_HOME/workspaces/<name>`), so `../roles` must be
   impossible; it arrives from chat (`/kanban workspace`, `workspace:` lines); and it has no `:`, so a
   worktree id (`wt:…`, below) can never equal a configured name. Enforced at startup and by
-  `pgw workspace add`.
-- **No workspace may be or contain `$PGW_HOME`, or the gateway's database** (wherever `PGW_DB` or
+  `mt workspace add`.
+- **No workspace may be or contain `$MT_HOME`, or the gateway's database** (wherever `MT_DB` or
   `db:` puts it). A workspace configured as `$HOME`, or any directory at or above those, would put
   every role's `.env`, or the database, inside an agent's checkout. It is a startup error, and
-  `pgw workspace add` refuses it. Inside `$PGW_HOME`, only `$PGW_HOME/workspaces/<name>` may be a
+  `mt workspace add` refuses it. Inside `$MT_HOME`, only `$MT_HOME/workspaces/<name>` may be a
   workspace — where `--clone` puts them. Anything else there (`roles/`, a single role's directory)
   would put `.env` files inside an agent's checkout, the thing this rule exists to prevent.
 - **One directory, one name, no nesting.** Two configured names whose directories resolve to the same
-  realpath, or where one lies inside the other, are a startup error, and `pgw workspace add` refuses
+  realpath, or where one lies inside the other, are a startup error, and `mt workspace add` refuses
   them. The one-run-per-workspace limit (§6.3) is counted per name; two names for one checkout would
   be two limits on one directory — two agents in it at once, exactly what the limit prevents — and a
   nested workspace is the same collision one level down.
 - **A workspace `default` must exist** — chat sessions, the implicit role `default` and rule 4 below
   all need it — so its absence is a startup error, as it is today when `workspace:` is missing.
-- **The existing `workspace:` setting, and `PGW_WORKSPACE`, become workspace `default`.** Defining
-  `default` in `workspaces:` while `workspace:` or `PGW_WORKSPACE` is also set is a startup error,
+- **The existing `workspace:` setting, and `MT_WORKSPACE`, become workspace `default`.** Defining
+  `default` in `workspaces:` while `workspace:` or `MT_WORKSPACE` is also set is a startup error,
   for the same reason as for the role `default` (§2.1).
 - **A name is a durable identity, and its directory never moves.** At startup each configured
   workspace is registered in the existing `workspaces` table (schema `001`, unused until now), with
@@ -315,7 +315,7 @@ yet:
    the CLI driver's environment is fixed when the driver is built. `StartOptions` gains `env`, merged
    over the agent's environment at spawn. The actor builds `StartOptions` itself, so this is **the one
    change to the actor**: `SessionActorDeps` gains `env`, which the actor passes to every start. This
-   is how a run's `PGW_KANBAN_*` variables (§7.2) reach the agent.
+   is how a run's `MT_KANBAN_*` variables (§7.2) reach the agent.
 
    **Who holds the environment.** The token exists only in memory — only its hash is stored — so the
    dispatcher holds each open run's environment, and the registry asks it for a session's environment
@@ -347,14 +347,14 @@ environment, because the agent runs as the gateway's user and can read anything 
 because files persist and travel. A role directory is exactly the thing that is copied, cloned,
 committed and shared, so its `.env` is guarded at every point where it could travel or leak:
 
-- **Created empty, `0600`**, by `pgw role create`, with a `.gitignore` containing `.env` beside it,
+- **Created empty, `0600`**, by `mt role create`, with a `.gitignore` containing `.env` beside it,
   so committing a roles directory does not commit its secrets.
-- **Never cloned.** `pgw role create --clone-from` copies `config.yaml`, `role.md` and `skills/`,
+- **Never cloned.** `mt role create --clone-from` copies `config.yaml`, `role.md` and `skills/`,
   and writes the new role an empty `.env`. A credential copied into a second role is one credential
   with two owners — and some cannot survive that: a single-use refresh token rotated by one copy is
   revoked for the other.
 - **Permissions are checked, not fixed.** A `.env` readable by group or others is a startup error,
-  and `pgw role check` reports it. The gateway does not change its mode itself: a file that was
+  and `mt role check` reports it. The gateway does not change its mode itself: a file that was
   world-readable may already have been read, and quietly tightening it hides that.
 - **Masked.** Every value in every role's `.env` joins the known-secret set (§10.1).
 - **Scoped.** A role's agent gets its own `.env`, plus whatever its `passEnv` names from the gateway's
@@ -369,8 +369,8 @@ the line, not a guess. It must be a regular file — not a symlink, which could 
 by the gateway's user.
 
 **Which names it may set.** The same names `passEnv` may not forward cannot be set here either:
-`PGW_*` and `LARK_*` belong to the gateway — an agent holding them could reconfigure or impersonate
-it. `PATH` is refused too: the gateway prepends the `pgw` binary's directory to it for every run
+`MT_*`, the legacy `PGW_*` (§13) and `LARK_*` belong to the gateway — an agent holding them could
+reconfigure or impersonate it. `PATH` is refused too: the gateway prepends the `mt` binary's directory to it for every run
 (§7.2), and a role replacing it would lose the worker CLI.
 
 **What it does not do**, stated so it is not assumed: every role's agent runs as the same OS user, so
@@ -381,20 +381,21 @@ them. Only a separate OS user or a container per role does that (architecture mi
 The README's rule changes with this, from "credentials never go in the file" to "credentials go in
 the environment, or in a role's `.env` — `0600`, never cloned, masked".
 
-### 2.6 The `pgw role` and `pgw workspace` commands
+### 2.6 The `mt role` and `mt workspace` commands
 
 ```
-pgw role create <name> [--clone-from <role>] [--description "..."]
-pgw role list
-pgw role check [<name>]                      # the startup validation, without restarting
-pgw workspace add <name> <absolute-path>
-pgw workspace add <name> --clone <git-url>   # clones into $PGW_HOME/workspaces/<name>
-pgw workspace list
+mt role create <name> [--clone-from <role>] [--description "..."]
+mt role list
+mt role check [<name>]                      # the startup validation, without restarting
+mt workspace add <name> <absolute-path>
+mt workspace add <name> --clone <git-url>   # clones into $MT_HOME/workspaces/<name>
+mt workspace list
 ```
 
-**Where the commands get the gateway's state.** They find the gateway's home, config file and database
-exactly as the gateway does — `PGW_CONFIG`, else `$PGW_HOME/config.yaml`; `PGW_DB`, else `db:`, else
-`$PGW_HOME/gateway.db` — and read registered workspaces from that database, opened read-only and
+**Where the commands get the gateway's state.** They find the gateway's home — through the same
+resolver, legacy names and fallback included (§13) — and the config file and database exactly as the
+gateway does — `MT_CONFIG`, else `$MT_HOME/config.yaml`; `MT_DB`, else `db:`, else
+`$MT_HOME/gateway.db` — and read registered workspaces from that database, opened read-only and
 never checkpointed, so the running gateway is not disturbed. A database that does not exist yet (a
 fresh install) has no registrations. A deployment with no config file (environment-only) cannot have
 `workspaces:` added to it; `workspace add` refuses and says to create one.
@@ -404,35 +405,35 @@ fresh install) has no registrations. A deployment with no config file (environme
   `skills/`, an empty `0600` `.env`, and the `.gitignore`. It refuses a name that exists — except
   `default` while that role still comes from the `agent:` block (below); `--clone-from` is refused
   with `default`, whose copy source is fixed.
-- **Copying from the legacy `default`.** The agent is the `agent:` block with any `PGW_AGENT_COMMAND`,
-  `PGW_AGENT_ARGS`, `PGW_AGENT_DRIVER` and `PGW_AGENT_UNSUPERVISED` overrides **set in the shell the
+- **Copying from the legacy `default`.** The agent is the `agent:` block with any `MT_AGENT_COMMAND`,
+  `MT_AGENT_ARGS`, `MT_AGENT_DRIVER` and `MT_AGENT_UNSUPERVISED` overrides **set in the shell the
   command runs in**, and the command prints which were applied — the shell may not be the service's.
-  `PGW_AGENT_ENV_*` values are never copied: they are secrets. The command lists their names, so they
+  `MT_AGENT_ENV_*` values are never copied: they are secrets. The command lists their names, so they
   can be put in the new role's `.env`, rather than leaving the new role to fail its first run on a
   missing credential with no hint why.
-- **Moving an existing deployment to `roles/default/`** is `pgw role create default`. It writes
+- **Moving an existing deployment to `roles/default/`** is `mt role create default`. It writes
   `roles/default/` from the legacy agent as above and prints the cutover: move the listed
-  `PGW_AGENT_ENV_*` values into `roles/default/.env`, remove the `agent:` block and every
-  `PGW_AGENT_*` variable from the service's configuration, run `pgw role check`, restart. Until the
+  `MT_AGENT_ENV_*` values into `roles/default/.env`, remove the `agent:` block and every
+  `MT_AGENT_*` variable from the service's configuration, run `mt role check`, restart. Until the
   `agent:` block and overrides are gone, startup refuses to run with both (§2.1) — deliberately, so
   the cutover cannot half-happen silently.
 - **`role check`** runs the startup validation, in two parts:
   - the parts that depend only on files — names, `config.yaml`, the tool policy against what the
     agent can enforce, `role.md` and skills, the `.env` format, names, ownership and mode, workspace
     names against `config.yaml` and the resolved database;
-  - the parts that depend on the environment — `passEnv` names being set, and whether `PGW_AGENT_*`
+  - the parts that depend on the environment — `passEnv` names being set, and whether `MT_AGENT_*`
     overrides conflict with `roles/default/` — checked against **this shell's** environment and
     reported separately, with a note that the service's environment may differ.
 - **`workspace add`** adds the name to `workspaces:` in the gateway's `config.yaml`, editing the file
   in place so its comments survive. Before writing, it runs **every check startup runs on workspaces
-  (§2.3)** — absolute, existing, a directory, not at or above `$PGW_HOME` or the database, not sharing
+  (§2.3)** — absolute, existing, a directory, not at or above `$MT_HOME` or the database, not sharing
   or nesting with another workspace — and refuses anything the next start would refuse, including:
   a name outside the grammar; a name already in `workspaces:` (registered or not — the gateway may
   not have restarted since it was added); a name registered in the database for a different
-  directory; `default` while `workspace:` or `PGW_WORKSPACE` is set — the latter read from this shell,
+  directory; `default` while `workspace:` or `MT_WORKSPACE` is set — the latter read from this shell,
   with the same note as `role check` that the service's environment may differ.
 - **`workspace add --clone <git-url>`** runs `git clone -- <url> <dir>` — the `--` so a URL starting
-  with `-` cannot be read as an option — into `$PGW_HOME/workspaces/<name>`. It refuses if that
+  with `-` cannot be read as an option — into `$MT_HOME/workspaces/<name>`. It refuses if that
   directory exists. If the clone fails, the partial directory is removed and `config.yaml` is not
   touched. Any URL `git` accepts is allowed, including transports that run commands: the command runs
   as the operator, who could run `git` directly, so restricting URLs would add no protection.
@@ -501,7 +502,7 @@ with a join, not by correlating two files.
 | `run_id`, `task_id`, `attempt` | `attempt` counts from 1 per task, across kinds |
 | `kind` | `work` or `review` |
 | `assignee_kind`, `assignee` | the role or person, snapshot at claim — reassigning the task does not rewrite history |
-| `agent_config`, `workspace` | for an agent run: the role's effective `agent` block at claim — for a legacy `default`, after `PGW_AGENT_*` overrides — with driver, command, args and the *names* of its environment variables, never their values; and the workspace. History shows what actually ran after the role's files change |
+| `agent_config`, `workspace` | for an agent run: the role's effective `agent` block at claim — for a legacy `default`, after `MT_AGENT_*` overrides — with driver, command, args and the *names* of its environment variables, never their values; and the workspace. History shows what actually ran after the role's files change |
 | `role_md_hash` | for an agent run: SHA-256 of the `role.md` it was given (§2.1) |
 | `session_id` | the gateway session for an agent run; null for a human run |
 | `seeded_from_run` | for rework (§5.3): the work run whose provider session this run resumes |
@@ -515,7 +516,7 @@ with a join, not by correlating two files.
 
 A run has two moments, and they are kept apart deliberately:
 
-- **Decided** — `outcome` is set. For a report, that is when `pgw kanban complete` (or `review`,
+- **Decided** — `outcome` is set. For a report, that is when `mt kanban complete` (or `review`,
   `block`, `changes`) succeeds, during the turn.
 - **Closed** — `ended_at` is set. For an agent run, that is when its session's last turn has ended:
   the agent process is gone. For a human run, it is the same moment as decided.
@@ -665,7 +666,7 @@ Completing a task whose parents are not all done is refused. Parents can only be
 link was added after the task started, which §3.2 prevents; the check is the backstop.
 
 **Every path to `done` goes through one `complete` operation**, and it runs the task's gates (§7.7):
-an agent's `pgw kanban complete`, a reviewer role's `complete`, a person's `/kanban done` or Done
+an agent's `mt kanban complete`, a reviewer role's `complete`, a person's `/kanban done` or Done
 button, and `/kanban approve`. A person cannot complete or approve a task **while an agent run is open
 on it** — because gates would run against a checkout that agent is still changing, and the agent's
 own later report would contradict the person's. If the run is undecided, the refusal says to
@@ -842,7 +843,7 @@ The task prompt is composed, in this order, of:
    an instruction to the model, not something the gateway can enforce; the nudges (§7.5) and the
    `protocol_violation` outcome are what catch a `role.md` that talks an agent out of reporting.
    - *work*: you have one task; orient by reading the context below; work in the workspace; report
-     through `pgw kanban`, and exactly one terminal report — `complete`, `review` or `block` — ends
+     through `mt kanban`, and exactly one terminal report — `complete`, `review` or `block` — ends
      your run; block only on genuine ambiguity, and say why; if a downstream review task exists,
      `complete` rather than `review`; if you find follow-up work, create a task for it rather than
      doing it; never put secrets in a summary, metadata or comment; stop once you have reported.
@@ -865,10 +866,10 @@ The run's environment, passed through `StartOptions.env` (§2.4):
 
 | Variable | |
 |---|---|
-| `PGW_KANBAN_RUN` | the run id |
-| `PGW_KANBAN_TOKEN` | a random 256-bit token; only its hash is stored |
-| `PGW_KANBAN_SOCKET` | the gateway's local socket |
-| `PATH` | with the directory of the `pgw` binary prepended |
+| `MT_KANBAN_RUN` | the run id |
+| `MT_KANBAN_TOKEN` | a random 256-bit token; only its hash is stored |
+| `MT_KANBAN_SOCKET` | the gateway's local socket |
+| `PATH` | with the directory of the `mt` binary prepended |
 
 **The token is the run's authority, scoped to the run.** It can report on its own task, and comment
 on and create tasks; it cannot move any other task. It works while the run is open (§3.3):
@@ -886,20 +887,20 @@ environment, and the token with it. A malicious workload in the workspace could 
 its scope, for as long as the run lives. The socket is created `0600`, so only the gateway's own user
 can connect at all; that, not the token, is the boundary between users.
 
-### 7.3 `pgw kanban` — the worker CLI (new)
+### 7.3 `mt kanban` — the worker CLI (new)
 
-Neither the `pgw` binary nor the socket exists yet. The binary arrives in plan B, with the `pgw role`
-and `pgw workspace` commands; the socket and `pgw kanban` arrive in plan C (§12).
+Neither the `mt` binary nor the socket exists yet. The binary arrives in plan B, with the `mt role`
+and `mt workspace` commands; the socket and `mt kanban` arrive in plan C (§12).
 
 ```
-pgw kanban show                      # this task + worker context, as JSON
-pgw kanban complete   < handoff.json # {summary, metadata}
-pgw kanban review     < handoff.json # {summary, metadata, reviewer?}
-pgw kanban changes    < reason.json  # reviewer only: {reason}
-pgw kanban block      < block.json   # {kind, reason}
-pgw kanban comment    < comment.json # {body, task_id?}
-pgw kanban create     < task.json    # {title, body, contract?, assignee, workspace?, parents?, idempotency_key?}
-pgw kanban link       < link.json    # {parent_id, child_id}
+mt kanban show                      # this task + worker context, as JSON
+mt kanban complete   < handoff.json # {summary, metadata}
+mt kanban review     < handoff.json # {summary, metadata, reviewer?}
+mt kanban changes    < reason.json  # reviewer only: {reason}
+mt kanban block      < block.json   # {kind, reason}
+mt kanban comment    < comment.json # {body, task_id?}
+mt kanban create     < task.json    # {title, body, contract?, assignee, workspace?, parents?, idempotency_key?}
+mt kanban link       < link.json    # {parent_id, child_id}
 ```
 
 - **JSON in on stdin, JSON out, always.** A summary is free text; passing it through shell arguments
@@ -931,7 +932,7 @@ When the actor resolves a submission with the turn's terminal, the dispatcher lo
 
 An agent that narrates its next step and stops without reporting is common, and usually the work is
 done and only the report is missing. So the dispatcher submits a short nudge into **the same
-session** — "you ended your turn without reporting; run `pgw kanban complete`, `review` or `block`" —
+session** — "you ended your turn without reporting; run `mt kanban complete`, `review` or `block`" —
 up to `kanban.nudge_limit` (default 2) times. If they run out, the run ends `protocol_violation`,
 with the agent's last output recorded so the next attempt and the person reading the card see what
 it said.
@@ -981,7 +982,7 @@ workspace, rather than running gates under another role's credentials. So an imp
 `review` runs gates as the implementer; a reviewer agent's `complete` runs them as the reviewer —
 with the reviewer's credentials, so a reviewer given only a read-only token runs gates with that
 token; and a person approving after an implementer's `review` runs them as the implementer. They never get the gateway's own environment, which holds its Lark
-secret, and never `PGW_KANBAN_TOKEN`: a test suite has no business reporting on the board.
+secret, and never `MT_KANBAN_TOKEN`: a test suite has no business reporting on the board.
 
 **Gates are not isolated from the network**, deliberately. They are commands an operator chose, in the
 same trust position as a cron job, not output from an agent. Denying the network would break ordinary
@@ -1236,7 +1237,7 @@ exact occurrence with `••••`:
 
 - the Lark app secret;
 - every environment value the gateway passes to an agent: every value in every role's `.env`
-  (§2.5), the `PGW_AGENT_ENV_*` values of the role `default` made from the `agent:` block, and the
+  (§2.5), the `MT_AGENT_ENV_*` values of the role `default` made from the `agent:` block, and the
   resolved values of each role's `passEnv` names — except names a role lists in `maskExempt`, for
   values that are long but not secret (`ANTHROPIC_BASE_URL`, `AWS_REGION`);
 - every live worker token (§7.2), added when a run is claimed and removed when it closes.
@@ -1311,10 +1312,11 @@ board.
 
 | Layer | How |
 |---|---|
-| Config | role directories and workspaces resolve; with no `roles/default/`, the `agent:` block and its `PGW_AGENT_*` overrides become the role `default`, and apply to nothing else; both a `roles/default/` and an `agent:` block fails; neither fails; `workspace:` becomes workspace `default`; relative or missing workspace paths fail; a role with a missing or invalid `config.yaml` or an unknown workspace fails; a `tools` policy the role's agent cannot enforce fails; an unreadable `role.md` or skill fails startup and later makes the role unresolvable |
-| Role `.env` | created empty and `0600` with a `.gitignore`; never copied by `--clone-from`; group- or world-readable, symlinked, or foreign-owned fails startup and `role check`, and is not chmod-ed; the format's accepted and refused lines; `PGW_*`, `LARK_*` and `PATH` refused; a missing `.env` valid; values reach only that role's agent; the same variable in `.env` and `passEnv` fails; values masked |
-| Role and workspace names | the grammar enforced for roles at discovery and by `role create`, and for workspaces at startup and by `workspace add` (`../x`, `A`, `a:b` refused); a workspace equal to or containing `$PGW_HOME` or a relocated database refused; inside `$PGW_HOME` only `workspaces/<name>` allowed; two names on one realpath, and one workspace nested in another, refused at startup and by `workspace add`; driver ids reserved; dot-entries ignored; other entries reported and ignored |
-| Role and workspace CLI | `role create default` migrating a legacy `default` and printing the cutover and the `PGW_AGENT_ENV_*` names; `role create` from `default` and from `--clone-from`, refusing an existing name, never copying `.env` or `PGW_AGENT_ENV_*` values; `role check` reports what startup would; `role check` reporting environment-dependent results separately; `workspace add` keeps the config file's comments, refuses a name registered to another directory and a directory containing `$PGW_HOME`, refuses without a config file, a name already in `workspaces:`, and `default` while `workspace:` is set; reads the database at a `PGW_DB` location, and treats a missing one as empty; `--clone` uses `--`, refuses an existing target, and leaves nothing behind on failure; none of them touch the socket |
+| Rename transition | each listed variable read under its old name with a warning; both set and equal → warning; both set and different → error naming both variables and no values; empty values judged by each variable's own reader; `AGENT_ENV_*` per suffix, union of suffixes, values masked whichever prefix supplied them; no `PGW_` form for `MT_KANBAN_*`; home: explicit wins, fresh install → `~/.manus-team`, only old → old with a warning, both → error; db, lock and downloads follow the chosen home; `mt` commands resolve the same home and never create `~/.manus-team` on fallback; `passEnv` and role `.env` refusing both `MT_*` and `PGW_*` |
+| Config | role directories and workspaces resolve; with no `roles/default/`, the `agent:` block and its `MT_AGENT_*` overrides become the role `default`, and apply to nothing else; both a `roles/default/` and an `agent:` block fails; neither fails; `workspace:` becomes workspace `default`; relative or missing workspace paths fail; a role with a missing or invalid `config.yaml` or an unknown workspace fails; a `tools` policy the role's agent cannot enforce fails; an unreadable `role.md` or skill fails startup and later makes the role unresolvable |
+| Role `.env` | created empty and `0600` with a `.gitignore`; never copied by `--clone-from`; group- or world-readable, symlinked, or foreign-owned fails startup and `role check`, and is not chmod-ed; the format's accepted and refused lines; `MT_*`, `PGW_*`, `LARK_*` and `PATH` refused; a missing `.env` valid; values reach only that role's agent; the same variable in `.env` and `passEnv` fails; values masked |
+| Role and workspace names | the grammar enforced for roles at discovery and by `role create`, and for workspaces at startup and by `workspace add` (`../x`, `A`, `a:b` refused); a workspace equal to or containing `$MT_HOME` or a relocated database refused; inside `$MT_HOME` only `workspaces/<name>` allowed; two names on one realpath, and one workspace nested in another, refused at startup and by `workspace add`; driver ids reserved; dot-entries ignored; other entries reported and ignored |
+| Role and workspace CLI | `role create default` migrating a legacy `default` and printing the cutover and the `MT_AGENT_ENV_*` names; `role create` from `default` and from `--clone-from`, refusing an existing name, never copying `.env` or `MT_AGENT_ENV_*` values; `role check` reports what startup would; `role check` reporting environment-dependent results separately; `workspace add` keeps the config file's comments, refuses a name registered to another directory and a directory containing `$MT_HOME`, refuses without a config file, a name already in `workspaces:`, and `default` while `workspace:` is set; reads the database at an `MT_DB` location, and treats a missing one as empty; `--clone` uses `--`, refuses an existing target, and leaves nothing behind on failure; none of them touch the socket |
 | Sessions | workspace name written to `sessions.workspace_id` at create and used on every actor rebuild; empty legacy value resolves to `default`; legacy driver id resolves to the role `default`; `sessions.agent_id` holds the role name |
 | Derived status | pure function; table of phase × parents × runs |
 | Transitions | every legal move, and every illegal one refused, against a real SQLite |
@@ -1331,31 +1333,32 @@ board.
 | Masking | a known value masked through each escaper, in composed worker context and `last_output`, and in stored free text and JSON string values; **a secret split across two message chunks masked on the card**; a secret containing `_` masked before escaping, and one containing `"` masked inside JSON; values under 8 characters and `maskExempt` names left alone; a worker token masked only while its run is open; `turn_submitted` input stored unmasked but shown masked; a gate containing a secret refused; a render withholding a trailing prefix of a secret, mid-stream and on a turn that ended part-way through one; ids inside payloads left unmasked; the registry gaining and losing a worker token with its run |
 | Reported commit | clean tree → commit; dirty tree → commit plus "uncommitted changes"; not a repo → "uncommitted"; recorded for a reviewer agent's `complete`, never for a person's report |
 | Workspaces | a name registered on first sight; a known name repointed to another directory fails startup; no workspace `default` fails startup; a downstream review task inherits its parents' common workspace, a role with its own workspace does not; an unclaimed archived parent ignored; parents in different workspaces make an agent task unresolvable, while a human one is claimed with a null workspace, has gated completion refused, and can then be given one by `/kanban workspace`; a worker-created follow-up uses its creating task's workspace without a link and is claimable at once; an agent claims a workspace while a person's review on another task there is open; a person's run leaves the workspace null and a later agent review claim re-applies the rules |
-| End to end | the fake CLI agent calling `pgw kanban complete` through the real socket |
+| End to end | the fake CLI agent calling `mt kanban complete` through the real socket |
 
 ---
 
 ## 12. Plans
 
-Separate implementation plans. Each ends with everything built so far working and tested. Order: A, B, F, C, D, with E
-independent once B is done. **Before F**, the `lark-interaction-fixes` branch is merged: F changes
+Separate implementation plans. Each ends with everything built so far working and tested. Order: A, A2, B, F, C,
+D, with E independent once B is done. **Before F**, the `lark-interaction-fixes` branch is merged: F changes
 the escapers, and `forMarkdown` is on that branch.
 
 | Plan | Contents | Depends on |
 |---|---|---|
 | **A. Rename** | the repository to `manus-team` (§13) | — |
-| **B. Roles and workspaces** | role directories (`config.yaml`, `role.md`, `skills/`, `.env` with its safeguards) and `workspaces:`, with the legacy `agent:` / `workspace:` as `default`; the `pgw` binary and its `pgw role` and `pgw workspace` commands; a driver per role; `sessions.agent_id` as the role name; a workspace per session; `StartOptions.env`; a channel per binding; seeding a session's provider session id; tool-policy enforcement check; the README's credentials rule (§2) | A |
-| **C. Kernel** | migration `003`; transitions and derived status; classifier; prompt composition; the socket and the `pgw kanban` commands; the dispatcher — passes, per-workspace limit, nudges, retries, rework, gates, restart handling; with F's masker: registering and removing worker tokens, masking composed worker context and `last_output` (layer 2), masking kanban free text and `kanban_events` on write (layer 3), and refusing gates that contain a secret | B, F |
+| **A2. Finish the rename** | the env-read layer with legacy names (§13); the shared home resolver and its fallback; `passEnv` refusing both prefixes; config error messages and the README's variable table under the new names; `src/identity.ts`'s comment, which still says the old names are kept | A |
+| **B. Roles and workspaces** | role directories (`config.yaml`, `role.md`, `skills/`, `.env` with its safeguards) and `workspaces:`, with the legacy `agent:` / `workspace:` as `default`; the `mt` binary and its `mt role` and `mt workspace` commands; a driver per role; `sessions.agent_id` as the role name; a workspace per session; `StartOptions.env`; a channel per binding; seeding a session's provider session id; tool-policy enforcement check; the README's credentials rule (§2) | A2 |
+| **C. Kernel** | migration `003`; transitions and derived status; classifier; prompt composition; the socket and the `mt kanban` commands; the dispatcher — passes, per-workspace limit, nudges, retries, rework, gates, restart handling; with F's masker: registering and removing worker tokens, masking composed worker context and `last_output` (layer 2), masking kanban free text and `kanban_events` on write (layer 3), and refusing gates that contain a secret | B, F |
 | **D. Lark** | `/kanban` commands; person targets; card `kind` routing; task, review and blocked cards; the group notice; subscriptions | C |
 | **E. Native resume** | the CLI driver captures the provider session id and passes `--session` (architecture §6.3), with transcript replay as the fallback | B; independent of C and D |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D, nothing can deliver a card to a person, so **plan C refuses human assignees and
-reviewers** at creation and in `pgw kanban review`, and **refuses roles whose agent is supervised**,
+reviewers** at creation and in `mt kanban review`, and **refuses roles whose agent is supervised**,
 whose approval cards would have nowhere to go until subscriptions exist. C's kernel implements and
 tests human runs and approval forwarding through its service API, and D turns them on.
 
-Nor can a person create a task before D: `/kanban new` arrives there, and every `pgw kanban` command
+Nor can a person create a task before D: `/kanban new` arrives there, and every `mt kanban` command
 needs a run's token. C does **not** add a token-less way in. Agents run as the gateway's own user, so
 a command that trusts "whoever can reach the socket" would trust every agent, and let any of them act
 as an operator. C is therefore proven by its service API and its end-to-end tests — a fake agent
@@ -1373,13 +1376,74 @@ The repository becomes **manus-team**: the team is the concept — people and ro
 one board — and Kanban is the board inside it. It is done first, before any kanban code, so that the
 spec, the migration and the CLI start under the final name and nothing is renamed twice.
 
-What changes: the repository, `package.json`, the README and docs, schema header comments, the Lark
-SDK `source` tag. What does **not**: the `PGW_*` environment variables, `PGW_HOME`, and the
-`~/.prime-gateway` default home. A running deployment's configuration, database and secrets live
-there, and renaming them would break it for no gain. The new worker CLI is called `pgw` to match
-those, not the repository.
+It is done in two steps:
 
----
+- **Plan A** renamed the product: the repository, `package.json`, the README and docs, schema header
+  comments, and the names the gateway identifies itself by to Lark and to agents, which now come
+  from one constant.
+- **Plan A2** renames what a deployment depends on: the environment variables `PGW_*` become `MT_*`,
+  the home `~/.prime-gateway` becomes `~/.manus-team`, and the CLI — not yet built — is `mt`.
+
+A running deployment's configuration, database and secrets live under the old names, so A2 keeps
+them working through a transition rather than breaking them.
+
+**Which variables have an old name.** Exactly the ones that exist today, and no others:
+`HOME`, `CONFIG`, `DB`, `DOWNLOAD_DIR`, `SCHEMA_DIR`, `WORKSPACE`, `MAX_LIVE_SESSIONS`,
+`OWNER_OPEN_ID`, `ALLOW_TALK`, `ALLOW_OPERATE`, `ALLOW_CHATS`, `ALLOW_DM`, `ALLOW_MENTION_ALL`,
+`AGENT_COMMAND`, `AGENT_ARGS`, `AGENT_DRIVER`, `AGENT_UNSUPERVISED`, and the prefix `AGENT_ENV_*` —
+each read as `MT_<name>` and, during the transition, as `PGW_<name>`. Variables introduced after the
+rename — `MT_KANBAN_*` (§7.2) and anything later — have no `PGW_` form: they never existed under it,
+and an agent run must not start accepting a `PGW_KANBAN_TOKEN`.
+
+**How an old name is read.**
+
+- **At the one place environment variables are read**, so every consumer — config, the role
+  `default` made from the `agent:` block, masking — sees the same result. Wherever this spec names
+  `MT_AGENT_*` or `MT_AGENT_ENV_*`, that includes the legacy spelling: a `PGW_AGENT_ENV_*` value is
+  passed to the agent, listed by `mt role create default`, removed in the cutover, counted as an
+  `agent:` override, and **masked** (§10.1), exactly as an `MT_AGENT_ENV_*` one is.
+- **"Set" means what it already means for that variable.** Most are unset when empty; the list
+  variables (`ALLOW_*`) treat an empty value as meaningful. The rules below use each variable's own
+  reading.
+- **Only the old name set:** it is used, with a warning naming the new one.
+- **Both set, equal:** fine; a warning that the old one can be removed.
+- **Both set, different:** a startup error naming both variables — **never their values**, which may
+  be secrets.
+- **The `AGENT_ENV_*` prefix** works per suffix: the agent gets the union of the suffixes set under
+  either prefix, and the three rules above apply to each suffix separately — `PGW_AGENT_ENV_FOO`
+  against `MT_AGENT_ENV_FOO`, and `PGW_AGENT_ENV_BAR` alone is simply used.
+- **Warnings** go to the operator's log at startup — standard error, where the gateway already
+  reports — never to a chat. `mt role check` prints the same warnings. The `PGW_*` names are
+  dropped in a later release, announced by those warnings.
+
+**The home.** One resolver decides it, and the gateway and every `mt` command (§2.6) use that same
+resolver, fallback included:
+
+1. **`MT_HOME`, or `PGW_HOME`, set:** that directory, and no fallback. Both set to different
+   directories is the general "both set, different" error above — `MT_HOME` does not silently win.
+2. **Neither set:** `~/.manus-team` if only it exists, or if neither exists (a fresh install).
+3. **Only `~/.prime-gateway` exists:** it is used, with a warning giving the commands to move it
+   while the gateway is stopped, and reminding the operator to rename `PGW_*` to `MT_*` in the
+   service's environment at the same time. Nothing is moved automatically: moving a live database
+   under a running process is how a log loses its last writes. An `mt` command on such a deployment
+   writes into `~/.prime-gateway` and never creates `~/.manus-team`.
+4. **Both exist:** a **startup error**, naming both. A second home can appear before a move is
+   finished — an interrupted copy, a directory made by hand, a tool that created
+   `~/.manus-team/roles` — and silently preferring it would start the gateway on an empty database,
+   with every session and binding apparently gone. Merge or remove one, or set `MT_HOME`.
+
+Everything derived from the home follows whichever was chosen, fallback included: the config file,
+`gateway.db` and its lock, `downloads/`, `roles/`, `workspaces/`.
+
+**Also.**
+- **What the move cannot carry:** attachment paths already recorded in old events point into the old
+  home's `downloads/`. They stop resolving once it moves. New events are unaffected.
+- **Agents can hold neither prefix.** `passEnv` and a role's `.env` refuse `MT_*` and `PGW_*` alike
+  (§2.5): both name the gateway's own configuration.
+- `LARK_*` variables keep their names: they belong to the Lark integration, not to the product.
+- The CLI is `mt`. On some systems `mt` is also a tape-drive utility; agents always get the gateway's,
+  because its directory is first on their `PATH` (§7.2), and an operator's shell resolves by its own
+  `PATH`.
 
 ## 14. Corrections to `architecture.md`
 
@@ -1389,6 +1453,8 @@ Made in the same change as this document:
   scheduled; work assigned on the board is (§17).
 - **§6.3** said `bytesec run --session` does not continue a conversation. On 0.7.4 it does — a second
   run with `--session <id>` recalled a fact given only to the first.
+- **Throughout**, the environment variables are `MT_*`, the home is `$MT_HOME` and the design
+  identifiers use `mt/`, after the rename (§13).
 - **§13** marks the first part of its redaction pass — exact-value masking — as designed (§10.1),
   and names a role's `.env` as the one file the gateway reads secrets from (§2.5).
 - **§14, §15, §17, Appendix A** gain the kanban failure modes, milestone, summary and terms.

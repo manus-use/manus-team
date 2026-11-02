@@ -1,6 +1,6 @@
 # manus-team — Architecture Design
 
-*Formerly `prime-gateway`. The `PGW_*` variables, `PGW_HOME` and the `~/.prime-gateway` home keep their names.*
+*Formerly `prime-gateway`. The old `PGW_*` variables and the `~/.prime-gateway` home are still read during the transition (kanban spec §13).*
 
 **Version:** 0.2 — design, reconciled against the code
 **Primary constraint:** long-lived durable sessions
@@ -154,7 +154,7 @@ Most combinations are legal. The illegal ones are declared as compatibility cons
 
 ## 3. Core data model
 
-SQLite, WAL mode, single file at `$PGW_HOME/gateway.db` (`PGW_DB` or `db:` overrides it).
+SQLite, WAL mode, single file at `$MT_HOME/gateway.db` (`MT_DB` or `db:` overrides it).
 
 `schema/001_initial.sql` and `schema/002_lark_channel.sql` are the authority for everything in
 this section; where the DDL below differs, the migrations win.
@@ -438,7 +438,7 @@ Keep it dumb. Every ounce of intelligence in the broker is intelligence you can'
 ### 4.3 The spool
 
 ```
-$PGW_HOME/sessions/<session_id>/<generation>/
+$MT_HOME/sessions/<session_id>/<generation>/
   ├── spool.ndjson       # one event per line, append-only, fsync-batched
   ├── raw/               # tool output, terminal output — referenced by chunk_ref
   └── broker.sock        # control socket
@@ -568,7 +568,7 @@ A broker accepts at most one attached gateway. A second `HELLO` on an already-at
 broker is **refused**, not queued — two gateway instances reconciling simultaneously would
 otherwise both attach and both advance offsets.
 
-The gateway holds a corresponding lock file at `$PGW_HOME/gateway.lock` to make double
+The gateway holds a corresponding lock file at `$MT_HOME/gateway.lock` to make double
 starts fail fast rather than fail subtly.
 
 ### 4.7 Testing the contract in isolation
@@ -831,12 +831,12 @@ interface ExecutionBackend {
 ### Handle is deterministic and reconstructible from persisted state alone
 
 ```
-handle = "pgw/" + session_id + "/" + generation
+handle = "mt/" + session_id + "/" + generation
 ```
 
-- **tmux** → session name `pgw/ses_8f72/42`
-- **container** → container name `pgw-ses_8f72-42`
-- **systemd scope** → `pgw-ses_8f72-42.scope`
+- **tmux** → session name `mt/ses_8f72/42`
+- **container** → container name `mt-ses_8f72-42`
+- **systemd scope** → `mt-ses_8f72-42.scope`
 
 **Never a PID.** PIDs get reused; a stale PID probe can return `running` for an unrelated process.
 
@@ -936,7 +936,7 @@ Do **not** guess. For filesystem effects, the workspace checkpoint (§9) lets yo
 
 ```
 repo/                              # bare or primary clone
-$PGW_HOME/workspaces/ws_42/      # worktree, branch pgw/ses_8f72
+$MT_HOME/workspaces/ws_42/      # worktree, branch mt/ses_8f72
 ```
 
 - **`root_path` is immutable for the workspace's lifetime.** Claude Code's session lookup is project-directory-scoped, so relocating a worktree orphans the provider session. Record it once, never move it.
@@ -947,7 +947,7 @@ $PGW_HOME/workspaces/ws_42/      # worktree, branch pgw/ses_8f72
 
 Auto-commit at turn boundaries and before/after approved destructive ops. Record `commit_sha` in the event log.
 
-**Use a separate ref namespace** — `refs/pgw/checkpoints/<session_id>` — so you don't fight agents that run `git` themselves. This is the safer default and costs nothing.
+**Use a separate ref namespace** — `refs/mt/checkpoints/<session_id>` — so you don't fight agents that run `git` themselves. This is the safer default and costs nothing.
 
 Buys you: diffing what the agent did while you were away, rollback, and a concrete answer to indeterminate tool calls.
 
@@ -1162,7 +1162,7 @@ Steps 1–4 are unglamorous and *are* the durability guarantee. Building channel
 | 10 | Container backend | isolation for untrusted work | not started |
 | 11 | Structured-CLI driver | for agents without ACP | **done second, and it is the only driver that runs** |
 | 12 | PTY driver + delivery fence | only if genuinely required | not started, and no longer expected to be |
-| 13 | Kanban v1 (§17) | a task assigned to a role runs, reports through `pgw kanban`, and releases its children; a human task is completed from a Lark card | designed — `docs/specs/2026-11-02-kanban-design.md` |
+| 13 | Kanban v1 (§17) | a task assigned to a role runs, reports through `mt kanban`, and releases its children; a human task is completed from a Lark card | designed — `docs/specs/2026-11-02-kanban-design.md` |
 
 Milestone 7 is the real test. If adding the second agent requires touching the gateway core, the driver abstraction is wrong and it's cheap to fix now.
 
@@ -1208,7 +1208,7 @@ parts that bear on the rest of this document:
   session. The event log's schema
   is unchanged (its text is now masked for known secrets, spec §10.1), and the actor's only change
   is that environment.
-- **The board owns lifecycle truth.** A worker moves its card only by reporting — `pgw kanban
+- **The board owns lifecycle truth.** A worker moves its card only by reporting — `mt kanban
   complete | review | block` over a local socket, authorized by a run-scoped token. A turn ending is
   not a report.
 - **One stored phase, one writer; display status derived.** The same rule as session status
@@ -1226,7 +1226,7 @@ parts that bear on the rest of this document:
   still held, never resent.
 - **Roles and workspaces** are configured separately. A *role* is a self-contained directory —
   `config.yaml` naming its coding agent (§6.5's registry entries), `role.md`, `skills/`, and a `.env`
-  for its own secrets — created with `pgw role create`; the single `agent:` block becomes the role
+  for its own secrets — created with `mt role create`; the single `agent:` block becomes the role
   `default`. A *workspace* is a named directory (`workspace:` becomes `default`). Tool policy is
   enforced by the coding agent or refused at startup, never silently ignored. A role's `.env` is the
   one exception to "secrets only in the environment" (§13): `0600`, never cloned, masked.
