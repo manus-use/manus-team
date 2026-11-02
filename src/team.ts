@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { type AgentConfig, ConfigError, type Env, type LoadOptions, type TeamSettings } from './config.js';
-import { discoverRoles, loadRoleDir, type Role } from './roles.js';
+import { discoverRoles, loadRoleDir, secretValuesOf, type Role } from './roles.js';
 import { resolveWorkspaces } from './workspaces.js';
 
 /**
@@ -64,6 +64,6 @@ function roleFromAgentBlock(agent: AgentConfig): Role {
     agent,
     roleMdPath: undefined,
     skills: [],
-    secretValues: Object.values(agent.env).filter((v) => v !== ''),
+    secretValues: secretValuesOf(agent.env, agent.maskExempt),
   };
 }

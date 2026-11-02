@@ -1,5 +1,6 @@
 import { ConfigError } from './config.js';
 import { main } from './index.js';
+import { redactKnownSecrets } from './secrets.js';
 
 /**
  * The executable. Everything it does is turn a failure into an exit code.
@@ -19,6 +20,8 @@ try {
     process.stderr.write(`configuration error: ${err.message}\n`);
     process.exit(78); // EX_CONFIG, so a supervisor can tell this from a crash.
   }
-  process.stderr.write(`failed to start: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+  process.stderr.write(
+    `failed to start: ${redactKnownSecrets(err instanceof Error ? (err.stack ?? err.message) : String(err))}\n`,
+  );
   process.exit(1);
 }

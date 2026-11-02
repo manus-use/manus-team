@@ -123,6 +123,14 @@ describe('loadRoleDir: .env, role.md, skills', () => {
     expect([...r.secretValues].sort()).toEqual(['ghp_x', 'sk-role']);
   });
 
+  it("leaves the values of maskExempt names out of the role's secrets", () => {
+    const dir = role('r', `${AGENT}  passEnv: [BASE_URL]\n  maskExempt: [BASE_URL]\n`);
+    writeFileSync(join(dir, '.env'), 'API_KEY=sk-role-12345678\n');
+    chmodSync(join(dir, '.env'), 0o600);
+    const { role: r } = load('r', { BASE_URL: 'https://example.invalid/v1' });
+    expect(r.secretValues).toEqual(['sk-role-12345678']);
+  });
+
   it('refuses a .env other users can read, and leaves its mode alone', () => {
     withEnv('API_KEY=sk-role\n', 0o644);
     expect(() => load('r', { GH_TOKEN: 'ghp_x' })).toThrow(/must be readable and writable only by its owner \(for example 0600\)/);

@@ -14,6 +14,7 @@ import { DEFAULT_ROLE, DEFAULT_WORKSPACE, SessionRegistry } from './core/registr
 import { NamedWorkspaces } from './core/workspace.js';
 import { replyUuid } from './core/ids.js';
 import { systemClock } from './time.js';
+import { addSecrets, redactKnownSecrets } from './secrets.js';
 
 /**
  * Wiring, and the boot order.
@@ -44,7 +45,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     // Metadata only. No message bodies, no agent text -- the log is operational,
     // and a log that quotes user content is a second copy of the data with none of
     // the retention rules.
-    process.stderr.write(`${new Date().toISOString()} ${line}\n`);
+    process.stderr.write(`${new Date().toISOString()} ${redactKnownSecrets(line)}\n`);
   };
 
   // Which file the settings came from, first thing: the default location is derived,
@@ -57,6 +58,12 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   );
 
   for (const line of team.notes) note(line);
+
+  // Every secret the gateway itself holds, masked wherever text leaves it (spec
+  // §10.1). Before anything can print or store agent text. Plan C adds and removes
+  // worker tokens as runs open and close.
+  addSecrets([config.lark.appSecret, ...[...team.roles.values()].flatMap((role) => role.secretValues)]);
+
   // Chat sessions run the role default in the workspace default; loadTeam guarantees both exist.
   const defaultRole = team.roles.get(DEFAULT_ROLE);
   const defaultWorkspace = team.workspaces.get(DEFAULT_WORKSPACE);
@@ -239,7 +246,7 @@ export async function main(): Promise<void> {
       .stop()
       .then(() => process.exit(0))
       .catch((err: unknown) => {
-        process.stderr.write(`shutdown failed: ${String(err)}\n`);
+        process.stderr.write(`shutdown failed: ${redactKnownSecrets(String(err))}\n`);
         process.exit(1);
       });
   };

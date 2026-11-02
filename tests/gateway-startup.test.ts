@@ -6,6 +6,7 @@ import { ConfigError, loadConfig, type GatewayConfig } from '../src/config.js';
 import { migrate, openDb } from '../src/db/open.js';
 import { createGateway } from '../src/index.js';
 import { loadTeam, type Team } from '../src/team.js';
+import { MASK, clearSecrets, redactKnownSecrets } from '../src/secrets.js';
 
 /**
  * Startup, up to the point where the gateway would connect. `createGateway` opens
@@ -18,6 +19,7 @@ let team: Team;
 let workspace: string;
 
 beforeEach(() => {
+  clearSecrets();
   // Not realpath'd on purpose: on macOS the temp dir is behind a symlink, so the
   // recorded path has to be the resolved one.
   root = mkdtempSync(join(tmpdir(), 'mt-startup-'));
@@ -52,6 +54,15 @@ function rows(): Array<{ id: string; root_path: string }> {
 }
 
 describe('createGateway', () => {
+  it('knows the Lark app secret once it has started up', async () => {
+    const gateway = await createGateway(config, team);
+    try {
+      expect(redactKnownSecrets(`x ${config.lark.appSecret} y`)).toBe(`x ${MASK} y`);
+    } finally {
+      await gateway.stop();
+    }
+  });
+
   it('refuses to start when a workspace name now points at another directory, and changes nothing', async () => {
     const db = openDb(config.dbPath);
     migrate(db, config.schemaDir);

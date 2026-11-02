@@ -50,6 +50,13 @@ function roleDir(name: string, config: string): void {
 const ROLE_AGENT = 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n';
 
 describe('loadTeam', () => {
+  it("keeps the agent: block's maskExempt names out of the role default's secrets", () => {
+    const e = env({ MT_AGENT_ENV_API_KEY: 'sk-agent-12345678', MT_AGENT_ENV_REGION: 'eu-west-1-region' });
+    const config = loadConfig(e, () => undefined);
+    const team = loadTeam({ ...config, agent: config.agent && { ...config.agent, maskExempt: ['REGION'] } }, e);
+    expect(team.roles.get('default')?.secretValues).toEqual(['sk-agent-12345678']);
+  });
+
   it("makes the gateway's agent block the role default when there is no roles/default", () => {
     const team = teamFor(env());
     const role = team.roles.get('default');

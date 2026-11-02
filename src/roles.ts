@@ -189,6 +189,7 @@ export function loadRoleDir(
   }
 
   const { skills, notes } = readSkills(dir);
+  const maskExempt = strings(configPath, 'agent.maskExempt', agentRaw['maskExempt']);
   return {
     role: {
       name,
@@ -204,12 +205,12 @@ export function loadRoleDir(
         unsupervised,
         passEnv,
         readOnlyTools: strings(configPath, 'agent.readOnlyTools', agentRaw['readOnlyTools']),
-        maskExempt: strings(configPath, 'agent.maskExempt', agentRaw['maskExempt']),
+        maskExempt,
       },
       roleMdPath: readRoleMd(dir),
       skills,
-      // Empty values are not secrets, and masking an empty string would mangle everything.
-      secretValues: [...Object.values(fromGateway), ...Object.values(fromFile)].filter((v) => v !== ''),
+      // Empty values are not secrets, and the registry ignores short ones (spec §10.1).
+      secretValues: secretValuesOf({ ...fromGateway, ...fromFile }, maskExempt),
     },
     notes,
   };
@@ -277,6 +278,13 @@ function readRoleEnv(dir: string): Record<string, string> {
 /** Names a role's .env cannot set: the gateway's own. */
 export function gatewayOwnsVariable(name: string): boolean {
   return name === 'PATH' || name.startsWith('MT_') || name.startsWith('LARK_');
+}
+
+/** The values a role's agent is given that are secrets: every one, except names in maskExempt. */
+export function secretValuesOf(env: Readonly<Record<string, string>>, maskExempt: readonly string[]): string[] {
+  return Object.entries(env)
+    .filter(([name, value]) => !maskExempt.includes(name) && value !== '')
+    .map(([, value]) => value);
 }
 
 /** `role.md` is optional; present, it must be a readable regular file. */
