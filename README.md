@@ -84,7 +84,8 @@ it does not persist, is not backed up, cannot be copied into a worktree, and can
 committed by accident. A key that looks like a credential (`secret`, `token`, `password`,
 `apiKey`, …) is refused at boot rather than quietly accepted, and so is `agent.env`, which
 would put values in the file rather than names. A role's `.env` is the one file secrets are
-read from: it must be `0600` and a regular file owned by the gateway's user.
+read from: it must be `0600` and a regular file owned by the gateway's user. It may not set
+`MT_*`, `LARK_*` or `PATH`.
 
 | File setting | Env override | Meaning |
 |---|---|---|
@@ -103,8 +104,8 @@ read from: it must be `0600` and a regular file owned by the gateway's user.
 | `agent.command` | `MT_AGENT_COMMAND` | The agent binary, e.g. `claude-agent-acp`. Required unless `roles/default/` exists. |
 | `agent.args` | `MT_AGENT_ARGS` | A list, or one string split on whitespace with quotes honoured. Not a shell: `$HOME` is not expanded, because the agent is spawned with `shell: false`. |
 | `agent.unsupervised` | `MT_AGENT_UNSUPERVISED` | Required by, and only by, `structured-cli`: a written acknowledgement that the agent acts with no approval card and no gate from `auth.operate`. Setting it alongside the `acp` driver is an error — a config must not claim a posture the gateway is not in. |
-| `agent.readOnlyTools` | — | The agent's tool names that only read; used to decide whether a failed run may be retried automatically. |
-| `agent.maskExempt` | — | Variable names whose values are not secret, so not masked. |
+| `agent.readOnlyTools` | — | The agent's tool names that only read. Checked at startup but not used in this build; automatic retry of a failed run will use it. |
+| `agent.maskExempt` | — | Variable names whose values are not secret. Checked at startup but not used in this build: nothing is masked yet. |
 | `agent.passEnv` | — | Variable **names** forwarded to the agent from the gateway's own environment. A name that is not set is an error, because forwarding nothing surfaces later as the agent failing to authenticate. Leave it empty for a subscription-authenticated agent: its credentials are under `$HOME`, which is forwarded already. |
 | — | `MT_AGENT_ENV_*` | Forwarded with the prefix stripped: `MT_AGENT_ENV_ANTHROPIC_API_KEY` becomes `ANTHROPIC_API_KEY`. Wins over `passEnv`. Opt-in by prefix, because an agent holding the Feishu secret could post as the bot and answer its own approvals. |
 | `maxLiveSessions` | `MT_MAX_LIVE_SESSIONS` | Concurrent agent processes. Default 8. |
@@ -150,7 +151,13 @@ agent:
 
 The role `default` runs chat sessions. It is `roles/default/` if that exists, and otherwise
 the gateway's own `agent:` block (in the table above); having both, or neither, stops the
-gateway at startup. Role names are lowercase letters, digits and `-`.
+gateway at startup. Role and workspace names are lowercase letters, digits and `-`, start
+with a letter, and are at most 40 characters; `acp` and `structured-cli` are reserved as
+role names. A directory under `roles/` with a reserved name stops the gateway at startup;
+one with any other invalid name is skipped, with a note in the startup log, and one whose
+name starts with `.` is skipped silently. In this build every chat session runs the role
+`default` in the workspace `default`; other roles are loaded and checked at startup, and
+run once tasks arrive.
 
 **Workspaces** are named directories in the config file:
 

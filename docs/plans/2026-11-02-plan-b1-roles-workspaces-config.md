@@ -551,6 +551,8 @@ git add src/config.ts tests/config.test.ts
 git commit -m "Read named workspaces, and let a role directory supply the default agent"
 ```
 
+- [ ] **Step 3.8: Variables alone, and no command (added after review).** With `roles/default/` present and only, say, `MT_AGENT_ARGS` or an `MT_AGENT_ENV_*` set, the error above advised setting `MT_AGENT_COMMAND`, which only leads to the "both define the role default" error. So when there is no `agent:` block in the file, at least one `MT_AGENT_*` variable is set, and `MT_AGENT_COMMAND` is not, `loadConfig` names the variables that are set (names only, never values) and gives both ways out: `MT_AGENT_ARGS, MT_AGENT_ENV_TOKEN are set but MT_AGENT_COMMAND is not. MT_AGENT_* variables define the role default: if <home>/roles/default exists, unset them; otherwise also set MT_AGENT_COMMAND`. It stays in `loadConfig` rather than `loadTeam`, so `loadConfig` never returns a half-built agent. An `agent:` block without a command keeps the `agent.command` message. The "treats an agent variable alone" test now expects the new message, and a test that the file-block message is unchanged is added: the suite goes to `Tests  421 passed (421)`. Commit: `Say which MT_AGENT_ variables define the role default when no command is set`.
+
 ---
 
 ### Task 4: Workspaces on disk
@@ -1339,7 +1341,7 @@ function readSkills(dir: string): { skills: Skill[]; notes: string[] } {
 
 - [ ] **Step 5.4: Run the tests** → `npx vitest run --project unit tests/roles.test.ts` → `Tests  23 passed (23)`.
 
-- [ ] **Step 5.5: Full suite** — `npm test 2>&1 | tail -4` → `Tests  454 passed (454)` (420 + 11 workspaces + 23 roles).
+- [ ] **Step 5.5: Full suite** — `npm test 2>&1 | tail -4` → `Tests  455 passed (455)` (421 + 11 workspaces + 23 roles).
 
 - [ ] **Step 5.6: Commit**
 
@@ -1577,7 +1579,7 @@ with
 
 `loadTeam` throws `ConfigError`, which `main.ts` already turns into a one-line error and exit 78.
 
-- [ ] **Step 7.4: Typecheck and full suite** — `npm run typecheck` → no output; `npm test 2>&1 | tail -4` → `Tests  460 passed (460)`.
+- [ ] **Step 7.4: Typecheck and full suite** — `npm run typecheck` → no output; `npm test 2>&1 | tail -4` → `Tests  461 passed (461)`.
 
 - [ ] **Step 7.5: Commit**
 
@@ -1592,7 +1594,7 @@ git commit -m "Load roles and workspaces at startup, and run the role default"
 
 **Files:** Modify `README.md`.
 
-- [ ] **Step 8.1: The credentials rule.** In the paragraph starting `**Credentials never go in the file.**`, replace that bold sentence with `**Credentials go in the environment, or in a role's \`.env\`.**`, and append to the end of the paragraph: `A role's \`.env\` is the one file secrets are read from: it must be \`0600\` and a regular file owned by the gateway's user.` Rewrap the paragraph to the width of the text around it.
+- [ ] **Step 8.1: The credentials rule.** In the paragraph starting `**Credentials never go in the file.**`, replace that bold sentence with `**Credentials go in the environment, or in a role's \`.env\`.**`, and append to the end of the paragraph: `A role's \`.env\` is the one file secrets are read from: it must be \`0600\` and a regular file owned by the gateway's user. It may not set \`MT_*\`, \`LARK_*\` or \`PATH\`.` Rewrap the paragraph to the width of the text around it.
 
 - [ ] **Step 8.2: A section on roles and workspaces**, placed after the paragraph that ends `exits 78.` (the "Everything is validated at boot" paragraph, after the configuration table) and before `### Chat commands` — not next to the credentials paragraph, which would put the whole configuration table under this heading:
 
@@ -1622,8 +1624,14 @@ agent:
 ```
 
 The role `default` runs chat sessions. It is `roles/default/` if that exists, and otherwise
-the gateway's own `agent:` block (in the table above); having both, or neither, stops the gateway at startup. Role
-names are lowercase letters, digits and `-`.
+the gateway's own `agent:` block (in the table above); having both, or neither, stops the
+gateway at startup. Role and workspace names are lowercase letters, digits and `-`, start
+with a letter, and are at most 40 characters; `acp` and `structured-cli` are reserved as
+role names. A directory under `roles/` with a reserved name stops the gateway at startup;
+one with any other invalid name is skipped, with a note in the startup log, and one whose
+name starts with `.` is skipped silently. In this build every chat session runs the role
+`default` in the workspace `default`; other roles are loaded and checked at startup, and
+run once tasks arrive.
 
 **Workspaces** are named directories in the config file:
 
@@ -1647,8 +1655,8 @@ including `MT_AGENT_ENV_*`: any of them still counts as a second definition of t
   - after the `workspace` row, add: | `workspaces` | — | Named workspaces: `name: absolute-path`. Must include `default` (or use `workspace`). |
   - in the `agent.command` row, replace `Required.` with: Required unless `roles/default/` exists.
   - in the `workspace` row, replace `Required.` with: Required unless `workspaces` is set.
-  - after the `agent.unsupervised` row, add: | `agent.readOnlyTools` | — | The agent's tool names that only read; used to decide whether a failed run may be retried automatically. |
-  - and: | `agent.maskExempt` | — | Variable names whose values are not secret, so not masked. |
+  - after the `agent.unsupervised` row, add: | `agent.readOnlyTools` | — | The agent's tool names that only read. Checked at startup but not used in this build; automatic retry of a failed run will use it. |
+  - and: | `agent.maskExempt` | — | Variable names whose values are not secret. Checked at startup but not used in this build: nothing is masked yet. |
 
 - [ ] **Step 8.3b: `config.example.yaml`.** After its `workspace:` setting, add a commented example:
 
@@ -1659,7 +1667,7 @@ including `MT_AGENT_ENV_*`: any of them still counts as a second definition of t
 #   docs: /srv/repos/docs
 ```
 
-- [ ] **Step 8.4: Full suite** — `npm test 2>&1 | tail -4` → `Tests  460 passed (460)`.
+- [ ] **Step 8.4: Full suite** — `npm test 2>&1 | tail -4` → `Tests  461 passed (461)`.
 
 - [ ] **Step 8.5: Commit**
 
@@ -1696,6 +1704,6 @@ Expected on this machine: `role default agent-block structured-cli bytesec`, `wo
 
 ## Done when
 
-- `Tests  460 passed (460)` and `npm run typecheck` clean, under Node 22, in the worktree.
+- `Tests  461 passed (461)` and `npm run typecheck` clean, under Node 22, in the worktree.
 - Task 9 shows the live deployment loads as the role `default` from its `agent:` block, in workspace `default`.
 - Nothing merged into the main checkout.
