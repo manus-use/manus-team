@@ -1,6 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { loadConfig, type GatewayConfig } from './config.js';
+import { loadTeam, type Team } from './team.js';
 import { migrate, openDb, type Db } from './db/open.js';
 import { sweepSeen } from './db/dedup.js';
 import { LarkAdapter } from './channel/lark/adapter.js';
@@ -40,7 +41,7 @@ export interface Gateway {
   readonly db: Db;
 }
 
-export async function createGateway(config: GatewayConfig): Promise<Gateway> {
+export async function createGateway(config: GatewayConfig, team: Team): Promise<Gateway> {
   const note = (line: string): void => {
     // Metadata only. No message bodies, no agent text -- the log is operational,
     // and a log that quotes user content is a second copy of the data with none of
@@ -55,6 +56,20 @@ export async function createGateway(config: GatewayConfig): Promise<Gateway> {
     config.configPath === undefined
       ? 'no config file; settings from the environment alone'
       : `settings from ${config.configPath}, environment overrides applied`,
+  );
+
+  for (const line of team.notes) note(line);
+  // Until plan B2 gives each session its own role and workspace, every session
+  // runs the role default's agent in the workspace named default.
+  const defaultRole = team.roles.get('default');
+  const defaultWorkspace = team.workspaces.get('default');
+  if (defaultRole === undefined || defaultWorkspace === undefined) {
+    throw new Error('loadTeam returned no role or workspace named default');
+  }
+  const agent = defaultRole.agent;
+  note(
+    `roles: ${[...team.roles.keys()].sort().join(', ')}; ` +
+      `workspaces: ${[...team.workspaces.keys()].sort().join(', ')}`,
   );
 
   await mkdir(dirname(config.dbPath), { recursive: true, mode: 0o700 });
@@ -73,9 +88,9 @@ export async function createGateway(config: GatewayConfig): Promise<Gateway> {
   if (!getDriverSafely('acp')) {
     registerDriver('acp', () =>
       createAcpDriver({
-        command: config.agent.command,
-        args: config.agent.args,
-        env: config.agent.env,
+        command: agent.command,
+        args: agent.args,
+        env: agent.env,
         clientName: PRODUCT_NAME,
       }),
     );
@@ -83,14 +98,14 @@ export async function createGateway(config: GatewayConfig): Promise<Gateway> {
   if (!getDriverSafely('structured-cli')) {
     registerDriver('structured-cli', () =>
       createCliDriver({
-        command: config.agent.command,
-        args: config.agent.args,
-        env: config.agent.env,
+        command: agent.command,
+        args: agent.args,
+        env: agent.env,
       }),
     );
   }
-  const driver = getDriver(config.agent.driver);
-  if (config.agent.unsupervised) {
+  const driver = getDriver(agent.driver);
+  if (agent.unsupervised) {
     // Loud, and every boot. The gateway's whole security story is that operating
     // on the workspace requires a click, and under this driver it does not; an
     // operator reading the log should not have to remember which driver implies
@@ -106,7 +121,7 @@ export async function createGateway(config: GatewayConfig): Promise<Gateway> {
     appSecret: config.lark.appSecret,
     // The agent may only attach files from its own workspace. Without this the
     // SDK enforces a blocklist only, which does not stop it reading elsewhere.
-    allowedFileDirs: [config.workspaceDir],
+    allowedFileDirs: [defaultWorkspace],
     ...(config.lark.domain === undefined ? {} : { domain: config.lark.domain }),
   });
 
@@ -124,7 +139,7 @@ export async function createGateway(config: GatewayConfig): Promise<Gateway> {
     db,
     driver,
     channel: adapter,
-    workspaces: new PlainDirWorkspaces(config.workspaceDir),
+    workspaces: new PlainDirWorkspaces(defaultWorkspace),
     channelId: adapter.id,
     appId: config.lark.appId,
     maxLive: config.maxLiveSessions,
@@ -237,7 +252,10 @@ function getDriverSafely(id: string): boolean {
  */
 export async function main(): Promise<void> {
   const config = loadConfig();
-  const gateway = await createGateway(config);
+  // Read and checked before anything starts: a broken role or workspace found
+  // later strands work; found here it is a line in the startup error.
+  const team = loadTeam(config, process.env);
+  const gateway = await createGateway(config, team);
   await gateway.start();
 
   let shuttingDown = false;
