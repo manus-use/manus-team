@@ -26,6 +26,9 @@ export function resolveWorkspaces(
   }
   const homeReal = realOrResolved(home);
   const dbReal = realOrResolved(dbPath);
+  // Resolved on its own: if roles/ is a symlink out of the home, its target
+  // holds every role's .env without being anywhere under the home.
+  const rolesReal = realOrResolved(join(home, 'roles'));
   const out = new Map<string, string>();
 
   for (const name of Object.keys(declared).sort()) {
@@ -45,6 +48,9 @@ export function resolveWorkspaces(
     const managed = join(homeReal, 'workspaces', name);
     if (within(real, homeReal) && real !== managed) {
       return { error: `workspace ${name}: inside the gateway's home, only ${managed} may be a workspace` };
+    }
+    if (within(rolesReal, real)) {
+      return { error: `workspace ${name}: ${real} contains the gateway's roles directory ${rolesReal}, which holds every role's secrets` };
     }
     for (const [other, otherReal] of out) {
       if (real === otherReal) {

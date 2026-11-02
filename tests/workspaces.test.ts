@@ -69,6 +69,15 @@ describe('resolveWorkspaces', () => {
     expect(refused({ default: home })).toMatch(/contains the gateway's home/);
   });
 
+  it('refuses a workspace containing the roles directory, when roles is a symlink out of the home', () => {
+    // $MT_HOME/roles points elsewhere: a workspace that contains its target
+    // would hold every role's .env, though it contains nothing of the home.
+    const rolesReal = dir('elsewhere', 'roles');
+    symlinkSync(rolesReal, join(home, 'roles'));
+    expect(refused({ default: dir('elsewhere') })).toMatch(/contains the gateway's roles directory/);
+    expect(refused({ default: rolesReal })).toMatch(/contains the gateway's roles directory/);
+  });
+
   it('refuses a workspace containing a home that does not exist yet, through a symlink', () => {
     // A fresh install: the home is not created until the gateway starts. The
     // workspace is reached through a symlink, so only a real-path comparison sees it.
