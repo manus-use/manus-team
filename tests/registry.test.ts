@@ -695,4 +695,24 @@ describe('sessions beyond chat', () => {
     );
     expect(resolveBinding(h.db.db, key({ conversationId: 'oc_x' }))).toBeUndefined();
   });
+
+  it('refuses to create a session where one is already bound', () => {
+    // Two live bindings at one place would make which session answers there an
+    // accident of row order. Replacing one is /new's job (rotate), not create's.
+    const h = harness();
+    const at = key({ conversationId: 'oc_taken' });
+    const first = h.registry.create(at, OWNER);
+    expect(() => h.registry.create(at, OWNER, { role: 'default' })).toThrow(/already has session/);
+    expect(resolveBinding(h.db.db, at)?.sessionId).toBe(first.id);
+  });
+
+  it('treats an empty seed as no seed', () => {
+    const h = harness();
+    const session = h.registry.create(key({ conversationId: 'oc_empty' }), OWNER, { seedProviderSessionId: '' });
+    expect(session.providerSessionId).toBeNull();
+    const created = readEvents(h.db.db, session.id, 0, lastSeq(h.db.db, session.id)).find(
+      (e) => e.type === 'session_created',
+    );
+    expect(created?.payload).toMatchObject({ seeded: false });
+  });
 });

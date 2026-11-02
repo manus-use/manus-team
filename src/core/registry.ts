@@ -371,7 +371,15 @@ export class SessionRegistry {
     const workspace = opts.workspace ?? DEFAULT_WORKSPACE;
     if (!this.#deps.drivers.has(role)) throw new Error(`role ${role} is not configured`);
     if (!this.#deps.workspaces.has(workspace)) throw new Error(`workspace ${workspace} is not configured`);
-    return this.#create(key, owner, this.#clock.now(), { role, workspace, seed: opts.seedProviderSessionId });
+    // A second live binding at one place would make which session answers there
+    // an accident of row order. Replacing a session is rotate's job.
+    const bound = resolveBinding(this.#deps.db, key);
+    if (bound !== undefined) {
+      throw new Error(`${key.channel}:${key.conversationId}/${key.threadId} already has session ${bound.sessionId}`);
+    }
+    // An empty seed is no seed: createSession stores it as none, and the log must agree.
+    const seed = opts.seedProviderSessionId === '' ? undefined : opts.seedProviderSessionId;
+    return this.#create(key, owner, this.#clock.now(), { role, workspace, seed });
   }
 
   #create(
