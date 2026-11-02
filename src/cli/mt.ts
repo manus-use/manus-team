@@ -1,5 +1,6 @@
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { ConfigError, type Env } from '../config.js';
+import { roleList } from './role.js';
 
 /**
  * `mt`: commands that create and check roles and workspaces (spec §2.6).
@@ -42,6 +43,10 @@ export function parse<T extends NonNullable<ParseArgsConfig['options']>>(args: r
   }
 }
 
+function expectNothing(positionals: readonly string[], what: string): void {
+  if (positionals.length > 0) throw new UsageError(`${what} takes no arguments`);
+}
+
 /** Prints a refusal and returns its exit code. */
 export function refuse(io: MtIo, message: string): number {
   io.err(`mt: ${message}`);
@@ -58,6 +63,7 @@ export function table(rows: readonly (readonly string[])[]): string[] {
 /** Exit codes: 0 done, 1 refused or a check failed, 2 the command line was wrong. */
 export async function runMt(argv: readonly string[], io: MtIo): Promise<number> {
   const [group, command] = argv;
+  const rest = argv.slice(2);
   try {
     if (group === undefined) {
       io.out(USAGE);
@@ -68,6 +74,10 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       return 0;
     }
     // (later tasks add each command here)
+    if (group === 'role' && command === 'list') {
+      expectNothing(parse(rest, {}).positionals, 'role list');
+      return roleList(io);
+    }
     throw new UsageError(`unknown command: ${[group, command].filter((s) => s !== undefined).join(' ')}`);
   } catch (err) {
     if (err instanceof UsageError) {
