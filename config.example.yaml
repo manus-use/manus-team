@@ -17,6 +17,11 @@
 # Absolute path the agent works in. Every session shares it in this build.
 workspace: /srv/repo
 
+# Or several named workspaces; `default` is required, and replaces `workspace`:
+# workspaces:
+#   default: /srv/repos/main
+#   docs: /srv/repos/docs
+
 # Concurrent agent processes. Sessions beyond this stay cold until one frees up.
 maxLiveSessions: 8
 

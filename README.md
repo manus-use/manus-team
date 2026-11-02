@@ -77,13 +77,14 @@ export LARK_APP_SECRET=...
 missing is an error, while the default location being absent is an ordinary
 environment-only deploy.
 
-**Credentials never go in the file.** The agent runs as the same user and is not sandboxed
-in this build, so anything on disk it can read. The environment is not airtight either — a
-same-uid process can read `/proc/<pid>/environ` on Linux — but it does not persist, is not
-backed up, cannot be copied into a worktree, and cannot be committed by accident. A key
-that looks like a credential (`secret`, `token`, `password`, `apiKey`, …) is refused at
-boot rather than quietly accepted, and so is `agent.env`, which would put values in the
-file rather than names.
+**Credentials go in the environment, or in a role's `.env`.** The agent runs as the same
+user and is not sandboxed in this build, so anything on disk it can read. The environment
+is not airtight either — a same-uid process can read `/proc/<pid>/environ` on Linux — but
+it does not persist, is not backed up, cannot be copied into a worktree, and cannot be
+committed by accident. A key that looks like a credential (`secret`, `token`, `password`,
+`apiKey`, …) is refused at boot rather than quietly accepted, and so is `agent.env`, which
+would put values in the file rather than names. A role's `.env` is the one file secrets are
+read from: it must be `0600` and a regular file owned by the gateway's user.
 
 | File setting | Env override | Meaning |
 |---|---|---|
@@ -96,11 +97,14 @@ file rather than names.
 | `auth.chats` | `MT_ALLOW_CHATS` | `chat_id`s the bot will work in. Empty means any chat it was added to. |
 | `auth.directMessages` | `MT_ALLOW_DM` | Answer direct messages without a mention. Default on. |
 | `auth.mentionAll` | `MT_ALLOW_MENTION_ALL` | Treat `@all` as addressing the bot. Default **off**: `@all` is a room-wide notification, not an instruction. |
-| `workspace` | `MT_WORKSPACE` | Absolute path the agent works in. Required. |
+| `workspace` | `MT_WORKSPACE` | Absolute path the agent works in. Required unless `workspaces` is set. |
+| `workspaces` | — | Named workspaces: `name: absolute-path`. Must include `default` (or use `workspace`). |
 | `agent.driver` | `MT_AGENT_DRIVER` | `acp` (default) or `structured-cli`. See [Protocol strategy](#protocol-strategy) — the CLI driver cannot ask before acting. |
-| `agent.command` | `MT_AGENT_COMMAND` | The agent binary, e.g. `claude-agent-acp`. Required. |
+| `agent.command` | `MT_AGENT_COMMAND` | The agent binary, e.g. `claude-agent-acp`. Required unless `roles/default/` exists. |
 | `agent.args` | `MT_AGENT_ARGS` | A list, or one string split on whitespace with quotes honoured. Not a shell: `$HOME` is not expanded, because the agent is spawned with `shell: false`. |
 | `agent.unsupervised` | `MT_AGENT_UNSUPERVISED` | Required by, and only by, `structured-cli`: a written acknowledgement that the agent acts with no approval card and no gate from `auth.operate`. Setting it alongside the `acp` driver is an error — a config must not claim a posture the gateway is not in. |
+| `agent.readOnlyTools` | — | The agent's tool names that only read; used to decide whether a failed run may be retried automatically. |
+| `agent.maskExempt` | — | Variable names whose values are not secret, so not masked. |
 | `agent.passEnv` | — | Variable **names** forwarded to the agent from the gateway's own environment. A name that is not set is an error, because forwarding nothing surfaces later as the agent failing to authenticate. Leave it empty for a subscription-authenticated agent: its credentials are under `$HOME`, which is forwarded already. |
 | — | `MT_AGENT_ENV_*` | Forwarded with the prefix stripped: `MT_AGENT_ENV_ANTHROPIC_API_KEY` becomes `ANTHROPIC_API_KEY`. Wins over `passEnv`. Opt-in by prefix, because an agent holding the Feishu secret could post as the bot and answer its own approvals. |
 | `maxLiveSessions` | `MT_MAX_LIVE_SESSIONS` | Concurrent agent processes. Default 8. |
@@ -119,6 +123,51 @@ Three rules make a mistake fail loudly instead of silently:
   keys that failure is silent *and* permissive.
 
 Everything is validated at boot; a configuration mistake prints one line and exits 78.
+
+### Roles and workspaces
+
+A **role** is who does a kind of work, and how it is run. Each is a directory under
+`$MT_HOME/roles/`:
+
+```
+roles/implementer/
+  config.yaml     # the coding agent, an optional workspace, an optional description
+  role.md         # optional standing instructions
+  skills/<name>/SKILL.md   # optional; front matter gives name and description
+  .env            # optional; this role's own secrets, 0600
+```
+
+```yaml
+# roles/implementer/config.yaml
+description: Writes and changes code
+workspace: default
+agent:
+  driver: structured-cli
+  command: bytesec
+  args: [run, -m, bytesec/modelhub-sg/gpt-5.6-sol]
+  unsupervised: true
+```
+
+The role `default` runs chat sessions. It is `roles/default/` if that exists, and otherwise
+the gateway's own `agent:` block (in the table above); having both, or neither, stops the
+gateway at startup. Role names are lowercase letters, digits and `-`.
+
+**Workspaces** are named directories in the config file:
+
+```yaml
+workspaces:
+  default: /srv/repos/bytesec-agents
+  docs: /srv/repos/docs
+```
+
+The single `workspace:` setting is the same as `workspaces.default`. A workspace must be an
+absolute path to an existing directory; may not be or contain `$MT_HOME` or the database;
+inside `$MT_HOME` only `workspaces/<name>` may be one; and no two workspaces may share or
+nest in one directory. Everything here is checked at startup.
+
+Once `roles/default/` exists, remove the `agent:` block **and** every `MT_AGENT_*` variable,
+including `MT_AGENT_ENV_*`: any of them still counts as a second definition of the role
+`default`, and the gateway will not start with two.
 
 ### Chat commands
 
