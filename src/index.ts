@@ -6,16 +6,13 @@ import { migrate, openDb, type Db } from './db/open.js';
 import { sweepSeen } from './db/dedup.js';
 import { LarkAdapter } from './channel/lark/adapter.js';
 import { LarkInbound } from './channel/lark/inbound.js';
-import { createAcpDriver } from './driver/acp/driver.js';
-import { createCliDriver } from './driver/cli/driver.js';
-import { getDriver, registerDriver } from './driver/registry.js';
+import { buildDriver } from './driver/build.js';
 import { Authorizer } from './policy/auth.js';
 import { Router } from './core/router.js';
 import { SessionRegistry } from './core/registry.js';
 import { PlainDirWorkspaces } from './core/workspace.js';
 import { replyUuid } from './core/ids.js';
 import { systemClock } from './time.js';
-import { PRODUCT_NAME } from './identity.js';
 
 /**
  * Wiring, and the boot order.
@@ -79,32 +76,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   const version = migrate(db, config.schemaDir);
   note(`schema at version ${version}`);
 
-  // Registration is process-global, so a second `createGateway` in one process --
-  // which is exactly what a test suite does -- must not fail on a duplicate.
-  //
-  // Both drivers are registered whichever one is selected: the registry is where
-  // "known but not implemented" is distinguished from "unknown", and that only
-  // works if what is built is what is registered.
-  if (!getDriverSafely('acp')) {
-    registerDriver('acp', () =>
-      createAcpDriver({
-        command: agent.command,
-        args: agent.args,
-        env: agent.env,
-        clientName: PRODUCT_NAME,
-      }),
-    );
-  }
-  if (!getDriverSafely('structured-cli')) {
-    registerDriver('structured-cli', () =>
-      createCliDriver({
-        command: agent.command,
-        args: agent.args,
-        env: agent.env,
-      }),
-    );
-  }
-  const driver = getDriver(agent.driver);
+  const driver = buildDriver(agent);
   if (agent.unsupervised) {
     // Loud, and every boot. The gateway's whole security story is that operating
     // on the workspace requires a click, and under this driver it does not; an
@@ -232,15 +204,6 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       db.close();
     },
   };
-}
-
-function getDriverSafely(id: string): boolean {
-  try {
-    getDriver(id);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**
