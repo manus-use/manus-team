@@ -15,7 +15,7 @@ import type { BindingKey, Principal, SessionRow, SessionState } from '../types.j
 import { BOOT_ID, newSessionId } from './ids.js';
 import { SessionActor } from './session-actor.js';
 import type { WorkspaceProvider } from './workspace.js';
-import { KNOWN_DRIVERS } from '../driver/registry.js';
+import { isReservedRoleName } from '../names.js';
 import type { Clock } from '../time.js';
 import { systemClock } from '../time.js';
 
@@ -61,7 +61,7 @@ export const DEFAULT_WORKSPACE = 'default';
  * why driver ids are reserved as role names.
  */
 export function roleOfSession(agentId: string): string {
-  return agentId === '' || (KNOWN_DRIVERS as readonly string[]).includes(agentId) ? DEFAULT_ROLE : agentId;
+  return agentId === '' || isReservedRoleName(agentId) ? DEFAULT_ROLE : agentId;
 }
 
 /** A session's workspace name, from `sessions.workspace_id`; rows written before hold ''. */
@@ -152,14 +152,16 @@ export class SessionRegistry {
 
     const session = getSession(this.#deps.db, sessionId);
     if (session === undefined) throw new Error(`no session ${sessionId}`);
-    const workspaceId = workspaceOfSession(session.workspaceId);
-    if (!this.#deps.workspaces.has(workspaceId)) {
-      throw new Error(`session ${sessionId} works in workspace ${workspaceId}, which is not configured`);
-    }
+    // The same order as create: role, workspace, channel. All before #makeRoom, so
+    // a refusal never retires another session's actor.
     const role = roleOfSession(session.agentId);
     const driver = this.#deps.drivers.get(role);
     if (driver === undefined) {
       throw new Error(`session ${sessionId} runs as role ${role}, which is not configured`);
+    }
+    const workspaceId = workspaceOfSession(session.workspaceId);
+    if (!this.#deps.workspaces.has(workspaceId)) {
+      throw new Error(`session ${sessionId} works in workspace ${workspaceId}, which is not configured`);
     }
     const channel = this.#deps.channels.get(key.channel);
     if (channel === undefined) {
@@ -363,14 +365,15 @@ export class SessionRegistry {
    * Create and bind a session as a role, in a workspace, optionally seeded.
    *
    * For sessions a chat does not create itself -- a run's, a rework's. Refuses a
-   * role or workspace that is not configured before anything is written, so a
-   * refused create leaves no session and no binding behind.
+   * role, workspace or channel that is not configured before anything is written,
+   * so a refused create leaves no session and no binding behind.
    */
   create(key: BindingKey, owner: Principal, opts: NewSession = {}): SessionRow {
     const role = opts.role ?? DEFAULT_ROLE;
     const workspace = opts.workspace ?? DEFAULT_WORKSPACE;
     if (!this.#deps.drivers.has(role)) throw new Error(`role ${role} is not configured`);
     if (!this.#deps.workspaces.has(workspace)) throw new Error(`workspace ${workspace} is not configured`);
+    if (!this.#deps.channels.has(key.channel)) throw new Error(`channel ${key.channel} is not run by this gateway`);
     // A second live binding at one place would make which session answers there
     // an accident of row order. Replacing a session is rotate's job.
     const bound = resolveBinding(this.#deps.db, key);

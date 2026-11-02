@@ -10,7 +10,7 @@ import { LarkInbound } from './channel/lark/inbound.js';
 import { buildRoleDrivers } from './driver/build.js';
 import { Authorizer } from './policy/auth.js';
 import { Router } from './core/router.js';
-import { SessionRegistry } from './core/registry.js';
+import { DEFAULT_ROLE, DEFAULT_WORKSPACE, SessionRegistry } from './core/registry.js';
 import { NamedWorkspaces } from './core/workspace.js';
 import { replyUuid } from './core/ids.js';
 import { systemClock } from './time.js';
@@ -58,8 +58,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
 
   for (const line of team.notes) note(line);
   // Chat sessions run the role default in the workspace default; loadTeam guarantees both exist.
-  const defaultRole = team.roles.get('default');
-  const defaultWorkspace = team.workspaces.get('default');
+  const defaultRole = team.roles.get(DEFAULT_ROLE);
+  const defaultWorkspace = team.workspaces.get(DEFAULT_WORKSPACE);
   if (defaultRole === undefined || defaultWorkspace === undefined) {
     throw new Error('loadTeam returned no role or workspace named default');
   }

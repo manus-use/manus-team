@@ -1188,7 +1188,7 @@ Three changes:
   if (registered.added.length > 0) note(`workspaces registered: ${registered.added.join(', ')}`);
 ```
 
-  There is no unit test for this wiring: `createGateway` connects to Lark. Task 1 covers `registerWorkspaces`, and Task 10's check exercises it against a copy of the live database.
+  Task 1 covers `registerWorkspaces`, and Task 10's check exercises it against a copy of the live database. `createGateway` does not contact Lark until `start()`, so the wiring itself is tested too: see the final-review follow-ups.
 
 - [ ] **Step 9.2: Drop `workspaceDir`.** Change these tests first, so the change is driven by them. In `tests/config.test.ts`, replace every `expect(cfg.workspaceDir).toBe(X)` (six places; `grep -n workspaceDir tests/config.test.ts`) with `expect(cfg.workspaces['default']).toBe(X)`. Then, in `src/config.ts`:
   - **The interface:** remove `workspaceDir: string;` and its comment from `GatewayConfig`.
@@ -1210,7 +1210,7 @@ Then make the two call sites use it:
 - **In `config.ts`:** replace the comment `// A list or one string, because ...` and its `args: Array.isArray(agentRaw['args']) ? … : …,` expression with `args: agentArgs(path, agentRaw['args']),`.
 - **In `roles.ts`:** replace the `const args = Array.isArray(agentRaw['args']) ? … : …;` expression with `const args = agentArgs(configPath, agentRaw['args']);`. Add `agentArgs` to its `./config.js` import, and drop `shellWords` from that import if nothing else in `roles.ts` uses it.
 
-- [ ] **Step 9.4: Run everything.** `npm test 2>&1 | tail -4` → `Tests  487 passed (487)`; `npm run test:e2e 2>&1 | tail -4` → `Tests  49 passed (49)`; `npm run typecheck` → no output.
+- [ ] **Step 9.4: Run everything.** `npm test 2>&1 | tail -4` → `Tests  493 passed (493)`; `npm run test:e2e 2>&1 | tail -4` → `Tests  49 passed (49)`; `npm run typecheck` → no output.
 
 - [ ] **Step 9.5: Commit.**
 
@@ -1287,9 +1287,17 @@ That is, the old `acp` session runs as the role `default`, today bytesec through
 
 ---
 
+## Final-review follow-ups
+
+1. **Startup refuses a moved workspace.** `tests/gateway-startup.test.ts` builds a config and team from an explicit environment, records `default` at `/elsewhere`, and checks that `createGateway` rejects with a `ConfigError` and leaves the table as it was. A second test checks that a first start records `default` at its realpath. Neither calls `start()`, so nothing contacts Lark.
+2. **The session environment is asked for on every build.** The `envFor` test in `tests/registry.test.ts` returns a different value on each call, releases the actor and builds it again, and checks that each start got its own value.
+3. **Registry cleanups.** `roleOfSession` uses `isReservedRoleName`. `actorFor` refuses in the order session, role, workspace, channel, all before `#makeRoom`. `create` refuses in the order role, workspace, channel, then an existing binding; the channel check is new, and a refused create binds nothing.
+4. **`src/index.ts`** looks the defaults up by `DEFAULT_ROLE` and `DEFAULT_WORKSPACE` rather than `'default'` literals. The startup guard and its message are unchanged.
+5. **`src/core/workspace.ts`** has its over-long comment lines rewrapped.
+
 ## Done when
 
-- `npm test` → `Tests  487 passed (487)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
+- `npm test` → `Tests  493 passed (493)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` → no output.
 - `git grep -n -E "registerDriver|getDriver|PlainDirWorkspaces|workspaceDir" -- src tests` → no output.
 - Task 10's check prints the expected three lines.

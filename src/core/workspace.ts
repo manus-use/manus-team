@@ -2,10 +2,10 @@
  * Where a session's work happens.
  *
  * One implementation today: each named workspace is a configured directory, shared
- * by every session that works in it. The interface exists anyway because the alternative -- a git worktree per session --
- * changes when a directory comes into existence and who is allowed to delete it,
- * and retrofitting that means touching every call site that assumed a path was
- * just a string in the config.
+ * by every session that works in it. The interface exists anyway because the
+ * alternative -- a git worktree per session -- changes when a directory comes into
+ * existence and who is allowed to delete it, and retrofitting that means touching
+ * every call site that assumed a path was just a string in the config.
  */
 
 export interface Workspace {
@@ -30,11 +30,11 @@ export interface WorkspaceProvider {
  * Each session works in the named workspace it records, and a workspace is one
  * configured directory.
  *
- * Concurrent sessions in the same workspace therefore share a working tree, which is a real limitation
- * and stated here rather than discovered: two agents editing the same files will
- * interleave their edits. It is the honest starting point -- the isolation story is
- * worktrees, and pretending a plain directory provides any is worse than the
- * limitation.
+ * Concurrent sessions in the same workspace therefore share a working tree, which
+ * is a real limitation and stated here rather than discovered: two agents editing
+ * the same files will interleave their edits. It is the honest starting point --
+ * the isolation story is worktrees, and pretending a plain directory provides any
+ * is worse than the limitation.
  */
 export class NamedWorkspaces implements WorkspaceProvider {
   readonly kind = 'plain-dir' as const;

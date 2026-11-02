@@ -317,6 +317,14 @@ describe('actors', () => {
     expect(h.registry.liveActor(live.id)).toBeDefined();
   });
 
+  it('names the role before the workspace when a session has neither', async () => {
+    const h = harness();
+    createSession(h.db.db, { id: 's_both', agentId: 'gone', workspaceId: 'gone', ownerPrincipal: 'on_owner' }, NOW);
+    await expect(h.registry.actorFor('s_both', key({ conversationId: 'oc_both' }))).rejects.toThrow(
+      /runs as role gone, which is not configured/,
+    );
+  });
+
   it('hands out one actor per session', async () => {
     // At most one actor per session, ever. Two writers to one session is the bug the
     // whole actor model exists to remove.
@@ -699,6 +707,13 @@ describe('sessions beyond chat', () => {
       /workspace gone is not configured/,
     );
     expect(resolveBinding(h.db.db, key({ conversationId: 'oc_x' }))).toBeUndefined();
+  });
+
+  it('refuses to create a session on a channel this gateway does not run, and binds nothing', () => {
+    const h = harness();
+    const at = key({ channel: 'slack', conversationId: 'oc_slack' });
+    expect(() => h.registry.create(at, OWNER)).toThrow(/channel slack is not run by this gateway/);
+    expect(resolveBinding(h.db.db, at)).toBeUndefined();
   });
 
   it('refuses to create a session where one is already bound', () => {
