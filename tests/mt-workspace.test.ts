@@ -1,7 +1,9 @@
-import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
+import type { Git } from '../src/cli/mt.js';
 import { loadTeamSettings } from '../src/config.js';
 import { migrate, openDb } from '../src/db/open.js';
 import { registerWorkspaces } from '../src/db/workspaces.js';
@@ -79,5 +81,50 @@ describe('mt workspace add', () => {
     const r = await fx.run(['workspace', 'add', 'docs', docsDir()]);
     expect(r.code).toBe(1);
     expect(r.err).toMatch(/^mt: .*unknown setting bogus/);
+  });
+});
+
+describe('mt workspace add --clone', () => {
+  it('clones into the home and adds it', async () => {
+    fx = mtFixture();
+    const source = join(fx.root, 'source');
+    execFileSync('git', ['init', '-q', source]);
+    execFileSync('git', ['-C', source, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '--allow-empty', '-q', '-m', 'init']);
+    const r = await fx.run(['workspace', 'add', 'docs', '--clone', source]);
+    expect(r.code, r.err).toBe(0);
+    const target = join(fx.home, 'workspaces', 'docs');
+    expect(existsSync(join(target, '.git'))).toBe(true);
+    expect(loadTeamSettings(fx.env).workspaces['docs']).toBe(target);
+  });
+
+  it('removes a failed clone and leaves the config file alone', async () => {
+    fx = mtFixture();
+    const before = readFileSync(fx.configPath, 'utf8');
+    const git: Git = async (args) => {
+      const target = args[3] ?? '';
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, 'partial'), 'x');
+      return { code: 128, stderr: 'fatal: repository not found' };
+    };
+    const r = await fx.run(['workspace', 'add', 'docs', '--clone', 'https://example.invalid/x.git'], { git });
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/git clone failed \(exit 128\)/);
+    expect(r.err).toMatch(/repository not found/);
+    expect(existsSync(join(fx.home, 'workspaces', 'docs'))).toBe(false);
+    expect(readFileSync(fx.configPath, 'utf8')).toBe(before);
+  });
+
+  it('refuses when the clone directory exists, without running git', async () => {
+    fx = mtFixture();
+    mkdirSync(join(fx.home, 'workspaces', 'docs'), { recursive: true });
+    let ran = false;
+    const git: Git = async () => {
+      ran = true;
+      return { code: 0, stderr: '' };
+    };
+    const r = await fx.run(['workspace', 'add', 'docs', '--clone', 'https://example.invalid/x.git'], { git });
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/already exists/);
+    expect(ran).toBe(false);
   });
 });
