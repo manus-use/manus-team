@@ -28,11 +28,23 @@ function key(over: Partial<BindingKey> = {}): BindingKey {
 class FakeWorkspaces implements WorkspaceProvider {
   readonly kind = 'plain-dir' as const;
   readonly acquired: string[] = [];
+  /** The workspace name of each acquire, in order. */
+  readonly names: string[] = [];
   readonly released: string[] = [];
+  readonly #known = new Set(['default', 'docs']);
 
-  async acquire(sessionId: string): Promise<Workspace> {
+  has(workspaceId: string): boolean {
+    return this.#known.has(workspaceId);
+  }
+
+  async acquire(sessionId: string, workspaceId: string): Promise<Workspace> {
     this.acquired.push(sessionId);
-    return { id: 'plain-dir:test', kind: this.kind, cwd: '/tmp/workspace' };
+    this.names.push(workspaceId);
+    return {
+      id: workspaceId,
+      kind: this.kind,
+      cwd: workspaceId === 'default' ? '/tmp/workspace' : `/tmp/${workspaceId}`,
+    };
   }
 
   async release(sessionId: string): Promise<void> {
@@ -230,6 +242,35 @@ describe('attach', () => {
 });
 
 describe('actors', () => {
+  it('records a chat session in the workspace default, and works there', async () => {
+    const h = harness();
+    const session = h.registry.bindOrCreate(key(), OWNER).session;
+    expect(session.workspaceId).toBe('default');
+    await h.registry.actorFor(session.id, key());
+    expect(h.workspaces.names).toEqual(['default']);
+  });
+
+  it('reads the workspace from the session, with an empty one meaning default', async () => {
+    // Rows written before this change hold '' (spec §2.4 item 2).
+    const h = harness();
+    createSession(h.db.db, { id: 's_old', agentId: 'default', workspaceId: '', ownerPrincipal: 'on_owner' }, NOW);
+    createSession(h.db.db, { id: 's_docs', agentId: 'default', workspaceId: 'docs', ownerPrincipal: 'on_owner' }, NOW);
+    await h.registry.actorFor('s_old', key({ conversationId: 'oc_old' }));
+    await h.registry.actorFor('s_docs', key({ conversationId: 'oc_docs' }));
+    expect(h.workspaces.names).toEqual(['default', 'docs']);
+  });
+
+  it('refuses a workspace that is not configured, without retiring anything to make room', async () => {
+    const h = harness(1);
+    const live = h.registry.bindOrCreate(key({ conversationId: 'oc_live' }), OWNER).session;
+    await h.registry.actorFor(live.id, key({ conversationId: 'oc_live' }));
+    createSession(h.db.db, { id: 's_nows', agentId: 'default', workspaceId: 'gone', ownerPrincipal: 'on_owner' }, NOW);
+    await expect(h.registry.actorFor('s_nows', key({ conversationId: 'oc_nows' }))).rejects.toThrow(
+      /works in workspace gone, which is not configured/,
+    );
+    expect(h.registry.liveActor(live.id)).toBeDefined();
+  });
+
   it('hands out one actor per session', async () => {
     // At most one actor per session, ever. Two writers to one session is the bug the
     // whole actor model exists to remove.

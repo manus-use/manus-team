@@ -15,6 +15,7 @@ import type { BindingKey, Principal, SessionRow, SessionState } from '../types.j
 import { BOOT_ID, newSessionId } from './ids.js';
 import { SessionActor } from './session-actor.js';
 import type { WorkspaceProvider } from './workspace.js';
+import { KNOWN_DRIVERS } from '../driver/registry.js';
 import type { Clock } from '../time.js';
 import { systemClock } from '../time.js';
 
@@ -49,6 +50,24 @@ const NON_TERMINAL: SessionStates = [
   'quarantined',
   'unknown',
 ];
+
+/** What a chat session runs as, and where (spec §2.4). */
+export const DEFAULT_ROLE = 'default';
+export const DEFAULT_WORKSPACE = 'default';
+
+/**
+ * A session's role, from `sessions.agent_id`. Rows written before roles existed
+ * hold a driver id (`acp`, `structured-cli`) and mean the role default -- which is
+ * why driver ids are reserved as role names.
+ */
+export function roleOfSession(agentId: string): string {
+  return agentId === '' || (KNOWN_DRIVERS as readonly string[]).includes(agentId) ? DEFAULT_ROLE : agentId;
+}
+
+/** A session's workspace name, from `sessions.workspace_id`; rows written before hold ''. */
+export function workspaceOfSession(workspaceId: string): string {
+  return workspaceId === '' ? DEFAULT_WORKSPACE : workspaceId;
+}
 
 export interface BootFinding {
   sessionId: string;
@@ -109,9 +128,16 @@ export class SessionRegistry {
       return existing.actor;
     }
 
+    const session = getSession(this.#deps.db, sessionId);
+    if (session === undefined) throw new Error(`no session ${sessionId}`);
+    const workspaceId = workspaceOfSession(session.workspaceId);
+    if (!this.#deps.workspaces.has(workspaceId)) {
+      throw new Error(`session ${sessionId} works in workspace ${workspaceId}, which is not configured`);
+    }
+
     await this.#makeRoom();
 
-    const workspace = await this.#deps.workspaces.acquire(sessionId);
+    const workspace = await this.#deps.workspaces.acquire(sessionId, workspaceId);
     const target: SendTarget = { chatId: key.conversationId, threadId: key.threadId };
     const actor = new SessionActor({
       db: this.#deps.db,
@@ -303,9 +329,9 @@ export class SessionRegistry {
       {
         id: newSessionId(),
         agentId: this.#deps.driver.id,
-        // The workspace id is filled in when the actor acquires one. Recording a
-        // guess here would make the column lie for the window before first use.
-        workspaceId: '',
+        // The name, recorded now: the provider is asked again on every actor
+        // build, so the session must remember where it works (spec §2.4 item 2).
+        workspaceId: DEFAULT_WORKSPACE,
         ownerPrincipal: owner.unionId ?? owner.openId,
       },
       now,

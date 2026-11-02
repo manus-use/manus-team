@@ -43,9 +43,13 @@ const OPTIONS: readonly PermissionOption[] = [
 class FakeWorkspaces implements WorkspaceProvider {
   readonly kind = 'plain-dir' as const;
 
-  async acquire(sessionId: string): Promise<Workspace> {
+  has(workspaceId: string): boolean {
+    return workspaceId === 'default';
+  }
+
+  async acquire(sessionId: string, workspaceId: string): Promise<Workspace> {
     void sessionId;
-    return { id: 'plain-dir:test', kind: this.kind, cwd: '/tmp/workspace' };
+    return { id: workspaceId, kind: this.kind, cwd: '/tmp/workspace' };
   }
 
   async release(sessionId: string): Promise<void> {

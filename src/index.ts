@@ -10,7 +10,7 @@ import { buildDriver } from './driver/build.js';
 import { Authorizer } from './policy/auth.js';
 import { Router } from './core/router.js';
 import { SessionRegistry } from './core/registry.js';
-import { PlainDirWorkspaces } from './core/workspace.js';
+import { NamedWorkspaces } from './core/workspace.js';
 import { replyUuid } from './core/ids.js';
 import { systemClock } from './time.js';
 
@@ -111,7 +111,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     db,
     driver,
     channel: adapter,
-    workspaces: new PlainDirWorkspaces(defaultWorkspace),
+    workspaces: new NamedWorkspaces(team.workspaces),
     channelId: adapter.id,
     appId: config.lark.appId,
     maxLive: config.maxLiveSessions,

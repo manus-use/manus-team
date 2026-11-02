@@ -1,7 +1,3 @@
-import { realpath, stat } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
-import { createHash } from 'node:crypto';
-
 /**
  * Where a session's work happens.
  *
@@ -13,7 +9,7 @@ import { createHash } from 'node:crypto';
  */
 
 export interface Workspace {
-  /** Stable across restarts. Derived from the resolved path, not minted. */
+  /** The workspace's name: its row in the workspaces table (spec §2.3). */
   id: string;
   kind: 'plain-dir' | 'git-worktree';
   /** Absolute and realpath-resolved. */
@@ -22,13 +18,16 @@ export interface Workspace {
 
 export interface WorkspaceProvider {
   readonly kind: Workspace['kind'];
-  acquire(sessionId: string): Promise<Workspace>;
+  /** Whether a workspace of this name is configured. */
+  has(workspaceId: string): boolean;
+  /** The workspace a session recorded, by name. Throws for a name no longer configured. */
+  acquire(sessionId: string, workspaceId: string): Promise<Workspace>;
   /** Idempotent, and must not throw. Nothing may depend on it having run. */
   release(sessionId: string): Promise<void>;
 }
 
 /**
- * Every session works in one configured directory.
+ * Every session works in one named directory.
  *
  * Concurrent sessions therefore share a working tree, which is a real limitation
  * and stated here rather than discovered: two agents editing the same files will
@@ -36,39 +35,27 @@ export interface WorkspaceProvider {
  * worktrees, and pretending a plain directory provides any is worse than the
  * limitation.
  */
-export class PlainDirWorkspaces implements WorkspaceProvider {
+export class NamedWorkspaces implements WorkspaceProvider {
   readonly kind = 'plain-dir' as const;
-  readonly #configured: string;
-  #resolved: Workspace | undefined;
+  readonly #paths: ReadonlyMap<string, string>;
 
-  constructor(dir: string) {
-    if (!isAbsolute(dir)) {
-      // Relative paths resolve against the gateway's cwd, which is whatever the
-      // service manager happened to set. That makes the workspace depend on how
-      // the process was launched.
-      throw new Error(`workspace dir must be absolute, got ${JSON.stringify(dir)}`);
-    }
-    this.#configured = dir;
+  /**
+   * @param paths Workspace name → real path, as `loadTeam` resolved and checked
+   *   them at startup. Resolved once, there: a symlink swapped in later cannot
+   *   redirect an agent with write access to a different tree.
+   */
+  constructor(paths: ReadonlyMap<string, string>) {
+    this.#paths = paths;
   }
 
-  async acquire(_sessionId: string): Promise<Workspace> {
-    const cached = this.#resolved;
-    if (cached !== undefined) return cached;
+  has(workspaceId: string): boolean {
+    return this.#paths.has(workspaceId);
+  }
 
-    // realpath once, then reuse. Pinning the resolved path means a symlink swapped
-    // underneath us later cannot silently redirect an agent with write access to a
-    // different tree.
-    const cwd = await realpath(this.#configured);
-    const info = await stat(cwd);
-    if (!info.isDirectory()) throw new Error(`workspace ${cwd} is not a directory`);
-
-    const workspace: Workspace = {
-      id: `plain-dir:${createHash('sha256').update(cwd, 'utf8').digest('hex').slice(0, 16)}`,
-      kind: this.kind,
-      cwd,
-    };
-    this.#resolved = workspace;
-    return workspace;
+  async acquire(_sessionId: string, workspaceId: string): Promise<Workspace> {
+    const cwd = this.#paths.get(workspaceId);
+    if (cwd === undefined) throw new Error(`workspace ${workspaceId} is not configured`);
+    return { id: workspaceId, kind: this.kind, cwd };
   }
 
   async release(_sessionId: string): Promise<void> {
