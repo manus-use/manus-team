@@ -87,6 +87,12 @@ would put values in the file rather than names. A role's `.env` is the one file 
 read from: it must be a regular file owned by the gateway's user, readable and writable only
 by its owner (for example `0600` or `0400`). It may not set `MT_*`, `LARK_*` or `PATH`.
 
+The gateway masks every secret it holds itself — the Lark app secret, and every value it gives
+an agent from a role's `.env`, `passEnv` or `MT_AGENT_ENV_*`, except names the role lists in
+`agent.maskExempt` — as `••••` in everything it shows in chat, and in what it stores in its event
+log and approvals. Values shorter than 8 characters are not masked. A secret the agent finds by
+itself, for instance in a file it reads, is not known to the gateway and is not masked.
+
 | File setting | Env override | Meaning |
 |---|---|---|
 | — | `LARK_APP_SECRET` **(required)** | The app secret. Environment only; never written to disk or the event log. |
@@ -105,7 +111,7 @@ by its owner (for example `0600` or `0400`). It may not set `MT_*`, `LARK_*` or 
 | `agent.args` | `MT_AGENT_ARGS` | A list, or one string split on whitespace with quotes honoured. Not a shell: `$HOME` is not expanded, because the agent is spawned with `shell: false`. |
 | `agent.unsupervised` | `MT_AGENT_UNSUPERVISED` | Required by, and only by, `structured-cli`: a written acknowledgement that the agent acts with no approval card and no gate from `auth.operate`. Setting it alongside the `acp` driver is an error — a config must not claim a posture the gateway is not in. |
 | `agent.readOnlyTools` | — | The agent's tool names that only read. Checked at startup but not used in this build; automatic retry of a failed run will use it. |
-| `agent.maskExempt` | — | Variable names whose values are not secret. Checked at startup but not used in this build: nothing is masked yet. |
+| `agent.maskExempt` | — | Variable names whose values are long but not secret, such as a base URL, so not masked. |
 | `agent.passEnv` | — | Variable **names** forwarded to the agent from the gateway's own environment. A name that is not set is an error, because forwarding nothing surfaces later as the agent failing to authenticate. Leave it empty for a subscription-authenticated agent: its credentials are under `$HOME`, which is forwarded already. |
 | — | `MT_AGENT_ENV_*` | Forwarded with the prefix stripped: `MT_AGENT_ENV_ANTHROPIC_API_KEY` becomes `ANTHROPIC_API_KEY`. Wins over `passEnv`. Opt-in by prefix, because an agent holding the Feishu secret could post as the bot and answer its own approvals. |
 | `maxLiveSessions` | `MT_MAX_LIVE_SESSIONS` | Concurrent agent processes. Default 8. |
