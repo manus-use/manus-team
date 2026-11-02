@@ -583,9 +583,31 @@ describe('loadConfig: roles and workspaces', () => {
   });
 
   it('treats an agent variable alone as configuring the agent, which then needs a command', () => {
-    expect(() =>
-      loadEnvOnly({ ...ENV_ONLY, MT_AGENT_COMMAND: undefined, MT_AGENT_DRIVER: 'acp' }),
-    ).toThrow(/agent\.command in the config file, or MT_AGENT_COMMAND/);
+    // The variables define the role default, so the error says which ones are set
+    // and both ways out: a stray variable next to roles/default should be unset,
+    // and adding a command there only trades this error for a "both define" one.
+    const run = () =>
+      loadEnvOnly({
+        ...ENV_ONLY,
+        MT_AGENT_COMMAND: undefined,
+        MT_AGENT_ARGS: '--verbose',
+        MT_AGENT_ENV_TOKEN: 'secret-value',
+      });
+    expect(run).toThrow(ConfigError);
+    expect(run).toThrow(/MT_AGENT_ARGS, MT_AGENT_ENV_TOKEN are set but MT_AGENT_COMMAND is not/);
+    expect(run).toThrow(/define the role default/);
+    expect(run).toThrow(
+      `if ${join(HOME, 'roles', 'default')} exists, unset them; otherwise also set MT_AGENT_COMMAND`,
+    );
+    // Names only: a value set for the agent may be a credential.
+    expect(run).not.toThrow(/secret-value|--verbose/);
+  });
+
+  it('keeps the agent.command advice for a file agent block with no command', () => {
+    const file = yamlFile({ agent: { command: undefined, args: ['acp'] } });
+    expect(() => load({ MT_AGENT_ARGS: '--verbose' }, file)).toThrow(
+      'an agent command is required: set agent.command in the config file, or MT_AGENT_COMMAND',
+    );
   });
 
   it('reads readOnlyTools and maskExempt in the agent block', () => {

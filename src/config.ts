@@ -173,14 +173,28 @@ export function loadConfig(
 
   // The agent block is optional: a role directory may define the role default
   // instead (team.ts). An MT_AGENT_* variable alone counts as configuring it.
-  const agentFromEnv =
-    ['MT_AGENT_COMMAND', 'MT_AGENT_ARGS', 'MT_AGENT_DRIVER', 'MT_AGENT_UNSUPERVISED'].some(
+  const agentVariables = [
+    ...['MT_AGENT_COMMAND', 'MT_AGENT_ARGS', 'MT_AGENT_DRIVER', 'MT_AGENT_UNSUPERVISED'].filter(
       (key) => envString(env, key) !== undefined,
-    ) ||
-    Object.keys(env).some(
-      (key) => key.startsWith(AGENT_ENV_PREFIX) && key.length > AGENT_ENV_PREFIX.length && env[key] !== undefined,
+    ),
+    ...Object.keys(env)
+      .filter(
+        (key) => key.startsWith(AGENT_ENV_PREFIX) && key.length > AGENT_ENV_PREFIX.length && env[key] !== undefined,
+      )
+      .sort(),
+  ];
+  if (!file.agentPresent && agentVariables.length > 0 && envString(env, 'MT_AGENT_COMMAND') === undefined) {
+    // Variables alone, and no command. Whether roles/default exists is not known
+    // here, and the two cases need opposite advice: a stray variable next to a
+    // role directory should go, while adding a command there only trades this
+    // error for the "both define the role default" one. Names only, never values.
+    throw new ConfigError(
+      `${agentVariables.join(', ')} ${agentVariables.length === 1 ? 'is' : 'are'} set but MT_AGENT_COMMAND is not. ` +
+        `MT_AGENT_* variables define the role default: if ${join(home, 'roles', 'default')} exists, ` +
+        'unset them; otherwise also set MT_AGENT_COMMAND',
     );
-  const agent = file.agentPresent || agentFromEnv ? legacyAgent(env, file) : undefined;
+  }
+  const agent = file.agentPresent || agentVariables.length > 0 ? legacyAgent(env, file) : undefined;
 
   const allowTalk = envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk;
   const allowOperate = envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate;
