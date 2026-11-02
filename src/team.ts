@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { type AgentConfig, ConfigError, type Env, type GatewayConfig } from './config.js';
+import { type AgentConfig, ConfigError, type Env, type TeamSettings } from './config.js';
 import { discoverRoles, loadRoleDir, type Role } from './roles.js';
 import { resolveWorkspaces } from './workspaces.js';
 
@@ -19,7 +19,7 @@ export interface Team {
   notes: readonly string[];
 }
 
-export function loadTeam(config: GatewayConfig, env: Env): Team {
+export function loadTeam(config: TeamSettings, env: Env): Team {
   const resolved = resolveWorkspaces(config.workspaces, config.home, config.dbPath);
   if ('error' in resolved) throw new ConfigError(resolved.error);
   const workspaceNames = new Set(resolved.workspaces.keys());

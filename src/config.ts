@@ -101,6 +101,21 @@ export interface GatewayConfig {
   maxLiveSessions: number;
 }
 
+/**
+ * What `loadTeam` and the `mt` commands need: where the gateway's files are, the
+ * workspaces, and the legacy agent block. No Lark settings and no owner, so an
+ * operator can create a role from a shell that holds no gateway credentials.
+ */
+export interface TeamSettings {
+  home: string;
+  /** The file read, or undefined for an environment-only deployment. */
+  configPath: string | undefined;
+  dbPath: string;
+  /** Workspace name → declared absolute path. Always has `default`. */
+  workspaces: Readonly<Record<string, string>>;
+  agent: AgentConfig | undefined;
+}
+
 export class ConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -133,6 +148,65 @@ export function loadConfig(
   env: Env = process.env,
   readFile: FileReader = readIfPresent,
 ): GatewayConfig {
+  const located = locate(env, readFile);
+  const { file } = located;
+
+  const ownerOpenId =
+    envString(env, 'MT_OWNER_OPEN_ID') ??
+    file.auth.owner ??
+    fail('an owner is required: set auth.owner in the config file, or MT_OWNER_OPEN_ID');
+  const team = teamSettingsFrom(env, located);
+
+  const allowTalk = envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk;
+  const allowOperate = envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate;
+
+  return {
+    dbPath: team.dbPath,
+    // Not settable from the file: it locates the migrations that belong to this
+    // build, which is a packaging concern rather than an operational one.
+    schemaDir: envString(env, 'MT_SCHEMA_DIR') ?? BUNDLED_SCHEMA_DIR,
+    downloadDir: envString(env, 'MT_DOWNLOAD_DIR') ?? file.downloads ?? join(located.home, 'downloads'),
+    configPath: team.configPath,
+    home: team.home,
+
+    lark: {
+      appId:
+        envString(env, 'LARK_APP_ID') ??
+        file.lark.appId ??
+        fail('an app id is required: set lark.appId in the config file, or LARK_APP_ID'),
+      // Environment only, and refused in the file. See the note at the top.
+      appSecret: envString(env, 'LARK_APP_SECRET') ?? fail('LARK_APP_SECRET is required'),
+      ...domainOf(envString(env, 'LARK_DOMAIN') ?? file.lark.domain),
+    },
+
+    auth: {
+      ownerOpenId,
+      // The owner is always included. An allowlist that excludes the owner locks
+      // out the only person who can fix it, and it is not editable from chat.
+      allowTalk: unique([ownerOpenId, ...allowTalk]),
+      allowOperate: unique([ownerOpenId, ...allowOperate]),
+      allowChats: envList(env, 'MT_ALLOW_CHATS') ?? file.auth.chats,
+      allowDirectMessages: envFlag(env, 'MT_ALLOW_DM') ?? file.auth.directMessages ?? true,
+      // Default false. `@all` is a room-wide notification, not an instruction, and
+      // treating it as one makes the bot answer announcements.
+      allowMentionAll: envFlag(env, 'MT_ALLOW_MENTION_ALL') ?? file.auth.mentionAll ?? false,
+    },
+
+    agent: team.agent,
+
+    workspaces: team.workspaces,
+    maxLiveSessions: envInteger(env, 'MT_MAX_LIVE_SESSIONS') ?? file.maxLiveSessions ?? 8,
+  };
+}
+
+interface Located {
+  home: string;
+  path: string;
+  text: string | undefined;
+  file: FileConfig;
+}
+
+function locate(env: Env, readFile: FileReader): Located {
   const home = envString(env, 'MT_HOME') ?? join(homedir(), '.manus-team');
   const explicit = envString(env, 'MT_CONFIG');
   const path = explicit ?? join(home, 'config.yaml');
@@ -144,12 +218,10 @@ export function loadConfig(
     throw new ConfigError(`MT_CONFIG points at ${path}, which does not exist`);
   }
   const file = text === undefined ? emptyFile() : parseFile(path, text);
+  return { home, path, text, file };
+}
 
-  const ownerOpenId =
-    envString(env, 'MT_OWNER_OPEN_ID') ??
-    file.auth.owner ??
-    fail('an owner is required: set auth.owner in the config file, or MT_OWNER_OPEN_ID');
-
+function teamSettingsFrom(env: Env, { home, path, text, file }: Located): TeamSettings {
   const single = envString(env, 'MT_WORKSPACE') ?? file.workspace;
   if (single !== undefined && file.workspaces['default'] !== undefined) {
     throw new ConfigError(
@@ -193,47 +265,18 @@ export function loadConfig(
     );
   }
   const agent = file.agentPresent || agentVariables.length > 0 ? legacyAgent(env, file) : undefined;
-
-  const allowTalk = envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk;
-  const allowOperate = envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate;
-
   return {
-    dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'gateway.db'),
-    // Not settable from the file: it locates the migrations that belong to this
-    // build, which is a packaging concern rather than an operational one.
-    schemaDir: envString(env, 'MT_SCHEMA_DIR') ?? BUNDLED_SCHEMA_DIR,
-    downloadDir: envString(env, 'MT_DOWNLOAD_DIR') ?? file.downloads ?? join(home, 'downloads'),
-    configPath: text === undefined ? undefined : path,
     home,
-
-    lark: {
-      appId:
-        envString(env, 'LARK_APP_ID') ??
-        file.lark.appId ??
-        fail('an app id is required: set lark.appId in the config file, or LARK_APP_ID'),
-      // Environment only, and refused in the file. See the note at the top.
-      appSecret: envString(env, 'LARK_APP_SECRET') ?? fail('LARK_APP_SECRET is required'),
-      ...domainOf(envString(env, 'LARK_DOMAIN') ?? file.lark.domain),
-    },
-
-    auth: {
-      ownerOpenId,
-      // The owner is always included. An allowlist that excludes the owner locks
-      // out the only person who can fix it, and it is not editable from chat.
-      allowTalk: unique([ownerOpenId, ...allowTalk]),
-      allowOperate: unique([ownerOpenId, ...allowOperate]),
-      allowChats: envList(env, 'MT_ALLOW_CHATS') ?? file.auth.chats,
-      allowDirectMessages: envFlag(env, 'MT_ALLOW_DM') ?? file.auth.directMessages ?? true,
-      // Default false. `@all` is a room-wide notification, not an instruction, and
-      // treating it as one makes the bot answer announcements.
-      allowMentionAll: envFlag(env, 'MT_ALLOW_MENTION_ALL') ?? file.auth.mentionAll ?? false,
-    },
-
-    agent,
-
+    configPath: text === undefined ? undefined : path,
+    dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'gateway.db'),
     workspaces,
-    maxLiveSessions: envInteger(env, 'MT_MAX_LIVE_SESSIONS') ?? file.maxLiveSessions ?? 8,
+    agent,
   };
+}
+
+/** The team half of the configuration, for `loadTeam` and the `mt` commands. */
+export function loadTeamSettings(env: Env = process.env, readFile: FileReader = readIfPresent): TeamSettings {
+  return teamSettingsFrom(env, locate(env, readFile));
 }
 
 /** The legacy `agent:` block, with its `MT_AGENT_*` overrides applied. */

@@ -4,7 +4,7 @@ import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { stringify } from 'yaml';
-import { ConfigError, loadConfig, type FileReader } from '../src/config.js';
+import { ConfigError, loadConfig, loadTeamSettings, type FileReader } from '../src/config.js';
 
 /**
  * Configuration is where a security property is easiest to lose by accident: a
@@ -621,5 +621,35 @@ describe('loadConfig: roles and workspaces', () => {
 
   it('exposes the home it settled on', () => {
     expect(load().home).toBe(HOME);
+  });
+});
+
+describe('loadTeamSettings', () => {
+  it('reads where things are, the workspaces and the agent, without Lark settings or an owner', () => {
+    const s = loadTeamSettings(
+      { MT_HOME: '/srv/mt', MT_WORKSPACE: '/srv/repo', MT_AGENT_COMMAND: 'claude-agent-acp' },
+      () => undefined,
+    );
+    expect(s).toMatchObject({
+      home: '/srv/mt',
+      configPath: undefined,
+      dbPath: '/srv/mt/gateway.db',
+      workspaces: { default: '/srv/repo' },
+    });
+    expect(s.agent?.command).toBe('claude-agent-acp');
+  });
+
+  it('agrees with loadConfig on everything they share', () => {
+    const env = {
+      MT_HOME: '/srv/mt',
+      MT_WORKSPACE: '/srv/repo',
+      MT_AGENT_COMMAND: 'claude-agent-acp',
+      MT_OWNER_OPEN_ID: 'ou_owner',
+      LARK_APP_ID: 'cli_app',
+      LARK_APP_SECRET: 'app-secret',
+    };
+    const c = loadConfig(env, () => undefined);
+    const s = loadTeamSettings(env, () => undefined);
+    expect(s).toEqual({ home: c.home, configPath: c.configPath, dbPath: c.dbPath, workspaces: c.workspaces, agent: c.agent });
   });
 });
