@@ -106,9 +106,9 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   const registry = new SessionRegistry({
     db,
     drivers,
-    channel: adapter,
+    // Lark only, until plan C adds the kanban sink.
+    channels: new Map([[adapter.id, adapter]]),
     workspaces: new NamedWorkspaces(team.workspaces),
-    channelId: adapter.id,
     appId: config.lark.appId,
     maxLive: config.maxLiveSessions,
     note,

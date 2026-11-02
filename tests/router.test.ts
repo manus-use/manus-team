@@ -88,9 +88,8 @@ function harness(
   const registry = new SessionRegistry({
     db: t.db,
     drivers: new Map([['default', driver]]),
-    channel,
+    channels: new Map([[CHANNEL, channel]]),
     workspaces: new FakeWorkspaces(),
-    channelId: CHANNEL,
     appId: APP,
     clock,
     note: (line) => notes.push(line),

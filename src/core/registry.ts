@@ -81,14 +81,35 @@ export interface SessionRegistryDeps {
   db: Db;
   /** Role name → that role's driver. Must hold `default` (spec §2.4 item 1). */
   drivers: ReadonlyMap<string, Driver>;
-  channel: Channel;
+  /**
+   * A binding's channel id → the channel a session bound there posts through:
+   * `lark` for chat, `kanban` for a run's sink (spec §2.4 item 4).
+   */
+  channels: ReadonlyMap<string, Channel>;
+  /**
+   * Extra environment for a session's agent, asked on every actor build (spec
+   * §2.4 item 3). Plan C's dispatcher holds a run's environment in memory only.
+   */
+  envFor?: (sessionId: string) => Readonly<Record<string, string>> | undefined;
   workspaces: WorkspaceProvider;
-  /** The channel id used in binding keys. */
-  channelId: string;
   appId: string;
   clock?: Clock;
   maxLive?: number;
   note?: (line: string) => void;
+}
+
+/** How a session other than a chat's default is created. */
+export interface NewSession {
+  /** Default `default`. */
+  role?: string;
+  /** Default `default`. */
+  workspace?: string;
+  /**
+   * Another session's observed provider session id, passed as a hint (spec §2.4
+   * item 5). The driver resumes from it if it can and otherwise starts fresh;
+   * whatever the agent then reports replaces it.
+   */
+  seedProviderSessionId?: string;
 }
 
 interface Entry {
@@ -140,19 +161,25 @@ export class SessionRegistry {
     if (driver === undefined) {
       throw new Error(`session ${sessionId} runs as role ${role}, which is not configured`);
     }
+    const channel = this.#deps.channels.get(key.channel);
+    if (channel === undefined) {
+      throw new Error(`session ${sessionId} is bound on channel ${key.channel}, which this gateway does not run`);
+    }
 
     await this.#makeRoom();
 
     const workspace = await this.#deps.workspaces.acquire(sessionId, workspaceId);
+    const env = this.#deps.envFor?.(sessionId);
     const target: SendTarget = { chatId: key.conversationId, threadId: key.threadId };
     const actor = new SessionActor({
       db: this.#deps.db,
       sessionId,
       driver,
-      channel: this.#deps.channel,
+      channel,
       key,
       target,
       cwd: workspace.cwd,
+      ...(env === undefined ? {} : { env }),
       clock: this.#clock,
       note: (line) => this.#note(`[${sessionId}] ${line}`),
     });
@@ -272,7 +299,10 @@ export class SessionRegistry {
       this.#note(`binding at ${key.conversationId}/${key.threadId} pointed at a missing session`);
     }
 
-    return { session: this.#create(key, owner, now), created: true };
+    return {
+      session: this.#create(key, owner, now, { role: DEFAULT_ROLE, workspace: DEFAULT_WORKSPACE, seed: undefined }),
+      created: true,
+    };
   }
 
   /**
@@ -300,7 +330,7 @@ export class SessionRegistry {
       );
     }
     revokeBindingsAt(this.#deps.db, key, now);
-    return this.#create(key, owner, now);
+    return this.#create(key, owner, now, { role: DEFAULT_ROLE, workspace: DEFAULT_WORKSPACE, seed: undefined });
   }
 
   /**
@@ -329,18 +359,39 @@ export class SessionRegistry {
     return { ok: true, session };
   }
 
-  #create(key: BindingKey, owner: Principal, now: number): SessionRow {
+  /**
+   * Create and bind a session as a role, in a workspace, optionally seeded.
+   *
+   * For sessions a chat does not create itself -- a run's, a rework's. Refuses a
+   * role or workspace that is not configured before anything is written, so a
+   * refused create leaves no session and no binding behind.
+   */
+  create(key: BindingKey, owner: Principal, opts: NewSession = {}): SessionRow {
+    const role = opts.role ?? DEFAULT_ROLE;
+    const workspace = opts.workspace ?? DEFAULT_WORKSPACE;
+    if (!this.#deps.drivers.has(role)) throw new Error(`role ${role} is not configured`);
+    if (!this.#deps.workspaces.has(workspace)) throw new Error(`workspace ${workspace} is not configured`);
+    return this.#create(key, owner, this.#clock.now(), { role, workspace, seed: opts.seedProviderSessionId });
+  }
+
+  #create(
+    key: BindingKey,
+    owner: Principal,
+    now: number,
+    opts: { role: string; workspace: string; seed: string | undefined },
+  ): SessionRow {
     const session = createSession(
       this.#deps.db,
       {
         id: newSessionId(),
         // The role, not the driver: the registry rebuilds this session's driver
         // from it (spec §2.4 item 1).
-        agentId: DEFAULT_ROLE,
+        agentId: opts.role,
         // The name, recorded now: the provider is asked again on every actor
         // build, so the session must remember where it works (spec §2.4 item 2).
-        workspaceId: DEFAULT_WORKSPACE,
+        workspaceId: opts.workspace,
         ownerPrincipal: owner.unionId ?? owner.openId,
+        ...(opts.seed === undefined ? {} : { providerSessionId: opts.seed }),
       },
       now,
     );
@@ -355,6 +406,9 @@ export class SessionRegistry {
           conversationId: key.conversationId,
           threadId: key.threadId,
           owner: session.ownerPrincipal,
+          role: opts.role,
+          workspace: opts.workspace,
+          seeded: opts.seed !== undefined,
         },
       },
       now,

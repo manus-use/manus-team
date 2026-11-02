@@ -69,7 +69,14 @@ afterEach(() => {
   while (open.length > 0) open.pop()?.close();
 });
 
-function harness(maxLive = DEFAULT_MAX_LIVE, extra: { drivers?: Record<string, FakeDriver> } = {}): Harness {
+function harness(
+  maxLive = DEFAULT_MAX_LIVE,
+  extra: {
+    drivers?: Record<string, FakeDriver>;
+    channels?: Record<string, FakeChannel>;
+    envFor?: (sessionId: string) => Readonly<Record<string, string>> | undefined;
+  } = {},
+): Harness {
   const db = testDb();
   open.push(db);
   const clock = new ManualClock(NOW);
@@ -81,9 +88,9 @@ function harness(maxLive = DEFAULT_MAX_LIVE, extra: { drivers?: Record<string, F
   const registry = new SessionRegistry({
     db: db.db,
     drivers: new Map<string, FakeDriver>([['default', driver], ...Object.entries(extra.drivers ?? {})]),
-    channel,
+    channels: new Map<string, FakeChannel>([['lark', channel], ...Object.entries(extra.channels ?? {})]),
+    ...(extra.envFor === undefined ? {} : { envFor: extra.envFor }),
     workspaces,
-    channelId: 'lark',
     appId: 'cli_app',
     clock,
     maxLive,
@@ -618,5 +625,74 @@ describe('park', () => {
     h.clock.advance(2000);
     expect(h.registry.park()).toBe(1);
     expect(getApproval(h.db.db, 'a_1')?.state).toBe('parked');
+  });
+});
+
+describe('sessions beyond chat', () => {
+  it('posts through the channel the session is bound on', async () => {
+    // A run's session posts through the kanban sink, a chat's through Lark (spec §2.4 item 4).
+    const kanban = new FakeChannel({ id: 'kanban' });
+    const h = harness(DEFAULT_MAX_LIVE, { channels: { kanban } });
+    const at = key({ channel: 'kanban', conversationId: 'run_1' });
+    const session = h.registry.bindOrCreate(at, OWNER).session;
+    const actor = await h.registry.actorFor(session.id, at);
+    await actor.submit({ messageId: 'om_k', appId: 'cli_app', input: { text: 'hi', paths: [] } });
+    // The card writer coalesces; flush so the write has happened before looking.
+    await actor.flushCard();
+    expect(kanban.calls.length).toBeGreaterThan(0);
+    expect(h.channel.calls).toEqual([]);
+  });
+
+  it('refuses a binding on a channel this gateway does not run', async () => {
+    const h = harness();
+    const at = key({ channel: 'slack' });
+    const session = h.registry.bindOrCreate(at, OWNER).session;
+    await expect(h.registry.actorFor(session.id, at)).rejects.toThrow(
+      /bound on channel slack, which this gateway does not run/,
+    );
+  });
+
+  it('asks for the session environment on every build, and passes it to the start', async () => {
+    const asked: string[] = [];
+    const h = harness(DEFAULT_MAX_LIVE, {
+      envFor: (sessionId) => {
+        asked.push(sessionId);
+        return { MT_KANBAN_RUN: 'r_1' };
+      },
+    });
+    const session = h.registry.bindOrCreate(key(), OWNER).session;
+    const actor = await h.registry.actorFor(session.id, key());
+    await actor.submit({ messageId: 'om_e', appId: 'cli_app', input: { text: 'hi', paths: [] } });
+    expect(asked).toEqual([session.id]);
+    expect(h.driver.starts[0]?.env).toEqual({ MT_KANBAN_RUN: 'r_1' });
+  });
+
+  it('creates a session as a role, in a workspace, seeded from another session', async () => {
+    // Review rework resumes the implementer's conversation (spec §2.4 item 5).
+    const reviewer = new FakeDriver('reviewer');
+    const h = harness(DEFAULT_MAX_LIVE, { drivers: { reviewer } });
+    const at = key({ conversationId: 'oc_rework' });
+    const session = h.registry.create(at, OWNER, {
+      role: 'reviewer',
+      workspace: 'docs',
+      seedProviderSessionId: 'prov_impl',
+    });
+    expect([session.agentId, session.workspaceId, session.providerSessionId]).toEqual(['reviewer', 'docs', 'prov_impl']);
+    expect(resolveBinding(h.db.db, at)?.sessionId).toBe(session.id);
+
+    const actor = await h.registry.actorFor(session.id, at);
+    await actor.submit({ messageId: 'om_r', appId: 'cli_app', input: { text: 'hi', paths: [] } });
+    expect(reviewer.starts[0]).toMatchObject({ cwd: '/tmp/docs', providerSessionId: 'prov_impl' });
+  });
+
+  it('refuses to create a session as a role or in a workspace that is not configured', () => {
+    const h = harness();
+    expect(() => h.registry.create(key({ conversationId: 'oc_x' }), OWNER, { role: 'gone' })).toThrow(
+      /role gone is not configured/,
+    );
+    expect(() => h.registry.create(key({ conversationId: 'oc_y' }), OWNER, { workspace: 'gone' })).toThrow(
+      /workspace gone is not configured/,
+    );
+    expect(resolveBinding(h.db.db, key({ conversationId: 'oc_x' }))).toBeUndefined();
   });
 });
