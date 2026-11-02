@@ -1,6 +1,6 @@
 # manus-team — Architecture Design
 
-*Formerly `prime-gateway`, with `PGW_*` variables and a `~/.prime-gateway` home; renamed in full (kanban spec §13).*
+*Formerly `prime-gateway`.*
 
 **Version:** 0.2 — design, reconciled against the code
 **Primary constraint:** long-lived durable sessions

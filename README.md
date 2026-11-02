@@ -77,10 +77,6 @@ export LARK_APP_SECRET=...
 missing is an error, while the default location being absent is an ordinary
 environment-only deploy.
 
-Renamed from prime-gateway: the variables were `PGW_*` and are now `MT_*`, and the home moved
-from `~/.prime-gateway` to `~/.manus-team`. The old names are not read; one left set stops the
-gateway at startup with a message naming it.
-
 **Credentials never go in the file.** The agent runs as the same user and is not sandboxed
 in this build, so anything on disk it can read. The environment is not airtight either — a
 same-uid process can read `/proc/<pid>/environ` on Linux — but it does not persist, is not

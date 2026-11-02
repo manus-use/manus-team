@@ -32,10 +32,10 @@
 | `schema/001_initial.sql`, `schema/002_lark_channel.sql` header comments | → `manus-team` | comments only; the SQL is untouched |
 | Lark SDK `source: 'prime-gateway'` (`src/channel/lark/adapter.ts`) | → `PRODUCT_NAME` | how the gateway identifies itself to Lark |
 | ACP client name (`src/driver/acp/driver.ts`, `src/index.ts`) | → `PRODUCT_NAME` | how the gateway identifies itself to an agent |
-| `architecture.md` unbuilt design identifiers: `prime/` handle prefix, tmux/container/systemd names, `prime/ses_…` branch, `refs/prime/checkpoints` | → `pgw` | nothing has been built with them; `pgw` matches the `PGW_` prefix that stays, so there is no third name later |
+| `architecture.md` unbuilt design identifiers: `prime/` handle prefix, tmux/container/systemd names, `prime/ses_…` branch, `refs/prime/checkpoints` | → `mt` | nothing has been built with them, so they take the final name now |
 | `config.example.yaml` example paths `/var/lib/prime/…` | → `/var/lib/manus-team/…` | examples a reader copies |
 | `~/.prime-gateway` (README, `config.example.yaml`, `src/config.ts`, the spec) | **unchanged** | a running deployment's config, database and secrets live there (spec §13) |
-| `PGW_*`, `PGW_HOME`, the `pgw` CLI name | **unchanged** | same reason |
+| the environment-variable prefix, the home variable and the CLI name | **unchanged** | same reason (all renamed later, in plan A2) |
 | Test temp-dir prefixes (`prime-cli-`, `prime-gw-test-`, …) and test fixture paths (`/var/lib/prime`, `/etc/prime/gw.yaml`) | **unchanged** | internal to tests; renaming them proves nothing |
 | `docs/specs/*`, `docs/plans/*` text that *describes* the rename | **unchanged** | they record the decision, including the old name |
 
@@ -121,7 +121,7 @@ Create `src/identity.ts`:
  * talks to.
  *
  * Deliberately *not* the name of anything on disk or in the environment: the
- * `PGW_*` variables, `PGW_HOME` and the `~/.prime-gateway` default home keep
+ * environment variables and the `~/.prime-gateway` default home keep
  * their names, because a running deployment's configuration, database and
  * secrets live under them. See docs/specs/2026-11-02-kanban-design.md §13.
  */
@@ -291,18 +291,18 @@ Leave line 3 (`~/.prime-gateway/config.yaml`) as it is.
 |---|---|
 | `# prime-gateway — Architecture Design` | `# manus-team — Architecture Design` |
 | `\| prime concept \| ACP mechanism \|` | `\| gateway concept \| ACP mechanism \|` |
-| `handle = "prime/" + session_id + "/" + generation` | `handle = "pgw/" + session_id + "/" + generation` |
-| `- **tmux** → session name \`prime/ses_8f72/42\`` | `- **tmux** → session name \`pgw/ses_8f72/42\`` |
-| `- **container** → container name \`prime-ses_8f72-42\`` | `- **container** → container name \`pgw-ses_8f72-42\`` |
-| `- **systemd scope** → \`prime-ses_8f72-42.scope\`` | `- **systemd scope** → \`pgw-ses_8f72-42.scope\`` |
-| `$PGW_HOME/workspaces/ws_42/      # worktree, branch prime/ses_8f72` | `$PGW_HOME/workspaces/ws_42/      # worktree, branch pgw/ses_8f72` |
-| `` `refs/prime/checkpoints/<session_id>` `` | `` `refs/pgw/checkpoints/<session_id>` `` |
+| `handle = "prime/" + session_id + "/" + generation` | `handle = "mt/" + session_id + "/" + generation` |
+| `- **tmux** → session name \`prime/ses_8f72/42\`` | `- **tmux** → session name \`mt/ses_8f72/42\`` |
+| `- **container** → container name \`prime-ses_8f72-42\`` | `- **container** → container name \`mt-ses_8f72-42\`` |
+| `- **systemd scope** → \`prime-ses_8f72-42.scope\`` | `- **systemd scope** → \`mt-ses_8f72-42.scope\`` |
+| `$MT_HOME/workspaces/ws_42/      # worktree, branch prime/ses_8f72` | `$MT_HOME/workspaces/ws_42/      # worktree, branch mt/ses_8f72` |
+| `` `refs/prime/checkpoints/<session_id>` `` | `` `refs/mt/checkpoints/<session_id>` `` |
 | `\| \`session_id\` \| prime's opaque durable ID \|` | `\| \`session_id\` \| the gateway's opaque durable ID \|` |
 
 Then add one line directly under the title, so a reader meeting the old name in history knows they are the same thing:
 
 ```markdown
-*Formerly `prime-gateway`. The `PGW_*` variables, `PGW_HOME` and the `~/.prime-gateway` home keep their names.*
+*Formerly `prime-gateway`.*
 ```
 
 - [ ] **Step 3.4: `docs/testing/durability.md`**
@@ -394,7 +394,7 @@ git -c credential.helper= -c 'credential.helper=!f() { echo username=manus-use; 
 ## Out of scope, deliberately
 
 - **Renaming the local checkout directory** (`~/Develop/manus/prime-gateway`). Nothing in the code depends on it, and moving it has costs this plan cannot see: a service definition (launchd/systemd) may start the gateway from that path, and Claude Code keys this project's saved memory by the directory path, so a move orphans it unless the memory directory is moved too. If the user wants it, it is a separate, manual step: stop the gateway, move the directory, update the service definition, and move `~/.claude/projects/-Users-x-Develop-manus-prime-gateway` to the matching new name.
-- **`~/.prime-gateway`, `PGW_*`, `PGW_HOME`** — kept by the spec (§13).
+- **`~/.prime-gateway` and the environment variables** — kept at the time (renamed later, in plan A2).
 - **Any behaviour change.** After this plan the gateway does exactly what it did, and says `manus-team` where it used to say `prime-gateway`.
 
 ## Done when

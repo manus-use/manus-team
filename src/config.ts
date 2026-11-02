@@ -121,7 +121,6 @@ export function loadConfig(
   env: Env = process.env,
   readFile: FileReader = readIfPresent,
 ): GatewayConfig {
-  refuseOldNames(env);
   const home = envString(env, 'MT_HOME') ?? join(homedir(), '.manus-team');
   const explicit = envString(env, 'MT_CONFIG');
   const path = explicit ?? join(home, 'config.yaml');
@@ -274,25 +273,6 @@ function requireSupervisionMatch(driver: KnownDriver, unsupervised: boolean): vo
 // ---------------------------------------------------------------------------
 // The agent's environment
 // ---------------------------------------------------------------------------
-
-/**
- * The variables were `PGW_*` before the rename and are not read any more.
- *
- * One still set is refused rather than ignored: ignored, it is a setting
- * someone believes in that has quietly stopped applying. The message names the
- * variables and never their values, which may be secrets.
- */
-function refuseOldNames(env: Env): void {
-  const old = Object.keys(env)
-    .filter((key) => key.startsWith('PGW_') && env[key] !== undefined)
-    .sort();
-  if (old.length === 0) return;
-  const renames = old.map((key) => `${key} → MT_${key.slice('PGW_'.length)}`).join(', ');
-  throw new ConfigError(
-    `${old.join(', ')} ${old.length === 1 ? 'is' : 'are'} no longer read: the variables were ` +
-      `renamed to MT_* (${renames}).`,
-  );
-}
 
 /**
  * `MT_AGENT_ENV_FOO=bar` becomes `FOO=bar` for the agent.

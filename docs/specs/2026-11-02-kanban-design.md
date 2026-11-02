@@ -1311,7 +1311,7 @@ board.
 
 | Layer | How |
 |---|---|
-| Rename | a `PGW_*` variable set fails startup, naming it and not its value; the home defaults to `~/.manus-team`; `passEnv` and role `.env` refuse `MT_*` and `LARK_*` |
+| Rename | the home defaults to `~/.manus-team`; `passEnv` and role `.env` refuse `MT_*` and `LARK_*` |
 | Config | role directories and workspaces resolve; with no `roles/default/`, the `agent:` block and its `MT_AGENT_*` overrides become the role `default`, and apply to nothing else; both a `roles/default/` and an `agent:` block fails; neither fails; `workspace:` becomes workspace `default`; relative or missing workspace paths fail; a role with a missing or invalid `config.yaml` or an unknown workspace fails; a `tools` policy the role's agent cannot enforce fails; an unreadable `role.md` or skill fails startup and later makes the role unresolvable |
 | Role `.env` | created empty and `0600` with a `.gitignore`; never copied by `--clone-from`; group- or world-readable, symlinked, or foreign-owned fails startup and `role check`, and is not chmod-ed; the format's accepted and refused lines; `MT_*`, `LARK_*` and `PATH` refused; a missing `.env` valid; values reach only that role's agent; the same variable in `.env` and `passEnv` fails; values masked |
 | Role and workspace names | the grammar enforced for roles at discovery and by `role create`, and for workspaces at startup and by `workspace add` (`../x`, `A`, `a:b` refused); a workspace equal to or containing `$MT_HOME` or a relocated database refused; inside `$MT_HOME` only `workspaces/<name>` allowed; two names on one realpath, and one workspace nested in another, refused at startup and by `workspace add`; driver ids reserved; dot-entries ignored; other entries reported and ignored |
@@ -1345,7 +1345,7 @@ the escapers, and `forMarkdown` is on that branch.
 | Plan | Contents | Depends on |
 |---|---|---|
 | **A. Rename** | the repository to `manus-team` (§13) | — |
-| **A2. Finish the rename** | `PGW_*` → `MT_*` in configuration, tests and docs; the home default `~/.manus-team`; a `PGW_*` variable set is a startup error; `passEnv` refusing `MT_*` and `LARK_*`; `src/identity.ts`'s comment (§13) | A |
+| **A2. Finish the rename** | the environment variables renamed to `MT_*` in configuration, tests and docs; the home default `~/.manus-team`; `passEnv` refusing `MT_*` and `LARK_*`; `src/identity.ts`'s comment (§13) | A |
 | **B. Roles and workspaces** | role directories (`config.yaml`, `role.md`, `skills/`, `.env` with its safeguards) and `workspaces:`, with the legacy `agent:` / `workspace:` as `default`; the `mt` binary and its `mt role` and `mt workspace` commands; a driver per role; `sessions.agent_id` as the role name; a workspace per session; `StartOptions.env`; a channel per binding; seeding a session's provider session id; tool-policy enforcement check; the README's credentials rule (§2) | A2 |
 | **C. Kernel** | migration `003`; transitions and derived status; classifier; prompt composition; the socket and the `mt kanban` commands; the dispatcher — passes, per-workspace limit, nudges, retries, rework, gates, restart handling; with F's masker: registering and removing worker tokens, masking composed worker context and `last_output` (layer 2), masking kanban free text and `kanban_events` on write (layer 3), and refusing gates that contain a secret | B, F |
 | **D. Lark** | `/kanban` commands; person targets; card `kind` routing; task, review and blocked cards; the group notice; subscriptions | C |
@@ -1378,16 +1378,12 @@ spec, the migration and the CLI start under the final name and nothing is rename
 - **Plan A** renamed the product: the repository, `package.json`, the README and docs, schema header
   comments, and the names the gateway identifies itself by to Lark and to agents, which come from
   one constant.
-- **Plan A2** renames everything a deployment depends on: the environment variables `PGW_*` become
-  `MT_*`, the home `~/.prime-gateway` becomes `~/.manus-team`, and the CLI — not yet built — is `mt`.
+- **Plan A2** renames everything a deployment depends on: the environment variables become `MT_*`,
+  the home `~/.prime-gateway` becomes `~/.manus-team`, and the CLI — not yet built — is `mt`.
 
-**No transition.** The old names are not read. There was one deployment, its environment set no
-`PGW_*` variable, and its home was moved to `~/.manus-team` (with the gateway stopped and the
+**No transition.** The old names are not read. There was one deployment, its environment set none
+of the old variables, and its home was moved to `~/.manus-team` (with the gateway stopped and the
 database checked) before this change. Keeping two names alive would be complexity with no user.
-
-**One guard.** A `PGW_*` variable set in the gateway's environment is a startup error naming it — not
-its value, which may be a secret. Ignoring it silently would let a setting someone still believes in
-quietly stop applying.
 
 `LARK_*` variables keep their names: they belong to the Lark integration, not to the product. The
 CLI is `mt`; on some systems `mt` is also a tape-drive utility, and agents always get the gateway's,

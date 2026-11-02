@@ -550,22 +550,6 @@ describe('loadConfig: against a real file', () => {
 });
 
 describe('loadConfig: after the rename', () => {
-  it('refuses to start while an old variable is still set, naming it and not its value', () => {
-    let message = '';
-    try {
-      load({ PGW_DB: '/var/lib/secret-path.db' });
-    } catch (err) {
-      message = err instanceof Error ? err.message : String(err);
-    }
-    expect(message).toContain('PGW_DB');
-    expect(message).toContain('MT_DB');
-    expect(message).not.toContain('/var/lib/secret-path.db');
-  });
-
-  it('names every old variable that is set, not just the first', () => {
-    expect(() => load({ PGW_DB: '/a', PGW_WORKSPACE: '/b' })).toThrow(/PGW_DB, PGW_WORKSPACE/);
-  });
-
   it('looks for its home in ~/.manus-team by default', () => {
     const files = reader({});
     loadConfig({ ...ENV_ONLY, LARK_APP_SECRET: 'app-secret' }, files);
