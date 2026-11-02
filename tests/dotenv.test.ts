@@ -46,8 +46,17 @@ describe('parseEnvFile', () => {
     expect(error('A=1\njust text')).toMatch(/^\.env:2: expected KEY=value/);
   });
 
-  it('refuses a name that is not a variable name', () => {
-    expect(error('1A=x')).toMatch(/^\.env:1: "1A" is not a valid variable name/);
+  it('refuses a name that is not a variable name, without quoting it', () => {
+    const message = error('1A=x');
+    expect(message).toMatch(/^\.env:1: the text before '=' is not a valid variable name/);
+    expect(message).not.toContain('1A');
+  });
+
+  it('never quotes a malformed line, which may be a pasted secret', () => {
+    const message = error('abc+def==xyz');
+    expect(message).toMatch(/^\.env:1: the text before '=' is not a valid variable name/);
+    expect(message).not.toContain('abc+def');
+    expect(message).not.toContain('xyz');
   });
 
   it('refuses an unterminated quote', () => {

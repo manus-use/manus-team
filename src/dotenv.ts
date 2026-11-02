@@ -7,7 +7,8 @@
  * else is an error naming the line: a guess at what an unusual line meant is how
  * a secret ends up half-read.
  *
- * Errors name lines and keys, never values -- the values are secrets.
+ * Errors name lines and valid keys, never values or other line text -- the
+ * values are secrets, and a malformed line may be one.
  */
 
 export type EnvFileResult = { values: Record<string, string> } | { error: string };
@@ -31,7 +32,11 @@ export function parseEnvFile(text: string, source: string): EnvFileResult {
 
     const key = line.slice(0, eq).trim();
     if (!VARIABLE_NAME.test(key)) {
-      return { error: `${at}: ${JSON.stringify(key)} is not a valid variable name` };
+      // Not even the name is quoted: a line that is not KEY=value may be the
+      // secret itself, a pasted token whose own '=' padding looks like a separator.
+      return {
+        error: `${at}: the text before '=' is not a valid variable name (letters, digits, '_'; not starting with a digit)`,
+      };
     }
 
     let value = line.slice(eq + 1).trim();
