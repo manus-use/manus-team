@@ -79,7 +79,7 @@ async function startAcpSession(
     command: config.command,
     args: config.args,
     cwd: opts.cwd,
-    ...(config.env === undefined ? {} : { env: config.env }),
+    env: { ...(config.env ?? {}), ...(opts.env ?? {}) },
   });
 
   const runtime = new AcpRuntime(proc);

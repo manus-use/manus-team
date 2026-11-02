@@ -169,6 +169,21 @@ describe('ACP driver: establishing a session', () => {
     const driver = createAcpDriver({ command: '/nonexistent/agent-binary', args: [] });
     await expect(driver.start({ cwd: tmpdir() })).rejects.toThrow(/failed to start/);
   });
+
+  it('gives the agent the session environment over the configured one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mt-acp-env-'));
+    const driver = createAcpDriver({
+      command: process.execPath,
+      args: [AGENT],
+      env: { FAKE_AGENT_MODE: 'basic', FAKE_AGENT_SESSION_ID: 'sess_configured' },
+    });
+    const started = await driver.start({ cwd: dir, env: { FAKE_AGENT_SESSION_ID: 'sess_from_start' } });
+    cleanups.push(async () => {
+      await started.runtime.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    expect(started.result.providerSessionId).toBe('sess_from_start');
+  });
 });
 
 describe('ACP driver: a turn', () => {

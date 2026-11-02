@@ -127,6 +127,25 @@ describe('CLI driver: establishing a session', () => {
       /not found on PATH/,
     );
   });
+
+  it('gives the agent the session environment over the configured one', async () => {
+    // A run's MT_KANBAN_* variables arrive this way (spec §2.4 item 3); the
+    // session's value wins, so the log lands where the start said, not the config.
+    const dir = mkdtempSync(join(tmpdir(), 'mt-cli-env-'));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const configured = join(dir, 'configured.log');
+    const fromStart = join(dir, 'from-start.log');
+    const driver = createCliDriver({
+      command: process.execPath,
+      args: [AGENT],
+      env: { FAKE_CLI_MODE: 'basic', FAKE_CLI_LOG: configured },
+    });
+    const { runtime } = await driver.start({ cwd: dir, env: { FAKE_CLI_LOG: fromStart } });
+    cleanups.push(() => runtime.close());
+    await collect(runtime.prompt(said('hello')));
+    expect(readFileSync(fromStart, 'utf8')).toContain('hello');
+    expect(() => readFileSync(configured, 'utf8')).toThrow();
+  });
 });
 
 describe('CLI driver: a turn', () => {

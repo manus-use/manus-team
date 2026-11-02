@@ -122,6 +122,7 @@ class CliRuntime implements AgentRuntime {
 
   #config: CliDriverConfig & { command: string };
   #cwd: string;
+  #env: Readonly<Record<string, string>>;
   #history: Exchange[];
   #maxPromptBytes: number;
 
@@ -136,6 +137,7 @@ class CliRuntime implements AgentRuntime {
   constructor(config: CliDriverConfig & { command: string }, opts: StartOptions) {
     this.#config = config;
     this.#cwd = opts.cwd;
+    this.#env = opts.env ?? {};
     this.#maxPromptBytes = config.maxPromptBytes ?? MAX_PROMPT_BYTES;
     this.#nonce = randomUUID().slice(0, 8);
     // The provider mints a session id per process and will not take one back, so
@@ -239,7 +241,7 @@ class CliRuntime implements AgentRuntime {
 
     const child = spawn(this.#config.command, args, {
       cwd: this.#cwd,
-      env: buildEnv(process.env, this.#config.env ?? {}),
+      env: buildEnv(process.env, { ...(this.#config.env ?? {}), ...this.#env }),
       // stdin is /dev/null: the prompt travels in argv, and an agent that blocks
       // on input would otherwise block forever with nobody to notice.
       stdio: ['ignore', 'pipe', 'pipe'],

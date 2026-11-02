@@ -91,6 +91,12 @@ export interface StartOptions {
    * record and the driver is not allowed its own idea of history.
    */
   replay?: readonly PromptInput[] | undefined;
+  /**
+   * Extra environment for this session's agent, merged over the driver's own
+   * `env` (a session's value wins) and filtered like it (`../driver/env.ts`).
+   * How a run's `MT_KANBAN_*` variables reach the agent (spec §2.4 item 3).
+   */
+  env?: Readonly<Record<string, string>> | undefined;
 }
 
 /**
