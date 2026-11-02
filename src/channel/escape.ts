@@ -12,6 +12,8 @@
  * in most renderers angle brackets are inert. In Feishu they are a tag syntax.
  */
 
+import { redactKnownSecrets } from '../secrets.js';
+
 /**
  * Characters Feishu's `lark_md` treats as markup.
  *
@@ -51,9 +53,13 @@ export function stripControl(text: string): string {
  *
  * Control-strip, then escape. The reverse order would let a stripped control
  * character split an escape sequence it had already inserted.
+ *
+ * Known secrets are masked after control characters are stripped and before
+ * anything is escaped (spec §10.1): a control character inside a secret would
+ * stop it matching, and escaping changes characters a secret may contain.
  */
 export function forDisplay(text: string): string {
-  return escapeMd(stripControl(text));
+  return escapeMd(redactKnownSecrets(stripControl(text)));
 }
 
 /**
@@ -69,9 +75,13 @@ export function forDisplay(text: string): string {
  * of which is doubled. Escaping the bracket alone turns an agent's `\<at ...>`
  * into `\\<at ...>`: an escaped backslash followed by a live tag. Backslashes
  * anywhere else are left alone, so the agent's own escapes keep their meaning.
+ *
+ * Known secrets are masked after control characters are stripped and before
+ * anything is escaped (spec §10.1): a control character inside a secret would
+ * stop it matching, and escaping changes characters a secret may contain.
  */
 export function forMarkdown(text: string): string {
-  return stripControl(text).replace(
+  return redactKnownSecrets(stripControl(text)).replace(
     /(\\*)([<>])/g,
     (_match, slashes: string, bracket: string) => `${slashes}${slashes}\\${bracket}`,
   );
@@ -85,9 +95,13 @@ export function forMarkdown(text: string): string {
  * request cannot itself become a notification: there is no tag syntax to inject
  * into, so the mention-spoofing vector does not exist rather than being
  * defended against.
+ *
+ * Known secrets are masked after control characters are stripped and before
+ * anything is escaped (spec §10.1): a control character inside a secret would
+ * stop it matching, and escaping changes characters a secret may contain.
  */
 export function forPlainText(text: string): string {
-  return stripControl(text);
+  return redactKnownSecrets(stripControl(text));
 }
 
 /**

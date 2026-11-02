@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   escapeMd,
   forDisplay,
@@ -8,6 +8,7 @@ import {
   stripControl,
   truncate,
 } from '../src/channel/escape.js';
+import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 
 const NUL = '\u0000';
 const BEL = '\u0007';
@@ -133,5 +134,27 @@ describe('mask', () => {
     expect(mask('abc')).toBe('****');
     expect(mask('supersecrettoken')).toBe('sup********');
     expect(mask('supersecrettoken')).not.toContain('secret');
+  });
+});
+
+describe('the escapers mask known secrets before escaping', () => {
+  beforeEach(() => {
+    clearSecrets();
+    addSecrets(['sk_live_abc123']);
+  });
+
+  it('forDisplay masks a secret that escaping would otherwise have changed', () => {
+    // Escaping first would turn the `_` into `\_`, and the secret would no longer match.
+    expect(forDisplay('key sk_live_abc123')).toBe(`key ${MASK}`);
+  });
+
+  it('forMarkdown masks and keeps the markdown', () => {
+    expect(forMarkdown('**key** sk_live_abc123')).toBe(`**key** ${MASK}`);
+  });
+
+  it('forPlainText masks, even a secret with a control character inside it', () => {
+    expect(forPlainText('sk_live_abc123')).toBe(MASK);
+    // Stripped first, so the control character cannot stop the secret matching.
+    expect(forPlainText('sk_live\u0007_abc123')).toBe(MASK);
   });
 });
