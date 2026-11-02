@@ -181,6 +181,32 @@ Once `roles/default/` exists, remove the `agent:` block **and** every `MT_AGENT_
 including `MT_AGENT_ENV_*`: any of them still counts as a second definition of the role
 `default`, and the gateway will not start with two.
 
+### The mt command
+
+`mt` creates and checks roles and workspaces. In a checkout, run it as `npm run -s mt -- …`.
+
+```
+mt role create <name> [--clone-from <role>] [--description "..."]
+mt role list
+mt role check [<name>]
+mt workspace add <name> <absolute-path>
+mt workspace add <name> --clone <git-url>
+mt workspace list
+```
+
+It finds the home, config file and database the way the gateway does (`MT_HOME`, `MT_CONFIG`,
+`MT_DB`), from the shell it runs in, and needs no Lark settings. It only writes files and
+never contacts the gateway; changes take effect at the next start.
+
+- `role create` writes `config.yaml` (from the role `default`, or `--clone-from`), a starter
+  `role.md`, `skills/`, an empty `0600` `.env` and a `.gitignore`. A `.env` is never copied.
+  `mt role create default` moves an `agent:` block into `roles/default/` and prints the steps
+  that finish the move.
+- `role check` runs the startup checks, and reports what comes from this shell's environment
+  separately: the service's environment may differ.
+- `workspace add` edits `workspaces:` in the config file, keeping its comments, and refuses
+  anything the next start would refuse. `--clone` clones into `$MT_HOME/workspaces/<name>`.
+
 ### Chat commands
 
 | Command | Tier | Effect |
