@@ -26,6 +26,7 @@ file is for.
 | `approvals` | `db/approvals.ts` | |
 | `channel_bindings` | `db/bindings.ts` | |
 | `seen_messages` | `db/dedup.ts` | |
+| `workspaces` | `db/workspaces.ts` | Rows are added, never updated: `root_path` is fixed the first time a name is seen (spec §2.3). `repo_root`, `branch` and `lock_holder` stay null until worktrees. |
 | `schema_version`, `user_version` | `db/open.ts` (`migrate`) | Migration files own the `schema_version` row contents; the runner owns `user_version`. |
 
 ## Rules that hold across all of them
