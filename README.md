@@ -172,6 +172,11 @@ absolute path to an existing directory; may not be or contain `$MT_HOME` or the 
 inside `$MT_HOME` only `workspaces/<name>` may be one; and no two workspaces may share or
 nest in one directory. Everything here is checked at startup.
 
+A workspace's name keeps the directory it was first used with: the gateway records it, and
+if the config later points that name somewhere else it will not start. Sessions opened in a
+directory belong to it, and moving them would orphan them. To use another directory, give
+it a new name.
+
 Once `roles/default/` exists, remove the `agent:` block **and** every `MT_AGENT_*` variable,
 including `MT_AGENT_ENV_*`: any of them still counts as a second definition of the role
 `default`, and the gateway will not start with two.
