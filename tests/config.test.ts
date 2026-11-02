@@ -1,5 +1,5 @@
 import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -24,7 +24,7 @@ const DEFAULT_PATH = join(HOME, 'config.yaml');
 
 /** The minimum environment: the secret, which the file may never hold. */
 const BASE: Record<string, string> = {
-  PGW_HOME: HOME,
+  MT_HOME: HOME,
   LARK_APP_SECRET: 'app-secret',
 };
 
@@ -78,9 +78,9 @@ function loadEnvOnly(env: Record<string, string | undefined>) {
 }
 
 const ENV_ONLY: Record<string, string> = {
-  PGW_OWNER_OPEN_ID: OWNER,
-  PGW_WORKSPACE: '/srv/repo',
-  PGW_AGENT_COMMAND: 'claude-agent-acp',
+  MT_OWNER_OPEN_ID: OWNER,
+  MT_WORKSPACE: '/srv/repo',
+  MT_AGENT_COMMAND: 'claude-agent-acp',
   LARK_APP_ID: 'cli_app',
 };
 
@@ -106,10 +106,10 @@ describe('loadConfig: where settings come from', () => {
     // The emergency path: an override must not require editing a file, because the
     // reason for the override is often that the file is what is wrong.
     const cfg = load({
-      PGW_WORKSPACE: '/srv/other',
-      PGW_OWNER_OPEN_ID: 'ou_new_owner',
-      PGW_AGENT_COMMAND: 'gemini',
-      PGW_MAX_LIVE_SESSIONS: '2',
+      MT_WORKSPACE: '/srv/other',
+      MT_OWNER_OPEN_ID: 'ou_new_owner',
+      MT_AGENT_COMMAND: 'gemini',
+      MT_MAX_LIVE_SESSIONS: '2',
       LARK_APP_ID: 'cli_other',
       LARK_DOMAIN: 'https://open.larksuite.com',
     });
@@ -121,13 +121,13 @@ describe('loadConfig: where settings come from', () => {
     expect(cfg.lark.domain).toBe('https://open.larksuite.com');
   });
 
-  it('looks for the file under PGW_HOME, and reads the one PGW_CONFIG names', () => {
+  it('looks for the file under MT_HOME, and reads the one MT_CONFIG names', () => {
     const byDefault = reader({});
     loadConfig({ ...BASE, ...ENV_ONLY }, byDefault);
     expect(byDefault.asked).toEqual([DEFAULT_PATH]);
 
     const named = reader({ '/etc/prime/gw.yaml': FULL_FILE });
-    const cfg = loadConfig({ ...BASE, PGW_CONFIG: '/etc/prime/gw.yaml' }, named);
+    const cfg = loadConfig({ ...BASE, MT_CONFIG: '/etc/prime/gw.yaml' }, named);
     expect(named.asked).toEqual(['/etc/prime/gw.yaml']);
     expect(cfg.configPath).toBe('/etc/prime/gw.yaml');
   });
@@ -135,8 +135,8 @@ describe('loadConfig: where settings come from', () => {
   it('refuses a named file that is not there', () => {
     // Silently falling back to the environment would start a gateway with none of
     // the settings the operator believed they had written down.
-    expect(() => loadConfig({ ...BASE, PGW_CONFIG: '/etc/nope.yaml' }, reader({}))).toThrow(
-      /PGW_CONFIG points at \/etc\/nope\.yaml, which does not exist/,
+    expect(() => loadConfig({ ...BASE, MT_CONFIG: '/etc/nope.yaml' }, reader({}))).toThrow(
+      /MT_CONFIG points at \/etc\/nope\.yaml, which does not exist/,
     );
   });
 
@@ -148,14 +148,14 @@ describe('loadConfig: where settings come from', () => {
 
 describe('loadConfig: required values', () => {
   it('names both sources for a value it cannot find', () => {
-    expect(() => loadEnvOnly({ ...ENV_ONLY, PGW_OWNER_OPEN_ID: undefined })).toThrow(
-      /auth\.owner in the config file, or PGW_OWNER_OPEN_ID/,
+    expect(() => loadEnvOnly({ ...ENV_ONLY, MT_OWNER_OPEN_ID: undefined })).toThrow(
+      /auth\.owner in the config file, or MT_OWNER_OPEN_ID/,
     );
-    expect(() => loadEnvOnly({ ...ENV_ONLY, PGW_WORKSPACE: undefined })).toThrow(
-      /workspace in the config file, or PGW_WORKSPACE/,
+    expect(() => loadEnvOnly({ ...ENV_ONLY, MT_WORKSPACE: undefined })).toThrow(
+      /workspace in the config file, or MT_WORKSPACE/,
     );
-    expect(() => loadEnvOnly({ ...ENV_ONLY, PGW_AGENT_COMMAND: undefined })).toThrow(
-      /agent\.command in the config file, or PGW_AGENT_COMMAND/,
+    expect(() => loadEnvOnly({ ...ENV_ONLY, MT_AGENT_COMMAND: undefined })).toThrow(
+      /agent\.command in the config file, or MT_AGENT_COMMAND/,
     );
     expect(() => loadEnvOnly({ ...ENV_ONLY, LARK_APP_ID: undefined })).toThrow(
       /lark\.appId in the config file, or LARK_APP_ID/,
@@ -172,11 +172,11 @@ describe('loadConfig: required values', () => {
   it('refuses a relative workspace, from either source', () => {
     // Relative resolves against whatever cwd the service manager set, so the
     // workspace would depend on how the process was launched.
-    expect(() => load({ PGW_WORKSPACE: './repo' })).toThrow('must be an absolute path');
+    expect(() => load({ MT_WORKSPACE: './repo' })).toThrow('must be an absolute path');
     expect(() => load({}, yamlFile({ workspace: './repo' }))).toThrow('must be an absolute path');
   });
 
-  it('derives the paths that are not set from PGW_HOME', () => {
+  it('derives the paths that are not set from MT_HOME', () => {
     const cfg = load();
     expect(cfg.dbPath).toBe(join(HOME, 'gateway.db'));
     expect(cfg.downloadDir).toBe(join(HOME, 'downloads'));
@@ -187,7 +187,7 @@ describe('loadConfig: required values', () => {
     expect(fromFile.dbPath).toBe('/tmp/db.sqlite');
     expect(fromFile.downloadDir).toBe('/tmp/dl');
 
-    const fromEnv = load({ PGW_DB: '/tmp/env.sqlite', PGW_DOWNLOAD_DIR: '/tmp/env-dl' });
+    const fromEnv = load({ MT_DB: '/tmp/env.sqlite', MT_DOWNLOAD_DIR: '/tmp/env-dl' });
     expect(fromEnv.dbPath).toBe('/tmp/env.sqlite');
     expect(fromEnv.downloadDir).toBe('/tmp/env-dl');
   });
@@ -200,7 +200,7 @@ describe('loadConfig: required values', () => {
     const cfg = load();
     expect(isAbsolute(cfg.schemaDir)).toBe(true);
     expect(existsSync(join(cfg.schemaDir, '001_initial.sql'))).toBe(true);
-    expect(load({ PGW_SCHEMA_DIR: '/tmp/schema' }).schemaDir).toBe('/tmp/schema');
+    expect(load({ MT_SCHEMA_DIR: '/tmp/schema' }).schemaDir).toBe('/tmp/schema');
     // Not a file setting: it points at migrations belonging to this build, which is
     // packaging rather than operations.
     expect(() => load({}, yamlFile({ schemaDir: '/tmp/schema' }))).toThrow('unknown setting');
@@ -229,7 +229,7 @@ describe('loadConfig: the file must not become a secret store', () => {
 
   it('refuses agent.env, pointing at the two ways to pass a value', () => {
     expect(() => load({}, yamlFile({ agent: { env: { ANTHROPIC_API_KEY: 'sk-oops' } } }))).toThrow(
-      /agent\.passEnv, or set PGW_AGENT_ENV_/,
+      /agent\.passEnv, or set MT_AGENT_ENV_/,
     );
   });
 });
@@ -296,25 +296,25 @@ describe('loadConfig: allowlists', () => {
     const fromFile = load({}, yamlFile({ auth: { talk: [' ou_a ', 'ou_b', 'ou_a'] } }));
     expect(fromFile.auth.allowTalk).toEqual([OWNER, 'ou_a', 'ou_b']);
 
-    const fromEnv = load({ PGW_ALLOW_TALK: ' ou_a , ,ou_b,ou_a ' });
+    const fromEnv = load({ MT_ALLOW_TALK: ' ou_a , ,ou_b,ou_a ' });
     expect(fromEnv.auth.allowTalk).toEqual([OWNER, 'ou_a', 'ou_b']);
   });
 
   it('replaces a list from the environment instead of merging it', () => {
     // Merging would leave no way to revoke: the removed id stays in the file and
     // there is no spelling of "not these" for an emergency lockdown.
-    const cfg = load({ PGW_ALLOW_TALK: 'ou_c' }, yamlFile({ auth: { talk: ['ou_a', 'ou_b'] } }));
+    const cfg = load({ MT_ALLOW_TALK: 'ou_c' }, yamlFile({ auth: { talk: ['ou_a', 'ou_b'] } }));
     expect(cfg.auth.allowTalk).toEqual([OWNER, 'ou_c']);
   });
 
   it('reads a set-but-empty list as owner-only, deliberately', () => {
-    const cfg = load({ PGW_ALLOW_TALK: '' }, yamlFile({ auth: { talk: ['ou_a'] } }));
+    const cfg = load({ MT_ALLOW_TALK: '' }, yamlFile({ auth: { talk: ['ou_a'] } }));
     expect(cfg.auth.allowTalk).toEqual([OWNER]);
   });
 
   it('reads an empty chat allowlist as any chat, which is the documented meaning', () => {
     expect(load().auth.allowChats).toEqual([]);
-    expect(load({ PGW_ALLOW_CHATS: 'oc_1,oc_2' }).auth.allowChats).toEqual(['oc_1', 'oc_2']);
+    expect(load({ MT_ALLOW_CHATS: 'oc_1,oc_2' }).auth.allowChats).toEqual(['oc_1', 'oc_2']);
     expect(load({}, yamlFile({ auth: { chats: ['oc_1'] } })).auth.allowChats).toEqual(['oc_1']);
   });
 });
@@ -335,22 +335,22 @@ describe('loadConfig: flags and numbers', () => {
 
   it('accepts the spellings people actually type in the environment', () => {
     for (const yes of ['1', 'true', 'TRUE', 'yes', 'on']) {
-      expect(load({ PGW_ALLOW_MENTION_ALL: yes }).auth.allowMentionAll).toBe(true);
+      expect(load({ MT_ALLOW_MENTION_ALL: yes }).auth.allowMentionAll).toBe(true);
     }
     for (const no of ['0', 'false', 'No', 'off']) {
-      expect(load({ PGW_ALLOW_DM: no }).auth.allowDirectMessages).toBe(false);
+      expect(load({ MT_ALLOW_DM: no }).auth.allowDirectMessages).toBe(false);
     }
   });
 
   it('refuses a flag it cannot read instead of defaulting it', () => {
-    expect(() => load({ PGW_ALLOW_MENTION_ALL: 'ture' })).toThrow('expected a boolean');
+    expect(() => load({ MT_ALLOW_MENTION_ALL: 'ture' })).toThrow('expected a boolean');
   });
 
   it('refuses a session cap that is not a positive integer', () => {
     expect(load().maxLiveSessions).toBe(8);
     expect(load({}, yamlFile({ maxLiveSessions: 3 })).maxLiveSessions).toBe(3);
     for (const bad of ['0', '-1', '2.5', 'many']) {
-      expect(() => load({ PGW_MAX_LIVE_SESSIONS: bad })).toThrow('positive integer');
+      expect(() => load({ MT_MAX_LIVE_SESSIONS: bad })).toThrow('positive integer');
     }
   });
 });
@@ -378,15 +378,15 @@ describe('loadConfig: the agent process', () => {
     expect(() => load({}, yamlFile({ agent: { passEnv: ['LARK_APP_SECRET'] } }))).toThrow(
       /must not forward LARK_APP_SECRET/,
     );
-    expect(() => load({}, yamlFile({ agent: { passEnv: ['PGW_HOME'] } }))).toThrow(
-      /must not forward PGW_HOME/,
+    expect(() => load({}, yamlFile({ agent: { passEnv: ['MT_HOME'] } }))).toThrow(
+      /must not forward MT_HOME/,
     );
   });
 
   it('forwards only environment variables that opted in by prefix', () => {
     const cfg = load({
-      PGW_AGENT_ENV_ANTHROPIC_API_KEY: 'sk-test',
-      PGW_AGENT_ENV_: 'nameless',
+      MT_AGENT_ENV_ANTHROPIC_API_KEY: 'sk-test',
+      MT_AGENT_ENV_: 'nameless',
       SOME_OTHER_SECRET: 'nope',
     });
     // Forwarding the whole environment would hand the agent the Feishu app secret.
@@ -396,7 +396,7 @@ describe('loadConfig: the agent process', () => {
 
   it('lets a prefixed variable override one passed through by name', () => {
     const cfg = load(
-      { ANTHROPIC_API_KEY: 'sk-ambient', PGW_AGENT_ENV_ANTHROPIC_API_KEY: 'sk-for-the-agent' },
+      { ANTHROPIC_API_KEY: 'sk-ambient', MT_AGENT_ENV_ANTHROPIC_API_KEY: 'sk-for-the-agent' },
       yamlFile({ agent: { passEnv: ['ANTHROPIC_API_KEY'] } }),
     );
     // The prefixed spelling exists to say "this value is for the agent", so it wins
@@ -412,13 +412,13 @@ describe('loadConfig: the agent process', () => {
       /contains a space, and is not a path/,
     );
     // And says what to write instead, since the fix is not obvious from the symptom.
-    expect(() => load({ PGW_AGENT_COMMAND: 'bytesec acp' })).toThrow(
+    expect(() => load({ MT_AGENT_COMMAND: 'bytesec acp' })).toThrow(
       /command: bytesec, args: \[acp\]/,
     );
   });
 
   it('allows a space in an absolute path, which is a real binary name', () => {
-    const cfg = load({ PGW_AGENT_COMMAND: '/Applications/My App/bin/agent' });
+    const cfg = load({ MT_AGENT_COMMAND: '/Applications/My App/bin/agent' });
     expect(cfg.agent.command).toBe('/Applications/My App/bin/agent');
   });
 
@@ -430,18 +430,18 @@ describe('loadConfig: the agent process', () => {
     expect(
       load({}, yamlFile({ agent: { args: '--acp --flag "two words"' } })).agent.args,
     ).toEqual(['--acp', '--flag', 'two words']);
-    expect(load({ PGW_AGENT_ARGS: '--acp --one' }).agent.args).toEqual(['--acp', '--one']);
+    expect(load({ MT_AGENT_ARGS: '--acp --one' }).agent.args).toEqual(['--acp', '--one']);
   });
 
   it('does not pretend to be a shell', () => {
     // The agent is spawned with `shell: false`. Accepting expansion here and
     // dropping it there is the half-support that looks like it works.
-    expect(load({ PGW_AGENT_ARGS: '$(whoami) $HOME' }).agent.args).toEqual(['$(whoami)', '$HOME']);
+    expect(load({ MT_AGENT_ARGS: '$(whoami) $HOME' }).agent.args).toEqual(['$(whoami)', '$HOME']);
   });
 
   it('defaults to no arguments rather than to a guess', () => {
     expect(load().agent.args).toEqual([]);
-    expect(load({ PGW_AGENT_ARGS: '   ' }).agent.args).toEqual([]);
+    expect(load({ MT_AGENT_ARGS: '   ' }).agent.args).toEqual([]);
   });
 });
 
@@ -457,12 +457,12 @@ describe('loadConfig: which driver, and on what terms', () => {
     const file = yamlFile({ agent: { driver: 'structured-cli', unsupervised: true } });
     expect(load({}, file).agent.driver).toBe('structured-cli');
     expect(
-      load({ PGW_AGENT_DRIVER: 'structured-cli', PGW_AGENT_UNSUPERVISED: '1' }).agent.driver,
+      load({ MT_AGENT_DRIVER: 'structured-cli', MT_AGENT_UNSUPERVISED: '1' }).agent.driver,
     ).toBe('structured-cli');
   });
 
   it('names the drivers it has rather than accepting one it does not', () => {
-    expect(() => load({ PGW_AGENT_DRIVER: 'acp2' })).toThrow(
+    expect(() => load({ MT_AGENT_DRIVER: 'acp2' })).toThrow(
       /must be one of acp, structured-cli/,
     );
   });
@@ -476,7 +476,7 @@ describe('loadConfig: which driver, and on what terms', () => {
       /no way to ask for permission/,
     );
     // And says what to write, since "use the other driver" is also a valid answer.
-    expect(() => load({ PGW_AGENT_DRIVER: 'structured-cli' })).toThrow(
+    expect(() => load({ MT_AGENT_DRIVER: 'structured-cli' })).toThrow(
       /Set agent\.unsupervised: true to accept that, or use the acp driver/,
     );
   });
@@ -495,7 +495,7 @@ describe('loadConfig: which driver, and on what terms', () => {
     // deleting the file's acknowledgement would fail on the mismatch, which would
     // make the safer setting the harder one to reach.
     const file = yamlFile({ agent: { driver: 'structured-cli', unsupervised: true } });
-    const cfg = load({ PGW_AGENT_DRIVER: 'acp', PGW_AGENT_UNSUPERVISED: '0' }, file);
+    const cfg = load({ MT_AGENT_DRIVER: 'acp', MT_AGENT_UNSUPERVISED: '0' }, file);
     expect(cfg.agent.driver).toBe('acp');
     expect(cfg.agent.unsupervised).toBe(false);
   });
@@ -508,7 +508,7 @@ describe('loadConfig: against a real file', () => {
     while (dirs.length > 0) rmSync(dirs.pop() as string, { recursive: true, force: true });
   });
 
-  it('reads config.yaml from PGW_HOME with the default reader', () => {
+  it('reads config.yaml from MT_HOME with the default reader', () => {
     // The one test that exercises path derivation and the reader together. The
     // default location is computed, and a loader reading the wrong file is
     // indistinguishable from one whose settings are being ignored.
@@ -516,7 +516,7 @@ describe('loadConfig: against a real file', () => {
     dirs.push(dir);
     writeFileSync(join(dir, 'config.yaml'), FULL_FILE);
 
-    const cfg = loadConfig({ PGW_HOME: dir, LARK_APP_SECRET: 'app-secret' });
+    const cfg = loadConfig({ MT_HOME: dir, LARK_APP_SECRET: 'app-secret' });
     expect(cfg.configPath).toBe(join(dir, 'config.yaml'));
     expect(cfg.workspaceDir).toBe('/srv/repo');
     expect(cfg.dbPath).toBe(join(dir, 'gateway.db'));
@@ -535,7 +535,7 @@ describe('loadConfig: against a real file', () => {
     // Nothing in the environment but the secret, which is the whole point: an
     // example that only loads once you have also guessed at some variable is an
     // example that fails on the first copy.
-    const cfg = loadConfig({ PGW_HOME: dir, LARK_APP_SECRET: 'app-secret' });
+    const cfg = loadConfig({ MT_HOME: dir, LARK_APP_SECRET: 'app-secret' });
     expect(cfg.auth.ownerOpenId).toMatch(/^ou_/);
     expect(cfg.agent.env).toEqual({});
     expect(cfg.maxLiveSessions).toBe(8);
@@ -544,7 +544,38 @@ describe('loadConfig: against a real file', () => {
   it('starts without a file when the environment carries everything', () => {
     const dir = mkdtempSync(join(tmpdir(), 'prime-config-'));
     dirs.push(dir);
-    const cfg = loadConfig({ PGW_HOME: dir, LARK_APP_SECRET: 'app-secret', ...ENV_ONLY });
+    const cfg = loadConfig({ MT_HOME: dir, LARK_APP_SECRET: 'app-secret', ...ENV_ONLY });
     expect(cfg.configPath).toBeUndefined();
+  });
+});
+
+describe('loadConfig: after the rename', () => {
+  it('refuses to start while an old variable is still set, naming it and not its value', () => {
+    let message = '';
+    try {
+      load({ PGW_DB: '/var/lib/secret-path.db' });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain('PGW_DB');
+    expect(message).toContain('MT_DB');
+    expect(message).not.toContain('/var/lib/secret-path.db');
+  });
+
+  it('names every old variable that is set, not just the first', () => {
+    expect(() => load({ PGW_DB: '/a', PGW_WORKSPACE: '/b' })).toThrow(/PGW_DB, PGW_WORKSPACE/);
+  });
+
+  it('looks for its home in ~/.manus-team by default', () => {
+    const files = reader({});
+    loadConfig({ ...ENV_ONLY, LARK_APP_SECRET: 'app-secret' }, files);
+    expect(files.asked).toEqual([join(homedir(), '.manus-team', 'config.yaml')]);
+  });
+
+  it('refuses to forward the gateway\'s own variables through passEnv', () => {
+    for (const name of ['MT_DB', 'LARK_APP_SECRET']) {
+      const file = yamlFile({ agent: { command: 'claude-agent-acp', passEnv: [name] } });
+      expect(() => load({ [name]: 'x' }, file)).toThrow('belongs to the gateway');
+    }
   });
 });

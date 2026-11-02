@@ -121,27 +121,28 @@ export function loadConfig(
   env: Env = process.env,
   readFile: FileReader = readIfPresent,
 ): GatewayConfig {
-  const home = envString(env, 'PGW_HOME') ?? join(homedir(), '.prime-gateway');
-  const explicit = envString(env, 'PGW_CONFIG');
+  refuseOldNames(env);
+  const home = envString(env, 'MT_HOME') ?? join(homedir(), '.manus-team');
+  const explicit = envString(env, 'MT_CONFIG');
   const path = explicit ?? join(home, 'config.yaml');
 
   const text = readFile(path);
   if (text === undefined && explicit !== undefined) {
     // A named file that is not there is a mistake; the default location being
     // absent is an ordinary environment-only deployment.
-    throw new ConfigError(`PGW_CONFIG points at ${path}, which does not exist`);
+    throw new ConfigError(`MT_CONFIG points at ${path}, which does not exist`);
   }
   const file = text === undefined ? emptyFile() : parseFile(path, text);
 
   const ownerOpenId =
-    envString(env, 'PGW_OWNER_OPEN_ID') ??
+    envString(env, 'MT_OWNER_OPEN_ID') ??
     file.auth.owner ??
-    fail('an owner is required: set auth.owner in the config file, or PGW_OWNER_OPEN_ID');
+    fail('an owner is required: set auth.owner in the config file, or MT_OWNER_OPEN_ID');
 
   const workspaceDir =
-    envString(env, 'PGW_WORKSPACE') ??
+    envString(env, 'MT_WORKSPACE') ??
     file.workspace ??
-    fail('a workspace is required: set workspace in the config file, or PGW_WORKSPACE');
+    fail('a workspace is required: set workspace in the config file, or MT_WORKSPACE');
   if (!isAbsolute(workspaceDir)) {
     // Relative resolves against the gateway's cwd, which is whatever the service
     // manager set. The workspace would then depend on how the process was launched.
@@ -149,9 +150,9 @@ export function loadConfig(
   }
 
   const command =
-    envString(env, 'PGW_AGENT_COMMAND') ??
+    envString(env, 'MT_AGENT_COMMAND') ??
     file.agent.command ??
-    fail('an agent command is required: set agent.command in the config file, or PGW_AGENT_COMMAND');
+    fail('an agent command is required: set agent.command in the config file, or MT_AGENT_COMMAND');
   if (/\s/.test(command) && !isAbsolute(command)) {
     // `command: bytesec acp` is a subcommand written where the binary goes. The
     // agent is spawned with `shell: false`, so this asks for a file whose name
@@ -168,23 +169,23 @@ export function loadConfig(
     );
   }
 
-  const argsFromEnv = envString(env, 'PGW_AGENT_ARGS');
+  const argsFromEnv = envString(env, 'MT_AGENT_ARGS');
   const args = argsFromEnv === undefined ? file.agent.args : shellWords(argsFromEnv);
 
-  const driver = driverOf(envString(env, 'PGW_AGENT_DRIVER') ?? file.agent.driver ?? 'acp');
+  const driver = driverOf(envString(env, 'MT_AGENT_DRIVER') ?? file.agent.driver ?? 'acp');
   const unsupervised =
-    envFlag(env, 'PGW_AGENT_UNSUPERVISED') ?? file.agent.unsupervised ?? false;
+    envFlag(env, 'MT_AGENT_UNSUPERVISED') ?? file.agent.unsupervised ?? false;
   requireSupervisionMatch(driver, unsupervised);
 
-  const allowTalk = envList(env, 'PGW_ALLOW_TALK') ?? file.auth.talk;
-  const allowOperate = envList(env, 'PGW_ALLOW_OPERATE') ?? file.auth.operate;
+  const allowTalk = envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk;
+  const allowOperate = envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate;
 
   return {
-    dbPath: envString(env, 'PGW_DB') ?? file.db ?? join(home, 'gateway.db'),
+    dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'gateway.db'),
     // Not settable from the file: it locates the migrations that belong to this
     // build, which is a packaging concern rather than an operational one.
-    schemaDir: envString(env, 'PGW_SCHEMA_DIR') ?? BUNDLED_SCHEMA_DIR,
-    downloadDir: envString(env, 'PGW_DOWNLOAD_DIR') ?? file.downloads ?? join(home, 'downloads'),
+    schemaDir: envString(env, 'MT_SCHEMA_DIR') ?? BUNDLED_SCHEMA_DIR,
+    downloadDir: envString(env, 'MT_DOWNLOAD_DIR') ?? file.downloads ?? join(home, 'downloads'),
     configPath: text === undefined ? undefined : path,
 
     lark: {
@@ -203,11 +204,11 @@ export function loadConfig(
       // out the only person who can fix it, and it is not editable from chat.
       allowTalk: unique([ownerOpenId, ...allowTalk]),
       allowOperate: unique([ownerOpenId, ...allowOperate]),
-      allowChats: envList(env, 'PGW_ALLOW_CHATS') ?? file.auth.chats,
-      allowDirectMessages: envFlag(env, 'PGW_ALLOW_DM') ?? file.auth.directMessages ?? true,
+      allowChats: envList(env, 'MT_ALLOW_CHATS') ?? file.auth.chats,
+      allowDirectMessages: envFlag(env, 'MT_ALLOW_DM') ?? file.auth.directMessages ?? true,
       // Default false. `@all` is a room-wide notification, not an instruction, and
       // treating it as one makes the bot answer announcements.
-      allowMentionAll: envFlag(env, 'PGW_ALLOW_MENTION_ALL') ?? file.auth.mentionAll ?? false,
+      allowMentionAll: envFlag(env, 'MT_ALLOW_MENTION_ALL') ?? file.auth.mentionAll ?? false,
     },
 
     agent: {
@@ -219,7 +220,7 @@ export function loadConfig(
     },
 
     workspaceDir,
-    maxLiveSessions: envInteger(env, 'PGW_MAX_LIVE_SESSIONS') ?? file.maxLiveSessions ?? 8,
+    maxLiveSessions: envInteger(env, 'MT_MAX_LIVE_SESSIONS') ?? file.maxLiveSessions ?? 8,
   };
 }
 
@@ -275,14 +276,33 @@ function requireSupervisionMatch(driver: KnownDriver, unsupervised: boolean): vo
 // ---------------------------------------------------------------------------
 
 /**
- * `PGW_AGENT_ENV_FOO=bar` becomes `FOO=bar` for the agent.
+ * The variables were `PGW_*` before the rename and are not read any more.
+ *
+ * One still set is refused rather than ignored: ignored, it is a setting
+ * someone believes in that has quietly stopped applying. The message names the
+ * variables and never their values, which may be secrets.
+ */
+function refuseOldNames(env: Env): void {
+  const old = Object.keys(env)
+    .filter((key) => key.startsWith('PGW_') && env[key] !== undefined)
+    .sort();
+  if (old.length === 0) return;
+  const renames = old.map((key) => `${key} → MT_${key.slice('PGW_'.length)}`).join(', ');
+  throw new ConfigError(
+    `${old.join(', ')} ${old.length === 1 ? 'is' : 'are'} no longer read: the variables were ` +
+      `renamed to MT_* (${renames}).`,
+  );
+}
+
+/**
+ * `MT_AGENT_ENV_FOO=bar` becomes `FOO=bar` for the agent.
  *
  * Opt-in by prefix rather than by pass-through, because forwarding the gateway's
  * whole environment would hand the agent the Feishu app secret -- the one
  * credential it must never hold, since an agent with it can post as the bot and
  * answer its own approval requests.
  */
-const AGENT_ENV_PREFIX = 'PGW_AGENT_ENV_';
+const AGENT_ENV_PREFIX = 'MT_AGENT_ENV_';
 
 /**
  * Names the gateway may forward verbatim, listed in the file as `agent.passEnv`.
@@ -297,7 +317,7 @@ function agentEnv(env: Env, passEnv: readonly string[]): Record<string, string> 
   const out: Record<string, string> = {};
 
   for (const name of passEnv) {
-    if (name.startsWith('PGW_') || name.startsWith('LARK_')) {
+    if (name.startsWith('MT_') || name.startsWith('LARK_')) {
       // The gateway's own configuration, and in the Lark case its identity. An
       // agent holding those can reconfigure or impersonate the gateway.
       throw new ConfigError(`agent.passEnv must not forward ${name}: it belongs to the gateway`);
@@ -463,13 +483,13 @@ function reject(
       throw new ConfigError(
         `${path}: ${flat(key)} looks like a credential, and the config file must not hold one. ` +
           'Set it in the environment instead (LARK_APP_SECRET for the app secret, ' +
-          'PGW_AGENT_ENV_* for the agent, or name it in agent.passEnv).',
+          'MT_AGENT_ENV_* for the agent, or name it in agent.passEnv).',
       );
     }
     if (key === 'env') {
       throw new ConfigError(
         `${path}: ${flat(key)} would put values in the file. List the variable names in ` +
-          'agent.passEnv, or set PGW_AGENT_ENV_<NAME> in the environment.',
+          'agent.passEnv, or set MT_AGENT_ENV_<NAME> in the environment.',
       );
     }
     if (!known.includes(key)) {
@@ -546,7 +566,7 @@ function envString(env: Env, key: string): string | undefined {
 /**
  * A comma-separated list, replacing whatever the file said.
  *
- * `PGW_ALLOW_TALK=` -- set but empty -- is a deliberate "nobody but the owner",
+ * `MT_ALLOW_TALK=` -- set but empty -- is a deliberate "nobody but the owner",
  * which is why it returns an empty list rather than falling through to the file.
  */
 function envList(env: Env, key: string): readonly string[] | undefined {
