@@ -95,8 +95,6 @@ export interface GatewayConfig {
   /** The `agent:` block or `MT_AGENT_*` variables, if either is present. Absent means a role directory must supply the role `default` (`team.ts`). */
   agent: AgentConfig | undefined;
 
-  /** The workspace named default — what every session uses until plan B2. */
-  workspaceDir: string;
   /** Workspace name → declared absolute path; checked on disk by `workspaces.ts`. Always has `default`. */
   workspaces: Readonly<Record<string, string>>;
 
@@ -162,13 +160,13 @@ export function loadConfig(
     ...file.workspaces,
     ...(single === undefined ? {} : { default: single }),
   };
-  const workspaceDir =
+  const defaultWorkspace =
     workspaces['default'] ??
     fail('a workspace is required: set workspaces.default, or workspace in the config file, or MT_WORKSPACE');
-  if (!isAbsolute(workspaceDir)) {
+  if (!isAbsolute(defaultWorkspace)) {
     // Relative resolves against the gateway's cwd, which is whatever the service
     // manager set. The workspace would then depend on how the process was launched.
-    throw new ConfigError(`the workspace must be an absolute path, got ${JSON.stringify(workspaceDir)}`);
+    throw new ConfigError(`the workspace must be an absolute path, got ${JSON.stringify(defaultWorkspace)}`);
   }
 
   // The agent block is optional: a role directory may define the role default
@@ -233,7 +231,6 @@ export function loadConfig(
 
     agent,
 
-    workspaceDir,
     workspaces,
     maxLiveSessions: envInteger(env, 'MT_MAX_LIVE_SESSIONS') ?? file.maxLiveSessions ?? 8,
   };
@@ -517,10 +514,7 @@ function parseFile(path: string, text: string): FileConfig {
   out.agent = {
     driver: str(path, 'agent.driver', agentRaw['driver']),
     command: str(path, 'agent.command', agentRaw['command']),
-    // A list or one string, because `args: --acp --debug` is what people write.
-    args: Array.isArray(agentRaw['args'])
-      ? strings(path, 'agent.args', agentRaw['args'])
-      : shellWords(str(path, 'agent.args', agentRaw['args']) ?? ''),
+    args: agentArgs(path, agentRaw['args']),
     passEnv: strings(path, 'agent.passEnv', agentRaw['passEnv']),
     unsupervised: bool(path, 'agent.unsupervised', agentRaw['unsupervised']),
     readOnlyTools: strings(path, 'agent.readOnlyTools', agentRaw['readOnlyTools']),
@@ -687,6 +681,11 @@ function unique(values: readonly string[]): string[] {
 
 function fail(message: string): never {
   throw new ConfigError(message);
+}
+
+/** `agent.args`: a list, or one string split like a shell would, because `args: --acp --debug` is what people write. */
+export function agentArgs(path: string, raw: unknown): readonly string[] {
+  return Array.isArray(raw) ? strings(path, 'agent.args', raw) : shellWords(str(path, 'agent.args', raw) ?? '');
 }
 
 /**

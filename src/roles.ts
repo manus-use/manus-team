@@ -5,6 +5,7 @@ import {
   type AgentConfig,
   ConfigError,
   type Env,
+  agentArgs,
   bool,
   checkCommand,
   driverOf,
@@ -12,7 +13,6 @@ import {
   reject,
   requireSupervisionMatch,
   section,
-  shellWords,
   str,
   strings,
   subsection,
@@ -170,9 +170,7 @@ export function loadRoleDir(
   const command = str(configPath, 'agent.command', agentRaw['command']);
   if (command === undefined) throw new ConfigError(`${configPath}: agent.command is required`);
   checkCommand(command);
-  const args = Array.isArray(agentRaw['args'])
-    ? strings(configPath, 'agent.args', agentRaw['args'])
-    : shellWords(str(configPath, 'agent.args', agentRaw['args']) ?? '');
+  const args = agentArgs(configPath, agentRaw['args']);
   const unsupervised = bool(configPath, 'agent.unsupervised', agentRaw['unsupervised']) ?? false;
   requireSupervisionMatch(driver, unsupervised);
 

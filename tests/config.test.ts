@@ -88,7 +88,7 @@ describe('loadConfig: where settings come from', () => {
   it('runs from the environment alone, with no file', () => {
     // The container deployment. A missing file at the default location is ordinary.
     const cfg = loadEnvOnly(ENV_ONLY);
-    expect(cfg.workspaceDir).toBe('/srv/repo');
+    expect(cfg.workspaces['default']).toBe('/srv/repo');
     expect(cfg.auth.ownerOpenId).toBe(OWNER);
     expect(cfg.agent?.command).toBe('claude-agent-acp');
     expect(cfg.configPath).toBeUndefined();
@@ -96,7 +96,7 @@ describe('loadConfig: where settings come from', () => {
 
   it('runs from the file, with only the secret in the environment', () => {
     const cfg = load();
-    expect(cfg.workspaceDir).toBe('/srv/repo');
+    expect(cfg.workspaces['default']).toBe('/srv/repo');
     expect(cfg.lark.appId).toBe('cli_app');
     expect(cfg.lark.appSecret).toBe('app-secret');
     expect(cfg.configPath).toBe(DEFAULT_PATH);
@@ -113,7 +113,7 @@ describe('loadConfig: where settings come from', () => {
       LARK_APP_ID: 'cli_other',
       LARK_DOMAIN: 'https://open.larksuite.com',
     });
-    expect(cfg.workspaceDir).toBe('/srv/other');
+    expect(cfg.workspaces['default']).toBe('/srv/other');
     expect(cfg.auth.ownerOpenId).toBe('ou_new_owner');
     expect(cfg.agent?.command).toBe('gemini');
     expect(cfg.maxLiveSessions).toBe(2);
@@ -142,7 +142,7 @@ describe('loadConfig: where settings come from', () => {
 
   it('treats an empty file as no settings rather than as an error', () => {
     const cfg = loadConfig({ ...BASE, ...ENV_ONLY }, reader({ [DEFAULT_PATH]: '\n# nothing yet\n' }));
-    expect(cfg.workspaceDir).toBe('/srv/repo');
+    expect(cfg.workspaces['default']).toBe('/srv/repo');
   });
 });
 
@@ -515,7 +515,7 @@ describe('loadConfig: against a real file', () => {
 
     const cfg = loadConfig({ MT_HOME: dir, LARK_APP_SECRET: 'app-secret' });
     expect(cfg.configPath).toBe(join(dir, 'config.yaml'));
-    expect(cfg.workspaceDir).toBe('/srv/repo');
+    expect(cfg.workspaces['default']).toBe('/srv/repo');
     expect(cfg.dbPath).toBe(join(dir, 'gateway.db'));
   });
 
@@ -565,7 +565,7 @@ describe('loadConfig: roles and workspaces', () => {
   it('reads named workspaces from the file', () => {
     const cfg = load({}, yamlFile({ workspace: undefined, workspaces: { default: '/srv/a', docs: '/srv/b' } }));
     expect(cfg.workspaces).toEqual({ default: '/srv/a', docs: '/srv/b' });
-    expect(cfg.workspaceDir).toBe('/srv/a');
+    expect(cfg.workspaces['default']).toBe('/srv/a');
   });
 
   it('makes the single workspace setting the workspace named default', () => {

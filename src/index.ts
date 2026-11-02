@@ -1,9 +1,10 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { loadConfig, type GatewayConfig } from './config.js';
+import { ConfigError, loadConfig, type GatewayConfig } from './config.js';
 import { loadTeam, type Team } from './team.js';
 import { migrate, openDb, type Db } from './db/open.js';
 import { sweepSeen } from './db/dedup.js';
+import { registerWorkspaces } from './db/workspaces.js';
 import { LarkAdapter } from './channel/lark/adapter.js';
 import { LarkInbound } from './channel/lark/inbound.js';
 import { buildRoleDrivers } from './driver/build.js';
@@ -73,6 +74,15 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   const db = openDb(config.dbPath);
   const version = migrate(db, config.schemaDir);
   note(`schema at version ${version}`);
+
+  // Before anything can open a session in one. A name whose directory moved would
+  // orphan the provider sessions opened there (spec §2.3).
+  const registered = registerWorkspaces(db, team.workspaces, systemClock.now());
+  if ('error' in registered) {
+    db.close();
+    throw new ConfigError(registered.error);
+  }
+  if (registered.added.length > 0) note(`workspaces registered: ${registered.added.join(', ')}`);
 
   const drivers = buildRoleDrivers(team.roles);
   for (const [name, role] of [...team.roles].sort(([a], [b]) => a.localeCompare(b))) {
