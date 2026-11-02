@@ -31,6 +31,7 @@ import {
   revokeBindingsAt,
 } from '../src/db/bindings.js';
 import type { BindingKey } from '../src/types.js';
+import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import { SCHEMA_DIR, testDb, type TestDb } from './helpers/db.js';
 
 const NOW = 1_760_000_000_000;
@@ -522,5 +523,52 @@ describe('sessions', () => {
     createSession(h.db, { id: 's_plain', agentId: 'default', workspaceId: 'default', ownerPrincipal: 'on_owner' }, NOW);
     expect(getSession(h.db, 's_seeded')?.providerSessionId).toBe('prov_impl');
     expect(getSession(h.db, 's_plain')?.providerSessionId).toBeNull();
+  });
+});
+
+describe('masking on write', () => {
+  beforeEach(() => {
+    clearSecrets();
+    addSecrets(['sk-test-123456']);
+    newSession();
+  });
+  afterEach(() => clearSecrets());
+
+  it('masks string values in an event payload and leaves identifying values alone', () => {
+    appendEvent(
+      h.db,
+      's_1',
+      { type: 'tool_call', actor: 'agent', payload: { toolCallId: 'sk-test-123456', title: 'cat sk-test-123456' } },
+      NOW,
+    );
+    const [event] = readEvents(h.db, 's_1', 0, lastSeq(h.db, 's_1'));
+    expect(event?.payload).toEqual({ toolCallId: 'sk-test-123456', title: `cat ${MASK}` });
+  });
+
+  it("keeps a person's turn_submitted input as given, since replay re-sends it", () => {
+    const payload = { text: 'use sk-test-123456', paths: ['/tmp/sk-test-123456'], messageId: 'om_1', replyTo: 'om_0' };
+    appendEvent(h.db, 's_1', { type: 'turn_submitted', actor: 'user', payload }, NOW);
+    const [event] = readEvents(h.db, 's_1', 0, lastSeq(h.db, 's_1'));
+    expect(event?.payload).toEqual(payload);
+  });
+
+  it('masks an approval payload, action and option names, but not its ids', () => {
+    createApproval(
+      h.db,
+      {
+        approvalId: 'ap_1',
+        sessionId: 's_1',
+        turnId: 't_1',
+        generation: 0,
+        action: 'run with sk-test-123456',
+        payload: { command: 'curl -H sk-test-123456' },
+        options: [{ optionId: 'sk-test-123456', name: 'Allow sk-test-123456', kind: 'allow_once' }],
+      },
+      NOW,
+    );
+    const row = getApproval(h.db, 'ap_1');
+    expect(row?.action).toBe(`run with ${MASK}`);
+    expect(row?.payload).toEqual({ command: `curl -H ${MASK}` });
+    expect(row?.options).toEqual([{ optionId: 'sk-test-123456', name: `Allow ${MASK}`, kind: 'allow_once' }]);
   });
 });

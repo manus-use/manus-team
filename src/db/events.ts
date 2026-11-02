@@ -1,6 +1,7 @@
 import type { Db } from './open.js';
 import { txImmediate } from './open.js';
 import type { Event, NewEvent } from '../types.js';
+import { redactValues } from '../secrets.js';
 
 interface EventRowRaw {
   session_id: string;
@@ -66,7 +67,7 @@ export function appendEvents(db: Db, sessionId: string, events: readonly NewEven
         turnId: e.turnId ?? null,
         type: e.type,
         actor: e.actor,
-        payload: e.payload,
+        payload: storedPayload(e),
       };
       insert.run(
         row.sessionId,
@@ -121,4 +122,22 @@ export function lastSeq(db: Db, sessionId: string): number {
     .prepare<[string], { last_seq: number }>('SELECT last_seq FROM sessions WHERE id = ?')
     .get(sessionId);
   return row?.last_seq ?? 0;
+}
+
+/**
+ * Masked value by value, before it is stored (spec §10.1 layer 3). Best effort: a
+ * secret streamed across two chunks matches neither, and layer 1, the escapers,
+ * masks it when shown. A person's turn_submitted input, its `text` and `paths`, is
+ * kept as given, because replay re-sends it to the agent (#replayInputs).
+ */
+function storedPayload(e: NewEvent): unknown {
+  if (e.type !== 'turn_submitted' || e.payload === null || typeof e.payload !== 'object') {
+    return redactValues(e.payload);
+  }
+  const { text, paths, ...rest } = e.payload as Record<string, unknown>;
+  return {
+    ...(redactValues(rest) as Record<string, unknown>),
+    ...(text === undefined ? {} : { text }),
+    ...(paths === undefined ? {} : { paths }),
+  };
 }

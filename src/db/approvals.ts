@@ -1,6 +1,7 @@
 import type { Db } from './open.js';
 import { txImmediate } from './open.js';
 import type { ApprovalRow, ApprovalState, PermissionOption } from '../types.js';
+import { redactKnownSecrets, redactValues } from '../secrets.js';
 
 interface ApprovalRaw {
   approval_id: string;
@@ -79,9 +80,9 @@ export function createApproval(
       a.sessionId,
       a.turnId,
       a.generation,
-      a.action,
-      JSON.stringify(a.payload ?? null),
-      JSON.stringify(a.options),
+      redactKnownSecrets(a.action),
+      JSON.stringify(redactValues(a.payload ?? null)),
+      JSON.stringify(redactValues(a.options)),
       now,
       now + parkAfterMs,
     );
