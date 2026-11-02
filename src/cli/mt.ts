@@ -74,7 +74,6 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       io.out(USAGE);
       return 0;
     }
-    // (later tasks add each command here)
     if (group === 'role' && command === 'list') {
       expectNothing(parse(rest, {}).positionals, 'role list');
       return roleList(io);

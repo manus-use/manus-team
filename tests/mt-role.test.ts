@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
@@ -114,6 +115,80 @@ describe('mt role create', () => {
     expect((await fx.run(['role', 'create', 'default', '--clone-from', 'impl'])).err).toMatch(/--clone-from/);
     expect((await fx.run(['role', 'create', 'x', '--clone-from', 'nope'])).err).toMatch(/no role nope/);
     expect((await fx.run(['role', 'create', 'x', '--clone-from', '../impl'])).code).toBe(1);
+  });
+
+  it('refuses a source whose config.yaml is a symlink, and prints nothing it points at', async () => {
+    fx = mtFixture();
+    const victim = roleDir('victim', ACP_AGENT);
+    writeFileSync(join(victim, '.env'), 'TOKEN=victim-secret-value\n');
+    const impl = join(fx.home, 'roles', 'impl');
+    mkdirSync(impl);
+    symlinkSync(join(victim, '.env'), join(impl, 'config.yaml'));
+    const r = await fx.run(['role', 'create', 'reviewer', '--clone-from', 'impl']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/config\.yaml is not a regular file/);
+    expect(existsSync(join(fx.home, 'roles', 'reviewer'))).toBe(false);
+    expect(`${r.out}${r.err}`).not.toMatch(/victim-secret-value/);
+  });
+
+  it('ignores a symlinked roles/default, as the gateway does, and copies from the agent: block', async () => {
+    fx = mtFixture();
+    const elsewhere = join(fx.root, 'elsewhere');
+    mkdirSync(elsewhere);
+    writeFileSync(join(elsewhere, 'config.yaml'), 'agent:\n  driver: acp\n  command: evil\n');
+    mkdirSync(join(fx.home, 'roles'));
+    symlinkSync(elsewhere, join(fx.home, 'roles', 'default'));
+    const r = await fx.run(['role', 'create', 'x']);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/the agent: block/);
+    const config = parseYaml(readFileSync(join(fx.home, 'roles', 'x', 'config.yaml'), 'utf8')) as {
+      agent: Record<string, unknown>;
+    };
+    expect(config.agent['command']).toBe('bytesec');
+
+    const again = await fx.run(['role', 'create', 'default']);
+    expect(again.code).toBe(1);
+    expect(again.err).toMatch(/exists but is not a role directory/);
+  });
+
+  it('refuses --description on a source config that is not a role config', async () => {
+    fx = mtFixture();
+    roleDir('impl', '- a\n');
+    const r = await fx.run(['role', 'create', 'x', '--clone-from', 'impl', '--description', 'd']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/^mt: impl's config\.yaml is not a valid role config; run mt role check impl$/m);
+    expect(existsSync(join(fx.home, 'roles', 'x'))).toBe(false);
+  });
+
+  it('copies skills without a FIFO in them', async () => {
+    fx = mtFixture();
+    const source = roleDir('impl', ACP_AGENT);
+    mkdirSync(join(source, 'skills', 'tdd'), { recursive: true });
+    writeFileSync(join(source, 'skills', 'tdd', 'SKILL.md'), '---\nname: tdd\ndescription: Test first\n---\n');
+    execFileSync('mkfifo', [join(source, 'skills', 'tdd', 'pipe')]);
+    const r = await fx.run(['role', 'create', 'x', '--clone-from', 'impl']);
+    expect(r.code).toBe(0);
+    expect(existsSync(join(fx.home, 'roles', 'x', 'skills', 'tdd', 'SKILL.md'))).toBe(true);
+    expect(existsSync(join(fx.home, 'roles', 'x', 'skills', 'tdd', 'pipe'))).toBe(false);
+  });
+
+  it("says a gateway variable cannot go in a role's .env, rather than how to put it there", async () => {
+    fx = mtFixture();
+    const r = await fx.run(['role', 'create', 'x'], {
+      env: {
+        MT_AGENT_ENV_PATH: 'p-not-for-printing',
+        MT_AGENT_ENV_MT_HOME: 'h-not-for-printing',
+        MT_AGENT_ENV_LARK_APP_SECRET: 'l-not-for-printing',
+        MT_AGENT_ENV_API_KEY: 'k-not-for-printing',
+      },
+    });
+    expect(r.code).toBe(0);
+    for (const name of ['PATH', 'MT_HOME', 'LARK_APP_SECRET']) {
+      expect(r.out).toContain(`  ${name} cannot go in a role's .env (it belongs to the gateway); this role will not get it`);
+      expect(r.out).not.toContain(`  ${name}=...`);
+    }
+    expect(r.out).toContain('  API_KEY=...');
+    expect(r.out).not.toMatch(/not-for-printing/);
   });
 });
 

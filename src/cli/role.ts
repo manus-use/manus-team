@@ -1,6 +1,5 @@
 import {
   cpSync,
-  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -10,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { parseDocument, parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { isMap, parseDocument, parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { ConfigError, loadTeamSettings, type AgentConfig, type Env } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { isReservedRoleName, nameProblem } from '../names.js';
@@ -88,19 +87,28 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
   const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
   const rolesDir = join(settings.home, 'roles');
   const dir = join(rolesDir, name);
-  if (existsSync(dir)) return refuse(io, `${dir} already exists`);
-  // Only a real role directory: discoverRoles skips a symlink, so the copy cannot
-  // be pointed outside roles/ by one.
-  if (opts.cloneFrom !== undefined && !discoverRoles(rolesDir).names.includes(opts.cloneFrom)) {
-    return refuse(io, `there is no role ${opts.cloneFrom} to copy from`);
+  // Only a real role directory is a source: discoverRoles skips a symlink, and so
+  // does the gateway, so the copy cannot be pointed outside roles/ by one.
+  const found = discoverRoles(rolesDir);
+  // lstat, so a symlink -- even a dangling one -- counts as being there.
+  if (lstatSync(dir, { throwIfNoEntry: false }) !== undefined) {
+    if (name === DEFAULT_ROLE && !found.names.includes(name)) {
+      return refuse(io, `${dir} exists but is not a role directory`);
+    }
+    return refuse(io, `${dir} already exists`);
   }
 
   const source = opts.cloneFrom ?? DEFAULT_ROLE;
   const sourceDir = join(rolesDir, source);
   let configText: string;
   let legacy = false;
-  if (existsSync(join(sourceDir, 'config.yaml'))) {
-    configText = readFileSync(join(sourceDir, 'config.yaml'), 'utf8');
+  if (found.names.includes(source)) {
+    const sourceConfig = join(sourceDir, 'config.yaml');
+    const stat = lstatSync(sourceConfig, { throwIfNoEntry: false });
+    if (stat === undefined) return refuse(io, `there is no role ${source} to copy from`);
+    // Never followed: a link would copy whatever it points at, a secret included.
+    if (!stat.isFile()) return refuse(io, `${source}'s config.yaml is not a regular file: ${sourceConfig}`);
+    configText = readFileSync(sourceConfig, 'utf8');
   } else if (source === DEFAULT_ROLE && settings.agent !== undefined) {
     configText = renderAgentConfig(settings.agent);
     legacy = true;
@@ -109,6 +117,9 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
   }
   if (opts.description !== undefined) {
     const doc = parseDocument(configText);
+    if (doc.errors.length > 0 || !isMap(doc.contents)) {
+      return refuse(io, `${source}'s config.yaml is not a valid role config; run mt role check ${source}`);
+    }
     doc.set('description', opts.description);
     configText = String(doc);
   }
@@ -121,7 +132,8 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
   try {
     writeFileSync(join(staging, 'config.yaml'), configText);
     // Symlinks are never followed, as discoverRoles and loadRoleDir never follow
-    // them: a link would copy whatever it points at into the new role.
+    // them: a link would copy whatever it points at into the new role. config.yaml
+    // was checked above; role.md and skills/ are checked here.
     const roleMd = copyDir === undefined ? undefined : join(copyDir, 'role.md');
     writeFileSync(
       join(staging, 'role.md'),
@@ -133,7 +145,12 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
     if (skills !== undefined && lstatSync(skills, { throwIfNoEntry: false })?.isDirectory() === true) {
       cpSync(skills, join(staging, 'skills'), {
         recursive: true,
-        filter: (src) => !lstatSync(src).isSymbolicLink(),
+        // Files and directories only: no symlink, and no FIFO or socket, which
+        // cpSync cannot copy.
+        filter: (src) => {
+          const s = lstatSync(src);
+          return s.isFile() || s.isDirectory();
+        },
       });
     } else {
       mkdirSync(join(staging, 'skills'));
@@ -182,10 +199,22 @@ function reportLegacyCopy(dir: string, io: MtIo): void {
   if (secrets.length > 0) {
     io.out(`not copied, because they are secrets: ${secrets.join(', ')}`);
     io.out(`put them in ${join(dir, '.env')} as:`);
-    for (const key of secrets) io.out(`  ${key.slice(AGENT_ENV_PREFIX.length)}=...`);
+    for (const key of secrets) {
+      const secret = key.slice(AGENT_ENV_PREFIX.length);
+      io.out(
+        gatewayOwned(secret)
+          ? `  ${secret} cannot go in a role's .env (it belongs to the gateway); this role will not get it`
+          : `  ${secret}=...`,
+      );
+    }
   }
   // Always, even when this shell holds none: the service may hold some this shell does not.
   io.out("  (only this shell's MT_AGENT_ENV_* names are listed; check the service's environment for others)");
+}
+
+/** Names a role's .env cannot set: the gateway's own. */
+function gatewayOwned(name: string): boolean {
+  return name === 'PATH' || name.startsWith('MT_') || name.startsWith('LARK_');
 }
 
 function reportCutover(dir: string, configPath: string | undefined, io: MtIo): void {

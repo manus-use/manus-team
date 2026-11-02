@@ -1721,8 +1721,19 @@ Do **not** run `role create` or `workspace add` against the real home.
 
 ---
 
+## Review follow-ups
+
+Fixed in `mt role create` after review, each test-first (five tests in `tests/mt-role.test.ts`):
+
+- A symlinked `config.yaml` in the copy source is refused (`<source>'s config.yaml is not a regular file`), never followed: a link to another role's `.env` would have copied its secret into the new, world-readable `config.yaml`.
+- `roles/<source>` is a source only if `discoverRoles` lists it. A symlinked `roles/default` is ignored, as the gateway ignores it, so the copy comes from the `agent:` block; `mt role create default` refuses it as existing but not a role directory.
+- `--description` on a source `config.yaml` that is not a YAML map is refused with `run mt role check <source>`, instead of crashing.
+- A FIFO or socket inside `skills/` is skipped, not passed to `cpSync`; only files and directories are copied.
+- An `MT_AGENT_ENV_<NAME>` whose NAME is `PATH` or starts with `MT_` or `LARK_` gets no `NAME=...` hint: a role's `.env` cannot hold it, so the role will not get it.
+- The placeholder comment in `src/cli/mt.ts` is gone.
+
 ## Done when
 
-- `npm test` → `Tests  527 passed (527)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
+- `npm test` → `Tests  532 passed (532)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` → no output.
 - Task 11.2 prints what it expects.
