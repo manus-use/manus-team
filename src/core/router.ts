@@ -5,7 +5,13 @@ import { getApproval } from '../db/approvals.js';
 import { bindingsInConversation, resolveBinding } from '../db/bindings.js';
 import type { Channel, SendTarget } from '../channel/types.js';
 import { forDisplay, truncate } from '../channel/escape.js';
-import type { BindingKey, InboundMessage, Principal, RejectReason } from '../types.js';
+import type {
+  BindingKey,
+  InboundAttachment,
+  InboundMessage,
+  Principal,
+  RejectReason,
+} from '../types.js';
 import type { Authorizer } from '../policy/auth.js';
 import { parseCommand, renderHelp, type CommandSpec } from './commands.js';
 import { replyUuid } from './ids.js';
@@ -149,10 +155,21 @@ export class Router {
       return;
     }
 
-    // Not a command: a prompt. Empty text with no attachments is nothing to send --
-    // an empty prompt burns a turn and confuses the agent.
-    if (message.text.trim() === '' && message.attachments.length === 0) {
-      await this.#reply(target, message, 'empty', 'That message had nothing in it.');
+    // Said before anything else about the prompt, including a refusal of it: the
+    // user is the only one who can resend the file, and is otherwise the one
+    // person who does not know it never arrived.
+    const skipped = message.attachments.filter((a) => a.skipped !== undefined);
+    if (skipped.length > 0) {
+      await this.#reply(target, message, 'attachments-skipped', describeSkipped(skipped));
+    }
+
+    // Not a command: a prompt. Nothing the agent could read is nothing to send --
+    // an empty prompt burns a turn and confuses the agent. A file that did not
+    // arrive counts as nothing, which the notice above has already explained.
+    if (message.text.trim() === '' && pathsOf(message).length === 0) {
+      if (skipped.length === 0) {
+        await this.#reply(target, message, 'empty', 'That message had nothing in it.');
+      }
       return;
     }
 
@@ -164,28 +181,79 @@ export class Router {
     if (created) this.#note(`created session ${session.id} for ${key.conversationId}/${key.threadId}`);
 
     const actor = await this.#deps.registry.actorFor(session.id, key);
-    const paths = message.attachments
-      .map((a) => a.localPath)
-      .filter((p): p is string => typeof p === 'string' && p !== '');
+    // Read before the submit, which counts itself in.
+    const ahead = actor.queued;
 
     let queued: Promise<unknown>;
     try {
       queued = actor.submit({
         messageId: message.messageId,
         appId: message.appId,
-        input: { text: message.text, paths },
+        input: { text: message.text, paths: pathsOf(message) },
+        ...(target.replyTo === undefined ? {} : { replyTo: target.replyTo }),
       });
     } catch (err) {
       await this.#reportSubmitFailure(err, message, target);
       return;
     }
 
+    // A refusal (full mailbox, closed actor) comes back as a rejected promise, not
+    // a throw, and is reported below. The depth is what tells them apart now: only
+    // an accepted prompt is counted. Acknowledging a refused one as "Queued" and
+    // then reporting it refused contradicts itself.
+    const accepted = actor.queued > ahead;
+
+    // Not awaited, for the same reason the turn is not: a slow reactions endpoint
+    // must not hold the chat-wide lane.
+    const acked = accepted ? this.#acknowledge(message.messageId) : Promise.resolve(false);
+
+    if (accepted && ahead > 0) {
+      await this.#reply(
+        target,
+        message,
+        'queued',
+        `Queued — ${ahead} ahead of this one. It starts when ${ahead === 1 ? 'that finishes' : 'they finish'}; \`/stop\` cancels the running one.`,
+      );
+    }
+
     // Deliberately not awaited. The chat-wide ingress lane is still held; holding
     // it for the length of a turn would stall every other thread in this chat
     // behind one long-running agent.
-    queued.catch((err: unknown) => {
-      void this.#reportSubmitFailure(err, message, target);
-    });
+    queued
+      .catch((err: unknown) => {
+        void this.#reportSubmitFailure(err, message, target);
+      })
+      .finally(() => {
+        void acked.then((ok) => (ok ? this.#unacknowledge(message.messageId) : undefined));
+      });
+  }
+
+  /**
+   * React to an accepted prompt. Resolves to whether the reaction landed.
+   *
+   * The first card waits out the coalesce window and the agent's start; this is
+   * what the user sees in the meantime. Best effort throughout: a bot without the
+   * reactions scope still answers, it just answers without the early signal.
+   */
+  async #acknowledge(messageId: string): Promise<boolean> {
+    try {
+      await this.#deps.channel.react(messageId, ACK_EMOJI);
+      return true;
+    } catch (err) {
+      this.#note(`reaction on ${messageId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  async #unacknowledge(messageId: string): Promise<void> {
+    try {
+      await this.#deps.channel.unreact(messageId, ACK_EMOJI);
+    } catch (err) {
+      // A reaction left behind is cosmetic. The card already says the turn ended.
+      this.#note(
+        `removing reaction on ${messageId} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   async #reportSubmitFailure(
@@ -436,8 +504,18 @@ export class Router {
     };
   }
 
+  /**
+   * Where replies to `message` go.
+   *
+   * Quoted only in a group at chat scope. A direct message is one conversation, so
+   * quoting there is noise; a thread already says what it belongs to.
+   */
   #targetFor(message: InboundMessage): SendTarget {
-    return { chatId: message.chatId, threadId: message.threadId };
+    const target = { chatId: message.chatId, threadId: message.threadId };
+    if (message.chatType === 'group' && message.threadId === '') {
+      return { ...target, replyTo: message.messageId };
+    }
+    return target;
   }
 
   /**
@@ -516,6 +594,30 @@ export class Router {
       this.#note(`reply (${purpose}) failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+}
+
+/**
+ * The reaction that means "accepted, working on it".
+ *
+ * A Feishu `emoji_type`. Held for the length of the turn and removed at its
+ * terminal, so a reaction that is still there means the turn is still open.
+ */
+export const ACK_EMOJI = 'Typing';
+
+/** The paths the agent will actually be given. */
+function pathsOf(message: InboundMessage): string[] {
+  return message.attachments
+    .map((a) => a.localPath)
+    .filter((p): p is string => typeof p === 'string' && p !== '');
+}
+
+function describeSkipped(attachments: readonly InboundAttachment[]): string {
+  const lines = attachments.map((a) => {
+    const name = forDisplay(a.name ?? a.kind);
+    const why = a.skipped === 'too_large' ? 'too large to fetch' : 'could not be downloaded';
+    return `• ${name} — ${why}`;
+  });
+  return `The agent will not see ${attachments.length === 1 ? 'this file' : 'these files'}:\n${lines.join('\n')}`;
 }
 
 function stringField(value: Record<string, unknown>, field: string): string | undefined {

@@ -259,7 +259,7 @@ export class CardWriter {
       }
       this.#finished = false;
       session = await this.#deps.channel.openCard(
-        this.#deps.target,
+        view.replyTo === undefined ? this.#deps.target : { ...this.#deps.target, replyTo: view.replyTo },
         view.text,
         this.#deps.sendUuid(target),
       );

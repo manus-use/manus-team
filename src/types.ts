@@ -215,6 +215,13 @@ export interface InboundAttachment {
   name: string | null;
   /** Local path once downloaded. Attachments are injected as paths, never inline. */
   localPath?: string;
+  /**
+   * Why there is no `localPath`, when there is none.
+   *
+   * Carried so the router can tell the user. A file that never reached the agent is
+   * otherwise invisible to the person who sent it -- they believe it was read.
+   */
+  skipped?: 'too_large' | 'download_failed';
 }
 
 export interface InboundMessage {

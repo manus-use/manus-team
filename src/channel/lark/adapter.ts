@@ -1,6 +1,7 @@
 import { createLarkChannel, type LarkChannel, type MarkdownStreamController } from '@larksuiteoapi/node-sdk';
 import type {
   ApprovalCardSpec,
+  ApprovalOutcomeView,
   CardSession,
   Channel,
   SendResult,
@@ -256,12 +257,47 @@ export class LarkAdapter implements Channel {
     });
   }
 
+  async updateApprovalCard(messageId: string, view: ApprovalOutcomeView): Promise<void> {
+    try {
+      await this.#lark.updateCard(messageId, approvalOutcomeCard(view));
+    } catch (err) {
+      throw toChannelError(err);
+    }
+  }
+
+  /**
+   * Reactions are not retried. They are a signal that matters only while it is
+   * timely, and a retry loop on one would spend the per-chat rate limit the answer
+   * itself is about to need.
+   */
+  async react(messageId: string, emoji: string): Promise<void> {
+    try {
+      await this.#lark.addReaction(messageId, emoji);
+    } catch (err) {
+      throw toChannelError(err);
+    }
+  }
+
+  async unreact(messageId: string, emoji: string): Promise<void> {
+    try {
+      // By emoji rather than by reaction id, so nothing has to remember the id
+      // across the turn -- or across a restart in the middle of one. Returns false
+      // when there was nothing to remove, which is not a failure.
+      await this.#lark.removeReactionByEmoji(messageId, emoji);
+    } catch (err) {
+      throw toChannelError(err);
+    }
+  }
+
   #sendOptions(target: SendTarget): { replyTo?: string; replyInThread?: boolean } {
     // Threading requires a message to reply to. When the target carries no anchor
     // the message goes to chat scope, which is the honest fallback: silently
     // dropping the thread association is better than replying under an unrelated
     // message.
-    if (target.threadId === '') return {};
+    if (target.threadId === '') {
+      // A quoted reply that stays in the main chat, not a new thread under it.
+      return target.replyTo === undefined ? {} : { replyTo: target.replyTo };
+    }
     return { replyTo: target.threadId, replyInThread: true };
   }
 
@@ -292,6 +328,32 @@ export class LarkAdapter implements Channel {
     }
     throw toChannelError(lastError);
   }
+}
+
+/**
+ * The card an answered approval becomes.
+ *
+ * Every piece of text is `plain_text`, as on the card it replaces. The answerer's
+ * display name is whatever they put in their profile, which makes it exactly as
+ * untrusted as the agent's request.
+ */
+export function approvalOutcomeCard(view: ApprovalOutcomeView): object {
+  return {
+    schema: '2.0',
+    config: { update_multi: true },
+    body: {
+      elements: [
+        { tag: 'div', text: { tag: 'plain_text', content: forPlainText(view.action) } },
+        {
+          tag: 'div',
+          text: {
+            tag: 'plain_text',
+            content: forPlainText(`Answered: ${view.choice} — by ${view.answeredBy}`),
+          },
+        },
+      ],
+    },
+  };
 }
 
 function buttonType(kind: string | undefined): string {

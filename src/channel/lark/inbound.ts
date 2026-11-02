@@ -15,7 +15,7 @@ import type { InboundCardAction, Router } from '../../core/router.js';
  * ladder -- from becoming gateway vocabulary.
  */
 
-/** Attachment cap. Beyond this the file is skipped and the user told. */
+/** Attachment cap. Beyond this the file is skipped, and the router tells the user. */
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 export interface LarkInboundConfig {
@@ -139,7 +139,7 @@ export class LarkInbound {
         );
         if (buffer.byteLength > MAX_ATTACHMENT_BYTES) {
           this.#note(`skipping ${resource.fileKey}: ${buffer.byteLength} bytes`);
-          out.push(attachment);
+          out.push({ ...attachment, skipped: 'too_large' });
           continue;
         }
         const path = join(dir, safeName(resource.fileKey, resource.fileName));
@@ -149,7 +149,7 @@ export class LarkInbound {
         this.#note(
           `download ${resource.fileKey} failed: ${err instanceof Error ? err.message : String(err)}`,
         );
-        out.push(attachment);
+        out.push({ ...attachment, skipped: 'download_failed' });
       }
     }
     return out;

@@ -448,9 +448,79 @@ describe('approvals', () => {
     click(h, approvalId, { optionId: 'allow' });
     const second = click(h, approvalId, { optionId: 'deny' });
     expect(second.kind).toBe('already');
-    expect(second.message).toContain('allow');
+    // The label the clicker saw on the button, not the agent's internal id.
+    expect(second.message).toContain('Allow');
     expect(second.unblocked).toBe(false);
     await turn;
+  });
+
+  it('names the chosen option by its label', async () => {
+    const h = harness();
+    h.driver.scripts = [askScript()];
+    const { turn, approvalId } = await parked(h);
+    expect(click(h, approvalId, { optionId: 'deny' }).message).toBe('Sent: Deny.');
+    await turn;
+  });
+
+  it('rewrites the card with the answer, so its buttons stop working', async () => {
+    // Left alone, the buttons stay live forever and every later click posts a
+    // chat message explaining that it did nothing.
+    const h = harness();
+    h.driver.scripts = [askScript()];
+    const { turn, approvalId } = await parked(h);
+    click(h, approvalId, { optionId: 'deny' });
+    await turn;
+
+    expect(h.channel.approvalUpdates).toEqual([
+      {
+        messageId: getApproval(h.db.db, approvalId)?.cardMessageId,
+        view: { action: 'rm -rf /', choice: 'Deny', answeredBy: CLICKER.openId },
+      },
+    ]);
+  });
+
+  it('shows who answered by name when the name is known', async () => {
+    const h = harness();
+    h.driver.scripts = [askScript()];
+    const { turn, approvalId } = await parked(h);
+    const row = getApproval(h.db.db, approvalId);
+    h.actor.resolveFromCard({
+      approvalId,
+      optionId: 'allow',
+      nonce: approvalNonce('s_1', approvalId, row?.generation ?? 0),
+      principal: { ...CLICKER, displayName: 'Alice' },
+      via: 'lark',
+    });
+    await turn;
+
+    expect(h.channel.approvalUpdates.at(0)?.view.answeredBy).toBe('Alice');
+  });
+
+  it('does not touch the card for a click that resolved nothing', async () => {
+    const h = harness();
+    h.driver.scripts = [askScript()];
+    const { turn, approvalId } = await parked(h);
+    click(h, approvalId, { optionId: 'allow_always' });
+    click(h, approvalId, { nonce: 'f'.repeat(32) });
+    await settle();
+    expect(h.channel.approvalUpdates).toEqual([]);
+
+    click(h, approvalId);
+    await turn;
+  });
+
+  it('still releases the agent when the card cannot be rewritten', async () => {
+    // The answer is the decision; the card is a picture of it. Failing to redraw
+    // the picture must not cost the decision.
+    const h = harness();
+    h.channel.failNext('updateApprovalCard', new Error('card is gone'));
+    h.driver.scripts = [askScript()];
+    const { turn, approvalId } = await parked(h);
+    const report = click(h, approvalId);
+
+    expect(report.unblocked).toBe(true);
+    expect(await turn).toBe('completed');
+    expect(h.notes.some((n) => n.includes('approval card'))).toBe(true);
   });
 
   it('reports unknown for an approval belonging to another session', async () => {

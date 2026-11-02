@@ -27,6 +27,7 @@ import type {
   PromptInput,
 } from '../driver/types.js';
 import type {
+  ApprovalRow,
   BindingKey,
   Event,
   NewEvent,
@@ -98,6 +99,8 @@ export interface SubmitRequest {
   messageId: string;
   appId: string;
   input: PromptInput;
+  /** The message this turn's card should quote. See `SendTarget.replyTo`. */
+  replyTo?: string;
 }
 
 export interface CardResolution {
@@ -219,6 +222,16 @@ export class SessionActor {
     return this.#enqueue(() => this.#runTurn(req));
   }
 
+  /**
+   * Prompts accepted and not yet finished, the running one included.
+   *
+   * Read before a submit, it is how many are ahead of the new prompt -- which is
+   * what a user waiting on a queued prompt needs to be told.
+   */
+  get queued(): number {
+    return this.#depth;
+  }
+
   #enqueue<T>(fn: () => Promise<T>): Promise<T> {
     if (this.#closed) return Promise.reject(new Error(`session ${this.sessionId} is closed`));
     if (this.#depth >= MAX_MAILBOX_DEPTH) {
@@ -270,7 +283,14 @@ export class SessionActor {
       actor: 'user',
       turnId,
       generation,
-      payload: { text: req.input.text, paths: req.input.paths, messageId: req.messageId },
+      // `replyTo` is in the log rather than held in memory so that a card
+      // re-rendered after a restart still quotes the question it answers.
+      payload: {
+        text: req.input.text,
+        paths: req.input.paths,
+        messageId: req.messageId,
+        ...(req.replyTo === undefined ? {} : { replyTo: req.replyTo }),
+      },
     });
 
     let promptSent = false;
@@ -615,7 +635,7 @@ export class SessionActor {
       case 'already':
         return {
           kind: 'already',
-          message: `Already answered (${outcome.approval.optionId ?? 'unknown'}). The first answer stands.`,
+          message: `Already answered (${optionLabel(outcome.approval, outcome.approval.optionId)}). The first answer stands.`,
           unblocked: false,
         };
       case 'stale':
@@ -649,6 +669,10 @@ export class SessionActor {
       },
     });
 
+    // Redrawn on every resolution, including the one after a restart below: the
+    // buttons are what has to stop working, whether or not anything is waiting.
+    this.#redrawApproval(outcome.approval, res);
+
     const waiting = this.#pending.get(res.approvalId);
     if (waiting === undefined) {
       // Recorded but nothing to release. Happens after a restart: the answer is
@@ -662,7 +686,34 @@ export class SessionActor {
 
     this.#settle(waiting, { kind: 'selected', optionId: res.optionId });
     setTurnState(this.#db, this.sessionId, waiting.turnId, 'running');
-    return { kind: 'resolved', message: `Sent: ${res.optionId}.`, unblocked: true };
+    return {
+      kind: 'resolved',
+      message: `Sent: ${optionLabel(outcome.approval, res.optionId)}.`,
+      unblocked: true,
+    };
+  }
+
+  /**
+   * Replace an answered card's buttons with its outcome.
+   *
+   * Not awaited: `resolveFromCard` is the path that releases a blocked agent, and
+   * it must not wait on Feishu to do it. Best effort -- the answer is the decision
+   * and is already durable; the card is only a picture of it.
+   */
+  #redrawApproval(approval: ApprovalRow, res: CardResolution): void {
+    const messageId = approval.cardMessageId;
+    if (messageId === null) return;
+    void this.#channel
+      .updateApprovalCard(messageId, {
+        action: approval.action,
+        choice: optionLabel(approval, res.optionId),
+        answeredBy: res.principal.displayName ?? res.principal.openId,
+      })
+      .catch((err: unknown) =>
+        this.#note(
+          `redrawing approval card ${messageId} failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
   }
 
   /**
@@ -910,4 +961,15 @@ export class SessionActor {
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   return timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+}
+
+/**
+ * The label an option was shown under, falling back to its id.
+ *
+ * What the user saw on the button is what they recognize. The id is the agent's
+ * internal name for it, and `allow_once` in a reply reads like a code, not an answer.
+ */
+function optionLabel(approval: ApprovalRow, optionId: string | null): string {
+  if (optionId === null) return 'unknown';
+  return approval.options.find((o) => o.optionId === optionId)?.name ?? optionId;
 }

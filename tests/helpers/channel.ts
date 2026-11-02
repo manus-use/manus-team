@@ -1,5 +1,6 @@
 import type {
   ApprovalCardSpec,
+  ApprovalOutcomeView,
   CardSession,
   Channel,
   SendResult,
@@ -22,7 +23,31 @@ import { systemClock } from '../../src/time.js';
  *    defined entirely by what happens *while* a write is outstanding.
  */
 
-type Method = 'sendText' | 'openCard' | 'sendApprovalCard' | 'set' | 'finish';
+type Method =
+  | 'sendText'
+  | 'openCard'
+  | 'sendApprovalCard'
+  | 'updateApprovalCard'
+  | 'react'
+  | 'unreact'
+  | 'set'
+  | 'finish';
+
+export interface ReactionCall {
+  op: 'add' | 'remove';
+  messageId: string;
+  emoji: string;
+}
+
+export interface ApprovalUpdateCall {
+  messageId: string;
+  view: ApprovalOutcomeView;
+}
+
+export interface CardOpenCall {
+  target: SendTarget;
+  uuid: string;
+}
 
 export interface TextCall {
   target: SendTarget;
@@ -96,6 +121,10 @@ export class FakeChannel implements Channel {
   readonly texts: TextCall[] = [];
   readonly approvalCards: ApprovalCall[] = [];
   readonly cards: FakeCard[] = [];
+  /** Where each card was opened, index-aligned with `cards`. */
+  readonly cardOpens: CardOpenCall[] = [];
+  readonly reactions: ReactionCall[] = [];
+  readonly approvalUpdates: ApprovalUpdateCall[] = [];
 
   readonly #clock: Clock;
   readonly #failures = new Map<Method, unknown[]>();
@@ -163,8 +192,7 @@ export class FakeChannel implements Channel {
     // whether the first render arrived via open or via set.
     card.sets.push(initialText);
     this.cards.push(card);
-    void target;
-    void uuid;
+    this.cardOpens.push({ target, uuid });
     return card;
   }
 
@@ -177,5 +205,23 @@ export class FakeChannel implements Channel {
     await this.gate('sendApprovalCard');
     this.approvalCards.push({ target, spec, uuid });
     return { messageId: `om_approval_${++this.#seq}`, deduped: false };
+  }
+
+  async updateApprovalCard(messageId: string, view: ApprovalOutcomeView): Promise<void> {
+    this.calls.push('updateApprovalCard');
+    await this.gate('updateApprovalCard');
+    this.approvalUpdates.push({ messageId, view });
+  }
+
+  async react(messageId: string, emoji: string): Promise<void> {
+    this.calls.push('react');
+    await this.gate('react');
+    this.reactions.push({ op: 'add', messageId, emoji });
+  }
+
+  async unreact(messageId: string, emoji: string): Promise<void> {
+    this.calls.push('unreact');
+    await this.gate('unreact');
+    this.reactions.push({ op: 'remove', messageId, emoji });
   }
 }

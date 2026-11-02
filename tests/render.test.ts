@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { CARD_TEXT_BUDGET, renderCard } from '../src/channel/render.js';
+import {
+  CARD_TEXT_BUDGET,
+  RETRY_AFTER_TOOLS_HINT,
+  RETRY_HINT,
+  renderCard,
+} from '../src/channel/render.js';
 import type { Event, EventType } from '../src/types.js';
 
 let seq = 0;
@@ -18,7 +23,93 @@ function ev(type: EventType, payload: unknown): Event {
   };
 }
 
+describe('renderCard: what to do after a failure', () => {
+  // "Turn failed." with nothing after it leaves the user guessing. Most failures
+  // the driver marks retryable are a provider blip, and the fix is to send the
+  // message again -- which nothing on the card used to say.
+  const failedWith = (...extra: Event[]): ReturnType<typeof renderCard> =>
+    renderCard([
+      ev('turn_submitted', { text: 'hi' }),
+      ...extra,
+      ev('agent_error', { message: 'responses API stream error 400', retryable: true }),
+      ev('turn_ended', { terminal: 'failed' }),
+    ]);
+
+  it('says to send it again when a failure is retryable', () => {
+    expect(failedWith().text).toContain(RETRY_HINT);
+  });
+
+  it('warns that steps already ran when the turn got as far as tools', () => {
+    const view = failedWith(
+      ev('tool_call', { toolCallId: 'c1', title: 'Edit main.ts', status: 'completed' }),
+    );
+    expect(view.text).toContain(RETRY_AFTER_TOOLS_HINT);
+    expect(view.text).not.toContain(RETRY_HINT);
+  });
+
+  it('gives no hint while the turn is still open', () => {
+    const view = renderCard([
+      ev('turn_submitted', { text: 'hi' }),
+      ev('agent_error', { message: 'transient', retryable: true }),
+    ]);
+    expect(view.text).not.toContain(RETRY_HINT);
+  });
+
+  it('gives no hint for an error that is not retryable', () => {
+    const view = renderCard([
+      ev('turn_submitted', { text: 'hi' }),
+      ev('agent_error', { message: 'bad config', retryable: false }),
+      ev('turn_ended', { terminal: 'failed' }),
+    ]);
+    expect(view.text).not.toContain(RETRY_HINT);
+    expect(view.text).not.toContain(RETRY_AFTER_TOOLS_HINT);
+  });
+
+  it('gives no hint for an ambiguous turn, which may already have acted', () => {
+    // Ambiguous is the terminal where resending can run the instruction twice.
+    // Inviting a casual retry there is the opposite of what the session hold is for.
+    const view = renderCard([
+      ev('turn_submitted', { text: 'hi' }),
+      ev('agent_error', { message: 'process exited', retryable: true }),
+      ev('turn_ended', { terminal: 'ambiguous' }),
+    ]);
+    expect(view.text).not.toContain(RETRY_HINT);
+    expect(view.text).not.toContain(RETRY_AFTER_TOOLS_HINT);
+  });
+
+  it("does not carry a previous turn's retryable error into a later failure", () => {
+    const view = renderCard([
+      ev('turn_submitted', { text: 'one' }),
+      ev('agent_error', { message: 'blip', retryable: true }),
+      ev('turn_ended', { terminal: 'failed' }),
+      ev('turn_submitted', { text: 'two' }),
+      ev('agent_error', { message: 'bad config', retryable: false }),
+      ev('turn_ended', { terminal: 'failed' }),
+    ]);
+    expect(view.text).not.toContain(RETRY_HINT);
+  });
+});
+
 describe('renderCard', () => {
+  it("carries the message the current turn's card should quote", () => {
+    // Taken from the log, not from the inbound message, so a card re-rendered
+    // after a restart still quotes the question it answers.
+    const view = renderCard([
+      ev('turn_submitted', { text: 'first', replyTo: 'om_first' }),
+      ev('turn_ended', { terminal: 'completed' }),
+      ev('turn_submitted', { text: 'second', replyTo: 'om_second' }),
+    ]);
+    expect(view.replyTo).toBe('om_second');
+  });
+
+  it('quotes nothing when the turn did not ask to', () => {
+    const view = renderCard([
+      ev('turn_submitted', { text: 'first', replyTo: 'om_first' }),
+      ev('turn_submitted', { text: 'in a dm' }),
+    ]);
+    expect(view.replyTo).toBeUndefined();
+  });
+
   it('says something rather than nothing while a turn is open', () => {
     // An empty card is indistinguishable from a broken one.
     const view = renderCard([]);

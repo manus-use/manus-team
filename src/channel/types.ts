@@ -14,6 +14,14 @@ export interface SendTarget {
   chatId: string;
   /** Feishu thread id, or '' for chat scope. */
   threadId: string;
+  /**
+   * A message to post as a quoted reply to, at chat scope.
+   *
+   * Set for group chats outside a thread, where an answer at chat scope says
+   * nothing about which question it answers. Ignored inside a thread, which
+   * already groups the conversation.
+   */
+  replyTo?: string;
 }
 
 export interface SendResult {
@@ -73,6 +81,20 @@ export interface ApprovalCardSpec {
   nonce: string;
 }
 
+/**
+ * What a resolved approval card is rewritten to show.
+ *
+ * Gateway-authored except `action`, which is the agent's request text and is
+ * rendered as `plain_text` for the same reason the original card renders it so.
+ */
+export interface ApprovalOutcomeView {
+  action: string;
+  /** The label of the option chosen, as it appeared on its button. */
+  choice: string;
+  /** Display name of whoever answered, or their id when no name is known. */
+  answeredBy: string;
+}
+
 export interface Channel {
   readonly id: string;
 
@@ -84,6 +106,19 @@ export interface Channel {
 
   /** Post an approval card with one button per offered option. */
   sendApprovalCard(target: SendTarget, spec: ApprovalCardSpec, uuid: string): Promise<SendResult>;
+
+  /**
+   * Rewrite an approval card once it has been answered: the outcome in place of
+   * the buttons. Without this the buttons stay live forever, and every later click
+   * produces a chat message explaining that it did nothing.
+   */
+  updateApprovalCard(messageId: string, view: ApprovalOutcomeView): Promise<void>;
+
+  /** Add the bot's reaction to a message. */
+  react(messageId: string, emoji: string): Promise<void>;
+
+  /** Remove the bot's own reaction. A reaction that is not there is not an error. */
+  unreact(messageId: string, emoji: string): Promise<void>;
 }
 
 /**

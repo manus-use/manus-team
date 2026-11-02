@@ -39,7 +39,24 @@ export interface RenderedCard {
    * turn's answer in the same render.
    */
   turnStartSeq: number;
+  /** The message the current turn's card quotes, from its `turn_submitted`. */
+  replyTo?: string;
 }
+
+/**
+ * What a retryable failure tells the user to do.
+ *
+ * Without it the card ends at "Turn failed." -- and the usual cause is a model
+ * provider error that a resend would get past, which the user has no way to know.
+ */
+export const RETRY_HINT = '_This is usually temporary. Send your message again to retry._';
+
+/**
+ * The same, for a turn that got as far as running tools. A resend starts the
+ * instruction over, so whatever those tools did will be done again.
+ */
+export const RETRY_AFTER_TOOLS_HINT =
+  '_This is usually temporary, but the steps above already ran. Check them before sending your message again._';
 
 interface ToolLine {
   title: string;
@@ -66,10 +83,13 @@ export function renderCard(events: readonly Event[]): RenderedCard {
   let message = '';
   const tools = new Map<string, ToolLine>();
   let error: string | undefined;
+  /** Whether the latest error said a retry could succeed. Only the latest counts. */
+  let errorRetryable = false;
   let finished = false;
   let terminal: string | undefined;
   let throughSeq = 0;
   let turnStartSeq = 0;
+  let replyTo: string | undefined;
   // Tracked so the placeholder can say *why* nothing is happening. A card reading
   // "Working…" while the agent is blocked on a button is how approvals sit
   // unanswered for hours: the user has no reason to look for one.
@@ -109,8 +129,10 @@ export function renderCard(events: readonly Event[]): RenderedCard {
         // A new prompt starts a new reply, so everything the previous one
         // accumulated goes -- see the note on this function.
         turnStartSeq = event.seq;
+        replyTo = typeof payload?.['replyTo'] === 'string' ? payload['replyTo'] : undefined;
         message = '';
         error = undefined;
+        errorRetryable = false;
         tools.clear();
         finished = false;
         terminal = undefined;
@@ -119,6 +141,7 @@ export function renderCard(events: readonly Event[]): RenderedCard {
       }
       case 'agent_error': {
         error = String(payload?.['message'] ?? 'unknown agent error');
+        errorRetryable = payload?.['retryable'] === true;
         break;
       }
       case 'approval_requested': {
@@ -162,6 +185,12 @@ export function renderCard(events: readonly Event[]): RenderedCard {
     parts.push(`_Turn ${forDisplay(terminal)}._`);
   }
 
+  // `failed` only. An `ambiguous` turn may already have acted on the prompt, and
+  // inviting a casual resend there is how one instruction runs twice.
+  if (finished && terminal === 'failed' && errorRetryable) {
+    parts.push(tools.size > 0 ? RETRY_AFTER_TOOLS_HINT : RETRY_HINT);
+  }
+
   // Empty output is a legitimate terminal, not a bug to paper over -- but an
   // empty card is indistinguishable from a broken one, so say so explicitly.
   if (parts.length === 0) {
@@ -173,6 +202,7 @@ export function renderCard(events: readonly Event[]): RenderedCard {
     throughSeq,
     finished,
     turnStartSeq,
+    ...(replyTo === undefined ? {} : { replyTo }),
   };
 }
 

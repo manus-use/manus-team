@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { Router } from '../src/core/router.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ACK_EMOJI, Router } from '../src/core/router.js';
+import { CARD_COALESCE_MS } from '../src/channel/card-writer.js';
 import { SessionRegistry } from '../src/core/registry.js';
 import { MAX_MAILBOX_DEPTH, type SessionActor } from '../src/core/session-actor.js';
 import { approvalNonce, replyUuid } from '../src/core/ids.js';
@@ -143,6 +144,16 @@ function boundSessionId(h: Harness, threadId = ''): string | undefined {
     conversationId: CHAT,
     threadId,
   })?.sessionId;
+}
+
+/**
+ * Wait for the card writer to open a card.
+ *
+ * Its coalesce delay is a real timer, so a fixed number of flushes is a guess --
+ * and an assertion about a card that has not opened yet passes vacuously.
+ */
+async function cardOpened(h: Harness, count = 1): Promise<void> {
+  await vi.waitFor(() => expect(h.channel.cardOpens.length).toBeGreaterThanOrEqual(count));
 }
 
 /** A session with a live actor and a turn that never ends. */
@@ -538,10 +549,15 @@ describe('Router: prompts', () => {
         .catch(() => undefined);
     }
 
+    const reactionsBefore = h.channel.reactions.length;
     await h.router.onMessage(msg({ text: 'one too many' }));
     await flush();
 
     expect(lastReply(h)).toContain('queue of prompts waiting');
+    // A refused prompt is not queued, and must not be acknowledged as though it
+    // were -- "Queued" followed by "queue full" contradicts itself.
+    expect(h.channel.texts.some((t) => t.text.includes('Queued'))).toBe(false);
+    expect(h.channel.reactions.length).toBe(reactionsBefore);
   });
 
   it('explains a held session rather than resuming it', async () => {
@@ -593,6 +609,209 @@ describe('Router: prompts', () => {
     await h.router.onMessage(msg({ text: '/help' }));
 
     expect(h.notes.some((n) => n.includes('reply (help) failed'))).toBe(true);
+  });
+});
+
+describe('Router: acknowledgement', () => {
+  it('reacts to a prompt as soon as it is accepted', async () => {
+    // The first card waits out the coalesce window and the agent's start. Without
+    // something sooner, the user cannot tell "working" from "ignored".
+    const h = harness();
+    const message = msg({ text: 'hello' });
+    await h.router.onMessage(message);
+
+    expect(h.channel.reactions.at(0)).toEqual({
+      op: 'add',
+      messageId: message.messageId,
+      emoji: ACK_EMOJI,
+    });
+  });
+
+  it('takes the reaction back once the turn ends', async () => {
+    const h = harness();
+    const message = msg({ text: 'hello' });
+    await h.router.onMessage(message);
+    await flush();
+
+    expect(h.channel.reactions.at(-1)).toEqual({
+      op: 'remove',
+      messageId: message.messageId,
+      emoji: ACK_EMOJI,
+    });
+  });
+
+  it('keeps the reaction while the turn is still running', async () => {
+    const h = harness();
+    await working(h);
+    expect(h.channel.reactions.map((r) => r.op)).toEqual(['add']);
+  });
+
+  it('does not react to commands, which answer for themselves', async () => {
+    const h = harness();
+    await h.router.onMessage(msg({ text: '/help' }));
+    expect(h.channel.reactions).toEqual([]);
+  });
+
+  it('does not react to a refusal', async () => {
+    const h = harness();
+    await h.router.onMessage(msg({ text: '   ' }));
+    expect(h.channel.reactions).toEqual([]);
+  });
+
+  it('still runs the prompt when the reaction cannot be added', async () => {
+    const h = harness();
+    h.channel.failNext('react', new Error('no permission for reactions'));
+    await h.router.onMessage(msg({ text: 'regardless' }));
+    await flush();
+
+    expect(h.driver.lastRuntime?.prompts.map((p) => p.text)).toEqual(['regardless']);
+    expect(h.notes.some((n) => n.includes('reaction'))).toBe(true);
+  });
+
+  it('says a prompt is queued, and how many are ahead of it', async () => {
+    // Queued prompts produce nothing until they start: `turn_submitted` is written
+    // when a turn runs, not when it is accepted. Silence there is what makes
+    // people send the same thing again.
+    const h = harness();
+    await working(h);
+
+    await h.router.onMessage(msg({ text: 'next' }));
+    await flush();
+
+    expect(lastReply(h)).toContain('Queued');
+    expect(lastReply(h)).toContain('1 ahead');
+  });
+
+  it('counts every prompt ahead, not just the running one', async () => {
+    const h = harness();
+    await working(h);
+    await h.router.onMessage(msg({ text: 'second' }));
+    await h.router.onMessage(msg({ text: 'third' }));
+    await flush();
+
+    expect(lastReply(h)).toContain('2 ahead');
+  });
+
+  it('says nothing about a queue when the session is free', async () => {
+    const h = harness();
+    await h.router.onMessage(msg({ text: 'first' }));
+    await flush();
+    expect(h.channel.texts.filter((t) => t.text.includes('Queued'))).toEqual([]);
+  });
+});
+
+describe('Router: reply placement', () => {
+  // In a busy group, an answer posted at chat scope says nothing about which
+  // question it answers. Quoting the asking message is what ties the two together.
+  const inGroup = (over: Partial<InboundMessage> = {}): InboundMessage =>
+    msg({ chatType: 'group', mentionedBot: true, ...over });
+
+  it("posts a group chat's card as a reply to the message that asked", async () => {
+    const h = harness();
+    const message = inGroup({ text: 'what changed?' });
+    await h.router.onMessage(message);
+    await cardOpened(h);
+
+    expect(h.channel.cardOpens.at(-1)?.target.replyTo).toBe(message.messageId);
+  });
+
+  it("quotes each turn's own question, not the first one", async () => {
+    const h = harness();
+    const first = inGroup({ text: 'one' });
+    const second = inGroup({ text: 'two' });
+    await h.router.onMessage(first);
+    // The first card has to be frozen before the clock moves: its last write
+    // stamps the coalesce window, and one landing after the advance would push the
+    // second card a real second out.
+    await vi.waitFor(() => expect(h.channel.cards.at(0)?.finishes).toHaveLength(1));
+    // Past the card writer's coalesce window, which it measures on this clock.
+    h.clock.advance(CARD_COALESCE_MS);
+    await h.router.onMessage(second);
+    // The writer's delay is measured on the manual clock but waited out on a real
+    // timer, so poll for the second card rather than guessing a flush count.
+    await cardOpened(h, 2);
+
+    expect(h.channel.cardOpens.map((c) => c.target.replyTo)).toEqual([
+      first.messageId,
+      second.messageId,
+    ]);
+  });
+
+  it('quotes the message a command reply answers, in a group', async () => {
+    const h = harness();
+    const message = inGroup({ text: '/help' });
+    await h.router.onMessage(message);
+    expect(h.channel.texts.at(-1)?.target.replyTo).toBe(message.messageId);
+  });
+
+  it('does not quote in a direct message, where there is only one conversation', async () => {
+    const h = harness();
+    await h.router.onMessage(msg({ text: 'hi' }));
+    await cardOpened(h);
+    await h.router.onMessage(msg({ text: '/help' }));
+
+    expect(h.channel.cardOpens.at(-1)?.target.replyTo).toBeUndefined();
+    expect(h.channel.texts.at(-1)?.target.replyTo).toBeUndefined();
+  });
+
+  it('does not quote inside a thread, which already groups the conversation', async () => {
+    const h = harness();
+    await h.router.onMessage(inGroup({ text: 'hi', threadId: 'omt_1' }));
+    await cardOpened(h);
+    expect(h.channel.cardOpens.at(-1)?.target.replyTo).toBeUndefined();
+  });
+});
+
+describe('Router: attachments', () => {
+  it('tells the user about a file the agent will not see', async () => {
+    // A skipped file used to reach only the operator log. The user believed the
+    // agent had read it; the agent never got the path.
+    const h = harness();
+    await h.router.onMessage(
+      msg({
+        text: 'summarize these',
+        attachments: [
+          { fileKey: 'f1', kind: 'image', name: 'ok.png', localPath: '/tmp/ok.png' },
+          { fileKey: 'f2', kind: 'file', name: 'huge.zip', skipped: 'too_large' },
+          { fileKey: 'f3', kind: 'file', name: 'lost.pdf', skipped: 'download_failed' },
+        ],
+      }),
+    );
+    await flush();
+
+    const notice = h.channel.texts.find((t) => t.text.includes('huge.zip'))?.text ?? '';
+    expect(notice).toContain('too large');
+    expect(notice).toContain('lost.pdf');
+    expect(notice).toContain('could not be downloaded');
+    expect(notice).not.toContain('ok.png');
+    // The rest of the message still goes through.
+    expect(h.driver.lastRuntime?.prompts.at(0)?.paths).toEqual(['/tmp/ok.png']);
+  });
+
+  it('escapes the file name it echoes back', async () => {
+    const h = harness();
+    await h.router.onMessage(
+      msg({
+        attachments: [{ fileKey: 'f1', kind: 'file', name: '<at user_id="all"></at>', skipped: 'too_large' }],
+      }),
+    );
+    await flush();
+    expect(h.channel.texts.some((t) => t.text.includes('<at user_id="all">'))).toBe(false);
+  });
+
+  it('refuses a message whose only content was a file that did not arrive', async () => {
+    const h = harness();
+    await h.router.onMessage(
+      msg({
+        text: '',
+        attachments: [{ fileKey: 'f1', kind: 'file', name: 'huge.zip', skipped: 'too_large' }],
+      }),
+    );
+    await flush();
+
+    // Nothing reached the agent, so there is nothing to burn a turn on.
+    expect(sessionCount(h)).toBe(0);
+    expect(lastReply(h)).toContain('huge.zip');
   });
 });
 
@@ -648,7 +867,7 @@ describe('Router: card actions', () => {
     const reply = await h.router.onCardAction(click(state.approvalId, 'deny', state.nonce));
     await flush();
 
-    expect(reply).toBe('Sent: deny.');
+    expect(reply).toBe('Sent: Deny.');
     expect(state.outcome()).toEqual({ kind: 'selected', optionId: 'deny' });
     const row = getApproval(h.db, state.approvalId);
     expect(row?.state).toBe('resolved');
