@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 export type Db = Database.Database;
@@ -16,6 +16,21 @@ export function openDb(path: string): Db {
   db.pragma('busy_timeout = 1000');
   db.pragma('synchronous = NORMAL');
   return db;
+}
+
+/**
+ * Read-only, for the `mt` commands (spec §2.6). It never migrates, writes or
+ * checkpoints, so a running gateway is not disturbed. A database that does not
+ * exist yet -- a fresh install -- is undefined, and is not created.
+ *
+ * When the gateway is stopped, opening a WAL database read-only may still create
+ * its -wal and -shm sidecar files. That is harmless when they belong to the
+ * gateway's user, so run mt as that user, not with sudo: root-owned sidecars
+ * would stop the gateway from opening its own database.
+ */
+export function openDbReadOnly(path: string): Db | undefined {
+  if (!existsSync(path)) return undefined;
+  return new Database(path, { readonly: true, fileMustExist: true });
 }
 
 /**

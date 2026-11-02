@@ -1,5 +1,5 @@
 import type { Db } from './open.js';
-import { txImmediate } from './open.js';
+import { openDbReadOnly, txImmediate } from './open.js';
 
 /**
  * The `workspaces` table: one row per workspace name, written the first time the
@@ -36,12 +36,7 @@ export function registerWorkspaces(
       if (row === undefined) {
         fresh.push([name, path]);
       } else if (row.root_path !== path) {
-        return {
-          error:
-            `workspace ${name} is ${row.root_path} (recorded when the name was first used), but the config ` +
-            `now resolves to ${path}. A workspace's directory never moves: the sessions opened in it would be ` +
-            'orphaned. Give the new directory a new name.',
-        };
+        return { error: movedMessage(name, row.root_path, path) };
       }
     }
 
@@ -51,4 +46,35 @@ export function registerWorkspaces(
     for (const [name, path] of fresh) insert.run(name, path, now);
     return { ok: true, added: fresh.map(([name]) => name) };
   });
+}
+
+/** The refusal for a name whose directory moved. Shared with `mt workspace add`. */
+export function movedMessage(name: string, recorded: string, path: string): string {
+  return (
+    `workspace ${name} is ${recorded} (recorded when the name was first used), but the config ` +
+    `now resolves to ${path}. A workspace's directory never moves: the sessions opened in it would be ` +
+    'orphaned. Give the new directory a new name.'
+  );
+}
+
+/** Each registered name → its recorded directory. Empty before the migrations create the table. */
+export function registeredWorkspaces(db: Db): Map<string, string> {
+  try {
+    const rows = db.prepare<[], { id: string; root_path: string }>('SELECT id, root_path FROM workspaces').all();
+    return new Map(rows.map((r) => [r.id, r.root_path]));
+  } catch (err) {
+    if (err instanceof Error && /no such table/.test(err.message)) return new Map();
+    throw err;
+  }
+}
+
+/** The registrations in the database at `dbPath`, read without disturbing a running gateway. */
+export function registrationsAt(dbPath: string): Map<string, string> {
+  const db = openDbReadOnly(dbPath);
+  if (db === undefined) return new Map();
+  try {
+    return registeredWorkspaces(db);
+  } finally {
+    db.close();
+  }
 }

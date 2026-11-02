@@ -1,5 +1,9 @@
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
-import { registerWorkspaces } from '../src/db/workspaces.js';
+import { registerWorkspaces, registrationsAt } from '../src/db/workspaces.js';
 import { testDb, type TestDb } from './helpers/db.js';
 
 const NOW = 1_760_000_000_000;
@@ -58,5 +62,37 @@ describe('registerWorkspaces', () => {
     // 'alpha' sorts before the moved name, so writing as it goes would insert it.
     registerWorkspaces(t.db, new Map([['alpha', '/srv/b'], ['default', '/srv/moved']]), NOW + 1);
     expect(rows(t).map((r) => r.id)).toEqual(['default']);
+  });
+});
+
+describe('registrationsAt', () => {
+  it('is empty for a database that does not exist, and does not create one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mt-reg-'));
+    try {
+      const path = join(dir, 'gateway.db');
+      expect(registrationsAt(path)).toEqual(new Map());
+      expect(existsSync(path)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads what the gateway registered', () => {
+    const t = db();
+    registerWorkspaces(t.db, new Map([['default', '/srv/a']]), NOW);
+    expect(registrationsAt(join(t.dir, 'gateway.db'))).toEqual(new Map([['default', '/srv/a']]));
+  });
+
+  it('is empty for a database the migrations have not reached', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mt-reg-'));
+    try {
+      const path = join(dir, 'gateway.db');
+      const raw = new Database(path);
+      raw.exec('CREATE TABLE other (a TEXT)');
+      raw.close();
+      expect(registrationsAt(path)).toEqual(new Map());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
