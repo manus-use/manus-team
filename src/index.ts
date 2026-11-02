@@ -14,6 +14,7 @@ import { SessionRegistry } from './core/registry.js';
 import { PlainDirWorkspaces } from './core/workspace.js';
 import { replyUuid } from './core/ids.js';
 import { systemClock } from './time.js';
+import { PRODUCT_NAME } from './identity.js';
 
 /**
  * Wiring, and the boot order.
@@ -75,7 +76,7 @@ export async function createGateway(config: GatewayConfig): Promise<Gateway> {
         command: config.agent.command,
         args: config.agent.args,
         env: config.agent.env,
-        clientName: 'prime-gateway',
+        clientName: PRODUCT_NAME,
       }),
     );
   }

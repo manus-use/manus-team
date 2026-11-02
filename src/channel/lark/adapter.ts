@@ -11,6 +11,7 @@ import { forPlainText, truncate } from '../escape.js';
 import { backoffMs, toChannelError } from './errors.js';
 import type { Clock } from '../../time.js';
 import { systemClock } from '../../time.js';
+import { PRODUCT_NAME } from '../../identity.js';
 
 /**
  * The Lark implementation of the outbound `Channel` port.
@@ -76,7 +77,7 @@ export class LarkAdapter implements Channel {
       // Needed because the normalizer drops fields the gateway relies on --
       // notably the sender's union_id, which is the canonical human key.
       includeRawEvent: true,
-      source: 'prime-gateway',
+      source: PRODUCT_NAME,
     });
   }
 

@@ -24,6 +24,7 @@ import type {
 } from '../types.js';
 import type { PermissionOption, TurnTerminal } from '../../types.js';
 import { spawnAgent, type SpawnedAgent } from './spawn.js';
+import { PRODUCT_NAME } from '../../identity.js';
 
 /**
  * The ACP driver.
@@ -191,7 +192,7 @@ class AcpRuntime implements AgentRuntime {
    * reported rather than hidden.
    */
   async establish(config: AcpDriverConfig, opts: StartOptions): Promise<StartResult> {
-    const app = client({ name: config.clientName ?? 'prime-gateway' })
+    const app = client({ name: config.clientName ?? PRODUCT_NAME })
       .onNotification('session/update', ({ params }) => {
         this.#onUpdate(params);
       })
