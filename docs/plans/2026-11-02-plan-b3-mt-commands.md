@@ -37,9 +37,9 @@
 - **Exit codes:**
   - `0`: done.
   - `1`: refused, or a check failed. A `ConfigError` lands here as `mt: <message>` on stderr.
-  - `2`: the command line was wrong. stderr gets the problem, then the usage.
+  - `2`: the command line was wrong. stderr gets the problem, then the usage. Bare `mt` also exits `2`, but nothing went wrong to report, so it prints the usage to stdout, as `mt help` does (which exits `0`).
 - **Locating state.** The commands find the home, the config file and the database exactly as the gateway does:
-  - the home is `MT_HOME`;
+  - the home is `MT_HOME`, else `~/.manus-team`;
   - the config file is `MT_CONFIG`, else `$MT_HOME/config.yaml`;
   - the database is `MT_DB`, else `db:`, else `$MT_HOME/gateway.db`.
 
@@ -54,8 +54,8 @@
 
 | File | Responsibility |
 |---|---|
-| `src/config.ts` (modify) | `TeamSettings`, `loadTeamSettings`; `loadConfig` built on the same pieces |
-| `src/team.ts`, `src/roles.ts` (modify) | `loadTeam(settings, env, opts)`; `LoadOptions.unsetPassEnv` |
+| `src/config.ts` (modify) | `TeamSettings`, `loadTeamSettings`; `loadConfig` built on the same pieces; `LoadOptions.unsetPassEnv` |
+| `src/team.ts`, `src/roles.ts` (modify) | `loadTeam(settings, env, opts)`, and `loadRoleDir` taking the same options |
 | `src/db/open.ts` (modify) | `openDbReadOnly` |
 | `src/db/workspaces.ts` (modify) | `registeredWorkspaces`, `registrationsAt`, `movedMessage` |
 | `src/cli/mt.ts` (create) | `runMt`, `MtIo`, usage, exit codes, `table`, `refuse` |
@@ -199,7 +199,7 @@ git commit -m "Read the team half of the configuration without needing Lark sett
 - Modify: `src/db/open.ts`, `src/db/workspaces.ts`
 - Test: `tests/workspace-registry.test.ts`
 
-The commands read the `workspaces` table opened read-only. A read-only connection never migrates, never writes and never checkpoints. A database that does not exist yet is "no registrations", and it is not created. `movedMessage` becomes shared, so `mt workspace add` refuses in the same words as startup.
+The commands read the `workspaces` table opened read-only. A read-only connection never migrates, never writes and never checkpoints. (With the gateway stopped it may still create the WAL sidecar files; the comment on `openDbReadOnly` says why that is harmless when `mt` runs as the gateway's user.) A database that does not exist yet is "no registrations", and it is not created. `movedMessage` becomes shared, so `mt workspace add` refuses in the same words as startup.
 
 - [ ] **Step 2.1: Write the failing tests.** Add to `tests/workspace-registry.test.ts`:
   - imports: `import { existsSync, mkdtempSync, rmSync } from 'node:fs';`, `import { tmpdir } from 'node:os';`, `import { join } from 'node:path';` and `import Database from 'better-sqlite3';`;
@@ -248,6 +248,11 @@ describe('registrationsAt', () => {
  * Read-only, for the `mt` commands (spec §2.6). It never migrates, writes or
  * checkpoints, so a running gateway is not disturbed. A database that does not
  * exist yet -- a fresh install -- is undefined, and is not created.
+ *
+ * When the gateway is stopped, opening a WAL database read-only may still create
+ * its -wal and -shm sidecar files. That is harmless when they belong to the
+ * gateway's user, so run mt as that user, not with sudo: root-owned sidecars
+ * would stop the gateway from opening its own database.
  */
 export function openDbReadOnly(path: string): Db | undefined {
   if (!existsSync(path)) return undefined;
@@ -307,10 +312,12 @@ git commit -m "Read registered workspaces from a database opened read-only"
 ### Task 3: A role can be loaded with unset `passEnv` names recorded, not fatal
 
 **Files:**
-- Modify: `src/roles.ts` (`loadRoleDir`, plus a new `LoadOptions`), `src/team.ts` (`loadTeam`)
+- Modify: `src/config.ts` (a new `LoadOptions` and `withUnsetRecorded`; `loadTeamSettings`, `teamSettingsFrom` and `legacyAgent` take the options), `src/roles.ts` (`loadRoleDir`), `src/team.ts` (`loadTeam`)
 - Test: `tests/team.test.ts`
 
-`mt role check` reports this shell's environment separately from the files (spec §2.6). A `passEnv` name that is not set is the environment's problem, so the check needs to load the team without failing on it. The gateway itself never passes the option.
+`mt role check` reports this shell's environment separately from the files (spec §2.6). A `passEnv` name that is not set is the environment's problem, so the check needs to load the team without failing on it. That covers both kinds of role: a role directory's `agent.passEnv`, and the legacy `agent:` block's, which `loadTeamSettings` reads. The gateway itself never passes the option.
+
+The other commands pass it too, with a collector they then ignore: `loadTeamSettings(io.env, undefined, { unsetPassEnv: [] })`. `role list`, `role create`, `workspace add` and `workspace list` need only names and paths from the settings, never the agent's environment. Without the collector, an `agent:` block naming a variable this shell does not hold would make every one of them fail, though none of them would use the value.
 
 - [ ] **Step 3.1: Write the failing test.** Add it inside `describe('loadTeam', …)` in `tests/team.test.ts`:
 
@@ -328,20 +335,22 @@ git commit -m "Read registered workspaces from a database opened read-only"
 
 - [ ] **Step 3.2: Run it to verify it fails.** `npx vitest run --project unit tests/team.test.ts`. Expected: FAIL. `loadTeam` ignores the third argument, so it throws `REVIEW_TOKEN, which is not set`.
 
-- [ ] **Step 3.3: Implement.** In `src/roles.ts`, export:
+- [ ] **Step 3.3: Implement.** In `src/config.ts`, after `passEnvValues`, export:
 
 ```ts
-/** How strictly a role is loaded. */
+/** How strictly the team is loaded. */
 export interface LoadOptions {
   /**
    * When given, a `passEnv` name that is not set is recorded here as `role: NAME`
    * instead of failing. `mt role check` reports this shell's environment apart
-   * from the files (spec §2.6). The gateway itself never passes it.
+   * from the files (spec §2.6); the other `mt` commands need only names and paths.
+   * The gateway itself never passes it.
    */
   unsetPassEnv?: string[];
 }
 
-function withUnsetRecorded(role: string, env: Env, passEnv: readonly string[], unset: string[]): Env {
+/** `env`, with each unset `passEnv` name recorded in `unset` and given a placeholder. */
+export function withUnsetRecorded(role: string, env: Env, passEnv: readonly string[], unset: string[]): Env {
   const filled: Record<string, string | undefined> = { ...env };
   for (const key of passEnv) {
     const value = env[key];
@@ -354,9 +363,40 @@ function withUnsetRecorded(role: string, env: Env, passEnv: readonly string[], u
 }
 ```
 
-Then:
-- Give `loadRoleDir` a fifth parameter, `opts: LoadOptions = {}`.
-- Replace `const fromGateway = passEnvValues(env, passEnv, \`${configPath}: agent.passEnv\`);` with:
+Then, still in `src/config.ts`:
+- Change `function legacyAgent(env: Env, file: FileConfig): AgentConfig {` to `function legacyAgent(env: Env, file: FileConfig, opts: LoadOptions = {}): AgentConfig {`.
+- In `legacyAgent`, replace `    env: agentEnv(env, file.agent.passEnv),` with:
+
+```ts
+    // The MT_/LARK_ refusal still applies to every name: passEnvValues checks it first.
+    env: agentEnv(
+      opts.unsetPassEnv === undefined
+        ? env
+        : withUnsetRecorded('default', env, file.agent.passEnv, opts.unsetPassEnv),
+      file.agent.passEnv,
+    ),
+```
+
+- Change `function teamSettingsFrom(env: Env, { home, path, text, file }: Located): TeamSettings {` to `function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: LoadOptions = {}): TeamSettings {`, and in it change `legacyAgent(env, file)` to `legacyAgent(env, file, opts)`.
+- Replace `loadTeamSettings` with:
+
+```ts
+/** The team half of the configuration, for `loadTeam` and the `mt` commands. */
+export function loadTeamSettings(
+  env: Env = process.env,
+  readFile: FileReader = readIfPresent,
+  opts: LoadOptions = {},
+): TeamSettings {
+  return teamSettingsFrom(env, locate(env, readFile), opts);
+}
+```
+
+`loadConfig` still calls `teamSettingsFrom(env, located)`, so the gateway keeps failing on an unset name.
+
+In `src/roles.ts`:
+- add `type LoadOptions` and `withUnsetRecorded` to the `./config.js` import;
+- give `loadRoleDir` a fifth parameter, `opts: LoadOptions = {}`;
+- replace `const fromGateway = passEnvValues(env, passEnv, \`${configPath}: agent.passEnv\`);` with:
 
 ```ts
   // The MT_/LARK_ refusal still applies to every name: passEnvValues checks it first.
@@ -365,7 +405,7 @@ Then:
 ```
 
 In `src/team.ts`:
-- import `type LoadOptions` from `./roles.js`;
+- add `type LoadOptions` to the `./config.js` import;
 - change the signature to `export function loadTeam(config: TeamSettings, env: Env, opts: LoadOptions = {}): Team {`;
 - pass `opts` as the fifth argument of `loadRoleDir(…)`.
 
@@ -374,7 +414,7 @@ In `src/team.ts`:
 - [ ] **Step 3.5: Commit.**
 
 ```bash
-git add src/roles.ts src/team.ts tests/team.test.ts
+git add src/config.ts src/roles.ts src/team.ts tests/team.test.ts
 git commit -m "Let a team be loaded with unset passEnv names recorded rather than fatal"
 ```
 
@@ -661,7 +701,8 @@ import { table, type MtIo } from './mt.js';
 
 /** `mt role list`: every role, its driver, where it comes from, and its description. */
 export function roleList(io: MtIo): number {
-  const settings = loadTeamSettings(io.env);
+  // Names only, so an unset agent.passEnv name is no reason to fail (Task 3).
+  const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
   const rolesDir = join(settings.home, 'roles');
   const found = discoverRoles(rolesDir);
   const rows: string[][] = [];
@@ -741,11 +782,12 @@ Spec §2.6 and §2.5. What it writes:
 What it refuses:
 - a bad name or a reserved one;
 - a role that already exists. The one exception is `default` while that role still comes from the `agent:` block;
-- `--clone-from` together with the name `default`.
+- `--clone-from` together with the name `default`;
+- a `--clone-from` source that is not a role directory. A symlinked one is not, and inside a role it copies, symlinks are skipped.
 
 When the source is the legacy `default`:
 - the agent is the `agent:` block, with any `MT_AGENT_COMMAND`/`ARGS`/`DRIVER`/`UNSUPERVISED` set in this shell applied, and it says which were applied;
-- `MT_AGENT_ENV_*` values are never copied, but their names are listed;
+- `MT_AGENT_ENV_*` values are never copied, but this shell's names are listed, with a reminder that the service may hold others;
 - `mt role create default` also prints the cutover.
 
 It writes into a dot-named staging directory, which `discoverRoles` ignores, and renames that into place, so a failure halfway leaves no half-made role.
@@ -838,7 +880,7 @@ describe('mt role create', () => {
 - [ ] **Step 6.2: Run them to verify they fail.** `npx vitest run --project unit tests/mt-role.test.ts`. Expected: the six new tests FAIL with `unknown command: role create`.
 
 - [ ] **Step 6.3: Implement.** Add to `src/cli/role.ts`. Merge the new names into the existing imports:
-- `cpSync`, `existsSync`, `mkdirSync`, `mkdtempSync`, `renameSync`, `rmSync` and `writeFileSync` from `node:fs`;
+- `cpSync`, `existsSync`, `lstatSync`, `mkdirSync`, `mkdtempSync`, `renameSync`, `rmSync` and `writeFileSync` from `node:fs`;
 - `parseDocument` and `stringify as stringifyYaml` from `yaml`;
 - `type AgentConfig` from `../config.js`;
 - `isReservedRoleName` and `nameProblem` from `../names.js`;
@@ -875,10 +917,16 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
     if (sourceProblem !== undefined) return refuse(io, sourceProblem);
   }
 
-  const settings = loadTeamSettings(io.env);
+  // Names and paths only; the agent's environment is never copied (Task 3).
+  const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
   const rolesDir = join(settings.home, 'roles');
   const dir = join(rolesDir, name);
   if (existsSync(dir)) return refuse(io, `${dir} already exists`);
+  // Only a real role directory: discoverRoles skips a symlink, so the copy cannot
+  // be pointed outside roles/ by one.
+  if (opts.cloneFrom !== undefined && !discoverRoles(rolesDir).names.includes(opts.cloneFrom)) {
+    return refuse(io, `there is no role ${opts.cloneFrom} to copy from`);
+  }
 
   const source = opts.cloneFrom ?? DEFAULT_ROLE;
   const sourceDir = join(rolesDir, source);
@@ -905,14 +953,24 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
   const staging = mkdtempSync(join(rolesDir, `.${name}-`));
   try {
     writeFileSync(join(staging, 'config.yaml'), configText);
+    // Symlinks are never followed, as discoverRoles and loadRoleDir never follow
+    // them: a link would copy whatever it points at into the new role.
     const roleMd = copyDir === undefined ? undefined : join(copyDir, 'role.md');
     writeFileSync(
       join(staging, 'role.md'),
-      roleMd !== undefined && existsSync(roleMd) ? readFileSync(roleMd, 'utf8') : starterRoleMd(name),
+      roleMd !== undefined && lstatSync(roleMd, { throwIfNoEntry: false })?.isFile() === true
+        ? readFileSync(roleMd, 'utf8')
+        : starterRoleMd(name),
     );
     const skills = copyDir === undefined ? undefined : join(copyDir, 'skills');
-    if (skills !== undefined && existsSync(skills)) cpSync(skills, join(staging, 'skills'), { recursive: true });
-    else mkdirSync(join(staging, 'skills'));
+    if (skills !== undefined && lstatSync(skills, { throwIfNoEntry: false })?.isDirectory() === true) {
+      cpSync(skills, join(staging, 'skills'), {
+        recursive: true,
+        filter: (src) => !lstatSync(src).isSymbolicLink(),
+      });
+    } else {
+      mkdirSync(join(staging, 'skills'));
+    }
     // Never cloned (spec §2.5): one credential with two owners is how a rotated
     // refresh token gets revoked for the other.
     writeFileSync(join(staging, '.env'), '', { mode: 0o600, flag: 'wx' });
@@ -959,6 +1017,8 @@ function reportLegacyCopy(dir: string, io: MtIo): void {
     io.out(`put them in ${join(dir, '.env')} as:`);
     for (const key of secrets) io.out(`  ${key.slice(AGENT_ENV_PREFIX.length)}=...`);
   }
+  // Always, even when this shell holds none: the service may hold some this shell does not.
+  io.out("  (only this shell's MT_AGENT_ENV_* names are listed; check the service's environment for others)");
 }
 
 function reportCutover(dir: string, configPath: string | undefined, io: MtIo): void {
@@ -970,7 +1030,7 @@ function reportCutover(dir: string, configPath: string | undefined, io: MtIo): v
   );
   io.out('  3. run mt role check');
   io.out('  4. restart the gateway');
-  io.out('until 1 and 2 are done the gateway will not start: it refuses to run with the role default defined twice');
+  io.out('until step 2 is done the gateway will not start: it refuses to run with the role default defined twice');
 }
 ```
 
@@ -1006,9 +1066,9 @@ git commit -m "Add mt role create, copying from the agent block or another role 
 
 The check runs the startup validation (spec §2.6). It loads the team settings and the team, checks each role's `.env`, and refuses any workspace name the database recorded for a different directory. It reports in two parts:
 - **Files:** problems that come from the files.
-- **This shell's environment:** unset `passEnv` names, and anything that only goes wrong because of this shell's `MT_AGENT_*` variables. A problem counts as the environment's if it disappears when those variables are removed.
+- **This shell's environment:** unset `passEnv` names, in a role directory or in the `agent:` block, and anything that goes wrong because of this shell's `MT_AGENT_*` variables. An error counts as the files' only when the same error remains after those variables are removed. Otherwise it is the environment's, even if the run without them fails some other way: an environment-only deployment, without its variables, has no role default, and that is not a file problem.
 
-The output notes that the service's environment may differ. With a name, the check also confirms that role exists. The rest of the team is checked as well, because startup checks all of it.
+Any notes startup would log, such as an entry under `roles/` that is ignored, are printed as `note: …`. The last line notes that the service's environment may differ. With a name, the check also confirms that role exists. The rest of the team is checked as well, because startup checks all of it.
 
 - [ ] **Step 7.1: Write the failing tests.** Add to `tests/mt-role.test.ts`:
   - imports: `openDb` and `migrate` from `../src/db/open.js`, `registerWorkspaces` from `../src/db/workspaces.js`, and `SCHEMA_DIR` from `./helpers/db.js`;
@@ -1069,10 +1129,28 @@ describe('mt role check', () => {
     expect(r.code).toBe(1);
     expect(r.out).toMatch(/there is no role nobody/);
   });
+
+  it("reports an unset passEnv name in the gateway's agent: block as this shell's, apart from the files", async () => {
+    fx = mtFixture((ws) =>
+      [
+        `workspace: ${ws}`,
+        'agent:',
+        '  driver: structured-cli',
+        '  command: bytesec',
+        '  unsupervised: true',
+        '  passEnv: [SVC_TOKEN]',
+        '',
+      ].join('\n'),
+    );
+    const r = await fx.run(['role', 'check']);
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^files: ok$/m);
+    expect(r.out).toMatch(/role default names SVC_TOKEN in agent.passEnv, and it is not set in this shell/);
+  });
 });
 ```
 
-- [ ] **Step 7.2: Run them to verify they fail.** `npx vitest run --project unit tests/mt-role.test.ts`. Expected: the six new tests FAIL with `unknown command: role check`.
+- [ ] **Step 7.2: Run them to verify they fail.** `npx vitest run --project unit tests/mt-role.test.ts`. Expected: the seven new tests FAIL with `unknown command: role check`.
 
 - [ ] **Step 7.3: Implement.** Add to `src/cli/role.ts`:
 - **Imports:** add `ConfigError` and `type Env` to the `../config.js` import. Add `loadTeam` from `../team.js`, and `movedMessage` and `registrationsAt` from `../db/workspaces.js`.
@@ -1083,23 +1161,29 @@ interface Attempt {
   error?: string;
   /** `role: NAME` for each passEnv name not set in the environment checked. */
   unset: string[];
+  /** What startup would log: entries under roles/ that were ignored, and why. */
+  notes: readonly string[];
 }
 
 /** One run of the startup validation against `env`. Never throws a ConfigError. */
 function attempt(env: Env, only: string | undefined): Attempt {
   const unset: string[] = [];
+  let notes: readonly string[] = [];
   try {
-    const settings = loadTeamSettings(env);
+    // The same collector for the agent: block and the role directories, so an
+    // unset name is reported, under the role that names it, whichever defines it.
+    const settings = loadTeamSettings(env, undefined, { unsetPassEnv: unset });
     const team = loadTeam(settings, env, { unsetPassEnv: unset });
-    if (only !== undefined && !team.roles.has(only)) return { error: `there is no role ${only}`, unset };
+    notes = team.notes;
+    if (only !== undefined && !team.roles.has(only)) return { error: `there is no role ${only}`, unset, notes };
     const recorded = registrationsAt(settings.dbPath);
     for (const [name, path] of team.workspaces) {
       const was = recorded.get(name);
-      if (was !== undefined && was !== path) return { error: movedMessage(name, was, path), unset };
+      if (was !== undefined && was !== path) return { error: movedMessage(name, was, path), unset, notes };
     }
-    return { unset: only === undefined ? unset : unset.filter((u) => u.startsWith(`${only}: `)) };
+    return { unset: only === undefined ? unset : unset.filter((u) => u.startsWith(`${only}: `)), notes };
   } catch (err) {
-    if (err instanceof ConfigError) return { error: err.message, unset };
+    if (err instanceof ConfigError) return { error: err.message, unset, notes };
     throw err;
   }
 }
@@ -1125,16 +1209,17 @@ export function roleCheck(only: string | undefined, io: MtIo): number {
     return `role ${role} names ${key} in agent.passEnv, and it is not set in this shell`;
   });
   if (real.error !== undefined) {
+    // The files are at fault only when the error survives removing this shell's
+    // MT_AGENT_* variables unchanged. A different error from the stripped run is
+    // not a file problem either: an environment-only deployment, stripped, has
+    // no role default at all.
     const stripped = attempt(withoutAgentVariables(io.env), only);
-    if (stripped.error === real.error) {
-      files.push(real.error);
-    } else {
-      environment.push(real.error);
-      if (stripped.error !== undefined) files.push(stripped.error);
-    }
+    if (stripped.error === real.error) files.push(real.error);
+    else environment.push(real.error);
   }
   report('files', files, io);
   report("this shell's environment", environment, io);
+  for (const note of real.notes) io.out(`note: ${note}`);
   io.out("note: the environment was checked in this shell; the service's environment may differ");
   return files.length + environment.length === 0 ? 0 : 1;
 }
@@ -1159,7 +1244,7 @@ In `src/cli/mt.ts`, import `roleCheck` and add:
     }
 ```
 
-- [ ] **Step 7.4: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  515 passed (515)`; `npm run typecheck` → no output.
+- [ ] **Step 7.4: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  516 passed (516)`; `npm run typecheck` → no output.
 
 - [ ] **Step 7.5: Commit.**
 
@@ -1183,12 +1268,12 @@ Spec §2.6. The command adds the name to `workspaces:` in the config file, editi
 - a name the database recorded for a different directory;
 - anything else the next start would refuse.
 
-It also refuses when there is no config file. The file is written to a temporary file next to it and renamed into place, with the original's mode.
+It also refuses when there is no config file. The file is written to a temporary file next to it and renamed into place, with the original's mode. If that write fails, the temporary file is removed, and so is a clone made for the new workspace.
 
 - [ ] **Step 8.1: Write the failing tests.** Create `tests/mt-workspace.test.ts`:
 
 ```ts
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
@@ -1262,6 +1347,14 @@ describe('mt workspace add', () => {
     expect((await fx.run(['workspace', 'add', 'Docs', docsDir()])).code).toBe(1);
     expect((await fx.run(['workspace', 'add', 'docs'])).code).toBe(2);
   });
+
+  it('reports a config file the gateway would refuse as mt: <message>, exit 1', async () => {
+    fx = mtFixture();
+    appendFileSync(fx.configPath, 'bogus: 1\n');
+    const r = await fx.run(['workspace', 'add', 'docs', docsDir()]);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/^mt: .*unknown setting bogus/);
+  });
 });
 ```
 
@@ -1273,7 +1366,7 @@ describe('mt workspace add', () => {
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseDocument } from 'yaml';
+import { isMap, parseDocument } from 'yaml';
 import { loadTeamSettings } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { nameProblem } from '../names.js';
@@ -1284,7 +1377,8 @@ export type AddTarget = { path: string } | { cloneUrl: string };
 
 /** `mt workspace add` (spec §2.6). Refuses anything the next start would refuse. */
 export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): Promise<number> {
-  const settings = loadTeamSettings(io.env);
+  // Names and paths only, so an unset agent.passEnv name is no reason to fail (Task 3).
+  const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
   if (settings.configPath === undefined) {
     return refuse(
       io,
@@ -1343,8 +1437,17 @@ export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): P
     return refuse(io, movedMessage(name, recorded, real));
   }
 
+  // `workspaces:` with no value parses as null, and setIn cannot add to it. Any
+  // other non-map was already refused by loadTeamSettings, so this replaces only
+  // a missing or empty key.
+  if (!isMap(doc.get('workspaces'))) doc.set('workspaces', doc.createNode({}));
   doc.setIn(['workspaces', name], path);
-  writeInPlace(configPath, String(doc));
+  try {
+    writeInPlace(configPath, String(doc));
+  } catch (err) {
+    undo();
+    throw err;
+  }
   io.out(`added workspace ${name} (${real}) to ${configPath}; the gateway uses it from its next start`);
   return 0;
 }
@@ -1353,8 +1456,13 @@ export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): P
 function writeInPlace(path: string, text: string): void {
   const real = realpathSync(path);
   const tmp = `${real}.mt-${process.pid}.tmp`;
-  writeFileSync(tmp, text, { mode: statSync(real).mode & 0o777, flag: 'wx' });
-  renameSync(tmp, real);
+  try {
+    writeFileSync(tmp, text, { mode: statSync(real).mode & 0o777, flag: 'wx' });
+    renameSync(tmp, real);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 const runGit: Git = (args) =>
@@ -1378,11 +1486,13 @@ In `src/cli/mt.ts`, import `workspaceAdd` and add:
       if (name === undefined || extra !== undefined || (path === undefined) === (values.clone === undefined)) {
         throw new UsageError('workspace add takes a name and either an absolute path or --clone <git-url>');
       }
-      return workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, io);
+      // `await`, so a ConfigError from the async command is caught below and
+      // reported as `mt: …` rather than escaping as a stack trace.
+      return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, io);
     }
 ```
 
-- [ ] **Step 8.4: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  521 passed (521)`; `npm run typecheck` → no output.
+- [ ] **Step 8.4: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  523 passed (523)`; `npm run typecheck` → no output.
 
 - [ ] **Step 8.5: Commit.**
 
@@ -1454,7 +1564,7 @@ describe('mt workspace add --clone', () => {
 
 - [ ] **Step 9.2: Run them.** `npx vitest run --project unit tests/mt-workspace.test.ts`. Expected: all pass. To prove the cleanup test can fail, temporarily delete the `rmSync(path, …)` line in the `result.code !== 0` branch and watch the second test fail; then restore the line.
 
-- [ ] **Step 9.3: Run everything.** `npm test 2>&1 | tail -4` → `Tests  524 passed (524)`; `npm run typecheck` → no output.
+- [ ] **Step 9.3: Run everything.** `npm test 2>&1 | tail -4` → `Tests  526 passed (526)`; `npm run typecheck` → no output.
 
 - [ ] **Step 9.4: Commit.**
 
@@ -1497,7 +1607,8 @@ describe('mt workspace list', () => {
 ```ts
 /** `mt workspace list`: each workspace, and whether the gateway has registered it. */
 export function workspaceList(io: MtIo): number {
-  const settings = loadTeamSettings(io.env);
+  // Names and paths only, so an unset agent.passEnv name is no reason to fail (Task 3).
+  const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
   const recorded = registrationsAt(settings.dbPath);
   const rows: string[][] = [];
   for (const name of Object.keys(settings.workspaces).sort()) {
@@ -1534,7 +1645,7 @@ In `src/cli/mt.ts`, import `workspaceList` and add:
     }
 ```
 
-- [ ] **Step 10.4: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  525 passed (525)`; `npm run typecheck` → no output.
+- [ ] **Step 10.4: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  527 passed (527)`; `npm run typecheck` → no output.
 
 - [ ] **Step 10.5: Commit.**
 
@@ -1612,6 +1723,6 @@ Do **not** run `role create` or `workspace add` against the real home.
 
 ## Done when
 
-- `npm test` → `Tests  525 passed (525)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
+- `npm test` → `Tests  527 passed (527)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` → no output.
 - Task 11.2 prints what it expects.
