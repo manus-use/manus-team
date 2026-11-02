@@ -6,10 +6,10 @@
 
 **Architecture:**
 - **The registry.** A process-wide registry of known secrets lives in `src/secrets.ts`. It ignores values shorter than 8 characters. Its one masking function is `redactKnownSecrets`.
-- **Layer 1, the escapers.** `forDisplay`, `forMarkdown` and `forPlainText` mask before they escape. This is the authoritative layer for chat.
+- **Layer 1, the escapers.** `forDisplay`, `forMarkdown` and `forPlainText` strip control characters, then mask, then escape. This is the authoritative layer for chat.
 - **Streaming cards.** A card re-renders as an answer streams in, so a secret can arrive in two pieces. `renderCard` therefore masks the joined answer and drops any trailing text that is the start of a secret.
-- **Layer 3, writes.** `appendEvents` and `createApproval` mask string values in their payloads before storing them. Identifying fields are left alone, and so is a person's `turn_submitted` input.
-- **Startup.** The registry is filled when the gateway starts.
+- **Layer 3, writes.** `appendEvents` and `createApproval` mask string values in their payloads before storing them. Identifying fields are left alone, and so are the `text` and `paths` of a person's `turn_submitted`.
+- **Startup.** The registry is filled when the gateway starts. The operator log and the startup and shutdown errors are masked.
 
 The registry is shaped so that plan C can add and remove worker tokens later.
 
@@ -51,9 +51,10 @@ The registry is shaped so that plan C can add and remove worker tokens later.
 | `src/channel/render.ts` (modify) | `renderCard` masks the joined answer and withholds a trailing secret prefix |
 | `src/db/events.ts`, `src/db/approvals.ts` (modify) | mask payloads on write |
 | `src/roles.ts`, `src/team.ts` (modify) | `Role.secretValues` honours `maskExempt` |
-| `src/index.ts` (modify) | fill the registry at startup; the operator log is masked |
-| `docs/architecture.md`, `README.md` (modify) | "pure given the secret set"; what is masked |
-| `tests/secrets.test.ts` (create); `tests/escape.test.ts`, `tests/render.test.ts`, `tests/db.test.ts`, `tests/roles.test.ts`, `tests/team.test.ts`, `tests/gateway-startup.test.ts` (modify) | |
+| `src/index.ts`, `src/main.ts` (modify) | fill the registry at startup; the operator log and the startup and shutdown errors are masked |
+| `src/core/session-actor.ts`, `src/core/router.ts` (modify) | the two replies that skipped an escaper go through `forDisplay` |
+| `docs/architecture.md` (check), `README.md` (modify) | "pure given the secret set" is already there; what is masked |
+| `tests/secrets.test.ts` (create); `tests/escape.test.ts`, `tests/render.test.ts`, `tests/db.test.ts`, `tests/roles.test.ts`, `tests/team.test.ts`, `tests/gateway-startup.test.ts`, `tests/router.test.ts`, `tests/session-actor.test.ts` (modify) | |
 
 ---
 
@@ -169,6 +170,7 @@ const MIN_PREFIX_LENGTH = 4;
 /**
  * Keys whose values identify rather than say something. They are left alone, as
  * identifying columns are: masking an id would break the lookups that use it.
+ * Workspace and assignee names identify too (spec §10.1).
  */
 const IDENTIFYING_KEYS: ReadonlySet<string> = new Set([
   'approvalId',
@@ -181,6 +183,14 @@ const IDENTIFYING_KEYS: ReadonlySet<string> = new Set([
   'turnId',
   'sessionId',
   'idempotencyKey',
+  'conversationId',
+  'threadId',
+  'owner',
+  'role',
+  'workspace',
+  'sender',
+  'resolvedBy',
+  'resolvedVia',
 ]);
 
 const secrets = new Set<string>();
@@ -281,7 +291,7 @@ git commit -m "Keep a registry of the secrets the gateway knows, and mask them"
 **Files:**
 - Modify: `src/channel/escape.ts`, `tests/escape.test.ts`
 
-Every piece of text that reaches chat goes through one of the three escapers. Call sites escape each piece before joining it into a reply, so masking inside the escaper is the one place that always runs before escaping. That order matters: escaping rewrites `_` and other characters, and a secret that contains one would no longer match afterwards.
+Every piece of text that reaches chat goes through one of the three escapers. Call sites escape each piece before joining it into a reply, so masking inside the escaper is the one place that always runs before escaping. That order matters: escaping rewrites `_` and other characters, and a secret that contains one would no longer match afterwards. Stripping control characters comes first for the same reason: a secret with one inside it matches only once it is gone.
 
 - [ ] **Step 2.1: Write the failing tests.** Add to `tests/escape.test.ts`:
   - imports: `beforeEach` from `vitest`, and `MASK`, `addSecrets` and `clearSecrets` from `../src/secrets.js`;
@@ -303,8 +313,10 @@ describe('the escapers mask known secrets before escaping', () => {
     expect(forMarkdown('**key** sk_live_abc123')).toBe(`**key** ${MASK}`);
   });
 
-  it('forPlainText masks', () => {
+  it('forPlainText masks, even a secret with a control character inside it', () => {
     expect(forPlainText('sk_live_abc123')).toBe(MASK);
+    // Stripped first, so the control character cannot stop the secret matching.
+    expect(forPlainText('sk_live\u0007_abc123')).toBe(MASK);
   });
 });
 ```
@@ -312,12 +324,12 @@ describe('the escapers mask known secrets before escaping', () => {
 - [ ] **Step 2.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/escape.test.ts`. Expected: the three new tests FAIL, for example `expected 'key sk\\_live\\_abc123' to be 'key ••••'`.
 
 - [ ] **Step 2.3: Implement.** In `src/channel/escape.ts`:
-  - add `import { redactKnownSecrets } from '../secrets.js';`;
-  - change the three escapers:
-    - `forDisplay` returns `escapeMd(stripControl(redactKnownSecrets(text)))`;
-    - in `forMarkdown`, `stripControl(text)` becomes `stripControl(redactKnownSecrets(text))`;
-    - `forPlainText` returns `stripControl(redactKnownSecrets(text))`;
-  - add one sentence to each of their doc comments: "Known secrets are masked first (spec §10.1): escaping changes characters a secret may contain, so masking afterwards would miss it."
+  - add `import { redactKnownSecrets } from '../secrets.js';` after the module's header comment;
+  - change the three escapers. Control characters are stripped before masking, so that one inside a secret cannot stop it matching:
+    - `forDisplay` returns `escapeMd(redactKnownSecrets(stripControl(text)))`;
+    - in `forMarkdown`, `stripControl(text).replace(` becomes `redactKnownSecrets(stripControl(text)).replace(`;
+    - `forPlainText` returns `redactKnownSecrets(stripControl(text))`;
+  - add one sentence to each of their doc comments: "Known secrets are masked after control characters are stripped and before anything is escaped (spec §10.1): a control character inside a secret would stop it matching, and escaping changes characters a secret may contain."
 
   Do not touch `mask()` or `escapeMd()`.
 
@@ -403,8 +415,8 @@ git commit -m "Never show the start of a secret on a card that is still streamin
 - Modify: `src/db/events.ts` (`appendEvents`), `src/db/approvals.ts` (`createApproval`), `tests/db.test.ts`
 
 This layer is best effort: a secret split across chunks is stored in two halves, and neither matches. It reduces how much reaches the database, and layer 1 stays the authoritative one. Two things are deliberately not masked:
-- **`turn_submitted`'s `input`.** It is what replay re-sends to the agent, and masking it would re-send `••••` in place of a value the person gave on purpose. Layer 1 still masks it wherever it is shown.
-- **Identifying values.** See `IDENTIFYING_KEYS`.
+- **`turn_submitted`'s `text` and `paths`.** The payload `src/core/session-actor.ts` writes is `{ text, paths, messageId, replyTo? }`, and `text` and `paths` are what replay re-sends to the agent (`#replayInputs`). Masking them would re-send `••••` in place of a value the person gave on purpose. Layer 1 still masks them wherever they are shown. The payload's other keys are masked as usual.
+- **Identifying values.** See `IDENTIFYING_KEYS`. Option ids are among them, so an approval's `options` are masked value by value too: their names come from the agent.
 
 - [ ] **Step 4.1: Write the failing tests.** Add to `tests/db.test.ts`:
   - imports: `MASK`, `addSecrets` and `clearSecrets` from `../src/secrets.js`;
@@ -431,13 +443,13 @@ describe('masking on write', () => {
   });
 
   it("keeps a person's turn_submitted input as given, since replay re-sends it", () => {
-    const payload = { input: { text: 'use sk-test-123456', paths: [] }, messageId: 'om_1' };
+    const payload = { text: 'use sk-test-123456', paths: ['/tmp/sk-test-123456'], messageId: 'om_1', replyTo: 'om_0' };
     appendEvent(h.db, 's_1', { type: 'turn_submitted', actor: 'user', payload }, NOW);
     const [event] = readEvents(h.db, 's_1', 0, lastSeq(h.db, 's_1'));
     expect(event?.payload).toEqual(payload);
   });
 
-  it('masks an approval payload and action, but not its ids', () => {
+  it('masks an approval payload, action and option names, but not its ids', () => {
     createApproval(
       h.db,
       {
@@ -447,49 +459,55 @@ describe('masking on write', () => {
         generation: 0,
         action: 'run with sk-test-123456',
         payload: { command: 'curl -H sk-test-123456' },
-        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        options: [{ optionId: 'sk-test-123456', name: 'Allow sk-test-123456', kind: 'allow_once' }],
       },
       NOW,
     );
     const row = getApproval(h.db, 'ap_1');
     expect(row?.action).toBe(`run with ${MASK}`);
     expect(row?.payload).toEqual({ command: `curl -H ${MASK}` });
+    expect(row?.options).toEqual([{ optionId: 'sk-test-123456', name: `Allow ${MASK}`, kind: 'allow_once' }]);
   });
 });
 ```
 
-If `beforeEach` or `afterEach` is not yet imported from `vitest` in that file, add it. The `PermissionOption` shape, `turn_submitted`'s real payload keys, and the field names on the row `getApproval` returns may differ from the test above. Check `src/types.ts`, the `turn_submitted` producer in `src/core/session-actor.ts` and the `ApprovalRow` decoder, and adapt the test to the real names, keeping what each assertion checks.
+`beforeEach` and `afterEach` are already imported from `vitest` in that file. The names above are the real ones: `PermissionOption` is `{ optionId, name, kind? }` in `src/types.ts`, and the `ApprovalRow` decoder in `src/db/approvals.ts` returns `options` parsed back into that shape.
 
-- [ ] **Step 4.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/db.test.ts`. Expected: the first and third tests FAIL because the values are stored unmasked. The second passes already; it guards the exception.
+- [ ] **Step 4.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/db.test.ts`. Expected: the first and third tests FAIL because the values are stored unmasked. The second passes already; it guards the exception for `text` and `paths`.
 
 - [ ] **Step 4.3: Implement.** In `src/db/events.ts`:
-  - add `import { redactValues } from '../secrets.js';`;
+  - add `import { redactValues } from '../secrets.js';` after the `../types.js` import;
   - in `appendEvents`, replace `payload: e.payload,` in the `row` object with `payload: storedPayload(e),`;
-  - add the helper below.
+  - add the helper below at the end of the file.
 
 ```ts
 /**
  * Masked value by value, before it is stored (spec §10.1 layer 3). Best effort: a
  * secret streamed across two chunks matches neither, and layer 1, the escapers,
- * masks it when shown. A person's turn_submitted input is kept as given, because
- * replay re-sends it to the agent.
+ * masks it when shown. A person's turn_submitted input, its `text` and `paths`, is
+ * kept as given, because replay re-sends it to the agent (#replayInputs).
  */
 function storedPayload(e: NewEvent): unknown {
   if (e.type !== 'turn_submitted' || e.payload === null || typeof e.payload !== 'object') {
     return redactValues(e.payload);
   }
-  const { input, ...rest } = e.payload as Record<string, unknown>;
-  return { ...(redactValues(rest) as Record<string, unknown>), ...(input === undefined ? {} : { input }) };
+  const { text, paths, ...rest } = e.payload as Record<string, unknown>;
+  return {
+    ...(redactValues(rest) as Record<string, unknown>),
+    ...(text === undefined ? {} : { text }),
+    ...(paths === undefined ? {} : { paths }),
+  };
 }
 ```
 
 The returned `Event` then carries the masked payload, which is what is stored, so callers see the stored truth.
 
 In `src/db/approvals.ts`:
-- add `import { redactKnownSecrets, redactValues } from '../secrets.js';`;
-- in `createApproval`'s `.run(...)`, replace `a.action,` with `redactKnownSecrets(a.action),`, and `JSON.stringify(a.payload ?? null),` with `JSON.stringify(redactValues(a.payload ?? null)),`.
-
-Leave `options` as it is: option ids identify.
+- add `import { redactKnownSecrets, redactValues } from '../secrets.js';` after the last import;
+- in `createApproval`'s `.run(...)`, make three replacements:
+  - `a.action,` becomes `redactKnownSecrets(a.action),`;
+  - `JSON.stringify(a.payload ?? null),` becomes `JSON.stringify(redactValues(a.payload ?? null)),`;
+  - `JSON.stringify(a.options),` becomes `JSON.stringify(redactValues(a.options)),`. Option names come from the agent; `optionId` is in `IDENTIFYING_KEYS`, so the ids stay as they are.
 
 - [ ] **Step 4.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  556 passed (556)`. Then run `npm run typecheck`. Expected: no output.
 
@@ -505,24 +523,25 @@ git commit -m "Mask known secrets in event and approval payloads before they are
 ### Task 5: A role's secrets honour `maskExempt`, and startup fills the registry
 
 **Files:**
-- Modify: `src/roles.ts`, `src/team.ts`, `src/index.ts`, `tests/roles.test.ts`, `tests/team.test.ts`, `tests/gateway-startup.test.ts`
+- Modify: `src/roles.ts`, `src/team.ts`, `src/index.ts`, `src/main.ts`, `tests/roles.test.ts`, `tests/team.test.ts`, `tests/gateway-startup.test.ts`
 
 `Role.secretValues` exists since B1 but nothing uses it, and it ignores `maskExempt`. A role lists in `maskExempt` the names whose values are long but not secret, such as `ANTHROPIC_BASE_URL`. Masking those would hide a URL in every answer that mentions it.
 
 - [ ] **Step 5.1: Write the failing tests.**
 
-  In `tests/roles.test.ts`, add a test in the style of that file's existing `loadRoleDir` tests. Use its helpers for writing a role directory, a `.env` at mode 0600, and an env object:
-  - the role's config has `passEnv: [BASE_URL]` and `maskExempt: [BASE_URL]`;
-  - its `.env` holds `API_KEY=sk-role-12345678`;
-  - the env passed has `BASE_URL: 'https://example.invalid/v1'`.
-
-  Assert:
+  In `tests/roles.test.ts`, insert this test directly before the test "refuses a .env other users can read". It uses the file's `role`, `AGENT` and `load` helpers, and `writeFileSync`, `chmodSync` and `join`, which it already imports:
 
 ```ts
-    expect(role.secretValues).toEqual(['sk-role-12345678']);
+  it("leaves the values of maskExempt names out of the role's secrets", () => {
+    const dir = role('r', `${AGENT}  passEnv: [BASE_URL]\n  maskExempt: [BASE_URL]\n`);
+    writeFileSync(join(dir, '.env'), 'API_KEY=sk-role-12345678\n');
+    chmodSync(join(dir, '.env'), 0o600);
+    const { role: r } = load('r', { BASE_URL: 'https://example.invalid/v1' });
+    expect(r.secretValues).toEqual(['sk-role-12345678']);
+  });
 ```
 
-  In `tests/team.test.ts`, add:
+  In `tests/team.test.ts`, add this as the first test of `describe('loadTeam', ...)`:
 
 ```ts
   it("keeps the agent: block's maskExempt names out of the role default's secrets", () => {
@@ -536,7 +555,7 @@ git commit -m "Mask known secrets in event and approval payloads before they are
   In `tests/gateway-startup.test.ts`:
   - import `MASK`, `clearSecrets` and `redactKnownSecrets` from `../src/secrets.js`;
   - call `clearSecrets()` at the start of `beforeEach`;
-  - add the test below. It needs the config's `LARK_APP_SECRET` to be at least 8 characters; `app-secret` is 10.
+  - add the test below as the first test of `describe('createGateway', ...)`. It needs the config's `LARK_APP_SECRET` to be at least 8 characters; `app-secret` is 10.
 
 ```ts
   it('knows the Lark app secret once it has started up', async () => {
@@ -566,7 +585,13 @@ export function secretValuesOf(env: Readonly<Record<string, string>>, maskExempt
 }
 ```
 
-  In `loadRoleDir`, compute `maskExempt` once as a local, and use the local in the `agent` object. Then replace the `secretValues:` expression and its comment with:
+  In `loadRoleDir`, compute `maskExempt` once as a local, directly after `const { skills, notes } = readSkills(dir);`, so the checks run in the same order as before:
+
+```ts
+  const maskExempt = strings(configPath, 'agent.maskExempt', agentRaw['maskExempt']);
+```
+
+  In the `agent` object, `maskExempt: strings(configPath, 'agent.maskExempt', agentRaw['maskExempt']),` becomes `maskExempt,`. Then replace the `secretValues:` expression and its comment with:
 
 ```ts
       // Empty values are not secrets, and the registry ignores short ones (spec §10.1).
@@ -577,8 +602,9 @@ export function secretValuesOf(env: Readonly<Record<string, string>>, maskExempt
 
   In `src/index.ts`:
   - import `addSecrets` and `redactKnownSecrets` from `./secrets.js`;
-  - add the block below directly after `for (const line of team.notes) note(line);`;
-  - change `note`'s body to write `redactKnownSecrets(line)`. Errors that `note` prints can carry an agent's stderr, which can carry a secret.
+  - add the block below directly after `for (const line of team.notes) note(line);`, with a blank line before it and after it;
+  - change `note`'s body to write `redactKnownSecrets(line)`. Errors that `note` prints can carry an agent's stderr, which can carry a secret;
+  - in `main`'s `shutdown`, `` `shutdown failed: ${String(err)}\n` `` becomes `` `shutdown failed: ${redactKnownSecrets(String(err))}\n` ``.
 
 ```ts
   // Every secret the gateway itself holds, masked wherever text leaves it (spec
@@ -587,12 +613,22 @@ export function secretValuesOf(env: Readonly<Record<string, string>>, maskExempt
   addSecrets([config.lark.appSecret, ...[...team.roles.values()].flatMap((role) => role.secretValues)]);
 ```
 
+  In `src/main.ts`:
+  - add `import { redactKnownSecrets } from './secrets.js';` after the `./index.js` import;
+  - replace the `failed to start` write with the one below. A startup error can quote a role's environment.
+
+```ts
+  process.stderr.write(
+    `failed to start: ${redactKnownSecrets(err instanceof Error ? (err.stack ?? err.message) : String(err))}\n`,
+  );
+```
+
 - [ ] **Step 5.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  559 passed (559)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 5.5: Commit.**
 
 ```bash
-git add src/roles.ts src/team.ts src/index.ts tests/roles.test.ts tests/team.test.ts tests/gateway-startup.test.ts
+git add src/roles.ts src/team.ts src/index.ts src/main.ts tests/roles.test.ts tests/team.test.ts tests/gateway-startup.test.ts
 git commit -m "Register the gateway's own secrets at startup, leaving out maskExempt names"
 ```
 
@@ -601,30 +637,99 @@ git commit -m "Register the gateway's own secrets at startup, leaving out maskEx
 ### Task 6: No other path to chat, and the docs
 
 **Files:**
-- Modify: `docs/architecture.md`, `README.md`
-- Possibly modify: any call site found in Step 6.1
+- Modify: `src/core/session-actor.ts`, `src/core/router.ts`, `tests/session-actor.test.ts`, `tests/router.test.ts`
+- Modify: `README.md`; check `docs/architecture.md`
 
-- [ ] **Step 6.1: Audit what reaches chat without an escaper.** Run:
+Two replies reach chat without an escaper, and both can carry text the gateway did not write:
+- the approval toasts in `SessionActor.resolveFromCard`, "Already answered (...)" and "Sent: ...", quote an option's label, which comes from the agent;
+- `/attach`'s refusal in the router quotes the session id the person typed: `No session ${sessionId}.`
 
-```bash
-git grep -n -E "sendText\(|updateApproval|openCard|\.set\(|finish\(" -- src/channel src/core src/index.ts
+- [ ] **Step 6.1: Write the failing tests.**
+
+  In `tests/router.test.ts`:
+  - import `MASK`, `addSecrets` and `clearSecrets` from `../src/secrets.js`;
+  - in the test "passes an attach refusal straight through to the chat", the refusal is now escaped, so `toBe('No session s_nope.')` becomes `toBe('No session s\\_nope.')`;
+  - add this test directly after it:
+
+```ts
+  it('masks a known secret in an attach refusal', async () => {
+    clearSecrets();
+    addSecrets(['sk-test-123456']);
+    try {
+      const h = harness();
+      await h.router.onMessage(msg({ text: '/attach sk-test-123456' }));
+      expect(lastReply(h)).toContain(`No session ${MASK}.`);
+    } finally {
+      clearSecrets();
+    }
+  });
 ```
 
-For each call that sends text to Lark, check that every piece of that text comes from one of these:
-- gateway-authored constants;
-- ids;
-- `forDisplay`, `forMarkdown` or `forPlainText`.
+  In `tests/session-actor.test.ts`:
+  - import `MASK`, `addSecrets` and `clearSecrets` from `../src/secrets.js`;
+  - in `describe('approvals', ...)`, add this test directly after "names the chosen option by its label". It uses that block's `parked` and `click` helpers.
 
-Pay particular attention to:
-- command replies in `src/core/commands.ts` and `src/core/router.ts`;
-- boot findings in `src/index.ts`;
-- `src/channel/card-writer.ts`;
-- approval cards in `src/channel/lark/`.
+```ts
+  it("escapes and masks the chosen option's label in the reply", async () => {
+    // The label is the agent's: a tag in it would notify the chat, and a secret in
+    // it would be shown.
+    clearSecrets();
+    addSecrets(['sk-test-123456']);
+    try {
+      const h = harness();
+      h.driver.scripts = [
+        async (ctl) => {
+          await ctl.ask('rm -rf /', [{ optionId: 'allow', name: '<at id=all></at> sk-test-123456' }]);
+          ctl.end('completed');
+        },
+      ];
+      const { turn, approvalId } = await parked(h);
+      expect(click(h, approvalId).message).toBe(`Sent: \\<at id=all\\>\\</at\\> ${MASK}.`);
+      await turn;
+    } finally {
+      clearSecrets();
+    }
+  });
+```
 
-Wherever a piece of agent- or user-originated text is sent without one of the three escapers, wrap it in the right one, and add a test next to that file's existing tests showing that a registered secret comes out masked. If nothing is found, say so in the commit message of Step 6.2 and change no code.
+  The secret in the label is already masked when Task 4 stores the approval's options. What this test adds is the escaping of the tag.
 
-- [ ] **Step 6.2: Docs.**
-  - **`docs/architecture.md` §12:** find the sentence or sentences that call the projection or rendering *pure*, using `grep -n -i pure docs/architecture.md`. Amend them to say it is pure **given the secret set**: the escapers read the process-wide registry in `src/secrets.ts`, and tests set it explicitly (kanban spec §10.1).
+- [ ] **Step 6.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/router.test.ts tests/session-actor.test.ts`. Expected: three FAILs:
+  - `expected 'No session s_nope.' to be 'No session s\_nope.'`;
+  - `expected 'No session sk-test-123456.' to contain 'No session ••••.'`;
+  - `expected 'Sent: <at id=all></at> ••••.' to be 'Sent: \<at id=all\>\</at\> ••••.'`.
+
+- [ ] **Step 6.3: Implement.**
+
+  In `src/core/session-actor.ts`:
+  - add `import { forDisplay } from '../channel/escape.js';` after the `../channel/card-writer.js` import;
+  - in `resolveFromCard`, wrap both `optionLabel(...)` uses in the toast strings in `forDisplay(...)`:
+    - `` `Already answered (${optionLabel(outcome.approval, outcome.approval.optionId)}). The first answer stands.` `` becomes `` `Already answered (${forDisplay(optionLabel(outcome.approval, outcome.approval.optionId))}). The first answer stands.` ``;
+    - `` `Sent: ${optionLabel(outcome.approval, res.optionId)}.` `` becomes `` `Sent: ${forDisplay(optionLabel(outcome.approval, res.optionId))}.` ``.
+
+  Leave the `choice: optionLabel(approval, res.optionId),` in `#redrawApproval` alone: the approval card renders it through `forPlainText`.
+
+  In `src/core/router.ts` `case 'attach'`, `: result.reason,` becomes `: forDisplay(result.reason),`. The file already imports `forDisplay` from `../channel/escape.js`.
+
+- [ ] **Step 6.4: Re-check that nothing else reaches chat unescaped.** Run:
+
+```bash
+git grep -n -E "sendText\(|sendApprovalCard|updateApproval|#reply\(|onCardAction|openCard|\.set\(|finish\(" -- src/channel src/core src/index.ts
+```
+
+  Expected: 64 lines. For each call that sends text to Lark, check that every piece of it is a gateway-authored constant, an id, or the output of `forDisplay`, `forMarkdown` or `forPlainText`. Expected: nothing beyond the two fixed above. Anything else found is fixed the same way, with a test next to that file's existing tests showing a registered secret comes out masked.
+
+- [ ] **Step 6.5: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  561 passed (561)`. Then run `npm run typecheck`. Expected: no output.
+
+- [ ] **Step 6.6: Commit.**
+
+```bash
+git add src/core/session-actor.ts src/core/router.ts tests/session-actor.test.ts tests/router.test.ts
+git commit -m "Escape the option label and the attach refusal before they reach chat"
+```
+
+- [ ] **Step 6.7: Docs.**
+  - **`docs/architecture.md` §12:** check that the projection comment already says it is pure *given the secret set*, using `grep -n "Pure \*given the secret set\*" docs/architecture.md`. Expected: one line, the `// 2. Projection.` comment. If it does, change nothing in this file.
   - **`README.md`:** directly after the credentials paragraph, the one that ends with the `.env` sentence, add:
 
 ```markdown
@@ -635,27 +740,27 @@ log and approvals. Values shorter than 8 characters are not masked. A secret the
 itself, for instance in a file it reads, is not known to the gateway and is not masked.
 ```
 
-  - **README table:** in the configuration table, change the `agent.maskExempt` row's description from "Checked at startup but not used in this build: nothing is masked yet." to "Variable names whose values are long but not secret, such as a base URL, so not masked."
+  - **README table:** in the configuration table, replace the whole description cell of the `agent.maskExempt` row with "Variable names whose values are long but not secret, such as a base URL, so not masked."
 
 Commit:
 
 ```bash
-git add docs/architecture.md README.md   # and any file Step 6.1 changed, with its test
-git commit -m "Say what is masked, and that rendering is pure given the secret set"
+git add README.md   # and docs/architecture.md, only if Step 6.7 changed it
+git commit -m "Say what the gateway masks"
 ```
 
-- [ ] **Step 6.3: Run everything.** Run:
-  - `npm test 2>&1 | tail -4`: expect 559, plus any tests Step 6.1 added;
+- [ ] **Step 6.8: Run everything.** Run:
+  - `npm test 2>&1 | tail -4`: expect 561;
   - `npm run test:e2e 2>&1 | tail -4`: expect 49;
   - `npm run typecheck`: expect no output;
   - `git grep -n -i "p[g]w" -- . ':!package-lock.json'`: expect no output.
 
-- [ ] **Step 6.4: Report, without merging.**
+- [ ] **Step 6.9: Report, without merging.**
 
 ---
 
 ## Done when
 
-- `npm test` gives `Tests  559 passed (559)` (more if Step 6.1 added tests). `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  561 passed (561)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
-- No escaper is bypassed on the way to chat (Step 6.1).
+- No escaper is bypassed on the way to chat (Step 6.4).
