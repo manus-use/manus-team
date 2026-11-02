@@ -239,7 +239,7 @@ to
 - [ ] **Step 2.4: No literal left in code**
 
 Run: `git grep -n "prime-gateway" -- src tests`
-Expected: exactly one line — `src/config.ts:124`, the `~/.prime-gateway` default home, which stays. Anything else is a missed literal.
+Expected: exactly two lines — `src/config.ts:124`, the `~/.prime-gateway` default home, which stays, and `src/identity.ts:6`, the doc comment from Task 1 that names that home on purpose. Anything else is a missed literal.
 
 - [ ] **Step 2.5: Full suite and typecheck**
 
@@ -333,8 +333,9 @@ Expected — matches in exactly these places and no others, every one of them th
 | `config.example.yaml` | 3 | `~/.prime-gateway/config.yaml` |
 | `docs/architecture.md` | the line under the title | the "Formerly `prime-gateway`" note |
 | `src/config.ts` | 124 | `'.prime-gateway'` |
+| `src/identity.ts` | 6 | the doc comment naming the kept home (Task 1) |
 
-Six lines in total. A seventh is a missed rename; fewer means a kept path was changed — revert it.
+Seven lines in total. An eighth is a missed rename; fewer means a kept path was changed — revert it.
 
 Then check the design identifiers were all renamed:
 
