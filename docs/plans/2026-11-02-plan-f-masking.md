@@ -761,6 +761,18 @@ git commit -m "Say what the gateway masks"
 
 ## Done when
 
-- `npm test` gives `Tests  561 passed (561)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  574 passed (574)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - No escaper is bypassed on the way to chat (Step 6.4).
+
+## Review follow-ups
+
+- A secret containing another known secret no longer leaks mid-stream. `withholdSecretPrefix` now works on raw text and never cuts a complete secret part-way; `renderCard` cuts, then masks.
+- `renderCard` strips control characters from the answer before withholding and masking, so a control character after a secret's start cannot defeat the withhold.
+- `redactKnownSecrets` collects every occurrence of every secret, overlapping ones included, and masks merged spans as one `MASK`.
+- `addSecrets` also registers a secret's control-stripped form, so the escapers match a secret that contains a control character; `removeSecrets` removes it too. `stripControl` moved to `src/text.ts`, re-exported from `src/channel/escape.ts`.
+- `addSecrets` ignores a value containing the mask character, so withholding can never eat a `MASK`.
+- The withhold loop stops as soon as a shorter prefix could not win.
+- `registerConfiguredSecrets` is exported from `src/index.ts` and called from both `main()`, right after `loadTeam`, and `createGateway`, before its startup notes. `src/main.ts` masks the configuration error line too.
+- `redactValues` leaves only a string directly under an identifying key alone; an object or array there is still walked.
+- `removeSecrets` notes that plan C must reference-count, or keep configured secrets apart, before it removes worker tokens.
