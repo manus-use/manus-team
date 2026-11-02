@@ -84,8 +84,8 @@ it does not persist, is not backed up, cannot be copied into a worktree, and can
 committed by accident. A key that looks like a credential (`secret`, `token`, `password`,
 `apiKey`, …) is refused at boot rather than quietly accepted, and so is `agent.env`, which
 would put values in the file rather than names. A role's `.env` is the one file secrets are
-read from: it must be `0600` and a regular file owned by the gateway's user. It may not set
-`MT_*`, `LARK_*` or `PATH`.
+read from: it must be a regular file owned by the gateway's user, readable and writable only
+by its owner (for example `0600` or `0400`). It may not set `MT_*`, `LARK_*` or `PATH`.
 
 | File setting | Env override | Meaning |
 |---|---|---|
@@ -135,7 +135,7 @@ roles/implementer/
   config.yaml     # the coding agent, an optional workspace, an optional description
   role.md         # optional standing instructions
   skills/<name>/SKILL.md   # optional; front matter gives name and description
-  .env            # optional; this role's own secrets, 0600
+  .env            # optional; this role's own secrets, owner-only (e.g. 0600)
 ```
 
 ```yaml

@@ -125,7 +125,7 @@ describe('loadRoleDir: .env, role.md, skills', () => {
 
   it('refuses a .env other users can read, and leaves its mode alone', () => {
     withEnv('API_KEY=sk-role\n', 0o644);
-    expect(() => load('r', { GH_TOKEN: 'ghp_x' })).toThrow(/must be 0600/);
+    expect(() => load('r', { GH_TOKEN: 'ghp_x' })).toThrow(/must be readable and writable only by its owner \(for example 0600\)/);
   });
 
   it('refuses a .env that is a symlink', () => {

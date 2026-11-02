@@ -250,7 +250,7 @@ function readRoleEnv(dir: string): Record<string, string> {
     if ((stat.mode & 0o077) !== 0) {
       throw new ConfigError(
         `${path} can be read or written by other users (mode ${(stat.mode & 0o777).toString(8)}); ` +
-          'it must be 0600. The gateway does not change it itself: a file that was readable may already have been read.',
+          'it must be readable and writable only by its owner (for example 0600). The gateway does not change it itself: a file that was readable may already have been read.',
       );
     }
     text = readFileSync(fd, 'utf8');

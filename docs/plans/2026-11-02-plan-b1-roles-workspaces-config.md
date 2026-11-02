@@ -183,7 +183,9 @@ describe('parseEnvFile', () => {
   });
 
   it('refuses a name that is not a variable name', () => {
-    expect(error('1A=x')).toMatch(/^\.env:1: "1A" is not a valid variable name/);
+    const message = error('1A=x');
+    expect(message).toMatch(/^\.env:1: the text before '=' is not a valid variable name/);
+    expect(message).not.toContain('1A');
   });
 
   it('refuses an unterminated quote', () => {
@@ -239,7 +241,9 @@ export function parseEnvFile(text: string, source: string): EnvFileResult {
 
     const key = line.slice(0, eq).trim();
     if (!VARIABLE_NAME.test(key)) {
-      return { error: `${at}: ${JSON.stringify(key)} is not a valid variable name` };
+      return {
+        error: `${at}: the text before '=' is not a valid variable name (letters, digits, '_'; not starting with a digit)`,
+      };
     }
 
     let value = line.slice(eq + 1).trim();
@@ -920,7 +924,7 @@ describe('loadRoleDir: .env, role.md, skills', () => {
 
   it('refuses a .env other users can read, and leaves its mode alone', () => {
     withEnv('API_KEY=sk-role\n', 0o644);
-    expect(() => load('r', { GH_TOKEN: 'ghp_x' })).toThrow(/must be 0600/);
+    expect(() => load('r', { GH_TOKEN: 'ghp_x' })).toThrow(/must be readable and writable only by its owner \(for example 0600\)/);
   });
 
   it('refuses a .env that is a symlink', () => {
@@ -1240,7 +1244,7 @@ function readRoleEnv(dir: string): Record<string, string> {
   if ((stat.mode & 0o077) !== 0) {
     throw new ConfigError(
       `${path} can be read or written by other users (mode ${(stat.mode & 0o777).toString(8)}); ` +
-        'it must be 0600. The gateway does not change it itself: a file that was readable may already have been read.',
+        'it must be readable and writable only by its owner (for example 0600). The gateway does not change it itself: a file that was readable may already have been read.',
     );
   }
 
@@ -1579,7 +1583,7 @@ with
 
 `loadTeam` throws `ConfigError`, which `main.ts` already turns into a one-line error and exit 78.
 
-- [ ] **Step 7.4: Typecheck and full suite** — `npm run typecheck` → no output; `npm test 2>&1 | tail -4` → `Tests  461 passed (461)`.
+- [ ] **Step 7.4: Typecheck and full suite** — `npm run typecheck` → no output; `npm test 2>&1 | tail -4` → `Tests  464 passed (464)`.
 
 - [ ] **Step 7.5: Commit**
 
@@ -1594,7 +1598,7 @@ git commit -m "Load roles and workspaces at startup, and run the role default"
 
 **Files:** Modify `README.md`.
 
-- [ ] **Step 8.1: The credentials rule.** In the paragraph starting `**Credentials never go in the file.**`, replace that bold sentence with `**Credentials go in the environment, or in a role's \`.env\`.**`, and append to the end of the paragraph: `A role's \`.env\` is the one file secrets are read from: it must be \`0600\` and a regular file owned by the gateway's user. It may not set \`MT_*\`, \`LARK_*\` or \`PATH\`.` Rewrap the paragraph to the width of the text around it.
+- [ ] **Step 8.1: The credentials rule.** In the paragraph starting `**Credentials never go in the file.**`, replace that bold sentence with `**Credentials go in the environment, or in a role's \`.env\`.**`, and append to the end of the paragraph: `A role's \`.env\` is the one file secrets are read from: it must be a regular file owned by the gateway's user, readable and writable only by its owner (for example \`0600\` or \`0400\`). It may not set \`MT_*\`, \`LARK_*\` or \`PATH\`.` Rewrap the paragraph to the width of the text around it.
 
 - [ ] **Step 8.2: A section on roles and workspaces**, placed after the paragraph that ends `exits 78.` (the "Everything is validated at boot" paragraph, after the configuration table) and before `### Chat commands` — not next to the credentials paragraph, which would put the whole configuration table under this heading:
 
@@ -1609,7 +1613,7 @@ roles/implementer/
   config.yaml     # the coding agent, an optional workspace, an optional description
   role.md         # optional standing instructions
   skills/<name>/SKILL.md   # optional; front matter gives name and description
-  .env            # optional; this role's own secrets, 0600
+  .env            # optional; this role's own secrets, owner-only (e.g. 0600)
 ```
 
 ```yaml
@@ -1667,7 +1671,7 @@ including `MT_AGENT_ENV_*`: any of them still counts as a second definition of t
 #   docs: /srv/repos/docs
 ```
 
-- [ ] **Step 8.4: Full suite** — `npm test 2>&1 | tail -4` → `Tests  461 passed (461)`.
+- [ ] **Step 8.4: Full suite** — `npm test 2>&1 | tail -4` → `Tests  464 passed (464)`.
 
 - [ ] **Step 8.5: Commit**
 
@@ -1702,8 +1706,19 @@ Expected on this machine: `role default agent-block structured-cli bytesec`, `wo
 
 ---
 
+## Final-review fixes
+
+Applied after the final review; the code blocks above show the original steps, the branch holds the result.
+
+- A malformed `.env` line is never quoted in an error, not even the text before `=`: it may be a pasted secret (`tests/dotenv.test.ts`, +1 test).
+- `readRoleEnv` opens `.env` once with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and runs the regular-file, owner and mode checks on `fstat` of that descriptor, so the file checked is the file read. `ELOOP` is the symlink refusal; `O_NONBLOCK` keeps a FIFO from hanging the open (`tests/roles.test.ts`, +1 test).
+- `resolveWorkspaces` also refuses a workspace that is or contains the real path of `$MT_HOME/roles`, which matters when `roles` is a symlink out of the home (`tests/workspaces.test.ts`, +1 test).
+- The mode check is `mode & 0o077`, so the wording is "readable and writable only by its owner (for example 0600)": 0400 passes too.
+
+With these, the suite is 464 tests.
+
 ## Done when
 
-- `Tests  461 passed (461)` and `npm run typecheck` clean, under Node 22, in the worktree.
+- `Tests  464 passed (464)` and `npm run typecheck` clean, under Node 22, in the worktree.
 - Task 9 shows the live deployment loads as the role `default` from its `agent:` block, in workspace `default`.
 - Nothing merged into the main checkout.
