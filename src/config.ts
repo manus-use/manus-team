@@ -41,6 +41,31 @@ const BUNDLED_SCHEMA_DIR = fileURLToPath(new URL('../schema', import.meta.url));
  *    way to revoke.
  */
 
+/** How to run a coding agent: the gateway's `agent:` block, or a role's (`roles.ts`). */
+export interface AgentConfig {
+  /** Which driver runs the agent. One of `KNOWN_DRIVERS`. */
+  driver: KnownDriver;
+  command: string;
+  args: readonly string[];
+  /** Extra environment for the agent process. Where credentials go. */
+  env: Readonly<Record<string, string>>;
+  /**
+   * The operator has accepted that the agent acts without asking.
+   *
+   * Required by `structured-cli`, which has no permission protocol, and refused
+   * by every driver that does. It is a written acknowledgement rather than a
+   * switch: a driver that quietly stops showing approval cards is a security
+   * posture nobody chose.
+   */
+  unsupervised: boolean;
+  /** Variable names forwarded from the gateway's environment. */
+  passEnv: readonly string[];
+  /** The agent's tool names that only read (spec §2.1, §8.3). */
+  readOnlyTools: readonly string[];
+  /** Environment names whose values are not secret, so not masked (spec §10.1). */
+  maskExempt: readonly string[];
+}
+
 export interface GatewayConfig {
   /** SQLite path. Its directory holds the WAL, so it must be writable. */
   dbPath: string;
@@ -49,6 +74,8 @@ export interface GatewayConfig {
   downloadDir: string;
   /** The file the settings came from, or undefined if the environment alone. */
   configPath: string | undefined;
+  /** The directory the config, database, downloads and roles live under. */
+  home: string;
 
   lark: {
     appId: string;
@@ -65,26 +92,13 @@ export interface GatewayConfig {
     allowMentionAll: boolean;
   };
 
-  agent: {
-    /** Which driver runs the agent. One of `KNOWN_DRIVERS`. */
-    driver: KnownDriver;
-    command: string;
-    args: readonly string[];
-    /** Extra environment for the agent process. Where credentials go. */
-    env: Readonly<Record<string, string>>;
-    /**
-     * The operator has accepted that the agent acts without asking.
-     *
-     * Required by `structured-cli`, which has no permission protocol, and refused
-     * by every driver that does. It is a written acknowledgement rather than a
-     * switch: a driver that quietly stops showing approval cards is a security
-     * posture nobody chose.
-     */
-    unsupervised: boolean;
-  };
+  /** The `agent:` block or `MT_AGENT_*` variables, if either is present. Absent means a role directory must supply the role `default` (`team.ts`). */
+  agent: AgentConfig | undefined;
 
-  /** Absolute path the agent works in. */
+  /** The workspace named default — what every session uses until plan B2. */
   workspaceDir: string;
+  /** Workspace name → declared absolute path; checked on disk by `workspaces.ts`. Always has `default`. */
+  workspaces: Readonly<Record<string, string>>;
 
   maxLiveSessions: number;
 }
@@ -96,7 +110,7 @@ export class ConfigError extends Error {
   }
 }
 
-type Env = Readonly<Record<string, string | undefined>>;
+export type Env = Readonly<Record<string, string | undefined>>;
 
 /**
  * Reads a config file, or reports that there isn't one.
@@ -138,43 +152,35 @@ export function loadConfig(
     file.auth.owner ??
     fail('an owner is required: set auth.owner in the config file, or MT_OWNER_OPEN_ID');
 
+  const single = envString(env, 'MT_WORKSPACE') ?? file.workspace;
+  if (single !== undefined && file.workspaces['default'] !== undefined) {
+    throw new ConfigError(
+      'workspaces.default and workspace (or MT_WORKSPACE) are both set: keep only workspaces.default',
+    );
+  }
+  const workspaces: Record<string, string> = {
+    ...file.workspaces,
+    ...(single === undefined ? {} : { default: single }),
+  };
   const workspaceDir =
-    envString(env, 'MT_WORKSPACE') ??
-    file.workspace ??
-    fail('a workspace is required: set workspace in the config file, or MT_WORKSPACE');
+    workspaces['default'] ??
+    fail('a workspace is required: set workspaces.default, or workspace in the config file, or MT_WORKSPACE');
   if (!isAbsolute(workspaceDir)) {
     // Relative resolves against the gateway's cwd, which is whatever the service
     // manager set. The workspace would then depend on how the process was launched.
     throw new ConfigError(`the workspace must be an absolute path, got ${JSON.stringify(workspaceDir)}`);
   }
 
-  const command =
-    envString(env, 'MT_AGENT_COMMAND') ??
-    file.agent.command ??
-    fail('an agent command is required: set agent.command in the config file, or MT_AGENT_COMMAND');
-  if (/\s/.test(command) && !isAbsolute(command)) {
-    // `command: bytesec acp` is a subcommand written where the binary goes. The
-    // agent is spawned with `shell: false`, so this asks for a file whose name
-    // contains a space and fails as an ENOENT at the first prompt -- long after
-    // boot, and reported as the agent not starting rather than as a typo here.
-    //
-    // Absolute paths are exempt: `/Applications/My App/bin/agent` is a real thing,
-    // whereas a bare name resolved on PATH cannot usefully contain a space.
-    const [first = '', ...rest] = command.split(/\s+/);
-    throw new ConfigError(
-      `the agent command ${JSON.stringify(command)} contains a space, and is not a path. ` +
-        `Arguments belong in agent.args: command: ${first}, args: [${rest.join(', ')}]. ` +
-        'Use an absolute path if the binary really is named that.',
+  // The agent block is optional: a role directory may define the role default
+  // instead (team.ts). An MT_AGENT_* variable alone counts as configuring it.
+  const agentFromEnv =
+    ['MT_AGENT_COMMAND', 'MT_AGENT_ARGS', 'MT_AGENT_DRIVER', 'MT_AGENT_UNSUPERVISED'].some(
+      (key) => envString(env, key) !== undefined,
+    ) ||
+    Object.keys(env).some(
+      (key) => key.startsWith(AGENT_ENV_PREFIX) && key.length > AGENT_ENV_PREFIX.length && env[key] !== undefined,
     );
-  }
-
-  const argsFromEnv = envString(env, 'MT_AGENT_ARGS');
-  const args = argsFromEnv === undefined ? file.agent.args : shellWords(argsFromEnv);
-
-  const driver = driverOf(envString(env, 'MT_AGENT_DRIVER') ?? file.agent.driver ?? 'acp');
-  const unsupervised =
-    envFlag(env, 'MT_AGENT_UNSUPERVISED') ?? file.agent.unsupervised ?? false;
-  requireSupervisionMatch(driver, unsupervised);
+  const agent = file.agentPresent || agentFromEnv ? legacyAgent(env, file) : undefined;
 
   const allowTalk = envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk;
   const allowOperate = envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate;
@@ -186,6 +192,7 @@ export function loadConfig(
     schemaDir: envString(env, 'MT_SCHEMA_DIR') ?? BUNDLED_SCHEMA_DIR,
     downloadDir: envString(env, 'MT_DOWNLOAD_DIR') ?? file.downloads ?? join(home, 'downloads'),
     configPath: text === undefined ? undefined : path,
+    home,
 
     lark: {
       appId:
@@ -210,24 +217,60 @@ export function loadConfig(
       allowMentionAll: envFlag(env, 'MT_ALLOW_MENTION_ALL') ?? file.auth.mentionAll ?? false,
     },
 
-    agent: {
-      driver,
-      command,
-      args,
-      env: agentEnv(env, file.agent.passEnv),
-      unsupervised,
-    },
+    agent,
 
     workspaceDir,
+    workspaces,
     maxLiveSessions: envInteger(env, 'MT_MAX_LIVE_SESSIONS') ?? file.maxLiveSessions ?? 8,
   };
+}
+
+/** The legacy `agent:` block, with its `MT_AGENT_*` overrides applied. */
+function legacyAgent(env: Env, file: FileConfig): AgentConfig {
+  const command =
+    envString(env, 'MT_AGENT_COMMAND') ??
+    file.agent.command ??
+    fail('an agent command is required: set agent.command in the config file, or MT_AGENT_COMMAND');
+  checkCommand(command);
+  const argsFromEnv = envString(env, 'MT_AGENT_ARGS');
+  const args = argsFromEnv === undefined ? file.agent.args : shellWords(argsFromEnv);
+  const driver = driverOf(envString(env, 'MT_AGENT_DRIVER') ?? file.agent.driver ?? 'acp');
+  const unsupervised = envFlag(env, 'MT_AGENT_UNSUPERVISED') ?? file.agent.unsupervised ?? false;
+  requireSupervisionMatch(driver, unsupervised);
+  return {
+    driver,
+    command,
+    args,
+    env: agentEnv(env, file.agent.passEnv),
+    unsupervised,
+    passEnv: file.agent.passEnv,
+    readOnlyTools: file.agent.readOnlyTools,
+    maskExempt: file.agent.maskExempt,
+  };
+}
+
+/**
+ * `command: bytesec acp` is a subcommand written where the binary goes. The agent
+ * is spawned with `shell: false`, so this asks for a file whose name contains a
+ * space and fails as an ENOENT at the first prompt -- long after boot, and
+ * reported as the agent not starting rather than as a typo here. Absolute paths
+ * are exempt: `/Applications/My App/bin/agent` is a real thing.
+ */
+export function checkCommand(command: string): void {
+  if (!/\s/.test(command) || isAbsolute(command)) return;
+  const [first = '', ...rest] = command.split(/\s+/);
+  throw new ConfigError(
+    `the agent command ${JSON.stringify(command)} contains a space, and is not a path. ` +
+      `Arguments belong in agent.args: command: ${first}, args: [${rest.join(', ')}]. ` +
+      'Use an absolute path if the binary really is named that.',
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Which driver, and on what terms
 // ---------------------------------------------------------------------------
 
-function driverOf(value: string): KnownDriver {
+export function driverOf(value: string): KnownDriver {
   if ((KNOWN_DRIVERS as readonly string[]).includes(value)) return value as KnownDriver;
   throw new ConfigError(
     `agent.driver must be one of ${KNOWN_DRIVERS.join(', ')}, got ${JSON.stringify(value)}`,
@@ -252,7 +295,7 @@ const UNSUPERVISED_DRIVERS: readonly KnownDriver[] = ['structured-cli'];
  * a driver that *does* ask describes a system that is not the one running, which is
  * how a config comes to be trusted for something it never said.
  */
-function requireSupervisionMatch(driver: KnownDriver, unsupervised: boolean): void {
+export function requireSupervisionMatch(driver: KnownDriver, unsupervised: boolean): void {
   const needed = UNSUPERVISED_DRIVERS.includes(driver);
   if (needed && !unsupervised) {
     throw new ConfigError(
@@ -284,6 +327,28 @@ function requireSupervisionMatch(driver: KnownDriver, unsupervised: boolean): vo
  */
 const AGENT_ENV_PREFIX = 'MT_AGENT_ENV_';
 
+/** Values for `passEnv` names, from the gateway's environment. `where` prefixes the errors. */
+export function passEnvValues(
+  env: Env,
+  passEnv: readonly string[],
+  where: string,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of passEnv) {
+    if (name.startsWith('MT_') || name.startsWith('LARK_')) {
+      // The gateway's own configuration, and in the Lark case its identity. An
+      // agent holding those can reconfigure or impersonate the gateway.
+      throw new ConfigError(`${where} must not forward ${name}: it belongs to the gateway`);
+    }
+    const value = env[name];
+    if (value === undefined || value === '') {
+      throw new ConfigError(`${where} names ${name}, which is not set in the environment`);
+    }
+    out[name] = value;
+  }
+  return out;
+}
+
 /**
  * Names the gateway may forward verbatim, listed in the file as `agent.passEnv`.
  *
@@ -294,20 +359,7 @@ const AGENT_ENV_PREFIX = 'MT_AGENT_ENV_';
  * authenticate. A declared name that is not set is therefore an error here.
  */
 function agentEnv(env: Env, passEnv: readonly string[]): Record<string, string> {
-  const out: Record<string, string> = {};
-
-  for (const name of passEnv) {
-    if (name.startsWith('MT_') || name.startsWith('LARK_')) {
-      // The gateway's own configuration, and in the Lark case its identity. An
-      // agent holding those can reconfigure or impersonate the gateway.
-      throw new ConfigError(`agent.passEnv must not forward ${name}: it belongs to the gateway`);
-    }
-    const value = env[name];
-    if (value === undefined || value === '') {
-      throw new ConfigError(`agent.passEnv names ${name}, which is not set in the environment`);
-    }
-    out[name] = value;
-  }
+  const out = passEnvValues(env, passEnv, 'agent.passEnv');
 
   // Prefixed values are applied second, so a variable set explicitly for the agent
   // overrides the one the gateway happens to be running with.
@@ -327,6 +379,7 @@ function agentEnv(env: Env, passEnv: readonly string[]): Record<string, string> 
 
 interface FileConfig {
   workspace: string | undefined;
+  workspaces: Record<string, string>;
   db: string | undefined;
   downloads: string | undefined;
   maxLiveSessions: number | undefined;
@@ -339,18 +392,22 @@ interface FileConfig {
     directMessages: boolean | undefined;
     mentionAll: boolean | undefined;
   };
+  agentPresent: boolean;
   agent: {
     driver: string | undefined;
     command: string | undefined;
     args: readonly string[];
     passEnv: readonly string[];
     unsupervised: boolean | undefined;
+    readOnlyTools: readonly string[];
+    maskExempt: readonly string[];
   };
 }
 
 function emptyFile(): FileConfig {
   return {
     workspace: undefined,
+    workspaces: {},
     db: undefined,
     downloads: undefined,
     maxLiveSessions: undefined,
@@ -363,12 +420,15 @@ function emptyFile(): FileConfig {
       directMessages: undefined,
       mentionAll: undefined,
     },
+    agentPresent: false,
     agent: {
       driver: undefined,
       command: undefined,
       args: [],
       passEnv: [],
       unsupervised: undefined,
+      readOnlyTools: [],
+      maskExempt: [],
     },
   };
 }
@@ -399,7 +459,7 @@ function parseFile(path: string, text: string): FileConfig {
   const authRaw = subsection(path, root, 'auth');
   const agentRaw = subsection(path, root, 'agent');
 
-  reject(path, '', root, ['workspace', 'db', 'downloads', 'maxLiveSessions', 'lark', 'auth', 'agent']);
+  reject(path, '', root, ['workspace', 'workspaces', 'db', 'downloads', 'maxLiveSessions', 'lark', 'auth', 'agent']);
   reject(path, 'lark', larkRaw, ['appId', 'domain']);
   reject(path, 'auth', authRaw, [
     'owner',
@@ -415,9 +475,13 @@ function parseFile(path: string, text: string): FileConfig {
     'args',
     'passEnv',
     'unsupervised',
+    'readOnlyTools',
+    'maskExempt',
   ]);
 
   out.workspace = str(path, 'workspace', root['workspace']);
+  out.workspaces = stringMap(path, 'workspaces', root['workspaces']);
+  out.agentPresent = root['agent'] !== undefined && root['agent'] !== null;
   out.db = str(path, 'db', root['db']);
   out.downloads = str(path, 'downloads', root['downloads']);
   out.maxLiveSessions = positiveInt(path, 'maxLiveSessions', root['maxLiveSessions']);
@@ -445,31 +509,37 @@ function parseFile(path: string, text: string): FileConfig {
       : shellWords(str(path, 'agent.args', agentRaw['args']) ?? ''),
     passEnv: strings(path, 'agent.passEnv', agentRaw['passEnv']),
     unsupervised: bool(path, 'agent.unsupervised', agentRaw['unsupervised']),
+    readOnlyTools: strings(path, 'agent.readOnlyTools', agentRaw['readOnlyTools']),
+    maskExempt: strings(path, 'agent.maskExempt', agentRaw['maskExempt']),
   };
 
   return out;
 }
 
 /** Reject unknown keys, and any key that means a credential is in the file. */
-function reject(
+export function reject(
   path: string,
   prefix: string,
   values: Record<string, unknown>,
   known: readonly string[],
+  hints: { secret: string; env: string } = {
+    secret:
+      'Set it in the environment instead (LARK_APP_SECRET for the app secret, ' +
+      'MT_AGENT_ENV_* for the agent, or name it in agent.passEnv).',
+    env: 'List the variable names in agent.passEnv, or set MT_AGENT_ENV_<NAME> in the environment.',
+  },
 ): void {
   const flat = (key: string): string => (prefix === '' ? key : `${prefix}.${key}`);
   for (const key of Object.keys(values)) {
     if (SECRET_KEY.test(key.replace(/[-_]/g, ''))) {
       throw new ConfigError(
         `${path}: ${flat(key)} looks like a credential, and the config file must not hold one. ` +
-          'Set it in the environment instead (LARK_APP_SECRET for the app secret, ' +
-          'MT_AGENT_ENV_* for the agent, or name it in agent.passEnv).',
+          hints.secret,
       );
     }
     if (key === 'env') {
       throw new ConfigError(
-        `${path}: ${flat(key)} would put values in the file. List the variable names in ` +
-          'agent.passEnv, or set MT_AGENT_ENV_<NAME> in the environment.',
+        `${path}: ${flat(key)} would put values in the file. ${hints.env}`,
       );
     }
     if (!known.includes(key)) {
@@ -478,14 +548,14 @@ function reject(
   }
 }
 
-function section(path: string, prefix: string, value: unknown): Record<string, unknown> {
+export function section(path: string, prefix: string, value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new ConfigError(`${path}: ${prefix === '' ? 'the file' : prefix} must be a mapping`);
   }
   return value as Record<string, unknown>;
 }
 
-function subsection(
+export function subsection(
   path: string,
   root: Record<string, unknown>,
   key: string,
@@ -495,7 +565,7 @@ function subsection(
   return section(path, key, value);
 }
 
-function str(path: string, key: string, value: unknown): string | undefined {
+export function str(path: string, key: string, value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string' || value.trim() === '') {
     throw new ConfigError(`${path}: ${key} must be a non-empty string`);
@@ -503,7 +573,17 @@ function str(path: string, key: string, value: unknown): string | undefined {
   return value.trim();
 }
 
-function strings(path: string, key: string, value: unknown): readonly string[] {
+function stringMap(path: string, key: string, value: unknown): Record<string, string> {
+  if (value === undefined || value === null) return {};
+  const out: Record<string, string> = {};
+  for (const [name, entry] of Object.entries(section(path, key, value))) {
+    const text = str(path, `${key}.${name}`, entry);
+    if (text !== undefined) out[name] = text;
+  }
+  return out;
+}
+
+export function strings(path: string, key: string, value: unknown): readonly string[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new ConfigError(`${path}: ${key} must be a list`);
   return unique(
@@ -516,7 +596,7 @@ function strings(path: string, key: string, value: unknown): readonly string[] {
   );
 }
 
-function bool(path: string, key: string, value: unknown): boolean | undefined {
+export function bool(path: string, key: string, value: unknown): boolean | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'boolean') {
     throw new ConfigError(`${path}: ${key} must be true or false, got ${JSON.stringify(value)}`);
@@ -602,7 +682,7 @@ function fail(message: string): never {
  * to support expansion -- accepting `$(...)` here and dropping it there is the kind
  * of half-support that looks like it works until it silently does not.
  */
-function shellWords(value: string): string[] {
+export function shellWords(value: string): string[] {
   const out: string[] = [];
   const pattern = /"([^"]*)"|'([^']*)'|(\S+)/g;
   let match: RegExpExecArray | null;

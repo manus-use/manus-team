@@ -90,7 +90,7 @@ describe('loadConfig: where settings come from', () => {
     const cfg = loadEnvOnly(ENV_ONLY);
     expect(cfg.workspaceDir).toBe('/srv/repo');
     expect(cfg.auth.ownerOpenId).toBe(OWNER);
-    expect(cfg.agent.command).toBe('claude-agent-acp');
+    expect(cfg.agent?.command).toBe('claude-agent-acp');
     expect(cfg.configPath).toBeUndefined();
   });
 
@@ -115,7 +115,7 @@ describe('loadConfig: where settings come from', () => {
     });
     expect(cfg.workspaceDir).toBe('/srv/other');
     expect(cfg.auth.ownerOpenId).toBe('ou_new_owner');
-    expect(cfg.agent.command).toBe('gemini');
+    expect(cfg.agent?.command).toBe('gemini');
     expect(cfg.maxLiveSessions).toBe(2);
     expect(cfg.lark.appId).toBe('cli_other');
     expect(cfg.lark.domain).toBe('https://open.larksuite.com');
@@ -153,9 +153,6 @@ describe('loadConfig: required values', () => {
     );
     expect(() => loadEnvOnly({ ...ENV_ONLY, MT_WORKSPACE: undefined })).toThrow(
       /workspace in the config file, or MT_WORKSPACE/,
-    );
-    expect(() => loadEnvOnly({ ...ENV_ONLY, MT_AGENT_COMMAND: undefined })).toThrow(
-      /agent\.command in the config file, or MT_AGENT_COMMAND/,
     );
     expect(() => loadEnvOnly({ ...ENV_ONLY, LARK_APP_ID: undefined })).toThrow(
       /lark\.appId in the config file, or LARK_APP_ID/,
@@ -361,7 +358,7 @@ describe('loadConfig: the agent process', () => {
       { ANTHROPIC_API_KEY: 'sk-test' },
       yamlFile({ agent: { passEnv: ['ANTHROPIC_API_KEY'] } }),
     );
-    expect(cfg.agent.env).toEqual({ ANTHROPIC_API_KEY: 'sk-test' });
+    expect(cfg.agent?.env).toEqual({ ANTHROPIC_API_KEY: 'sk-test' });
   });
 
   it('refuses to forward a name that is not set, because that is the typo case', () => {
@@ -390,8 +387,8 @@ describe('loadConfig: the agent process', () => {
       SOME_OTHER_SECRET: 'nope',
     });
     // Forwarding the whole environment would hand the agent the Feishu app secret.
-    expect(cfg.agent.env).toEqual({ ANTHROPIC_API_KEY: 'sk-test' });
-    expect(Object.values(cfg.agent.env)).not.toContain('app-secret');
+    expect(cfg.agent?.env).toEqual({ ANTHROPIC_API_KEY: 'sk-test' });
+    expect(Object.values(cfg.agent?.env ?? {})).not.toContain('app-secret');
   });
 
   it('lets a prefixed variable override one passed through by name', () => {
@@ -401,7 +398,7 @@ describe('loadConfig: the agent process', () => {
     );
     // The prefixed spelling exists to say "this value is for the agent", so it wins
     // over whatever the gateway happens to be running with.
-    expect(cfg.agent.env).toEqual({ ANTHROPIC_API_KEY: 'sk-for-the-agent' });
+    expect(cfg.agent?.env).toEqual({ ANTHROPIC_API_KEY: 'sk-for-the-agent' });
   });
 
   it('refuses a subcommand written into the command, from either source', () => {
@@ -419,29 +416,29 @@ describe('loadConfig: the agent process', () => {
 
   it('allows a space in an absolute path, which is a real binary name', () => {
     const cfg = load({ MT_AGENT_COMMAND: '/Applications/My App/bin/agent' });
-    expect(cfg.agent.command).toBe('/Applications/My App/bin/agent');
+    expect(cfg.agent?.command).toBe('/Applications/My App/bin/agent');
   });
 
   it('accepts arguments as a list or as one string', () => {
-    expect(load({}, yamlFile({ agent: { args: ['--acp', '--debug'] } })).agent.args).toEqual([
+    expect(load({}, yamlFile({ agent: { args: ['--acp', '--debug'] } })).agent?.args).toEqual([
       '--acp',
       '--debug',
     ]);
     expect(
-      load({}, yamlFile({ agent: { args: '--acp --flag "two words"' } })).agent.args,
+      load({}, yamlFile({ agent: { args: '--acp --flag "two words"' } })).agent?.args,
     ).toEqual(['--acp', '--flag', 'two words']);
-    expect(load({ MT_AGENT_ARGS: '--acp --one' }).agent.args).toEqual(['--acp', '--one']);
+    expect(load({ MT_AGENT_ARGS: '--acp --one' }).agent?.args).toEqual(['--acp', '--one']);
   });
 
   it('does not pretend to be a shell', () => {
     // The agent is spawned with `shell: false`. Accepting expansion here and
     // dropping it there is the half-support that looks like it works.
-    expect(load({ MT_AGENT_ARGS: '$(whoami) $HOME' }).agent.args).toEqual(['$(whoami)', '$HOME']);
+    expect(load({ MT_AGENT_ARGS: '$(whoami) $HOME' }).agent?.args).toEqual(['$(whoami)', '$HOME']);
   });
 
   it('defaults to no arguments rather than to a guess', () => {
-    expect(load().agent.args).toEqual([]);
-    expect(load({ MT_AGENT_ARGS: '   ' }).agent.args).toEqual([]);
+    expect(load().agent?.args).toEqual([]);
+    expect(load({ MT_AGENT_ARGS: '   ' }).agent?.args).toEqual([]);
   });
 });
 
@@ -449,15 +446,15 @@ describe('loadConfig: which driver, and on what terms', () => {
   it('defaults to the driver that can ask before acting', () => {
     // ACP is primary. The CLI driver exists for when an agent's ACP server is
     // broken, and defaulting to it would trade the approval flow away by accident.
-    expect(load().agent.driver).toBe('acp');
-    expect(load().agent.unsupervised).toBe(false);
+    expect(load().agent?.driver).toBe('acp');
+    expect(load().agent?.unsupervised).toBe(false);
   });
 
   it('selects a driver from the file or the environment', () => {
     const file = yamlFile({ agent: { driver: 'structured-cli', unsupervised: true } });
-    expect(load({}, file).agent.driver).toBe('structured-cli');
+    expect(load({}, file).agent?.driver).toBe('structured-cli');
     expect(
-      load({ MT_AGENT_DRIVER: 'structured-cli', MT_AGENT_UNSUPERVISED: '1' }).agent.driver,
+      load({ MT_AGENT_DRIVER: 'structured-cli', MT_AGENT_UNSUPERVISED: '1' }).agent?.driver,
     ).toBe('structured-cli');
   });
 
@@ -496,8 +493,8 @@ describe('loadConfig: which driver, and on what terms', () => {
     // make the safer setting the harder one to reach.
     const file = yamlFile({ agent: { driver: 'structured-cli', unsupervised: true } });
     const cfg = load({ MT_AGENT_DRIVER: 'acp', MT_AGENT_UNSUPERVISED: '0' }, file);
-    expect(cfg.agent.driver).toBe('acp');
-    expect(cfg.agent.unsupervised).toBe(false);
+    expect(cfg.agent?.driver).toBe('acp');
+    expect(cfg.agent?.unsupervised).toBe(false);
   });
 });
 
@@ -537,7 +534,7 @@ describe('loadConfig: against a real file', () => {
     // example that fails on the first copy.
     const cfg = loadConfig({ MT_HOME: dir, LARK_APP_SECRET: 'app-secret' });
     expect(cfg.auth.ownerOpenId).toMatch(/^ou_/);
-    expect(cfg.agent.env).toEqual({});
+    expect(cfg.agent?.env).toEqual({});
     expect(cfg.maxLiveSessions).toBe(8);
   });
 
@@ -561,5 +558,46 @@ describe('loadConfig: after the rename', () => {
       const file = yamlFile({ agent: { command: 'claude-agent-acp', passEnv: [name] } });
       expect(() => load({ [name]: 'x' }, file)).toThrow('belongs to the gateway');
     }
+  });
+});
+
+describe('loadConfig: roles and workspaces', () => {
+  it('reads named workspaces from the file', () => {
+    const cfg = load({}, yamlFile({ workspace: undefined, workspaces: { default: '/srv/a', docs: '/srv/b' } }));
+    expect(cfg.workspaces).toEqual({ default: '/srv/a', docs: '/srv/b' });
+    expect(cfg.workspaceDir).toBe('/srv/a');
+  });
+
+  it('makes the single workspace setting the workspace named default', () => {
+    expect(load().workspaces).toEqual({ default: '/srv/repo' });
+    expect(load({ MT_WORKSPACE: '/srv/env' }).workspaces).toEqual({ default: '/srv/env' });
+  });
+
+  it('refuses a default workspace set both ways', () => {
+    const file = yamlFile({ workspaces: { default: '/srv/a' } });
+    expect(() => load({}, file)).toThrow(/workspaces\.default and workspace/);
+  });
+
+  it('leaves the agent undefined when nothing configures one', () => {
+    expect(loadEnvOnly({ ...ENV_ONLY, MT_AGENT_COMMAND: undefined }).agent).toBeUndefined();
+  });
+
+  it('treats an agent variable alone as configuring the agent, which then needs a command', () => {
+    expect(() =>
+      loadEnvOnly({ ...ENV_ONLY, MT_AGENT_COMMAND: undefined, MT_AGENT_DRIVER: 'acp' }),
+    ).toThrow(/agent\.command in the config file, or MT_AGENT_COMMAND/);
+  });
+
+  it('reads readOnlyTools and maskExempt in the agent block', () => {
+    const file = yamlFile({
+      agent: { command: 'claude-agent-acp', readOnlyTools: ['read'], maskExempt: ['API_URL'] },
+    });
+    const cfg = load({}, file);
+    expect(cfg.agent?.readOnlyTools).toEqual(['read']);
+    expect(cfg.agent?.maskExempt).toEqual(['API_URL']);
+  });
+
+  it('exposes the home it settled on', () => {
+    expect(load().home).toBe(HOME);
   });
 });
