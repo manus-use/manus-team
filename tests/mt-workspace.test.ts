@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
@@ -73,6 +73,54 @@ describe('mt workspace add', () => {
     fx = mtFixture();
     expect((await fx.run(['workspace', 'add', 'Docs', docsDir()])).code).toBe(1);
     expect((await fx.run(['workspace', 'add', 'docs'])).code).toBe(2);
+  });
+
+  it.skipIf(process.getuid?.() === 0)('reports a config file it cannot write as mt: <message>, exit 1', async () => {
+    fx = mtFixture();
+    const docs = docsDir();
+    const before = readFileSync(fx.configPath, 'utf8');
+    chmodSync(fx.home, 0o500);
+    try {
+      const r = await fx.run(['workspace', 'add', 'docs', docs]);
+      expect(r.code).toBe(1);
+      expect(r.err).toMatch(/^mt: cannot write/);
+    } finally {
+      chmodSync(fx.home, 0o700);
+    }
+    expect(readFileSync(fx.configPath, 'utf8')).toBe(before);
+  });
+
+  it('keeps the comment on an empty workspaces: key', async () => {
+    fx = mtFixture((ws) => `workspace: ${ws}\nworkspaces:  # extra repos\n`);
+    const docs = docsDir();
+    const r = await fx.run(['workspace', 'add', 'docs', docs]);
+    expect(r.code, r.err).toBe(0);
+    const text = readFileSync(fx.configPath, 'utf8');
+    expect(text).toMatch(/# extra repos/);
+    expect((parseYaml(text) as { workspaces: Record<string, string> }).workspaces['docs']).toBe(docs);
+  });
+
+  it('keeps the mode of the config file whatever the umask', async () => {
+    fx = mtFixture();
+    chmodSync(fx.configPath, 0o664);
+    const old = process.umask(0o077);
+    try {
+      expect((await fx.run(['workspace', 'add', 'docs', docsDir()])).code).toBe(0);
+    } finally {
+      process.umask(old);
+    }
+    expect(statSync(fx.configPath).mode & 0o777).toBe(0o664);
+  });
+
+  it('leaves a temporary file it did not create', async () => {
+    fx = mtFixture();
+    const stray = `${fx.configPath}.mt-${process.pid}.tmp`;
+    writeFileSync(stray, 'another run');
+    const r = await fx.run(['workspace', 'add', 'docs', docsDir()]);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/^mt: cannot write/);
+    expect(readFileSync(stray, 'utf8')).toBe('another run');
+    expect(readdirSync(fx.home)).toContain('config.yaml');
   });
 
   it('reports a config file the gateway would refuse as mt: <message>, exit 1', async () => {

@@ -1732,8 +1732,16 @@ Fixed in `mt role create` after review, each test-first (five tests in `tests/mt
 - An `MT_AGENT_ENV_<NAME>` whose NAME is `PATH` or starts with `MT_` or `LARK_` gets no `NAME=...` hint: a role's `.env` cannot hold it, so the role will not get it.
 - The placeholder comment in `src/cli/mt.ts` is gone.
 
+Fixed in `mt workspace add` and `mt role check` after a second review, each test-first (four tests in `tests/mt-workspace.test.ts`, one in `tests/mt-role.test.ts`):
+
+- A config file that cannot be written (EACCES, a read-only directory) is reported as `mt: cannot write <path>: <reason>`, exit 1, after removing a fresh clone, instead of escaping as a stack trace.
+- The comment on an empty `workspaces:  # note` is kept: the null value's `comment` and `commentBefore` move to the new map, above its entries.
+- The temporary file is chmod-ed to the config file's mode before the rename, so the umask cannot narrow it.
+- A failed write removes the temporary file only if this run created it: an EEXIST from the `wx` open leaves another run's file alone.
+- `mt role check <name>` applies the name filter on every path, error or not, so `mt role check nobody` no longer lists other roles' unset `passEnv` names.
+
 ## Done when
 
-- `npm test` → `Tests  532 passed (532)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
+- `npm test` → `Tests  537 passed (537)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` → no output.
 - Task 11.2 prints what it expects.

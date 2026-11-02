@@ -1,7 +1,19 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { isMap, parseDocument } from 'yaml';
+import { isMap, parseDocument, type Node } from 'yaml';
 import { loadTeamSettings } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { nameProblem } from '../names.js';
@@ -75,13 +87,21 @@ export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): P
   // `workspaces:` with no value parses as null, and setIn cannot add to it. Any
   // other non-map was already refused by loadTeamSettings, so this replaces only
   // a missing or empty key.
-  if (!isMap(doc.get('workspaces'))) doc.set('workspaces', doc.createNode({}));
+  if (!isMap(doc.get('workspaces'))) {
+    const empty = doc.get('workspaces', true) as Node | undefined;
+    const map = doc.createNode({});
+    // `workspaces:  # note` hangs the note on the null value; keep it, above the
+    // entries, where it still reads as the key's.
+    const notes = [empty?.commentBefore, empty?.comment].filter((c): c is string => c != null && c !== '');
+    if (notes.length > 0) map.commentBefore = notes.join('\n');
+    doc.set('workspaces', map);
+  }
   doc.setIn(['workspaces', name], path);
   try {
     writeInPlace(configPath, String(doc));
   } catch (err) {
     undo();
-    throw err;
+    return refuse(io, `cannot write ${configPath}: ${(err as Error).message}`);
   }
   io.out(`added workspace ${name} (${real}) to ${configPath}; the gateway uses it from its next start`);
   return 0;
@@ -121,11 +141,22 @@ export function workspaceList(io: MtIo): number {
 function writeInPlace(path: string, text: string): void {
   const real = realpathSync(path);
   const tmp = `${real}.mt-${process.pid}.tmp`;
+  const mode = statSync(real).mode & 0o777;
+  let created = false;
   try {
-    writeFileSync(tmp, text, { mode: statSync(real).mode & 0o777, flag: 'wx' });
+    const fd = openSync(tmp, 'wx', mode);
+    created = true;
+    try {
+      writeFileSync(fd, text);
+    } finally {
+      closeSync(fd);
+    }
+    // The umask narrows the mode given to open; this puts the original back.
+    chmodSync(tmp, mode);
     renameSync(tmp, real);
   } catch (err) {
-    rmSync(tmp, { force: true });
+    // Only this run's file: an EEXIST from `wx` means the one there is another's.
+    if (created) rmSync(tmp, { force: true });
     throw err;
   }
 }

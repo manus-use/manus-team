@@ -247,6 +247,19 @@ describe('mt role check', () => {
     expect(r.out).toMatch(/there is no role nobody/);
   });
 
+  it("reports only the named role's unset passEnv names, on every path", async () => {
+    fx = mtFixture();
+    roleDir('reviewer', `${ACP_AGENT}  passEnv: [REVIEW_TOKEN]\n`);
+    roleDir('other', ACP_AGENT);
+    const ok = await fx.run(['role', 'check', 'other']);
+    expect(ok.code).toBe(0);
+    expect(ok.out).not.toMatch(/reviewer/);
+    const missing = await fx.run(['role', 'check', 'nobody']);
+    expect(missing.code).toBe(1);
+    expect(missing.out).toMatch(/there is no role nobody/);
+    expect(missing.out).not.toMatch(/reviewer/);
+  });
+
   it("reports an unset passEnv name in the gateway's agent: block as this shell's, apart from the files", async () => {
     fx = mtFixture((ws) =>
       [

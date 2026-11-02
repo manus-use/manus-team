@@ -239,6 +239,13 @@ interface Attempt {
 
 /** One run of the startup validation against `env`. Never throws a ConfigError. */
 function attempt(env: Env, only: string | undefined): Attempt {
+  const result = attemptAll(env, only);
+  // On every path, error or not: `mt role check nobody` names no other role's variables.
+  if (only === undefined) return result;
+  return { ...result, unset: result.unset.filter((u) => u.startsWith(`${only}: `)) };
+}
+
+function attemptAll(env: Env, only: string | undefined): Attempt {
   const unset: string[] = [];
   let notes: readonly string[] = [];
   try {
@@ -253,7 +260,7 @@ function attempt(env: Env, only: string | undefined): Attempt {
       const was = recorded.get(name);
       if (was !== undefined && was !== path) return { error: movedMessage(name, was, path), unset, notes };
     }
-    return { unset: only === undefined ? unset : unset.filter((u) => u.startsWith(`${only}: `)), notes };
+    return { unset, notes };
   } catch (err) {
     if (err instanceof ConfigError) return { error: err.message, unset, notes };
     throw err;
