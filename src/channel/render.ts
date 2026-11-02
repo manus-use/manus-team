@@ -1,6 +1,6 @@
 import { redactKnownSecrets, withholdSecretPrefix } from '../secrets.js';
 import type { Event } from '../types.js';
-import { forDisplay, forMarkdown, truncate } from './escape.js';
+import { forDisplay, forMarkdown, stripControl, truncate } from './escape.js';
 
 /**
  * Project a slice of the event log into card text.
@@ -171,11 +171,14 @@ export function renderCard(events: readonly Event[]): RenderedCard {
   const toolLines = [...tools.values()].map((t) => `${statusIcon(t.status)} ${forDisplay(t.title)}`);
   if (toolLines.length > 0) parts.push(toolLines.join('\n'));
 
-  // Masked whole, then cut: the joined answer is the only text guaranteed to hold
-  // a streamed secret whole. A trailing fragment of one is dropped, because this
-  // render may be mid-stream (spec §10.1). Masking first means the tail of a
-  // complete secret can never be mistaken for a fragment.
-  const body = withholdSecretPrefix(redactKnownSecrets(message)).trim();
+  // Cut, then masked: the joined answer is the only text guaranteed to hold a
+  // streamed secret whole. A trailing fragment of one is dropped, because this
+  // render may be mid-stream (spec §10.1). The cut is worked out on the raw text,
+  // control characters already stripped: masked first, a secret inside a longer
+  // one would hide the longer one's start, and a control character would stop a
+  // fragment matching. The cut never falls inside a complete secret, so what is
+  // kept masks the same as the whole would.
+  const body = redactKnownSecrets(withholdSecretPrefix(stripControl(message))).trim();
   // Markdown is kept for the answer and nowhere else: see `forMarkdown`.
   if (body !== '') parts.push(forMarkdown(body));
 

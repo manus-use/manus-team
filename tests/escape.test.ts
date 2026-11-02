@@ -157,4 +157,10 @@ describe('the escapers mask known secrets before escaping', () => {
     // Stripped first, so the control character cannot stop the secret matching.
     expect(forPlainText('sk_live\u0007_abc123')).toBe(MASK);
   });
+
+  it('masks a registered secret that itself contains a control character', () => {
+    addSecrets(['sk_ctrl\u0007_abcdef']);
+    expect(forPlainText('k sk_ctrl\u0007_abcdef')).toBe(`k ${MASK}`);
+    expect(forDisplay('k sk_ctrl\u0007_abcdef')).toBe(`k ${MASK}`);
+  });
 });

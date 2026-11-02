@@ -339,4 +339,42 @@ describe('renderCard: known secrets', () => {
     expect(view.text).toContain('the key is');
     expect(view.text).not.toContain('sk-te');
   });
+
+  it('does not show the end of a secret that contains a control character', () => {
+    const view = renderCard([
+      ev('turn_submitted', { text: 'hi' }),
+      ev('agent_message_chunk', { text: 'the key is sk-test-12\u0007' }),
+    ]);
+    expect(view.text).not.toContain('sk-te');
+  });
+});
+
+describe('renderCard: a secret that contains another', () => {
+  beforeEach(() => clearSecrets());
+
+  function fragments(secret: string): string[] {
+    const out: string[] = [];
+    for (let i = 0; i + 4 <= secret.length; i += 1) out.push(secret.slice(i, i + 4));
+    return out;
+  }
+
+  it('withholds the outer secret when the inner one is at its start', () => {
+    const outer = 'abcdefgh-longer-secret-value';
+    addSecrets(['abcdefgh', outer]);
+    const view = renderCard([
+      ev('turn_submitted', { text: 'hi' }),
+      ev('agent_message_chunk', { text: 'k abcdefgh-longer-secr' }),
+    ]);
+    for (const fragment of fragments(outer)) expect(view.text).not.toContain(fragment);
+  });
+
+  it('withholds the outer secret when the inner one is in its middle', () => {
+    const outer = 'AAA-mid-secret-x-tail-ZZZZZZ';
+    addSecrets(['mid-secret-x', outer]);
+    const view = renderCard([
+      ev('turn_submitted', { text: 'hi' }),
+      ev('agent_message_chunk', { text: 'k AAA-mid-secret-x-tail-ZZ' }),
+    ]);
+    for (const fragment of fragments(outer)) expect(view.text).not.toContain(fragment);
+  });
 });

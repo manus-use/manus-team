@@ -41,6 +41,48 @@ describe('withholdSecretPrefix', () => {
     expect(withholdSecretPrefix('the key is sk-')).toBe('the key is sk-');
     expect(withholdSecretPrefix('nothing here')).toBe('nothing here');
   });
+
+  it('works on raw text, so a secret inside a longer one cannot hide the longer one', () => {
+    addSecrets(['abcdefgh', 'abcdefgh-longer-secret-value']);
+    expect(withholdSecretPrefix('k abcdefgh-longer-secr')).toBe('k ');
+  });
+
+  it('never cuts a complete secret part-way: the cut moves to its start', () => {
+    // The tail of the complete one is the start of the other.
+    addSecrets(['abcdefgh', 'efgh-other-value']);
+    expect(withholdSecretPrefix('k abcdefgh')).toBe('k ');
+  });
+
+  it('keeps a complete secret that ends before the cut', () => {
+    addSecrets(['abcdefgh', 'sk-test-123456']);
+    expect(withholdSecretPrefix('k abcdefgh and sk-te')).toBe('k abcdefgh and ');
+  });
+});
+
+describe('redactKnownSecrets: overlaps', () => {
+  it('masks two secrets whose occurrences overlap as one span', () => {
+    addSecrets(['abcdefgh12', '12345678xy']);
+    expect(redactKnownSecrets('k abcdefgh12345678xy z')).toBe(`k ${MASK} z`);
+  });
+
+  it('masks overlapping occurrences of the same secret', () => {
+    addSecrets(['abababab']);
+    expect(redactKnownSecrets('k ababababab z')).toBe(`k ${MASK} z`);
+  });
+});
+
+describe('addSecrets', () => {
+  it('also knows a secret with its control characters stripped, as the escapers see it', () => {
+    addSecrets(['sk-ctrl\u0007-abcdef']);
+    expect(redactKnownSecrets('k sk-ctrl-abcdef')).toBe(`k ${MASK}`);
+    removeSecrets(['sk-ctrl\u0007-abcdef']);
+    expect(redactKnownSecrets('k sk-ctrl-abcdef')).toBe('k sk-ctrl-abcdef');
+  });
+
+  it('ignores a value containing the mask character', () => {
+    addSecrets(['abc•defghij']);
+    expect(redactKnownSecrets('k abc•defghij')).toBe('k abc•defghij');
+  });
 });
 
 describe('redactValues', () => {
@@ -55,6 +97,14 @@ describe('redactValues', () => {
       approvalId: 'secret-"quoted"-value',
       message: `got ${MASK}`,
       nested: { list: [MASK, 3, true, null] },
+    });
+  });
+
+  it('still walks an object or array under an identifying key', () => {
+    addSecrets(['sk-test-123456']);
+    expect(redactValues({ owner: { note: 'sk-test-123456' }, role: ['sk-test-123456'] })).toEqual({
+      owner: { note: MASK },
+      role: [MASK],
     });
   });
 
