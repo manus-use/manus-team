@@ -657,14 +657,19 @@ describe('sessions beyond chat', () => {
     const h = harness(DEFAULT_MAX_LIVE, {
       envFor: (sessionId) => {
         asked.push(sessionId);
-        return { MT_KANBAN_RUN: 'r_1' };
+        // Different on every call, so a cached value would show.
+        return { MT_KANBAN_RUN: `r_${asked.length}` };
       },
     });
     const session = h.registry.bindOrCreate(key(), OWNER).session;
-    const actor = await h.registry.actorFor(session.id, key());
-    await actor.submit({ messageId: 'om_e', appId: 'cli_app', input: { text: 'hi', paths: [] } });
-    expect(asked).toEqual([session.id]);
+    const first = await h.registry.actorFor(session.id, key());
+    await first.submit({ messageId: 'om_e', appId: 'cli_app', input: { text: 'hi', paths: [] } });
+    await h.registry.release(session.id);
+    const second = await h.registry.actorFor(session.id, key());
+    await second.submit({ messageId: 'om_e2', appId: 'cli_app', input: { text: 'again', paths: [] } });
+    expect(asked).toEqual([session.id, session.id]);
     expect(h.driver.starts[0]?.env).toEqual({ MT_KANBAN_RUN: 'r_1' });
+    expect(h.driver.starts[1]?.env).toEqual({ MT_KANBAN_RUN: 'r_2' });
   });
 
   it('creates a session as a role, in a workspace, seeded from another session', async () => {
