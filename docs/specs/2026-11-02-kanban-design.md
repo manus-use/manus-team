@@ -70,8 +70,11 @@ $MT_HOME/roles/                 # default ~/.manus-team/roles
     config.yaml                  # the coding agent, workspace, tools, description
     role.md                      # standing instructions
     skills/
-      testing.md
-      git-hygiene.md
+      testing/
+        SKILL.md                 # front matter: name, description
+        references/              # anything else the skill needs
+      git-hygiene/
+        SKILL.md
     .env                         # this role's secrets — 0600, never cloned (§2.5)
     .gitignore                   # contains .env
   reviewer/
@@ -189,12 +192,14 @@ tests before you report"). Delivered by the gateway at the head of every task pr
 not a personality or an identity, and nothing reads it as one: it is text the agent is given, which
 is also why it works with any agent.
 
-**Skills.** Each file in `skills/` is a markdown file with front matter giving a `name` and a
-one-line `description` — the format Claude Code uses for skills, so the same file can be installed
-natively later. v1 does not install anything: the task prompt **lists** each skill's name,
-description and absolute path, and the agent opens a skill when it is relevant. That keeps skills
-from spending the context window until they are needed, and works with any agent that can read a
-file.
+**Skills.** A skill is a directory, `skills/<name>/`, holding a `SKILL.md` whose front matter gives
+a `name` — the same as the directory's — and a one-line `description`; anything else the skill
+needs (`references/`, scripts) sits beside it. That is the format bytesec agent packages and Claude
+Code both use, so a skill written once works with either, an existing bytesec skill can be copied in
+unchanged, and plan R can install skills natively. Until a role's coding agent has a renderer
+(plan R), the task prompt **lists** each skill's name, description and the absolute path of its
+`SKILL.md`, and the agent opens a skill when it is relevant. That keeps skills from spending the
+context window until they are needed, and works with any agent that can read a file.
 
 **Tools.** A role may declare `allow` and `deny` lists. Only the coding agent can *enforce* them —
 the gateway sees tool calls after the fact, or, on a supervised agent, as approval requests it could
@@ -835,8 +840,12 @@ the click resolves through the approval's session, which the router already look
 The task prompt is composed, in this order, of:
 
 1. **The role** — the role's `role.md`, if it has one.
-2. **The skills** — for each of the role's skills, its name, description and absolute path, and the
-   instruction to read one when it applies.
+2. **The skills** — for each of the role's skills, its name, description and the absolute path of its
+   `SKILL.md`, and the instruction to read one when it applies.
+
+   For a role whose coding agent has a renderer (plan R), `role.md` and the skills are delivered in
+   the agent's own format instead — `role.md` as its system prompt, the skills through its own skill
+   loading — and are left out of the task prompt.
 3. **The protocol** for the run's kind. It comes after `role.md` and says it takes precedence:
    a role's instructions may shape *how* work is done, not whether it is reported. That precedence is
    an instruction to the model, not something the gateway can enforce; the nudges (§7.5) and the
@@ -1339,7 +1348,8 @@ board.
 ## 12. Plans
 
 Separate implementation plans. Each ends with everything built so far working and tested. Order: A, A2, B, F, C,
-D, with E independent once B is done. **Before F**, the `lark-interaction-fixes` branch is merged: F changes
+D, then R; E is independent once B is done. B is delivered as B1 (roles and workspaces in
+configuration), B2 (the session layer) and B3 (the `mt` commands). **Before F**, the `lark-interaction-fixes` branch is merged: F changes
 the escapers, and `forMarkdown` is on that branch.
 
 | Plan | Contents | Depends on |
@@ -1350,6 +1360,7 @@ the escapers, and `forMarkdown` is on that branch.
 | **C. Kernel** | migration `003`; transitions and derived status; classifier; prompt composition; the socket and the `mt kanban` commands; the dispatcher — passes, per-workspace limit, nudges, retries, rework, gates, restart handling; with F's masker: registering and removing worker tokens, masking composed worker context and `last_output` (layer 2), masking kanban free text and `kanban_events` on write (layer 3), and refusing gates that contain a secret | B, F |
 | **D. Lark** | `/kanban` commands; person targets; card `kind` routing; task, review and blocked cards; the group notice; subscriptions | C |
 | **E. Native resume** | the CLI driver captures the provider session id and passes `--session` (architecture §6.3), with transcript replay as the fallback | B; independent of C and D |
+| **R. Native rendering** | starts with a spike: where `bytesec run --agent` looks up a package (the workspace's `apm/packages/`, or a global install), so rendering never writes into a workspace repository. Then a renderer per coding agent: for bytesec, a role becomes an agent package — `role.md` as `agents/<role>.md` (`mode: primary`), its `skills/` copied — in a directory the gateway manages, run with `--agent`; Claude Code's later. Prompt injection (§7.1) stays the fallback for an agent with no renderer | B2 |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D, nothing can deliver a card to a person, so **plan C refuses human assignees and

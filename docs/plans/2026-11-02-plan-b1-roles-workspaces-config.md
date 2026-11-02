@@ -953,18 +953,37 @@ describe('loadRoleDir: .env, role.md, skills', () => {
     expect(load('without').role.roleMdPath).toBeUndefined();
   });
 
-  it('reads each skill from its front matter', () => {
+  it('reads each skill directory from its SKILL.md front matter', () => {
     role('r', AGENT, {
-      'skills/testing.md': '---\nname: testing\ndescription: How to run the tests\n---\nRun npm test.\n',
+      'skills/testing/SKILL.md': '---\nname: testing\ndescription: How to run the tests\n---\nRun npm test.\n',
+      'skills/testing/references/ci.md': 'notes',
     });
+    const dir = join(rolesDir, 'r', 'skills', 'testing');
     expect(load('r').role.skills).toEqual([
-      { name: 'testing', description: 'How to run the tests', path: join(rolesDir, 'r', 'skills', 'testing.md') },
+      { name: 'testing', description: 'How to run the tests', dir, path: join(dir, 'SKILL.md') },
     ]);
   });
 
   it('refuses a skill without front matter', () => {
-    role('r', AGENT, { 'skills/bare.md': 'just text' });
+    role('r', AGENT, { 'skills/bare/SKILL.md': 'just text' });
     expect(() => load('r')).toThrow(/must start with front matter/);
+  });
+
+  it('refuses a skill directory with no SKILL.md', () => {
+    role('r', AGENT, { 'skills/empty/notes.md': 'x' });
+    expect(() => load('r')).toThrow(/needs a SKILL\.md/);
+  });
+
+  it("refuses a skill whose name is not its directory's", () => {
+    role('r', AGENT, { 'skills/testing/SKILL.md': '---\nname: other\ndescription: d\n---\n' });
+    expect(() => load('r')).toThrow(/does not match its directory/);
+  });
+
+  it('reports a loose file in skills/ and ignores it', () => {
+    role('r', AGENT, { 'skills/stray.md': 'x' });
+    const loaded = load('r');
+    expect(loaded.role.skills).toEqual([]);
+    expect(loaded.notes.join('\n')).toContain('stray.md');
   });
 });
 ```
@@ -1009,6 +1028,9 @@ import { isReservedRoleName, nameProblem } from './names.js';
 export interface Skill {
   name: string;
   description: string;
+  /** The skill's directory, `skills/<name>/`: its SKILL.md and anything beside it. */
+  dir: string;
+  /** Its SKILL.md. */
   path: string;
 }
 
@@ -1253,9 +1275,11 @@ function readRoleMd(dir: string): string | undefined {
 }
 
 /**
- * Skills: each `skills/*.md` with front matter giving a `name` and a one-line
- * `description` -- the format Claude Code uses, so the same file can be installed
- * natively later. Other entries are reported and ignored.
+ * Skills: each `skills/<name>/` directory holding a `SKILL.md` whose front matter
+ * gives a `name` (its directory's) and a one-line `description`, with anything else
+ * the skill needs beside it -- the format bytesec agent packages and Claude Code
+ * both use, so a skill works with either and can be rendered natively later
+ * (spec §2.2, plan R). Anything else in `skills/` is reported and ignored.
  */
 function readSkills(dir: string): { skills: Skill[]; notes: string[] } {
   const skillsDir = join(dir, 'skills');
@@ -1271,12 +1295,22 @@ function readSkills(dir: string): { skills: Skill[]; notes: string[] } {
   const notes: string[] = [];
   for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
     if (entry.name.startsWith('.')) continue;
-    const path = join(skillsDir, entry.name);
-    if (!entry.isFile() || !entry.name.endsWith('.md')) {
-      notes.push(`ignoring ${path}: a skill is a .md file`);
+    const dir = join(skillsDir, entry.name);
+    if (!entry.isDirectory()) {
+      notes.push(`ignoring ${dir}: a skill is a directory holding a SKILL.md`);
       continue;
     }
-    const matter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(readFileSync(path, 'utf8'))?.[1];
+    const path = join(dir, 'SKILL.md');
+    let text: string;
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new ConfigError(`${dir}: a skill directory needs a SKILL.md`);
+      }
+      throw new ConfigError(`${path} cannot be read: ${(err as Error).message}`);
+    }
+    const matter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)?.[1];
     if (matter === undefined) {
       throw new ConfigError(`${path}: a skill must start with front matter (--- name: … description: … ---)`);
     }
@@ -1292,15 +1326,20 @@ function readSkills(dir: string): { skills: Skill[]; notes: string[] } {
     if (name === undefined || description === undefined) {
       throw new ConfigError(`${path}: its front matter needs a name and a description`);
     }
-    skills.push({ name, description, path });
+    if (name !== entry.name) {
+      throw new ConfigError(
+        `${path}: its name ${JSON.stringify(name)} does not match its directory ${JSON.stringify(entry.name)}`,
+      );
+    }
+    skills.push({ name, description, dir, path });
   }
   return { skills, notes };
 }
 ```
 
-- [ ] **Step 5.4: Run the tests** → `npx vitest run --project unit tests/roles.test.ts` → `Tests  20 passed (20)`.
+- [ ] **Step 5.4: Run the tests** → `npx vitest run --project unit tests/roles.test.ts` → `Tests  23 passed (23)`.
 
-- [ ] **Step 5.5: Full suite** — `npm test 2>&1 | tail -4` → `Tests  451 passed (451)` (420 + 11 workspaces + 20 roles).
+- [ ] **Step 5.5: Full suite** — `npm test 2>&1 | tail -4` → `Tests  454 passed (454)` (420 + 11 workspaces + 23 roles).
 
 - [ ] **Step 5.6: Commit**
 
@@ -1538,7 +1577,7 @@ with
 
 `loadTeam` throws `ConfigError`, which `main.ts` already turns into a one-line error and exit 78.
 
-- [ ] **Step 7.4: Typecheck and full suite** — `npm run typecheck` → no output; `npm test 2>&1 | tail -4` → `Tests  457 passed (457)`.
+- [ ] **Step 7.4: Typecheck and full suite** — `npm run typecheck` → no output; `npm test 2>&1 | tail -4` → `Tests  460 passed (460)`.
 
 - [ ] **Step 7.5: Commit**
 
@@ -1567,7 +1606,7 @@ A **role** is who does a kind of work, and how it is run. Each is a directory un
 roles/implementer/
   config.yaml     # the coding agent, an optional workspace, an optional description
   role.md         # optional standing instructions
-  skills/*.md     # optional; each starts with front matter giving name and description
+  skills/<name>/SKILL.md   # optional; front matter gives name and description
   .env            # optional; this role's own secrets, 0600
 ```
 
@@ -1620,7 +1659,7 @@ including `MT_AGENT_ENV_*`: any of them still counts as a second definition of t
 #   docs: /srv/repos/docs
 ```
 
-- [ ] **Step 8.4: Full suite** — `npm test 2>&1 | tail -4` → `Tests  457 passed (457)`.
+- [ ] **Step 8.4: Full suite** — `npm test 2>&1 | tail -4` → `Tests  460 passed (460)`.
 
 - [ ] **Step 8.5: Commit**
 
@@ -1657,6 +1696,6 @@ Expected on this machine: `role default agent-block structured-cli bytesec`, `wo
 
 ## Done when
 
-- `Tests  457 passed (457)` and `npm run typecheck` clean, under Node 22, in the worktree.
+- `Tests  460 passed (460)` and `npm run typecheck` clean, under Node 22, in the worktree.
 - Task 9 shows the live deployment loads as the role `default` from its `agent:` block, in workspace `default`.
 - Nothing merged into the main checkout.
