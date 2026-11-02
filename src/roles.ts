@@ -1,0 +1,342 @@
+import { lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
+import {
+  type AgentConfig,
+  ConfigError,
+  type Env,
+  bool,
+  checkCommand,
+  driverOf,
+  passEnvValues,
+  reject,
+  requireSupervisionMatch,
+  section,
+  shellWords,
+  str,
+  strings,
+  subsection,
+} from './config.js';
+import type { KnownDriver } from './driver/registry.js';
+import { parseEnvFile } from './dotenv.js';
+import { isReservedRoleName, nameProblem } from './names.js';
+
+/**
+ * Roles: who does a kind of work, and how it is run (spec §2.1–§2.2, §2.5).
+ *
+ * A role is a directory under `$MT_HOME/roles/`: `config.yaml` naming its coding
+ * agent, an optional `role.md` of standing instructions, optional `skills/`, and
+ * an optional `.env` for its own secrets. Everything wrong with one is found
+ * here, at startup.
+ */
+
+export interface Skill {
+  name: string;
+  description: string;
+  /** The skill's directory, `skills/<name>/`: its SKILL.md and anything beside it. */
+  dir: string;
+  /** Its SKILL.md. */
+  path: string;
+}
+
+export interface Role {
+  name: string;
+  /** A role directory, or the gateway's `agent:` block standing in for `default`. */
+  source: 'directory' | 'agent-block';
+  dir: string | undefined;
+  description: string | undefined;
+  /** A workspace name the role always works in, or undefined (spec §2.3). */
+  workspace: string | undefined;
+  agent: AgentConfig;
+  /** The path of `role.md` if the role has one; its contents are read at each claim. */
+  roleMdPath: string | undefined;
+  skills: readonly Skill[];
+  /** Every value this role's agent is given from a secret source, for masking (spec §10.1). */
+  secretValues: readonly string[];
+}
+
+/** Drivers that can enforce a role's tool policy. None yet (spec §2.2). */
+const TOOL_POLICY_DRIVERS: readonly KnownDriver[] = [];
+
+const HINTS = {
+  secret: "Put it in the role's .env instead.",
+  env: "Put the values in the role's .env, or name them in agent.passEnv.",
+};
+
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
+
+export interface Discovered {
+  names: string[];
+  notes: string[];
+}
+
+/**
+ * The role directories under `rolesDir`.
+ *
+ * Dot-entries are ignored, so the directory can be under version control.
+ * Anything else that is not a valid role -- a file, a badly named directory --
+ * is reported once and ignored. A directory named like a driver is an error.
+ *
+ * Symlinks are not followed: a symlinked role directory is reported as not a
+ * directory, and a symlinked `role.md` or `.env` is refused. That is stricter
+ * than the spec requires, deliberately -- a role is meant to be self-contained,
+ * and a link is how it quietly stops being.
+ */
+export function discoverRoles(rolesDir: string): Discovered {
+  let entries;
+  try {
+    entries = readdirSync(rolesDir, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { names: [], notes: [] };
+    throw new ConfigError(`cannot read ${rolesDir}: ${(err as Error).message}`);
+  }
+
+  const names: string[] = [];
+  const notes: string[] = [];
+  for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.name.startsWith('.')) continue;
+    const where = join(rolesDir, entry.name);
+    if (!entry.isDirectory()) {
+      notes.push(`ignoring ${where}: not a directory, so not a role`);
+      continue;
+    }
+    if (isReservedRoleName(entry.name)) {
+      throw new ConfigError(`${where}: role name ${JSON.stringify(entry.name)} is reserved: it is a driver id`);
+    }
+    const problem = nameProblem('role', entry.name);
+    if (problem !== undefined) {
+      notes.push(`ignoring ${where}: ${problem}`);
+      continue;
+    }
+    names.push(entry.name);
+  }
+  return { names, notes };
+}
+
+// ---------------------------------------------------------------------------
+// One role
+// ---------------------------------------------------------------------------
+
+export function loadRoleDir(
+  name: string,
+  dir: string,
+  env: Env,
+  workspaceNames: ReadonlySet<string>,
+): { role: Role; notes: string[] } {
+  const configPath = join(dir, 'config.yaml');
+  let text: string;
+  try {
+    text = readFileSync(configPath, 'utf8');
+  } catch (err) {
+    throw new ConfigError(`role ${name}: cannot read ${configPath}: ${(err as Error).message}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(text);
+  } catch (err) {
+    throw new ConfigError(`${configPath} is not valid YAML: ${(err as Error).message}`);
+  }
+  const root = section(configPath, '', parsed ?? {});
+  const agentRaw = subsection(configPath, root, 'agent');
+  reject(configPath, '', root, ['description', 'workspace', 'tools', 'agent'], HINTS);
+  reject(
+    configPath,
+    'agent',
+    agentRaw,
+    ['driver', 'command', 'args', 'unsupervised', 'passEnv', 'readOnlyTools', 'maskExempt'],
+    HINTS,
+  );
+  if (root['agent'] === undefined || root['agent'] === null) {
+    throw new ConfigError(`${configPath}: agent is required`);
+  }
+
+  const workspace = str(configPath, 'workspace', root['workspace']);
+  if (workspace !== undefined && !workspaceNames.has(workspace)) {
+    throw new ConfigError(
+      `${configPath}: workspace ${JSON.stringify(workspace)} is not configured (known: ${[...workspaceNames].join(', ')})`,
+    );
+  }
+
+  const driver = driverOf(str(configPath, 'agent.driver', agentRaw['driver']) ?? 'acp');
+  if (root['tools'] !== undefined && root['tools'] !== null && !TOOL_POLICY_DRIVERS.includes(driver)) {
+    // Silently accepting it would leave a role believed to be restricted that is not.
+    throw new ConfigError(
+      `${configPath}: role ${name} declares a tools policy, but its agent's driver (${driver}) ` +
+        'cannot enforce one. Remove tools, or use an agent that can enforce it.',
+    );
+  }
+  const command = str(configPath, 'agent.command', agentRaw['command']);
+  if (command === undefined) throw new ConfigError(`${configPath}: agent.command is required`);
+  checkCommand(command);
+  const args = Array.isArray(agentRaw['args'])
+    ? strings(configPath, 'agent.args', agentRaw['args'])
+    : shellWords(str(configPath, 'agent.args', agentRaw['args']) ?? '');
+  const unsupervised = bool(configPath, 'agent.unsupervised', agentRaw['unsupervised']) ?? false;
+  requireSupervisionMatch(driver, unsupervised);
+
+  const passEnv = strings(configPath, 'agent.passEnv', agentRaw['passEnv']);
+  const fromGateway = passEnvValues(env, passEnv, `${configPath}: agent.passEnv`);
+  const fromFile = readRoleEnv(dir);
+  for (const key of Object.keys(fromFile)) {
+    if (passEnv.includes(key)) {
+      throw new ConfigError(`role ${name}: ${key} is set in .env and named in agent.passEnv; keep one`);
+    }
+  }
+
+  const { skills, notes } = readSkills(dir);
+  return {
+    role: {
+      name,
+      source: 'directory',
+      dir,
+      description: str(configPath, 'description', root['description']),
+      workspace,
+      agent: {
+        driver,
+        command,
+        args,
+        env: { ...fromGateway, ...fromFile },
+        unsupervised,
+        passEnv,
+        readOnlyTools: strings(configPath, 'agent.readOnlyTools', agentRaw['readOnlyTools']),
+        maskExempt: strings(configPath, 'agent.maskExempt', agentRaw['maskExempt']),
+      },
+      roleMdPath: readRoleMd(dir),
+      skills,
+      // Empty values are not secrets, and masking an empty string would mangle everything.
+      secretValues: [...Object.values(fromGateway), ...Object.values(fromFile)].filter((v) => v !== ''),
+    },
+    notes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// .env, role.md, skills
+// ---------------------------------------------------------------------------
+
+/**
+ * A role's own secrets (spec §2.5). The one file the gateway reads secrets from,
+ * so it is checked at every point where it could leak or travel: it must be a
+ * regular file (a symlink could point anywhere), owned by the gateway's user,
+ * and readable by nobody else. A loose mode is refused, not fixed: a file that
+ * was readable may already have been read, and tightening it quietly hides that.
+ */
+function readRoleEnv(dir: string): Record<string, string> {
+  const path = join(dir, '.env');
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw new ConfigError(`cannot inspect ${path}: ${(err as Error).message}`);
+  }
+  if (stat.isSymbolicLink()) {
+    throw new ConfigError(`${path} is a symlink; a role's .env must be a regular file, so it cannot point anywhere else`);
+  }
+  if (!stat.isFile()) throw new ConfigError(`${path} is not a regular file`);
+  const uid = process.getuid?.();
+  if (uid !== undefined && stat.uid !== uid) {
+    throw new ConfigError(`${path} is owned by another user; it must belong to the user the gateway runs as`);
+  }
+  if ((stat.mode & 0o077) !== 0) {
+    throw new ConfigError(
+      `${path} can be read or written by other users (mode ${(stat.mode & 0o777).toString(8)}); ` +
+        'it must be 0600. The gateway does not change it itself: a file that was readable may already have been read.',
+    );
+  }
+
+  const parsed = parseEnvFile(readFileSync(path, 'utf8'), path);
+  if ('error' in parsed) throw new ConfigError(parsed.error);
+  for (const key of Object.keys(parsed.values)) {
+    if (key.startsWith('MT_') || key.startsWith('LARK_')) {
+      throw new ConfigError(`${path}: ${key} may not be set in a role's .env: it belongs to the gateway`);
+    }
+    if (key === 'PATH') {
+      throw new ConfigError(`${path}: PATH may not be set in a role's .env: the gateway sets it for every run`);
+    }
+  }
+  return parsed.values;
+}
+
+/** `role.md` is optional; present, it must be a readable regular file. */
+function readRoleMd(dir: string): string | undefined {
+  const path = join(dir, 'role.md');
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw new ConfigError(`cannot inspect ${path}: ${(err as Error).message}`);
+  }
+  if (!stat.isFile()) throw new ConfigError(`${path} is not a regular file`);
+  try {
+    readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new ConfigError(`${path} cannot be read: ${(err as Error).message}`);
+  }
+  return path;
+}
+
+/**
+ * Skills: each `skills/<name>/` directory holding a `SKILL.md` whose front matter
+ * gives a `name` (its directory's) and a one-line `description`, with anything else
+ * the skill needs beside it -- the format bytesec agent packages and Claude Code
+ * both use, so a skill works with either and can be rendered natively later
+ * (spec §2.2, plan R). Anything else in `skills/` is reported and ignored.
+ */
+function readSkills(dir: string): { skills: Skill[]; notes: string[] } {
+  const skillsDir = join(dir, 'skills');
+  let entries;
+  try {
+    entries = readdirSync(skillsDir, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { skills: [], notes: [] };
+    throw new ConfigError(`cannot read ${skillsDir}: ${(err as Error).message}`);
+  }
+
+  const skills: Skill[] = [];
+  const notes: string[] = [];
+  for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.name.startsWith('.')) continue;
+    const dir = join(skillsDir, entry.name);
+    if (!entry.isDirectory()) {
+      notes.push(`ignoring ${dir}: a skill is a directory holding a SKILL.md`);
+      continue;
+    }
+    const path = join(dir, 'SKILL.md');
+    let text: string;
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new ConfigError(`${dir}: a skill directory needs a SKILL.md`);
+      }
+      throw new ConfigError(`${path} cannot be read: ${(err as Error).message}`);
+    }
+    const matter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)?.[1];
+    if (matter === undefined) {
+      throw new ConfigError(`${path}: a skill must start with front matter (--- name: … description: … ---)`);
+    }
+    let fields: unknown;
+    try {
+      fields = parseYaml(matter);
+    } catch (err) {
+      throw new ConfigError(`${path}: its front matter is not valid YAML: ${(err as Error).message}`);
+    }
+    const meta = section(path, 'front matter', fields ?? {});
+    const name = str(path, 'name', meta['name']);
+    const description = str(path, 'description', meta['description']);
+    if (name === undefined || description === undefined) {
+      throw new ConfigError(`${path}: its front matter needs a name and a description`);
+    }
+    if (name !== entry.name) {
+      throw new ConfigError(
+        `${path}: its name ${JSON.stringify(name)} does not match its directory ${JSON.stringify(entry.name)}`,
+      );
+    }
+    skills.push({ name, description, dir, path });
+  }
+  return { skills, notes };
+}
