@@ -510,4 +510,17 @@ describe('sessions', () => {
     expect(listSessionsByState(h.db, ['initializing']).map((s) => s.id)).toEqual(['s_1']);
     expect(listSessionsByState(h.db, [])).toEqual([]);
   });
+
+  it('records a seeded provider session id at creation, and none otherwise', () => {
+    // Review rework resumes the implementer's conversation (spec §2.4 item 5):
+    // the seed is a hint the driver may use, and the agent's own report replaces it.
+    createSession(
+      h.db,
+      { id: 's_seeded', agentId: 'reviewer', workspaceId: 'default', ownerPrincipal: 'on_owner', providerSessionId: 'prov_impl' },
+      NOW,
+    );
+    createSession(h.db, { id: 's_plain', agentId: 'default', workspaceId: 'default', ownerPrincipal: 'on_owner' }, NOW);
+    expect(getSession(h.db, 's_seeded')?.providerSessionId).toBe('prov_impl');
+    expect(getSession(h.db, 's_plain')?.providerSessionId).toBeNull();
+  });
 });

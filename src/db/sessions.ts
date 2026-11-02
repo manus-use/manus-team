@@ -55,6 +55,11 @@ export function createSession(
     workspaceId: string;
     ownerPrincipal: string;
     title?: string | null;
+    /**
+     * Seeded from another session's observed id (spec §2.4 item 5). A hint, not an
+     * observation: whatever the agent reports at start replaces it.
+     */
+    providerSessionId?: string | undefined;
   },
   now: number,
 ): SessionRow {
@@ -62,9 +67,9 @@ export function createSession(
     d.prepare(
       `INSERT INTO sessions
          (id, agent_id, workspace_id, owner_principal, state, title, generation,
-          last_seq, created_at, last_activity_at)
-       VALUES (?, ?, ?, ?, 'initializing', ?, 0, 0, ?, ?)`,
-    ).run(s.id, s.agentId, s.workspaceId, s.ownerPrincipal, s.title ?? null, now, now);
+          provider_session_id, last_seq, created_at, last_activity_at)
+       VALUES (?, ?, ?, ?, 'initializing', ?, 0, ?, 0, ?, ?)`,
+    ).run(s.id, s.agentId, s.workspaceId, s.ownerPrincipal, s.title ?? null, s.providerSessionId ?? null, now, now);
     const row = d.prepare<[string], SessionRaw>(`SELECT ${COLS} FROM sessions WHERE id = ?`).get(s.id);
     if (row === undefined) throw new Error('createSession wrote no row');
     return decode(row);
