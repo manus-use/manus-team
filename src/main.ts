@@ -12,12 +12,16 @@ import { redactKnownSecrets } from './secrets.js';
  * A configuration mistake prints one line and no stack. It is the failure an
  * operator hits most often, always at the first deploy, and a 40-frame trace
  * buries the name of the variable they forgot.
+ *
+ * Both writes are masked, but only for the secrets known by then: main() registers
+ * them once loadTeam has returned, so an error from loadConfig or loadTeam itself
+ * comes before any is known.
  */
 try {
   await main();
 } catch (err) {
   if (err instanceof ConfigError) {
-    process.stderr.write(`configuration error: ${err.message}\n`);
+    process.stderr.write(`configuration error: ${redactKnownSecrets(err.message)}\n`);
     process.exit(78); // EX_CONFIG, so a supervisor can tell this from a crash.
   }
   process.stderr.write(

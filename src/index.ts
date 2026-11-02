@@ -40,7 +40,21 @@ export interface Gateway {
   readonly db: Db;
 }
 
+/**
+ * Register every secret the configuration and the team hold: the Lark app secret
+ * and every role's environment values, less maskExempt names. Idempotent, so both
+ * main() and createGateway call it.
+ */
+export function registerConfiguredSecrets(config: GatewayConfig, team: Team): void {
+  addSecrets([config.lark.appSecret, ...[...team.roles.values()].flatMap((role) => role.secretValues)]);
+}
+
 export async function createGateway(config: GatewayConfig, team: Team): Promise<Gateway> {
+  // Every secret the gateway itself holds, masked wherever text leaves it (spec
+  // §10.1). Before anything can print, the notes below included, or store agent
+  // text. Plan C adds and removes worker tokens as runs open and close.
+  registerConfiguredSecrets(config, team);
+
   const note = (line: string): void => {
     // Metadata only. No message bodies, no agent text -- the log is operational,
     // and a log that quotes user content is a second copy of the data with none of
@@ -58,11 +72,6 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   );
 
   for (const line of team.notes) note(line);
-
-  // Every secret the gateway itself holds, masked wherever text leaves it (spec
-  // §10.1). Before anything can print or store agent text. Plan C adds and removes
-  // worker tokens as runs open and close.
-  addSecrets([config.lark.appSecret, ...[...team.roles.values()].flatMap((role) => role.secretValues)]);
 
   // Chat sessions run the role default in the workspace default; loadTeam guarantees both exist.
   const defaultRole = team.roles.get(DEFAULT_ROLE);
@@ -231,6 +240,8 @@ export async function main(): Promise<void> {
   // Read and checked before anything starts: a broken role or workspace found
   // later strands work; found here it is a line in the startup error.
   const team = loadTeam(config, process.env);
+  // Now, not only in createGateway: an error raised in between is masked too.
+  registerConfiguredSecrets(config, team);
   const gateway = await createGateway(config, team);
   await gateway.start();
 

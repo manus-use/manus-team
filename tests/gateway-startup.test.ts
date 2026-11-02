@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ConfigError, loadConfig, type GatewayConfig } from '../src/config.js';
 import { migrate, openDb } from '../src/db/open.js';
-import { createGateway } from '../src/index.js';
+import { createGateway, registerConfiguredSecrets } from '../src/index.js';
 import { loadTeam, type Team } from '../src/team.js';
 import { MASK, clearSecrets, redactKnownSecrets } from '../src/secrets.js';
 
@@ -52,6 +52,14 @@ function rows(): Array<{ id: string; root_path: string }> {
     db.close();
   }
 }
+
+describe('registerConfiguredSecrets', () => {
+  // main() calls it before createGateway, so an error raised in between is masked too.
+  it('knows the Lark app secret without a gateway being created', () => {
+    registerConfiguredSecrets(config, team);
+    expect(redactKnownSecrets(`x ${config.lark.appSecret} y`)).toBe(`x ${MASK} y`);
+  });
+});
 
 describe('createGateway', () => {
   it('knows the Lark app secret once it has started up', async () => {
