@@ -862,3 +862,33 @@ function firstTurn(h: Harness): { state: string; terminal: string | null } {
   if (row === undefined) throw new Error('no turn');
   return row;
 }
+
+describe('environment', () => {
+  it('passes its environment to every start, and none when it has none', async () => {
+    const db = testDb();
+    open.push(db);
+    const clock = new ManualClock(NOW);
+    createSession(db.db, { id: 's_env', agentId: 'default', workspaceId: '', ownerPrincipal: 'on_owner' }, NOW);
+    bindSession(db.db, KEY, 's_env', NOW);
+    const driver = new FakeDriver();
+    const actor = new SessionActor({
+      db: db.db,
+      sessionId: 's_env',
+      driver,
+      channel: new FakeChannel({ clock }),
+      key: KEY,
+      target: { chatId: KEY.conversationId, threadId: KEY.threadId },
+      cwd: '/tmp/workspace',
+      env: { MT_KANBAN_RUN: 'r_1' },
+      clock,
+    });
+    await actor.submit({ messageId: 'om_env', appId: KEY.appId, input: { text: 'hi', paths: [] } });
+    expect(driver.starts[0]?.env).toEqual({ MT_KANBAN_RUN: 'r_1' });
+    await actor.close();
+
+    const h = harness();
+    await h.actor.submit({ messageId: 'om_plain', appId: KEY.appId, input: { text: 'hi', paths: [] } });
+    expect(h.driver.starts).toHaveLength(1);
+    expect(h.driver.starts[0]?.env).toBeUndefined();
+  });
+});
