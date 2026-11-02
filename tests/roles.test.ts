@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -132,6 +133,12 @@ describe('loadRoleDir: .env, role.md, skills', () => {
     writeFileSync(join(rolesDir, 'elsewhere'), 'A=1\n');
     symlinkSync(join(rolesDir, 'elsewhere'), join(dir, '.env'));
     expect(() => load('r')).toThrow(/is a symlink/);
+  });
+
+  it('refuses a .env that is a FIFO, without waiting for a writer', () => {
+    const dir = role('r', AGENT);
+    execFileSync('mkfifo', [join(dir, '.env')]);
+    expect(() => load('r')).toThrow(/is not a regular file/);
   });
 
   it("refuses the gateway's own names and PATH", () => {
