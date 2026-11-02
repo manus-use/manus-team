@@ -1,9 +1,20 @@
-import { readFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { parse as parseYaml } from 'yaml';
-import { loadTeamSettings } from '../config.js';
+import { parseDocument, parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { loadTeamSettings, type AgentConfig } from '../config.js';
+import { isReservedRoleName, nameProblem } from '../names.js';
 import { discoverRoles } from '../roles.js';
-import { table, type MtIo } from './mt.js';
+import { refuse, table, type MtIo } from './mt.js';
 
 /** `mt role list`: every role, its driver, where it comes from, and its description. */
 export function roleList(io: MtIo): number {
@@ -39,4 +50,150 @@ function summarize(path: string): { driver: string; description: string } {
   } catch {
     return { driver: '?', description: '(unreadable config.yaml)' };
   }
+}
+
+const DEFAULT_ROLE = 'default';
+const AGENT_OVERRIDES = ['MT_AGENT_COMMAND', 'MT_AGENT_ARGS', 'MT_AGENT_DRIVER', 'MT_AGENT_UNSUPERVISED'] as const;
+const AGENT_ENV_PREFIX = 'MT_AGENT_ENV_';
+
+function starterRoleMd(name: string): string {
+  return (
+    `<!-- Standing instructions for the ${name} role, given to its agent at every claim.\n` +
+    '     Say what the role does, how it works, and what it must not do. -->\n'
+  );
+}
+
+export interface CreateOptions {
+  cloneFrom?: string | undefined;
+  description?: string | undefined;
+}
+
+/** `mt role create` (spec §2.6). */
+export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number {
+  const problem = nameProblem('role', name);
+  if (problem !== undefined) return refuse(io, problem);
+  if (isReservedRoleName(name)) return refuse(io, `role name ${name} is reserved: it is a driver id`);
+  if (name === DEFAULT_ROLE && opts.cloneFrom !== undefined) {
+    return refuse(io, 'the role default is always made from the agent: block; --clone-from cannot be used with it');
+  }
+  if (opts.cloneFrom !== undefined) {
+    // A name, never a path: `--clone-from ../x` must not read outside roles/.
+    const sourceProblem = nameProblem('role', opts.cloneFrom);
+    if (sourceProblem !== undefined) return refuse(io, sourceProblem);
+  }
+
+  // Names and paths only; the agent's environment is never copied (Task 3).
+  const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
+  const rolesDir = join(settings.home, 'roles');
+  const dir = join(rolesDir, name);
+  if (existsSync(dir)) return refuse(io, `${dir} already exists`);
+  // Only a real role directory: discoverRoles skips a symlink, so the copy cannot
+  // be pointed outside roles/ by one.
+  if (opts.cloneFrom !== undefined && !discoverRoles(rolesDir).names.includes(opts.cloneFrom)) {
+    return refuse(io, `there is no role ${opts.cloneFrom} to copy from`);
+  }
+
+  const source = opts.cloneFrom ?? DEFAULT_ROLE;
+  const sourceDir = join(rolesDir, source);
+  let configText: string;
+  let legacy = false;
+  if (existsSync(join(sourceDir, 'config.yaml'))) {
+    configText = readFileSync(join(sourceDir, 'config.yaml'), 'utf8');
+  } else if (source === DEFAULT_ROLE && settings.agent !== undefined) {
+    configText = renderAgentConfig(settings.agent);
+    legacy = true;
+  } else {
+    return refuse(io, `there is no role ${source} to copy from`);
+  }
+  if (opts.description !== undefined) {
+    const doc = parseDocument(configText);
+    doc.set('description', opts.description);
+    configText = String(doc);
+  }
+  // role.md and skills/ come with --clone-from; copying from default takes config.yaml only.
+  const copyDir = opts.cloneFrom === undefined ? undefined : sourceDir;
+
+  mkdirSync(rolesDir, { recursive: true, mode: 0o700 });
+  // Dot-named, so discoverRoles ignores it until the rename puts it in place.
+  const staging = mkdtempSync(join(rolesDir, `.${name}-`));
+  try {
+    writeFileSync(join(staging, 'config.yaml'), configText);
+    // Symlinks are never followed, as discoverRoles and loadRoleDir never follow
+    // them: a link would copy whatever it points at into the new role.
+    const roleMd = copyDir === undefined ? undefined : join(copyDir, 'role.md');
+    writeFileSync(
+      join(staging, 'role.md'),
+      roleMd !== undefined && lstatSync(roleMd, { throwIfNoEntry: false })?.isFile() === true
+        ? readFileSync(roleMd, 'utf8')
+        : starterRoleMd(name),
+    );
+    const skills = copyDir === undefined ? undefined : join(copyDir, 'skills');
+    if (skills !== undefined && lstatSync(skills, { throwIfNoEntry: false })?.isDirectory() === true) {
+      cpSync(skills, join(staging, 'skills'), {
+        recursive: true,
+        filter: (src) => !lstatSync(src).isSymbolicLink(),
+      });
+    } else {
+      mkdirSync(join(staging, 'skills'));
+    }
+    // Never cloned (spec §2.5): one credential with two owners is how a rotated
+    // refresh token gets revoked for the other.
+    writeFileSync(join(staging, '.env'), '', { mode: 0o600, flag: 'wx' });
+    writeFileSync(join(staging, '.gitignore'), '.env\n');
+    renameSync(staging, dir);
+  } catch (err) {
+    rmSync(staging, { recursive: true, force: true });
+    throw err;
+  }
+
+  io.out(`created role ${name} at ${dir}, with config.yaml from ${legacy ? 'the agent: block' : `role ${source}`}`);
+  if (legacy) reportLegacyCopy(dir, io);
+  if (name === DEFAULT_ROLE) reportCutover(dir, settings.configPath, io);
+  io.out(`check it with: mt role check ${name}`);
+  return 0;
+}
+
+function renderAgentConfig(agent: AgentConfig): string {
+  const block: Record<string, unknown> = {
+    driver: agent.driver,
+    command: agent.command,
+    args: [...agent.args],
+    unsupervised: agent.unsupervised,
+  };
+  if (agent.passEnv.length > 0) block['passEnv'] = [...agent.passEnv];
+  if (agent.readOnlyTools.length > 0) block['readOnlyTools'] = [...agent.readOnlyTools];
+  if (agent.maskExempt.length > 0) block['maskExempt'] = [...agent.maskExempt];
+  // Names only. The agent block's env holds values, and none of them is written.
+  return `# Written by mt role create from the gateway's agent: block.\n${stringifyYaml({ agent: block })}`;
+}
+
+function reportLegacyCopy(dir: string, io: MtIo): void {
+  for (const key of AGENT_OVERRIDES) {
+    const value = io.env[key];
+    if (value !== undefined && value.trim() !== '') {
+      io.out(`applied ${key} from this shell (the service's environment may differ)`);
+    }
+  }
+  const secrets = Object.keys(io.env)
+    .filter((key) => key.startsWith(AGENT_ENV_PREFIX) && key.length > AGENT_ENV_PREFIX.length)
+    .sort();
+  if (secrets.length > 0) {
+    io.out(`not copied, because they are secrets: ${secrets.join(', ')}`);
+    io.out(`put them in ${join(dir, '.env')} as:`);
+    for (const key of secrets) io.out(`  ${key.slice(AGENT_ENV_PREFIX.length)}=...`);
+  }
+  // Always, even when this shell holds none: the service may hold some this shell does not.
+  io.out("  (only this shell's MT_AGENT_ENV_* names are listed; check the service's environment for others)");
+}
+
+function reportCutover(dir: string, configPath: string | undefined, io: MtIo): void {
+  io.out('to make this the role default:');
+  io.out(`  1. put the values listed above, if any, in ${join(dir, '.env')}`);
+  io.out(
+    `  2. remove the agent: block${configPath === undefined ? '' : ` from ${configPath}`}, ` +
+      "and every MT_AGENT_* variable from the service's environment",
+  );
+  io.out('  3. run mt role check');
+  io.out('  4. restart the gateway');
+  io.out('until step 2 is done the gateway will not start: it refuses to run with the role default defined twice');
 }

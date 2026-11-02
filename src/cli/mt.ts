@@ -1,6 +1,6 @@
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { ConfigError, type Env } from '../config.js';
-import { roleList } from './role.js';
+import { roleCreate, roleList } from './role.js';
 
 /**
  * `mt`: commands that create and check roles and workspaces (spec §2.6).
@@ -77,6 +77,15 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
     if (group === 'role' && command === 'list') {
       expectNothing(parse(rest, {}).positionals, 'role list');
       return roleList(io);
+    }
+    if (group === 'role' && command === 'create') {
+      const { values, positionals } = parse(rest, {
+        'clone-from': { type: 'string' },
+        description: { type: 'string' },
+      });
+      const [name, extra] = positionals;
+      if (name === undefined || extra !== undefined) throw new UsageError('role create takes one name');
+      return roleCreate(name, { cloneFrom: values['clone-from'], description: values.description }, io);
     }
     throw new UsageError(`unknown command: ${[group, command].filter((s) => s !== undefined).join(' ')}`);
   } catch (err) {
