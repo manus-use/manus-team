@@ -11,9 +11,11 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { parseDocument, parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { loadTeamSettings, type AgentConfig } from '../config.js';
+import { ConfigError, loadTeamSettings, type AgentConfig, type Env } from '../config.js';
+import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { isReservedRoleName, nameProblem } from '../names.js';
 import { discoverRoles } from '../roles.js';
+import { loadTeam } from '../team.js';
 import { refuse, table, type MtIo } from './mt.js';
 
 /** `mt role list`: every role, its driver, where it comes from, and its description. */
@@ -196,4 +198,80 @@ function reportCutover(dir: string, configPath: string | undefined, io: MtIo): v
   io.out('  3. run mt role check');
   io.out('  4. restart the gateway');
   io.out('until step 2 is done the gateway will not start: it refuses to run with the role default defined twice');
+}
+
+interface Attempt {
+  error?: string;
+  /** `role: NAME` for each passEnv name not set in the environment checked. */
+  unset: string[];
+  /** What startup would log: entries under roles/ that were ignored, and why. */
+  notes: readonly string[];
+}
+
+/** One run of the startup validation against `env`. Never throws a ConfigError. */
+function attempt(env: Env, only: string | undefined): Attempt {
+  const unset: string[] = [];
+  let notes: readonly string[] = [];
+  try {
+    // The same collector for the agent: block and the role directories, so an
+    // unset name is reported, under the role that names it, whichever defines it.
+    const settings = loadTeamSettings(env, undefined, { unsetPassEnv: unset });
+    const team = loadTeam(settings, env, { unsetPassEnv: unset });
+    notes = team.notes;
+    if (only !== undefined && !team.roles.has(only)) return { error: `there is no role ${only}`, unset, notes };
+    const recorded = registrationsAt(settings.dbPath);
+    for (const [name, path] of team.workspaces) {
+      const was = recorded.get(name);
+      if (was !== undefined && was !== path) return { error: movedMessage(name, was, path), unset, notes };
+    }
+    return { unset: only === undefined ? unset : unset.filter((u) => u.startsWith(`${only}: `)), notes };
+  } catch (err) {
+    if (err instanceof ConfigError) return { error: err.message, unset, notes };
+    throw err;
+  }
+}
+
+function withoutAgentVariables(env: Env): Env {
+  const out: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!key.startsWith('MT_AGENT_')) out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * `mt role check [name]` (spec §2.6): the startup validation, in two parts --
+ * what the files say, and what this shell's environment adds. A problem that
+ * goes away without this shell's MT_AGENT_* variables is the environment's.
+ */
+export function roleCheck(only: string | undefined, io: MtIo): number {
+  const real = attempt(io.env, only);
+  const files: string[] = [];
+  const environment = real.unset.map((entry) => {
+    const [role, key] = entry.split(': ');
+    return `role ${role} names ${key} in agent.passEnv, and it is not set in this shell`;
+  });
+  if (real.error !== undefined) {
+    // The files are at fault only when the error survives removing this shell's
+    // MT_AGENT_* variables unchanged. A different error from the stripped run is
+    // not a file problem either: an environment-only deployment, stripped, has
+    // no role default at all.
+    const stripped = attempt(withoutAgentVariables(io.env), only);
+    if (stripped.error === real.error) files.push(real.error);
+    else environment.push(real.error);
+  }
+  report('files', files, io);
+  report("this shell's environment", environment, io);
+  for (const note of real.notes) io.out(`note: ${note}`);
+  io.out("note: the environment was checked in this shell; the service's environment may differ");
+  return files.length + environment.length === 0 ? 0 : 1;
+}
+
+function report(what: string, problems: readonly string[], io: MtIo): void {
+  if (problems.length === 0) {
+    io.out(`${what}: ok`);
+    return;
+  }
+  io.out(`${what}:`);
+  for (const p of problems) io.out(`  ${p}`);
 }

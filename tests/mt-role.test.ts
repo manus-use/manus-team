@@ -3,6 +3,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { loadRoleDir } from '../src/roles.js';
+import { migrate, openDb } from '../src/db/open.js';
+import { registerWorkspaces } from '../src/db/workspaces.js';
+import { SCHEMA_DIR } from './helpers/db.js';
 import { mtFixture, type MtFixture } from './helpers/mt.js';
 
 let fx: MtFixture;
@@ -111,5 +114,79 @@ describe('mt role create', () => {
     expect((await fx.run(['role', 'create', 'default', '--clone-from', 'impl'])).err).toMatch(/--clone-from/);
     expect((await fx.run(['role', 'create', 'x', '--clone-from', 'nope'])).err).toMatch(/no role nope/);
     expect((await fx.run(['role', 'create', 'x', '--clone-from', '../impl'])).code).toBe(1);
+  });
+});
+
+describe('mt role check', () => {
+  it('passes a sound team', async () => {
+    fx = mtFixture();
+    const r = await fx.run(['role', 'check']);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^files: ok$/m);
+    expect(r.out).toMatch(/^this shell's environment: ok$/m);
+    expect(r.out).toMatch(/service's environment may differ/);
+  });
+
+  it('reports a broken role file under the files', async () => {
+    fx = mtFixture();
+    roleDir('broken', 'agent: [\n');
+    const r = await fx.run(['role', 'check']);
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^files:\n {2}.*broken/m);
+    expect(r.out).toMatch(/^this shell's environment: ok$/m);
+  });
+
+  it("reports an unset passEnv name as this shell's, apart from the files", async () => {
+    fx = mtFixture();
+    roleDir('reviewer', `${ACP_AGENT}  passEnv: [REVIEW_TOKEN]\n`);
+    const r = await fx.run(['role', 'check', 'reviewer']);
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^files: ok$/m);
+    expect(r.out).toMatch(/role reviewer names REVIEW_TOKEN in agent.passEnv, and it is not set in this shell/);
+  });
+
+  it("reports MT_AGENT_* variables beside roles/default as this shell's", async () => {
+    fx = mtFixture((ws) => `workspace: ${ws}\n`);
+    roleDir('default', ACP_AGENT);
+    const r = await fx.run(['role', 'check'], { env: { MT_AGENT_COMMAND: 'bytesec' } });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^files: ok$/m);
+    expect(r.out).toMatch(/define the role default; keep one/);
+  });
+
+  it('refuses a workspace the database recorded at another directory', async () => {
+    fx = mtFixture();
+    const db = openDb(join(fx.home, 'gateway.db'));
+    migrate(db, SCHEMA_DIR);
+    registerWorkspaces(db, new Map([['default', '/elsewhere']]), 0);
+    db.close();
+    const r = await fx.run(['role', 'check']);
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/workspace default is \/elsewhere/);
+  });
+
+  it('says so when the named role does not exist', async () => {
+    fx = mtFixture();
+    const r = await fx.run(['role', 'check', 'nobody']);
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/there is no role nobody/);
+  });
+
+  it("reports an unset passEnv name in the gateway's agent: block as this shell's, apart from the files", async () => {
+    fx = mtFixture((ws) =>
+      [
+        `workspace: ${ws}`,
+        'agent:',
+        '  driver: structured-cli',
+        '  command: bytesec',
+        '  unsupervised: true',
+        '  passEnv: [SVC_TOKEN]',
+        '',
+      ].join('\n'),
+    );
+    const r = await fx.run(['role', 'check']);
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^files: ok$/m);
+    expect(r.out).toMatch(/role default names SVC_TOKEN in agent.passEnv, and it is not set in this shell/);
   });
 });
