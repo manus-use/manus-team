@@ -40,6 +40,9 @@ Chat sessions keep running the role `default` in the workspace `default`. Every 
   - the `kanban` sink channel itself.
 
   This plan provides the hooks and the channel map, and nothing calls `create` with a non-default role yet.
+- **Also for plan C:**
+  - Lark's `allowedFileDirs` is only the workspace `default`, so a chat session in another workspace could not attach files. Chat sessions are all in `default` until plan D.
+  - An ACP agent that rejects a seeded id makes `session/resume` or `session/load` throw, rather than starting fresh as §2.4 item 5 says. C's rework must start without the seed when that happens.
 - **Plan B3:** the `mt` binary and its `mt role` and `mt workspace` commands.
 - **Plan E:** native resume in the CLI driver. Until then a seed reaches the CLI driver and is ignored: it replays, and with no history it starts fresh.
 - **Already done in B1:** the tool-policy check. A role declaring `tools` is a startup error, because no driver can enforce one (`TOOL_POLICY_DRIVERS = []` in `src/roles.ts`).
@@ -143,7 +146,8 @@ describe('registerWorkspaces', () => {
     // Checked before anything is written, so a refused start leaves the table as it was.
     const t = db();
     registerWorkspaces(t.db, new Map([['default', '/srv/a']]), NOW);
-    registerWorkspaces(t.db, new Map([['default', '/srv/moved'], ['docs', '/srv/b']]), NOW + 1);
+    // 'alpha' sorts before the moved name, so writing as it goes would insert it.
+    registerWorkspaces(t.db, new Map([['alpha', '/srv/b'], ['default', '/srv/moved']]), NOW + 1);
     expect(rows(t).map((r) => r.id)).toEqual(['default']);
   });
 });
@@ -408,6 +412,7 @@ describe('environment', () => {
 
     const h = harness();
     await h.actor.submit({ messageId: 'om_plain', appId: KEY.appId, input: { text: 'hi', paths: [] } });
+    expect(h.driver.starts).toHaveLength(1);
     expect(h.driver.starts[0]?.env).toBeUndefined();
   });
 });
@@ -672,6 +677,17 @@ and add, inside `describe('actors', …)`:
     await h.registry.actorFor('s_docs', key({ conversationId: 'oc_docs' }));
     expect(h.workspaces.names).toEqual(['default', 'docs']);
   });
+
+  it('refuses a workspace that is not configured, without retiring anything to make room', async () => {
+    const h = harness(1);
+    const live = h.registry.bindOrCreate(key({ conversationId: 'oc_live' }), OWNER).session;
+    await h.registry.actorFor(live.id, key({ conversationId: 'oc_live' }));
+    createSession(h.db.db, { id: 's_nows', agentId: 'default', workspaceId: 'gone', ownerPrincipal: 'on_owner' }, NOW);
+    await expect(h.registry.actorFor('s_nows', key({ conversationId: 'oc_nows' }))).rejects.toThrow(
+      /works in workspace gone, which is not configured/,
+    );
+    expect(h.registry.liveActor(live.id)).toBeDefined();
+  });
 ```
 
 In `tests/router.test.ts`, change that file's `FakeWorkspaces` to the new interface:
@@ -697,7 +713,7 @@ class FakeWorkspaces implements WorkspaceProvider {
 
 - [ ] **Step 6.3: Run them to verify they fail.** Run: `npx vitest run --project unit tests/workspace.test.ts tests/registry.test.ts`. Expected:
   - `workspace.test.ts` FAILS, because `NamedWorkspaces` is not exported;
-  - the two new registry tests FAIL: `expected '' to be 'default'`, and `names` is empty or holds `undefined`.
+  - the three new registry tests FAIL: `expected '' to be 'default'`, `names` holding `undefined`, and the unconfigured workspace not refused.
 
 - [ ] **Step 6.4: Implement the provider.** In `src/core/workspace.ts`:
   - **`Workspace.id`:** change the doc comment to `/** The workspace's name: its row in the workspaces table (spec §2.3). */`.
@@ -779,10 +795,17 @@ export function workspaceOfSession(workspaceId: string): string {
     if (session === undefined) throw new Error(`no session ${sessionId}`);
 ```
 
-    Place that before `await this.#makeRoom();`, and after it:
+```ts
+    const workspaceId = workspaceOfSession(session.workspaceId);
+    if (!this.#deps.workspaces.has(workspaceId)) {
+      throw new Error(`session ${sessionId} works in workspace ${workspaceId}, which is not configured`);
+    }
+```
+
+    Place both before `await this.#makeRoom();`. Every refusal comes before room is made, so a session that cannot run never retires one that can. After `#makeRoom`:
 
 ```ts
-    const workspace = await this.#deps.workspaces.acquire(sessionId, workspaceOfSession(session.workspaceId));
+    const workspace = await this.#deps.workspaces.acquire(sessionId, workspaceId);
 ```
 
   - **`#create`:** replace
@@ -800,7 +823,7 @@ export function workspaceOfSession(workspaceId: string): string {
 
 In `src/index.ts`, change the import of `PlainDirWorkspaces` to `NamedWorkspaces`, and `workspaces: new PlainDirWorkspaces(defaultWorkspace),` to `workspaces: new NamedWorkspaces(team.workspaces),`.
 
-- [ ] **Step 6.6: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  477 passed (477)`; `npm run typecheck` → no output.
+- [ ] **Step 6.6: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  478 passed (478)`; `npm run typecheck` → no output.
 
 - [ ] **Step 6.7: Commit.**
 
@@ -874,7 +897,7 @@ Spec §2.4 item 1:
 
 In `tests/router.test.ts`, replace `driver,` in its `new SessionRegistry({…})` deps with `drivers: new Map([['default', driver]]),`.
 
-- [ ] **Step 7.2: Run them to verify they fail.** `npx vitest run --project unit tests/registry.test.ts`. Expected: the four new tests FAIL. For example, `agentId` is `'fake'`, and `s_gone` starts with the default driver instead of being refused.
+- [ ] **Step 7.2: Run them to verify they fail.** `npx vitest run --project unit tests/registry.test.ts`. Expected: most of the file FAILS with `Cannot read properties of undefined (reading 'id')`, because `#create` still reads `this.#deps.driver` while the harness now passes `drivers`. The four new tests are among the failures.
 
 - [ ] **Step 7.3: Implement.** In `src/core/registry.ts`:
   - **`SessionRegistryDeps`:** replace `driver: Driver;` with:
@@ -921,9 +944,10 @@ In `src/index.ts`:
 ```
 
 - **The registry deps:** in `new SessionRegistry({…})`, replace `driver,` with `drivers,`.
+- **The stale comment:** replace the comment above `const defaultRole` ("Until plan B2 gives each session its own role and workspace, …") with `// Chat sessions run the role default in the workspace default; loadTeam guarantees both exist.`
 - **Unused bindings:** remove `const agent = defaultRole.agent;` if nothing else uses it. Keep the `defaultRole` check: it is what refuses to start without a role default.
 
-- [ ] **Step 7.4: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  481 passed (481)`; `npm run typecheck` → no output.
+- [ ] **Step 7.4: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  482 passed (482)`; `npm run typecheck` → no output.
 
 - [ ] **Step 7.5: Commit.**
 
@@ -964,6 +988,8 @@ describe('sessions beyond chat', () => {
     const session = h.registry.bindOrCreate(at, OWNER).session;
     const actor = await h.registry.actorFor(session.id, at);
     await actor.submit({ messageId: 'om_k', appId: 'cli_app', input: { text: 'hi', paths: [] } });
+    // The card writer coalesces; flush so the write has happened before looking.
+    await actor.flushCard();
     expect(kanban.calls.length).toBeGreaterThan(0);
     expect(h.channel.calls).toEqual([]);
   });
@@ -1126,7 +1152,7 @@ In `src/index.ts`, replace `channel: adapter,` and `channelId: adapter.id,` in t
     channels: new Map([[adapter.id, adapter]]),
 ```
 
-- [ ] **Step 8.4: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  486 passed (486)`; `npm run typecheck` → no output.
+- [ ] **Step 8.4: Run the tests.** `npm test 2>&1 | tail -4` → `Tests  487 passed (487)`; `npm run typecheck` → no output.
 
 - [ ] **Step 8.5: Commit.**
 
@@ -1164,7 +1190,7 @@ Three changes:
 
   There is no unit test for this wiring: `createGateway` connects to Lark. Task 1 covers `registerWorkspaces`, and Task 10's check exercises it against a copy of the live database.
 
-- [ ] **Step 9.2: Drop `workspaceDir`.** Change these tests first, so the change is driven by them. In `tests/config.test.ts`, replace every `expect(cfg.workspaceDir).toBe(X)` (five places; `grep -n workspaceDir tests/config.test.ts`) with `expect(cfg.workspaces['default']).toBe(X)`. Then, in `src/config.ts`:
+- [ ] **Step 9.2: Drop `workspaceDir`.** Change these tests first, so the change is driven by them. In `tests/config.test.ts`, replace every `expect(cfg.workspaceDir).toBe(X)` (six places; `grep -n workspaceDir tests/config.test.ts`) with `expect(cfg.workspaces['default']).toBe(X)`. Then, in `src/config.ts`:
   - **The interface:** remove `workspaceDir: string;` and its comment from `GatewayConfig`.
   - **The local:** rename `const workspaceDir =` to `const defaultWorkspace =`. Keep its "a workspace is required" `fail(…)` and the absolute-path check, with their messages unchanged.
   - **The returned object:** remove `workspaceDir,` from it.
@@ -1175,7 +1201,7 @@ Three changes:
 
 ```ts
 /** `agent.args`: a list, or one string split like a shell would, because `args: --acp --debug` is what people write. */
-export function agentArgs(path: string, raw: unknown): string[] {
+export function agentArgs(path: string, raw: unknown): readonly string[] {
   return Array.isArray(raw) ? strings(path, 'agent.args', raw) : shellWords(str(path, 'agent.args', raw) ?? '');
 }
 ```
@@ -1184,9 +1210,7 @@ Then make the two call sites use it:
 - **In `config.ts`:** replace the comment `// A list or one string, because ...` and its `args: Array.isArray(agentRaw['args']) ? … : …,` expression with `args: agentArgs(path, agentRaw['args']),`.
 - **In `roles.ts`:** replace the `const args = Array.isArray(agentRaw['args']) ? … : …;` expression with `const args = agentArgs(configPath, agentRaw['args']);`. Add `agentArgs` to its `./config.js` import, and drop `shellWords` from that import if nothing else in `roles.ts` uses it.
 
-If `strings` returns `readonly string[]`, make the helper's return type `readonly string[]`, which is what `AgentConfig.args` is.
-
-- [ ] **Step 9.4: Run everything.** `npm test 2>&1 | tail -4` → `Tests  486 passed (486)`; `npm run test:e2e 2>&1 | tail -4` → `Tests  49 passed (49)`; `npm run typecheck` → no output.
+- [ ] **Step 9.4: Run everything.** `npm test 2>&1 | tail -4` → `Tests  487 passed (487)`; `npm run test:e2e 2>&1 | tail -4` → `Tests  49 passed (49)`; `npm run typecheck` → no output.
 
 - [ ] **Step 9.5: Commit.**
 
@@ -1265,7 +1289,7 @@ That is, the old `acp` session runs as the role `default`, today bytesec through
 
 ## Done when
 
-- `npm test` → `Tests  486 passed (486)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
+- `npm test` → `Tests  487 passed (487)`, `npm run test:e2e` → `Tests  49 passed (49)`, and `npm run typecheck` prints nothing, all under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` → no output.
 - `git grep -n -E "registerDriver|getDriver|PlainDirWorkspaces|workspaceDir" -- src tests` → no output.
 - Task 10's check prints the expected three lines.
