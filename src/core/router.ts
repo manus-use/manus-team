@@ -398,7 +398,7 @@ export class Router {
           `attach-${arg}`,
           result.ok
             ? `Attached \`${result.session.id}\`. History replays into this thread on the next message.`
-            : result.reason,
+            : forDisplay(result.reason),
         );
         return;
       }

@@ -12,6 +12,7 @@ import { setState } from '../src/db/sessions.js';
 import type { Db } from '../src/db/open.js';
 import type { InboundMessage, PermissionOption, Principal } from '../src/types.js';
 import type { Workspace, WorkspaceProvider } from '../src/core/workspace.js';
+import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import { FakeChannel } from './helpers/channel.js';
 import { FakeDriver, type TurnControl } from './helpers/driver.js';
 import { ManualClock, settle, testDb, type TestDb } from './helpers/db.js';
@@ -367,7 +368,19 @@ describe('Router: commands', () => {
   it('passes an attach refusal straight through to the chat', async () => {
     const h = harness();
     await h.router.onMessage(msg({ text: '/attach s_nope' }));
-    expect(lastReply(h)).toBe('No session s_nope.');
+    expect(lastReply(h)).toBe('No session s\\_nope.');
+  });
+
+  it('masks a known secret in an attach refusal', async () => {
+    clearSecrets();
+    addSecrets(['sk-test-123456']);
+    try {
+      const h = harness();
+      await h.router.onMessage(msg({ text: '/attach sk-test-123456' }));
+      expect(lastReply(h)).toContain(`No session ${MASK}.`);
+    } finally {
+      clearSecrets();
+    }
   });
 
   it('rebinds the thread on a successful /attach', async () => {

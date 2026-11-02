@@ -18,6 +18,7 @@ import {
 } from '../db/approvals.js';
 import { advanceCursor, resolveBinding, setActiveCard } from '../db/bindings.js';
 import { CardWriter } from '../channel/card-writer.js';
+import { forDisplay } from '../channel/escape.js';
 import type { Channel, SendTarget } from '../channel/types.js';
 import type {
   AgentRuntime,
@@ -639,7 +640,7 @@ export class SessionActor {
       case 'already':
         return {
           kind: 'already',
-          message: `Already answered (${optionLabel(outcome.approval, outcome.approval.optionId)}). The first answer stands.`,
+          message: `Already answered (${forDisplay(optionLabel(outcome.approval, outcome.approval.optionId))}). The first answer stands.`,
           unblocked: false,
         };
       case 'stale':
@@ -692,7 +693,7 @@ export class SessionActor {
     setTurnState(this.#db, this.sessionId, waiting.turnId, 'running');
     return {
       kind: 'resolved',
-      message: `Sent: ${optionLabel(outcome.approval, res.optionId)}.`,
+      message: `Sent: ${forDisplay(optionLabel(outcome.approval, res.optionId))}.`,
       unblocked: true,
     };
   }

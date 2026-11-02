@@ -14,6 +14,7 @@ import { createApproval, getApproval } from '../src/db/approvals.js';
 import { lastSeq, readEvents } from '../src/db/events.js';
 import type { BindingKey, Event, Principal } from '../src/types.js';
 import { ChannelError } from '../src/channel/types.js';
+import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import { FakeChannel } from './helpers/channel.js';
 import { FakeDriver, type TurnControl } from './helpers/driver.js';
 import { ManualClock, settle, testDb, type TestDb } from './helpers/db.js';
@@ -460,6 +461,27 @@ describe('approvals', () => {
     const { turn, approvalId } = await parked(h);
     expect(click(h, approvalId, { optionId: 'deny' }).message).toBe('Sent: Deny.');
     await turn;
+  });
+
+  it("escapes and masks the chosen option's label in the reply", async () => {
+    // The label is the agent's: a tag in it would notify the chat, and a secret in
+    // it would be shown.
+    clearSecrets();
+    addSecrets(['sk-test-123456']);
+    try {
+      const h = harness();
+      h.driver.scripts = [
+        async (ctl) => {
+          await ctl.ask('rm -rf /', [{ optionId: 'allow', name: '<at id=all></at> sk-test-123456' }]);
+          ctl.end('completed');
+        },
+      ];
+      const { turn, approvalId } = await parked(h);
+      expect(click(h, approvalId).message).toBe(`Sent: \\<at id=all\\>\\</at\\> ${MASK}.`);
+      await turn;
+    } finally {
+      clearSecrets();
+    }
   });
 
   it('rewrites the card with the answer, so its buttons stop working', async () => {
