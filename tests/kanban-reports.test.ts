@@ -207,7 +207,7 @@ describe('requestReview', () => {
     expect(taskView(h.db, task.taskId)?.status).toBe('review');
     expect(eventsOf(h.db, task.taskId).at(-1)).toMatchObject({
       kind: 'review_requested',
-      payload: { summary: 'ready', reviewer: 'second-opinion' },
+      payload: { summary: 'ready', reviewer: 'second-opinion', reviewerKind: 'role' },
     });
     ok(closeRun(h.db, work.runId, NOW));
     expect(claimed(h.db, task.taskId)).toMatchObject({
@@ -217,6 +217,18 @@ describe('requestReview', () => {
       workspace: 'default',
     });
     expect(taskView(h.db, task.taskId)?.status).toBe('reviewing');
+  });
+
+  it('refuses a review while a parent is not done, as complete does', () => {
+    const parent = newTask(h.db);
+    const task = newTask(h.db, { assignee: BOB, reviewer: REVIEWER, parents: [parent.taskId] });
+    expect(requestReview(h.db, task.taskId, asPerson('lark:on_bob'), { summary: 'have a look' }, NOW)).toEqual({
+      ok: false,
+      code: 'parents_unfinished',
+      message: `task ${task.taskId} has a parent that is not done`,
+    });
+    expect(getTask(h.db, task.taskId)?.phase).toBe('open');
+    expect(eventsOf(h.db, task.taskId).map((e) => e.kind)).toEqual(['created']);
   });
 
   it('refuses a review with nobody to review it, and leaves the run undecided', () => {

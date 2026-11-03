@@ -44,7 +44,7 @@ describe('assign', () => {
     expect(eventsOf(h.db, task.taskId).at(-1)).toMatchObject({
       kind: 'assignee_set',
       runId: run.runId,
-      payload: { assignee: 'other-role' },
+      payload: { assignee: 'other-role', assigneeKind: 'role' },
     });
     expect(complete(h.db, task.taskId, asRun(run), { summary: 'x' }, NOW)).toMatchObject({ code: 'run_superseded' });
     ok(closeRun(h.db, run.runId, NOW));
@@ -85,6 +85,10 @@ describe('assign', () => {
       ok: true,
       task: { phase: 'review', reviewer: REVIEWER },
       run: { runId: review.runId, outcome: 'superseded' },
+    });
+    expect(eventsOf(h.db, task.taskId).at(-1)).toMatchObject({
+      kind: 'reviewer_set',
+      payload: { reviewer: 'reviewer', reviewerKind: 'role' },
     });
     ok(closeRun(h.db, review.runId, NOW));
     expect(claimed(h.db, task.taskId).assignee).toEqual(REVIEWER);

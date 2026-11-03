@@ -63,7 +63,9 @@ describe('createTask', () => {
         {
           title: 'Write the parser',
           assignee: 'implementer',
+          assigneeKind: 'role',
           reviewer: null,
+          reviewerKind: null,
           workspace: 'web',
           parents: [],
           createdFromTask: null,
@@ -136,6 +138,13 @@ describe('createTask', () => {
       assignee: 'sk-test-123456',
       workspace: 'sk-test-123456',
     });
+  });
+
+  it('masks every contract value, whatever its field is called', () => {
+    // `workspace` is a key the global masker leaves alone; in a contract it is free text.
+    addSecrets(['sk-test-123456']);
+    const task = create({ contract: { workspace: 'use sk-test-123456', outcome: 'sk-test-123456' } as never });
+    expect(getTask(h.db, task.taskId)?.contract).toEqual({ workspace: `use ${MASK}`, outcome: MASK });
   });
 });
 

@@ -97,7 +97,9 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'createdFromTask',
   'seededFromRun',
   'assignee',
+  'assigneeKind',
   'reviewer',
+  'reviewerKind',
   'workspace',
 ]);
 
@@ -114,6 +116,14 @@ function record(
 }
 
 const mask = redactKnownSecrets;
+
+/**
+ * A contract is flat text, so each value is masked as text. Not redactValues: it
+ * leaves a value under a globally identifying key such as `workspace` alone.
+ */
+function maskContract(contract: Contract): Contract {
+  return Object.fromEntries(Object.entries(contract).map(([field, value]) => [field, mask(value)]));
+}
 
 function mustGet(d: Db, taskId: string): TaskRow {
   const task = getTask(d, taskId);
@@ -181,7 +191,7 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
       taskId,
       mask(t.title),
       mask(t.body ?? ''),
-      JSON.stringify(redactValues(t.contract ?? {})),
+      JSON.stringify(maskContract(t.contract ?? {})),
       t.assignee?.kind ?? null,
       t.assignee?.name ?? null,
       t.reviewer?.kind ?? null,
@@ -208,7 +218,9 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
         payload: {
           title: t.title,
           assignee: t.assignee?.name ?? null,
+          assigneeKind: t.assignee?.kind ?? null,
           reviewer: t.reviewer?.name ?? null,
+          reviewerKind: t.reviewer?.kind ?? null,
           workspace: t.workspace ?? null,
           parents,
           createdFromTask,
@@ -441,7 +453,7 @@ export function attachSession(db: Db, runId: string, sessionId: string, now: num
 
 /**
  * Make `parentId` a parent of `childId` (spec §3.2). Linking an existing pair
- * again changes nothing.
+ * again changes nothing, whatever either task's phase: that is checked first.
  *
  * Refused:
  * - a child past its parents gate -- in review, blocked from review, done or
@@ -453,6 +465,7 @@ export function attachSession(db: Db, runId: string, sessionId: string, now: num
  */
 export function link(db: Db, parentId: string, childId: string, by: string, now: number): Result<{ added: boolean }> {
   return tx(db, (d) => {
+    if (linked(d, parentId, childId)) return { ok: true, added: false };
     if (getTask(d, parentId) === undefined) return refuse('not_found', `no task ${parentId}`);
     const child = getTask(d, childId);
     if (child === undefined) return refuse('not_found', `no task ${childId}`);
@@ -464,6 +477,14 @@ export function link(db: Db, parentId: string, childId: string, by: string, now:
     }
     return linkIn(d, parentId, childId, by, now);
   });
+}
+
+function linked(d: Db, parentId: string, childId: string): boolean {
+  return (
+    d
+      .prepare<[string, string], { n: number }>('SELECT 1 AS n FROM kanban_links WHERE parent_id = ? AND child_id = ?')
+      .get(parentId, childId) !== undefined
+  );
 }
 
 /**
@@ -482,10 +503,7 @@ function linkIn(
 ): Result<{ added: boolean }> {
   if (getTask(d, parentId) === undefined) return refuse('not_found', `no task ${parentId}`);
   if (parentId === childId) return refuse('cycle', `task ${childId} cannot be its own parent`);
-  const exists = d
-    .prepare<[string, string], { n: number }>('SELECT 1 AS n FROM kanban_links WHERE parent_id = ? AND child_id = ?')
-    .get(parentId, childId);
-  if (exists !== undefined) return { ok: true, added: false };
+  if (linked(d, parentId, childId)) return { ok: true, added: false };
   const cycle = d
     .prepare<[string, string], { n: number }>(
       `WITH RECURSIVE up(id) AS (
@@ -691,8 +709,9 @@ export function complete(
 /**
  * Same-task review (spec §5.3). A reviewer named in the report replaces the
  * task's; with none named anywhere it is refused, since a task in review with
- * nobody to review it is stranded under another label. Gates run before it,
- * from plan C4.
+ * nobody to review it is stranded under another label. A task whose parents are
+ * not all finished is refused, as complete() refuses it: the work being reviewed
+ * was meant to wait for them. Gates run before it, from plan C4.
  */
 export function requestReview(
   db: Db,
@@ -704,6 +723,9 @@ export function requestReview(
   return tx(db, (d) => {
     const r = reporting(d, taskId, by, ['open'], 'ask for review');
     if (!r.ok) return r;
+    if (!parentsOf(d, taskId).every((p) => isFinished(p.phase))) {
+      return refuse('parents_unfinished', `task ${taskId} has a parent that is not done`);
+    }
     const reviewer = handoff.reviewer ?? r.task.reviewer;
     if (reviewer === null) return refuse('no_reviewer', `nobody is named to review task ${taskId}`);
     if (r.run !== undefined) decide(d, r.run, 'review_requested', handoff, now);
@@ -719,7 +741,7 @@ export function requestReview(
         runId: r.run?.runId ?? null,
         kind: 'review_requested',
         actor: actorOf(by),
-        payload: { summary: handoff.summary, reviewer: reviewer.name },
+        payload: { summary: handoff.summary, reviewer: reviewer.name, reviewerKind: reviewer.kind },
       },
       now,
     );
@@ -949,7 +971,9 @@ export interface RunEnding {
   lastOutput?: string | null;
   /**
    * The run made a tool call outside its role's readOnlyTools (spec §8.3). Plan
-   * C2 reads the tool calls from the run's session log.
+   * C2 reads the tool calls from the run's session log. Absent means unknown,
+   * which is taken as true: an if-no-side-effects task then stops for a person
+   * rather than being retried blind.
    */
   hadSideEffects?: boolean;
 }
@@ -977,8 +1001,8 @@ export type NextStep = 'retry' | 'cooldown' | 'blocked';
  *   same wall.
  * - `interrupted` is not counted: the task did nothing wrong.
  *
- * With `retry_on_crash: if-no-side-effects`, a run that changed things blocks as
- * `needs_input` instead of being retried, so a person looks first.
+ * With `retry_on_crash: if-no-side-effects`, a run that changed things, or may
+ * have, blocks as `needs_input` instead of being retried, so a person looks first.
  */
 export function endRun(
   db: Db,
@@ -998,8 +1022,11 @@ export function endRun(
     const before = mustGet(d, run.taskId);
     decide(d, run, ending.outcome, { error: ending.error ?? null, lastOutput: ending.lastOutput ?? null }, now);
 
-    const cautious = before.retryOnCrash === 'if-no-side-effects' && ending.hadSideEffects === true;
-    const careful = `the run ended ${ending.outcome} after changing things; look before it is retried`;
+    const cautious = before.retryOnCrash === 'if-no-side-effects' && ending.hadSideEffects !== false;
+    const careful =
+      ending.hadSideEffects === true
+        ? `the run ended ${ending.outcome} after changing things; look before it is retried`
+        : `the run ended ${ending.outcome}, and may have changed things; look before it is retried`;
     let next: NextStep = 'retry';
     let blockAs: { kind: Exclude<BlockKind, 'dependency'>; reason: string } | undefined;
     switch (ending.outcome) {
@@ -1104,7 +1131,13 @@ function reassign(
     );
     record(
       d,
-      { taskId, runId: run?.runId ?? null, kind: `${role}_set`, actor: by, payload: { [role]: who.name } },
+      {
+        taskId,
+        runId: run?.runId ?? null,
+        kind: `${role}_set`,
+        actor: by,
+        payload: { [role]: who.name, [`${role}Kind`]: who.kind },
+      },
       now,
     );
     return { ok: true, task: mustGet(d, taskId), run };

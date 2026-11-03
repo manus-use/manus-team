@@ -88,7 +88,7 @@ CREATE TABLE kanban_runs (
   summary          TEXT,
   metadata         BLOB,                           -- JSON
   reported_commit  TEXT,
-  reported_dirty   INTEGER,
+  reported_dirty   INTEGER CHECK (reported_dirty IN (0, 1)),
   error            TEXT,
   last_output      TEXT,
   submissions      INTEGER NOT NULL DEFAULT 0,
@@ -96,7 +96,9 @@ CREATE TABLE kanban_runs (
   ended_at         INTEGER,
   UNIQUE (task_id, attempt),
   CHECK (ended_at IS NULL OR outcome IS NOT NULL),
-  CHECK ((assignee_kind = 'role') = (agent_config IS NOT NULL))
+  CHECK ((assignee_kind = 'role') = (agent_config IS NOT NULL)),
+  -- A person's run has no process, so no session (§3.3).
+  CHECK (assignee_kind = 'role' OR session_id IS NULL)
 ) STRICT;
 
 -- At most one open run per task: two claims racing fail here, not as two agents.

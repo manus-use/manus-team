@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { link } from '../src/db/kanban.js';
+import { complete, link, requestReview } from '../src/db/kanban.js';
 import { eventsOf, parentsOf, taskView } from '../src/db/kanban-read.js';
 import { testDb, type TestDb } from './helpers/db.js';
 import { ALICE, NOW, claimed, newTask } from './helpers/kanban.js';
@@ -11,6 +11,13 @@ beforeEach(() => {
 });
 
 afterEach(() => h.close());
+
+const PERSON = { kind: 'person', principal: ALICE } as const;
+
+function ok<T extends { ok: boolean }>(r: T): Extract<T, { ok: true }> {
+  if (!r.ok) throw new Error(JSON.stringify(r));
+  return r as Extract<T, { ok: true }>;
+}
 
 describe('link', () => {
   it('makes a parent hold its child back, and records it on the child', () => {
@@ -31,6 +38,39 @@ describe('link', () => {
     const child = newTask(h.db, { parents: [parent.taskId] });
     expect(link(h.db, parent.taskId, child.taskId, ALICE, NOW)).toEqual({ ok: true, added: false });
     expect(eventsOf(h.db, child.taskId).map((e) => e.kind)).toEqual(['created']);
+  });
+
+  it('changes nothing when the pair is already linked, whatever the phase', () => {
+    const parent = newTask(h.db);
+    const done = newTask(h.db, { parents: [parent.taskId] });
+    const review = newTask(h.db, { parents: [parent.taskId], reviewer: { kind: 'role', name: 'reviewer' } });
+    ok(complete(h.db, parent.taskId, PERSON, { summary: 'x' }, NOW));
+    ok(complete(h.db, done.taskId, PERSON, { summary: 'x' }, NOW));
+    ok(requestReview(h.db, review.taskId, PERSON, { summary: 'x' }, NOW));
+    expect(link(h.db, parent.taskId, done.taskId, ALICE, NOW)).toEqual({ ok: true, added: false });
+    expect(link(h.db, parent.taskId, review.taskId, ALICE, NOW)).toEqual({ ok: true, added: false });
+    expect(eventsOf(h.db, done.taskId).map((e) => e.kind)).toEqual(['created', 'completed']);
+  });
+
+  it('refuses a new parent for a done task', () => {
+    const parent = newTask(h.db);
+    const done = newTask(h.db);
+    ok(complete(h.db, done.taskId, PERSON, { summary: 'x' }, NOW));
+    expect(link(h.db, parent.taskId, done.taskId, ALICE, NOW)).toEqual({
+      ok: false,
+      code: 'illegal_transition',
+      message: `task ${done.taskId} is done; a parent added now could not hold it back`,
+    });
+    expect(parentsOf(h.db, done.taskId)).toEqual([]);
+  });
+
+  it('allows a second path through a diamond, which is not a cycle', () => {
+    const a = newTask(h.db);
+    const b = newTask(h.db, { parents: [a.taskId] });
+    const c = newTask(h.db, { parents: [a.taskId] });
+    const d = newTask(h.db, { parents: [b.taskId, c.taskId] });
+    expect(link(h.db, a.taskId, d.taskId, ALICE, NOW)).toEqual({ ok: true, added: true });
+    expect(link(h.db, d.taskId, a.taskId, ALICE, NOW)).toMatchObject({ ok: false, code: 'cycle' });
   });
 
   it('refuses a cycle, however long, and a task as its own parent', () => {

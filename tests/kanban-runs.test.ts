@@ -198,6 +198,17 @@ describe('endRun', () => {
     expect(attempt(task(), { outcome: 'failed', hadSideEffects: true }).next).toBe('retry');
   });
 
+  it('with if-no-side-effects, asks a person when nobody knows whether the run changed things', () => {
+    const careful = { retryOnCrash: 'if-no-side-effects' } as const;
+    expect(attempt(task(careful), { outcome: 'crashed' })).toMatchObject({
+      next: 'blocked',
+      task: {
+        blockKind: 'needs_input',
+        blockReason: 'the run ended crashed, and may have changed things; look before it is retried',
+      },
+    });
+  });
+
   it("never overwrites a decided run's outcome, and refuses a closed run", () => {
     const id = task();
     const run = claimed(h.db, id);

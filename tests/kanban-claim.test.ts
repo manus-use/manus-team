@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { attachSession, claim, createTask } from '../src/db/kanban.js';
+import {
+  DEFAULT_LIMITS,
+  attachSession,
+  block,
+  claim,
+  closeRun,
+  createTask,
+  endRun,
+  requestReview,
+} from '../src/db/kanban.js';
 import { eventsOf, getRun, getTask, parentsOf, runsOf, taskView } from '../src/db/kanban-read.js';
 import { createSession } from '../src/db/sessions.js';
 import { testDb, type TestDb } from './helpers/db.js';
@@ -77,6 +86,39 @@ describe('claim', () => {
     const parent = newTask(h.db);
     const child = newTask(h.db, { parents: [parent.taskId] });
     expect(tryClaim(child.taskId)).toMatchObject({ ok: false, code: 'not_claimable' });
+  });
+
+  it('refuses a review claim while a parent is not done', () => {
+    const parent = newTask(h.db, { assignee: BOB });
+    const task = newTask(h.db, { reviewer: { kind: 'role', name: 'reviewer' } });
+    const work = claimed(h.db, task.taskId);
+    requestReview(h.db, task.taskId, { kind: 'run', runId: work.runId }, { summary: 'v1' }, NOW);
+    closeRun(h.db, work.runId, NOW);
+    const review = claimed(h.db, task.taskId);
+    const by = { kind: 'run', runId: review.runId } as const;
+    block(h.db, task.taskId, by, { kind: 'dependency', reason: 'wait', parents: [parent.taskId] }, NOW);
+    closeRun(h.db, review.runId, NOW);
+    expect(getTask(h.db, task.taskId)?.phase).toBe('review');
+    expect(tryClaim(task.taskId)).toEqual({
+      ok: false,
+      code: 'not_claimable',
+      message: `task ${task.taskId} is waiting on a parent that is not done`,
+    });
+  });
+
+  it('refuses a claim during a cooldown, and makes it once the cooldown is reached', () => {
+    const task = newTask(h.db);
+    const run = claimed(h.db, task.taskId);
+    endRun(h.db, run.runId, { outcome: 'rate_limited', hadSideEffects: false }, DEFAULT_LIMITS, NOW);
+    closeRun(h.db, run.runId, NOW);
+    const until = getTask(h.db, task.taskId)?.cooldownUntil ?? 0;
+    expect(until).toBeGreaterThan(NOW);
+    expect(tryClaim(task.taskId, {}, until - 1)).toEqual({
+      ok: false,
+      code: 'not_claimable',
+      message: `task ${task.taskId} is cooling down after being throttled`,
+    });
+    expect(tryClaim(task.taskId, {}, until)).toMatchObject({ ok: true, run: { attempt: 2 } });
   });
 
   it('refuses a claim for someone the task is no longer assigned to', () => {

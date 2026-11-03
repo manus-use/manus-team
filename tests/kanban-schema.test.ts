@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createSession } from '../src/db/sessions.js';
 import { testDb, type TestDb } from './helpers/db.js';
 
 /**
@@ -34,7 +35,14 @@ function task(id: string, extra: Record<string, string | number | null> = {}): v
     .run(...Object.values(row));
 }
 
-function run(id: string, taskId: string, attempt: number, extra: Record<string, string | number | null> = {}): void {
+/** A raw run row; `agent` false leaves agent_config null, as a person's run has it. */
+function run(
+  id: string,
+  taskId: string,
+  attempt: number,
+  extra: Record<string, string | number | null> = {},
+  agent = true,
+): void {
   const row: Record<string, string | number | null> = {
     run_id: id,
     task_id: taskId,
@@ -49,7 +57,7 @@ function run(id: string, taskId: string, attempt: number, extra: Record<string, 
   h.db
     .prepare(
       `INSERT INTO kanban_runs (agent_config, ${cols.join(', ')})
-       VALUES (jsonb('{}'), ${cols.map(() => '?').join(', ')})`,
+       VALUES (${agent ? "jsonb('{}')" : 'NULL'}, ${cols.map(() => '?').join(', ')})`,
     )
     .run(...Object.values(row));
 }
@@ -107,5 +115,44 @@ describe('migration 003', () => {
     expect(() => task('k_2', { idempotency_key: 'lark:om_1' })).toThrow(/UNIQUE constraint failed/);
     task('k_3');
     task('k_4');
+  });
+
+  it('stores reported_dirty as 0 or 1 only', () => {
+    task('k_1');
+    task('k_2');
+    expect(() => run('r_1', 'k_1', 1, { reported_dirty: 2 })).toThrow(/CHECK constraint failed/);
+    run('r_2', 'k_1', 1, { reported_dirty: 1 });
+    run('r_3', 'k_2', 1, { reported_dirty: 0 });
+  });
+
+  it("gives a person's run no session, and a session to one run at most", () => {
+    for (const id of ['s_1', 's_2']) {
+      createSession(h.db, { id, agentId: 'implementer', workspaceId: 'default', ownerPrincipal: 'test' }, NOW);
+    }
+    task('k_1');
+    task('k_2');
+    task('k_3');
+    const person = { assignee_kind: 'human', assignee: 'lark:on_bob' };
+    expect(() => run('r_1', 'k_1', 1, { ...person, session_id: 's_1' }, false)).toThrow(/CHECK constraint failed/);
+    run('r_2', 'k_1', 1, person, false);
+    run('r_3', 'k_2', 1, { session_id: 's_1' });
+    expect(() => run('r_4', 'k_3', 1, { session_id: 's_1' })).toThrow(/UNIQUE constraint failed/);
+    run('r_5', 'k_3', 1, { session_id: 's_2' });
+  });
+
+  it('gives a run an agent exactly when it is for a role', () => {
+    task('k_1');
+    expect(() => run('r_1', 'k_1', 1, {}, false)).toThrow(/CHECK constraint failed/);
+    expect(() => run('r_2', 'k_1', 1, { assignee_kind: 'human', assignee: 'lark:on_bob' })).toThrow(
+      /CHECK constraint failed/,
+    );
+  });
+
+  it('names an assignee and a reviewer together with their kind, or neither', () => {
+    expect(() => task('k_1', { assignee_kind: 'role' })).toThrow(/CHECK constraint failed/);
+    expect(() => task('k_2', { assignee: 'implementer' })).toThrow(/CHECK constraint failed/);
+    expect(() => task('k_3', { reviewer_kind: 'human' })).toThrow(/CHECK constraint failed/);
+    expect(() => task('k_4', { reviewer: 'lark:on_bob' })).toThrow(/CHECK constraint failed/);
+    task('k_5', { assignee_kind: 'role', assignee: 'implementer', reviewer_kind: 'human', reviewer: 'lark:on_bob' });
   });
 });
