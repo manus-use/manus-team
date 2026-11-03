@@ -720,14 +720,14 @@ describe('loadConfig: the kanban section', () => {
 
   it('refuses max_running above maxLiveSessions: a run is a live session', () => {
     expect(() => load({}, yamlFile({ maxLiveSessions: 4, kanban: { max_running: 5 } }))).toThrow(
-      'kanban.max_running (5) is above maxLiveSessions (4)',
+      `${DEFAULT_PATH}: kanban.max_running (5) is above maxLiveSessions (4)`,
     );
     expect(load({}, yamlFile({ maxLiveSessions: 4, kanban: { max_running: 4 } })).kanban.maxRunning).toBe(4);
   });
 
   it('names MT_MAX_LIVE_SESSIONS when that is where the session limit came from', () => {
     expect(() => load({ MT_MAX_LIVE_SESSIONS: '2' }, yamlFile({ maxLiveSessions: 8, kanban: { max_running: 5 } }))).toThrow(
-      'kanban.max_running (5) is above MT_MAX_LIVE_SESSIONS (2)',
+      `${DEFAULT_PATH}: kanban.max_running (5) is above MT_MAX_LIVE_SESSIONS (2)`,
     );
   });
 

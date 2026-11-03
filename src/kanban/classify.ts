@@ -22,11 +22,12 @@ export type FailureClass = 'terminal_provider' | 'rate_limited' | 'crashed' | 'f
 /**
  * An HTTP status, where the text says it is one: `status 429`, `Error: 401`, `HTTP 503`.
  * Not a count that follows `error`: "Error: 503 tests passed" is a test run's tally.
+ * Nor a status a test expected: "expected status code 403 but got 200" is an assertion.
  */
 function status(codes: string): RegExp {
   return new RegExp(
     `\\b(?:status(?: code)?|code|http|error)\\b[\\s:=#-]{0,4}(?:${codes})\\b` +
-      '(?!\\s+(?:tests?|passed|failed|files?|errors?|warnings?|lines?|items?|of)\\b)',
+      '(?![,;]?\\s+(?:tests?|passed|failed|files?|errors?|warnings?|lines?|items?|of|but|to|instead|expected|got)\\b)',
     'i',
   );
 }

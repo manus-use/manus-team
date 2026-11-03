@@ -16,8 +16,16 @@ export interface ToolCall {
   status: string;
 }
 
-/** The most of an agent's last output a run records as `last_output` (spec §3.3). */
+/** The most of an agent's last output a run records as `last_output` (spec §3.3), in characters (code points). */
 export const LAST_OUTPUT_CHARS = 2000;
+
+/** The last `max` code points of `text`: cut on a character, as the prompt's `tailBytes` is, never inside a surrogate pair. */
+function tailChars(text: string, max: number): string {
+  // Each code point is one or two UTF-16 units, so a text this short has no more than max.
+  if (text.length <= max) return text;
+  const points = Array.from(text);
+  return points.length <= max ? text : points.slice(-max).join('');
+}
 
 function eventsOf(db: Db, sessionId: string): Event[] {
   return readEvents(db, sessionId, 0, lastSeq(db, sessionId));
@@ -94,5 +102,5 @@ export function lastTurnOf(db: Db, sessionId: string): LastTurn {
     }
   }
   // Masked before it is cut, so the cut cannot leave the end of a secret showing.
-  return { errors, output: redactKnownSecrets(withholdSecretPrefix(said)).slice(-LAST_OUTPUT_CHARS) };
+  return { errors, output: tailChars(redactKnownSecrets(withholdSecretPrefix(said)), LAST_OUTPUT_CHARS) };
 }

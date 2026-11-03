@@ -40,6 +40,10 @@ const CASES: ReadonlyArray<[TurnTerminal, string, FailureClass]> = [
   // Numbers that are not statuses are not read as one.
   ['failed', 'tests failed: 512 passed, 3 failed (src/a.ts:401)', 'failed'],
   ['failed', 'error at line 512: unexpected token', 'failed'],
+  // A test's assertion on a status: the expected code, not the provider's answer.
+  ['failed', 'AssertionError: expected status code 403 but got 200', 'failed'],
+  ['failed', 'AssertionError: expected status 401, got 200', 'failed'],
+  ['failed', 'expected response status 429 to equal 200', 'failed'],
   // The agent's own tools failing are not the provider refusing it.
   ['failed', 'fatal: Authentication failed for https://example.invalid/repo.git', 'failed'],
   ['failed', 'Error: Test timed out in 5000ms.', 'failed'],

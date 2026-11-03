@@ -149,6 +149,15 @@ describe('lastTurnOf', () => {
     expect(output.endsWith('aEND')).toBe(true);
   });
 
+  it('cuts the tail on a character, never between the halves of an emoji', () => {
+    log(submitted('t_1'), said('t_1', `${'\u{1F600}'.repeat(LAST_OUTPUT_CHARS)}x`));
+    const { output } = lastTurnOf(h.db, S);
+    expect(output).not.toMatch(/^[\uDC00-\uDFFF]/);
+    expect(output).not.toMatch(/[\uD800-\uDBFF]$/);
+    expect([...output]).toHaveLength(LAST_OUTPUT_CHARS);
+    expect(output.endsWith('\u{1F600}x')).toBe(true);
+  });
+
   it('masks a secret split across two chunks, and drops one the turn ended part-way through', () => {
     addSecrets(['sk-live-1234567890']);
     log(submitted('t_1'), said('t_1', 'key is sk-live-'), said('t_1', '1234567890; then sk-live-12'));

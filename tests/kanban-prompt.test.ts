@@ -116,6 +116,10 @@ describe('composePrompt', () => {
     expect(work).toContain('"title"');
     expect(work).toContain('"assignee"');
     expect(work).toContain('"parents"');
+    expect(work).toContain('"assignee": "<role name, or lark:<union_id> for a person>"');
+    expect(work).toContain('"reviewer": "<role name, or lark:<union_id> for a person>"');
+    expect(work).not.toContain('"kind": "role" | "human"');
+    expect(work).toContain('`mt kanban link < link.json`, with {"parent_id": "...", "child_id": "..."}');
     expect(work).toContain('`mt kanban comment < comment.json`, with {"body": "..."}');
     expect(work).toContain('`mt kanban show`');
     const review = composePrompt(brief({ kind: 'review', task: task({ phase: 'review' }) }));
@@ -272,6 +276,41 @@ describe('composePrompt', () => {
     expect(prompt).not.toContain('## Attempt 3 ');
     expect(prompt).toContain('## Attempt 4 ');
     expect(prompt).toContain('## Attempt 8 ');
+  });
+
+  it('keeps the attempts and the comments when many parents hand off in full, and says how many parents it left out', () => {
+    const parents = Array.from({ length: 20 }, (_, i) => ({
+      task: task({ taskId: `k_p${i}`, title: `parent ${i}`, phase: 'done' as const }),
+      summary: 's'.repeat(50_000),
+      metadata: { notes: 'm'.repeat(50_000) },
+    }));
+    const attempts = Array.from({ length: 5 }, (_, i) => ({
+      run: run({ runId: `r_${i + 1}`, attempt: i + 1, outcome: 'failed' as const }),
+      toolCalls: [{ toolCallId: `c${i}`, title: `tool-of-attempt-${i + 1}`, status: 'completed' }],
+    }));
+    const comments = Array.from({ length: 3 }, (_, i) => ({
+      id: i + 1,
+      taskId: 'k_task',
+      author: 'lark:on_alice',
+      body: `comment ${i}`,
+      createdAt: NOW + i,
+    }));
+    const children = [task({ taskId: 'k_child', title: 'Review it' })];
+    const prompt = composePrompt(brief({ parents, attempts, comments, children }));
+    const told = prompt.slice(prompt.indexOf('# The task'));
+    expect(Buffer.byteLength(told, 'utf8')).toBeLessThanOrEqual(CONTEXT_BUDGET_BYTES);
+    expect(prompt).toContain('## Attempt 5 (work, implementer): failed');
+    expect(prompt).toContain('- tool-of-attempt-5 (completed)');
+    expect(prompt).toContain('## Comments');
+    expect(prompt).toContain('- lark:on_alice: comment 2');
+    expect(prompt).toContain('## Children');
+    expect(prompt).toContain('## Parent k_p0: parent 0 (done)');
+    expect(prompt).toMatch(/\n\d+ more parents omitted; mt kanban show has them\.\n/);
+    const omitted = Number(/\n(\d+) more parents omitted/.exec(prompt)?.[1]);
+    const shown = prompt.split('\n').filter((l) => l.startsWith('## Parent ')).length;
+    expect(omitted + shown).toBe(20);
+    // Fitted, not cut at the budget: the last section is whole.
+    expect(prompt.trimEnd().endsWith('- k_child: Review it (implementer, open)')).toBe(true);
   });
 
   it('masks a secret holding a quote inside metadata, before the metadata is serialized', () => {

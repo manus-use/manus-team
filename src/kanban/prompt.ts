@@ -36,9 +36,10 @@ import { CONTRACT_FIELDS, type CommentRow, type RunKind, type RunRow, type TaskR
  * the context together get CONTEXT_BUDGET_BYTES, half of that, which leaves the
  * other half for role.md, the skills, the protocol, and the transcript a later
  * turn in the same session carries (C3's nudges). Each piece is capped
- * (PIECE_BYTES); the context keeps the latest MAX_ATTEMPTS attempts, the newest
- * comments that fit, and says what it left out, and whatever still runs over is
- * cut at the budget with a line saying so. role.md is not cut: it is the
+ * (PIECE_BYTES), and each section of the context has its own share (see
+ * `told`): the latest MAX_ATTEMPTS attempts that fit, the newest comments that
+ * fit, and the parents that fit in what is left, each saying what it left out.
+ * Whatever still runs over is cut at the budget with a line saying so. role.md is not cut: it is the
  * operator's file, and the run records its hash. A role.md so large that the
  * prompt passes the driver's cap is refused by the driver before the agent
  * starts; the turn fails, the run ends `failed` with the driver's size message
@@ -69,6 +70,8 @@ const MAX_TOOL_CALLS = 40;
 const MAX_LINKED = 20;
 /** Kept for comments when attempts are fitted, so a long history cannot crowd out the thread. */
 const COMMENT_RESERVE_BYTES = 8 * 1024;
+/** Kept for parents' handoffs when attempts and comments are fitted; parents also get whatever those leave. */
+const PARENT_RESERVE_BYTES = 8 * 1024;
 
 const CUT = '[cut; mt kanban show has all of it]';
 const SHOW = 'mt kanban show has them.';
@@ -101,6 +104,9 @@ export interface RunBrief {
   children: readonly TaskRow[];
 }
 
+/** An assignee or a reviewer, as KanbanService takes one: a role name, or a person's principal. */
+const WHO = '"<role name, or lark:<union_id> for a person>"';
+
 const BLOCK_KINDS = '"needs_input" | "capability" | "transient" | "dependency"';
 
 /** The commands besides the reports, each list ending with its own last item. */
@@ -112,11 +118,12 @@ const WORK_PROTOCOL = `You have one task, below. Orient yourself by reading the 
 
 Report through the \`mt kanban\` command, which reads JSON on stdin and answers in JSON. Exactly one terminal report ends your run:
 - \`mt kanban complete < handoff.json\`, with {"summary": "...", "metadata": {...}}, when the task is done;
-- \`mt kanban review < handoff.json\`, with the same fields and optionally "reviewer", to ask for this task to be reviewed;
+- \`mt kanban review < handoff.json\`, with the same fields and optionally "reviewer": ${WHO}, to ask for this task to be reviewed;
 - \`mt kanban block < block.json\`, with {"kind": ${BLOCK_KINDS}, "reason": "..."}, and "parents" (task ids) for a dependency, when you cannot go on.
 
 ${OTHER_COMMANDS};
-- \`mt kanban create < task.json\`, with {"title": "...", "body": "...", "assignee": {"kind": "role" | "human", "name": "..."}}, and optionally "contract", "workspace", "parents" (task ids) and "idempotency_key", creates a task.
+- \`mt kanban create < task.json\`, with {"title": "...", "body": "...", "assignee": ${WHO}}, and optionally "reviewer": ${WHO}, "contract", "workspace", "parents" (task ids) and "idempotency_key", creates a task;
+- \`mt kanban link < link.json\`, with {"parent_id": "...", "child_id": "..."}, makes one task wait on another.
 
 Block only on genuine ambiguity, and say why. If one of the task's children below reviews this task, report complete rather than review. If you find follow-up work, create a task for it with \`mt kanban create\` rather than doing it. Never put a secret in a summary, metadata or comment. Stop once you have reported.`;
 
@@ -246,17 +253,11 @@ function commentLines(c: CommentRow): string[] {
   return labelled(`- ${flat(c.author)}`, piece(c.body, PIECE_BYTES.comment));
 }
 
-function parentLines(b: RunBrief): string[] {
-  if (b.parents.length === 0) return [];
-  const lines = ['', 'The tasks this one depends on, and what each handed off:'];
-  for (const p of b.parents.slice(0, MAX_LINKED)) {
-    lines.push('', `## Parent ${p.task.taskId}: ${flat(p.task.title)} (${p.task.phase})`);
-    if (p.summary === null) lines.push('No handoff: it was never completed.');
-    else lines.push(...labelled('Summary', piece(p.summary, PIECE_BYTES.summary)));
-    if (p.metadata !== null && p.metadata !== undefined) lines.push(...labelled('Metadata', json(p.metadata)));
-  }
-  const left = b.parents.length - MAX_LINKED;
-  if (left > 0) lines.push('', `${left} more parents omitted; ${SHOW}`);
+function parentLines(p: ParentHandoff): string[] {
+  const lines = ['', `## Parent ${p.task.taskId}: ${flat(p.task.title)} (${p.task.phase})`];
+  if (p.summary === null) lines.push('No handoff: it was never completed.');
+  else lines.push(...labelled('Summary', piece(p.summary, PIECE_BYTES.summary)));
+  if (p.metadata !== null && p.metadata !== undefined) lines.push(...labelled('Metadata', json(p.metadata)));
   return lines;
 }
 
@@ -290,44 +291,98 @@ function newestThatFit<T>(items: readonly T[], render: (item: T) => string[], ro
   return [kept, items.length - kept.length];
 }
 
-/** The task and the worker context, fitted to CONTEXT_BUDGET_BYTES. */
+/**
+ * The first items, in their order, whose lines fit in `room` bytes, and how many
+ * were left out after them. None is kept when the first does not fit: the
+ * omission line says they are there.
+ */
+function firstThatFit<T>(items: readonly T[], render: (item: T) => string[], room: number): [string[][], number] {
+  const kept: string[][] = [];
+  let used = 0;
+  for (const item of items) {
+    const lines = render(item);
+    const size = bytes(lines);
+    if (used + size > room) break;
+    kept.push(lines);
+    used += size;
+  }
+  return [kept, items.length - kept.length];
+}
+
+/** A section's share of what is left: its reserve, or less when all of it needs less. */
+function share(lines: readonly string[], reserve: number): number {
+  return lines.length === 0 ? 0 : Math.min(reserve, bytes(lines));
+}
+
+/**
+ * The task and the worker context, fitted to CONTEXT_BUDGET_BYTES. Each section
+ * has its own share: the task and the children are bounded by their caps and
+ * sized first; the attempts are fitted next, leaving the comments and the
+ * parents their reserves; the comments next, leaving the parents theirs; and the
+ * parents get what is left. So no number of parents, however long their
+ * handoffs, can push the attempts, the thread or the children out.
+ */
 function told(b: RunBrief): string {
   const task = taskSection(b.task);
-  const parents = parentLines(b);
   const children = childLines(b);
-  let used = bytes(task) + bytes(['', '# Context']) + bytes(parents) + bytes(children);
+  const frame = ['', '# Context'];
+  const parentHeader = b.parents.length === 0 ? [] : ['', 'The tasks this one depends on, and what each handed off:'];
+  // The omission lines' own sizes are kept back, at their longest.
+  const parentsOmitted = (n: number): string[] => ['', `${n} more parents omitted; ${SHOW}`];
+  const parentFixed = b.parents.length === 0 ? 0 : bytes([...parentHeader, ...parentsOmitted(b.parents.length)]);
+  const allParents = b.parents.slice(0, MAX_LINKED).flatMap(parentLines);
+  const parentShare = b.parents.length === 0 ? 0 : parentFixed + share(allParents, PARENT_RESERVE_BYTES);
+  const commentHeader = ['', '## Comments', `${b.comments.length} earlier comments omitted; ${SHOW}`];
+  const commentShare =
+    b.comments.length === 0 ? 0 : bytes(commentHeader) + share(b.comments.flatMap(commentLines), COMMENT_RESERVE_BYTES);
+  let left = CONTEXT_BUDGET_BYTES - bytes(task) - bytes(frame) - bytes(children);
 
-  // The latest attempts first, leaving the thread its reserve.
+  // The latest attempts first, leaving the thread and the parents their shares.
   const recent = b.attempts.slice(-MAX_ATTEMPTS);
-  const [attempts, attemptsLeft] = newestThatFit(
-    recent,
-    (a) => ['', ...attemptLines(a)],
-    CONTEXT_BUDGET_BYTES - used - COMMENT_RESERVE_BYTES,
-  );
   const attemptBlock: string[] = [];
   if (b.attempts.length > 0) {
-    attemptBlock.push('', 'Earlier attempts on this task, oldest first. A retry starts fresh: check the workspace for what these left behind.');
-    const left = attemptsLeft + (b.attempts.length - recent.length);
-    if (left > 0) attemptBlock.push(`${left} earlier attempts omitted; ${SHOW}`);
+    const header = [
+      '',
+      'Earlier attempts on this task, oldest first. A retry starts fresh: check the workspace for what these left behind.',
+      `${b.attempts.length} earlier attempts omitted; ${SHOW}`,
+    ];
+    const [attempts, attemptsLeft] = newestThatFit(
+      recent,
+      (a) => ['', ...attemptLines(a)],
+      left - bytes(header) - commentShare - parentShare,
+    );
+    attemptBlock.push(header[0] as string, header[1] as string);
+    const omitted = attemptsLeft + (b.attempts.length - recent.length);
+    if (omitted > 0) attemptBlock.push(`${omitted} earlier attempts omitted; ${SHOW}`);
     for (const a of attempts) attemptBlock.push(...a);
+    left -= bytes(attemptBlock);
   }
-  used += bytes(attemptBlock);
 
   const commentBlock: string[] = [];
   if (b.comments.length > 0) {
-    // The omission line's own size is kept back, at its longest.
-    const header = ['', '## Comments', `${b.comments.length} earlier comments omitted; ${SHOW}`];
-    const [comments, left] = newestThatFit(b.comments, commentLines, CONTEXT_BUDGET_BYTES - used - bytes(header));
+    const [comments, omitted] = newestThatFit(b.comments, commentLines, left - bytes(commentHeader) - parentShare);
     commentBlock.push('', '## Comments');
-    if (left > 0) commentBlock.push(`${left} earlier comments omitted; ${SHOW}`);
+    if (omitted > 0) commentBlock.push(`${omitted} earlier comments omitted; ${SHOW}`);
     for (const c of comments) commentBlock.push(...c);
+    left -= bytes(commentBlock);
   }
 
-  const context = [...parents, ...attemptBlock, ...commentBlock, ...children];
+  // The parents, in what is left: as many as fit, in their order.
+  const parentBlock: string[] = [];
+  if (b.parents.length > 0) {
+    const [parents, unfit] = firstThatFit(b.parents.slice(0, MAX_LINKED), parentLines, left - parentFixed);
+    parentBlock.push(...parentHeader);
+    for (const p of parents) parentBlock.push(...p);
+    const omitted = unfit + Math.max(0, b.parents.length - MAX_LINKED);
+    if (omitted > 0) parentBlock.push(...parentsOmitted(omitted));
+  }
+
+  const context = [...parentBlock, ...attemptBlock, ...commentBlock, ...children];
   if (context.length === 0) context.push('', 'Nothing yet: no parents, earlier attempts, comments or children.');
-  const text = redactKnownSecrets([...task, '', '# Context', ...context].join('\n'));
+  const text = redactKnownSecrets([...task, ...frame, ...context].join('\n'));
   if (Buffer.byteLength(text, 'utf8') <= CONTEXT_BUDGET_BYTES) return text;
-  // Still over, from many parents or a long task: cut at the budget, on a line.
+  // Still over -- the newest attempt or comment is always kept, whatever its
+  // size, and masking can lengthen a piece -- so cut at the budget, on a line.
   const end = `\n${CUT}`;
   const head = headBytes(text, CONTEXT_BUDGET_BYTES - Buffer.byteLength(end, 'utf8') - 1);
   const atLine = head.lastIndexOf('\n');

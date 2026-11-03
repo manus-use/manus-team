@@ -234,7 +234,7 @@ export function loadConfig(
     // more runs than live sessions would hold the gateway over its cap.
     const liveName = liveFromEnv === undefined ? 'maxLiveSessions' : 'MT_MAX_LIVE_SESSIONS';
     throw new ConfigError(
-      `kanban.max_running (${maxRunning}) is above ${liveName} (${maxLiveSessions}); ` +
+      `${located.path}: kanban.max_running (${maxRunning}) is above ${liveName} (${maxLiveSessions}); ` +
         'a run is a live session, so the two limits must not disagree',
     );
   }
