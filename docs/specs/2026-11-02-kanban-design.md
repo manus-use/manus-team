@@ -788,16 +788,17 @@ or unblocked, a run ended, a review requested — and on a sweep every `kanban.s
 (default 60 s) for the things only time changes: cooldowns ending, runtimes exceeded, tasks
 becoming stranded.
 
-The `kanban.*` settings this document names are written in the config file in camelCase, like every
-other key in it: `kanban.failureLimit`, `kanban.maxRunning`, `kanban.sweepIntervalS` and so on. They
-are set in the file only, with no environment overrides: a run's own environment is `MT_KANBAN_*`
-(§7.2), and a gateway setting under that prefix would read as one of a run's variables.
+The `kanban.*` settings this document names are set in the config file only, with no environment
+overrides: a run's own environment is `MT_KANBAN_*` (§7.2), and a gateway setting under that prefix
+would read as one of a run's variables. They are spelled as this document spells them, in snake_case,
+while the rest of the file is camelCase.
 
 ### 6.2 A pass
 
 1. Collect claimable tasks with **no open run of any kind**: **ready** (§4.1) for work, **review**
    for review. A task whose previous run has reported but not yet closed is skipped until it closes;
-   claiming it would only fail on the one-open-run index (§3.3). Order by priority, then age.
+   claiming it would only fail on the one-open-run index (§3.3). Order by priority, higher first, then
+   age, oldest first.
 2. Skip any whose `cooldown_until` is in the future, whose assignee (or reviewer) does not resolve
    (§4.2), or — for an agent run — whose workspace already has an open agent run (§6.3), or when
    `kanban.max_running` agent runs are open.

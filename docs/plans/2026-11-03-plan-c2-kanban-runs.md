@@ -5,12 +5,12 @@
 **Goal:** The board's tasks get done by agents: a dispatcher claims ready tasks and runs each claim as a fresh gateway session on a sink channel, with a composed task prompt; a run ends when its turn ends, and a run that ends without a report is classified, counted and retried in a new session that is told what the last one did; a restart closes every open run, and a run past its limit is cancelled. No worker CLI yet: in this plan a run's agent cannot report, so the tests' fake agents report through `KanbanService`, as plan C3's CLI will.
 
 **Architecture:**
-- **Configuration.** `src/config.ts` reads a `kanban:` section into `GatewayConfig.kanban`: `enabled` (default off), `maxRunning` (default `maxLiveSessions`, never above it), the breaker's limits, the runtime limit, the sweep interval and the stranded delay.
+- **Configuration.** `src/config.ts` reads a `kanban:` section into `GatewayConfig.kanban`: `enabled` (default off), `max_running` (default `maxLiveSessions`, never above it), the breaker's limits, the runtime limit, the sweep interval and the stranded delay. The section's keys are snake_case, as the spec spells them; the rest of the file stays camelCase.
 - **Pure parts.** `src/kanban/classify.ts` is the failure classifier of spec §8.1, one function over the turn's terminal and its error text. `src/kanban/prompt.ts` composes the task prompt of spec §7.1 and masks its task and context as one assembled text (spec §10.1 layer 2).
 - **Reading what a run did.** `src/kanban/session-log.ts` reads a run's tool calls, and its last turn's errors and masked output, from the session event log. `src/kanban/brief.ts` gathers what a prompt is composed from: parents' handoffs, earlier attempts with their tool calls, comments, children.
 - **The board.** `src/db/kanban-read.ts` gains the dispatcher's reads: open runs, a run by its session, the open agent run count, the claimable tasks in order, a task's latest completion. `src/db/kanban.ts`, still the only writer, gains `noteStranded` and `countSubmission`, which the service exposes.
 - **The session layer.** `src/kanban/sink.ts` is the `kanban` channel: it discards card output and refuses approval cards. `src/core/registry.ts` gains `pinned` (an open run's actor is never retired to make room), asks `envFor` before it makes room so the dispatcher can refuse a build, and gains `archive(key)` for a closed run's session.
-- **The dispatcher.** `src/kanban/dispatcher.ts` owns the run lifecycle: passes, `maxRunning`, one agent run per workspace (the claim's check), starting a run, ending it when its turn ends, the sweep (runtime limits, cooldowns, stranded notices), and the boot step that closes every run a restart killed. It holds each open run's environment in memory and gives it to the registry.
+- **The dispatcher.** `src/kanban/dispatcher.ts` owns the run lifecycle: passes, `max_running`, one agent run per workspace (the claim's check), starting a run, ending it when its turn ends, the sweep (runtime limits, cooldowns, stranded notices), and the boot step that closes every run a restart killed. It holds each open run's environment in memory and gives it to the registry.
 - **Wiring.** `src/index.ts` always registers the sink channel and the dispatcher's two hooks, posts boot findings only to Lark bindings, and builds and starts the dispatcher only when `kanban.enabled` is set.
 
 **Tech Stack:** TypeScript (Node 22, ESM/NodeNext, strict, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`), vitest, better-sqlite3.
@@ -39,7 +39,7 @@
 
 ## Decisions the spec left open
 
-Each is the reading most consistent with the rest of the spec. Decisions 1–4 change what an operator sees, and the user should confirm them. Decisions 1, 2, 4, 7 and 8 are now in the spec (§4.2, §6.1, §6.3, §7.4, §12).
+Each is the reading most consistent with the rest of the spec. Decisions 1–4 change what an operator sees; the user has confirmed them, and chose the spec's snake_case spelling for Decision 2. Decisions 1, 2, 4, 7, 8 and 27 are now in the spec (§4.2, §6.1, §6.2, §6.3, §7.4, §12).
 
 1. **The dispatcher is wired into the gateway in this plan, and runs only when `kanban.enabled: true` is set.** The default is off, so merging C2 changes nothing for the live gateway: its config has no `kanban:` section. The alternative, leaving `src/index.ts` alone until C3, was rejected for three reasons:
    - The boot order of spec §8.4 lives in `start()`: reconcile, post findings only to chat bindings, then close every run the restart killed. Wiring it here is what makes C2's restart handling real code rather than a library C3 has to plug in.
@@ -47,14 +47,14 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–4 c
    - C3 then only adds the socket and the token to a dispatcher that is already started and stopped with the gateway.
 
    Two pieces of the wiring are on whatever the flag says, and change nothing today: the `kanban` sink is in the registry's channel map, and boot findings are posted only to bindings on the Lark channel. Every existing binding is a Lark binding. The flag stays off until people can create tasks (plan D) and agents can report (plan C3). Turned on before C3, every agent run would end `protocol_violation`, since its agent has no `mt kanban` to report with (Decision 5).
-2. **The `kanban:` settings are spelled in camelCase, and are file only.** The spec names them `kanban.failure_limit`, `kanban.max_running` and so on. Every other key in the config file is camelCase (`maxLiveSessions`, `passEnv`, `readOnlyTools`), and an operator who writes `failure_limit` next to `maxLiveSessions` gets an unknown-key error. So the file says `failureLimit`, `transientLimit`, `transientCooldownS`, `maxRunning`, `defaultMaxRuntimeS`, `sweepIntervalS`, `strandedAfterS` and `enabled`. There are no environment overrides, as there are none for `workspaces`. A run's own environment is `MT_KANBAN_*` (spec §7.2), and gateway settings under that prefix would read as run variables.
-3. **Settings for later plans are refused until those plans use them.** `nudgeLimit` (C3) and `blockRecurrenceLimit` (D) are unknown keys in C2. An accepted setting that does nothing is how a value someone changed turns out never to have applied.
-4. **`kanban.maxRunning` above `maxLiveSessions` is a startup error.** Spec §6.3 says the two limits "must not disagree". An open run's actor is pinned, so more runs than live sessions would hold the gateway over its cap for as long as they ran. Equal is allowed and is the default. Lower keeps room for chat.
+2. **The `kanban:` settings are spelled as the spec spells them, in snake_case, and are file only.** The keys are `enabled`, `max_running`, `failure_limit`, `transient_limit`, `transient_cooldown_s`, `default_max_runtime_s`, `sweep_interval_s` and `stranded_after_s`. The rest of `config.yaml` stays camelCase (`maxLiveSessions`, `passEnv`); only the `kanban:` section uses snake_case, which a comment in `src/config.ts` and the README say. A camelCase key in the section, such as `failureLimit`, is an unknown-key error naming the known ones. Inside the code the settings keep camelCase field names (`GatewayConfig.kanban.maxRunning`), mapped from the file's keys in one table. There are no environment overrides, as there are none for `workspaces`. A run's own environment is `MT_KANBAN_*` (spec §7.2), and gateway settings under that prefix would read as run variables.
+3. **Settings for later plans are refused until those plans use them.** `nudge_limit` (C3) and `block_recurrence_limit` (D) are unknown keys in C2. An accepted setting that does nothing is how a value someone changed turns out never to have applied.
+4. **`kanban.max_running` above `maxLiveSessions` is a startup error.** Spec §6.3 says the two limits "must not disagree". An open run's actor is pinned, so more runs than live sessions would hold the gateway over its cap for as long as they ran. Equal is allowed and is the default. Lower keeps room for chat.
 5. **How the prompt refers to the worker protocol before C3.** The protocol section names the `mt kanban` commands, their JSON and the terminal reports, as spec §7.1 and §7.3 give them and C3 will provide them. The prompt does not change when C3 lands. Until then a real agent finds no such command and its run ends without a report. C2 is proven by fake agents whose scripts report through `KanbanService`, and by runs that end without reporting and reach the classifier.
 6. **A turn that completes without a report ends `protocol_violation` at once.** Stop nudges (spec §7.5) are C3's. They go in the dispatcher's `terminal === 'completed'` branch, before that outcome. The agent's last output is recorded with it.
 7. **Every closed run's session is archived and its binding revoked**, not only a run closed at boot. Spec §7.4 says the session "is released". One run is one session (spec §3.3), so the session is never used again whichever way the run closed. Archiving it is what makes a stale approval card for it resolve to "no longer bound", the reason §8.4 gives for doing it at boot.
-8. **A task is stranded once it has sat unclaimable for `strandedAfterS` since a pass found it so.** That is the time of its `skipped_unassignable` event, and nothing may have been written on the task since. Spec §4.2 said "measured from the latest event that made it ready", but most such events are on other tasks, or are no event at all: a parent completing, a cooldown ending. The skip is written by the first pass after the task became ready, at most a sweep later. A comment or a reassignment restarts the wait, since someone is looking at the task. The notice is a `stranded` kanban event, which plan D delivers to subscribers. `stranded_notified_at` is set with it, and the next claim clears it (C1). `noteUnassignable` treats a `stranded` event like its own skip, so the notice does not cause a second skip to be written.
-9. **Only a pass that tried a task can find it stranded.** While `maxRunning` agent runs are open, a pass does not try agent tasks, so one that nobody can be given is reported once a slot frees, not before. A task waiting behind a busy workspace or the limit is queued, and is never reported (spec §4.2).
+8. **A task is stranded once it has sat unclaimable for `stranded_after_s` since a pass found it so.** That is the time of its `skipped_unassignable` event, and nothing may have been written on the task since. Spec §4.2 said "measured from the latest event that made it ready", but most such events are on other tasks, or are no event at all: a parent completing, a cooldown ending. The skip is written by the first pass after the task became ready, at most a sweep later. A comment or a reassignment restarts the wait, since someone is looking at the task. The notice is a `stranded` kanban event, which plan D delivers to subscribers. `stranded_notified_at` is set with it, and the next claim clears it (C1). `noteUnassignable` treats a `stranded` event like its own skip, so the notice does not cause a second skip to be written.
+9. **Only a pass that tried a task can find it stranded.** While `max_running` agent runs are open, a pass does not try agent tasks, so one that nobody can be given is reported once a slot frees, not before. A task waiting behind a busy workspace or the limit is queued, and is never reported (spec §4.2).
 10. **Cooldowns are checked by the listing.** A task in its cooldown shows `ready` (C1's note). `claimableTasks` leaves it out until `cooldown_until` has passed. The claim still refuses it as a backstop.
 11. **A second rework may resume from a seeded provider-session id nobody confirmed.** C1's `reworkSeed` trusts `sessions.provider_session_id`, which is a seed until the agent reports its own. That seed is an id another session observed, the first work run's, so resuming from it resumes the same conversation. The rework prompt is written to survive a fresh start either way. Nothing changes.
 12. **C2 writes `submissions`.** C1 listed its writer under C3, but the task prompt is the first submission, and its key, `kanban:<run_id>:0`, uses the count before it (spec §7.5). `countSubmission` arrives here, and C3's nudges call it too.
@@ -71,7 +71,9 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–4 c
 23. **`envFor` refuses by throwing.** The registry now asks it before retiring anything to make room, alongside its role, workspace and channel checks. When the registry is about to rebuild the session of an open run this process did not start, the dispatcher ends the run `interrupted`, closes it, archives its session and throws (spec §2.4 item 3). After boot this cannot happen, since boot closes every open run first. It is the backstop.
 24. **What starts a pass.** A pass runs when a run closes, and on every sweep. Plans C3 and D call `dispatcher.pass()` after the service calls that can make a task claimable: create, link, unblock, review requested. In C2 nothing else calls the service.
 25. **The runtime limit cancels a turn once its agent is running.** The `timed_out` outcome is recorded at the first sweep past the limit. A turn whose agent is still starting has nothing to cancel yet, so each later sweep tries again until it has a runtime, and then cancels once. An agent whose start never returns keeps its run open until a restart: the session layer has no way to abandon a start.
-26. **The classifier reads provider errors, not every error.** Status codes count only directly after `status`, `code`, `HTTP` or `error`. Credentials are recognised by 401, 403, "unauthorized", the providers' `authentication_error` and `permission_error`, and "invalid API key", not by the bare word "authentication": `git`'s "Authentication failed" is the agent's tool failing, an ordinary failure. Timeouts count when they are a request's, a connection's or a socket's, not a test's.
+26. **The classifier reads provider errors, not every error.** Status codes count only directly after `status`, `code`, `HTTP` or `error`. Credentials are recognised by 401, 403, "unauthorized", the providers' `authentication_error` and `permission_error`, "invalid API key", Bedrock's `AccessDeniedException`, `ExpiredTokenException` and `UnrecognizedClientException`, and a spent credit balance. The bare word "authentication" is not enough: `git`'s "Authentication failed" is the agent's tool failing, an ordinary failure. A model that is not found or does not exist is a wall, but "Model is temporarily unavailable" is the provider busy, so it is throttling. So are connection errors, `fetch failed`, and timeouts of a request, a connection or a socket, but not a test's timeout.
+27. **Higher `priority` is claimed first; equal priorities go oldest first.** The spec said only "by priority, then age". This order matches the `priority DESC, created_at` index migration 003 already has. It is now in spec §6.2.
+28. **A turn that ignores its cancel has its session released at the next sweep.** ACP's cancel is cooperative, so an agent can ignore it and hold its workspace and a `max_running` slot until a restart. If a sweep finds a run still open after its cancel was sent, it releases the run's session, which ends the agent's process, and closes the run with the outcome recorded before the cancel.
 
 ## Out of scope (later plans)
 
@@ -79,7 +81,7 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–4 c
   - the run's token, `MT_KANBAN_SOCKET` and the `mt` directory on `PATH`, added to the environment `#run` builds;
   - registering the token with the masker when the run is claimed and removing it when it closes, reference-counted;
   - the `0600` socket and the `mt kanban` commands;
-  - stop nudges and `kanban.nudgeLimit`, in place of the immediate `protocol_violation`;
+  - stop nudges and `kanban.nudge_limit`, in place of the immediate `protocol_violation`;
   - forwarding a comment to an undecided run, through `countSubmission` and the same key scheme;
   - calling `dispatcher.pass()` after a worker's `create` or `link`.
 - **Plan C4, review, rework and gates:**
@@ -92,10 +94,17 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–4 c
   - forwarding a supervised agent's approval card from the sink to the task's first subscription;
   - sending a person their run's card, since a person's run starts nothing in C2;
   - the `/kanban` commands, each followed by `dispatcher.pass()`;
-  - `kanban.blockRecurrenceLimit`;
+  - `kanban.block_recurrence_limit`;
   - turning `kanban.enabled` on by default, or removing it;
-  - refusing `/attach` to a run's session, which would bind a chat to it.
+  - refusing `/attach` to a run's session, which would bind a chat to it. `registry.attach` refuses only `terminated` sessions, so the refusal must cover archived run sessions too;
+  - a test that `boot()` runs before the first pass with the flag on, added when D turns the flag on.
 - **The README.** Only the new settings rows, in Task 1. A section on using the board waits until it can be used.
+
+### Known limitations, not fixed here
+
+- A sweep can record `timed_out` while the driver is still starting, and the prompt still goes out once it has. In C3 that agent's reports get `run_superseded`.
+- `stop()` does not wait for an archive already in flight. If the database closes first, the only result is a line in the log; the next boot closes the run.
+- The classifier can misread tool output that reaches `agent_error`, such as `gh`'s "HTTP 401", npm's 403, or "disk quota exceeded". It reads only `agent_error` text, which today is the agent's own errors and stderr.
 
 ### What later plans need from the runs
 
@@ -132,7 +141,7 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–4 c
 **Files:**
 - Modify: `src/config.ts`, `tests/config.test.ts`, `README.md`
 
-The dispatcher's settings (Decisions 1–4). `failureLimit`, `transientLimit` and `transientCooldownS` are C1's `KanbanLimits`, which the service already takes. `maxRunning` defaults to `maxLiveSessions`, so the two limits agree unless the operator lowers one. Above it is refused. The section is file only, and an unknown key in it is an error naming the known ones, as for every other section.
+The dispatcher's settings (Decisions 1–4). The section's keys are snake_case, as the spec spells them (Decision 2), and one table maps each to the camelCase field the code reads. `failure_limit`, `transient_limit` and `transient_cooldown_s` are C1's `KanbanLimits`, which the service already takes. `max_running` defaults to `maxLiveSessions`, so the two limits agree unless the operator lowers one. Above it is refused. The section is file only, and an unknown key in it, camelCase included, is an error naming the known ones, as for every other section.
 
 - [ ] **Step 1.1: Write the failing tests.**
 
@@ -141,7 +150,7 @@ Add to the end of `tests/config.test.ts`:
 ```ts
 
 describe('loadConfig: the kanban section', () => {
-  it('defaults to the spec values, off, with maxRunning at maxLiveSessions', () => {
+  it('defaults to the spec values, off, with max_running at maxLiveSessions', () => {
     expect(load().kanban).toEqual({
       enabled: false,
       maxRunning: 8,
@@ -155,19 +164,19 @@ describe('loadConfig: the kanban section', () => {
     expect(load({ MT_MAX_LIVE_SESSIONS: '3' }).kanban.maxRunning).toBe(3);
   });
 
-  it('reads every setting from the file', () => {
+  it('reads every setting from the file, spelled as the spec spells it', () => {
     const cfg = load(
       {},
       yamlFile({
         kanban: {
           enabled: true,
-          maxRunning: 4,
-          failureLimit: 3,
-          transientLimit: 5,
-          transientCooldownS: 60,
-          defaultMaxRuntimeS: 600,
-          sweepIntervalS: 30,
-          strandedAfterS: 120,
+          max_running: 4,
+          failure_limit: 3,
+          transient_limit: 5,
+          transient_cooldown_s: 60,
+          default_max_runtime_s: 600,
+          sweep_interval_s: 30,
+          stranded_after_s: 120,
         },
       }),
     );
@@ -184,27 +193,31 @@ describe('loadConfig: the kanban section', () => {
   });
 
   it('refuses an unknown key, naming the known ones', () => {
-    expect(() => load({}, yamlFile({ kanban: { failure_limit: 3 } }))).toThrow(
-      'unknown setting kanban.failure_limit (known: enabled, maxRunning, failureLimit',
+    // camelCase, as the rest of the file is, is not this section's spelling.
+    expect(() => load({}, yamlFile({ kanban: { failureLimit: 3 } }))).toThrow(
+      'unknown setting kanban.failureLimit (known: enabled, max_running, failure_limit',
     );
     // Plan C3's and plan D's settings are not accepted before they do anything.
-    expect(() => load({}, yamlFile({ kanban: { nudgeLimit: 2 } }))).toThrow('unknown setting kanban.nudgeLimit');
+    expect(() => load({}, yamlFile({ kanban: { nudge_limit: 2 } }))).toThrow('unknown setting kanban.nudge_limit');
+    expect(() => load({}, yamlFile({ kanban: { block_recurrence_limit: 2 } }))).toThrow(
+      'unknown setting kanban.block_recurrence_limit',
+    );
   });
 
   it('refuses a value that is not a positive whole number, or a flag that is not a boolean', () => {
-    expect(() => load({}, yamlFile({ kanban: { failureLimit: 0 } }))).toThrow(
-      'kanban.failureLimit must be a positive integer',
+    expect(() => load({}, yamlFile({ kanban: { failure_limit: 0 } }))).toThrow(
+      'kanban.failure_limit must be a positive integer',
     );
-    expect(() => load({}, yamlFile({ kanban: { sweepIntervalS: 1.5 } }))).toThrow('positive integer');
+    expect(() => load({}, yamlFile({ kanban: { sweep_interval_s: 1.5 } }))).toThrow('positive integer');
     expect(() => load({}, yamlFile({ kanban: { enabled: 'yes' } }))).toThrow('kanban.enabled must be true or false');
     expect(() => load({}, yamlFile({ kanban: [] }))).toThrow('kanban must be a mapping');
   });
 
-  it('refuses maxRunning above maxLiveSessions: a run is a live session', () => {
-    expect(() => load({}, yamlFile({ maxLiveSessions: 4, kanban: { maxRunning: 5 } }))).toThrow(
-      'kanban.maxRunning (5) is above maxLiveSessions (4)',
+  it('refuses max_running above maxLiveSessions: a run is a live session', () => {
+    expect(() => load({}, yamlFile({ maxLiveSessions: 4, kanban: { max_running: 5 } }))).toThrow(
+      'kanban.max_running (5) is above maxLiveSessions (4)',
     );
-    expect(load({}, yamlFile({ maxLiveSessions: 4, kanban: { maxRunning: 4 } })).kanban.maxRunning).toBe(4);
+    expect(load({}, yamlFile({ maxLiveSessions: 4, kanban: { max_running: 4 } })).kanban.maxRunning).toBe(4);
   });
 });
 ```
@@ -237,9 +250,11 @@ with:
 }
 
 /**
- * The `kanban:` section (spec §6, §8). Written in camelCase like every other key
- * in the file. File only: `MT_KANBAN_*` names are a run's own environment (spec
- * §7.2), and a gateway setting under the same prefix would read as one of them.
+ * The `kanban:` section (spec §6, §8). Its keys are spelled as the spec spells
+ * them, in snake_case -- `max_running`, `failure_limit` -- while the rest of the
+ * file is camelCase. File only: `MT_KANBAN_*` names are a run's own environment
+ * (spec §7.2), and a gateway setting under the same prefix would read as one of
+ * them.
  */
 export interface KanbanSettings {
   /** Run the dispatcher. Off until the board can be used (spec §12). */
@@ -270,15 +285,16 @@ export const KANBAN_DEFAULTS: Omit<KanbanSettings, 'maxRunning'> = {
   strandedAfterS: 30 * 60,
 };
 
-const KANBAN_NUMBERS = [
-  'maxRunning',
-  'failureLimit',
-  'transientLimit',
-  'transientCooldownS',
-  'defaultMaxRuntimeS',
-  'sweepIntervalS',
-  'strandedAfterS',
-] as const;
+/** The section's numeric keys, as the file spells them, and the setting each sets. */
+const KANBAN_NUMBERS = {
+  max_running: 'maxRunning',
+  failure_limit: 'failureLimit',
+  transient_limit: 'transientLimit',
+  transient_cooldown_s: 'transientCooldownS',
+  default_max_runtime_s: 'defaultMaxRuntimeS',
+  sweep_interval_s: 'sweepIntervalS',
+  stranded_after_s: 'strandedAfterS',
+} as const;
 
 /**
  * What `loadTeam` and the `mt` commands need: where the gateway's files are, the
@@ -304,7 +320,7 @@ with:
     // A run is a session, and its actor is pinned while it is open (spec §6.3):
     // more runs than live sessions would hold the gateway over its cap.
     throw new ConfigError(
-      `kanban.maxRunning (${maxRunning}) is above maxLiveSessions (${maxLiveSessions}); ` +
+      `kanban.max_running (${maxRunning}) is above maxLiveSessions (${maxLiveSessions}); ` +
         'a run is a live session, so the two limits must not disagree',
     );
   }
@@ -355,7 +371,7 @@ with:
     readOnlyTools: readonly string[];
     maskExempt: readonly string[];
   };
-  kanban: { enabled?: boolean } & Partial<Record<(typeof KANBAN_NUMBERS)[number], number>>;
+  kanban: { enabled?: boolean } & Partial<Record<(typeof KANBAN_NUMBERS)[keyof typeof KANBAN_NUMBERS], number>>;
 }
 
 function emptyFile(): FileConfig {
@@ -431,7 +447,7 @@ with:
 ```ts
     'maskExempt',
   ]);
-  reject(path, 'kanban', kanbanRaw, ['enabled', ...KANBAN_NUMBERS]);
+  reject(path, 'kanban', kanbanRaw, ['enabled', ...Object.keys(KANBAN_NUMBERS)]);
 
   out.workspace = str(path, 'workspace', root['workspace']);
 ```
@@ -453,9 +469,9 @@ with:
 
   const enabled = bool(path, 'kanban.enabled', kanbanRaw['enabled']);
   if (enabled !== undefined) out.kanban.enabled = enabled;
-  for (const key of KANBAN_NUMBERS) {
+  for (const [key, setting] of Object.entries(KANBAN_NUMBERS)) {
     const n = positiveInt(path, `kanban.${key}`, kanbanRaw[key]);
-    if (n !== undefined) out.kanban[key] = n;
+    if (n !== undefined) out.kanban[setting] = n;
   }
 
   return out;
@@ -474,12 +490,12 @@ with:
 
 ```md
 | `maxLiveSessions` | `MT_MAX_LIVE_SESSIONS` | Concurrent agent processes. Default 8. |
-| `kanban.enabled` | — | Run the board's dispatcher. Default **off**: nothing can create a task or report on one yet. |
-| `kanban.maxRunning` | — | Open agent runs at once. Default `maxLiveSessions`, and refused above it: a run is a live session. Set it lower to keep room for chat. |
-| `kanban.failureLimit` | — | Counted failures before a task gives up and blocks. Default 2: a first attempt and one retry. |
-| `kanban.transientLimit`, `kanban.transientCooldownS` | — | A throttled run is retried after a cooldown, 300 s by default, doubling each time up to an hour; after 10 in a row the task blocks. |
-| `kanban.defaultMaxRuntimeS` | — | A run's wall-clock limit unless its task sets one. Default 4 hours. |
-| `kanban.sweepIntervalS`, `kanban.strandedAfterS` | — | How often the dispatcher checks runtimes, cooldowns and stranded tasks (default 60 s), and how long a task nobody can take waits before it is reported stranded (default 30 min). |
+| `kanban.enabled` | — | Run the board's dispatcher. Default **off**: nothing can create a task or report on one yet. The `kanban:` keys are snake_case, as the kanban design spells them; the rest of the file is camelCase. They are set in the file only. |
+| `kanban.max_running` | — | Open agent runs at once. Default `maxLiveSessions`, and refused above it: a run is a live session. Set it lower to keep room for chat. |
+| `kanban.failure_limit` | — | Counted failures before a task gives up and blocks. Default 2: a first attempt and one retry. |
+| `kanban.transient_limit`, `kanban.transient_cooldown_s` | — | A throttled run is retried after a cooldown, 300 s by default, doubling each time up to an hour; after 10 in a row the task blocks. |
+| `kanban.default_max_runtime_s` | — | A run's wall-clock limit unless its task sets one. Default 4 hours. |
+| `kanban.sweep_interval_s`, `kanban.stranded_after_s` | — | How often the dispatcher checks runtimes, cooldowns and stranded tasks (default 60 s), and how long a task nobody can take waits before it is reported stranded (default 30 min). |
 | `db`, `downloads` | `MT_DB`, `MT_DOWNLOAD_DIR` | Derived from `MT_HOME` unless set. |
 ```
 
@@ -499,7 +515,7 @@ git commit -m "Read the kanban section of the config file"
 **Files:**
 - Create: `src/kanban/classify.ts`, `tests/kanban-classify.test.ts`
 
-Spec §8.1: one pure function over the turn's terminal and the text of that turn's errors. The checks run in order and the first match wins: provider refusal, then throttling, then the terminal. The text is checked before the terminal because the CLI driver reports any agent that exits early as `ambiguous`, with its stderr in the error. A 400 is an ordinary failure. The patterns are the provider's (Decision 26): `512 passed`, `line 512`, `git`'s "Authentication failed" and a test's timeout are not read as a provider refusing. The table is built from real error strings; a new provider's wording is a new row.
+Spec §8.1: one pure function over the turn's terminal and the text of that turn's errors. The checks run in order and the first match wins: provider refusal, then throttling, then the terminal. The text is checked before the terminal because the CLI driver reports any agent that exits early as `ambiguous`, with its stderr in the error. A 400 is an ordinary failure. The patterns are the provider's (Decision 26), Bedrock's wording included: `512 passed`, `line 512`, `git`'s "Authentication failed" and a test's timeout are not read as a provider refusing, and a connection error or a model that is only temporarily unavailable is throttling. The table is built from real error strings; a new provider's wording is a new row.
 
 - [ ] **Step 2.1: Write the failing tests.** Create `tests/kanban-classify.test.ts`:
 
@@ -529,6 +545,11 @@ const CASES: ReadonlyArray<[TurnTerminal, string, FailureClass]> = [
   ['ambiguous', 'read ECONNRESET', 'rate_limited'],
   ['ambiguous', 'connect ETIMEDOUT 10.0.0.1:443', 'rate_limited'],
   ['failed', 'Request timed out.', 'rate_limited'],
+  ['ambiguous', 'API Error: Connection error.', 'rate_limited'],
+  ['failed', 'TypeError: fetch failed', 'rate_limited'],
+  ['failed', 'ModelNotReadyException: Model is temporarily unavailable, please retry', 'rate_limited'],
+  ['failed', "AccessDeniedException: You don't have access to the model with the specified model ID.", 'terminal_provider'],
+  ['failed', 'ExpiredTokenException: The security token included in the request is expired', 'terminal_provider'],
   // The 400 of 2026-11-02: every request refused for three minutes, then fine.
   ['failed', 'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Bad request"}}', 'failed'],
   // Not a provider wall either way: a 400 that killed the agent is a crash.
@@ -600,7 +621,11 @@ const TERMINAL_PROVIDER: readonly RegExp[] = [
   /\bunauthori[sz]ed\b/i,
   /\b(?:authentication_error|permission_error)\b/,
   /\binvalid[ _-]?api[ _-]?key\b/i,
-  /\bmodel\b[^\n]{0,60}\b(?:not found|does not exist|not available|unavailable)\b/i,
+  // Bedrock's wording for refused or expired credentials, and a spent balance.
+  /\b(?:AccessDeniedException|ExpiredTokenException|UnrecognizedClientException)\b/,
+  /\bcredit balance is too low\b/i,
+  // Not "unavailable": "Model is temporarily unavailable" is the provider busy, not a wall.
+  /\bmodel\b[^\n]{0,60}\b(?:not found|does not exist)\b/i,
   /\b(?:model_not_found|no such model|unknown model)\b/i,
 ];
 
@@ -613,7 +638,7 @@ const RATE_LIMITED: readonly RegExp[] = [
   /\boverloaded\b/i,
   /\b(?:internal server error|bad gateway|service unavailable|gateway timeout)\b/i,
   /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN)\b/,
-  /\b(?:connection reset|socket hang up)\b/i,
+  /\b(?:connection reset|connection error|socket hang up|fetch failed|temporarily unavailable)\b/i,
   // The provider's timeouts, not a test's: "Test timed out in 5000ms" is an ordinary failure.
   /\b(?:request|connection|connect|socket|read|gateway) (?:timed out|timeout)\b/i,
 ];
@@ -626,7 +651,7 @@ export function classifyFailure(terminal: TurnTerminal, errorText: string): Fail
 }
 ```
 
-- [ ] **Step 2.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  764 passed (764)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 2.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  769 passed (769)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 2.5: Commit.**
 
@@ -646,8 +671,8 @@ git commit -m "Classify a run's failure from its terminal and its errors"
 These are the reads C1 listed for C2, plus the two the prompt needs:
 - `openRuns`, for restart handling;
 - `runBySession`, for `envFor`;
-- `openAgentRunCount`, for `maxRunning`. It counts open runs, decided or not, because a run that has reported still has its process (spec §3.3).
-- `claimableTasks`, a pass's candidates (spec §6.2 step 1): in open or review, no open run, every parent finished, no cooldown running (Decision 10). They come highest priority first, then oldest, matching the index migration 003 already has. Whether anyone can take a task is still the claim's to decide.
+- `openAgentRunCount`, for `max_running`. It counts open runs, decided or not, because a run that has reported still has its process (spec §3.3).
+- `claimableTasks`, a pass's candidates (spec §6.2 step 1): in open or review, no open run, every parent finished, no cooldown running (Decision 10). They come highest priority first, then oldest, matching the index migration 003 already has (Decision 27). Whether anyone can take a task is still the claim's to decide.
 - `latestCompletion`, a parent's handoff: the run's summary and metadata, or a person's summary from the `completed` event.
 
 - [ ] **Step 3.1: Write the failing tests.** Create `tests/kanban-read.test.ts`:
@@ -857,7 +882,7 @@ export function latestCompletion(db: Db, taskId: string): Completion | undefined
 }
 ```
 
-- [ ] **Step 3.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  773 passed (773)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 3.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  778 passed (778)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 3.5: Commit.**
 
@@ -1146,7 +1171,7 @@ with:
    * (spec §4.4): the done task's summary is what its children were given as their
 ```
 
-- [ ] **Step 4.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  780 passed (780)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 4.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  785 passed (785)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 4.5: Commit.**
 
@@ -1393,7 +1418,7 @@ export function lastTurnOf(db: Db, sessionId: string): LastTurn {
 }
 ```
 
-- [ ] **Step 5.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  788 passed (788)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 5.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  793 passed (793)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 5.5: Commit.**
 
@@ -1785,7 +1810,7 @@ export function composePrompt(b: RunBrief): string {
 }
 ```
 
-- [ ] **Step 6.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  798 passed (798)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 6.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  803 passed (803)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 6.5: Commit.**
 
@@ -2001,7 +2026,7 @@ export function briefFor(db: Db, c: ClaimedRun): RunBrief {
 }
 ```
 
-- [ ] **Step 7.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  801 passed (801)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 7.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  806 passed (806)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 7.5: Commit.**
 
@@ -2199,7 +2224,7 @@ export class KanbanSink implements Channel {
 }
 ```
 
-- [ ] **Step 8.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  804 passed (804)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 8.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  809 passed (809)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 8.5: Commit.**
 
@@ -2474,7 +2499,7 @@ with:
   async closeAll(): Promise<void> {
 ```
 
-- [ ] **Step 9.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  808 passed (808)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 9.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  813 passed (813)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 9.5: Commit.**
 
@@ -3175,7 +3200,7 @@ export class Dispatcher {
 }
 ```
 
-- [ ] **Step 10.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  816 passed (816)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 10.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  821 passed (821)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 10.5: Commit.**
 
@@ -3186,12 +3211,12 @@ git commit -m "Dispatch ready tasks onto fresh sessions, one agent run per works
 
 ---
 
-### Task 11: `kanban.maxRunning`
+### Task 11: `kanban.max_running`
 
 **Files:**
 - Modify: `src/kanban/dispatcher.ts`, `tests/kanban-dispatcher.test.ts`
 
-A pass skips an agent task while `maxRunning` agent runs are open (spec §6.2 step 2, §6.3). The count comes from the board, so it includes a run opened earlier in the same pass, and a run that has reported and is finishing. A person's run holds no process and is not limited.
+A pass skips an agent task while `max_running` agent runs are open (spec §6.2 step 2, §6.3). The count comes from the board, so it includes a run opened earlier in the same pass, and a run that has reported and is finishing. A person's run holds no process and is not limited.
 
 - [ ] **Step 11.1: Write the failing test.**
 
@@ -3277,13 +3302,13 @@ with:
       const claimed = this.#deps.service.claim(task.taskId);
 ```
 
-- [ ] **Step 11.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  817 passed (817)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 11.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  822 passed (822)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 11.5: Commit.**
 
 ```bash
 git add src/kanban/dispatcher.ts tests/kanban-dispatcher.test.ts
-git commit -m "Open no more agent runs than kanban.maxRunning"
+git commit -m "Open no more agent runs than kanban.max_running"
 ```
 
 ---
@@ -3543,7 +3568,7 @@ with:
   }
 ```
 
-- [ ] **Step 12.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  825 passed (825)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 12.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  830 passed (830)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 12.5: Commit.**
 
@@ -3560,18 +3585,19 @@ git commit -m "Classify a run that ends unreported, and tell its retry what it d
 - Modify: `src/kanban/dispatcher.ts`
 - Create: `tests/kanban-dispatch-sweep.test.ts`
 
-The sweep runs every `sweepIntervalS` (spec §6.1) and handles what only time changes:
-- **The runtime limit** (spec §8.5). An undecided run past its task's `max_runtime_s`, else `defaultMaxRuntimeS`, ends `timed_out`. That outcome is recorded before the turn is cancelled, so the classifier never sees the turn (spec §6.4). A decided run past the limit has its turn cancelled and keeps its outcome. A turn is cancelled once, when its agent has a runtime (Decision 25).
+The sweep runs every `sweep_interval_s` (spec §6.1) and handles what only time changes:
+- **The runtime limit** (spec §8.5). An undecided run past its task's `max_runtime_s`, else `default_max_runtime_s`, ends `timed_out`. That outcome is recorded before the turn is cancelled, so the classifier never sees the turn (spec §6.4). A decided run past the limit has its turn cancelled and keeps its outcome. A turn is cancelled once, when its agent has a runtime (Decision 25). If the run is still open at a later sweep, its agent ignored the cancel: the sweep releases its session and closes the run (Decision 28).
 - **Cooldowns.** The sweep's pass claims a task whose cooldown has ended.
-- **Stranded tasks** (Decisions 8 and 9). A pass remembers what it found unassignable and why. The sweep asks the service to note each one whose skip is older than `strandedAfterS`.
+- **Stranded tasks** (Decisions 8 and 9). A pass remembers what it found unassignable and why. The sweep asks the service to note each one whose skip is older than `stranded_after_s`.
 
-`start()` sweeps at once and then on a timer. `stop()` ends passes and recording (Decision 21). The dispatcher now checks for that in two more places: after a run's actor is built, and between archiving a run's session and closing the run.
+`start()` sweeps at once and then on a timer, and a failed sweep is noted rather than thrown, the first one included, since the gateway calls `start()` after Lark has connected. `stop()` ends passes and recording (Decision 21). The dispatcher now checks for that in two more places: after a run's actor is built, and between archiving a run's session and closing the run.
 
 - [ ] **Step 13.1: Write the failing tests.** Create `tests/kanban-dispatch-sweep.test.ts`:
 
 ```ts
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { eventsOf, getTask, runsOf } from '../src/db/kanban-read.js';
+import { getSession } from '../src/db/sessions.js';
 import { ALICE } from './helpers/kanban.js';
 import { completes, dispatchHarness, holds, reportComplete, until, type DispatchHarness } from './helpers/dispatch.js';
 
@@ -3659,6 +3685,37 @@ describe('Dispatcher: the runtime limit (spec §8.5)', () => {
     held.end('cancelled');
     await h.dispatcher.idle();
     expect(runsOf(h.t.db, task.taskId)[0]?.endedAt).not.toBeNull();
+  });
+
+  it('releases the session of a turn that ignores its cancel at the next sweep, and closes the run', async () => {
+    const h = harness();
+    const task = h.create({ workspace: 'web', maxRuntimeS: 60, failureLimit: 1 });
+    h.clock.advance(1);
+    const next = h.create({ title: 'next', workspace: 'web' });
+    const implementer = h.driver('implementer');
+    // An agent that never acts on a cancel: its turn ends only when the test says.
+    const stubborn = holds(implementer);
+    completes(h, implementer);
+
+    h.dispatcher.pass();
+    await until(() => stubborn.started, 'the run to start');
+    h.clock.advance(60_000);
+    h.dispatcher.sweep();
+    expect(implementer.runtimes[0]?.cancels).toBe(1);
+    expect(runsOf(h.t.db, task.taskId)[0]?.endedAt).toBeNull();
+
+    h.dispatcher.sweep();
+    await until(() => runsOf(h.t.db, task.taskId)[0]?.endedAt !== null, 'the run to close');
+    const [run] = runsOf(h.t.db, task.taskId);
+    expect(run?.outcome).toBe('timed_out');
+    expect(implementer.runtimes[0]?.closes).toBe(1);
+    expect(getSession(h.t.db, run?.sessionId ?? '')?.state).toBe('archived');
+
+    // Its workspace is free again.
+    await until(() => runsOf(h.t.db, next.taskId)[0]?.endedAt !== null, 'the next task to run');
+    expect(runsOf(h.t.db, next.taskId).map((r) => r.outcome)).toEqual(['completed']);
+    stubborn.end('completed');
+    await h.dispatcher.idle();
   });
 
   it('keeps the outcome of a run that has reported, and only closes it', async () => {
@@ -3768,7 +3825,7 @@ describe('Dispatcher: start and stop', () => {
 });
 ```
 
-- [ ] **Step 13.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-dispatch-sweep.test.ts`. Expected: every test FAILS, with `h.dispatcher.sweep is not a function` or `h.dispatcher.start is not a function`, and `Tests  6 failed (6)`.
+- [ ] **Step 13.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-dispatch-sweep.test.ts`. Expected: every test FAILS, with `h.dispatcher.sweep is not a function` or `h.dispatcher.start is not a function`, and `Tests  7 failed (7)`.
 
 - [ ] **Step 13.3: Implement.**
 
@@ -3807,6 +3864,8 @@ with:
   env: Readonly<Record<string, string>>;
   /** Its turn has been cancelled for running past its limit: once is enough. */
   cancelling: boolean;
+  /** Its session has been released because its turn ignored the cancel. */
+  released: boolean;
 }
 
 function message(err: unknown): string {
@@ -3887,15 +3946,19 @@ with:
   /** Sweep every `sweepIntervalS`, starting now. */
   start(): void {
     if (this.#timer !== undefined || this.#stopped) return;
-    this.#timer = setInterval(() => {
-      try {
-        this.sweep();
-      } catch (err) {
-        this.#note(`kanban: sweep failed: ${message(err)}`);
-      }
-    }, this.#deps.settings.sweepIntervalS * 1000);
+    this.#timer = setInterval(() => this.#sweepNoting(), this.#deps.settings.sweepIntervalS * 1000);
     this.#timer.unref();
-    this.sweep();
+    // Caught here too: the gateway calls start() after it has connected, and a
+    // failed first sweep must not fail the start.
+    this.#sweepNoting();
+  }
+
+  #sweepNoting(): void {
+    try {
+      this.sweep();
+    } catch (err) {
+      this.#note(`kanban: sweep failed: ${message(err)}`);
+    }
   }
 
   /**
@@ -3918,9 +3981,19 @@ with:
   #limitRuntimes(): void {
     const now = this.#clock.now();
     for (const [sessionId, open] of this.#open) {
-      if (open.cancelling) continue;
       const run = getRun(this.#deps.db, open.runId);
       if (run === undefined || run.endedAt !== null) continue;
+      if (open.cancelling) {
+        // Cancelled a sweep ago and still open: its agent ignored the cancel, which
+        // ACP leaves to the agent. Releasing the session ends the process; the run,
+        // decided before the cancel, is closed, and its workspace freed.
+        if (!open.released) {
+          open.released = true;
+          this.#note(`kanban: run ${run.runId} ignored its cancel; releasing its session`);
+          this.#track(this.#release(sessionId, open));
+        }
+        continue;
+      }
       const limitS = getTask(this.#deps.db, run.taskId)?.maxRuntimeS ?? this.#deps.settings.defaultMaxRuntimeS;
       if (now - run.startedAt < limitS * 1000) continue;
       if (run.outcome === null) {
@@ -3939,6 +4012,12 @@ with:
       this.#note(`kanban: run ${run.runId} passed its runtime limit; cancelling its turn`);
       void actor.cancel();
     }
+  }
+
+  /** End a turn that ignored its cancel by releasing its session, and close its run. */
+  async #release(sessionId: string, open: OpenRun): Promise<void> {
+    await this.#deps.sessions.release(sessionId);
+    await this.#close(open.runId, open.key, sessionId);
   }
 
   /** Tell, once, about each task the last pass found nobody to give to, if it has waited long enough (spec §4.2). */
@@ -3965,7 +4044,7 @@ with:
 ```ts
       return;
     }
-    this.#open.set(sessionId, { runId: run.runId, key, env: { MT_KANBAN_RUN: run.runId }, cancelling: false });
+    this.#open.set(sessionId, { runId: run.runId, key, env: { MT_KANBAN_RUN: run.runId }, cancelling: false, released: false });
 
     let terminal: TurnTerminal;
 ```
@@ -4027,7 +4106,7 @@ with:
     const closed = this.#deps.service.closeRun(runId);
 ```
 
-- [ ] **Step 13.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  831 passed (831)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 13.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  837 passed (837)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 13.5: Commit.**
 
@@ -4283,7 +4362,7 @@ with:
   }
 ```
 
-- [ ] **Step 14.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  836 passed (836)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 14.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  842 passed (842)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 14.5: Commit.**
 
@@ -4630,7 +4709,7 @@ with:
       // Stop taking work before draining it, or the drain never finishes.
 ```
 
-- [ ] **Step 15.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  839 passed (839)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 15.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  845 passed (845)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 15.5: Commit.**
 
@@ -4640,7 +4719,7 @@ git commit -m "Start the dispatcher with the gateway when kanban.enabled is set"
 ```
 
 - [ ] **Step 15.6: Run everything.** Run:
-  - `npm test 2>&1 | tail -4`: expect `Tests  839 passed (839)`;
+  - `npm test 2>&1 | tail -4`: expect `Tests  845 passed (845)`;
   - `npm run test:e2e 2>&1 | tail -4`: expect `Tests  49 passed (49)`;
   - `npm run typecheck`: expect no output;
   - `git grep -n -E "UPDATE kanban_|INSERT INTO kanban_" -- src`: expect matches in `src/db/kanban.ts` only;
@@ -4652,8 +4731,8 @@ git commit -m "Start the dispatcher with the gateway when kanban.enabled is set"
 
 ## Done when
 
-- `npm test` gives `Tests  839 passed (839)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  845 passed (845)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table, and only `src/kanban/service.ts` imports it (Step 15.6, and the guard in `tests/kanban-service.test.ts`).
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
-- A task assigned to a role is claimed, run as a fresh session on the sink channel, and closed when its turn ends. It has one agent run per workspace and no more than `maxRunning` agent runs open. A run that ends unreported is classified, counted and retried in a new session told what the last one did. A restart closes every open run. A run past its limit ends `timed_out`. Each of these has a test against the real board, registry and actors.
+- A task assigned to a role is claimed, run as a fresh session on the sink channel, and closed when its turn ends. It has one agent run per workspace and no more than `max_running` agent runs open. A run that ends unreported is classified, counted and retried in a new session told what the last one did. A restart closes every open run. A run past its limit ends `timed_out`. Each of these has a test against the real board, registry and actors.
 - With `kanban.enabled` unset, the gateway builds no dispatcher.
