@@ -270,16 +270,29 @@ export class SessionRegistry {
   }
 
   /**
-   * Archive the session bound at this location and revoke its binding: a kanban
-   * run's session once the run is closed (spec §7.4, §8.4). It is never resumed --
-   * a new run gets a new session -- and a stale approval card for it resolves to
-   * "no longer bound". Its log is kept. Nothing bound here is nothing to do.
+   * Archive the session bound at this location and revoke every binding it has:
+   * a kanban run's session once the run is closed (spec §7.4, §8.4). It is never
+   * resumed -- a new run gets a new session -- so a thread `/attach` pointed at it
+   * is unbound too, and a stale approval card for it resolves to "no longer
+   * bound". Its log is kept. Nothing bound here is nothing to do.
+   *
+   * The bindings are revoked first, each owner writing in its own transaction
+   * (src/db/WRITERS.md): a failure after them leaves a session nothing routes
+   * to, which only a deliberate `/attach` by id reaches, rather than an archived
+   * session a chat thread could still wake.
    */
   async archive(key: BindingKey, reason: string): Promise<void> {
     const bound = resolveBinding(this.#deps.db, key);
     if (bound === undefined) return;
     await this.release(bound.sessionId);
     const now = this.#clock.now();
+    for (const b of bindingsForSession(this.#deps.db, bound.sessionId)) {
+      revokeBindingsAt(
+        this.#deps.db,
+        { channel: b.channel, appId: b.appId, conversationId: b.conversationId, threadId: b.threadId },
+        now,
+      );
+    }
     setState(this.#deps.db, bound.sessionId, 'archived', now);
     appendEvent(
       this.#deps.db,
@@ -287,7 +300,6 @@ export class SessionRegistry {
       { type: 'session_state_changed', actor: 'gateway', payload: { state: 'archived', reason } },
       now,
     );
-    revokeBindingsAt(this.#deps.db, key, now);
   }
 
   async closeAll(): Promise<void> {

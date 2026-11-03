@@ -117,10 +117,10 @@ describe('endedUnreported', () => {
     const task = newTask(h.db);
     const run = claimed(h.db, task.taskId);
     expect(endedUnreported(run)).toBe(false);
-    for (const outcome of ['failed', 'crashed', 'timed_out', 'protocol_violation', 'rate_limited', 'interrupted'] as const) {
+    for (const outcome of ['failed', 'crashed', 'timed_out', 'protocol_violation', 'rate_limited', 'interrupted', 'terminal_provider'] as const) {
       expect(endedUnreported({ ...run, outcome })).toBe(true);
     }
-    for (const outcome of ['completed', 'review_requested', 'blocked', 'cancelled', 'superseded'] as const) {
+    for (const outcome of ['completed', 'review_requested', 'changes_requested', 'blocked', 'cancelled', 'superseded'] as const) {
       expect(endedUnreported({ ...run, outcome })).toBe(false);
     }
   });

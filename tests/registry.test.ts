@@ -795,6 +795,29 @@ describe('kanban runs', () => {
     });
   });
 
+  it('revokes every binding of the session it archives, not only the one at the place given', async () => {
+    const h = harness();
+    const at = key({ channel: 'lark', conversationId: 'k_task', threadId: 'r_1' });
+    const thread = key({ conversationId: 'oc_thread', threadId: 'om_thread' });
+    const session = h.registry.create(at, OWNER);
+    expect((await h.registry.attach(thread, session.id)).ok).toBe(true);
+
+    await h.registry.archive(at, 'the run is over');
+    expect(resolveBinding(h.db.db, thread)).toBeUndefined();
+    expect(bindingsForSession(h.db.db, session.id)).toEqual([]);
+  });
+
+  it('revokes the bindings before it marks the session archived, so a failure in between leaves nothing bound', async () => {
+    const h = harness();
+    const at = key({ channel: 'lark', conversationId: 'k_task', threadId: 'r_1' });
+    const session = h.registry.create(at, OWNER);
+    h.db.db.exec(`CREATE TRIGGER no_archive BEFORE UPDATE OF state ON sessions WHEN NEW.state = 'archived'
+      BEGIN SELECT RAISE(ABORT, 'archiving refused'); END`);
+
+    await expect(h.registry.archive(at, 'the run is over')).rejects.toThrow('archiving refused');
+    expect(bindingsForSession(h.db.db, session.id)).toEqual([]);
+  });
+
   it('archives nothing where nothing is bound', async () => {
     const h = harness();
     await h.registry.archive(key({ conversationId: 'oc_none' }), 'nothing');
