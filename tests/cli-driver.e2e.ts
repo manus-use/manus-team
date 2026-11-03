@@ -23,7 +23,7 @@ interface Started {
   result: StartResult;
   cwd: string;
   /** One entry per process the driver started, in order. */
-  invocations(): Array<{ argv: string[]; prompt: string }>;
+  invocations(): Array<{ argv: string[]; prompt: string; apm: string | null }>;
 }
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -34,7 +34,12 @@ afterEach(async () => {
 
 async function start(
   mode: string,
-  opts: { replay?: PromptInput[]; maxPromptBytes?: number } = {},
+  opts: {
+    replay?: PromptInput[];
+    maxPromptBytes?: number;
+    args?: string[];
+    env?: Record<string, string>;
+  } = {},
 ): Promise<Started> {
   const dir = mkdtempSync(join(tmpdir(), 'prime-cli-'));
   const logPath = join(dir, 'invocations.log');
@@ -45,7 +50,7 @@ async function start(
     ...(opts.maxPromptBytes === undefined ? {} : { maxPromptBytes: opts.maxPromptBytes }),
   });
 
-  const started = await driver.start({ cwd: dir, replay: opts.replay });
+  const started = await driver.start({ cwd: dir, replay: opts.replay, args: opts.args, env: opts.env });
 
   cleanups.push(async () => {
     await started.runtime.close();
@@ -66,7 +71,7 @@ async function start(
       return raw
         .split('\n')
         .filter((line) => line.trim() !== '')
-        .map((line) => JSON.parse(line) as { argv: string[]; prompt: string });
+        .map((line) => JSON.parse(line) as { argv: string[]; prompt: string; apm: string | null });
     },
   };
 }
@@ -173,6 +178,28 @@ describe('CLI driver: a turn', () => {
     // `--` before the prompt, or a message beginning with `-` is parsed as flags
     // and the agent prints its own help instead of answering.
     expect(argv.indexOf('--')).toBe(argv.length - 2);
+  });
+
+  it("puts a session's own arguments after the configured ones, and its environment in the agent's", async () => {
+    // How a kanban run reaches its role's native agent package (plan R).
+    const s = await start('basic', { args: ['--agent', 'implementer'], env: { BYTESEC_LOCAL_APM_PATH: '/pkg/a' } });
+    await collect(s.runtime.prompt(said('go')));
+    await collect(s.runtime.prompt(said('again')));
+
+    // Every turn is a process, and each is given them.
+    for (const { argv, apm } of s.invocations()) {
+      // argv after the script: the configured args are the script itself here.
+      expect(argv.slice(0, 3)).toEqual(['--agent', 'implementer', '--format']);
+      expect(apm).toBe('/pkg/a');
+    }
+    expect(s.invocations()).toHaveLength(2);
+  });
+
+  it('gives an agent no extra arguments, and no package, when the session has none', async () => {
+    const s = await start('basic');
+    await collect(s.runtime.prompt(said('go')));
+    expect(s.invocations()[0]?.argv[0]).toBe('--format');
+    expect(s.invocations()[0]?.apm).toBeNull();
   });
 
   it('maps a tool call through its states under one id', async () => {

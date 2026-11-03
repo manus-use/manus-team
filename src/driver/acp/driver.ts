@@ -62,6 +62,11 @@ export function createAcpDriver(config: AcpDriverConfig): Driver {
   return {
     id: 'acp',
     async start(opts: StartOptions) {
+      // Nothing renders for an ACP agent, so a session given its own arguments is
+      // a mistake: starting without them would quietly run a different agent.
+      if (opts.args !== undefined && opts.args.length > 0) {
+        throw new Error('the acp driver takes no per-session arguments; only a structured-cli agent is given them');
+      }
       return startAcpSession(config, opts);
     },
   };

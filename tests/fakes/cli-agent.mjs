@@ -23,7 +23,9 @@
  *
  * Every invocation appends its argv to `FAKE_CLI_LOG` as one JSON line. That file
  * is how a test sees the composed prompt -- which is the whole of this driver's
- * session handling, and otherwise invisible.
+ * session handling, and otherwise invisible. The line also carries the one
+ * environment variable a native package is named by, `BYTESEC_LOCAL_APM_PATH`,
+ * as `apm` (null when unset).
  */
 
 import { appendFileSync } from 'node:fs';
@@ -36,7 +38,8 @@ const dashdash = argv.indexOf('--');
 const prompt = dashdash === -1 ? '' : argv.slice(dashdash + 1).join(' ');
 
 if (LOG !== undefined) {
-  appendFileSync(LOG, `${JSON.stringify({ argv, prompt })}\n`);
+  const apm = process.env['BYTESEC_LOCAL_APM_PATH'] ?? null;
+  appendFileSync(LOG, `${JSON.stringify({ argv, prompt, apm })}\n`);
 }
 
 const SESSION = 'ses_fake_cli';

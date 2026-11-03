@@ -123,6 +123,8 @@ class CliRuntime implements AgentRuntime {
   #config: CliDriverConfig & { command: string };
   #cwd: string;
   #env: Readonly<Record<string, string>>;
+  /** This session's own arguments, after the configured ones (StartOptions.args). */
+  #args: readonly string[];
   #history: Exchange[];
   #maxPromptBytes: number;
 
@@ -138,6 +140,7 @@ class CliRuntime implements AgentRuntime {
     this.#config = config;
     this.#cwd = opts.cwd;
     this.#env = opts.env ?? {};
+    this.#args = opts.args ?? [];
     this.#maxPromptBytes = config.maxPromptBytes ?? MAX_PROMPT_BYTES;
     this.#nonce = randomUUID().slice(0, 8);
     // The provider mints a session id per process and will not take one back, so
@@ -220,6 +223,10 @@ class CliRuntime implements AgentRuntime {
   async *#runTurn(input: PromptInput, composed: string): AsyncGenerator<DriverEvent> {
     const args = [
       ...this.#config.args,
+      // This session's own, such as the native agent a kanban run is given. After
+      // the subcommand and model the operator configured, before the driver's
+      // flags, so none of them can displace the parsing contract or the prompt.
+      ...this.#args,
       // The parsing contract. Passed by the driver rather than left to the
       // operator's `agent.args`, because the driver cannot read `text` output and
       // a missing flag here is a turn that produces nothing at all.

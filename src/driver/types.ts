@@ -97,6 +97,13 @@ export interface StartOptions {
    * How a run's `MT_KANBAN_*` variables reach the agent (spec §2.4 item 3).
    */
   env?: Readonly<Record<string, string>> | undefined;
+  /**
+   * Extra arguments for this session's agent, after the driver's own `args`:
+   * how a kanban run names the native agent package its role was rendered into
+   * (`--agent <role>`, plan R). Only the structured-CLI driver takes them; the
+   * ACP driver refuses any, rather than start an agent without them.
+   */
+  args?: readonly string[] | undefined;
 }
 
 /**

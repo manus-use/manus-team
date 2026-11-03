@@ -39,6 +39,17 @@ describe('buildDriver', () => {
   });
 });
 
+describe('the acp driver and per-session arguments', () => {
+  it('refuses them before it starts anything: nothing renders for an acp agent', async () => {
+    const acp = buildDriver(agent({ driver: 'acp', unsupervised: false }));
+    await expect(acp.start({ cwd: tmpdir(), args: ['--agent', 'implementer'] })).rejects.toThrow(
+      'the acp driver takes no per-session arguments; only a structured-cli agent is given them',
+    );
+    // An empty list is no arguments: the start goes on, and fails on the missing binary.
+    await expect(acp.start({ cwd: tmpdir(), args: [] })).rejects.toThrow(/ACP session failed to start/);
+  });
+});
+
 describe('buildRoleDrivers', () => {
   it('gives two roles of one kind each their own driver, with their own command', async () => {
     // Impossible with the old process-wide registry, which refused a second
