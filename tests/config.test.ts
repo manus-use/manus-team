@@ -653,3 +653,75 @@ describe('loadTeamSettings', () => {
     expect(s).toEqual({ home: c.home, configPath: c.configPath, dbPath: c.dbPath, workspaces: c.workspaces, agent: c.agent });
   });
 });
+
+describe('loadConfig: the kanban section', () => {
+  it('defaults to the spec values, off, with max_running at maxLiveSessions', () => {
+    expect(load().kanban).toEqual({
+      enabled: false,
+      maxRunning: 8,
+      failureLimit: 2,
+      transientLimit: 10,
+      transientCooldownS: 300,
+      defaultMaxRuntimeS: 14_400,
+      sweepIntervalS: 60,
+      strandedAfterS: 1_800,
+    });
+    expect(load({ MT_MAX_LIVE_SESSIONS: '3' }).kanban.maxRunning).toBe(3);
+  });
+
+  it('reads every setting from the file, spelled as the spec spells it', () => {
+    const cfg = load(
+      {},
+      yamlFile({
+        kanban: {
+          enabled: true,
+          max_running: 4,
+          failure_limit: 3,
+          transient_limit: 5,
+          transient_cooldown_s: 60,
+          default_max_runtime_s: 600,
+          sweep_interval_s: 30,
+          stranded_after_s: 120,
+        },
+      }),
+    );
+    expect(cfg.kanban).toEqual({
+      enabled: true,
+      maxRunning: 4,
+      failureLimit: 3,
+      transientLimit: 5,
+      transientCooldownS: 60,
+      defaultMaxRuntimeS: 600,
+      sweepIntervalS: 30,
+      strandedAfterS: 120,
+    });
+  });
+
+  it('refuses an unknown key, naming the known ones', () => {
+    // camelCase, as the rest of the file is, is not this section's spelling.
+    expect(() => load({}, yamlFile({ kanban: { failureLimit: 3 } }))).toThrow(
+      'unknown setting kanban.failureLimit (known: enabled, max_running, failure_limit',
+    );
+    // Plan C3's and plan D's settings are not accepted before they do anything.
+    expect(() => load({}, yamlFile({ kanban: { nudge_limit: 2 } }))).toThrow('unknown setting kanban.nudge_limit');
+    expect(() => load({}, yamlFile({ kanban: { block_recurrence_limit: 2 } }))).toThrow(
+      'unknown setting kanban.block_recurrence_limit',
+    );
+  });
+
+  it('refuses a value that is not a positive whole number, or a flag that is not a boolean', () => {
+    expect(() => load({}, yamlFile({ kanban: { failure_limit: 0 } }))).toThrow(
+      'kanban.failure_limit must be a positive integer',
+    );
+    expect(() => load({}, yamlFile({ kanban: { sweep_interval_s: 1.5 } }))).toThrow('positive integer');
+    expect(() => load({}, yamlFile({ kanban: { enabled: 'yes' } }))).toThrow('kanban.enabled must be true or false');
+    expect(() => load({}, yamlFile({ kanban: [] }))).toThrow('kanban must be a mapping');
+  });
+
+  it('refuses max_running above maxLiveSessions: a run is a live session', () => {
+    expect(() => load({}, yamlFile({ maxLiveSessions: 4, kanban: { max_running: 5 } }))).toThrow(
+      'kanban.max_running (5) is above maxLiveSessions (4)',
+    );
+    expect(load({}, yamlFile({ maxLiveSessions: 4, kanban: { max_running: 4 } })).kanban.maxRunning).toBe(4);
+  });
+});

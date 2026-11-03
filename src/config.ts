@@ -99,7 +99,57 @@ export interface GatewayConfig {
   workspaces: Readonly<Record<string, string>>;
 
   maxLiveSessions: number;
+
+  /** The board's dispatcher and breaker (spec §6, §8). */
+  kanban: KanbanSettings;
 }
+
+/**
+ * The `kanban:` section (spec §6, §8). Its keys are spelled as the spec spells
+ * them, in snake_case -- `max_running`, `failure_limit` -- while the rest of the
+ * file is camelCase. File only: `MT_KANBAN_*` names are a run's own environment
+ * (spec §7.2), and a gateway setting under the same prefix would read as one of
+ * them.
+ */
+export interface KanbanSettings {
+  /** Run the dispatcher. Off until the board can be used (spec §12). */
+  enabled: boolean;
+  /** Open agent runs at once. Default `maxLiveSessions`, and never above it (spec §6.3). */
+  maxRunning: number;
+  /** Counted failures that block a task as gave_up (spec §8.2). */
+  failureLimit: number;
+  /** Throttled runs in a row that block a task as transient (spec §8.2). */
+  transientLimit: number;
+  /** The first cooldown after a throttled run, doubling each time (spec §8.2). */
+  transientCooldownS: number;
+  /** A run's wall-clock limit, unless its task sets one (spec §8.5). */
+  defaultMaxRuntimeS: number;
+  /** How often the sweep runs: runtime limits, cooldowns, stranded tasks (spec §6.1). */
+  sweepIntervalS: number;
+  /** How long a task nobody can be given waits before it is reported stranded (spec §4.2). */
+  strandedAfterS: number;
+}
+
+export const KANBAN_DEFAULTS: Omit<KanbanSettings, 'maxRunning'> = {
+  enabled: false,
+  failureLimit: 2,
+  transientLimit: 10,
+  transientCooldownS: 300,
+  defaultMaxRuntimeS: 4 * 60 * 60,
+  sweepIntervalS: 60,
+  strandedAfterS: 30 * 60,
+};
+
+/** The section's numeric keys, as the file spells them, and the setting each sets. */
+const KANBAN_NUMBERS = {
+  max_running: 'maxRunning',
+  failure_limit: 'failureLimit',
+  transient_limit: 'transientLimit',
+  transient_cooldown_s: 'transientCooldownS',
+  default_max_runtime_s: 'defaultMaxRuntimeS',
+  sweep_interval_s: 'sweepIntervalS',
+  stranded_after_s: 'strandedAfterS',
+} as const;
 
 /**
  * What `loadTeam` and the `mt` commands need: where the gateway's files are, the
@@ -159,6 +209,16 @@ export function loadConfig(
 
   const allowTalk = envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk;
   const allowOperate = envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate;
+  const maxLiveSessions = envInteger(env, 'MT_MAX_LIVE_SESSIONS') ?? file.maxLiveSessions ?? 8;
+  const maxRunning = file.kanban.maxRunning ?? maxLiveSessions;
+  if (maxRunning > maxLiveSessions) {
+    // A run is a session, and its actor is pinned while it is open (spec §6.3):
+    // more runs than live sessions would hold the gateway over its cap.
+    throw new ConfigError(
+      `kanban.max_running (${maxRunning}) is above maxLiveSessions (${maxLiveSessions}); ` +
+        'a run is a live session, so the two limits must not disagree',
+    );
+  }
 
   return {
     dbPath: team.dbPath,
@@ -195,7 +255,17 @@ export function loadConfig(
     agent: team.agent,
 
     workspaces: team.workspaces,
-    maxLiveSessions: envInteger(env, 'MT_MAX_LIVE_SESSIONS') ?? file.maxLiveSessions ?? 8,
+    maxLiveSessions,
+    kanban: {
+      enabled: file.kanban.enabled ?? KANBAN_DEFAULTS.enabled,
+      maxRunning,
+      failureLimit: file.kanban.failureLimit ?? KANBAN_DEFAULTS.failureLimit,
+      transientLimit: file.kanban.transientLimit ?? KANBAN_DEFAULTS.transientLimit,
+      transientCooldownS: file.kanban.transientCooldownS ?? KANBAN_DEFAULTS.transientCooldownS,
+      defaultMaxRuntimeS: file.kanban.defaultMaxRuntimeS ?? KANBAN_DEFAULTS.defaultMaxRuntimeS,
+      sweepIntervalS: file.kanban.sweepIntervalS ?? KANBAN_DEFAULTS.sweepIntervalS,
+      strandedAfterS: file.kanban.strandedAfterS ?? KANBAN_DEFAULTS.strandedAfterS,
+    },
   };
 }
 
@@ -493,6 +563,7 @@ interface FileConfig {
     readOnlyTools: readonly string[];
     maskExempt: readonly string[];
   };
+  kanban: { enabled?: boolean } & Partial<Record<(typeof KANBAN_NUMBERS)[keyof typeof KANBAN_NUMBERS], number>>;
 }
 
 function emptyFile(): FileConfig {
@@ -521,6 +592,7 @@ function emptyFile(): FileConfig {
       readOnlyTools: [],
       maskExempt: [],
     },
+    kanban: {},
   };
 }
 
@@ -549,8 +621,19 @@ function parseFile(path: string, text: string): FileConfig {
   const larkRaw = subsection(path, root, 'lark');
   const authRaw = subsection(path, root, 'auth');
   const agentRaw = subsection(path, root, 'agent');
+  const kanbanRaw = subsection(path, root, 'kanban');
 
-  reject(path, '', root, ['workspace', 'workspaces', 'db', 'downloads', 'maxLiveSessions', 'lark', 'auth', 'agent']);
+  reject(path, '', root, [
+    'workspace',
+    'workspaces',
+    'db',
+    'downloads',
+    'maxLiveSessions',
+    'lark',
+    'auth',
+    'agent',
+    'kanban',
+  ]);
   reject(path, 'lark', larkRaw, ['appId', 'domain']);
   reject(path, 'auth', authRaw, [
     'owner',
@@ -569,6 +652,7 @@ function parseFile(path: string, text: string): FileConfig {
     'readOnlyTools',
     'maskExempt',
   ]);
+  reject(path, 'kanban', kanbanRaw, ['enabled', ...Object.keys(KANBAN_NUMBERS)]);
 
   out.workspace = str(path, 'workspace', root['workspace']);
   out.workspaces = stringMap(path, 'workspaces', root['workspaces']);
@@ -600,6 +684,13 @@ function parseFile(path: string, text: string): FileConfig {
     readOnlyTools: strings(path, 'agent.readOnlyTools', agentRaw['readOnlyTools']),
     maskExempt: strings(path, 'agent.maskExempt', agentRaw['maskExempt']),
   };
+
+  const enabled = bool(path, 'kanban.enabled', kanbanRaw['enabled']);
+  if (enabled !== undefined) out.kanban.enabled = enabled;
+  for (const [key, setting] of Object.entries(KANBAN_NUMBERS)) {
+    const n = positiveInt(path, `kanban.${key}`, kanbanRaw[key]);
+    if (n !== undefined) out.kanban[setting] = n;
+  }
 
   return out;
 }
