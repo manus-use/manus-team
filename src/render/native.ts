@@ -1,0 +1,234 @@
+import { createHash } from 'node:crypto';
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import type { Role } from '../roles.js';
+import { bytesecRenderer } from './bytesec.js';
+import type { Launch, PackageFile, Renderer, SkillFiles } from './types.js';
+
+/**
+ * Writing a role's native package (plan R), and removing old ones.
+ *
+ * **Where.** `$MT_HOME/rendered/<role>/<hash>/`, which is itself the package:
+ * inside the gateway's home, never in a workspace. A workspace may not contain
+ * the home, and inside the home only `workspaces/<name>` may be one (spec §2.3),
+ * so an agent's checkout never holds a rendered package, and no package is
+ * written into a repository.
+ *
+ * **Content-addressed.** The hash is of the package's own files, so it covers
+ * role.md, every skill file, and whatever the renderer writes around them. Two
+ * runs on two versions of a role's files get two directories, and a finished
+ * package is never rewritten: one that exists is used as it is.
+ *
+ * **Atomic.** A package is written in a dot-directory beside it and renamed into
+ * place, so a directory with a hash name is always complete.
+ *
+ * **Only regular files.** A skill's symlinks, FIFOs and sockets are not copied,
+ * as `mt role create` copies none; nor is any `.env`. A SKILL.md that is not a
+ * regular file fails the render: the skill would arrive without it. This holds
+ * for the skills a role imports by name as for its own: both are in
+ * `role.skills`.
+ *
+ * **Bounded.** A package may hold at most MAX_PACKAGE_FILES files and
+ * MAX_PACKAGE_BYTES bytes, counted while the skills are walked, so a skill that
+ * is a whole checkout fails at the limit instead of being read first.
+ *
+ * **Private.** Directories are 0700, set even on one that already existed, and
+ * files 0600.
+ */
+
+/** The renderers, in the order they are asked. */
+export const RENDERERS: readonly Renderer[] = [bytesecRenderer];
+
+/** The most a package may hold: rendering reads it whole at each claim. */
+export const MAX_PACKAGE_BYTES = 16 * 1024 * 1024;
+export const MAX_PACKAGE_FILES = 2000;
+
+const STAGING = '.stage-';
+
+export type Native = { ok: true; renderer: Renderer } | { ok: false; reason: string };
+
+/**
+ * Whether a role's runs are rendered, and by which renderer, or why not. Read
+ * from the role as loaded: rendering itself can still fail, and then the run's
+ * role.md and skills go in its prompt.
+ */
+export function nativeFor(role: Role): Native {
+  if (role.agent.native === false) return { ok: false, reason: 'agent.native is false' };
+  if (role.roleMdPath === undefined && role.skills.length === 0) {
+    return { ok: false, reason: 'it has no role.md and no skills' };
+  }
+  const renderer = RENDERERS.find((r) => r.handles(role));
+  if (renderer === undefined) {
+    return { ok: false, reason: `no renderer for its agent (${role.agent.driver}, ${basename(role.agent.command)})` };
+  }
+  const refused = renderer.refuses(role);
+  return refused === undefined ? { ok: true, renderer } : { ok: false, reason: refused };
+}
+
+export interface Rendered extends Launch {
+  /** The package directory. */
+  dir: string;
+  /** Its content hash, the directory's name: what a run records (plan R). */
+  hash: string;
+}
+
+/**
+ * Render a role's package under `root` from the role.md bytes the claim read,
+ * and say how a run uses it. Throws when it cannot: the caller falls back to
+ * the task prompt.
+ */
+export function renderNative(root: string, role: Role, renderer: Renderer, roleMd: Buffer | undefined): Rendered {
+  const budget: Budget = { role: role.name, files: 0, bytes: 0 };
+  const files = renderer.files(role, roleMd, role.skills.map((s) => readSkill(s, budget)));
+  checkFiles(role, files);
+  const roleDir = privateDir(privateDir(root), role.name);
+  const hash = packageHash(files);
+  const dir = join(roleDir, hash);
+  const existing = lstatSync(dir, { throwIfNoEntry: false });
+  if (existing === undefined) {
+    const staging = mkdtempSync(join(roleDir, STAGING));
+    try {
+      for (const f of files) {
+        const path = join(staging, ...f.path.split('/'));
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        writeFileSync(path, f.bytes, { mode: 0o600, flag: 'wx' });
+      }
+      renameSync(staging, dir);
+    } catch (err) {
+      rmSync(staging, { recursive: true, force: true });
+      throw err;
+    }
+  } else if (!existing.isDirectory()) {
+    throw new Error(`${dir} is in the way: it is not a directory`);
+  }
+  return { dir, hash, ...renderer.launch(role, dir) };
+}
+
+/**
+ * Remove a role's packages other than those in `keep` -- the one just rendered,
+ * and those of runs still open -- and any staging left by a process that died
+ * mid-write. A role's newest package therefore stays until its next render.
+ */
+export function sweepRole(root: string, roleName: string, keep: ReadonlySet<string>): void {
+  const roleDir = join(root, roleName);
+  for (const entry of entries(roleDir)) {
+    const path = join(roleDir, entry);
+    if (!keep.has(path)) rmSync(path, { recursive: true, force: true });
+  }
+}
+
+/**
+ * At boot: remove the packages of roles no longer configured, and any staging
+ * a process left behind. Nothing is open at boot, so nothing else is in use;
+ * each role's other old packages go at its next render.
+ */
+export function sweepRoles(root: string, roles: ReadonlySet<string>): void {
+  for (const entry of entries(root)) {
+    const path = join(root, entry);
+    if (!roles.has(entry)) {
+      rmSync(path, { recursive: true, force: true });
+      continue;
+    }
+    for (const inner of entries(path)) {
+      if (inner.startsWith(STAGING)) rmSync(join(path, inner), { recursive: true, force: true });
+    }
+  }
+}
+
+/** A directory's entries, or none when it is missing. Never follows a symlink. */
+function entries(dir: string): string[] {
+  const stat = lstatSync(dir, { throwIfNoEntry: false });
+  if (stat === undefined || !stat.isDirectory()) return [];
+  return readdirSync(dir).sort();
+}
+
+/**
+ * `parent/name` as a real directory, made if missing; a symlink or a file is
+ * refused. Then 0700, whatever it was: one made before, by hand or by an older
+ * build, is made private too.
+ */
+function privateDir(parent: string, name?: string): string {
+  const dir = name === undefined ? parent : join(parent, name);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (!lstatSync(dir).isDirectory()) throw new Error(`${dir} is not a directory`);
+  chmodSync(dir, 0o700);
+  return dir;
+}
+
+/** What a package has taken so far, counted as its skills are walked. */
+interface Budget {
+  role: string;
+  files: number;
+  bytes: number;
+}
+
+function tooMany(b: Budget): Error {
+  return new Error(`role ${b.role}'s package would hold ${b.files} files; at most ${MAX_PACKAGE_FILES} are rendered`);
+}
+
+function tooBig(b: Budget): Error {
+  return new Error(`role ${b.role}'s package would be ${b.bytes} bytes; at most ${MAX_PACKAGE_BYTES} are rendered`);
+}
+
+/**
+ * Every regular file under a skill's directory, but any `.env`; its SKILL.md must
+ * be one. Each file is counted against the budget before it is read, and the
+ * walk stops at the first that passes either limit.
+ */
+function readSkill(skill: Role['skills'][number], budget: Budget): SkillFiles {
+  if (lstatSync(skill.path, { throwIfNoEntry: false })?.isFile() !== true) {
+    throw new Error(`${skill.path} is not a regular file`);
+  }
+  const files: PackageFile[] = [];
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const path = join(dir, entry.name);
+      const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) {
+        walk(path, rel);
+        continue;
+      }
+      if (!entry.isFile() || entry.name === '.env') continue;
+      budget.files += 1;
+      if (budget.files > MAX_PACKAGE_FILES) throw tooMany(budget);
+      budget.bytes += lstatSync(path).size;
+      if (budget.bytes > MAX_PACKAGE_BYTES) throw tooBig(budget);
+      files.push({ path: rel, bytes: readFileSync(path) });
+    }
+  };
+  walk(skill.dir, '');
+  return { name: skill.name, files };
+}
+
+/** The whole package, with what the renderer adds around the skills, against the same limits. */
+function checkFiles(role: Role, files: readonly PackageFile[]): void {
+  const total: Budget = { role: role.name, files: files.length, bytes: files.reduce((n, f) => n + f.bytes.length, 0) };
+  if (total.files > MAX_PACKAGE_FILES) throw tooMany(total);
+  if (total.bytes > MAX_PACKAGE_BYTES) throw tooBig(total);
+  for (const f of files) {
+    const parts = f.path.split('/');
+    if (f.path.startsWith('/') || parts.some((p) => p === '' || p === '.' || p === '..')) {
+      throw new Error(`a package file may not be at ${JSON.stringify(f.path)}`);
+    }
+  }
+}
+
+/** sha256 of every file's path and bytes, in path order, each length-prefixed so no two packages hash alike. */
+export function packageHash(files: readonly PackageFile[]): string {
+  const hash = createHash('sha256');
+  for (const f of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    hash.update(`${Buffer.byteLength(f.path)}:${f.path}:${f.bytes.length}:`);
+    hash.update(f.bytes);
+  }
+  return hash.digest('hex');
+}

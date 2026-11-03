@@ -105,6 +105,13 @@ describe('resolveWorkspaces', () => {
     expect(refused({ default: roles })).toMatch(/inside the gateway's home, only/);
   });
 
+  it("refuses the rendered packages, or one of them, as a workspace: they are the home's (plan R)", () => {
+    const pkg = join(home, 'rendered', 'implementer', 'a'.repeat(64));
+    mkdirSync(pkg, { recursive: true });
+    expect(refused({ default: join(home, 'rendered') })).toMatch(/inside the gateway's home, only/);
+    expect(refused({ default: pkg })).toMatch(/inside the gateway's home, only/);
+  });
+
   it('refuses two names for one directory', () => {
     const a = dir('a');
     expect(refused({ default: a, other: a })).toMatch(/are the same directory/);
