@@ -89,8 +89,16 @@ export interface SessionRegistryDeps {
   /**
    * Extra environment for a session's agent, asked on every actor build (spec
    * §2.4 item 3). Plan C's dispatcher holds a run's environment in memory only.
+   * Asked before anything is retired to make room, so it may throw to refuse the
+   * build: a run's session rebuilt with its environment gone (spec §2.4 item 3).
    */
   envFor?: (sessionId: string) => Readonly<Record<string, string>> | undefined;
+  /**
+   * Sessions never retired as idle to make room: an open kanban run's (spec §2.4
+   * item 3), so it cannot be rebuilt between one turn and the next. The registry
+   * goes over its cap instead, as it does for busy actors.
+   */
+  pinned?: (sessionId: string) => boolean;
   workspaces: WorkspaceProvider;
   appId: string;
   clock?: Clock;
@@ -167,11 +175,13 @@ export class SessionRegistry {
     if (channel === undefined) {
       throw new Error(`session ${sessionId} is bound on channel ${key.channel}, which this gateway does not run`);
     }
+    // With the checks, before #makeRoom: the dispatcher refuses a run's session
+    // whose environment did not survive a restart (spec §2.4 item 3).
+    const env = this.#deps.envFor?.(sessionId);
 
     await this.#makeRoom();
 
     const workspace = await this.#deps.workspaces.acquire(sessionId, workspaceId);
-    const env = this.#deps.envFor?.(sessionId);
     const target: SendTarget = { chatId: key.conversationId, threadId: key.threadId };
     const actor = new SessionActor({
       db: this.#deps.db,
@@ -223,16 +233,17 @@ export class SessionRegistry {
   /**
    * Retire the least-recently-used actor that is not doing anything.
    *
-   * A busy actor is never retired, even when that leaves the registry over its cap.
-   * The trade is deliberate and one-sided: being over the cap is a capacity problem
-   * that shows up in a metric, whereas closing a session mid-turn destroys work the
-   * user is waiting for.
+   * A busy actor is never retired, and nor is a pinned one -- an open kanban
+   * run's -- even when that leaves the registry over its cap. The trade is
+   * deliberate and one-sided: being over the cap is a capacity problem that shows
+   * up in a metric, whereas closing a session mid-turn destroys work the user is
+   * waiting for.
    */
   async #makeRoom(): Promise<void> {
     if (this.#actors.size < this.#maxLive) return;
 
     const candidates = [...this.#actors.entries()]
-      .filter(([, entry]) => !entry.actor.status().busy)
+      .filter(([sessionId, entry]) => !entry.actor.status().busy && this.#deps.pinned?.(sessionId) !== true)
       .sort((a, b) => a[1].lastUsed - b[1].lastUsed);
 
     const victim = candidates[0];
@@ -256,6 +267,27 @@ export class SessionRegistry {
     this.#actors.delete(sessionId);
     await entry.actor.close();
     await this.#deps.workspaces.release(sessionId);
+  }
+
+  /**
+   * Archive the session bound at this location and revoke its binding: a kanban
+   * run's session once the run is closed (spec §7.4, §8.4). It is never resumed --
+   * a new run gets a new session -- and a stale approval card for it resolves to
+   * "no longer bound". Its log is kept. Nothing bound here is nothing to do.
+   */
+  async archive(key: BindingKey, reason: string): Promise<void> {
+    const bound = resolveBinding(this.#deps.db, key);
+    if (bound === undefined) return;
+    await this.release(bound.sessionId);
+    const now = this.#clock.now();
+    setState(this.#deps.db, bound.sessionId, 'archived', now);
+    appendEvent(
+      this.#deps.db,
+      bound.sessionId,
+      { type: 'session_state_changed', actor: 'gateway', payload: { state: 'archived', reason } },
+      now,
+    );
+    revokeBindingsAt(this.#deps.db, key, now);
   }
 
   async closeAll(): Promise<void> {

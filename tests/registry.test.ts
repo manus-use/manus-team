@@ -75,6 +75,7 @@ function harness(
     drivers?: Record<string, FakeDriver>;
     channels?: Record<string, FakeChannel>;
     envFor?: (sessionId: string) => Readonly<Record<string, string>> | undefined;
+    pinned?: (sessionId: string) => boolean;
   } = {},
 ): Harness {
   const db = testDb();
@@ -90,6 +91,7 @@ function harness(
     drivers: new Map<string, FakeDriver>([['default', driver], ...Object.entries(extra.drivers ?? {})]),
     channels: new Map<string, FakeChannel>([['lark', channel], ...Object.entries(extra.channels ?? {})]),
     ...(extra.envFor === undefined ? {} : { envFor: extra.envFor }),
+    ...(extra.pinned === undefined ? {} : { pinned: extra.pinned }),
     workspaces,
     appId: 'cli_app',
     clock,
@@ -734,5 +736,68 @@ describe('sessions beyond chat', () => {
       (e) => e.type === 'session_created',
     );
     expect(created?.payload).toMatchObject({ seeded: false });
+  });
+});
+
+describe('kanban runs', () => {
+  it('never retires a pinned actor to make room, even an idle one, and goes over its cap instead', async () => {
+    const pinned = new Set<string>();
+    const h = harness(1, { pinned: (sessionId) => pinned.has(sessionId) });
+    const run = h.registry.bindOrCreate(key({ conversationId: 'oc_run' }), OWNER).session;
+    pinned.add(run.id);
+    await h.registry.actorFor(run.id, key({ conversationId: 'oc_run' }));
+    const chat = h.registry.bindOrCreate(key({ conversationId: 'oc_chat' }), OWNER).session;
+    await h.registry.actorFor(chat.id, key({ conversationId: 'oc_chat' }));
+
+    expect(h.registry.liveActor(run.id)).toBeDefined();
+    expect(h.registry.liveCount).toBe(2);
+    expect(h.notes.some((n) => n.includes('over capacity'))).toBe(true);
+
+    // Unpinned, it is an idle actor like any other.
+    pinned.delete(run.id);
+    const third = h.registry.bindOrCreate(key({ conversationId: 'oc_3' }), OWNER).session;
+    await h.registry.actorFor(third.id, key({ conversationId: 'oc_3' }));
+    expect(h.registry.liveActor(run.id)).toBeUndefined();
+  });
+
+  it('asks for the environment before making room, so a refusal retires nothing', async () => {
+    const h = harness(1, {
+      envFor: (sessionId) => {
+        if (sessionId === 's_lost') throw new Error('run r_1 has no environment');
+        return undefined;
+      },
+    });
+    const live = h.registry.bindOrCreate(key({ conversationId: 'oc_live' }), OWNER).session;
+    await h.registry.actorFor(live.id, key({ conversationId: 'oc_live' }));
+    createSession(h.db.db, { id: 's_lost', agentId: 'default', workspaceId: '', ownerPrincipal: 'kanban' }, NOW);
+    await expect(h.registry.actorFor('s_lost', key({ conversationId: 'oc_lost' }))).rejects.toThrow(
+      'run r_1 has no environment',
+    );
+    expect(h.registry.liveActor(live.id)).toBeDefined();
+    expect(h.workspaces.acquired).toEqual([live.id]);
+  });
+
+  it("archives the session bound at a place, closing its actor and revoking the binding", async () => {
+    const h = harness();
+    const at = key({ channel: 'lark', conversationId: 'k_task', threadId: 'r_1' });
+    const session = h.registry.create(at, OWNER);
+    await h.registry.actorFor(session.id, at);
+
+    await h.registry.archive(at, 'the run is over');
+    expect(h.registry.liveActor(session.id)).toBeUndefined();
+    expect(getSession(h.db.db, session.id)?.state).toBe('archived');
+    expect(resolveBinding(h.db.db, at)).toBeUndefined();
+    expect(bindingsForSession(h.db.db, session.id)).toEqual([]);
+    const last = readEvents(h.db.db, session.id, 0, lastSeq(h.db.db, session.id)).at(-1);
+    expect(last).toMatchObject({
+      type: 'session_state_changed',
+      payload: { state: 'archived', reason: 'the run is over' },
+    });
+  });
+
+  it('archives nothing where nothing is bound', async () => {
+    const h = harness();
+    await h.registry.archive(key({ conversationId: 'oc_none' }), 'nothing');
+    expect(h.registry.liveCount).toBe(0);
   });
 });
