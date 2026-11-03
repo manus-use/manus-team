@@ -330,6 +330,19 @@ export class KanbanService {
     return board.closeRun(this.#db, runId, this.#clock.now());
   }
 
+  /** Count a prompt sent into a run's session; `n` is the count before it, for its key. */
+  countSubmission(runId: string): Result<{ n: number }> {
+    return board.countSubmission(this.#db, runId, this.#clock.now());
+  }
+
+  /**
+   * Tell a task's subscribers, once, that nobody can be given it (spec §4.2),
+   * if it has been sitting unclaimable since `cutoff`. Plan C2's sweep calls it.
+   */
+  noteStranded(taskId: string, reason: string, cutoff: number): Result<{ written: boolean }> {
+    return board.noteStranded(this.#db, taskId, reason, cutoff, this.#clock.now());
+  }
+
   /**
    * New work on a done task is a new task with it as a parent, never a reopening
    * (spec §4.4): the done task's summary is what its children were given as their

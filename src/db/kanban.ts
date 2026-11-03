@@ -1261,8 +1261,62 @@ export function noteUnassignable(db: Db, taskId: string, reason: string, now: nu
     const last = d
       .prepare<[string], { kind: string }>('SELECT kind FROM kanban_events WHERE task_id = ? ORDER BY id DESC LIMIT 1')
       .get(taskId);
-    if (last?.kind === 'skipped_unassignable') return { ok: true, written: false };
+    // A stranded notice follows the skip it is about, and says the same thing.
+    if (last?.kind === 'skipped_unassignable' || last?.kind === 'stranded') return { ok: true, written: false };
     record(d, { taskId, kind: 'skipped_unassignable', actor: 'gateway', payload: { reason } }, now);
     return { ok: true, written: true };
+  });
+}
+
+/**
+ * A task nobody can be given has waited too long (spec §4.2): its subscribers are
+ * told it is stranded and why, once. The `stranded` event is the notice, which
+ * plan D delivers; `stranded_notified_at` records that it went out, and a claim
+ * clears it.
+ *
+ * Only while the task's latest event is the skip that found nobody to give it to,
+ * written at or before `cutoff`: anything since -- a claim, a comment, a new
+ * assignee -- means it has not been sitting unclaimable all that time.
+ */
+export function noteStranded(
+  db: Db,
+  taskId: string,
+  reason: string,
+  cutoff: number,
+  now: number,
+): Result<{ written: boolean }> {
+  return tx(db, (d) => {
+    const task = getTask(d, taskId);
+    if (task === undefined) return refuse('not_found', `no task ${taskId}`);
+    if (task.strandedNotifiedAt !== null || (task.phase !== 'open' && task.phase !== 'review')) {
+      return { ok: true, written: false };
+    }
+    const last = d
+      .prepare<[string], { kind: string; created_at: number }>(
+        'SELECT kind, created_at FROM kanban_events WHERE task_id = ? ORDER BY id DESC LIMIT 1',
+      )
+      .get(taskId);
+    if (last?.kind !== 'skipped_unassignable' || last.created_at > cutoff) return { ok: true, written: false };
+    d.prepare('UPDATE kanban_tasks SET stranded_notified_at = ? WHERE task_id = ?').run(now, taskId);
+    record(d, { taskId, kind: 'stranded', actor: 'gateway', payload: { reason } }, now);
+    return { ok: true, written: true };
+  });
+}
+
+/**
+ * Count a prompt sent into an agent run's session (spec §3.3): the task prompt,
+ * and from plan C3 each nudge or forwarded comment. Returns the count before this
+ * one, which keys the submission as `kanban:<run_id>:<n>` (spec §7.5): the actor
+ * deduplicates turns on that key, so each prompt needs its own.
+ */
+export function countSubmission(db: Db, runId: string, now: number): Result<{ n: number }> {
+  return tx(db, (d) => {
+    const run = getRun(d, runId);
+    if (run === undefined) return refuse('not_found', `no run ${runId}`);
+    if (run.endedAt !== null) return refuse('already_closed', `run ${runId} is closed`);
+    if (run.agentConfig === null) return refuse('invalid', `run ${runId} is a person's, and has no session to prompt`);
+    d.prepare('UPDATE kanban_runs SET submissions = submissions + 1 WHERE run_id = ?').run(runId);
+    record(d, { taskId: run.taskId, runId, kind: 'submitted', actor: 'gateway', payload: { n: run.submissions } }, now);
+    return { ok: true, n: run.submissions };
   });
 }
