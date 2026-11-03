@@ -58,7 +58,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   const note = (line: string): void => {
     // Metadata only. No message bodies, no agent text -- the log is operational,
     // and a log that quotes user content is a second copy of the data with none of
-    // the retention rules.
+    // the retention rules. The line is still masked, because an error in it can
+    // carry an agent's stderr.
     process.stderr.write(`${new Date().toISOString()} ${redactKnownSecrets(line)}\n`);
   };
 
@@ -240,7 +241,8 @@ export async function main(): Promise<void> {
   // Read and checked before anything starts: a broken role or workspace found
   // later strands work; found here it is a line in the startup error.
   const team = loadTeam(config, process.env);
-  // Now, not only in createGateway: an error raised in between is masked too.
+  // Registered here, before anything else can fail, so an error raised between
+  // loadTeam and the gateway starting is masked whatever createGateway does first.
   registerConfiguredSecrets(config, team);
   const gateway = await createGateway(config, team);
   await gateway.start();

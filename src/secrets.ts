@@ -68,6 +68,10 @@ function reorder(): void {
  * stripped, because the escapers strip before they match. A form shorter than
  * MIN_SECRET_LENGTH is not a secret. A value containing MASK's character is
  * ignored, so that withholding a fragment of it can never eat a MASK.
+ *
+ * A value of MIN_SECRET_LENGTH or more whose stripped form is shorter is
+ * registered only in its raw form: the escapers, which match the stripped text,
+ * will not mask it.
  */
 function forms(value: string): string[] {
   if (value.includes('•')) return [];
@@ -106,8 +110,16 @@ export function clearSecrets(): void {
 export function redactKnownSecrets(text: string): string {
   const spans: Array<[number, number]> = [];
   for (const secret of ordered) {
+    // One secret's occurrences come in order, so an overlapping or touching one
+    // extends the last span: a run of overlapping matches stays one span.
+    let last: [number, number] | undefined;
     for (let at = text.indexOf(secret); at !== -1; at = text.indexOf(secret, at + 1)) {
-      spans.push([at, at + secret.length]);
+      if (last !== undefined && at <= last[1]) {
+        last[1] = at + secret.length;
+      } else {
+        last = [at, at + secret.length];
+        spans.push(last);
+      }
     }
   }
   if (spans.length === 0) return text;

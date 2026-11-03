@@ -1,6 +1,7 @@
 import { redactKnownSecrets, withholdSecretPrefix } from '../secrets.js';
+import { stripControl } from '../text.js';
 import type { Event } from '../types.js';
-import { forDisplay, forMarkdown, stripControl, truncate } from './escape.js';
+import { forDisplay, forMarkdown, truncate } from './escape.js';
 
 /**
  * Project a slice of the event log into card text.

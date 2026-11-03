@@ -53,7 +53,7 @@ export interface Role {
   /** The path of `role.md` if the role has one; its contents are read at each claim. */
   roleMdPath: string | undefined;
   skills: readonly Skill[];
-  /** Every value this role's agent is given from a secret source, for masking (spec §10.1). */
+  /** Every value this role's agent is given from a secret source, except names in maskExempt, for masking (spec §10.1). */
   secretValues: readonly string[];
 }
 
