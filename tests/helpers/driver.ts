@@ -146,6 +146,7 @@ export class FakeRuntime implements AgentRuntime {
 
   async close(): Promise<void> {
     this.closes += 1;
+    await this.#driver.onClose?.();
   }
 }
 
@@ -160,6 +161,8 @@ export class FakeDriver implements Driver {
   failStartWith: unknown = undefined;
   /** Runs inside `start`, before the runtime exists. Lets a test move state mid-start. */
   onStart: (() => Promise<void> | void) | undefined = undefined;
+  /** Runs inside each runtime's `close`: lets a test end a turn the way a dying process does. */
+  onClose: (() => Promise<void> | void) | undefined = undefined;
 
   constructor(id = 'fake') {
     this.id = id;

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { bindingsForSession } from '../src/db/bindings.js';
 import { getRun, getTask, openRunOf, openRuns, runsOf } from '../src/db/kanban-read.js';
 import { getSession, setExecution } from '../src/db/sessions.js';
-import { runKey } from '../src/kanban/dispatcher.js';
+import { KANBAN_OWNER, runKey } from '../src/kanban/dispatcher.js';
 import { ALICE, claimed, newTask } from './helpers/kanban.js';
 import type { TurnControl } from './helpers/driver.js';
 import {
@@ -205,5 +205,36 @@ describe('Dispatcher: a restart, when something fails', () => {
     expect(h.notes).toContain(`kanban: run ${first?.runId} not closed after a restart: not_found`);
     expect(h.notes).toContain(`kanban: ending run ${second?.runId} after a restart failed: SQLITE_IOERR`);
     expect(h.notes.some((n) => n.endsWith('closed after a restart'))).toBe(false);
+  });
+
+  it('archives at boot a kanban session left bound by a failed archive, and one bound with no run', async () => {
+    const h0 = dispatchHarness();
+    open.push(h0);
+    const task = h0.create({ title: 'Build', workspace: 'web' });
+    completes(h0, h0.driver('implementer'));
+    vi.spyOn(h0.registry, 'archive').mockRejectedValueOnce(new Error('the agent would not close'));
+    h0.dispatcher.pass();
+    await h0.dispatcher.idle();
+    const [run] = runsOf(h0.t.db, task.taskId);
+    expect(run?.endedAt).not.toBeNull();
+    const closedSession = run?.sessionId ?? '';
+    expect(bindingsForSession(h0.t.db, closedSession)).toHaveLength(1);
+    // A session bound on the kanban channel at a run the board has never had.
+    const stray = h0.registry.create(runKey(APP, { taskId: task.taskId, runId: 'r_missing' }), KANBAN_OWNER).id;
+    // One bound elsewhere is not the dispatcher's.
+    const chat = h0.registry.create(
+      { channel: 'lark', appId: APP, conversationId: 'oc_chat', threadId: 'om_root' },
+      KANBAN_OWNER,
+    ).id;
+    h0.dispatcher.stop();
+
+    const h = after(h0);
+    await h.dispatcher.boot();
+    for (const sessionId of [closedSession, stray]) {
+      expect(bindingsForSession(h.t.db, sessionId)).toEqual([]);
+      expect(getSession(h.t.db, sessionId)?.state).toBe('archived');
+    }
+    expect(bindingsForSession(h.t.db, chat)).toHaveLength(1);
+    expect(getSession(h.t.db, chat)?.state).not.toBe('archived');
   });
 });

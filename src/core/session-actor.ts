@@ -391,13 +391,18 @@ export class SessionActor {
     });
 
     if (quarantine) {
-      setState(this.#db, this.sessionId, 'quarantined', now);
-      this.#append({
-        type: 'session_state_changed',
-        actor: 'gateway',
-        generation,
-        payload: { state: 'quarantined', reason: 'delivery to the agent was ambiguous' },
-      });
+      // An archived or terminated session is final: nobody resumes it, so there
+      // is nothing to hold it for, and overwriting that state would undo it.
+      const state = this.#requireSession().state;
+      if (state !== 'archived' && state !== 'terminated') {
+        setState(this.#db, this.sessionId, 'quarantined', now);
+        this.#append({
+          type: 'session_state_changed',
+          actor: 'gateway',
+          generation,
+          payload: { state: 'quarantined', reason: 'delivery to the agent was ambiguous' },
+        });
+      }
       // A quarantined session must not keep a runtime it may not use: the whole
       // point of the state is that resuming needs a human decision.
       await this.#teardownRuntime();

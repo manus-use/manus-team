@@ -177,6 +177,16 @@ export function bindingsForSession(db: Db, sessionId: string): BindingRow[] {
     .map(decode);
 }
 
+/** Every live binding on a channel for an app: what a boot checks the kanban channel's against the board. */
+export function bindingsOnChannel(db: Db, channel: string, appId: string): BindingRow[] {
+  return db
+    .prepare<[string, string], BindingRaw>(
+      `SELECT ${COLS} FROM channel_bindings WHERE channel = ? AND account_id = ? AND revoked_at IS NULL ORDER BY bound_at`,
+    )
+    .all(channel, appId)
+    .map(decode);
+}
+
 export function bindingsInConversation(
   db: Db,
   channel: string,

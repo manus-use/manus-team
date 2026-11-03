@@ -1,4 +1,5 @@
 import type { SessionRegistry } from '../core/registry.js';
+import { bindingsOnChannel } from '../db/bindings.js';
 import type { Db } from '../db/open.js';
 import { claimableTasks, getRun, getTask, openAgentRunCount, openRuns, runBySession } from '../db/kanban-read.js';
 import { getSession } from '../db/sessions.js';
@@ -62,10 +63,19 @@ export function runKey(appId: string, run: { taskId: string; runId: string }): B
   return { channel: KANBAN_CHANNEL, appId, conversationId: run.taskId, threadId: run.runId };
 }
 
-/** An agent run this process started, by its session. */
-interface OpenRun {
+/** A run this process is starting or has started, as its closing sees it. */
+interface RunHandle {
   runId: string;
   key: BindingKey;
+  /** Its session, once one was created. */
+  sessionId?: string;
+  /** Set by the first close, whoever asks: a run is closed at most once, and a later ask waits for that one. */
+  closing: Promise<void> | undefined;
+}
+
+/** An agent run this process started, by its session. */
+interface OpenRun extends RunHandle {
+  sessionId: string;
   /** The run's environment, held only here (spec §2.4 item 3). */
   env: Readonly<Record<string, string>>;
   /** Its turn has been cancelled for running past its limit: once is enough. */
@@ -133,6 +143,8 @@ export class Dispatcher {
    * again subject to retry_on_crash. A decided one keeps its outcome. Either way
    * it is closed, its session archived and its binding revoked: never resumed, as
    * a new run gets a new session. A person's run holds no process, and is left.
+   * Then any session still bound on the kanban channel at a closed run, or at
+   * none, is archived: an archive that failed before is retried here.
    *
    * Never rejects: a run that fails is noted and the rest go on, since the
    * gateway's start -- chat included -- waits on this.
@@ -148,6 +160,38 @@ export class Dispatcher {
     for (const run of runs) {
       if (run.agentConfig === null) continue;
       await this.#endLost(run, 'the gateway restarted; the run is over');
+    }
+    await this.#archiveLeftovers();
+  }
+
+  /**
+   * A session still bound on the kanban channel at a run that is closed, or at
+   * none: its archive failed when the run closed, or the process died in
+   * between. Archived now, which a failed archive is never retried otherwise.
+   * Read from the board and the bindings; the registry revokes them.
+   */
+  async #archiveLeftovers(): Promise<void> {
+    let bound: ReturnType<typeof bindingsOnChannel>;
+    try {
+      bound = bindingsOnChannel(this.#deps.db, KANBAN_CHANNEL, this.#deps.appId);
+    } catch (err) {
+      this.#note(`kanban: reading the kanban bindings after a restart failed: ${message(err)}`);
+      return;
+    }
+    for (const b of bound) {
+      const run = getRun(this.#deps.db, b.threadId);
+      if (run !== undefined && run.endedAt === null) continue;
+      try {
+        await this.#deps.sessions.archive(
+          { channel: b.channel, appId: b.appId, conversationId: b.conversationId, threadId: b.threadId },
+          run === undefined ? 'the session is bound at no run' : 'the run is over',
+        );
+        const why = run === undefined ? 'bound at no run' : `run ${run.runId} is closed`;
+        this.#note(`kanban: session ${b.sessionId} archived after a restart: ${why}`);
+      } catch {
+        // The error is not quoted: it can carry an agent's stderr.
+        this.#note(`kanban: archiving session ${b.sessionId} failed after a restart`);
+      }
     }
   }
 
@@ -300,7 +344,7 @@ export class Dispatcher {
         if (!open.released) {
           open.released = true;
           this.#note(`kanban: run ${run.runId} ignored its cancel; releasing its session`);
-          this.#track(this.#release(sessionId, open));
+          this.#track(this.#close(open, { releaseFirst: true }));
         }
         continue;
       }
@@ -322,12 +366,6 @@ export class Dispatcher {
       this.#note(`kanban: run ${run.runId} passed its runtime limit; cancelling its turn`);
       void actor.cancel();
     }
-  }
-
-  /** End a turn that ignored its cancel by releasing its session, and close its run. */
-  async #release(sessionId: string, open: OpenRun): Promise<void> {
-    await this.#deps.sessions.release(sessionId);
-    await this.#close(open.runId, open.key, sessionId);
   }
 
   /** Tell, once, about each task the last pass found nobody to give to, if it has waited long enough (spec §4.2). */
@@ -377,7 +415,22 @@ export class Dispatcher {
     const { run } = claimed;
     // A person's run is sent a card, from plan D; it holds no session.
     if (run.assignee.kind !== 'role') return;
-    const key = runKey(this.#deps.appId, run);
+    const handle: RunHandle = { runId: run.runId, key: runKey(this.#deps.appId, run), closing: undefined };
+    try {
+      await this.#drive(claimed, handle);
+    } finally {
+      // The run's one cleanup, once its close -- by whoever asked for it -- is
+      // over: everything that must happen exactly once per run goes here. Plan C3
+      // removes the run's token from the masker here too.
+      await handle.closing?.catch(() => undefined);
+      if (handle.sessionId !== undefined) this.#open.delete(handle.sessionId);
+    }
+  }
+
+  /** The body of `#run`: start the session, send the prompt, and handle the turn's end. */
+  async #drive(claimed: Claimed, handle: RunHandle): Promise<void> {
+    const { run } = claimed;
+    const key = handle.key;
     let sessionId: string;
     try {
       if (run.workspace === null) throw new Error(`run ${run.runId} has no workspace`);
@@ -398,10 +451,17 @@ export class Dispatcher {
         hadSideEffects: false,
       });
       this.#note(`kanban: run ${run.runId} could not start`);
-      await this.#close(run.runId, key);
+      await this.#close(handle);
       return;
     }
-    this.#open.set(sessionId, { runId: run.runId, key, env: { MT_KANBAN_RUN: run.runId }, cancelling: false, released: false });
+    handle.sessionId = sessionId;
+    const open: OpenRun = Object.assign(handle, {
+      sessionId,
+      env: { MT_KANBAN_RUN: run.runId },
+      cancelling: false,
+      released: false,
+    });
+    this.#open.set(sessionId, open);
 
     let terminal: TurnTerminal | 'decided';
     let thrown: string | undefined;
@@ -430,7 +490,7 @@ export class Dispatcher {
     }
     if (terminal === 'decided') {
       this.#note(`kanban: run ${run.runId} was decided while its agent was being built; no prompt was sent`);
-      await this.#close(run.runId, key, sessionId);
+      await this.#close(open);
       return;
     }
     await this.#turnEnded(sessionId, terminal, thrown);
@@ -457,6 +517,9 @@ export class Dispatcher {
     const open = this.#open.get(sessionId);
     // Stopped: the gateway is shutting down, and the next boot ends the run.
     if (open === undefined || this.#stopped) return;
+    // Released because it ignored its cancel: that release ended this turn, the
+    // run was decided before it, and the release closes it.
+    if (open.released) return;
     const run = getRun(this.#deps.db, open.runId);
     if (run !== undefined && run.outcome === null) {
       const turn = lastTurnOf(this.#deps.db, sessionId);
@@ -472,7 +535,7 @@ export class Dispatcher {
             { outcome: classifyFailure(terminal, error), error: error === '' ? `the turn ended ${terminal}` : error };
       this.#end(run.runId, { ...ending, lastOutput: turn.output, ...this.#sideEffects(run, sessionId) });
     }
-    await this.#close(open.runId, open.key, sessionId);
+    await this.#close(open);
   }
 
   /**
@@ -497,8 +560,25 @@ export class Dispatcher {
    * release -- does not keep the run open: its outcome is decided, and an open run
    * would hold its workspace, a max_running slot and its pin until a restart. It
    * is noted by id, its session released if it is still live, and the run closed.
+   *
+   * At most once per run, whoever asks -- the turn's end, a release, a failed
+   * start: a later ask gets the first one's promise. `releaseFirst` is for a turn
+   * that ignored its cancel, whose session is released to end its process.
    */
-  async #close(runId: string, key: BindingKey, sessionId?: string): Promise<void> {
+  #close(run: RunHandle, opts: { releaseFirst?: boolean } = {}): Promise<void> {
+    if (run.closing !== undefined) return run.closing;
+    run.closing = this.#closeOnce(run, opts.releaseFirst === true);
+    return run.closing;
+  }
+
+  async #closeOnce(handle: RunHandle, releaseFirst: boolean): Promise<void> {
+    const { runId, key, sessionId } = handle;
+    if (releaseFirst && sessionId !== undefined) {
+      // Not quoted, as below; the archive releases it again, and closes the run either way.
+      await this.#deps.sessions.release(sessionId).catch(() => {
+        this.#note(`kanban: run ${runId}: releasing its session ${sessionId} failed`);
+      });
+    }
     try {
       await this.#deps.sessions.archive(key, 'the run is over');
     } catch {
@@ -512,7 +592,6 @@ export class Dispatcher {
     else if (closed.code === 'undecided') {
       this.#note(`kanban: run ${runId} not closed: undecided; it stays open until the gateway restarts`);
     } else this.#note(`kanban: run ${runId} not closed: ${closed.code}`);
-    if (sessionId !== undefined) this.#open.delete(sessionId);
     this.pass();
   }
 }

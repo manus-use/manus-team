@@ -181,6 +181,29 @@ describe('turn terminals', () => {
     expect(getSession(h.db.db, 's_1')?.state).toBe('quarantined');
   });
 
+  it.each(['archived', 'terminated'] as const)(
+    'never marks a session %s during an ambiguous turn quarantined',
+    async (state) => {
+      // A kanban run's session archived under a turn the archive's release ended:
+      // the archive is final, and nobody will resume the session to rescue it.
+      const h = harness();
+      h.driver.scripts = [
+        (ctl) => {
+          ctl.emit({ kind: 'message-chunk', text: 'half an answer' });
+          setState(h.db.db, 's_1', state, NOW);
+        },
+      ];
+      expect(await h.submit()).toBe('ambiguous');
+      expect(getSession(h.db.db, 's_1')?.state).toBe(state);
+      const events = readEvents(h.db.db, 's_1', 0, lastSeq(h.db.db, 's_1'));
+      const quarantined = events.filter(
+        (e) => e.type === 'session_state_changed' && (e.payload as { state?: string }).state === 'quarantined',
+      );
+      expect(quarantined).toEqual([]);
+      expect(h.driver.lastRuntime?.closes).toBe(1);
+    },
+  );
+
   it('records an ambiguous terminal as indeterminate rather than as a failure', async () => {
     const h = harness();
     h.driver.scripts = [() => undefined];

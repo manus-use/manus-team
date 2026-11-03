@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { eventsOf, getTask, runsOf } from '../src/db/kanban-read.js';
+import { lastSeq, readEvents } from '../src/db/events.js';
 import { getSession } from '../src/db/sessions.js';
 import { ALICE } from './helpers/kanban.js';
 import { completes, dispatchHarness, holds, reportComplete, until, type DispatchHarness } from './helpers/dispatch.js';
@@ -119,6 +120,34 @@ describe('Dispatcher: the runtime limit (spec §8.5)', () => {
     expect(runsOf(h.t.db, next.taskId).map((r) => r.outcome)).toEqual(['completed']);
     stubborn.end('completed');
     await h.dispatcher.idle();
+  });
+
+  it('closes a released run once when closing its agent ends the turn', async () => {
+    const h = harness();
+    const task = h.create({ workspace: 'web', maxRuntimeS: 60 });
+    const implementer = h.driver('implementer');
+    const stubborn = holds(implementer);
+    // What a real process does: it ignores the cancel, but dies when closed, and its turn ends cancelled.
+    implementer.onClose = () => stubborn.end('cancelled');
+
+    h.dispatcher.pass();
+    await until(() => stubborn.started, 'the run to start');
+    h.clock.advance(60_000);
+    h.dispatcher.sweep();
+    h.dispatcher.sweep();
+    await h.dispatcher.idle();
+
+    const [run] = runsOf(h.t.db, task.taskId);
+    expect(run).toMatchObject({ outcome: 'timed_out' });
+    expect(run?.endedAt).not.toBeNull();
+    const sessionId = run?.sessionId ?? '';
+    const archived = readEvents(h.t.db, sessionId, 0, lastSeq(h.t.db, sessionId)).filter(
+      (e) => e.type === 'session_state_changed' && (e.payload as { state?: string }).state === 'archived',
+    );
+    expect(archived).toHaveLength(1);
+    expect(h.notes.filter((n) => n.includes(`run ${run?.runId ?? ''} closed`))).toHaveLength(1);
+    expect(h.notes.filter((n) => n.includes('already_closed'))).toEqual([]);
+    expect(h.dispatcher.pinned(sessionId)).toBe(false);
   });
 
   it('keeps the outcome of a run that has reported, and only closes it', async () => {

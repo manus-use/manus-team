@@ -276,10 +276,12 @@ export class SessionRegistry {
    * is unbound too, and a stale approval card for it resolves to "no longer
    * bound". Its log is kept. Nothing bound here is nothing to do.
    *
-   * The bindings are revoked first, each owner writing in its own transaction
-   * (src/db/WRITERS.md): a failure after them leaves a session nothing routes
-   * to, which only a deliberate `/attach` by id reaches, rather than an archived
-   * session a chat thread could still wake.
+   * In this order: the session is released (its actor closed, its workspace
+   * freed), then its bindings revoked, then it is marked archived and the event
+   * appended -- each owner writing in its own transaction (src/db/WRITERS.md).
+   * Revoked before it is marked, so a failure in between leaves a session nothing
+   * routes to, which only a deliberate `/attach` by id reaches, rather than an
+   * archived session a chat thread could still wake.
    */
   async archive(key: BindingKey, reason: string): Promise<void> {
     const bound = resolveBinding(this.#deps.db, key);
