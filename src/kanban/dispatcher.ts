@@ -1,6 +1,6 @@
 import type { SessionRegistry } from '../core/registry.js';
 import type { Db } from '../db/open.js';
-import { claimableTasks, getRun } from '../db/kanban-read.js';
+import { claimableTasks, getRun, openAgentRunCount } from '../db/kanban-read.js';
 import { getSession } from '../db/sessions.js';
 import type { Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
@@ -109,6 +109,10 @@ export class Dispatcher {
    */
   pass(): void {
     for (const task of claimableTasks(this.#deps.db, this.#clock.now())) {
+      const who = task.phase === 'review' ? task.reviewer : task.assignee;
+      // Counted from the board, so a run opened earlier in this pass counts. A
+      // person's run holds no process, and is not limited (spec §6.3).
+      if (who?.kind === 'role' && openAgentRunCount(this.#deps.db) >= this.#deps.settings.maxRunning) continue;
       const claimed = this.#deps.service.claim(task.taskId);
       // Refusals are the board's to record: the claim notes a task nobody can be
       // given; a busy workspace or a racing claim leaves it for the next pass.

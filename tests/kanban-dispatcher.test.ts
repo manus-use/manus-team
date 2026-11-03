@@ -226,3 +226,42 @@ describe('Dispatcher: an open run is pinned', () => {
     expect(h.registry.liveActor(sessionId)).toBeUndefined();
   });
 });
+
+describe('Dispatcher: kanban.maxRunning', () => {
+  it('opens no more agent runs than maxRunning, counting runs that have reported and are finishing', async () => {
+    const h = harness({ settings: { maxRunning: 2 } });
+    const web = h.create({ title: 'web', workspace: 'web' });
+    h.clock.advance(1);
+    const api = h.create({ title: 'api', workspace: 'api', assignee: 'reviewer' });
+    h.clock.advance(1);
+    const docs = h.create({ title: 'docs', assignee: 'docs-writer' });
+    const implementer = h.driver('implementer');
+    let finish: (() => void) | undefined;
+    const tidying = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let reported = false;
+    implementer.scripts.push(async (ctl) => {
+      reportComplete(h, implementer);
+      reported = true;
+      await tidying;
+      ctl.end('completed');
+    });
+    const other = holds(h.driver('reviewer'));
+    const third = holds(h.driver('docs-writer'));
+
+    h.dispatcher.pass();
+    await until(() => reported && other.started, 'two runs to start');
+    h.dispatcher.pass();
+    expect([web, api, docs].map((t) => runsOf(h.t.db, t.taskId).length)).toEqual([1, 1, 0]);
+
+    // Once the reported run has closed, there is room for the third.
+    finish?.();
+    await until(() => third.started, 'the third run to start');
+    expect(runsOf(h.t.db, docs.taskId)).toHaveLength(1);
+
+    other.end('completed', () => reportComplete(h, h.driver('reviewer')));
+    third.end('completed', () => reportComplete(h, h.driver('docs-writer')));
+    await h.dispatcher.idle();
+  });
+});
