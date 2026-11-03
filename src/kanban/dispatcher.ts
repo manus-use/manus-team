@@ -6,9 +6,10 @@ import type { Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, Principal, TurnTerminal } from '../types.js';
 import { briefFor } from './brief.js';
+import { classifyFailure } from './classify.js';
 import { composePrompt } from './prompt.js';
 import type { Claimed, KanbanService } from './service.js';
-import { lastTurnOf } from './session-log.js';
+import { hadSideEffects, lastTurnOf, toolCallsOf } from './session-log.js';
 import { KANBAN_CHANNEL } from './sink.js';
 import type { RunRow } from './types.js';
 
@@ -210,16 +211,30 @@ export class Dispatcher {
     const run = getRun(this.#deps.db, open.runId);
     if (run !== undefined && run.outcome === null) {
       const turn = lastTurnOf(this.#deps.db, sessionId);
-      const error = [...turn.errors, ...(thrown === undefined ? [] : [thrown])].join('\n');
-      this.#deps.service.endRun(
-        run.runId,
+      // A refusal the actor rethrew is in the log already; one from before the turn is not.
+      const errors = thrown === undefined || turn.errors.includes(thrown) ? turn.errors : [...turn.errors, thrown];
+      const error = errors.join('\n');
+      const ending =
         terminal === 'completed'
           ? // No report, and the turn completed. Plan C3 nudges first.
-            { outcome: 'protocol_violation', error: 'the run ended its turn without reporting', lastOutput: turn.output }
-          : { outcome: 'failed', error: error === '' ? `the turn ended ${terminal}` : error, lastOutput: turn.output },
-      );
+            { outcome: 'protocol_violation' as const, error: 'the run ended its turn without reporting' }
+          : // Classified only here, for a turn nobody cancelled: a run the
+            // dispatcher cancels is decided before it asks (spec §6.4).
+            { outcome: classifyFailure(terminal, error), error: error === '' ? `the turn ended ${terminal}` : error };
+      this.#deps.service.endRun(run.runId, { ...ending, lastOutput: turn.output, ...this.#sideEffects(run, sessionId) });
     }
     await this.#close(open.runId, open.key, sessionId);
+  }
+
+  /**
+   * Whether the run made a tool call outside its role's readOnlyTools (spec
+   * §8.3), read from its session's log. Left out -- unknown, which the board
+   * takes as yes -- when the role is no longer configured.
+   */
+  #sideEffects(run: RunRow, sessionId: string): { hadSideEffects?: boolean } {
+    const role = this.#deps.roles.get(run.assignee.name);
+    if (role === undefined) return {};
+    return { hadSideEffects: hadSideEffects(toolCallsOf(this.#deps.db, sessionId), role.agent.readOnlyTools) };
   }
 
   /**
