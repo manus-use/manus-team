@@ -15,6 +15,7 @@ import {
   type Contract,
   type CreatedVia,
   type Refusal,
+  type Rendering,
   type ReportedBlockKind,
   type Reporter,
   type Result,
@@ -313,6 +314,11 @@ export class KanbanService {
       ...(resolved.ok && resolved.roleMdBytes !== undefined ? { roleMdBytes: resolved.roleMdBytes } : {}),
       role: resolved.ok ? resolved.role : undefined,
     };
+  }
+
+  /** Record how the run's role reached its agent, once the dispatcher has rendered it or not (plan R). */
+  recordRendering(runId: string, rendering: Rendering): Result<{ run: RunRow }> {
+    return board.recordRendering(this.#db, runId, rendering, this.#clock.now());
   }
 
   /** Record the run's gateway session, once plan C2 has created it. */

@@ -17,6 +17,7 @@ import type {
   Refusal,
   RefusalCode,
   ReportedBlockKind,
+  Rendering,
   Reporter,
   Result,
   RetryOnCrash,
@@ -442,6 +443,37 @@ function mustGetRun(d: Db, runId: string): RunRow {
   const run = getRun(d, runId);
   if (run === undefined) throw new Error(`run ${runId} vanished inside its own transaction`);
   return run;
+}
+
+/** A package's content hash: sha256, in lower-case hex. */
+const PACKAGE_HASH = /^[0-9a-f]{64}$/;
+
+/**
+ * Record how an agent run's role reached its agent (plan R): as a native
+ * package, by its content hash, or in the prompt. It goes into the run's
+ * `agent_config`, beside the agent it ran, since it is part of what ran: a
+ * rework or a resume is seeded only from a run that ran the same way. Written
+ * once, on an open agent run.
+ */
+export function recordRendering(db: Db, runId: string, rendering: Rendering, now: number): Result<{ run: RunRow }> {
+  return tx(db, (d) => {
+    const run = getRun(d, runId);
+    if (run === undefined) return refuse('not_found', `no run ${runId}`);
+    if (run.endedAt !== null) return refuse('already_closed', `run ${runId} is closed`);
+    if (run.agentConfig === null) return refuse('invalid', `run ${runId} is a person's: nothing renders for it`);
+    if (run.agentConfig.native !== undefined) return refuse('invalid', `run ${runId}'s rendering is already recorded`);
+    const fine = rendering.native ? PACKAGE_HASH.test(rendering.packageHash) : !('packageHash' in rendering);
+    if (!fine) {
+      return refuse('invalid', 'a native run records its package hash, 64 lower-case hex digits; any other run records none');
+    }
+    const recorded = rendering.native ? { native: true, packageHash: rendering.packageHash } : { native: false };
+    d.prepare('UPDATE kanban_runs SET agent_config = jsonb(?) WHERE run_id = ?').run(
+      JSON.stringify({ ...run.agentConfig, ...recorded }),
+      runId,
+    );
+    record(d, { taskId: run.taskId, runId, kind: 'run_rendered', actor: 'gateway', payload: recorded }, now);
+    return { ok: true, run: mustGetRun(d, runId) };
+  });
 }
 
 /**

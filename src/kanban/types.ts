@@ -108,7 +108,19 @@ export interface AgentSnapshot {
   args: readonly string[];
   unsupervised: boolean;
   envNames: readonly string[];
+  /**
+   * Whether the run's role reached its agent as a native package (plan R).
+   * Recorded once, by the dispatcher, just after the claim, when the render has
+   * been decided: rendered, or put in the prompt. Absent on a run claimed before
+   * plan R, or one whose start stopped before it was recorded.
+   */
+  native?: boolean;
+  /** The native package's content hash: its directory's name under `$MT_HOME/rendered/<role>/`. */
+  packageHash?: string;
 }
+
+/** How a run's role reached its agent (plan R): as a native package, or in the prompt. */
+export type Rendering = { native: true; packageHash: string } | { native: false };
 
 export interface RunRow {
   runId: string;

@@ -29,7 +29,7 @@ file is for.
 | `workspaces` | `db/workspaces.ts` | Rows are added, never updated: `root_path` is fixed the first time a name is seen (spec §2.3). `repo_root`, `branch` and `lock_holder` stay null until worktrees. |
 | `kanban_tasks` | `db/kanban.ts` | `phase` is written only by its named transitions, each of which checks the current phase (spec §4.1). `workspace` is written once, while null. |
 | `kanban_links` | `db/kanban.ts` | Added in the transaction that checks for a cycle and for an open run on the child (spec §3.2). Never deleted. |
-| `kanban_runs` | `db/kanban.ts` | Inserted by a claim. `outcome` is written once, on an undecided run; `ended_at` once, on a decided one (spec §3.3). |
+| `kanban_runs` | `db/kanban.ts` | Inserted by a claim. `outcome` is written once, on an undecided run; `ended_at` once, on a decided one (spec §3.3). `agent_config` gains `native` and `packageHash` once, by `recordRendering` (plan R). |
 | `kanban_comments` | `db/kanban.ts` | Rows are added, never updated. |
 | `kanban_events` | `db/kanban.ts` | Append-only, written in the transaction of the change it records. String values in `payload` are masked on write (spec §10.1). |
 | `kanban_gates`, `kanban_subscriptions` | `db/kanban.ts` | No writer until plans C4 (gates) and D (subscriptions); they add their functions to `db/kanban.ts`. |
