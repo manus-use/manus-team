@@ -118,6 +118,75 @@ describe('loadRoleDir: config.yaml', () => {
   });
 });
 
+describe('loadRoleDir: skills imported by name', () => {
+  /** A user-level skill directory under a made-up home: never the real one. */
+  function userSkill(root: string, name: string, description = `the ${name} skill`): string {
+    const dir = join(rolesDir, 'home', root, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\nUse it.\n`);
+    return dir;
+  }
+  const HOME = () => ({ HOME: join(rolesDir, 'home') });
+
+  it("adds each named user skill after the role's own, from where bytesec would load it", () => {
+    const dir = userSkill('.agents/skills', 'lark-doc');
+    role('r', `${AGENT}  skills: [lark-doc]\n`, {
+      'skills/testing/SKILL.md': '---\nname: testing\ndescription: How to test\n---\n',
+    });
+    expect(load('r', HOME()).role.skills).toEqual([
+      expect.objectContaining({ name: 'testing' }),
+      { name: 'lark-doc', description: 'the lark-doc skill', dir, path: join(dir, 'SKILL.md') },
+    ]);
+  });
+
+  it("looks where bytesec looks, its config directory first, then .trae, .coco, .agents and .claude", () => {
+    userSkill('.claude/skills', 'lark-im', 'from claude');
+    userSkill('.agents/skills', 'lark-im', 'from agents');
+    role('r', `${AGENT}  skills: [lark-im]\n`);
+    expect(load('r', HOME()).role.skills[0]?.description).toBe('from agents');
+    userSkill('.config/bytesec/skill', 'lark-im', 'from config skill');
+    expect(load('r', HOME()).role.skills[0]?.description).toBe('from config skill');
+    userSkill('.config/bytesec/skills', 'lark-im', 'from config skills');
+    expect(load('r', HOME()).role.skills[0]?.description).toBe('from config skills');
+    // XDG_CONFIG_HOME moves the config directory, as it moves bytesec's.
+    const xdg = join(rolesDir, 'xdg');
+    mkdirSync(join(xdg, 'bytesec', 'skills', 'lark-im'), { recursive: true });
+    writeFileSync(join(xdg, 'bytesec', 'skills', 'lark-im', 'SKILL.md'), '---\nname: lark-im\ndescription: from xdg\n---\n');
+    expect(load('r', { ...HOME(), XDG_CONFIG_HOME: xdg }).role.skills[0]?.description).toBe('from xdg');
+  });
+
+  it('does not follow a symlinked skill directory, and goes on to the next', () => {
+    const real = userSkill('.agents/skills', 'lark-base');
+    mkdirSync(join(rolesDir, 'home', '.trae', 'skills'), { recursive: true });
+    symlinkSync(real, join(rolesDir, 'home', '.trae', 'skills', 'lark-base'));
+    role('r', `${AGENT}  skills: [lark-base]\n`);
+    expect(load('r', HOME()).role.skills[0]?.dir).toBe(real);
+    rmSync(real, { recursive: true });
+    expect(() => load('r', HOME())).toThrow(/a symlinked skill directory is not followed/);
+  });
+
+  it('refuses a name it cannot find, naming the role, and finds nothing without a home', () => {
+    role('r', `${AGENT}  skills: [lark-missing]\n`);
+    expect(() => load('r', HOME())).toThrow(/^role r: agent\.skills names lark-missing, which is in none of .*\.agents\/skills/);
+    expect(() => load('r')).toThrow('role r: agent.skills names lark-missing, but HOME is not set, so there is nowhere to look');
+  });
+
+  it("refuses a name outside bytesec's skill-name rule, and one the role has itself", () => {
+    userSkill('.agents/skills', 'testing');
+    role('bad', `${AGENT}  skills: [Lark_Doc]\n`);
+    expect(() => load('bad', HOME())).toThrow(/agent\.skills: "Lark_Doc" is not a skill name bytesec loads/);
+    role('both', `${AGENT}  skills: [testing]\n`, { 'skills/testing/SKILL.md': '---\nname: testing\ndescription: d\n---\n' });
+    expect(() => load('both', HOME())).toThrow('role both: skill testing is in its skills/ and in agent.skills; keep one');
+  });
+
+  it("checks an imported skill's front matter as it checks the role's own", () => {
+    const dir = userSkill('.agents/skills', 'lark-task');
+    writeFileSync(join(dir, 'SKILL.md'), 'no front matter');
+    role('r', `${AGENT}  skills: [lark-task]\n`);
+    expect(() => load('r', HOME())).toThrow(/must start with front matter/);
+  });
+});
+
 describe('loadRoleDir: .env, role.md, skills', () => {
   function withEnv(text: string, mode = 0o600): void {
     const dir = role('r', `${AGENT}  passEnv: [GH_TOKEN]\n`);

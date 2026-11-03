@@ -161,6 +161,14 @@ agent:
   unsupervised: true
 ```
 
+A role may also use skills from the user's own, by name: `agent.skills: [lark-doc, lark-im]` in
+its `config.yaml`. Each name is looked up where bytesec keeps a user's skills, in this order:
+`$XDG_CONFIG_HOME/bytesec/skills` (else `~/.config/bytesec/skills`), the same directory's
+`skill/`, then `~/.trae/skills`, `~/.coco/skills`, `~/.agents/skills` and `~/.claude/skills`. The
+first real directory holding a `SKILL.md` wins; a symlink is not followed. A name that is not
+found, or is also one of the role's own skills, stops the gateway at startup. An imported skill is
+given to the agent exactly as the role's own are.
+
 The role `default` runs chat sessions. It is `roles/default/` if that exists, and otherwise
 the gateway's own `agent:` block (in the table above); having both, or neither, stops the
 gateway at startup. Role and workspace names are lowercase letters, digits and `-`, start

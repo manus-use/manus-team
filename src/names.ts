@@ -12,6 +12,16 @@ import { KNOWN_DRIVERS } from './driver/registry.js';
  */
 export const NAME_PATTERN = /^[a-z](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 
+/**
+ * bytesec's own rule for a skill's name, as bytesec 0.7.4 checks it: lowercase
+ * letters, digits and single `-`, not at either end, at most 64 characters. A
+ * skill a role imports by name (`agent.skills`) must follow it, and bytesec's
+ * renderer refuses a role with one of its own that does not.
+ */
+export function isBytesecSkillName(name: string): boolean {
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) && !name.includes('--') && name.length <= 64;
+}
+
 /** Why `name` is not a valid role or workspace name, or undefined if it is. */
 export function nameProblem(kind: 'role' | 'workspace', name: string): string | undefined {
   if (NAME_PATTERN.test(name)) return undefined;

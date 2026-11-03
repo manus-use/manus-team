@@ -460,6 +460,19 @@ describe('mt role check', () => {
     expect(r.out).toMatch(/service's environment may differ/);
   });
 
+  it('reports a skill named in agent.skills that cannot be found under the files', async () => {
+    fx = mtFixture();
+    roleDir('implementer', 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n  skills: [lark-doc]\n');
+    // A made-up home, never the real one.
+    const home = join(fx.root, 'user');
+    const r = await fx.run(['role', 'check'], { env: { HOME: home } });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^files:\n {2}role implementer: agent\.skills names lark-doc, which is in none of /m);
+    mkdirSync(join(home, '.agents', 'skills', 'lark-doc'), { recursive: true });
+    writeFileSync(join(home, '.agents', 'skills', 'lark-doc', 'SKILL.md'), '---\nname: lark-doc\ndescription: Lark docs\n---\n');
+    expect((await fx.run(['role', 'check'], { env: { HOME: home } })).code).toBe(0);
+  });
+
   it('reports a broken role file under the files', async () => {
     fx = mtFixture();
     roleDir('broken', 'agent: [\n');
