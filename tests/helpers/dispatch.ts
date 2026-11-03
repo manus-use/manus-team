@@ -56,7 +56,11 @@ export interface DispatchHarness {
   driver(roleName: string): FakeDriver;
   /** Create a task through the service, as chat would. */
   create(req: Partial<CreateRequest>): TaskRow;
-  /** The run an agent started on this driver most recently is working on. */
+  /**
+   * The run an agent started on this driver most recently is working on. Right
+   * only while the driver has one run at a time; a script reads its own from
+   * `ctl.env`, as `completes` does.
+   */
   runOf(driver: FakeDriver): RunRow;
   close(): void;
 }
@@ -149,17 +153,24 @@ export async function until(done: () => boolean, what = 'the condition'): Promis
   throw new Error(`gave up waiting for ${what}`);
 }
 
-/** Report complete through the service, as the agent of this driver's latest run would. */
-export function reportComplete(h: DispatchHarness, driver: FakeDriver, summary = 'done'): void {
-  const run = h.runOf(driver);
+/**
+ * Report complete through the service, as the agent of a run would: the run
+ * given by id, or this driver's latest -- which is right only while the driver
+ * has one run at a time.
+ */
+export function reportComplete(h: DispatchHarness, from: FakeDriver | string, summary = 'done'): void {
+  const run = typeof from === 'string' ? getRun(h.t.db, from) : h.runOf(from);
+  if (run === undefined) throw new Error(`no run ${String(from)}`);
   const r = h.service.complete(run.taskId, { kind: 'run', runId: run.runId }, { summary });
   if (!r.ok) throw new Error(`${r.code}: ${r.message}`);
 }
 
-/** The next turn on this driver reports complete, then ends. */
+/** The next turn on this driver reports complete for its own run, then ends. */
 export function completes(h: DispatchHarness, driver: FakeDriver, summary = 'done'): void {
   driver.scripts.push((ctl) => {
-    reportComplete(h, driver, summary);
+    const runId = ctl.env?.['MT_KANBAN_RUN'];
+    if (runId === undefined) throw new Error(`a turn on driver ${driver.id} was started with no run`);
+    reportComplete(h, runId, summary);
     ctl.end('completed');
   });
 }

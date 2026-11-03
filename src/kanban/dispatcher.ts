@@ -94,7 +94,16 @@ export class Dispatcher {
   constructor(deps: DispatcherDeps) {
     this.#deps = deps;
     this.#clock = deps.clock ?? systemClock;
-    this.#note = deps.note ?? (() => undefined);
+    const note = deps.note ?? (() => undefined);
+    // A note is told, never relied on: one that throws must not end a pass or
+    // leave a run's promise rejected with nobody to catch it.
+    this.#note = (line) => {
+      try {
+        note(line);
+      } catch {
+        // Nowhere left to say it.
+      }
+    };
   }
 
   /**
@@ -130,14 +139,19 @@ export class Dispatcher {
     for (const run of openRuns(this.#deps.db)) {
       if (run.agentConfig === null) continue;
       this.#interrupt(run);
-      await this.#deps.sessions.archive(runKey(this.#deps.appId, run), 'the gateway restarted; the run is over');
+      try {
+        await this.#deps.sessions.archive(runKey(this.#deps.appId, run), 'the gateway restarted; the run is over');
+      } catch {
+        // The run is closed already; one session that would not archive must not stop the rest.
+        this.#note(`kanban: run ${run.runId}: archiving its session ${run.sessionId ?? 'none'} failed after a restart`);
+      }
     }
   }
 
   /** End an open run whose process is gone, keeping a reported outcome, and close it. */
   #interrupt(run: RunRow): void {
     if (run.outcome === null) {
-      this.#deps.service.endRun(run.runId, {
+      this.#end(run.runId, {
         outcome: 'interrupted',
         error: 'the gateway restarted during the run',
         // A run whose session never started cannot have changed anything.
@@ -146,8 +160,19 @@ export class Dispatcher {
           : { lastOutput: lastTurnOf(this.#deps.db, run.sessionId).output, ...this.#sideEffects(run, run.sessionId) }),
       });
     }
-    this.#deps.service.closeRun(run.runId);
-    this.#note(`kanban: run ${run.runId} closed after a restart`);
+    const closed = this.#deps.service.closeRun(run.runId);
+    if (closed.ok) this.#note(`kanban: run ${run.runId} closed after a restart`);
+    else this.#note(`kanban: run ${run.runId} not closed after a restart: ${closed.code}`);
+  }
+
+  /**
+   * End an undecided run (spec §8.2). A refusal is noted rather than dropped: the
+   * run then stays undecided, so closeRun refuses it too, and it holds its
+   * workspace until the next boot ends it.
+   */
+  #end(runId: string, ending: Parameters<KanbanService['endRun']>[1]): void {
+    const ended = this.#deps.service.endRun(runId, ending);
+    if (!ended.ok) this.#note(`kanban: run ${runId} not ended: ${ended.code}`);
   }
 
   /** An open run's actor is never retired to make room (spec §2.4 item 3). */
@@ -162,20 +187,33 @@ export class Dispatcher {
    */
   pass(): void {
     if (this.#stopped) return;
+    let tasks: ReturnType<typeof claimableTasks>;
+    try {
+      tasks = claimableTasks(this.#deps.db, this.#clock.now());
+    } catch (err) {
+      this.#note(`kanban: reading the claimable tasks failed: ${message(err)}`);
+      return;
+    }
     const unassignable = new Map<string, string>();
-    for (const task of claimableTasks(this.#deps.db, this.#clock.now())) {
-      const who = task.phase === 'review' ? task.reviewer : task.assignee;
-      // Counted from the board, so a run opened earlier in this pass counts. A
-      // person's run holds no process, and is not limited (spec §6.3).
-      if (who?.kind === 'role' && openAgentRunCount(this.#deps.db) >= this.#deps.settings.maxRunning) continue;
-      const claimed = this.#deps.service.claim(task.taskId);
-      // Refusals are the board's to record: the claim notes a task nobody can be
-      // given; a busy workspace or a racing claim leaves it for the next pass.
-      if (!claimed.ok) {
-        if (claimed.code === 'unassignable') unassignable.set(task.taskId, claimed.message);
-        continue;
+    for (const task of tasks) {
+      // One task's failure is that task's: the pass goes on to the next, and
+      // never throws to the sweep, the boot or the run that called it.
+      try {
+        const who = task.phase === 'review' ? task.reviewer : task.assignee;
+        // Counted from the board, so a run opened earlier in this pass counts. A
+        // person's run holds no process, and is not limited (spec §6.3).
+        if (who?.kind === 'role' && openAgentRunCount(this.#deps.db) >= this.#deps.settings.maxRunning) continue;
+        const claimed = this.#deps.service.claim(task.taskId);
+        // Refusals are the board's to record: the claim notes a task nobody can be
+        // given; a busy workspace or a racing claim leaves it for the next pass.
+        if (!claimed.ok) {
+          if (claimed.code === 'unassignable') unassignable.set(task.taskId, claimed.message);
+          continue;
+        }
+        this.#track(this.#run(claimed));
+      } catch (err) {
+        this.#note(`kanban: claiming ${task.taskId} failed: ${message(err)}`);
       }
-      this.#track(this.#run(claimed));
     }
     this.#unassignable = unassignable;
   }
@@ -246,7 +284,7 @@ export class Dispatcher {
       const limitS = getTask(this.#deps.db, run.taskId)?.maxRuntimeS ?? this.#deps.settings.defaultMaxRuntimeS;
       if (now - run.startedAt < limitS * 1000) continue;
       if (run.outcome === null) {
-        this.#deps.service.endRun(run.runId, {
+        this.#end(run.runId, {
           outcome: 'timed_out',
           error: `the run passed its limit of ${limitS} s`,
           lastOutput: lastTurnOf(this.#deps.db, sessionId).output,
@@ -286,7 +324,8 @@ export class Dispatcher {
   #track(work: Promise<void>): void {
     const tracked = work.catch((err: unknown) => this.#note(`kanban: ${message(err)}`));
     this.#inflight.add(tracked);
-    void tracked.finally(() => this.#inflight.delete(tracked));
+    // Caught again: `finally` passes a rejection on, and nothing else awaits this chain.
+    tracked.finally(() => this.#inflight.delete(tracked)).catch(() => undefined);
   }
 
   /**
@@ -313,7 +352,7 @@ export class Dispatcher {
     } catch (err) {
       // Nothing was started, so nothing was changed: an ordinary failure. A
       // session created before the failure is archived with the run.
-      this.#deps.service.endRun(run.runId, {
+      this.#end(run.runId, {
         outcome: 'failed',
         error: `the run could not start: ${message(err)}`,
         hadSideEffects: false,
@@ -380,7 +419,7 @@ export class Dispatcher {
           : // Classified only here, for a turn nobody cancelled: a run the
             // dispatcher cancels is decided before it asks (spec §6.4).
             { outcome: classifyFailure(terminal, error), error: error === '' ? `the turn ended ${terminal}` : error };
-      this.#deps.service.endRun(run.runId, { ...ending, lastOutput: turn.output, ...this.#sideEffects(run, sessionId) });
+      this.#end(run.runId, { ...ending, lastOutput: turn.output, ...this.#sideEffects(run, sessionId) });
     }
     await this.#close(open.runId, open.key, sessionId);
   }
@@ -402,12 +441,26 @@ export class Dispatcher {
    * leaves a decided run open, which the next boot closes (spec §8.4), rather
    * than a closed run whose session is still bound. Stopped in between, the run is
    * left for that boot too: the database may be closing.
+   *
+   * An archive that fails -- the agent would not close, the workspace would not
+   * release -- does not keep the run open: its outcome is decided, and an open run
+   * would hold its workspace, a max_running slot and its pin until a restart. It
+   * is noted by id, its session released if it is still live, and the run closed.
    */
   async #close(runId: string, key: BindingKey, sessionId?: string): Promise<void> {
-    await this.#deps.sessions.archive(key, 'the run is over');
+    try {
+      await this.#deps.sessions.archive(key, 'the run is over');
+    } catch {
+      // The error is not quoted: it can carry an agent's stderr.
+      this.#note(`kanban: run ${runId}: archiving its session ${sessionId ?? 'none'} failed; closing the run anyway`);
+      if (sessionId !== undefined) await this.#deps.sessions.release(sessionId).catch(() => undefined);
+    }
     if (this.#stopped) return;
     const closed = this.#deps.service.closeRun(runId);
     if (closed.ok) this.#note(`kanban: run ${runId} closed, ${closed.run.outcome ?? 'undecided'}`);
+    else if (closed.code === 'undecided') {
+      this.#note(`kanban: run ${runId} not closed: undecided; it stays open until the gateway restarts`);
+    } else this.#note(`kanban: run ${runId} not closed: ${closed.code}`);
     if (sessionId !== undefined) this.#open.delete(sessionId);
     this.pass();
   }

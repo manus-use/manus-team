@@ -32,6 +32,8 @@ export interface TurnControl {
    */
   ask(action: string, options: readonly PermissionOption[]): Promise<PermissionOutcome>;
   end(terminal: TurnTerminal): void;
+  /** The environment this turn's runtime was started with: whose run it is, for a kanban script. */
+  readonly env: Readonly<Record<string, string>> | undefined;
 }
 
 export type TurnScript = (ctl: TurnControl) => Promise<void> | void;
@@ -80,9 +82,11 @@ export class FakeRuntime implements AgentRuntime {
   failPromptWith: unknown = undefined;
 
   readonly #driver: FakeDriver;
+  readonly #env: Readonly<Record<string, string>> | undefined;
 
-  constructor(driver: FakeDriver) {
+  constructor(driver: FakeDriver, env?: Readonly<Record<string, string>>) {
     this.#driver = driver;
+    this.#env = env;
   }
 
   get providerSessionId(): string {
@@ -118,6 +122,7 @@ export class FakeRuntime implements AgentRuntime {
             });
           }),
         end: (terminal) => queue.push({ kind: 'turn-ended', terminal }),
+        env: this.#env,
       };
       try {
         await script(ctl);
@@ -167,7 +172,7 @@ export class FakeDriver implements Driver {
       const err = this.failStartWith;
       throw err instanceof Error ? err : new Error(String(err));
     }
-    const runtime = new FakeRuntime(this);
+    const runtime = new FakeRuntime(this, opts.env);
     this.runtimes.push(runtime);
     return { runtime, result: { providerSessionId: this.providerSessionId, mode: this.mode } };
   }

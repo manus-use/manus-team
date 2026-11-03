@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { bindingsForSession, resolveBinding } from '../src/db/bindings.js';
 import { lastSeq, readEvents } from '../src/db/events.js';
 import { getTask, runsOf } from '../src/db/kanban-read.js';
 import { getSession } from '../src/db/sessions.js';
+import { settle } from './helpers/db.js';
 import { runKey } from '../src/kanban/dispatcher.js';
 import {
   APP,
@@ -263,5 +264,108 @@ describe('Dispatcher: kanban.maxRunning', () => {
     other.end('completed', () => reportComplete(h, h.driver('reviewer')));
     third.end('completed', () => reportComplete(h, h.driver('docs-writer')));
     await h.dispatcher.idle();
+  });
+});
+
+describe('Dispatcher: one failure does not stall the board', () => {
+  it('closes a run whose session would not archive, unpins it, and runs the next task in its workspace', async () => {
+    const h = harness();
+    const first = h.create({ title: 'first', workspace: 'web' });
+    const second = h.create({ title: 'second', workspace: 'web' });
+    const implementer = h.driver('implementer');
+    completes(h, implementer);
+    completes(h, implementer);
+    vi.spyOn(h.registry, 'archive').mockRejectedValueOnce(new Error('the agent would not close'));
+
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+
+    const [run] = runsOf(h.t.db, first.taskId);
+    expect(run?.outcome).toBe('completed');
+    expect(run?.endedAt).not.toBeNull();
+    const sessionId = run?.sessionId ?? '';
+    expect(h.dispatcher.pinned(sessionId)).toBe(false);
+    expect(h.registry.liveActor(sessionId)).toBeUndefined();
+    expect(h.notes).toContain(`kanban: run ${run?.runId}: archiving its session ${sessionId} failed; closing the run anyway`);
+    // Ids only: the error's text is not in the note.
+    expect(h.notes.some((n) => n.includes('would not close'))).toBe(false);
+    expect(runsOf(h.t.db, second.taskId).map((r) => r.outcome)).toEqual(['completed']);
+  });
+
+  it('goes on to the next task when claiming one throws, and the pass does not', async () => {
+    const h = harness();
+    const broken = h.create({ title: 'broken', workspace: 'web' });
+    const other = h.create({ title: 'other', workspace: 'docs', assignee: 'docs-writer' });
+    completes(h, h.driver('docs-writer'));
+    const claim = h.service.claim.bind(h.service);
+    vi.spyOn(h.service, 'claim').mockImplementation((taskId, opts) => {
+      if (taskId === broken.taskId) throw new Error('SQLITE_IOERR');
+      return claim(taskId, opts);
+    });
+
+    expect(() => h.dispatcher.pass()).not.toThrow();
+    await h.dispatcher.idle();
+
+    expect(h.notes).toContain(`kanban: claiming ${broken.taskId} failed: SQLITE_IOERR`);
+    expect(runsOf(h.t.db, broken.taskId)).toEqual([]);
+    expect(runsOf(h.t.db, other.taskId).map((r) => r.outcome)).toEqual(['completed']);
+  });
+
+  it('notes a run the board would not end, and that it stays open until a restart', async () => {
+    const h = harness();
+    const task = h.create({ workspace: 'web' });
+    h.driver('implementer').scripts.push((ctl) => ctl.end('completed'));
+    vi.spyOn(h.service, 'endRun').mockReturnValueOnce({ ok: false, code: 'invalid', message: 'refused' });
+
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+
+    const [run] = runsOf(h.t.db, task.taskId);
+    expect(run).toMatchObject({ outcome: null, endedAt: null });
+    expect(h.notes).toContain(`kanban: run ${run?.runId} not ended: invalid`);
+    expect(h.notes).toContain(`kanban: run ${run?.runId} not closed: undecided; it stays open until the gateway restarts`);
+    expect(h.dispatcher.pinned(run?.sessionId ?? '')).toBe(false);
+  });
+
+  it('survives a note that throws, with no unhandled rejection', async () => {
+    const h = harness();
+    const task = h.create({ workspace: 'web' });
+    completes(h, h.driver('implementer'));
+    vi.spyOn(h.registry, 'archive').mockRejectedValueOnce(new Error('the agent would not close'));
+    vi.spyOn(h.notes, 'push').mockImplementation(() => {
+      throw new Error('stderr is gone');
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      expect(() => h.dispatcher.pass()).not.toThrow();
+      await h.dispatcher.idle();
+      await settle();
+      expect(runsOf(h.t.db, task.taskId)[0]?.endedAt).not.toBeNull();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('reports for its own run when one role runs in two workspaces at once', async () => {
+    const h = harness();
+    const web = h.create({ title: 'web', workspace: 'web' });
+    const api = h.create({ title: 'api', workspace: 'api' });
+    const implementer = h.driver('implementer');
+    completes(h, implementer, 'web done');
+    completes(h, implementer, 'api done');
+
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+
+    expect(implementer.starts).toHaveLength(2);
+    expect([...runsOf(h.t.db, web.taskId), ...runsOf(h.t.db, api.taskId)].map((r) => r.outcome)).toEqual([
+      'completed',
+      'completed',
+    ]);
   });
 });
