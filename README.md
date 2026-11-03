@@ -166,7 +166,8 @@ its `config.yaml`. Each name is looked up where bytesec keeps a user's skills, i
 `$XDG_CONFIG_HOME/bytesec/skills` (else `~/.config/bytesec/skills`), the same directory's
 `skill/`, then `~/.trae/skills`, `~/.coco/skills`, `~/.agents/skills` and `~/.claude/skills`. The
 first real directory holding a `SKILL.md` wins; a symlink is not followed. A name that is not
-found, or is also one of the role's own skills, stops the gateway at startup. An imported skill is
+found, is not a skill name bytesec loads, or is also one of the role's own skills, stops the
+gateway at startup. An imported skill is
 given to the agent exactly as the role's own are.
 
 The role `default` runs chat sessions. It is `roles/default/` if that exists, and otherwise
@@ -190,7 +191,11 @@ bytesec hides your user-level skills and the workspace's from it. Name the user 
 needs in its `agent.skills` and they are copied into the package with its own. Set
 `agent.native: false` in a role's `config.yaml` to have its `role.md` and skills sent in the
 task prompt instead, as every other agent gets them; if writing the package fails, a run gets
-them that way too, and the log says so. Chat sessions are not affected.
+them that way too, and the log says so. Some roles are not rendered and get them in the prompt
+too: one named `bytesec-agent`, which bytesec keeps for its own agent; one whose `agent.args`
+already hold `--agent`; one whose environment sets `BYTESEC_LOCAL_APM_PATH` itself; and one
+with a skill whose name bytesec will not load. `mt role check` says which, and why. Chat
+sessions are not affected.
 
 **Workspaces** are named directories in the config file:
 

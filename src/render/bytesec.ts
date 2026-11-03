@@ -31,7 +31,7 @@ const PACKAGE_NAME = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 /** Agent names bytesec keeps for itself: `--agent bytesec-agent` runs its built-in agent, not a package. */
 const RESERVED = ['bytesec-agent'];
 /** The variable naming the package, and the older name bytesec also reads. */
-export const APM_PATH = 'BYTESEC_LOCAL_APM_PATH';
+const APM_PATH = 'BYTESEC_LOCAL_APM_PATH';
 const APM_PATH_OLD = 'OPENCODE_LOCAL_APM_PATH';
 
 function oneLine(text: string): string {

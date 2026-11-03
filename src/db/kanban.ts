@@ -452,9 +452,9 @@ const PACKAGE_HASH = /^[0-9a-f]{64}$/;
 /**
  * Record how an agent run's role reached its agent (plan R): as a native
  * package, by its content hash, or in the prompt. It goes into the run's
- * `agent_config`, beside the agent it ran, since it is part of what ran: a
- * rework or a resume is seeded only from a run that ran the same way. Written
- * once, on an open agent run.
+ * `agent_config`, beside the agent it ran, since it is part of what ran: C4
+ * and E will seed only from a run with the same native-ness and package hash.
+ * Written once, on an open agent run.
  */
 export function recordRendering(db: Db, runId: string, rendering: Rendering, now: number): Result<{ run: RunRow }> {
   return tx(db, (d) => {

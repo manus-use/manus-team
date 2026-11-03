@@ -479,8 +479,8 @@ export class Dispatcher {
     // Before the session, and synchronously up to the run's entry in #open, so
     // the sweep of another run's render sees this one's package as in use.
     const rendered = this.#render(claimed);
-    // On the run, once decided: a rework or a resume is seeded only from a run
-    // that ran the same way. A refusal is noted, and the run goes on.
+    // On the run, once decided: C4 and E will seed only from a run with the
+    // same native-ness and package hash. A refusal is noted, and the run goes on.
     const recorded = this.#deps.service.recordRendering(
       run.runId,
       rendered === undefined ? { native: false } : { native: true, packageHash: rendered.hash },

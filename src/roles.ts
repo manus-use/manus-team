@@ -323,7 +323,7 @@ function readRoleMd(dir: string): string | undefined {
  * `--expose-user-skills`. HOME and XDG_CONFIG_HOME come from the environment the
  * gateway was given, which tests replace.
  */
-export function userSkillDirs(env: Env): string[] {
+function userSkillDirs(env: Env): string[] {
   const home = env['HOME'] === '' ? undefined : env['HOME'];
   const xdg = env['XDG_CONFIG_HOME'] === '' ? undefined : env['XDG_CONFIG_HOME'];
   const config = xdg ?? (home === undefined ? undefined : join(home, '.config'));

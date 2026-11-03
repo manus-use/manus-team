@@ -111,7 +111,7 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–3, 
 8. **A package's directory is named by its content**: `$MT_HOME/rendered/<role>/<sha256>/`, which is itself the package directory.
    - The hash is over the package's own files, sorted by path, each path and its bytes length-prefixed. It covers `role.md`, every skill file, the description and whatever the renderer writes, by construction.
    - Two runs on two versions of a role's files never share a directory.
-   - A directory that exists is reused as it is: it was renamed into place whole, so it is complete.
+   - A directory that exists is reused once its files are checked against what would be written: it was renamed into place whole, so it is complete, but an agent runs as the same user and could edit it. One that differs is staged afresh and swapped in (review follow-ups).
 9. **A package is written atomically, privately and from regular files only.**
    - It is written in a `.stage-XXXXXX` directory (`mkdtemp`) beside its final place, and renamed. A failed write removes the staging.
    - Directories are `0700` and files `0600`. A render root, or a role directory in it, that is a symlink or a file is refused rather than followed.
@@ -229,7 +229,10 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–3, 
 - **C3:**
   - a run's environment is `{ ...rendered?.env, MT_KANBAN_RUN }` in `Dispatcher.#drive`; the token, socket and `PATH` join it there;
   - nudges and forwarded comments are new turns in the same session, and the CLI driver gives every turn the session's `args`, so a nudged native run stays native;
-  - the CLI driver's replayed history now carries a shorter first prompt for a native run, which leaves more room for the transcript.
+  - the CLI driver's replayed history now carries a shorter first prompt for a native run, which leaves more room for the transcript;
+  - on a native run, `role.md` is in the system prompt, which ranks above the user turn that carries the protocol and its precedence line. Consider rendering the protocol and the precedence line into the agent file's body after `role.md` (one package per run kind), or watch `protocol_violation` rates on native roles;
+  - if C3 composes a prompt again from the DB, read `run.agentConfig.native` rather than a `briefFor` option;
+  - rendering is synchronous, up to 16 MiB per claim, so a pass with many claims can delay chat. Consider moving it off the event loop, or lowering the cap.
 - **C4:**
   - review and rework runs are rendered like work runs, from the reviewer's or the implementer's role;
   - seed a rework or resume only from a run with the same native-ness and package hash. Both are in the run's `agent_config` (Decision 20). `reworkSeed` in `src/db/kanban.ts` compares only `driver`, `command` and `args` today, and at the claim the new run's hash is not known yet: C4 compares against the package the role renders to now, or decides the seed after the render.
@@ -262,7 +265,7 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–3, 
 | `tests/render-bytesec.test.ts`, `tests/render-native.test.ts`, `tests/kanban-rendering.test.ts`, `tests/kanban-dispatch-native.test.ts` (create) | |
 | `tests/names.test.ts`, `tests/roles.test.ts`, `tests/config.test.ts`, `tests/driver-build.test.ts`, `tests/cli-driver.e2e.ts`, `tests/fakes/cli-agent.mjs`, `tests/registry.test.ts`, `tests/workspaces.test.ts`, `tests/kanban-service.test.ts`, `tests/kanban-prompt.test.ts`, `tests/kanban-brief.test.ts`, `tests/helpers/dispatch.ts`, `tests/mt-role.test.ts` (modify) | |
 
-Running counts, unit then end to end: Task 1 932 / 49, Task 2 934 / 49, Task 3 941 / 49, Task 4 942 / 51, Task 5 944, Task 6 950, Task 7 965, Task 8 965, Task 9 968, Task 10 970, Task 11 976, Task 12 978 / 51, review follow-ups 986 / 51.
+Running counts, unit then end to end: Task 1 932 / 49, Task 2 934 / 49, Task 3 941 / 49, Task 4 942 / 51, Task 5 944, Task 6 950, Task 7 965, Task 8 965, Task 9 968, Task 10 970, Task 11 976, Task 12 978 / 51, review follow-ups 986 / 51, final review follow-ups 988 / 51.
 
 ---
 
@@ -3647,11 +3650,22 @@ The reviews of Tasks 1–3 and 7–9 found the following, fixed after Task 12, e
 
 Counts after: `Tests  986 passed (986)` unit, `Tests  51 passed (51)` end to end.
 
+The final review found the following, fixed the same way.
+
+- **A reused package is checked.** When the hash directory exists, `renderNative` compares it with the files it would write: the same paths, the same bytes, all regular files, and no other file, directory or link. Each file is opened as `readRegular` opens one and read at most one byte past its expected length. One that differs, as one an agent edited would, is staged afresh, the old directory renamed aside to `<staging>-old`, the new one renamed in, and the old removed; a process that dies part way leaves only a `.stage-` name, which the boot sweep removes. A test edits, adds, removes and symlinks files in a package, and each time the next render restores it, leaves nothing aside, and returns the hash of what is on disk, which is what the run records.
+- **The skill walk does not follow a swapped subdirectory.** A directory entry is `lstat`ed again before the walk recurses into it, and skipped unless it is still a real directory. A test swaps `references/` for a symlink after the listing, through the `readdirSync` hook, and nothing from its target is copied.
+- **The seeding comments say what is planned.** In `Dispatcher.#drive` and on `recordRendering`, they now say that C4 and E will seed only from a run with the same native-ness and package hash; nothing seeds that way yet.
+- **Fewer exports.** `APM_PATH` (`src/render/bytesec.ts`), `RENDERERS` (`src/render/native.ts`) and `userSkillDirs` (`src/roles.ts`) are no longer exported: nothing outside their modules, tests included, used them.
+- **README.** The native-rendering paragraph lists the roles that are not rendered (`bytesec-agent`, `--agent` already in `agent.args`, `BYTESEC_LOCAL_APM_PATH` set by the role, a skill name bytesec will not load) and says `mt role check` gives the reason. The imported-skills text says an invalid skill name stops the gateway at startup.
+- **Plan notes.** Three items for C3 under "What later plans need": the system prompt's rank over the protocol, `run.agentConfig.native` for a prompt composed again, and rendering on the event loop.
+
+Counts after: `Tests  988 passed (988)` unit, `Tests  51 passed (51)` end to end.
+
 ---
 
 ## Done when
 
-- `npm test` gives `Tests  986 passed (986)`. `npm run test:e2e` gives `Tests  51 passed (51)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  988 passed (988)`. `npm run test:e2e` gives `Tests  51 passed (51)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - No test runs bytesec or reaches the network: the dispatcher's tests drive `FakeDriver`s, and the only agent processes any test spawns are the fakes in `tests/fakes/`.
 - A role's `agent.skills` are found where bytesec finds a user's skills, checked at startup, copied into its package, and listed in its prompt when it is not rendered.
