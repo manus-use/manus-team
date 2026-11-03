@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eventsOf } from '../src/db/kanban-read.js';
+import { createSession } from '../src/db/sessions.js';
 import { KanbanService, type CreateRequest, type KanbanServiceDeps } from '../src/kanban/service.js';
 import type { AgentConfig } from '../src/config.js';
 import type { Role } from '../src/roles.js';
@@ -213,5 +214,139 @@ describe('KanbanService: claims and the runs they open', () => {
       task: { blockKind: 'gave_up' },
     });
     expect(s.closeRun(run.runId)).toMatchObject({ ok: true, run: { endedAt: clock.now() } });
+  });
+});
+
+describe('KanbanService: the rest of the board', () => {
+  it('runs a task from claim to done, and shows it', () => {
+    const s = service();
+    const task = ok(s.create(request())).task;
+    const run = ok(s.claim(task.taskId)).run;
+    createSession(
+      h.db,
+      { id: 's_run', agentId: 'implementer', workspaceId: 'default', ownerPrincipal: ALICE },
+      clock.now(),
+    );
+    ok(s.attachSession(run.runId, 's_run'));
+    ok(s.comment(task.taskId, 'remember the empty file', ALICE));
+    clock.advance(60_000);
+    ok(s.complete(task.taskId, { kind: 'run', runId: run.runId }, { summary: 'parser written' }));
+    ok(s.closeRun(run.runId));
+    expect(ok(s.show(task.taskId)).view).toMatchObject({
+      status: 'done',
+      task: { phase: 'done', closedAt: clock.now() },
+      runs: [
+        { runId: run.runId, sessionId: 's_run', outcome: 'completed', summary: 'parser written', endedAt: clock.now() },
+      ],
+      comments: [{ author: ALICE, body: 'remember the empty file' }],
+    });
+    expect(s.show('k_missing')).toEqual({ ok: false, code: 'not_found', message: 'no task k_missing' });
+  });
+
+  it('checks a reviewer named in a review report like any assignee', () => {
+    const s = service();
+    const task = ok(s.create(request())).task;
+    const by = { kind: 'run', runId: ok(s.claim(task.taskId)).run.runId } as const;
+    expect(s.requestReview(task.taskId, by, { summary: 'v1', reviewer: 'lark:on_bob' })).toMatchObject({
+      ok: false,
+      code: 'person_not_assignable',
+    });
+    expect(s.requestReview(task.taskId, by, { summary: 'v1', reviewer: 'ghost' })).toMatchObject({
+      ok: false,
+      code: 'unknown_role',
+    });
+    expect(s.requestReview(task.taskId, by, { summary: 'v1', reviewer: 'reviewer' })).toMatchObject({
+      ok: true,
+      task: { phase: 'review', reviewer: { kind: 'role', name: 'reviewer' } },
+    });
+  });
+
+  it('reassigns only to a name the board may give work to, and sets only a configured workspace', () => {
+    const s = service();
+    const task = ok(s.create(request())).task;
+    expect(s.assign(task.taskId, 'supervised', ALICE)).toMatchObject({ ok: false, code: 'supervised_role' });
+    expect(s.assignReviewer(task.taskId, 'lark:on_bob', ALICE)).toMatchObject({
+      ok: false,
+      code: 'person_not_assignable',
+    });
+    expect(s.assign(task.taskId, 'docs-writer', ALICE)).toMatchObject({
+      ok: true,
+      task: { assignee: { kind: 'role', name: 'docs-writer' } },
+    });
+    expect(s.setWorkspace(task.taskId, 'nowhere', ALICE)).toEqual({
+      ok: false,
+      code: 'unknown_workspace',
+      message: 'workspace nowhere is not configured',
+    });
+    expect(s.setWorkspace(task.taskId, 'web', ALICE)).toMatchObject({ ok: true, task: { workspace: 'web' } });
+  });
+
+  it('refuses an empty comment, reason or change request, and a block kind nobody may report', () => {
+    const s = service();
+    const task = ok(s.create(request({ reviewer: 'reviewer' }))).task;
+    const by = { kind: 'run', runId: ok(s.claim(task.taskId)).run.runId } as const;
+    expect(s.comment(task.taskId, '  ', ALICE)).toEqual({
+      ok: false,
+      code: 'invalid',
+      message: 'a comment needs text',
+    });
+    expect(s.block(task.taskId, by, { kind: 'gave_up', reason: 'x' })).toEqual({
+      ok: false,
+      code: 'invalid',
+      message: "gave_up is set by the board's breaker, never reported",
+    });
+    expect(s.block(task.taskId, by, { kind: 'bored', reason: 'x' })).toEqual({
+      ok: false,
+      code: 'invalid',
+      message: 'unknown block kind bored (one of dependency, needs_input, capability, transient)',
+    });
+    expect(s.block(task.taskId, by, { kind: 'needs_input', reason: '' })).toMatchObject({ code: 'invalid' });
+    expect(s.requestChanges(task.taskId, by, ' ')).toMatchObject({ code: 'invalid' });
+  });
+
+  it('blocks, unblocks, stops and archives', () => {
+    const s = service();
+    const task = ok(s.create(request())).task;
+    const first = ok(s.claim(task.taskId)).run;
+    expect(
+      s.block(task.taskId, { kind: 'run', runId: first.runId }, { kind: 'needs_input', reason: 'which db?' }),
+    ).toMatchObject({
+      ok: true,
+      task: { phase: 'blocked' },
+    });
+    ok(s.closeRun(first.runId));
+    expect(s.unblock(task.taskId, ALICE, 'postgres')).toMatchObject({ ok: true, task: { phase: 'open' } });
+    const second = ok(s.claim(task.taskId)).run;
+    expect(s.stop(task.taskId, ALICE)).toMatchObject({ ok: true, run: { runId: second.runId, outcome: 'cancelled' } });
+    ok(s.closeRun(second.runId));
+    expect(s.archive(task.taskId, ALICE)).toMatchObject({ ok: true, task: { phase: 'archived' } });
+  });
+
+  it('creates a follow-up for a done task instead of reopening it', () => {
+    const s = service();
+    const task = ok(s.create(request())).task;
+    expect(s.followUp(task.taskId, request({ title: 'handle CRLF' }))).toEqual({
+      ok: false,
+      code: 'illegal_transition',
+      message: `task ${task.taskId} is open; only a done task gets follow-ups`,
+    });
+    ok(s.complete(task.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' }));
+    const follow = ok(s.followUp(task.taskId, request({ title: 'handle CRLF', body: 'CI log: ...' }))).task;
+    expect(ok(s.show(follow.taskId)).view).toMatchObject({
+      status: 'ready',
+      parents: [{ taskId: task.taskId, phase: 'done' }],
+      task: { body: 'CI log: ...' },
+    });
+    expect(ok(s.show(task.taskId)).view.task.phase).toBe('done');
+  });
+
+  it('links tasks, refusing a cycle', () => {
+    const s = service();
+    const a = ok(s.create(request({ title: 'a' }))).task;
+    const b = ok(s.create(request({ title: 'b', parents: [a.taskId] }))).task;
+    expect(s.link(b.taskId, a.taskId, ALICE)).toMatchObject({ ok: false, code: 'cycle' });
+    const c = ok(s.create(request({ title: 'c' }))).task;
+    expect(s.link(c.taskId, b.taskId, ALICE)).toEqual({ ok: true, added: true });
+    expect(ok(s.show(b.taskId)).view.parents.map((t) => t.title)).toEqual(['a', 'c']);
   });
 });

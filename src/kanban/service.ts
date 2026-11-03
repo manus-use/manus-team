@@ -2,15 +2,19 @@ import { createHash } from 'node:crypto';
 import { accessSync, constants, readFileSync } from 'node:fs';
 import type { Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
-import { getTask } from '../db/kanban-read.js';
+import { getTask, taskView, type TaskView } from '../db/kanban-read.js';
 import type { Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
 import {
+  BLOCK_KINDS,
   CONTRACT_FIELDS,
   type AgentSnapshot,
   type Assignee,
+  type CommentRow,
   type Contract,
   type CreatedVia,
+  type ReportedBlockKind,
+  type Reporter,
   type Result,
   type RetryOnCrash,
   type RunRow,
@@ -76,6 +80,9 @@ export interface Claimed {
   /** The role.md whose hash the run records, for plan C2's prompt; undefined without one. */
   roleMd: string | undefined;
 }
+
+/** The kinds a worker or a person may report; gave_up is the breaker's. */
+const REPORTABLE: readonly ReportedBlockKind[] = BLOCK_KINDS.filter((k): k is ReportedBlockKind => k !== 'gave_up');
 
 /** A person's principal, as channels identify them. */
 const PERSON = /^lark:[A-Za-z0-9_-]+$/;
@@ -220,6 +227,102 @@ export class KanbanService {
   /** The run's last turn has ended: it is closed, and its workspace free. */
   closeRun(runId: string): Result<{ run: RunRow }> {
     return board.closeRun(this.#db, runId, this.#clock.now());
+  }
+
+  /**
+   * New work on a done task is a new task with it as a parent, never a reopening
+   * (spec §4.4): the done task's summary is what its children were given as their
+   * handoff, and reopening it would rewrite the input to work that already ran.
+   */
+  followUp(taskId: string, req: CreateRequest): Result<{ task: TaskRow; existing: boolean }> {
+    const done = getTask(this.#db, taskId);
+    if (done === undefined) return board.refuse('not_found', `no task ${taskId}`);
+    if (done.phase !== 'done') {
+      return board.refuse('illegal_transition', `task ${taskId} is ${done.phase}; only a done task gets follow-ups`);
+    }
+    return this.create({ ...req, parents: [taskId, ...(req.parents ?? [])] });
+  }
+
+  link(parentId: string, childId: string, by: string): Result<{ added: boolean }> {
+    return board.link(this.#db, parentId, childId, by, this.#clock.now());
+  }
+
+  /** Workspaces are named, never paths, and only configured ones (spec §2.3). */
+  setWorkspace(taskId: string, workspace: string, by: string): Result<{ task: TaskRow }> {
+    if (!this.#workspaces.has(workspace)) {
+      return board.refuse('unknown_workspace', `workspace ${workspace} is not configured`);
+    }
+    return board.setWorkspace(this.#db, taskId, workspace, by, this.#clock.now());
+  }
+
+  comment(taskId: string, body: string, by: string): Result<{ comment: CommentRow }> {
+    if (body.trim() === '') return board.refuse('invalid', 'a comment needs text');
+    return board.addComment(this.#db, taskId, by, body, this.#clock.now());
+  }
+
+  /** Every path to done (spec §5.1). Gates run here first, from plan C4. */
+  complete(taskId: string, by: Reporter, handoff: board.Handoff): Result<{ task: TaskRow; run: RunRow | undefined }> {
+    return board.complete(this.#db, taskId, by, handoff, this.#clock.now());
+  }
+
+  /** A reviewer the report names is checked like any assignee (spec §5.3, §12). */
+  requestReview(
+    taskId: string,
+    by: Reporter,
+    handoff: board.Handoff & { reviewer?: string },
+  ): Result<{ task: TaskRow; run: RunRow | undefined }> {
+    const { reviewer, ...rest } = handoff;
+    if (reviewer === undefined) return board.requestReview(this.#db, taskId, by, rest, this.#clock.now());
+    const who = this.#assignable(reviewer);
+    if (!who.ok) return who;
+    return board.requestReview(this.#db, taskId, by, { ...rest, reviewer: who.assignee }, this.#clock.now());
+  }
+
+  requestChanges(taskId: string, by: Reporter, reason: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
+    if (reason.trim() === '') return board.refuse('invalid', 'changes need a reason the implementer can act on');
+    return board.requestChanges(this.#db, taskId, by, reason, this.#clock.now());
+  }
+
+  /** `kind` arrives as text from an agent's JSON or from chat, so it is checked here. */
+  block(
+    taskId: string,
+    by: Reporter,
+    report: { kind: string; reason: string; parents?: readonly string[] },
+  ): Result<{ task: TaskRow; run: RunRow | undefined }> {
+    const kind = REPORTABLE.find((k) => k === report.kind);
+    if (kind === undefined) {
+      return board.refuse(
+        'invalid',
+        report.kind === 'gave_up'
+          ? "gave_up is set by the board's breaker, never reported"
+          : `unknown block kind ${report.kind} (one of ${REPORTABLE.join(', ')})`,
+      );
+    }
+    if (report.reason.trim() === '') return board.refuse('invalid', 'a block needs a reason');
+    return board.block(
+      this.#db,
+      taskId,
+      by,
+      { kind, reason: report.reason, ...(report.parents === undefined ? {} : { parents: report.parents }) },
+      this.#clock.now(),
+    );
+  }
+
+  unblock(taskId: string, by: string, comment?: string): Result<{ task: TaskRow }> {
+    return board.unblock(this.#db, taskId, by, comment, this.#clock.now());
+  }
+
+  stop(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow }> {
+    return board.stop(this.#db, taskId, by, this.#clock.now());
+  }
+
+  archive(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
+    return board.archive(this.#db, taskId, by, this.#clock.now());
+  }
+
+  show(taskId: string): Result<{ view: TaskView }> {
+    const view = taskView(this.#db, taskId);
+    return view === undefined ? board.refuse('not_found', `no task ${taskId}`) : { ok: true, view };
   }
 
   /** Who the next claim is for, resolved against the team as it is now. */
