@@ -255,6 +255,10 @@ describe('loadConfig: the file is validated, not trusted', () => {
     );
   });
 
+  it("refuses agent.native in the agent: block, whose role has no role.md or skills to render", () => {
+    expect(() => load({}, yamlFile({ agent: { native: false } }))).toThrow(/unknown setting agent\.native \(known: driver, /);
+  });
+
   it('refuses a value of the wrong type', () => {
     expect(() => load({}, yamlFile({ auth: { talk: 'ou_a' } }))).toThrow('auth.talk must be a list');
     expect(() => load({}, yamlFile({ auth: { talk: ['ou_a', ''] } }))).toThrow(

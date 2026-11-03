@@ -148,7 +148,7 @@ export function loadRoleDir(
     configPath,
     'agent',
     agentRaw,
-    ['driver', 'command', 'args', 'unsupervised', 'passEnv', 'readOnlyTools', 'maskExempt'],
+    ['driver', 'command', 'args', 'unsupervised', 'passEnv', 'readOnlyTools', 'maskExempt', 'native'],
     HINTS,
   );
   if (root['agent'] === undefined || root['agent'] === null) {
@@ -190,6 +190,7 @@ export function loadRoleDir(
 
   const { skills, notes } = readSkills(dir);
   const maskExempt = strings(configPath, 'agent.maskExempt', agentRaw['maskExempt']);
+  const native = bool(configPath, 'agent.native', agentRaw['native']);
   return {
     role: {
       name,
@@ -206,6 +207,7 @@ export function loadRoleDir(
         passEnv,
         readOnlyTools: strings(configPath, 'agent.readOnlyTools', agentRaw['readOnlyTools']),
         maskExempt,
+        ...(native === undefined ? {} : { native }),
       },
       roleMdPath: readRoleMd(dir),
       skills,

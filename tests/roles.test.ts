@@ -102,6 +102,15 @@ describe('loadRoleDir: config.yaml', () => {
     expect(() => load('r')).toThrow(/has no way to ask for permission/);
   });
 
+  it('reads agent.native, which only a role directory has', () => {
+    role('plain', AGENT);
+    role('injected', `${AGENT}  native: false\n`);
+    expect(load('plain').role.agent.native).toBeUndefined();
+    expect(load('injected').role.agent.native).toBe(false);
+    role('bad', `${AGENT}  native: no\n`);
+    expect(() => load('bad')).toThrow(/agent\.native must be true or false, got "no"/);
+  });
+
   it('requires every passEnv name to be set', () => {
     role('r', `${AGENT}  passEnv: [GH_TOKEN]\n`);
     expect(() => load('r')).toThrow(/names GH_TOKEN, which is not set/);

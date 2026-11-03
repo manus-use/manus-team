@@ -64,6 +64,13 @@ export interface AgentConfig {
   readOnlyTools: readonly string[];
   /** Environment names whose values are not secret, so not masked (spec §10.1). */
   maskExempt: readonly string[];
+  /**
+   * A role directory's `agent.native`. Unset or true, a role whose agent has a
+   * renderer runs as a native agent package; false keeps its role.md and skills
+   * in the task prompt (spec §2.2, plan R). The `agent:` block has no such key:
+   * its role has no role.md and no skills to render.
+   */
+  native?: boolean;
 }
 
 export interface GatewayConfig {
