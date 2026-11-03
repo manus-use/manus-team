@@ -188,19 +188,25 @@ export function withholdSecretPrefix(text: string): string {
  * `\` so that it no longer matches. A string directly under one of
  * IDENTIFYING_KEYS is left alone; an object or array there is still walked.
  * Returns the input itself when there is nothing to mask.
+ *
+ * `alsoIdentifying` names more keys to leave alone, for one writer's payloads:
+ * the board's ids and assignee names (db/kanban.ts). They are not added to
+ * IDENTIFYING_KEYS, which also exempts keys in session events and approvals,
+ * whose payloads an agent shapes.
  */
-export function redactValues(value: unknown): unknown {
+export function redactValues(value: unknown, alsoIdentifying?: ReadonlySet<string>): unknown {
   if (ordered.length === 0) return value;
-  return walk(value);
+  return walk(value, alsoIdentifying);
 }
 
-function walk(value: unknown): unknown {
+function walk(value: unknown, also: ReadonlySet<string> | undefined): unknown {
   if (typeof value === 'string') return redactKnownSecrets(value);
-  if (Array.isArray(value)) return value.map(walk);
+  if (Array.isArray(value)) return value.map((inner) => walk(inner, also));
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, inner] of Object.entries(value)) {
-      out[key] = IDENTIFYING_KEYS.has(key) && typeof inner === 'string' ? inner : walk(inner);
+      const identifying = IDENTIFYING_KEYS.has(key) || also?.has(key) === true;
+      out[key] = identifying && typeof inner === 'string' ? inner : walk(inner, also);
     }
     return out;
   }

@@ -108,6 +108,17 @@ describe('redactValues', () => {
     });
   });
 
+  it('leaves the keys a caller names as identifying alone, for that call only', () => {
+    addSecrets(['implementer-12345']);
+    const payload = { assignee: 'implementer-12345', taskId: 'implementer-12345', summary: 'implementer-12345' };
+    expect(redactValues(payload, new Set(['assignee', 'taskId']))).toEqual({
+      assignee: 'implementer-12345',
+      taskId: 'implementer-12345',
+      summary: MASK,
+    });
+    expect(redactValues(payload)).toEqual({ assignee: MASK, taskId: MASK, summary: MASK });
+  });
+
   it('returns the input untouched when no secret is known', () => {
     const payload = { message: 'anything' };
     expect(redactValues(payload)).toBe(payload);
