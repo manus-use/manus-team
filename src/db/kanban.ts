@@ -1061,3 +1061,143 @@ export function endRun(
     return { ok: true, task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next };
   });
 }
+
+// ---------------------------------------------------------------------------
+// Assigning, workspaces, archiving
+// ---------------------------------------------------------------------------
+
+/**
+ * The open run a change takes the task away from: an undecided one ends
+ * `superseded`; a decided one keeps its outcome (spec §3.3). Either way the run
+ * is returned so the caller can cancel an agent's turn and close it.
+ */
+function supersede(d: Db, open: RunRow | undefined, now: number): RunRow | undefined {
+  if (open === undefined) return undefined;
+  if (open.outcome === null) decide(d, open, 'superseded', {}, now);
+  return mustGetRun(d, open.runId);
+}
+
+function reassign(
+  db: Db,
+  taskId: string,
+  role: 'assignee' | 'reviewer',
+  who: Assignee,
+  by: string,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  return tx(db, (d) => {
+    const task = getTask(d, taskId);
+    if (task === undefined) return refuse('not_found', `no task ${taskId}`);
+    if (task.phase === 'done' || task.phase === 'archived') {
+      return refuse('illegal_transition', `task ${taskId} is ${task.phase}; it cannot be reassigned`);
+    }
+    const current = task[role];
+    if (current !== null && current.kind === who.kind && current.name === who.name) {
+      return { ok: true, task, run: undefined };
+    }
+    const open = openRunOf(d, taskId);
+    const run = open?.kind === (role === 'assignee' ? 'work' : 'review') ? supersede(d, open, now) : undefined;
+    d.prepare(`UPDATE kanban_tasks SET ${role}_kind = ?, ${role} = ? WHERE task_id = ?`).run(
+      who.kind,
+      who.name,
+      taskId,
+    );
+    record(
+      d,
+      { taskId, runId: run?.runId ?? null, kind: `${role}_set`, actor: by, payload: { [role]: who.name } },
+      now,
+    );
+    return { ok: true, task: mustGet(d, taskId), run };
+  });
+}
+
+/**
+ * `/kanban assign` (spec §5.1): the phase is unchanged, and the next work claim
+ * goes to the new assignee. An open work run is superseded.
+ */
+export function assign(
+  db: Db,
+  taskId: string,
+  assignee: Assignee,
+  by: string,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  return reassign(db, taskId, 'assignee', assignee, by, now);
+}
+
+/** The same, for the reviewer: the next review claim goes to them. An open review run is superseded. */
+export function assignReviewer(
+  db: Db,
+  taskId: string,
+  reviewer: Assignee,
+  by: string,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  return reassign(db, taskId, 'reviewer', reviewer, by, now);
+}
+
+/**
+ * `/kanban workspace` (spec §2.3): set a task's workspace while it is null, in any
+ * phase. Refused once fixed, not merely once claimed, so a null workspace -- a
+ * person's task whose parents disagreed -- can always be set.
+ */
+export function setWorkspace(
+  db: Db,
+  taskId: string,
+  workspace: string,
+  by: string,
+  now: number,
+): Result<{ task: TaskRow }> {
+  return tx(db, (d) => {
+    const task = getTask(d, taskId);
+    if (task === undefined) return refuse('not_found', `no task ${taskId}`);
+    if (task.workspace !== null) {
+      return refuse('workspace_fixed', `task ${taskId} works in ${task.workspace}; a fixed workspace does not change`);
+    }
+    d.prepare('UPDATE kanban_tasks SET workspace = ? WHERE task_id = ?').run(workspace, taskId);
+    record(d, { taskId, kind: 'workspace_set', actor: by, payload: { workspace } }, now);
+    return { ok: true, task: mustGet(d, taskId) };
+  });
+}
+
+/**
+ * Archive a task from any phase but archived (spec §5.1). An undecided run ends
+ * `superseded`. A done task keeps the time it was done. An archived parent no
+ * longer holds its children back.
+ */
+export function archive(
+  db: Db,
+  taskId: string,
+  by: string,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  return tx(db, (d) => {
+    const task = getTask(d, taskId);
+    if (task === undefined) return refuse('not_found', `no task ${taskId}`);
+    if (task.phase === 'archived') return refuse('illegal_transition', `task ${taskId} is already archived`);
+    const run = supersede(d, openRunOf(d, taskId), now);
+    d.prepare(
+      `UPDATE kanban_tasks SET phase = 'archived', blocked_from = NULL, closed_at = coalesce(closed_at, ?)
+        WHERE task_id = ?`,
+    ).run(now, taskId);
+    record(d, { taskId, runId: run?.runId ?? null, kind: 'archived', actor: by, payload: { from: task.phase } }, now);
+    return { ok: true, task: mustGet(d, taskId), run };
+  });
+}
+
+/**
+ * A ready task nobody can be given (spec §4.2) is never dropped and never sent to
+ * a fallback: it is recorded, once -- until something else happens to the task,
+ * so a dispatcher pass every minute does not fill its log.
+ */
+export function noteUnassignable(db: Db, taskId: string, reason: string, now: number): Result<{ written: boolean }> {
+  return tx(db, (d) => {
+    if (getTask(d, taskId) === undefined) return refuse('not_found', `no task ${taskId}`);
+    const last = d
+      .prepare<[string], { kind: string }>('SELECT kind FROM kanban_events WHERE task_id = ? ORDER BY id DESC LIMIT 1')
+      .get(taskId);
+    if (last?.kind === 'skipped_unassignable') return { ok: true, written: false };
+    record(d, { taskId, kind: 'skipped_unassignable', actor: 'gateway', payload: { reason } }, now);
+    return { ok: true, written: true };
+  });
+}
