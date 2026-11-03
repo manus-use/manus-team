@@ -86,7 +86,12 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–4 c
   - the `0600` socket and the `mt kanban` commands;
   - stop nudges and `kanban.nudge_limit`, in place of the immediate `protocol_violation`;
   - forwarding a comment to an undecided run, through `countSubmission` and the same key scheme;
-  - calling `dispatcher.pass()` after a worker's `create` or `link`.
+  - calling `dispatcher.pass()` after a worker's `create` or `link`;
+  - **the token's flow:** the token is minted in `pass()` before `service.claim(taskId, {tokenHash})` and carried into `#run`; its removal from the masker goes in `#run`'s per-run `finally`, so it happens once whoever closes the run;
+  - **a submit loop in `#run`** for nudges and forwarded comments. The "decided meanwhile" check after `actorFor` is repeated before every submit, so no nudge follows a timeout's cancel;
+  - **the replayed history:** the CLI driver's `#compose` drops the whole replayed history when role.md is large, so a nudge would reach the agent without the task. C3 keeps the task prompt in the nudge, or caps the history differently;
+  - **superseded runs:** a `dispatcher.cancel(runId)` for a run the service's assign, stop or archive supersedes; without it the run keeps its workspace and its `max_running` slot until its turn ends;
+  - **triggering passes:** consider a change hook on `KanbanService` that calls `dispatcher.pass()`, rather than every caller remembering to.
 - **Plan C4, review, rework and gates:**
   - the prompt's own sections for the reviewer's reason, the implementer's previous handoff, and the last gate result;
   - the rework prompt;
@@ -109,7 +114,7 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–4 c
 - The gateway's `stop()` waits at most 5 s for the dispatcher's work. A start that never returns is not drained, so an archive behind it can still meet a closed database: the only result is a line in the log, and the next boot closes the run.
 - At capacity, a role task is skipped before `claim`, so a role task nobody can be given is not reported stranded until a `max_running` slot frees up.
 - No test covers a failing first sweep in `start()` being noted, or `start()` running `boot()` before the first pass with the flag on. Plan D adds one when it turns the flag on.
-- A run whose session would not archive is closed anyway, so its session can stay bound at the run's key (on the `kanban` channel, where nothing routes) and, if the registry's release did not get that far, unarchived. Only a deliberate `/attach` by id reaches it.
+- A run whose session would not archive is closed anyway, so until the next restart its session can stay bound at the run's key (on the `kanban` channel, where nothing routes) and, if the registry's release did not get that far, unarchived. Only a deliberate `/attach` by id reaches it. `boot()` archives every such session: any live `kanban` binding whose run is closed, or which has no run.
 - The classifier can misread tool output that reaches `agent_error`, such as `gh`'s "HTTP 401", npm's 403, or "disk quota exceeded". It reads only `agent_error` text, which today is the agent's own errors and stderr.
 - A secret split across two separate stored pieces, such as two comments, is not masked: the prompt puts a label, a newline or an indent between them, which breaks the exact match. This is inherent to matching known values exactly; a secret is caught only where it is stored whole.
 - `src/driver/cli/driver.ts` drops stderr lines that start with `{`. A provider error that bytesec logs as JSON therefore never reaches `agent_error` or the classifier, and the run falls back to `crashed` (an ambiguous terminal) or `failed`, and is counted.
@@ -119,7 +124,7 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–4 c
 - **C3:**
   - the run's environment is built in `Dispatcher.#run`, and `envFor` returns it;
   - a nudge goes where `#turnEnded` now records `protocol_violation`, and needs `countSubmission` for its key;
-  - `#close` is where a run's token leaves the masker.
+  - the `finally` in `Dispatcher.#run` is where a run's token leaves the masker: it runs once per run, after the run's one close, whoever asked for it.
 - **C4:** `briefFor` in `src/kanban/brief.ts` is where the review and rework sections are gathered.
 - **D:** the `stranded` events, and `dispatcher.pass()` after each `/kanban` command that can make a task claimable.
 
@@ -4778,11 +4783,32 @@ From the review of Tasks 13–15 and an earlier registry review. They add 14 uni
 
 **Tests.** `completes` in tests/helpers/dispatch.ts reports for the run its own start was given (`MT_KANBAN_RUN`, now on the fake driver's `TurnControl` as `env`), so one role can run in two workspaces at once; `reportComplete` takes a run id, or a driver while it has one run at a time. `endedUnreported`'s test lists `terminal_provider` as true and `changes_requested` as false.
 
+### After the final review
+
+From the final review of the branch. They add 9 unit tests (922 → 931).
+
+**Dispatcher (`src/kanban/dispatcher.ts`).**
+- *A run is closed once.* Closing a released session's runtime ends its turn `cancelled`, so the turn's end and the release both asked to close the run: two archive events, and an `already_closed` note. Each run now has a handle whose `closing` promise the first `#close` sets; a later ask gets that promise. `#turnEnded` returns at once for a released run. The release itself is `#close(open, { releaseFirst: true })`. Tested with a fake runtime whose `close()` ends the turn: one archive event, one "closed" note, no `already_closed`, and unpinned.
+- *One cleanup per run.* `#run` wraps the run in a `finally` that waits for the run's close and then unpins it (`#open.delete`). C3 removes the run's token there.
+- *A failed archive is retried at boot.* After ending the open runs, `boot()` archives every session with a live binding on the `kanban` channel whose run is closed, or which has no run, through `registry.archive`. The bindings are read with the new `bindingsOnChannel` in `src/db/bindings.ts`. Tested with an archive that failed before the restart, a binding at a run id the board never had, and a Lark binding left alone.
+
+**Prompt (`src/kanban/prompt.ts`).**
+- *Each section has its own share.* The task and the children are sized first. The attempts are fitted next, leaving the comments and the parents their shares; then the comments, leaving the parents theirs; then the parents, in what is left. A share is the section's reserve (8 KiB each for comments and parents), or less when the whole section needs less. Parents are fitted in order while they fit, then "N more parents omitted; mt kanban show has them.". Before this, parents were capped only by count and sized first, so 7 or 8 full handoffs pushed the attempts, comments and children past the final cut. The sections keep their order. Tested: 20 parents with maximal handoffs, 5 attempts with tool calls, and comments give a prompt under the budget with attempt 5 and its tool call, the newest comment, the children, and the parents-omitted line.
+- *`create`'s shape.* The assignee is `"<role name, or lark:<union_id> for a person>"`, as `KanbanService.create` takes it, and so is the optional reviewer, in `create` and in the `review` report. The work protocol lists `mt kanban link < link.json` with `{"parent_id": "...", "child_id": "..."}`, as spec §7.3 has it.
+
+**Session actor (`src/core/session-actor.ts`).** An ambiguous turn no longer marks an `archived` or `terminated` session `quarantined`. 2 tests.
+
+**Classifier (`src/kanban/classify.ts`).** A status followed by `but`, `to`, `instead`, `expected` or `got` (optionally after a comma) is a test's assertion, not a provider's answer: "AssertionError: expected status code 403 but got 200" is `failed`. 3 rows.
+
+**Session log (`src/kanban/session-log.ts`).** `lastTurnOf` cuts `last_output` to its last 2000 code points, not UTF-16 units, so an emoji at the cut is not split. 1 test.
+
+**Smaller.** `registry.archive`'s comment gives the real order: released, then the bindings revoked, then archived. `briefFor` takes the service's `Claimed`; `ClaimedRun` is gone. The `max_running` error starts with the config file's path, as the other `kanban:` errors do.
+
 ---
 
 ## Done when
 
-- `npm test` gives `Tests  922 passed (922)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  931 passed (931)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table, and only `src/kanban/service.ts` imports it (Step 15.6, and the guard in `tests/kanban-service.test.ts`).
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - A task assigned to a role is claimed, run as a fresh session on the sink channel, and closed when its turn ends. It has one agent run per workspace and no more than `max_running` agent runs open. A run that ends unreported is classified, counted and retried in a new session told what the last one did. A restart closes every open run. A run past its limit ends `timed_out`. Each of these has a test against the real board, registry and actors.
