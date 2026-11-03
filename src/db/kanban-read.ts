@@ -311,3 +311,86 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
     comments: commentsOf(db, taskId),
   };
 }
+
+// ---------------------------------------------------------------------------
+// What the dispatcher reads (plan C2)
+// ---------------------------------------------------------------------------
+
+/** Every open run, oldest first: what a restart closes (spec §8.4). */
+export function openRuns(db: Db): RunRow[] {
+  return db
+    .prepare<[], RunRaw>(`SELECT ${RUN_COLS} FROM kanban_runs WHERE ended_at IS NULL ORDER BY started_at, rowid`)
+    .all()
+    .map(decodeRun);
+}
+
+/** The run a gateway session belongs to: at most one, by the unique index on session_id. */
+export function runBySession(db: Db, sessionId: string): RunRow | undefined {
+  const row = db.prepare<[string], RunRaw>(`SELECT ${RUN_COLS} FROM kanban_runs WHERE session_id = ?`).get(sessionId);
+  return row === undefined ? undefined : decodeRun(row);
+}
+
+/**
+ * Open agent runs, decided or not: what `kanban.maxRunning` counts (spec §6.3).
+ * A run that has reported still has its process, and its live session.
+ */
+export function openAgentRunCount(db: Db): number {
+  const row = db
+    .prepare<[], { n: number }>(
+      "SELECT count(*) AS n FROM kanban_runs WHERE ended_at IS NULL AND assignee_kind = 'role'",
+    )
+    .get();
+  return row?.n ?? 0;
+}
+
+/**
+ * Tasks a pass may try to claim (spec §6.2 step 1), highest priority first, then
+ * oldest: in open or review, with no open run of any kind, every parent finished,
+ * and no cooldown still running. A task in its cooldown shows as ready (spec
+ * §4.1), so the cooldown is checked here rather than left to the claim to refuse.
+ *
+ * Whether someone can take it -- the assignee, the workspace -- is the claim's to
+ * decide, inside its transaction.
+ */
+export function claimableTasks(db: Db, now: number): TaskRow[] {
+  return db
+    .prepare<[number], TaskRaw>(
+      `SELECT ${TASK_COLS} FROM kanban_tasks t
+        WHERE t.phase IN ('open', 'review')
+          AND (t.cooldown_until IS NULL OR t.cooldown_until <= ?)
+          AND NOT EXISTS (SELECT 1 FROM kanban_runs r WHERE r.task_id = t.task_id AND r.ended_at IS NULL)
+          AND NOT EXISTS (
+            SELECT 1 FROM kanban_links l JOIN kanban_tasks p ON p.task_id = l.parent_id
+             WHERE l.child_id = t.task_id AND p.phase NOT IN ('done', 'archived'))
+        ORDER BY t.priority DESC, t.created_at, t.rowid`,
+    )
+    .all(now)
+    .map(decodeTask);
+}
+
+/** A task's completion, as its children are given it: the handoff (spec §7.1). */
+export interface Completion {
+  summary: string;
+  metadata: unknown;
+  /** The run that completed it; null for a person's completion. */
+  runId: string | null;
+}
+
+/**
+ * The task's latest completion: its `completed` event, and the run's summary and
+ * metadata when a run completed it. A person's completion has no run, and its
+ * summary is the event's. Undefined if the task was never completed.
+ */
+export function latestCompletion(db: Db, taskId: string): Completion | undefined {
+  const event = db
+    .prepare<[string], EventRaw>(
+      `SELECT id, task_id, run_id, kind, actor, json(payload) AS payload, created_at
+         FROM kanban_events WHERE task_id = ? AND kind = 'completed' ORDER BY id DESC LIMIT 1`,
+    )
+    .get(taskId);
+  if (event === undefined) return undefined;
+  const run = event.run_id === null ? undefined : getRun(db, event.run_id);
+  if (run !== undefined) return { summary: run.summary ?? '', metadata: run.metadata, runId: run.runId };
+  const payload = json(event.payload) as { summary?: unknown };
+  return { summary: typeof payload.summary === 'string' ? payload.summary : '', metadata: null, runId: null };
+}
