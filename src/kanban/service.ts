@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { accessSync, constants, readFileSync } from 'node:fs';
 import type { Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
-import { getTask, taskView, type TaskView } from '../db/kanban-read.js';
+import { getRun, getTask, taskView, type TaskView } from '../db/kanban-read.js';
 import type { Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
 import {
@@ -13,6 +13,7 @@ import {
   type CommentRow,
   type Contract,
   type CreatedVia,
+  type Refusal,
   type ReportedBlockKind,
   type Reporter,
   type Result,
@@ -98,9 +99,57 @@ export function agentSnapshot(role: Role): AgentSnapshot {
   };
 }
 
-function isWhole(n: number | undefined, min: number): boolean {
-  return n === undefined || (Number.isInteger(n) && n >= min);
+// Every entry point takes what an agent's JSON or chat sent, typed or not: a
+// wrong type is refused as `invalid`, never thrown, and never reaches a write.
+
+function isText(v: unknown): v is string {
+  return typeof v === 'string';
 }
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function isTextList(v: unknown): v is readonly string[] {
+  return Array.isArray(v) && v.every(isText);
+}
+
+/** Absent, or a whole number SQLite stores exactly, at least `min`. */
+function isWhole(n: unknown, min: number): boolean {
+  return n === undefined || (Number.isSafeInteger(n) && (n as number) >= min);
+}
+
+/** A refusal unless every id given is text. */
+function idsRefused(...ids: unknown[]): Refusal | undefined {
+  return ids.every(isText) ? undefined : board.refuse('invalid', 'task ids are text');
+}
+
+/** A refusal unless the handoff has a text summary, and its report fields their types. */
+function handoffRefused(by: Reporter, handoff: unknown): Refusal | undefined {
+  if (!isRecord(handoff) || !isText(handoff.summary)) {
+    return board.refuse('invalid', 'a report needs a summary, as text');
+  }
+  // An agent always says what it did; a person approving may say nothing.
+  if (by.kind === 'run' && handoff.summary.trim() === '') {
+    return board.refuse('invalid', 'a report needs a summary of what was done');
+  }
+  const { reportedCommit: commit, reportedDirty: dirty } = handoff;
+  if (commit !== undefined && commit !== null && !isText(commit)) {
+    return board.refuse('invalid', 'reported_commit is text');
+  }
+  if (dirty !== undefined && dirty !== null && typeof dirty !== 'boolean') {
+    return board.refuse('invalid', 'reported_dirty is true or false');
+  }
+  return undefined;
+}
+
+/**
+ * A worker's idempotency key is stored as `run-task:<its run's task>:<key>`, so
+ * two runs' keys never collide, and neither can return a chat's task.
+ */
+const RUN_KEY = 'run-task:';
+/** Chat's keys: the message that asked, `lark:<message_id>`. */
+const CHAT_KEY = 'lark:';
 
 export class KanbanService {
   readonly #db: Db;
@@ -126,7 +175,13 @@ export class KanbanService {
    * should fail while the person is still looking, not strand the task later.
    */
   create(req: CreateRequest): Result<{ task: TaskRow; existing: boolean }> {
-    if (req.title.trim() === '') return board.refuse('invalid', 'a task needs a title');
+    if (!isRecord(req)) return board.refuse('invalid', 'a task to create is an object');
+    if (!isText(req.title) || req.title.trim() === '') return board.refuse('invalid', 'a task needs a title');
+    if (req.body !== undefined && !isText(req.body)) return board.refuse('invalid', 'a body is text');
+    if (req.workspace !== undefined && !isText(req.workspace)) return board.refuse('invalid', 'a workspace is a name');
+    if (req.parents !== undefined && !isTextList(req.parents)) {
+      return board.refuse('invalid', 'parents are a list of task ids');
+    }
     const contract = this.#contract(req.contract);
     if (!contract.ok) return contract;
     if (req.workspace !== undefined && !this.#workspaces.has(req.workspace)) {
@@ -146,6 +201,8 @@ export class KanbanService {
     if (assignee !== undefined && !assignee.ok) return assignee;
     const reviewer = req.reviewer === undefined ? undefined : this.#assignable(req.reviewer);
     if (reviewer !== undefined && !reviewer.ok) return reviewer;
+    const key = this.#idempotencyKey(req);
+    if (!key.ok) return key;
     return board.createTask(
       this.#db,
       {
@@ -157,7 +214,7 @@ export class KanbanService {
         workspace: req.workspace ?? null,
         ...(req.parents === undefined ? {} : { parents: req.parents }),
         ...(req.priority === undefined ? {} : { priority: req.priority }),
-        idempotencyKey: req.idempotencyKey ?? null,
+        idempotencyKey: key.key,
         failureLimit: req.failureLimit ?? null,
         ...(req.retryOnCrash === undefined ? {} : { retryOnCrash: req.retryOnCrash }),
         maxRuntimeS: req.maxRuntimeS ?? null,
@@ -169,12 +226,16 @@ export class KanbanService {
   }
 
   assign(taskId: string, assignee: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
     const who = this.#assignable(assignee);
     if (!who.ok) return who;
     return board.assign(this.#db, taskId, who.assignee, by, this.#clock.now());
   }
 
   assignReviewer(taskId: string, reviewer: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
     const who = this.#assignable(reviewer);
     if (!who.ok) return who;
     return board.assignReviewer(this.#db, taskId, who.assignee, by, this.#clock.now());
@@ -190,6 +251,8 @@ export class KanbanService {
    * the task unassignable -- written once, never sent to a fallback (spec §4.2).
    */
   claim(taskId: string, opts: { tokenHash?: string } = {}): Result<Claimed> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
     const now = this.#clock.now();
     const task = getTask(this.#db, taskId);
     if (task === undefined) return board.refuse('not_found', `no task ${taskId}`);
@@ -235,6 +298,12 @@ export class KanbanService {
    * handoff, and reopening it would rewrite the input to work that already ran.
    */
   followUp(taskId: string, req: CreateRequest): Result<{ task: TaskRow; existing: boolean }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!isRecord(req)) return board.refuse('invalid', 'a task to create is an object');
+    if (req.parents !== undefined && !isTextList(req.parents)) {
+      return board.refuse('invalid', 'parents are a list of task ids');
+    }
     const done = getTask(this.#db, taskId);
     if (done === undefined) return board.refuse('not_found', `no task ${taskId}`);
     if (done.phase !== 'done') {
@@ -244,11 +313,16 @@ export class KanbanService {
   }
 
   link(parentId: string, childId: string, by: string): Result<{ added: boolean }> {
+    const ids = idsRefused(parentId, childId);
+    if (ids !== undefined) return ids;
     return board.link(this.#db, parentId, childId, by, this.#clock.now());
   }
 
   /** Workspaces are named, never paths, and only configured ones (spec §2.3). */
   setWorkspace(taskId: string, workspace: string, by: string): Result<{ task: TaskRow }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!isText(workspace)) return board.refuse('invalid', 'a workspace is a name');
     if (!this.#workspaces.has(workspace)) {
       return board.refuse('unknown_workspace', `workspace ${workspace} is not configured`);
     }
@@ -256,12 +330,16 @@ export class KanbanService {
   }
 
   comment(taskId: string, body: string, by: string): Result<{ comment: CommentRow }> {
-    if (body.trim() === '') return board.refuse('invalid', 'a comment needs text');
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!isText(body) || body.trim() === '') return board.refuse('invalid', 'a comment needs text');
     return board.addComment(this.#db, taskId, by, body, this.#clock.now());
   }
 
   /** Every path to done (spec §5.1). Gates run here first, from plan C4. */
   complete(taskId: string, by: Reporter, handoff: board.Handoff): Result<{ task: TaskRow; run: RunRow | undefined }> {
+    const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
+    if (refused !== undefined) return refused;
     return board.complete(this.#db, taskId, by, handoff, this.#clock.now());
   }
 
@@ -271,6 +349,8 @@ export class KanbanService {
     by: Reporter,
     handoff: board.Handoff & { reviewer?: string },
   ): Result<{ task: TaskRow; run: RunRow | undefined }> {
+    const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
+    if (refused !== undefined) return refused;
     const { reviewer, ...rest } = handoff;
     if (reviewer === undefined) return board.requestReview(this.#db, taskId, by, rest, this.#clock.now());
     const who = this.#assignable(reviewer);
@@ -279,7 +359,11 @@ export class KanbanService {
   }
 
   requestChanges(taskId: string, by: Reporter, reason: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
-    if (reason.trim() === '') return board.refuse('invalid', 'changes need a reason the implementer can act on');
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!isText(reason) || reason.trim() === '') {
+      return board.refuse('invalid', 'changes need a reason the implementer can act on');
+    }
     return board.requestChanges(this.#db, taskId, by, reason, this.#clock.now());
   }
 
@@ -289,6 +373,9 @@ export class KanbanService {
     by: Reporter,
     report: { kind: string; reason: string; parents?: readonly string[] },
   ): Result<{ task: TaskRow; run: RunRow | undefined }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!isRecord(report)) return board.refuse('invalid', 'a block is an object with a kind and a reason');
     const kind = REPORTABLE.find((k) => k === report.kind);
     if (kind === undefined) {
       return board.refuse(
@@ -298,7 +385,12 @@ export class KanbanService {
           : `unknown block kind ${report.kind} (one of ${REPORTABLE.join(', ')})`,
       );
     }
-    if (report.reason.trim() === '') return board.refuse('invalid', 'a block needs a reason');
+    if (!isText(report.reason) || report.reason.trim() === '') {
+      return board.refuse('invalid', 'a block needs a reason');
+    }
+    if (report.parents !== undefined && !isTextList(report.parents)) {
+      return board.refuse('invalid', 'parents are a list of task ids');
+    }
     return board.block(
       this.#db,
       taskId,
@@ -309,18 +401,27 @@ export class KanbanService {
   }
 
   unblock(taskId: string, by: string, comment?: string): Result<{ task: TaskRow }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (comment !== undefined && !isText(comment)) return board.refuse('invalid', 'a comment is text');
     return board.unblock(this.#db, taskId, by, comment, this.#clock.now());
   }
 
   stop(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
     return board.stop(this.#db, taskId, by, this.#clock.now());
   }
 
   archive(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
     return board.archive(this.#db, taskId, by, this.#clock.now());
   }
 
   show(taskId: string): Result<{ view: TaskView }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
     const view = taskView(this.#db, taskId);
     return view === undefined ? board.refuse('not_found', `no task ${taskId}`) : { ok: true, view };
   }
@@ -376,7 +477,9 @@ export class KanbanService {
    * A name the board may hand work to: a configured role whose agent runs
    * unsupervised, or a person with talk tier once people can be reached.
    */
-  #assignable(name: string): Result<{ assignee: Assignee }> {
+  #assignable(name: unknown): Result<{ assignee: Assignee }> {
+    if (!isText(name)) return board.refuse('invalid', 'an assignee or reviewer is a role name or a person, as text');
+    if (name.trim() === '') return board.refuse('invalid', 'an assignee or reviewer needs a name');
     if (name.includes(':')) {
       if (!PERSON.test(name)) {
         return board.refuse('invalid', `${JSON.stringify(name)} is neither a role name nor a person (lark:<union_id>)`);
@@ -402,6 +505,27 @@ export class KanbanService {
       );
     }
     return { ok: true, assignee: { kind: 'role', name } };
+  }
+
+  /**
+   * The key the task is stored under (spec §3.1). A chat's key is the message's,
+   * and only chat may use one; a run's is namespaced by the run's task, so a
+   * worker repeating a command gets its own task back and nobody else's.
+   */
+  #idempotencyKey(req: CreateRequest): Result<{ key: string | null }> {
+    const key: unknown = req.idempotencyKey;
+    if (key === undefined) return { ok: true, key: null };
+    if (!isText(key) || key === '') return board.refuse('invalid', 'an idempotency key is non-empty text');
+    if (key.startsWith(RUN_KEY)) {
+      return board.refuse('invalid', `an idempotency key starting ${RUN_KEY} is the board's own`);
+    }
+    if (req.createdVia.kind !== 'chat' && key.startsWith(CHAT_KEY)) {
+      return board.refuse('invalid', `an idempotency key starting ${CHAT_KEY} is for chat`);
+    }
+    if (req.createdVia.kind !== 'run') return { ok: true, key };
+    const run = getRun(this.#db, req.createdVia.runId);
+    if (run === undefined) return board.refuse('not_found', `no run ${req.createdVia.runId}`);
+    return { ok: true, key: `${RUN_KEY}${run.taskId}:${key}` };
   }
 
   /** A contract has only the five fields, each text (spec §4.3). */

@@ -93,7 +93,7 @@ Each is the reading most consistent with the rest of the spec. Decisions 1 and 2
   - minting the run token and storing its `token_hash`, which the schema keeps unique;
   - registering the token with the masker, reference-counted;
   - the `0600` socket and the `mt kanban` commands, which map onto this service, with `block` taking `{kind, reason, parents}`;
-  - namespacing a worker's `idempotency_key` by its task (`run-task:<task_id>:<key>`), so that two runs' keys cannot collide with each other or with chat's;
+  - passing a worker's `idempotency_key` through unchanged: the service already stores a run's key as `run-task:<its run's task_id>:<key>` and refuses a `lark:` key from anyone but chat, so two runs' keys cannot collide with each other or with chat's;
   - creating a task from a run, which inherits the run's task's subscriptions;
   - stop nudges, and forwarding comments to an undecided run;
   - capturing `reported_commit` and `reported_dirty` before a report.

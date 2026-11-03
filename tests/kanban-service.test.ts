@@ -350,3 +350,181 @@ describe('KanbanService: the rest of the board', () => {
     expect(ok(s.show(b.taskId)).view.parents.map((t) => t.title)).toEqual(['a', 'c']);
   });
 });
+
+describe('KanbanService: malformed input', () => {
+  const TABLES = ['kanban_tasks', 'kanban_runs', 'kanban_links', 'kanban_comments', 'kanban_events'];
+  function counts(): number[] {
+    return TABLES.map((t) => h.db.prepare<[], { n: number }>(`SELECT count(*) AS n FROM ${t}`).get()?.n ?? -1);
+  }
+  /** A value of the wrong type, as an agent's JSON can carry one. */
+  const bad = (v: unknown): never => v as never;
+
+  it('refuses every wrong-typed field, at every entry point, as invalid, and writes nothing', () => {
+    const s = service();
+    const open = ok(s.create(request({ title: 'open', reviewer: 'reviewer' }))).task;
+    const by = { kind: 'run', runId: ok(s.claim(open.taskId)).run.runId } as const;
+    const done = ok(s.create(request({ title: 'done', assignee: 'docs-writer' }))).task;
+    ok(s.complete(done.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' }));
+    const { title: _title, ...untitled } = request();
+
+    const cases: Array<[string, () => unknown]> = [
+      ['create: title a number', () => s.create(request({ title: bad(3) }))],
+      ['create: no title', () => s.create(bad(untitled))],
+      ['create: title null', () => s.create(request({ title: bad(null) }))],
+      ['create: body an object', () => s.create(request({ body: bad({}) }))],
+      ['create: body a number', () => s.create(request({ body: bad(3) }))],
+      ['create: assignee a number', () => s.create(request({ assignee: bad(3) }))],
+      ['create: assignee null', () => s.create(request({ assignee: bad(null) }))],
+      ['create: assignee empty', () => s.create(request({ assignee: '' }))],
+      ['create: reviewer a number', () => s.create(request({ reviewer: bad(3) }))],
+      ['create: reviewer null', () => s.create(request({ reviewer: bad(null) }))],
+      ['create: workspace a number', () => s.create(request({ workspace: bad(3) }))],
+      ['create: parents a string', () => s.create(request({ parents: bad(done.taskId) }))],
+      ['create: parents not strings', () => s.create(request({ parents: bad([3]) }))],
+      ['create: priority huge', () => s.create(request({ priority: 1e300 }))],
+      ['create: priority a fraction', () => s.create(request({ priority: 1.5 }))],
+      ['create: priority text', () => s.create(request({ priority: bad('1') }))],
+      ['create: failure limit text', () => s.create(request({ failureLimit: bad('2') }))],
+      ['create: runtime huge', () => s.create(request({ maxRuntimeS: 1e300 }))],
+      ['create: retry a number', () => s.create(request({ retryOnCrash: bad(3) }))],
+      ['create: key a number', () => s.create(request({ idempotencyKey: bad(3) }))],
+      ['create: contract value a number', () => s.create(request({ contract: bad({ outcome: 3 }) }))],
+      ['create: contract value null', () => s.create(request({ contract: bad({ outcome: null }) }))],
+      ['create: contract text', () => s.create(request({ contract: bad('x') }))],
+      ['create: contract a list', () => s.create(request({ contract: bad([]) }))],
+      ['followUp: title a number', () => s.followUp(done.taskId, request({ title: bad(3) }))],
+      ['followUp: parents a string', () => s.followUp(done.taskId, request({ parents: bad(open.taskId) }))],
+      ['followUp: task id an object', () => s.followUp(bad({}), request())],
+      ['assign: a number', () => s.assign(open.taskId, bad(3), ALICE)],
+      ['assign: null', () => s.assign(open.taskId, bad(null), ALICE)],
+      ['assign: empty', () => s.assign(open.taskId, '', ALICE)],
+      ['assign: task id an object', () => s.assign(bad({}), 'implementer', ALICE)],
+      ['assignReviewer: a number', () => s.assignReviewer(open.taskId, bad(3), ALICE)],
+      ['assignReviewer: null', () => s.assignReviewer(open.taskId, bad(null), ALICE)],
+      ['claim: task id an object', () => s.claim(bad({}))],
+      ['comment: body a number', () => s.comment(open.taskId, bad(3), ALICE)],
+      ['comment: body an object', () => s.comment(open.taskId, bad({}), ALICE)],
+      ['comment: body null', () => s.comment(open.taskId, bad(null), ALICE)],
+      ['comment: task id an object', () => s.comment(bad({}), 'hi', ALICE)],
+      ['complete: summary a number', () => s.complete(open.taskId, by, { summary: bad(3) })],
+      ['complete: summary null', () => s.complete(open.taskId, by, { summary: bad(null) })],
+      ['complete: summary blank', () => s.complete(open.taskId, by, { summary: '  ' })],
+      ['complete: no handoff', () => s.complete(open.taskId, by, bad(null))],
+      ['complete: commit a number', () => s.complete(open.taskId, by, { summary: 'x', reportedCommit: bad(3) })],
+      ['complete: dirty text', () => s.complete(open.taskId, by, { summary: 'x', reportedDirty: bad('yes') })],
+      ['requestReview: summary a number', () => s.requestReview(open.taskId, by, { summary: bad(3) })],
+      ['requestReview: summary blank', () => s.requestReview(open.taskId, by, { summary: '\n' })],
+      ['requestReview: reviewer a number', () => s.requestReview(open.taskId, by, { summary: 'x', reviewer: bad(3) })],
+      ['requestReview: reviewer null', () => s.requestReview(open.taskId, by, { summary: 'x', reviewer: bad(null) })],
+      ['requestReview: reviewer empty', () => s.requestReview(open.taskId, by, { summary: 'x', reviewer: '' })],
+      ['requestChanges: reason a number', () => s.requestChanges(open.taskId, by, bad(3))],
+      ['requestChanges: reason null', () => s.requestChanges(open.taskId, by, bad(null))],
+      ['block: reason a number', () => s.block(open.taskId, by, { kind: 'needs_input', reason: bad(3) })],
+      ['block: reason null', () => s.block(open.taskId, by, { kind: 'needs_input', reason: bad(null) })],
+      ['block: kind a number', () => s.block(open.taskId, by, { kind: bad(3), reason: 'x' })],
+      [
+        'block: parents a string',
+        () => s.block(open.taskId, by, { kind: 'dependency', reason: 'x', parents: bad(done.taskId) }),
+      ],
+      [
+        'block: parents not strings',
+        () => s.block(open.taskId, by, { kind: 'dependency', reason: 'x', parents: bad([3]) }),
+      ],
+      ['block: no report', () => s.block(open.taskId, by, bad(null))],
+      ['unblock: comment a number', () => s.unblock(open.taskId, ALICE, bad(3))],
+      ['link: parent a number', () => s.link(bad(3), open.taskId, ALICE)],
+      ['link: child an object', () => s.link(done.taskId, bad({}), ALICE)],
+      ['setWorkspace: a number', () => s.setWorkspace(open.taskId, bad(3), ALICE)],
+      ['setWorkspace: null', () => s.setWorkspace(open.taskId, bad(null), ALICE)],
+      ['stop: task id an object', () => s.stop(bad({}), ALICE)],
+      ['archive: task id an object', () => s.archive(bad({}), ALICE)],
+      ['show: task id an object', () => s.show(bad({}))],
+    ];
+
+    const wrong: string[] = [];
+    for (const [what, call] of cases) {
+      const before = counts();
+      let r: unknown;
+      try {
+        r = call();
+      } catch (err) {
+        r = { threw: (err as Error).message };
+      }
+      const { ok: passed, code } = (r ?? {}) as { ok?: unknown; code?: unknown };
+      const refused = passed === false && code === 'invalid';
+      if (!refused) wrong.push(`${what}: ${JSON.stringify(r)}`);
+      else if (JSON.stringify(counts()) !== JSON.stringify(before)) wrong.push(`${what}: wrote something`);
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it("accepts a person's blank summary: an approval needs no words", () => {
+    const s = service();
+    const task = ok(s.create(request())).task;
+    expect(s.complete(task.taskId, { kind: 'person', principal: ALICE }, { summary: '' })).toMatchObject({ ok: true });
+  });
+});
+
+describe('KanbanService: idempotency keys', () => {
+  /** A task with a run working on it, and how that run creates. */
+  function working(s: KanbanService, workspace: string) {
+    const task = ok(s.create(request({ title: `in ${workspace}`, workspace }))).task;
+    const runId = ok(s.claim(task.taskId)).run.runId;
+    return { task, runId, as: { createdBy: `run:${runId}`, createdVia: { kind: 'run', runId } as const } };
+  }
+
+  it("refuses a chat-shaped key from an agent, and a key shaped like a run's from anyone", () => {
+    const s = service();
+    const { as } = working(s, 'web');
+    expect(s.create(request({ idempotencyKey: 'lark:om_1', ...as }))).toEqual({
+      ok: false,
+      code: 'invalid',
+      message: 'an idempotency key starting lark: is for chat',
+    });
+    expect(s.create(request({ idempotencyKey: 'run-task:k_x:step' }))).toMatchObject({ ok: false, code: 'invalid' });
+    expect(s.create(request({ idempotencyKey: 'lark:om_1' }))).toMatchObject({ ok: true, existing: false });
+  });
+
+  it("keeps two runs' keys apart, and gives a run its own task back", () => {
+    const s = service();
+    const one = working(s, 'web');
+    const two = working(s, 'api');
+    const a = ok(s.create(request({ title: 'from one', idempotencyKey: 'step-1', ...one.as }))).task;
+    const b = ok(s.create(request({ title: 'from two', idempotencyKey: 'step-1', ...two.as }))).task;
+    expect(b.taskId).not.toBe(a.taskId);
+    expect(a.idempotencyKey).toBe(`run-task:${one.task.taskId}:step-1`);
+    expect(b.idempotencyKey).toBe(`run-task:${two.task.taskId}:step-1`);
+    expect(s.create(request({ title: 'from one again', idempotencyKey: 'step-1', ...one.as }))).toEqual({
+      ok: true,
+      task: a,
+      existing: true,
+    });
+  });
+
+  it('never returns a chat task to a run', () => {
+    const s = service();
+    const { as } = working(s, 'web');
+    const chat = ok(s.create(request({ idempotencyKey: 'plain' }))).task;
+    const r = ok(s.create(request({ idempotencyKey: 'plain', ...as })));
+    expect(r.existing).toBe(false);
+    expect(r.task.taskId).not.toBe(chat.taskId);
+  });
+
+  it('namespaces a follow-up from a run the same way', () => {
+    const s = service();
+    const done = ok(s.create(request({ title: 'done', assignee: 'docs-writer' }))).task;
+    ok(s.complete(done.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' }));
+    const { task, as } = working(s, 'web');
+    const first = ok(s.followUp(done.taskId, request({ idempotencyKey: 'more', ...as }))).task;
+    expect(first.idempotencyKey).toBe(`run-task:${task.taskId}:more`);
+    expect(s.followUp(done.taskId, request({ idempotencyKey: 'more', ...as }))).toMatchObject({
+      ok: true,
+      existing: true,
+      task: { taskId: first.taskId },
+    });
+    expect(s.followUp(done.taskId, request({ idempotencyKey: 'lark:om_9', ...as }))).toMatchObject({
+      ok: false,
+      code: 'invalid',
+    });
+  });
+});
