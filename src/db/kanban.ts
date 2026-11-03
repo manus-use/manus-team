@@ -1,8 +1,10 @@
 import type { Db } from './open.js';
 import { txImmediate } from './open.js';
-import { newTaskId } from '../core/ids.js';
+import { newRunId, newTaskId } from '../core/ids.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
+import { resolveTaskWorkspace } from '../kanban/workspace.js';
 import type {
+  AgentSnapshot,
   Assignee,
   CommentRow,
   Contract,
@@ -11,9 +13,20 @@ import type {
   RefusalCode,
   Result,
   RetryOnCrash,
+  RunKind,
+  RunRow,
   TaskRow,
 } from '../kanban/types.js';
-import { getRun, getTask, getTaskByKey } from './kanban-read.js';
+import {
+  getRun,
+  getTask,
+  getTaskByKey,
+  isFinished,
+  openAgentRunIn,
+  openRunOf,
+  parentsOf,
+  runsOf,
+} from './kanban-read.js';
 
 /**
  * The board's only writer (spec §4.1, WRITERS.md).
@@ -220,4 +233,196 @@ function insertComment(d: Db, taskId: string, author: string, body: string, now:
     .run(taskId, author, masked, now);
   record(d, { taskId, kind: 'commented', actor: author, payload: { body } }, now);
   return { id: Number(lastInsertRowid), taskId, author, body: masked, createdAt: now };
+}
+
+// ---------------------------------------------------------------------------
+// Claiming
+// ---------------------------------------------------------------------------
+
+/** Who a claim is for, as the service resolved it from the team. */
+export interface Claimant {
+  /** The task's assignee for a work run, its reviewer for a review run. */
+  assignee: Assignee;
+  /** The role's effective agent; null for a person. */
+  agentConfig: AgentSnapshot | null;
+  /** The role's workspace, if it names one explicitly (spec §2.3 rule 2). */
+  roleWorkspace: string | undefined;
+  /** SHA-256 of the role.md the run is given (spec §2.1); null without one. */
+  roleMdHash: string | null;
+}
+
+export interface ClaimInput {
+  taskId: string;
+  claimant: Claimant;
+  /** SHA-256 of the run's worker token (plan C3); the token is never stored. */
+  tokenHash?: string | null;
+  /** The configured workspace names: an agent run in any other is unassignable. */
+  workspaces: ReadonlySet<string>;
+}
+
+/**
+ * Open a run on a task (spec §5.1, §6.2 step 3): a work run on a ready task, a
+ * review run on a task in review with no open run.
+ *
+ * In one transaction, so that what the claim was decided on is still true when
+ * the run is inserted: the phase, the parents, no open run (also enforced by the
+ * partial unique index, so two racing claims fail at the database), the
+ * assignee, the cooldown, and the workspace.
+ *
+ * A null workspace is resolved here (spec §2.3) and fixed on the task. Where it
+ * cannot be -- the parents disagree -- an agent claim is refused as unassignable
+ * before anything is written, and a person's run is opened with the workspace
+ * still null. An agent run is also refused in a workspace no longer configured,
+ * and in one that already has an open agent run (spec §6.3). A person's run
+ * holds no workspace.
+ */
+export function claim(db: Db, input: ClaimInput, now: number): Result<{ run: RunRow; task: TaskRow }> {
+  return tx(db, (d) => {
+    const task = getTask(d, input.taskId);
+    if (task === undefined) return refuse('not_found', `no task ${input.taskId}`);
+    if (task.phase !== 'open' && task.phase !== 'review') {
+      return refuse('illegal_transition', `task ${task.taskId} is ${task.phase}, so it cannot be claimed`);
+    }
+    const kind: RunKind = task.phase === 'open' ? 'work' : 'review';
+    const open = openRunOf(d, task.taskId);
+    if (open !== undefined) return refuse('run_open', `task ${task.taskId} already has an open run, ${open.runId}`);
+
+    const who = kind === 'work' ? task.assignee : task.reviewer;
+    if (who === null) {
+      return refuse('unassignable', `task ${task.taskId} has no ${kind === 'work' ? 'assignee' : 'reviewer'}`);
+    }
+    if (who.kind !== input.claimant.assignee.kind || who.name !== input.claimant.assignee.name) {
+      return refuse('stale', `task ${task.taskId} is now for ${who.name}, not ${input.claimant.assignee.name}`);
+    }
+    const agent = who.kind === 'role';
+    if (agent !== (input.claimant.agentConfig !== null)) {
+      throw new Error('a claim carries an agent exactly when it is for a role');
+    }
+    const parents = parentsOf(d, task.taskId);
+    // A review waits on its parents too: a reviewer's dependency block adds them (spec §5.4).
+    if (!parents.every((p) => isFinished(p.phase))) {
+      return refuse('not_claimable', `task ${task.taskId} is waiting on a parent that is not done`);
+    }
+    if (task.cooldownUntil !== null && task.cooldownUntil > now) {
+      return refuse('not_claimable', `task ${task.taskId} is cooling down after being throttled`);
+    }
+
+    let workspace = task.workspace;
+    if (workspace === null) {
+      const from = task.createdFromTask === null ? undefined : getTask(d, task.createdFromTask);
+      const resolved = resolveTaskWorkspace({
+        own: null,
+        roleWorkspace: agent ? input.claimant.roleWorkspace : undefined,
+        upstream: parents.length > 0 ? parents.map((p) => p.workspace) : from === undefined ? [] : [from.workspace],
+      });
+      if ('conflict' in resolved) {
+        if (agent) {
+          return refuse(
+            'unassignable',
+            `task ${task.taskId}'s parents are in different workspaces (${resolved.conflict.join(', ')}); ` +
+              'set its workspace',
+          );
+        }
+      } else {
+        workspace = resolved.workspace;
+      }
+    }
+    if (agent) {
+      if (workspace === null || !input.workspaces.has(workspace)) {
+        return refuse('unassignable', `task ${task.taskId}'s workspace ${String(workspace)} is not configured`);
+      }
+      const busy = openAgentRunIn(d, workspace);
+      if (busy !== undefined) {
+        return refuse('workspace_busy', `workspace ${workspace} has an open agent run, ${busy.runId}`);
+      }
+    }
+
+    const runs = runsOf(d, task.taskId);
+    const runId = newRunId();
+    const attempt = (runs.at(-1)?.attempt ?? 0) + 1;
+    const seededFromRun = kind === 'work' ? reworkSeed(d, runs, input.claimant.agentConfig) : null;
+    d.prepare(
+      `INSERT INTO kanban_runs
+         (run_id, task_id, attempt, kind, assignee_kind, assignee, agent_config, workspace,
+          role_md_hash, seeded_from_run, token_hash, started_at)
+       VALUES (?, ?, ?, ?, ?, ?, jsonb(?), ?, ?, ?, ?, ?)`,
+    ).run(
+      runId,
+      task.taskId,
+      attempt,
+      kind,
+      who.kind,
+      who.name,
+      input.claimant.agentConfig === null ? null : JSON.stringify(input.claimant.agentConfig),
+      workspace,
+      input.claimant.roleMdHash,
+      seededFromRun,
+      input.tokenHash ?? null,
+      now,
+    );
+    // A claimed task is no longer stranded (spec §3.1).
+    d.prepare('UPDATE kanban_tasks SET workspace = ?, stranded_notified_at = NULL WHERE task_id = ?').run(
+      workspace,
+      task.taskId,
+    );
+    record(
+      d,
+      {
+        taskId: task.taskId,
+        runId,
+        kind: 'claimed',
+        actor: 'gateway',
+        payload: { kind, attempt, assignee: who.name, workspace, seededFromRun },
+      },
+      now,
+    );
+    return { ok: true, run: mustGetRun(d, runId), task: mustGet(d, task.taskId) };
+  });
+}
+
+/**
+ * The run a rework resumes (spec §5.3): only right after a reviewer's
+ * `changes`, only from the last work run, only if it ran the same agent --
+ * driver, command and arguments; environment names are not compared -- and only
+ * if its session observed a provider session id to resume. Anything else starts
+ * fresh, and the column stays null: it names the run actually resumed.
+ */
+function reworkSeed(d: Db, runs: readonly RunRow[], agent: AgentSnapshot | null): string | null {
+  const last = runs.at(-1);
+  if (agent === null || last?.kind !== 'review' || last.outcome !== 'changes_requested') return null;
+  const work = runs.findLast((r) => r.kind === 'work');
+  if (work === undefined || work.agentConfig === null || work.sessionId === null) return null;
+  const before = work.agentConfig;
+  const same =
+    before.driver === agent.driver &&
+    before.command === agent.command &&
+    JSON.stringify(before.args) === JSON.stringify(agent.args);
+  if (!same) return null;
+  const seen = d
+    .prepare<[string], { provider_session_id: string | null }>('SELECT provider_session_id FROM sessions WHERE id = ?')
+    .get(work.sessionId);
+  return seen?.provider_session_id ? work.runId : null;
+}
+
+function mustGetRun(d: Db, runId: string): RunRow {
+  const run = getRun(d, runId);
+  if (run === undefined) throw new Error(`run ${runId} vanished inside its own transaction`);
+  return run;
+}
+
+/**
+ * Record the gateway session an agent run runs in (spec §3.3: one run, one
+ * session). Plan C2 calls it once the session is created, after the claim.
+ */
+export function attachSession(db: Db, runId: string, sessionId: string, now: number): Result<{ run: RunRow }> {
+  return tx(db, (d) => {
+    const run = getRun(d, runId);
+    if (run === undefined) return refuse('not_found', `no run ${runId}`);
+    if (run.endedAt !== null) return refuse('already_closed', `run ${runId} is closed`);
+    if (run.agentConfig === null) return refuse('invalid', `run ${runId} is a person's, and has no session`);
+    if (run.sessionId !== null) return refuse('invalid', `run ${runId} already has session ${run.sessionId}`);
+    d.prepare('UPDATE kanban_runs SET session_id = ? WHERE run_id = ?').run(sessionId, runId);
+    record(d, { taskId: run.taskId, runId, kind: 'session_attached', actor: 'gateway', payload: { sessionId } }, now);
+    return { ok: true, run: mustGetRun(d, runId) };
+  });
 }
