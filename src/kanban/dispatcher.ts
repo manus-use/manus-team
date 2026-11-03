@@ -1,6 +1,6 @@
 import type { SessionRegistry } from '../core/registry.js';
 import type { Db } from '../db/open.js';
-import { claimableTasks, getRun, getTask, openAgentRunCount } from '../db/kanban-read.js';
+import { claimableTasks, getRun, getTask, openAgentRunCount, openRuns, runBySession } from '../db/kanban-read.js';
 import { getSession } from '../db/sessions.js';
 import type { Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
@@ -101,9 +101,53 @@ export class Dispatcher {
    * A session's environment, for the registry to give its agent (spec §2.4 item
    * 3): an open run's `MT_KANBAN_RUN`, held in memory only. Plan C3 adds the
    * run's token, its socket and the `mt` binary's directory.
+   *
+   * An open run's session this process did not start has lost its environment
+   * with the process that did. It is not rebuilt: the run ends `interrupted`, and
+   * the build is refused, rather than prompting an agent that could not report.
    */
   envFor(sessionId: string): Readonly<Record<string, string>> | undefined {
-    return this.#open.get(sessionId)?.env;
+    const open = this.#open.get(sessionId);
+    if (open !== undefined) return open.env;
+    const run = runBySession(this.#deps.db, sessionId);
+    if (run === undefined || run.endedAt !== null) return undefined;
+    this.#interrupt(run);
+    this.#track(this.#deps.sessions.archive(runKey(this.#deps.appId, run), 'its environment did not survive a restart'));
+    throw new Error(
+      `run ${run.runId} has ended interrupted: its environment did not survive a restart, so its agent could not report`,
+    );
+  }
+
+  /**
+   * After a restart (spec §8.4 steps 3 and 4), before the first pass: every open
+   * agent run's process died with the gateway. An undecided run ends
+   * `interrupted` -- not counted, since the task did nothing wrong, and claimable
+   * again subject to retry_on_crash. A decided one keeps its outcome. Either way
+   * it is closed, its session archived and its binding revoked: never resumed, as
+   * a new run gets a new session. A person's run holds no process, and is left.
+   */
+  async boot(): Promise<void> {
+    for (const run of openRuns(this.#deps.db)) {
+      if (run.agentConfig === null) continue;
+      this.#interrupt(run);
+      await this.#deps.sessions.archive(runKey(this.#deps.appId, run), 'the gateway restarted; the run is over');
+    }
+  }
+
+  /** End an open run whose process is gone, keeping a reported outcome, and close it. */
+  #interrupt(run: RunRow): void {
+    if (run.outcome === null) {
+      this.#deps.service.endRun(run.runId, {
+        outcome: 'interrupted',
+        error: 'the gateway restarted during the run',
+        // A run whose session never started cannot have changed anything.
+        ...(run.sessionId === null
+          ? { hadSideEffects: false }
+          : { lastOutput: lastTurnOf(this.#deps.db, run.sessionId).output, ...this.#sideEffects(run, run.sessionId) }),
+      });
+    }
+    this.#deps.service.closeRun(run.runId);
+    this.#note(`kanban: run ${run.runId} closed after a restart`);
   }
 
   /** An open run's actor is never retired to make room (spec §2.4 item 3). */
