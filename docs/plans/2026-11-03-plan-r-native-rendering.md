@@ -262,7 +262,7 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–3, 
 | `tests/render-bytesec.test.ts`, `tests/render-native.test.ts`, `tests/kanban-rendering.test.ts`, `tests/kanban-dispatch-native.test.ts` (create) | |
 | `tests/names.test.ts`, `tests/roles.test.ts`, `tests/config.test.ts`, `tests/driver-build.test.ts`, `tests/cli-driver.e2e.ts`, `tests/fakes/cli-agent.mjs`, `tests/registry.test.ts`, `tests/workspaces.test.ts`, `tests/kanban-service.test.ts`, `tests/kanban-prompt.test.ts`, `tests/kanban-brief.test.ts`, `tests/helpers/dispatch.ts`, `tests/mt-role.test.ts` (modify) | |
 
-Running counts, unit then end to end: Task 1 932 / 49, Task 2 934 / 49, Task 3 941 / 49, Task 4 942 / 51, Task 5 944, Task 6 950, Task 7 965, Task 8 965, Task 9 968, Task 10 970, Task 11 976, Task 12 978 / 51.
+Running counts, unit then end to end: Task 1 932 / 49, Task 2 934 / 49, Task 3 941 / 49, Task 4 942 / 51, Task 5 944, Task 6 950, Task 7 965, Task 8 965, Task 9 968, Task 10 970, Task 11 976, Task 12 978 / 51, review follow-ups 986 / 51.
 
 ---
 
@@ -3633,9 +3633,25 @@ If `bytedcli` loads, a native agent can see user skills after all: record it, an
 
 ---
 
+## Review follow-ups
+
+The reviews of Tasks 1–3 and 7–9 found the following, fixed after Task 12, each test first. The task steps above show the code as first written; the code and tests in the tree are the corrected ones.
+
+- **The package hash is not masked.** `packageHash` joins `BOARD_KEYS` in `src/db/kanban.ts`, so a known secret that happens to occur inside a hash no longer masks part of it in the `run_rendered` event. `tests/kanban-rendering.test.ts` now uses a non-trivial hash and registers a secret found inside it.
+- **A skill directory must still be one at render time.** `readSkill` refuses a skill whose directory is no longer a real directory, as one replaced by a symlink after startup is, before anything is listed: the render fails and falls back, and nothing from the link's target is copied.
+- **No `.env` directory is walked.** An entry named `.env` is skipped whether it is a file or a directory. `.env.local` and the like are copied: spec §2.7 excludes `.env` only.
+- **The sweeps stay in the render directory.** `sweepRole` and `sweepRoles` do nothing unless their root is a real directory, not a symlink, and `sweepRole` does nothing for a role name that fails `NAME_PATTERN`, such as `..`.
+- **The file read is the file checked.** Each file is opened with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, checked with `fstat`, and read from that descriptor, at most the bytes left in the budget plus one, then closed; as `src/roles.ts` reads a `.env`. A file swapped for a symlink or a FIFO after the listing is skipped, without hanging, and a file that grows cannot take more than the budget.
+- **A concurrent render is not a failure.** When the rename into place fails with `ENOTEMPTY` or `EEXIST` because the hash directory now exists, the staging is removed and that package is used: the same hash is the same content.
+- **`src/roles.ts`.** The `readSkills` docblock sits above `readSkills` again, not above `userSkillDirs`. A skill not found anywhere says "(a symlinked skill directory or SKILL.md is not followed)". A new test shows that a real `.trae/skills/x` whose SKILL.md is a symlink is passed over for a real `.agents/skills/x`.
+
+Counts after: `Tests  986 passed (986)` unit, `Tests  51 passed (51)` end to end.
+
+---
+
 ## Done when
 
-- `npm test` gives `Tests  978 passed (978)`. `npm run test:e2e` gives `Tests  51 passed (51)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  986 passed (986)`. `npm run test:e2e` gives `Tests  51 passed (51)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - No test runs bytesec or reaches the network: the dispatcher's tests drive `FakeDriver`s, and the only agent processes any test spawns are the fakes in `tests/fakes/`.
 - A role's `agent.skills` are found where bytesec finds a user's skills, checked at startup, copied into its package, and listed in its prompt when it is not rendered.
