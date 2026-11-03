@@ -8,12 +8,14 @@ import type {
   ActivePhase,
   AgentSnapshot,
   Assignee,
+  BlockKind,
   CommentRow,
   Contract,
   CreatedVia,
   Phase,
   Refusal,
   RefusalCode,
+  ReportedBlockKind,
   Reporter,
   Result,
   RetryOnCrash,
@@ -768,5 +770,156 @@ export function closeRun(db: Db, runId: string, now: number): Result<{ run: RunR
       now,
     );
     return { ok: true, run: mustGetRun(d, runId) };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Blocking, unblocking, stopping
+// ---------------------------------------------------------------------------
+
+export interface BlockReport {
+  kind: ReportedBlockKind;
+  reason: string;
+  /** For `dependency`: the tasks it waits on, linked as parents in the same transaction. */
+  parents?: readonly string[];
+}
+
+/**
+ * Move a task to `blocked` (spec §5.4), remembering the phase it left. A block of
+ * the same kind as the last one -- which survives unblock -- is a recurrence,
+ * and recurrences are reset only by completion: resetting them on unblock is the
+ * amnesia that lets a task bounce between blocked and unblocked forever.
+ */
+function enterBlocked(d: Db, task: TaskRow, kind: Exclude<BlockKind, 'dependency'>, reason: string): number {
+  if (task.phase !== 'open' && task.phase !== 'review') throw new Error(`cannot block a ${task.phase} task`);
+  const recurrences = task.blockRecurrences + (task.blockKind === kind ? 1 : 0);
+  d.prepare(
+    `UPDATE kanban_tasks
+        SET phase = 'blocked', blocked_from = ?, block_kind = ?, block_reason = ?, block_recurrences = ?
+      WHERE task_id = ?`,
+  ).run(task.phase, kind, mask(reason), recurrences, task.taskId);
+  return recurrences;
+}
+
+/**
+ * A worker's or person's `block` (spec §5.1, §5.4).
+ *
+ * `dependency` never sits in `blocked`, since no person needs to act. The task
+ * keeps its phase, and the parents the report names are linked here, so its next
+ * claim waits for them:
+ * - from a work run it stays `open`, shown as todo;
+ * - from a review run it stays `review`, shown as todo, and the reviewer is
+ *   claimed again once the parents are done. The implementer's work is done; only
+ *   the review was waiting, so it is not redone.
+ *
+ * A dependency block that leaves nothing unfinished to wait on is refused: the
+ * task would be claimable again at once.
+ */
+export function block(
+  db: Db,
+  taskId: string,
+  by: Reporter,
+  report: BlockReport,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  return tx(db, (d) => {
+    const r = reporting(d, taskId, by, ['open', 'review'], 'be blocked');
+    if (!r.ok) return r;
+    if (r.run !== undefined) decide(d, r.run, 'blocked', { summary: report.reason }, now);
+    const actor = actorOf(by);
+    if (report.kind === 'dependency') {
+      const parents = report.parents ?? [];
+      for (const parent of parents) {
+        const linked = linkIn(d, parent, taskId, actor, now, r.run?.runId);
+        if (!linked.ok) return linked;
+      }
+      if (parentsOf(d, taskId).every((p) => isFinished(p.phase))) {
+        return refuse('invalid', `a dependency block must name a task ${taskId} waits on that is not done`);
+      }
+      record(
+        d,
+        {
+          taskId,
+          runId: r.run?.runId ?? null,
+          kind: 'blocked',
+          actor,
+          payload: { kind: report.kind, reason: report.reason, parents },
+        },
+        now,
+      );
+    } else {
+      const recurrences = enterBlocked(d, r.task, report.kind, report.reason);
+      record(
+        d,
+        {
+          taskId,
+          runId: r.run?.runId ?? null,
+          kind: 'blocked',
+          actor,
+          payload: { kind: report.kind, reason: report.reason, blockRecurrences: recurrences },
+        },
+        now,
+      );
+    }
+    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+  });
+}
+
+/**
+ * Return a blocked task to the phase it left (spec §5.4), optionally with a
+ * comment the next run will read. The kind and reason are kept.
+ *
+ * Unblocking a `gave_up` task resets its failure count, and a `transient` one its
+ * throttling count (spec §8.2): otherwise a person who fixed the cause would get
+ * one attempt, or none, before the breaker tripped again.
+ */
+export function unblock(
+  db: Db,
+  taskId: string,
+  by: string,
+  comment: string | undefined,
+  now: number,
+): Result<{ task: TaskRow }> {
+  return tx(db, (d) => {
+    const task = getTask(d, taskId);
+    if (task === undefined) return refuse('not_found', `no task ${taskId}`);
+    if (task.phase !== 'blocked') return refuse('illegal_transition', `task ${taskId} is ${task.phase}, not blocked`);
+    d.prepare(
+      `UPDATE kanban_tasks
+          SET phase = blocked_from, blocked_from = NULL,
+              consecutive_failures = CASE block_kind WHEN 'gave_up' THEN 0 ELSE consecutive_failures END,
+              consecutive_transient = CASE block_kind WHEN 'transient' THEN 0 ELSE consecutive_transient END,
+              cooldown_until = CASE block_kind WHEN 'transient' THEN NULL ELSE cooldown_until END
+        WHERE task_id = ?`,
+    ).run(taskId);
+    record(d, { taskId, kind: 'unblocked', actor: by, payload: { kind: task.blockKind } }, now);
+    if (comment !== undefined && comment !== '') insertComment(d, taskId, by, comment, now);
+    return { ok: true, task: mustGet(d, taskId) };
+  });
+}
+
+/**
+ * `/kanban stop` (spec §5.1). An undecided run is cancelled and the task blocks
+ * as `needs_input`, rather than staying ready and being dispatched again at once.
+ * A run that has already reported keeps its outcome; nothing is written.
+ *
+ * The run returned still has `endedAt` null when it is an agent's: the caller
+ * cancels its turn, and closes it when the turn ends.
+ */
+export function stop(db: Db, taskId: string, by: string, now: number): Result<{ task: TaskRow; run: RunRow }> {
+  return tx(db, (d) => {
+    const task = getTask(d, taskId);
+    if (task === undefined) return refuse('not_found', `no task ${taskId}`);
+    const open = openRunOf(d, taskId);
+    if (open === undefined) return refuse('no_open_run', `task ${taskId} has no open run to stop`);
+    if (open.outcome !== null) return { ok: true, task, run: open };
+    decide(d, open, 'cancelled', {}, now);
+    const recurrences = enterBlocked(d, task, 'needs_input', `stopped by ${by}`);
+    record(
+      d,
+      { taskId, runId: open.runId, kind: 'stopped', actor: by, payload: { blockRecurrences: recurrences } },
+      now,
+    );
+    return { ok: true, task: mustGet(d, taskId), run: mustGetRun(d, open.runId) };
   });
 }
