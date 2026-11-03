@@ -213,6 +213,8 @@ describe('KanbanService: claims and the runs they open', () => {
     const r = ok(s.claim(ok(s.create(request())).task.taskId));
     expect(r.run.roleMdHash).toBe(createHash('sha256').update(bytes).digest('hex'));
     expect(r.roleMd).toBe('hi\uFFFD\n');
+    // The bytes themselves too, which a native package is rendered from.
+    expect(r.roleMdBytes).toEqual(bytes);
     expect(r.role).toBe(implementer);
   });
 
@@ -250,11 +252,13 @@ describe('KanbanService: claims and the runs they open', () => {
   it("claims a person's task once people can be reached, with no agent", () => {
     const s = service({ people: { canTalk: () => true } });
     const task = ok(s.create(request({ assignee: 'lark:on_bob' }))).task;
-    expect(ok(s.claim(task.taskId))).toMatchObject({
+    const claimed = ok(s.claim(task.taskId));
+    expect(claimed).toMatchObject({
       run: { agentConfig: null, roleMdHash: null },
       roleMd: undefined,
       role: undefined,
     });
+    expect(claimed).not.toHaveProperty('roleMdBytes');
   });
 
   it('ends and closes runs with its limits', () => {

@@ -81,6 +81,8 @@ export interface Claimed {
   task: TaskRow;
   /** The role.md whose hash the run records, for plan C2's prompt; undefined without one. */
   roleMd: string | undefined;
+  /** The same role.md as the bytes that were hashed, which a native package is rendered from (plan R). */
+  roleMdBytes?: Buffer;
   /**
    * The role the claim resolved, whose files were just checked: plan C2's prompt
    * uses its skills, not a later lookup's. Undefined for a person's run.
@@ -308,6 +310,7 @@ export class KanbanService {
       run: r.run,
       task: r.task,
       roleMd: resolved.ok ? resolved.roleMd : undefined,
+      ...(resolved.ok && resolved.roleMdBytes !== undefined ? { roleMdBytes: resolved.roleMdBytes } : {}),
       role: resolved.ok ? resolved.role : undefined,
     };
   }
@@ -481,7 +484,9 @@ export class KanbanService {
   }
 
   /** Who the next claim is for, resolved against the team as it is now. */
-  #claimant(task: TaskRow): Result<{ claimant: board.Claimant; roleMd: string | undefined; role: Role | undefined }> {
+  #claimant(
+    task: TaskRow,
+  ): Result<{ claimant: board.Claimant; roleMd: string | undefined; roleMdBytes?: Buffer; role: Role | undefined }> {
     const who = task.phase === 'review' ? task.reviewer : task.assignee;
     if (who === null) {
       return board.refuse(
@@ -533,6 +538,7 @@ export class KanbanService {
         roleMdHash: bytes === undefined ? null : createHash('sha256').update(bytes).digest('hex'),
       },
       roleMd: bytes?.toString('utf8'),
+      ...(bytes === undefined ? {} : { roleMdBytes: bytes }),
       role,
     };
   }
