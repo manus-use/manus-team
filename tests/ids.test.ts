@@ -3,7 +3,9 @@ import {
   BOOT_ID,
   approvalNonce,
   newApprovalId,
+  newRunId,
   newSessionId,
+  newTaskId,
   newTurnId,
   replyUuid,
   sendUuid,
@@ -20,6 +22,11 @@ describe('random ids', () => {
     expect(newSessionId()).toMatch(/^s_[0-9a-z]{16}$/);
     expect(newTurnId()).toMatch(/^t_[0-9a-z]{12}$/);
     expect(newApprovalId()).toMatch(/^a_[0-9a-z]{12}$/);
+  });
+
+  it('names kanban tasks k_ and runs r_', () => {
+    expect(newTaskId()).toMatch(/^k_[0-9a-z]{12}$/);
+    expect(newRunId()).toMatch(/^r_[0-9a-z]{12}$/);
   });
 });
 

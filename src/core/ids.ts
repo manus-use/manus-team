@@ -50,6 +50,16 @@ export function newApprovalId(): string {
   return `a_${randomToken(12)}`;
 }
 
+/** A kanban task (spec §3.1). Opaque: nothing reads meaning into it. */
+export function newTaskId(): string {
+  return `k_${randomToken(12)}`;
+}
+
+/** One attempt at a kanban task (spec §3.3). */
+export function newRunId(): string {
+  return `r_${randomToken(12)}`;
+}
+
 /**
  * A per-process boot id, minted once at import time.
  *
