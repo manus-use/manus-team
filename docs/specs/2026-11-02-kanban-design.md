@@ -137,7 +137,7 @@ called `acp` would make those rows ambiguous.
 
 **The `agent` block** carries the fields the gateway's `agent:` block does today — `driver`,
 `command`, `args`, `unsupervised`, `passEnv` — validated by the same rules, including the refusal of
-anything in the file that looks like a credential: secrets go in the role's `.env` (§2.5). Three
+anything in the file that looks like a credential: secrets go in the role's `.env` (§2.5). Four
 more, all optional:
 
 - **`readOnlyTools`** — the agent's tool names that only read. Used by
@@ -149,10 +149,11 @@ more, all optional:
   (§10.1) leaves them alone.
 - **`native`** — `false` keeps the role's `role.md` and skills in the task prompt (§7.1) even though
   its agent has a renderer (§2.7). Unset, or `true`, a role whose agent has one runs natively.
+- **`skills`** — user-level skills the role imports by name, such as `[lark-doc, lark-im]` (§2.2).
 
 The gateway's legacy `agent:` block accepts `readOnlyTools` and `maskExempt` too, so a deployment
-that has not moved to `roles/` gets the same behaviour. It does not accept `native`: its role has no
-`role.md` and no skills, so there is nothing to render.
+that has not moved to `roles/` gets the same behaviour. It does not accept `native` or `skills`: its
+role has no `role.md` and no skills, so there is nothing to render or add to.
 
 **The role `default`, and the existing `agent:` block.** Chat sessions use the role `default`, and
 so does a task assigned to `default`. It is either a directory `roles/default/`, or — when there is
@@ -168,6 +169,8 @@ keep working unchanged. Each of these is a startup error:
 - a role directory whose `config.yaml` is missing or invalid, or which names an unknown workspace;
 - a role's `role.md` or a skill file that exists but cannot be read, or a skill without the required
   front matter;
+- a skill named in `agent.skills` that is not found, is not a name bytesec's skill-name rule
+  accepts, or is also one of the role's own skills (§2.2);
 - a role's `.env` that fails any check of §2.5.
 
 A mistake found only when a task is claimed would strand that task; found at startup, it is a line
@@ -207,6 +210,20 @@ renderer, or which opts out, the task prompt **lists** each skill's name, descri
 absolute path of its `SKILL.md`, and the agent opens a skill when it is relevant. That keeps skills
 from spending the context window until they are needed, and works with any agent that can read a
 file.
+
+**Imported skills.** A role may also use skills from the user's own, by name: `agent.skills:
+[lark-doc, lark-im]`. A native agent sees only its package's skills (§2.7), so this is how a role
+keeps a user skill it needs. Each name is looked up where bytesec 0.7.4 finds a user's skills, in
+the order that finds the one bytesec itself would use (it loads them in the reverse order, and a
+later skill of a name replaces an earlier one): `$XDG_CONFIG_HOME/bytesec/skills` (else
+`~/.config/bytesec/skills`), the same directory's `skill/`, then `~/.trae/skills`,
+`~/.coco/skills`, `~/.agents/skills` and `~/.claude/skills`. `~/.bytesec/skills` is not searched:
+bytesec reads it only under `--expose-user-skills`. The first real directory holding a regular
+`SKILL.md` wins; a symlink is not followed. A name must follow bytesec's skill-name rule (lowercase
+letters, digits and single `-`, not at either end, at most 64 characters); a name that is not found,
+or is also one of the role's own skills, is a startup error naming the role. An imported skill is
+checked as the role's own are and then treated exactly as they are: listed in the prompt at its
+user path when the role is injected, copied into the package when it is rendered.
 
 **Tools.** A role may declare `allow` and `deny` lists. Only the coding agent can *enforce* them —
 the gateway sees tool calls after the fact, or, on a supervised agent, as approval requests it could
@@ -485,7 +502,7 @@ the fallback.
   and bytesec's renderer does not refuse it. The renderer refuses a role named `bytesec-agent`
   (bytesec runs its built-in agent under that name), a role whose `agent.args` already pass
   `--agent`, a role whose environment already sets `BYTESEC_LOCAL_APM_PATH` or
-  `OPENCODE_LOCAL_APM_PATH`, and a role with a skill whose name bytesec's own skill-name rule refuses
+  `OPENCODE_LOCAL_APM_PATH`, in its `.env` or through `passEnv`, and a role with a skill whose name bytesec's own skill-name rule refuses
   (lowercase letters, digits and single `-`, not at either end, at most 64 characters). The role
   `default` made from the `agent:` block has no `role.md` and no skills, so it is never rendered.
   **Chat sessions are never rendered**: rendering is per kanban run, and chat never received
@@ -493,16 +510,20 @@ the fallback.
 - **What a role becomes.** A bytesec agent package, laid out as a real one is: `apm.json`
   (`{"name": "<role>", "description": "...", "source": "default", "path": ""}`), `agents/<role>.md`
   (front matter `name`, `description`, `mode: primary`, then the `role.md` bytes the claim read,
-  unchanged), and `skills/<skill>/…`, every regular file of each skill.
+  unchanged), and `skills/<skill>/…`, every regular file of each of its own skills and of each skill
+  it imports.
 - **Where, and when.** Just after the claim, from the same `role.md` bytes the claim hashed, into
   `$MT_HOME/rendered/<role>/<hash>/`, which is itself the package. It is inside the gateway's home,
   so never in a workspace (§2.3: no workspace may contain the home, and inside it only
   `workspaces/<name>` may be one), and nothing is ever written into a repository. The hash is of the
-  package's own files — paths and bytes — so it covers `role.md` and every skill file: runs on
+  package's own files — paths and bytes — so it covers `role.md` and every skill file, imported ones
+  included, so a changed user skill makes a new package: runs on
   different versions of a role's files get different directories, and a finished package is reused,
   never rewritten. It is written in a dot-directory and renamed into place, with `0700` directories
-  and `0600` files. Only regular files are copied, never a symlink, and never a `.env`; a `SKILL.md`
-  that is not a regular file fails the render. A package over 16 MiB or 2,000 files fails it too.
+  (forced on ones that already existed) and `0600` files. Only regular files are copied, never a
+  symlink, and never a `.env`; a `SKILL.md` that is not a regular file fails the render. A package
+  over 16 MiB or 2,000 files fails it too, counted while the skills are walked, before each file is
+  read.
 - **How the run uses it.** The run's environment gains `BYTESEC_LOCAL_APM_PATH=<package dir>`, and
   its agent's arguments gain `--agent <role>`, both held by the dispatcher with the rest of the run's
   environment (§2.4 item 3). Each run points at its own role's single package: bytesec 0.7.4, pointed
@@ -520,14 +541,23 @@ the fallback.
   bytesec's provider prompt, its tool and workspace guidelines and its environment section are kept
   around it. `mode` only says the agent may be run directly. Behaviour on real coding tasks under a
   `role.md` persona is not yet measured, so `agent.native: false` is the operator's escape hatch.
-- **Limits, stated so they are not assumed.** bytesec still loads the user's own global skills
-  beside the package's: `BYTESEC_NO_GLOBAL_APM=1` did not hide them. `bytesec agent list` does not
+- **A native agent sees only its package's skills.** bytesec gives a package's agent the skill
+  permission `{"*": "deny", <the package's own skills>: "allow"}` and shows it only skills inside
+  the package. So a native run cannot use the user's skills or the workspace's, though bytesec still
+  loads them (the spike saw `bytedcli` loaded); `BYTESEC_NO_GLOBAL_APM` changes what is loaded, not
+  what the agent may use, and is not set. `agent.skills` (§2.2) is how a role brings user skills in.
+- **Limits, stated so they are not assumed.** `bytesec agent list` does not
   show a package given by `BYTESEC_LOCAL_APM_PATH`, so the gateway cannot verify a render by listing
   it. A bytesec that no longer finds the package fails the run's turn, which is classified like any
   other failure (§8.1); the fallback covers a render that fails, not an agent that rejects it.
 - **The run's record.** A run records the hash of the `role.md` it was given (§3.3), as before. Its
-  `agent_config` is taken at the claim, before the render, and does not say whether the run was
-  native; the log does.
+  `agent_config` is taken at the claim; once the render is decided, the dispatcher adds
+  `native: true` and the package's `packageHash`, or `native: false`, through `KanbanService`, with
+  `db/kanban.ts` as the only writer, once, with a `run_rendered` event. It is there, not in a new
+  column, because it is part of the agent the run ran, needs no migration, shows in the run's read
+  type, and is what seeding compares: a rework (C4) or a resume (plan E) is seeded only from a run
+  with the same native-ness and package hash. A run with neither key, claimed before plan R, counts
+  as not native.
 
 ---
 
@@ -1473,8 +1503,8 @@ board.
 | Links | cycle refusal; link onto a task with an open run, or past its parents gate, refused; a dependency block's parents linked with it, from a work run (task stays open) and from a review run (task stays in review, its next review claim waiting on them) |
 | Classifier | a table of real error strings → classes, including the 400 that was transient |
 | Dispatcher | fake driver: claim race (two passes, one run); one open agent run per workspace, parallel across workspaces, `max_running`; workspace resolved at a claim while null — explicit, else the role's explicit one, else the parents' common one, else `default` — and reused by review, retry and later gates; `/kanban workspace` refused once the workspace is non-null; an agent claim on a task a person left null re-applies the rules; an unknown workspace refused at create; a removed workspace makes its tasks unresolvable; cooldown and doubling; stranded notice once, never for queued tasks; max runtime → `timed_out`, but a decided run past the limit keeps its outcome; a reporting run holds its workspace until it closes; dispatcher-cancel reason wins over the classifier |
-| Prompt | `role.md`, skills list, protocol, task and context, in order; the run records `role_md_hash` and `agent_config`; a native run's prompt without `role.md` and the skills, and otherwise the same |
-| Native rendering | which roles are rendered, and each reason one is not; the package's layout and `role.md`'s bytes unchanged; content-addressed, reused, never rewritten; atomic, `0700`, regular files only, no `.env`; a too-large package and a symlinked `SKILL.md` refused; old packages swept but those of open runs, and unconfigured roles' at boot; `--agent` and `BYTESEC_LOCAL_APM_PATH` reaching the fake CLI agent's argv and environment on every turn; the ACP driver refusing per-session arguments; a failed render falling back to the prompt with a note; `mt role check`'s line; no test runs real bytesec |
+| Prompt | `role.md`, skills list, protocol, task and context, in order; the run records `role_md_hash` and `agent_config`; a native run's prompt without `role.md` and the skills, and otherwise the same; imported skills listed like the role's own |
+| Native rendering | `agent.skills` found in bytesec's order under a made-up home, a symlink not followed, an unknown, misnamed or duplicated-with-own name a startup error and a `role check` file problem, never the real home read; which roles are rendered, and each reason one is not; the package's layout and `role.md`'s bytes unchanged; content-addressed, reused, never rewritten; atomic, `0700`, regular files only, no `.env`; a too-large package and a symlinked `SKILL.md` refused; old packages swept but those of open runs, and unconfigured roles' at boot; `--agent` and `BYTESEC_LOCAL_APM_PATH` reaching the fake CLI agent's argv and environment on every turn; the ACP driver refusing per-session arguments; a failed render falling back to the prompt with a note; imported skills copied into the package and in its hash; the walk stopping at the file limit; a run's `native` and `packageHash` recorded once in `agent_config`; `mt role check`'s line; no test runs real bytesec |
 | Retry | `failure_limit` 2 → one retry; `gave_up` and its unblock reset; `rate_limited` not counted; `if-no-side-effects` against `readOnlyTools`; the retry's context containing the previous run's tool calls |
 | Review | reviewer `changes` → rework run seeded from the work run when their `agent_config` matches, unseeded otherwise; a failing review run counted and retried; `review` with no reviewer refused |
 | Worker CLI | handler tests over JSON; token scope; `already_reported`; `run_superseded`; gates refusing completion; gates not seeing the token |
@@ -1509,7 +1539,7 @@ branch.
 | **C4. Review, rework and gates** | same-task review and rework, quality gates, the reported commit (§5.3, §7.7, §7.8); refusing gates that contain a known secret; a crash handler whose output is masked | C3 |
 | **D. Lark** | `/kanban` commands; person targets; card `kind` routing; task, review and blocked cards; the group notice; subscriptions | C4 |
 | **E. Native resume** | the CLI driver captures the provider session id and passes `--session` (architecture §6.3), with transcript replay as the fallback | B; independent of C and D |
-| **R. Native rendering** | the spike, done on bytesec 0.7.4: `BYTESEC_LOCAL_APM_PATH=<one package dir>` with `bytesec run --agent <name>` loads that package's agent, whose body becomes the system prompt, and its skills; a directory of packages fails silently; the user's global skills still load. Then (§2.7): the role grammar tightened so a name cannot end in `-`; `agent.native`; `StartOptions.args` and the registry's `argsFor`; a renderer interface with bytesec's renderer; content-addressed, atomic packages under `$MT_HOME/rendered`, swept; the dispatcher rendering just after the claim and falling back to prompt injection when a render fails; the prompt leaving `role.md` and the skills out of a native run; `mt role check` saying which roles run natively. Claude Code's renderer is later. Prompt injection (§7.1) stays the fallback | B2, C2 |
+| **R. Native rendering** | the spike, done on bytesec 0.7.4: `BYTESEC_LOCAL_APM_PATH=<one package dir>` with `bytesec run --agent <name>` loads that package's agent, whose body becomes the system prompt, and its skills; a directory of packages fails silently; a package's agent may use only the package's skills. Then (§2.7): the role grammar tightened so a name cannot end in `-`; `agent.native`; `agent.skills`, imported from where bytesec finds a user's skills, since a native agent sees only its package's; `StartOptions.args` and the registry's `argsFor`; a renderer interface with bytesec's renderer; content-addressed, atomic packages under `$MT_HOME/rendered`, swept; the dispatcher rendering just after the claim, recording on the run whether it is native and by which package, and falling back to prompt injection when a render fails; the prompt leaving `role.md` and the skills out of a native run; `mt role check` saying which roles run natively. Claude Code's renderer is later. Prompt injection (§7.1) stays the fallback | B2, C2 |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D, nothing can deliver a card to a person, so **plan C refuses human assignees and

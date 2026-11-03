@@ -2,14 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A role whose coding agent is bytesec runs each board task as a native bytesec agent package. Its `role.md` becomes the agent's own system prompt, its skills load as bytesec skills, and the task prompt leaves both out, so they are not sent twice. The package is written in a directory the gateway manages under `$MT_HOME`, never in a workspace. A role can opt out with `agent.native: false`, a render that fails falls back to today's prompt injection, and every agent without a renderer keeps that injection (spec §7.1).
+**Goal:** A role whose coding agent is bytesec runs each board task as a native bytesec agent package. Its `role.md` becomes the agent's own system prompt, its skills load as bytesec skills, and the task prompt leaves both out, so they are not sent twice. The package is written in a directory the gateway manages under `$MT_HOME`, never in a workspace. A native agent sees only its package's skills, so a role can also import user-level skills by name (`agent.skills`), and they are copied in. Each run records whether it ran natively, and from which package. A role can opt out with `agent.native: false`, a render that fails falls back to today's prompt injection, and every agent without a renderer keeps that injection (spec §7.1).
 
 **Architecture:**
 - **Names.** `src/names.ts` tightens the role and workspace grammar so a name cannot end in `-`. Every role name is then a valid bytesec package name.
-- **Configuration.** `src/roles.ts` reads `agent.native` from a role directory's `config.yaml` into `AgentConfig.native`.
+- **Configuration.** `src/roles.ts` reads `agent.native` from a role directory's `config.yaml` into `AgentConfig.native`. It also reads `agent.skills`, user-level skills imported by name: it finds each where bytesec finds a user's skills, checks it as it checks the role's own, and appends it to `role.skills`.
 - **The session layer.** `StartOptions` gains `args`, which the structured-CLI driver puts after the configured `agent.args` and which the ACP driver refuses. `SessionActorDeps` gains `args`, and the registry asks a new `argsFor` hook on every actor build, as it asks `envFor`.
 - **Rendering.** `src/render/types.ts` is the renderer interface. `src/render/bytesec.ts` is bytesec's renderer: which roles it takes, what package a role becomes, and how a run uses it. `src/render/native.ts` decides whether a role is rendered (`nativeFor`), writes a content-addressed package atomically (`renderNative`) and removes old ones (`sweepRole`, `sweepRoles`).
-- **The run.** The claim also hands over the `role.md` bytes it hashed. The dispatcher renders the role just after the claim, gives the run `--agent <role>` and `BYTESEC_LOCAL_APM_PATH`, and composes its prompt without `role.md` and the skills. `src/index.ts` points it at `$MT_HOME/rendered`.
+- **The run.** The claim also hands over the `role.md` bytes it hashed. The dispatcher renders the role just after the claim, records on the run whether it is native and by which package hash (`KanbanService.recordRendering`, written by `db/kanban.ts` into the run's `agent_config`), gives the run `--agent <role>` and `BYTESEC_LOCAL_APM_PATH`, and composes its prompt without `role.md` and the skills. `src/index.ts` points it at `$MT_HOME/rendered`.
 - **The `mt` CLI.** `mt role check` says, one line a role, whether the role's runs are rendered, and why not.
 
 **Tech Stack:** TypeScript (Node 22, ESM/NodeNext, strict, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`), vitest, better-sqlite3.
@@ -33,8 +33,15 @@ Done before this plan, on bytesec 0.7.4. Its findings are why the design is what
 - **Precedence:** an agent from the override wins over a project package of the same name. In bytesec's code they are assigned, not `??=`.
 
 **Limits:**
-- `BYTESEC_NO_GLOBAL_APM=1` did not hide the user-level skill `bytedcli`, which appeared in both runs. A role gets its own skills plus the user's global ones.
+- **A package's agent sees only the package's skills.** The spike saw the user-level skill `bytedcli` loaded in both runs, with and without `BYTESEC_NO_GLOBAL_APM=1`. Loaded is not usable, though. bytesec's `loadApmPackageDirectory` gives a package's agent the skill permission `{"*": "deny", <the package's own skills>: "allow"}`, and `isSkillVisibleToAgent` shows a package agent only the skills inside its package. So a native run loses the user's skills and the workspace's, and `agent.skills` is how a role brings user skills in: they are copied into the package (Decisions 22–24). The smoke test checks both halves.
 - `bytesec agent list` does not show override packages, so the gateway cannot verify a rendered package by listing it.
+- **Where bytesec finds a user's skills**, read from its code:
+  - `skills/` under each of `~/.claude`, `~/.agents`, `~/.coco` and `~/.trae` (`SKILL_ROOT_TARGETS`), scanned in that order;
+  - then its config directory, `$XDG_CONFIG_HOME/bytesec` or else `~/.config/bytesec`, in `{skill,skills}/`;
+  - a later skill of the same name replaces an earlier one (`skills[name] = …`);
+  - `~/.bytesec/skills` is read only under `--expose-user-skills`, which is off by default.
+
+  On this machine `~/.agents/skills` holds the `lark-*` skills, `~/.claude/skills` holds symlinks to them, and `~/.config/bytesec/skill` holds `bytedcli`.
 - bytesec's package-name pattern is `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`. Its skill-name rule is the same pattern, with no `--` and at most 64 characters. `bytesec-agent` is reserved: `--agent bytesec-agent` runs the built-in agent and looks up no package.
 
 **What `mode: primary` does to bytesec's own instructions.** The open risk was that the md body replaces the default agent's instructions. bytesec's bundled code was read with `strings ~/.local/bin/bytesec`, read-only, and settles most of it (Decision 19):
@@ -62,11 +69,12 @@ Done before this plan, on bytesec 0.7.4. Its findings are why the design is what
 - **Baseline.** `npm test` gives `Tests  931 passed (931)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing.
 - **Finding edits.** Find each edit by its quoted text, not by line number. Every quoted text appears exactly once in its file at the point the step applies it. Apply a step's edits in the order given.
 - **No real bytesec.** No test runs bytesec or reaches the network. The dispatcher's tests read the `StartOptions` a `FakeDriver` was given. The CLI driver's end-to-end tests read the argv and the `BYTESEC_LOCAL_APM_PATH` the fake CLI agent logs. The manual smoke test at the end is the only real run, and it is not part of any count.
+- **Never the real home.** Tests that import skills give `loadRoleDir`, or `mt`, a made-up `HOME` under their temporary directory. No test reads `~/.agents`, `~/.claude` or `~/.config/bytesec`.
 - **Real files.** Rendering tests write under a fresh `mkdtemp` directory, removed after each test, and realpath it first (on macOS `/tmp` is `/private/tmp`).
 
 ## Decisions the spec left open
 
-Each is the reading most consistent with the rest of the spec. Decisions 1–3 and 6 are the user's. **Decision 19, the default-instructions risk, and Decision 20 are for the user to confirm.** All of them are now in the spec, mostly in its new §2.7.
+Each is the reading most consistent with the rest of the spec. Decisions 1–3, 6, 19, 20 and 22 are the user's: 19 was confirmed, 20 was changed to record native-ness on the run, and 22 was added after the first review. All of them are now in the spec, mostly in its new §2.7.
 
 1. **Plan R comes now, before C3.** The spec's order becomes A, A2, B, F, C1, C2, R, C3, C4, D (§12). R needs C2's claim, which reads and hashes `role.md`, and C2's dispatcher, which builds a run's environment. C3 then makes reportable runs that already get their role natively.
 2. **"The agent is bytesec" means driver `structured-cli` and a command whose basename is `bytesec`.**
@@ -87,7 +95,7 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–3 a
    - a name outside bytesec's package pattern (none after Task 1, but the renderer does not rely on it);
    - the name `bytesec-agent`;
    - `agent.args` that already pass `--agent` or `--agent=…`: the operator chose an agent;
-   - an environment that already sets `BYTESEC_LOCAL_APM_PATH` or `OPENCODE_LOCAL_APM_PATH`, which bytesec also reads: a session's value would silently win over the operator's;
+   - an environment that already sets `BYTESEC_LOCAL_APM_PATH` or `OPENCODE_LOCAL_APM_PATH`, which bytesec also reads, in the role's `.env` or through `passEnv`: a session's value would silently win over the operator's;
    - a skill whose name bytesec's skill-name rule refuses: bytesec would not load it.
 
    Refusing the whole role is simpler than rendering part of it. It also keeps what the agent is told in one place.
@@ -109,7 +117,8 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–3 a
    - Directories are `0700` and files `0600`. A render root, or a role directory in it, that is a symlink or a file is refused rather than followed.
    - Only regular files are copied, as `mt role create` copies them: symlinks, FIFOs and sockets are skipped, and so is any `.env`.
    - A `SKILL.md` that is not itself a regular file fails the render, since the skill would arrive without it.
-   - A package over 16 MiB or 2,000 files fails it too. It is read whole at each claim, and a skill that size is a mistake.
+   - A package over 16 MiB or 2,000 files fails it too. The limits are counted while the skills are walked, before each file is read, so a skill that is a whole checkout fails at the limit rather than being read first.
+   - A render directory that already existed is `chmod`-ed to `0700`, so one made by hand or by an older build is private too.
 10. **Old packages are swept at two moments.**
     - **When a role is rendered**, its other packages are removed, except those of open runs: the dispatcher keeps each open run's package directory.
     - **At boot**, when nothing is open, the directories of roles no longer configured are removed, and so is any staging a dead process left. Each role's other packages go at its next render.
@@ -120,14 +129,14 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–3 a
     - No workspace may be or contain the home.
     - Inside the home only `workspaces/<name>` may be one (spec §2.3).
 
-    So neither `rendered/` nor a package in it can be a workspace or lie in one. `src/workspaces.ts` is unchanged, and a test pins the rule (Task 6).
+    So neither `rendered/` nor a package in it can be a workspace or lie in one. `src/workspaces.ts` is unchanged, and a test pins the rule (Task 7).
 12. **How the run gets the package: arguments and environment, both held by the dispatcher.**
     - `StartOptions` and `SessionActorDeps` gain `args`, as they gained `env` (spec §2.4 item 3).
     - The CLI driver puts them after `agent.args` and before its own flags: `bytesec run -m <model> --agent <role> --format json --dir <ws> -y -- <prompt>`. Every turn's process gets them.
     - The ACP driver refuses non-empty `args`: the codebase refuses mismatches rather than degrade quietly.
     - The registry asks a new `argsFor` hook after `envFor`. It is a second hook rather than a change to `envFor`'s type, so `envFor` keeps its one refusal path and its callers do not change.
     - The environment goes through the existing `envFor`, as `{ ...rendered.env, MT_KANBAN_RUN }`, so plan C3's token joins it in one place.
-13. **`BYTESEC_NO_GLOBAL_APM` is not set.** The spike showed no effect: the user's global skill loaded with it set.
+13. **`BYTESEC_NO_GLOBAL_APM` is not set.** It changes what bytesec loads, not what a package's agent may use, and the spike showed no difference. User skills reach a native agent only through `agent.skills`.
 14. **A native run's prompt leaves out `# Your role` and `# Skills`, and nothing else.**
     - From `# How to work` on, it is byte for byte what an injected run gets.
     - The protocol's precedence line stays. It says the rules "come after your role instructions", which is still true: they are now the system prompt.
@@ -155,31 +164,60 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–3 a
     - `native: role default does not: it has no role.md and no skills`.
 
     With a role named, only that role's line is printed. On a failed check there is no team, so no lines.
-19. **The default-instructions risk: render by default, keep `agent.native: false` as the operator's escape hatch, and add nothing to the package to restore bytesec's defaults.** *For the user to confirm.*
+19. **The default-instructions risk: render by default, keep `agent.native: false` as the operator's escape hatch, and add nothing to the package to restore bytesec's defaults.** *Confirmed by the user.*
     - From the code (see the spike): `mode: primary` with a body replaces only bytesec's default identity paragraph. The provider prompt and `AGENT_GUIDELINES` stay.
     - Restoring that paragraph would tell a coding role it is "the default security agent for the ByteSec platform", which is the part a role should replace.
     - What is not known is whether real coding work gets worse under a short `role.md` persona. The plan ends with a manual smoke test against real bytesec, and the operator should watch the first real tasks.
     - If they degrade, `agent.native: false` restores injection for that role without a code change.
-20. **A run's `agent_config` does not record whether the run was native.** *For the user to confirm.*
-    - The snapshot is taken in the claim's transaction, before the render, and a render can still fall back.
-    - The log line `kanban: run <id> runs role <name> as a native bytesec agent` says which runs were. The run's `role_md_hash` keeps its meaning.
-    - C4's rework seeding compares `agent_config`, so it treats a native and an injected run of one agent as the same agent. Both resume nothing under the CLI driver until plan E.
+20. **A run records whether it ran natively, and from which package**, in its `agent_config`. *The user's decision.*
+    - Once the render is decided, rendered or put in the prompt, the dispatcher calls `KanbanService.recordRendering`. It writes `native: true` and `packageHash: <sha256>`, or `native: false`, into the run's `agent_config`, with a `run_rendered` event. `db/kanban.ts` stays the sole writer, and the write happens once.
+    - **Why `agent_config`:**
+      - it is the run's snapshot of the agent it ran, and how the role reached the agent is part of that;
+      - it is JSONB, so no migration;
+      - `RunRow.agentConfig` is the read type, so the board's run view shows it with nothing added;
+      - the comparisons that seed a rework (C4) or a resume (E) already read it.
+    - The snapshot is still taken at the claim. The two keys are added after the render, because a render can fall back.
+    - A run claimed before plan R, or one whose start stopped before the record, has neither key, and counts as not native.
 21. **The package's details.**
     - The description, in `apm.json` and the front matter, is the role's `description` flattened to one line, or `the <role> role`. It is written as a JSON string, which YAML reads as a double-quoted scalar.
     - The agent body is the raw `role.md` bytes, untrimmed. The prompt trims them, but here they are a file, not part of a larger text.
+    - The front matter's `name` is a JSON string too, so a role named `true`, `false` or `null` stays a string.
+22. **A role imports user-level skills by name: `agent.skills: [lark-doc, lark-im]`.** *The user's decision.*
+    - Each name must follow bytesec's skill-name rule, `isBytesecSkillName`.
+    - A name that is also one of the role's own `skills/` is a startup error: two sources for one skill.
+    - A name found nowhere is a startup error naming the role, and `mt role check` reports it under the files.
+    - A name listed twice counts once, as every list in the config does.
+    - An imported skill is read and checked as the role's own are, front matter included, and appended to `role.skills` after them. From there it is treated exactly as they are:
+      - the claim checks its `SKILL.md`;
+      - the renderer copies it with the same rules (regular files only, no `.env`, the same limits);
+      - its files are in the package hash, so a changed user skill makes a new package.
+    - The legacy `agent:` block refuses the key, as it refuses `native`.
+23. **Where imported skills are looked up, first match wins:**
+    1. `$XDG_CONFIG_HOME/bytesec/skills`, else `~/.config/bytesec/skills`;
+    2. the same directory's `skill/`;
+    3. `~/.trae/skills`;
+    4. `~/.coco/skills`;
+    5. `~/.agents/skills`;
+    6. `~/.claude/skills`.
+
+    That is bytesec's own load order reversed. bytesec lets a later skill of the same name replace an earlier one, so this finds the skill bytesec itself would have used for an agent that is not a package's.
+    - `~/.bytesec/skills` is left out: bytesec reads it only under `--expose-user-skills`.
+    - A directory that is a symlink, or whose `SKILL.md` is one, is not followed, and the next directory is tried. On this machine `~/.claude/skills/lark-*` are symlinks into `~/.agents/skills`, which comes first anyway.
+    - `HOME` and `XDG_CONFIG_HOME` are read from the environment the gateway was given, which is also what tests replace.
+24. **An injected role lists its imported skills in the prompt, exactly as its own**: name, description and the absolute path of the user's `SKILL.md`. So `agent.skills` means the same whether the role is rendered, opts out, falls back, or has an agent with no renderer.
+
 
 ## Out of scope (later plans)
 
 - **A Claude Code renderer.** A second `Renderer` in `RENDERERS`; its format and launch need their own spike.
 - **Rendering for ACP agents**, including `bytesec acp`.
 - **Tool policies through the package.** A bytesec agent's front matter can carry `tools` and `permission`. Whether they hold under `run -y` is untested, so `tools` stays refused at startup for every driver (spec §2.2).
-- **Hiding the user's global skills** from a rendered role. No switch the spike tried does it.
+- **The workspace's own skills for a native run.** A package's agent cannot see skills in the workspace (`.agents/skills`, `.claude/skills` in the repository), and `agent.skills` imports only user-level ones.
 - **Verifying a package with bytesec.** `bytesec agent list` does not show override packages.
-- **Recording native rendering in `agent_config`** (Decision 20).
 
 ### Known limitations, not fixed here
 
-- A rendered role also gets the user's global bytesec skills, such as `bytedcli`.
+- A native run cannot use the user's skills, such as `bytedcli`, or the workspace's, unless the role imports them with `agent.skills`. bytesec still loads them, but denies and hides them from a package's agent.
 - The fallback covers a render that fails, not a bytesec that rejects a package it was given, for example after an upgrade that changes the lookup. Such a run's turn fails and is classified like any other failure (spec §8.1). `agent.native: false` is the operator's way out.
 - The spike and the code reading are of bytesec 0.7.4 only.
 - A role edited several times while its runs are open keeps one package per open version until those runs close and the role renders again.
@@ -194,16 +232,17 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–3 a
   - the CLI driver's replayed history now carries a shorter first prompt for a native run, which leaves more room for the transcript.
 - **C4:**
   - review and rework runs are rendered like work runs, from the reviewer's or the implementer's role;
-  - rework seeding compares `agent_config`, which is the same for native and injected runs (Decision 20).
-- **A Claude Code renderer:** implement `Renderer` in `src/render/`, add it to `RENDERERS` in `src/render/native.ts`, and give its CLI driver per-session `args` as Task 3 does here, or launch through the environment only.
+  - seed a rework or resume only from a run with the same native-ness and package hash. Both are in the run's `agent_config` (Decision 20). `reworkSeed` in `src/db/kanban.ts` compares only `driver`, `command` and `args` today, and at the claim the new run's hash is not known yet: C4 compares against the package the role renders to now, or decides the seed after the render.
+- **E:** seed a rework or resume only from a run with the same native-ness and package hash, read from `agent_config`.
+- **A Claude Code renderer:** implement `Renderer` in `src/render/`, add it to `RENDERERS` in `src/render/native.ts`, and give its CLI driver per-session `args` as Task 4 does here, or launch through the environment only.
 
 ## File structure
 
 | File | Responsibility |
 |---|---|
-| `src/names.ts` (modify) | the grammar without a trailing `-` |
+| `src/names.ts` (modify) | the grammar without a trailing `-`; `isBytesecSkillName` |
 | `src/config.ts` (modify) | `AgentConfig.native` |
-| `src/roles.ts` (modify) | reading `agent.native` from a role's `config.yaml` |
+| `src/roles.ts` (modify) | reading `agent.native` and `agent.skills`; `userSkillDirs`; `readSkillDir` |
 | `src/driver/types.ts` (modify) | `StartOptions.args` |
 | `src/driver/cli/driver.ts` (modify) | a session's `args` after the configured ones |
 | `src/driver/acp/driver.ts` (modify) | refusing per-session `args` |
@@ -212,16 +251,18 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–3 a
 | `src/render/types.ts` (create) | `Renderer`, `PackageFile`, `SkillFiles`, `Launch` |
 | `src/render/bytesec.ts` (create) | `bytesecRenderer` |
 | `src/render/native.ts` (create) | `RENDERERS`, `nativeFor`, `renderNative`, `sweepRole`, `sweepRoles`, `packageHash` |
-| `src/kanban/service.ts` (modify) | `Claimed.roleMdBytes` |
+| `src/kanban/service.ts` (modify) | `Claimed.roleMdBytes`; `recordRendering` |
+| `src/kanban/types.ts` (modify) | `AgentSnapshot.native`, `AgentSnapshot.packageHash`, `Rendering` |
+| `src/db/kanban.ts`, `src/db/WRITERS.md` (modify) | `recordRendering`, the sole writer of the two keys |
 | `src/kanban/prompt.ts`, `src/kanban/brief.ts` (modify) | `RunBrief.native`; the prompt without `role.md` and the skills |
 | `src/kanban/dispatcher.ts` (modify) | rendering after the claim, `argsFor`, the sweeps, the fallback |
 | `src/index.ts` (modify) | `renderRoot` and `argsFor` wired |
 | `src/cli/role.ts` (modify) | `mt role check`'s `native:` lines |
-| `README.md` (modify) | the name grammar; native rendering; `mt role check` |
-| `tests/render-bytesec.test.ts`, `tests/render-native.test.ts`, `tests/kanban-dispatch-native.test.ts` (create) | |
+| `README.md` (modify) | the name grammar; `agent.skills`; native rendering; `mt role check` |
+| `tests/render-bytesec.test.ts`, `tests/render-native.test.ts`, `tests/kanban-rendering.test.ts`, `tests/kanban-dispatch-native.test.ts` (create) | |
 | `tests/names.test.ts`, `tests/roles.test.ts`, `tests/config.test.ts`, `tests/driver-build.test.ts`, `tests/cli-driver.e2e.ts`, `tests/fakes/cli-agent.mjs`, `tests/registry.test.ts`, `tests/workspaces.test.ts`, `tests/kanban-service.test.ts`, `tests/kanban-prompt.test.ts`, `tests/kanban-brief.test.ts`, `tests/helpers/dispatch.ts`, `tests/mt-role.test.ts` (modify) | |
 
-Running counts, unit then end to end: Task 1 932 / 49, Task 2 934 / 49, Task 3 935 / 51, Task 4 937, Task 5 943, Task 6 956, Task 7 956, Task 8 958, Task 9 963, Task 10 965 / 51.
+Running counts, unit then end to end: Task 1 932 / 49, Task 2 934 / 49, Task 3 941 / 49, Task 4 942 / 51, Task 5 944, Task 6 950, Task 7 965, Task 8 965, Task 9 968, Task 10 970, Task 11 976, Task 12 978 / 51.
 
 ---
 
@@ -455,7 +496,416 @@ git commit -m "Let a role opt out of native rendering with agent.native: false"
 
 ---
 
-### Task 3: A session's own arguments reach its agent's command line
+### Task 3: A role imports skills by name
+
+**Files:**
+- Modify: `src/names.ts`, `src/roles.ts`, `README.md`, `tests/roles.test.ts`, `tests/config.test.ts`, `tests/mt-role.test.ts`
+
+A role may import user-level skills by name: `agent.skills: [lark-doc, lark-im]` in its `config.yaml` (Decisions 22–24). A native package's agent can use only the package's own skills, so this is how a rendered role keeps a user skill it needs. An injected role gets the same skills listed in its prompt.
+- **Where.** `userSkillDirs(env)` lists the directories bytesec loads a user's skills from, in lookup order: `$XDG_CONFIG_HOME/bytesec/skills` (else `~/.config/bytesec/skills`), then `…/bytesec/skill`, `~/.trae/skills`, `~/.coco/skills`, `~/.agents/skills` and `~/.claude/skills`. The first real directory holding a regular `SKILL.md` wins, and a symlink is not followed. `HOME` and `XDG_CONFIG_HOME` come from the environment `loadRoleDir` is given, so tests use a made-up home and never read the real one.
+- **Checks.** A name must follow bytesec's skill-name rule, now `isBytesecSkillName` in `src/names.ts`. A name that is also one of the role's own skills is refused, since two sources for one skill is a mistake. A name found nowhere is a startup error naming the role, which `mt role check` reports under the files. A name listed twice counts once, as in every list the config reads.
+- **What it becomes.** Each import is read as the role's own skills are, front matter included, and appended to `role.skills` after them. Everything downstream therefore treats both alike: the claim's file check, the prompt's skills list, and the renderer's copy and its hash.
+
+`readSkills` keeps its loop, and its body becomes `readSkillDir`, shared by both. The config test's second line passes already: the legacy `agent:` block refuses `agent.skills` as unknown.
+
+- [ ] **Step 3.1: Write the failing tests.**
+
+In `tests/roles.test.ts`, replace:
+
+```ts
+describe('loadRoleDir: .env, role.md, skills', () => {
+```
+
+with:
+
+```ts
+describe('loadRoleDir: skills imported by name', () => {
+  /** A user-level skill directory under a made-up home: never the real one. */
+  function userSkill(root: string, name: string, description = `the ${name} skill`): string {
+    const dir = join(rolesDir, 'home', root, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\nUse it.\n`);
+    return dir;
+  }
+  const HOME = () => ({ HOME: join(rolesDir, 'home') });
+
+  it("adds each named user skill after the role's own, from where bytesec would load it", () => {
+    const dir = userSkill('.agents/skills', 'lark-doc');
+    role('r', `${AGENT}  skills: [lark-doc]\n`, {
+      'skills/testing/SKILL.md': '---\nname: testing\ndescription: How to test\n---\n',
+    });
+    expect(load('r', HOME()).role.skills).toEqual([
+      expect.objectContaining({ name: 'testing' }),
+      { name: 'lark-doc', description: 'the lark-doc skill', dir, path: join(dir, 'SKILL.md') },
+    ]);
+  });
+
+  it("looks where bytesec looks, its config directory first, then .trae, .coco, .agents and .claude", () => {
+    userSkill('.claude/skills', 'lark-im', 'from claude');
+    userSkill('.agents/skills', 'lark-im', 'from agents');
+    role('r', `${AGENT}  skills: [lark-im]\n`);
+    expect(load('r', HOME()).role.skills[0]?.description).toBe('from agents');
+    userSkill('.config/bytesec/skill', 'lark-im', 'from config skill');
+    expect(load('r', HOME()).role.skills[0]?.description).toBe('from config skill');
+    userSkill('.config/bytesec/skills', 'lark-im', 'from config skills');
+    expect(load('r', HOME()).role.skills[0]?.description).toBe('from config skills');
+    // XDG_CONFIG_HOME moves the config directory, as it moves bytesec's.
+    const xdg = join(rolesDir, 'xdg');
+    mkdirSync(join(xdg, 'bytesec', 'skills', 'lark-im'), { recursive: true });
+    writeFileSync(join(xdg, 'bytesec', 'skills', 'lark-im', 'SKILL.md'), '---\nname: lark-im\ndescription: from xdg\n---\n');
+    expect(load('r', { ...HOME(), XDG_CONFIG_HOME: xdg }).role.skills[0]?.description).toBe('from xdg');
+  });
+
+  it('does not follow a symlinked skill directory, and goes on to the next', () => {
+    const real = userSkill('.agents/skills', 'lark-base');
+    mkdirSync(join(rolesDir, 'home', '.trae', 'skills'), { recursive: true });
+    symlinkSync(real, join(rolesDir, 'home', '.trae', 'skills', 'lark-base'));
+    role('r', `${AGENT}  skills: [lark-base]\n`);
+    expect(load('r', HOME()).role.skills[0]?.dir).toBe(real);
+    rmSync(real, { recursive: true });
+    expect(() => load('r', HOME())).toThrow(/a symlinked skill directory is not followed/);
+  });
+
+  it('refuses a name it cannot find, naming the role, and finds nothing without a home', () => {
+    role('r', `${AGENT}  skills: [lark-missing]\n`);
+    expect(() => load('r', HOME())).toThrow(/^role r: agent\.skills names lark-missing, which is in none of .*\.agents\/skills/);
+    expect(() => load('r')).toThrow('role r: agent.skills names lark-missing, but HOME is not set, so there is nowhere to look');
+  });
+
+  it("refuses a name outside bytesec's skill-name rule, and one the role has itself", () => {
+    userSkill('.agents/skills', 'testing');
+    role('bad', `${AGENT}  skills: [Lark_Doc]\n`);
+    expect(() => load('bad', HOME())).toThrow(/agent\.skills: "Lark_Doc" is not a skill name bytesec loads/);
+    role('both', `${AGENT}  skills: [testing]\n`, { 'skills/testing/SKILL.md': '---\nname: testing\ndescription: d\n---\n' });
+    expect(() => load('both', HOME())).toThrow('role both: skill testing is in its skills/ and in agent.skills; keep one');
+  });
+
+  it("checks an imported skill's front matter as it checks the role's own", () => {
+    const dir = userSkill('.agents/skills', 'lark-task');
+    writeFileSync(join(dir, 'SKILL.md'), 'no front matter');
+    role('r', `${AGENT}  skills: [lark-task]\n`);
+    expect(() => load('r', HOME())).toThrow(/must start with front matter/);
+  });
+});
+
+describe('loadRoleDir: .env, role.md, skills', () => {
+```
+
+In `tests/config.test.ts`, replace:
+
+```ts
+  it("refuses agent.native in the agent: block, whose role has no role.md or skills to render", () => {
+    expect(() => load({}, yamlFile({ agent: { native: false } }))).toThrow(/unknown setting agent\.native \(known: driver, /);
+  });
+```
+
+with:
+
+```ts
+  it("refuses agent.native and agent.skills in the agent: block, whose role has no role.md or skills to render", () => {
+    expect(() => load({}, yamlFile({ agent: { native: false } }))).toThrow(/unknown setting agent\.native \(known: driver, /);
+    expect(() => load({}, yamlFile({ agent: { skills: ['lark-doc'] } }))).toThrow(/unknown setting agent\.skills \(known: driver, /);
+  });
+```
+
+In `tests/mt-role.test.ts`, replace:
+
+```ts
+  it('reports a broken role file under the files', async () => {
+```
+
+with:
+
+```ts
+  it('reports a skill named in agent.skills that cannot be found under the files', async () => {
+    fx = mtFixture();
+    roleDir('implementer', 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n  skills: [lark-doc]\n');
+    // A made-up home, never the real one.
+    const home = join(fx.root, 'user');
+    const r = await fx.run(['role', 'check'], { env: { HOME: home } });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^files:\n {2}role implementer: agent\.skills names lark-doc, which is in none of /m);
+    mkdirSync(join(home, '.agents', 'skills', 'lark-doc'), { recursive: true });
+    writeFileSync(join(home, '.agents', 'skills', 'lark-doc', 'SKILL.md'), '---\nname: lark-doc\ndescription: Lark docs\n---\n');
+    expect((await fx.run(['role', 'check'], { env: { HOME: home } })).code).toBe(0);
+  });
+
+  it('reports a broken role file under the files', async () => {
+```
+
+- [ ] **Step 3.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/roles.test.ts tests/config.test.ts tests/mt-role.test.ts`. Expected: the six new roles tests and the new `mt role check` test FAIL, most with `ConfigError: …/r/config.yaml: unknown setting agent.skills (known: driver, command, args, unsupervised, passEnv, readOnlyTools, maskExempt, native)`; and `Tests  7 failed | 130 passed (137)`.
+
+- [ ] **Step 3.3: Implement.**
+
+In `src/names.ts`, replace:
+
+```ts
+/** Why `name` is not a valid role or workspace name, or undefined if it is. */
+```
+
+with:
+
+```ts
+/**
+ * bytesec's own rule for a skill's name, as bytesec 0.7.4 checks it: lowercase
+ * letters, digits and single `-`, not at either end, at most 64 characters. A
+ * skill a role imports by name (`agent.skills`) must follow it, and bytesec's
+ * renderer refuses a role with one of its own that does not.
+ */
+export function isBytesecSkillName(name: string): boolean {
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) && !name.includes('--') && name.length <= 64;
+}
+
+/** Why `name` is not a valid role or workspace name, or undefined if it is. */
+```
+
+In `src/roles.ts`, replace:
+
+```ts
+import { isReservedRoleName, nameProblem } from './names.js';
+```
+
+with:
+
+```ts
+import { isBytesecSkillName, isReservedRoleName, nameProblem } from './names.js';
+```
+
+In `src/roles.ts`, replace:
+
+```ts
+    ['driver', 'command', 'args', 'unsupervised', 'passEnv', 'readOnlyTools', 'maskExempt', 'native'],
+```
+
+with:
+
+```ts
+    ['driver', 'command', 'args', 'unsupervised', 'passEnv', 'readOnlyTools', 'maskExempt', 'native', 'skills'],
+```
+
+In `src/roles.ts`, replace:
+
+```ts
+  const { skills, notes } = readSkills(dir);
+```
+
+with:
+
+```ts
+  const { skills: own, notes } = readSkills(dir);
+  const imported = importSkills(name, configPath, strings(configPath, 'agent.skills', agentRaw['skills']), own, env);
+  const skills = [...own, ...imported];
+```
+
+In `src/roles.ts`, replace:
+
+```ts
+function readSkills(dir: string): { skills: Skill[]; notes: string[] } {
+```
+
+with:
+
+```ts
+/**
+ * The user-level skill directories bytesec 0.7.4 loads for an agent that is not
+ * a package's, in the order a role's `agent.skills` are looked up: the first
+ * that holds a name wins. bytesec scans `~/.claude`, `~/.agents`, `~/.coco` and
+ * `~/.trae` (each one's `skills/`) and then its config directory
+ * (`$XDG_CONFIG_HOME/bytesec`, else `~/.config/bytesec`: `skill/`, then
+ * `skills/`), and a later skill of the same name replaces an earlier one, so
+ * this is that order reversed: the skill bytesec itself would have used.
+ * `~/.bytesec/skills` is not here: bytesec reads it only under
+ * `--expose-user-skills`. HOME and XDG_CONFIG_HOME come from the environment the
+ * gateway was given, which tests replace.
+ */
+export function userSkillDirs(env: Env): string[] {
+  const home = env['HOME'] === '' ? undefined : env['HOME'];
+  const xdg = env['XDG_CONFIG_HOME'] === '' ? undefined : env['XDG_CONFIG_HOME'];
+  const config = xdg ?? (home === undefined ? undefined : join(home, '.config'));
+  const dirs: string[] = [];
+  if (config !== undefined) dirs.push(join(config, 'bytesec', 'skills'), join(config, 'bytesec', 'skill'));
+  if (home !== undefined) for (const root of ['.trae', '.coco', '.agents', '.claude']) dirs.push(join(home, root, 'skills'));
+  return dirs;
+}
+
+/**
+ * The skills a role imports by name (`agent.skills`), found where bytesec finds
+ * a user's skills (`userSkillDirs`), each checked as the role's own are. A name
+ * must follow bytesec's skill-name rule, and may not also be one of the role's
+ * own skills: two sources for one skill is a mistake. A name listed twice counts
+ * once, as in every list in the file. A
+ * skill directory, or its SKILL.md, that is a symlink is not followed, and the
+ * next directory is tried. Not found anywhere is a startup error naming the role.
+ */
+function importSkills(role: string, configPath: string, names: readonly string[], own: readonly Skill[], env: Env): Skill[] {
+  const roots = userSkillDirs(env);
+  const out: Skill[] = [];
+  for (const name of names) {
+    if (!isBytesecSkillName(name)) {
+      throw new ConfigError(
+        `${configPath}: agent.skills: ${JSON.stringify(name)} is not a skill name bytesec loads: lowercase ` +
+          "letters, digits and single '-', not at either end, at most 64 characters",
+      );
+    }
+    if (own.some((s) => s.name === name)) {
+      throw new ConfigError(`role ${role}: skill ${name} is in its skills/ and in agent.skills; keep one`);
+    }
+    if (roots.length === 0) {
+      throw new ConfigError(`role ${role}: agent.skills names ${name}, but HOME is not set, so there is nowhere to look`);
+    }
+    const dir = roots
+      .map((root) => join(root, name))
+      .find(
+        (d) =>
+          lstatSync(d, { throwIfNoEntry: false })?.isDirectory() === true &&
+          lstatSync(join(d, 'SKILL.md'), { throwIfNoEntry: false })?.isFile() === true,
+      );
+    if (dir === undefined) {
+      throw new ConfigError(
+        `role ${role}: agent.skills names ${name}, which is in none of ${roots.join(', ')} ` +
+          '(a symlinked skill directory is not followed)',
+      );
+    }
+    out.push(readSkillDir(dir, name));
+  }
+  return out;
+}
+
+function readSkills(dir: string): { skills: Skill[]; notes: string[] } {
+```
+
+In `src/roles.ts`, replace:
+
+```ts
+    const path = join(dir, 'SKILL.md');
+    let text: string;
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new ConfigError(`${dir}: a skill directory needs a SKILL.md`);
+      }
+      throw new ConfigError(`${path} cannot be read: ${(err as Error).message}`);
+    }
+    const matter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)?.[1];
+    if (matter === undefined) {
+      throw new ConfigError(`${path}: a skill must start with front matter (--- name: … description: … ---)`);
+    }
+    let fields: unknown;
+    try {
+      fields = parseYaml(matter);
+    } catch (err) {
+      throw new ConfigError(`${path}: its front matter is not valid YAML: ${(err as Error).message}`);
+    }
+    const meta = section(path, 'front matter', fields ?? {});
+    const name = str(path, 'name', meta['name']);
+    const description = str(path, 'description', meta['description']);
+    if (name === undefined || description === undefined) {
+      throw new ConfigError(`${path}: its front matter needs a name and a description`);
+    }
+    if (name !== entry.name) {
+      throw new ConfigError(
+        `${path}: its name ${JSON.stringify(name)} does not match its directory ${JSON.stringify(entry.name)}`,
+      );
+    }
+    skills.push({ name, description, dir, path });
+  }
+  return { skills, notes };
+}
+```
+
+with:
+
+```ts
+    skills.push(readSkillDir(dir, entry.name));
+  }
+  return { skills, notes };
+}
+
+/** One skill directory: its SKILL.md's front matter, whose name must be the directory's. */
+function readSkillDir(dir: string, dirName: string): Skill {
+  const path = join(dir, 'SKILL.md');
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new ConfigError(`${dir}: a skill directory needs a SKILL.md`);
+    }
+    throw new ConfigError(`${path} cannot be read: ${(err as Error).message}`);
+  }
+  const matter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)?.[1];
+  if (matter === undefined) {
+    throw new ConfigError(`${path}: a skill must start with front matter (--- name: … description: … ---)`);
+  }
+  let fields: unknown;
+  try {
+    fields = parseYaml(matter);
+  } catch (err) {
+    throw new ConfigError(`${path}: its front matter is not valid YAML: ${(err as Error).message}`);
+  }
+  const meta = section(path, 'front matter', fields ?? {});
+  const name = str(path, 'name', meta['name']);
+  const description = str(path, 'description', meta['description']);
+  if (name === undefined || description === undefined) {
+    throw new ConfigError(`${path}: its front matter needs a name and a description`);
+  }
+  if (name !== dirName) {
+    throw new ConfigError(
+      `${path}: its name ${JSON.stringify(name)} does not match its directory ${JSON.stringify(dirName)}`,
+    );
+  }
+  return { name, description, dir, path };
+}
+```
+
+In `src/roles.ts`, replace:
+
+```ts
+  roleMdPath: string | undefined;
+  skills: readonly Skill[];
+```
+
+with:
+
+```ts
+  roleMdPath: string | undefined;
+  /** Its own `skills/`, then those it imports by name from the user's (`agent.skills`), in that order. */
+  skills: readonly Skill[];
+```
+
+In `README.md`, replace:
+
+```md
+The role `default` runs chat sessions. It is `roles/default/` if that exists, and otherwise
+```
+
+with:
+
+```md
+A role may also use skills from the user's own, by name: `agent.skills: [lark-doc, lark-im]` in
+its `config.yaml`. Each name is looked up where bytesec keeps a user's skills, in this order:
+`$XDG_CONFIG_HOME/bytesec/skills` (else `~/.config/bytesec/skills`), the same directory's
+`skill/`, then `~/.trae/skills`, `~/.coco/skills`, `~/.agents/skills` and `~/.claude/skills`. The
+first real directory holding a `SKILL.md` wins; a symlink is not followed. A name that is not
+found, or is also one of the role's own skills, stops the gateway at startup. An imported skill is
+given to the agent exactly as the role's own are.
+
+The role `default` runs chat sessions. It is `roles/default/` if that exists, and otherwise
+```
+
+- [ ] **Step 3.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  941 passed (941)`. Then run `npm run typecheck`. Expected: no output.
+
+- [ ] **Step 3.5: Commit.**
+
+```bash
+git add src/names.ts src/roles.ts README.md tests/roles.test.ts tests/config.test.ts tests/mt-role.test.ts
+git commit -m "Let a role import user skills by name, found where bytesec finds them"
+```
+
+---
+
+### Task 4: A session's own arguments reach its agent's command line
 
 **Files:**
 - Modify: `src/driver/types.ts`, `src/driver/cli/driver.ts`, `src/driver/acp/driver.ts`, `tests/fakes/cli-agent.mjs`, `tests/cli-driver.e2e.ts`, `tests/driver-build.test.ts`
@@ -464,7 +914,7 @@ git commit -m "Let a role opt out of native rendering with agent.native: false"
 
 The fake CLI agent's log line gains `apm`, the value of `BYTESEC_LOCAL_APM_PATH` in its environment, so the end-to-end test sees both halves of what a native run is given. No test runs real bytesec.
 
-- [ ] **Step 3.1: Write the failing tests.**
+- [ ] **Step 4.1: Write the failing tests.**
 
 In `tests/fakes/cli-agent.mjs`, replace:
 
@@ -611,9 +1061,9 @@ describe('the acp driver and per-session arguments', () => {
 describe('buildRoleDrivers', () => {
 ```
 
-- [ ] **Step 3.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/driver-build.test.ts`. Expected: the new test FAILS, with `expected [Function] to throw error including 'the acp driver takes no per-session a…' but got 'ACP session failed to start: ACP conn…'`, and `Tests  1 failed | 3 passed (4)`. Then run `npx vitest run --project e2e tests/cli-driver.e2e.ts`. Expected: the first new test FAILS, with `expected [ '--format', 'json', '--dir' ] to deeply equal [ Array(3) ]`; the second passes already; and `Tests  1 failed | 26 passed (27)`.
+- [ ] **Step 4.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/driver-build.test.ts`. Expected: the new test FAILS, with `expected [Function] to throw error including 'the acp driver takes no per-session a…' but got 'ACP session failed to start: ACP conn…'`, and `Tests  1 failed | 3 passed (4)`. Then run `npx vitest run --project e2e tests/cli-driver.e2e.ts`. Expected: the first new test FAILS, with `expected [ '--format', 'json', '--dir' ] to deeply equal [ Array(3) ]`; the second passes already; and `Tests  1 failed | 26 passed (27)`.
 
-- [ ] **Step 3.3: Implement.**
+- [ ] **Step 4.3: Implement.**
 
 In `src/driver/types.ts`, replace:
 
@@ -710,9 +1160,9 @@ with:
       return startAcpSession(config, opts);
 ```
 
-- [ ] **Step 3.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  935 passed (935)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  51 passed (51)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 4.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  942 passed (942)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  51 passed (51)`. Then run `npm run typecheck`. Expected: no output.
 
-- [ ] **Step 3.5: Commit.**
+- [ ] **Step 4.5: Commit.**
 
 ```bash
 git add src/driver/types.ts src/driver/cli/driver.ts src/driver/acp/driver.ts tests/fakes/cli-agent.mjs tests/cli-driver.e2e.ts tests/driver-build.test.ts
@@ -721,14 +1171,14 @@ git commit -m "Give a session's agent arguments of its own, after the configured
 
 ---
 
-### Task 4: The registry asks for a session's arguments
+### Task 5: The registry asks for a session's arguments
 
 **Files:**
 - Modify: `src/core/session-actor.ts`, `src/core/registry.ts`, `tests/registry.test.ts`
 
 The session layer carries the arguments as it carries the environment (spec §2.4 item 3, amended). `SessionActorDeps` gains `args`, which the actor passes to every start. The registry gains an `argsFor` hook, asked on every actor build right after `envFor`, so the dispatcher can give an open run's agent its `--agent` (Decision 12). It is a second hook, not a change to `envFor`: `envFor` keeps its one job of refusing a run this process did not start, and `argsFor` only reads what an open run holds. The second test passes already, and pins that a session with no arguments gets `undefined`, not `[]`.
 
-- [ ] **Step 4.1: Write the failing tests.**
+- [ ] **Step 5.1: Write the failing tests.**
 
 In `tests/registry.test.ts`, replace:
 
@@ -801,9 +1251,9 @@ with:
   it('creates a session as a role, in a workspace, seeded from another session', async () => {
 ```
 
-- [ ] **Step 4.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/registry.test.ts`. Expected: the first new test FAILS, with `expected [ undefined, undefined ] to deeply equal [ [ '--agent', 'role-1' ], …(1) ]`, and `Tests  1 failed | 61 passed (62)`.
+- [ ] **Step 5.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/registry.test.ts`. Expected: the first new test FAILS, with `expected [ undefined, undefined ] to deeply equal [ [ '--agent', 'role-1' ], …(1) ]`, and `Tests  1 failed | 61 passed (62)`.
 
-- [ ] **Step 4.3: Implement.**
+- [ ] **Step 5.3: Implement.**
 
 In `src/core/session-actor.ts`, replace:
 
@@ -920,9 +1370,9 @@ with:
       clock: this.#clock,
 ```
 
-- [ ] **Step 4.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  937 passed (937)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 5.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  944 passed (944)`. Then run `npm run typecheck`. Expected: no output.
 
-- [ ] **Step 4.5: Commit.**
+- [ ] **Step 5.5: Commit.**
 
 ```bash
 git add src/core/session-actor.ts src/core/registry.ts tests/registry.test.ts
@@ -931,19 +1381,19 @@ git commit -m "Ask for a session's own agent arguments on every actor build"
 
 ---
 
-### Task 5: bytesec's renderer
+### Task 6: bytesec's renderer
 
 **Files:**
 - Create: `src/render/types.ts`, `src/render/bytesec.ts`, `tests/render-bytesec.test.ts`
 
-The renderer interface and bytesec's renderer (Decisions 2, 5 and 16). A `Renderer` says which roles' agents are its own (`handles`), why one of those cannot be rendered (`refuses`), what files the package holds (`files`), and how a run uses it (`launch`). It reads no files and writes none: `./native.ts`, in Task 6, does that. The layout is copied from a real bytesec package, which the spike loaded:
+The renderer interface and bytesec's renderer (Decisions 2, 5 and 16). A `Renderer` says which roles' agents are its own (`handles`), why one of those cannot be rendered (`refuses`), what files the package holds (`files`), and how a run uses it (`launch`). It reads no files and writes none: `./native.ts`, in Task 7, does that. The layout is copied from a real bytesec package, which the spike loaded:
 - `apm.json`: `{"name": "<role>", "description": "...", "source": "default", "path": ""}`;
 - `agents/<role>.md`: front matter `name`, `description` and `mode: primary`, then the `role.md` bytes, unchanged;
 - `skills/<skill>/…`: every file of each skill.
 
-The description is the role's `description`, flattened to one line, or `the <role> role`. It is written as a JSON string, which YAML reads as a double-quoted scalar, so a colon or a quote cannot break the front matter.
+The description is the role's `description`, flattened to one line, or `the <role> role`. It and the name are written as JSON strings, which YAML reads as double-quoted scalars, so a colon or a quote cannot break the front matter, and a role named `true` or `null` stays a string. The renderer also refuses a role that sets `BYTESEC_LOCAL_APM_PATH` or `OPENCODE_LOCAL_APM_PATH` in its environment or forwards either through `passEnv`. Imported skills need nothing here: they are in `role.skills`.
 
-- [ ] **Step 5.1: Write the failing tests.**
+- [ ] **Step 6.1: Write the failing tests.**
 
 Create `tests/render-bytesec.test.ts`:
 
@@ -1013,6 +1463,10 @@ describe('bytesecRenderer: which roles', () => {
     expect(bytesecRenderer.refuses(role('implementer', {}, { env: { OPENCODE_LOCAL_APM_PATH: '/p' } }))).toBe(
       'its environment already sets OPENCODE_LOCAL_APM_PATH',
     );
+    // Forwarded from the gateway's environment is set too.
+    expect(bytesecRenderer.refuses(role('implementer', {}, { passEnv: ['BYTESEC_LOCAL_APM_PATH'] }))).toBe(
+      'its environment already sets BYTESEC_LOCAL_APM_PATH',
+    );
     expect(bytesecRenderer.refuses(role('Bad-'))).toBe('bytesec cannot name an agent "Bad-"');
   });
 
@@ -1047,7 +1501,7 @@ describe('bytesecRenderer: the package', () => {
       path: '',
     });
     expect(t['agents/implementer.md']).toBe(
-      '---\nname: implementer\ndescription: "Writes: \\"code\\" well"\nmode: primary\n---\nYou change code in this repository.\n',
+      '---\nname: "implementer"\ndescription: "Writes: \\"code\\" well"\nmode: primary\n---\nYou change code in this repository.\n',
     );
     expect(t['skills/testing/references/ci.md']).toBe('ci');
   });
@@ -1058,7 +1512,7 @@ describe('bytesecRenderer: the package', () => {
     expect(agent?.bytes.subarray(-4)).toEqual(bytes);
     const bare = text(bytesecRenderer.files(role('implementer', { roleMdPath: undefined }), undefined, []));
     // No body: bytesec keeps its own default identity.
-    expect(bare['agents/implementer.md']).toBe('---\nname: implementer\ndescription: "the implementer role"\nmode: primary\n---\n');
+    expect(bare['agents/implementer.md']).toBe('---\nname: "implementer"\ndescription: "the implementer role"\nmode: primary\n---\n');
   });
 
   it('launches the package by its directory and the role as the agent', () => {
@@ -1070,9 +1524,9 @@ describe('bytesecRenderer: the package', () => {
 });
 ```
 
-- [ ] **Step 5.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/render-bytesec.test.ts`. Expected: FAIL, with `Error: Cannot find module '../src/render/bytesec.js'`, and `Tests  no tests`.
+- [ ] **Step 6.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/render-bytesec.test.ts`. Expected: FAIL, with `Error: Cannot find module '../src/render/bytesec.js'`, and `Tests  no tests`.
 
-- [ ] **Step 5.3: Implement.**
+- [ ] **Step 6.3: Implement.**
 
 Create `src/render/types.ts`:
 
@@ -1127,6 +1581,7 @@ Create `src/render/bytesec.ts`:
 
 ```ts
 import { basename } from 'node:path';
+import { isBytesecSkillName } from '../names.js';
 import type { Role } from '../roles.js';
 import type { Launch, PackageFile, Renderer, SkillFiles } from './types.js';
 
@@ -1144,16 +1599,17 @@ import type { Launch, PackageFile, Renderer, SkillFiles } from './types.js';
  *   and its tool and workspace guidelines around it. Its skills are loaded as
  *   the package's own. An agent from this path wins over a project package of
  *   the same name.
- * - The user's global skills are loaded too: `BYTESEC_NO_GLOBAL_APM=1` did not
- *   hide them, so it is not set.
+ * - A package's agent may use only the package's own skills: bytesec gives it
+ *   the skill permission `{"*": "deny", <its skills>: "allow"}` and shows it
+ *   only skills inside the package. The user's and the workspace's skills are
+ *   out of its reach, so a role brings a user skill in by naming it in
+ *   `agent.skills`, and it is copied into the package. `BYTESEC_NO_GLOBAL_APM`
+ *   is not set: it changes what bytesec loads, not what the agent may use.
  */
 
 const COMMAND = 'bytesec';
 /** bytesec's own pattern for an agent package's name. */
 const PACKAGE_NAME = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
-/** bytesec's own rule for a skill's name: no `--`, at most 64 characters. */
-const SKILL_NAME = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
-const SKILL_NAME_MAX = 64;
 /** Agent names bytesec keeps for itself: `--agent bytesec-agent` runs its built-in agent, not a package. */
 const RESERVED = ['bytesec-agent'];
 /** The variable naming the package, and the older name bytesec also reads. */
@@ -1185,10 +1641,12 @@ export const bytesecRenderer: Renderer = {
       return 'its agent.args already choose a bytesec agent with --agent';
     }
     for (const key of [APM_PATH, APM_PATH_OLD]) {
-      if (role.agent.env[key] !== undefined) return `its environment already sets ${key}`;
+      if (role.agent.env[key] !== undefined || role.agent.passEnv.includes(key)) {
+        return `its environment already sets ${key}`;
+      }
     }
     for (const skill of role.skills) {
-      if (!SKILL_NAME.test(skill.name) || skill.name.includes('--') || skill.name.length > SKILL_NAME_MAX) {
+      if (!isBytesecSkillName(skill.name)) {
         return (
           `bytesec cannot load its skill ${JSON.stringify(skill.name)}: a bytesec skill name is lowercase ` +
           "letters, digits and single '-', not at either end, and at most 64 characters"
@@ -1203,7 +1661,15 @@ export const bytesecRenderer: Renderer = {
     const apm = { name: role.name, description, source: 'default', path: '' };
     // JSON strings are YAML double-quoted scalars, so a description holding a
     // colon or a quote cannot break the front matter.
-    const matter = ['---', `name: ${role.name}`, `description: ${JSON.stringify(description)}`, 'mode: primary', '---', ''];
+    const matter = [
+      '---',
+      // Quoted too, so a role named `true` or `null` is still a string.
+      `name: ${JSON.stringify(role.name)}`,
+      `description: ${JSON.stringify(description)}`,
+      'mode: primary',
+      '---',
+      '',
+    ];
     const files: PackageFile[] = [
       { path: 'apm.json', bytes: Buffer.from(`${JSON.stringify(apm, null, 2)}\n`) },
       // role.md as the claim read it, byte for byte: the run records its hash.
@@ -1221,9 +1687,9 @@ export const bytesecRenderer: Renderer = {
 };
 ```
 
-- [ ] **Step 5.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  943 passed (943)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 6.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  950 passed (950)`. Then run `npm run typecheck`. Expected: no output.
 
-- [ ] **Step 5.5: Commit.**
+- [ ] **Step 6.5: Commit.**
 
 ```bash
 git add src/render/types.ts src/render/bytesec.ts tests/render-bytesec.test.ts
@@ -1232,7 +1698,7 @@ git commit -m "Describe how a role becomes a bytesec agent package"
 
 ---
 
-### Task 6: Writing a package, and sweeping old ones
+### Task 7: Writing a package, and sweeping old ones
 
 **Files:**
 - Create: `src/render/native.ts`, `tests/render-native.test.ts`
@@ -1241,24 +1707,46 @@ git commit -m "Describe how a role becomes a bytesec agent package"
 Which roles are rendered (`nativeFor`), writing a package (`renderNative`) and removing old ones (`sweepRole`, `sweepRoles`). Decisions 7–11:
 - **Content-addressed.** The directory is `<root>/<role>/<sha256>`, the hash of the package's own files, each path and its bytes length-prefixed. One that exists is used as it is, never rewritten.
 - **Atomic.** It is written in a `.stage-` directory beside it, then renamed. A write that fails removes the staging.
-- **Regular files only.** A skill's symlinks, FIFOs and sockets are skipped, as are `.env` files. A `SKILL.md` that is not a regular file fails the render, since the skill would arrive without it. More than 16 MiB, or 2,000 files, fails it too: the package is read whole at each claim.
-- **Private.** Directories are `0700`, files `0600`. A render root, or a role's directory in it, that is a symlink or a file is refused.
+- **Regular files only.** A skill's symlinks, FIFOs and sockets are skipped, as are `.env` files. A `SKILL.md` that is not a regular file fails the render, since the skill would arrive without it. Imported skills are walked the same way.
+- **Bounded while walking.** More than 16 MiB or 2,000 files fails the render. Each file is counted before it is read, and the walk stops at the first one past a limit, so a skill that is a whole checkout is not read first. The whole package is checked against the same limits once the renderer has added its files.
+- **Private.** Directories are `0700`, files `0600`. `chmod` makes a directory that already existed `0700` too. A render root, or a role's directory in it, that is a symlink or a file is refused.
+- **Its hash.** `Rendered.hash` is the directory's name, which a run records (Task 9).
 - **Sweeping.** `sweepRole` removes a role's packages except those it is told to keep. `sweepRoles`, at boot, removes the directories of roles no longer configured, and staging left by a process that died.
 
 The workspace test passes already: it pins that `$MT_HOME/rendered`, and a package in it, cannot be a workspace, since inside the home only `workspaces/<name>` may be one (spec §2.3). `src/workspaces.ts` needs no change.
 
-- [ ] **Step 6.1: Write the failing tests.**
+- [ ] **Step 7.1: Write the failing tests.**
 
 Create `tests/render-native.test.ts`:
 
 ```ts
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentConfig } from '../src/config.js';
 import { bytesecRenderer } from '../src/render/bytesec.js';
-import { MAX_PACKAGE_BYTES, nativeFor, packageHash, renderNative, sweepRole, sweepRoles } from '../src/render/native.js';
+import {
+  MAX_PACKAGE_BYTES,
+  MAX_PACKAGE_FILES,
+  nativeFor,
+  packageHash,
+  renderNative,
+  sweepRole,
+  sweepRoles,
+} from '../src/render/native.js';
 import type { Role } from '../src/roles.js';
 
 /**
@@ -1349,6 +1837,7 @@ describe('renderNative', () => {
     const r = roleOnDisk();
     const out = renderNative(root, r, bytesecRenderer, md(r));
     expect(out.dir).toMatch(new RegExp(`^${root}/implementer/[0-9a-f]{64}$`));
+    expect(out.hash).toBe(out.dir.slice(-64));
     expect(out.args).toEqual(['--agent', 'implementer']);
     expect(out.env).toEqual({ BYTESEC_LOCAL_APM_PATH: out.dir });
     expect(tree(out.dir)).toEqual([
@@ -1369,6 +1858,26 @@ describe('renderNative', () => {
       expect(statSync(d).mode & 0o777).toBe(0o700);
     }
     expect(statSync(join(out.dir, 'apm.json')).mode & 0o777).toBe(0o600);
+  });
+
+  it('makes a render directory that already existed private too', () => {
+    const r = roleOnDisk();
+    mkdirSync(join(root, 'implementer'), { recursive: true, mode: 0o755 });
+    chmodSync(root, 0o755);
+    chmodSync(join(root, 'implementer'), 0o755);
+    renderNative(root, r, bytesecRenderer, md(r));
+    expect(statSync(root).mode & 0o777).toBe(0o700);
+    expect(statSync(join(root, 'implementer')).mode & 0o777).toBe(0o700);
+  });
+
+  it('stops walking a skill at the file limit, before reading the rest', () => {
+    const r = roleOnDisk();
+    const many = join(r.skills[0]?.dir ?? '', 'many');
+    mkdirSync(many);
+    for (let i = 0; i <= MAX_PACKAGE_FILES; i += 1) writeFileSync(join(many, `f${String(i).padStart(4, '0')}`), '');
+    expect(() => renderNative(root, r, bytesecRenderer, md(r))).toThrow(
+      `role implementer's package would hold ${MAX_PACKAGE_FILES + 1} files; at most ${MAX_PACKAGE_FILES} are rendered`,
+    );
   });
 
   it('reuses a finished package, and gives new content a new directory', () => {
@@ -1501,15 +2010,25 @@ with:
   it('refuses two names for one directory', () => {
 ```
 
-- [ ] **Step 6.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/render-native.test.ts tests/workspaces.test.ts`. Expected: `tests/render-native.test.ts` FAILS, with `Error: Cannot find module '../src/render/native.js'`; the workspace tests pass; and `Test Files  1 failed | 1 passed (2)`, `Tests  13 passed (13)`.
+- [ ] **Step 7.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/render-native.test.ts tests/workspaces.test.ts`. Expected: `tests/render-native.test.ts` FAILS, with `Error: Cannot find module '../src/render/native.js'`; the workspace tests pass; and `Test Files  1 failed | 1 passed (2)`, `Tests  13 passed (13)`.
 
-- [ ] **Step 6.3: Implement.**
+- [ ] **Step 7.3: Implement.**
 
 Create `src/render/native.ts`:
 
 ```ts
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { Role } from '../roles.js';
 import { bytesecRenderer } from './bytesec.js';
@@ -1534,9 +2053,16 @@ import type { Launch, PackageFile, Renderer, SkillFiles } from './types.js';
  *
  * **Only regular files.** A skill's symlinks, FIFOs and sockets are not copied,
  * as `mt role create` copies none; nor is any `.env`. A SKILL.md that is not a
- * regular file fails the render: the skill would arrive without it.
+ * regular file fails the render: the skill would arrive without it. This holds
+ * for the skills a role imports by name as for its own: both are in
+ * `role.skills`.
  *
- * **Private.** Directories are 0700 and files 0600.
+ * **Bounded.** A package may hold at most MAX_PACKAGE_FILES files and
+ * MAX_PACKAGE_BYTES bytes, counted while the skills are walked, so a skill that
+ * is a whole checkout fails at the limit instead of being read first.
+ *
+ * **Private.** Directories are 0700, set even on one that already existed, and
+ * files 0600.
  */
 
 /** The renderers, in the order they are asked. */
@@ -1571,6 +2097,8 @@ export function nativeFor(role: Role): Native {
 export interface Rendered extends Launch {
   /** The package directory. */
   dir: string;
+  /** Its content hash, the directory's name: what a run records (plan R). */
+  hash: string;
 }
 
 /**
@@ -1579,10 +2107,12 @@ export interface Rendered extends Launch {
  * the task prompt.
  */
 export function renderNative(root: string, role: Role, renderer: Renderer, roleMd: Buffer | undefined): Rendered {
-  const files = renderer.files(role, roleMd, role.skills.map(readSkill));
+  const budget: Budget = { role: role.name, files: 0, bytes: 0 };
+  const files = renderer.files(role, roleMd, role.skills.map((s) => readSkill(s, budget)));
   checkFiles(role, files);
   const roleDir = privateDir(privateDir(root), role.name);
-  const dir = join(roleDir, packageHash(files));
+  const hash = packageHash(files);
+  const dir = join(roleDir, hash);
   const existing = lstatSync(dir, { throwIfNoEntry: false });
   if (existing === undefined) {
     const staging = mkdtempSync(join(roleDir, STAGING));
@@ -1600,7 +2130,7 @@ export function renderNative(root: string, role: Role, renderer: Renderer, roleM
   } else if (!existing.isDirectory()) {
     throw new Error(`${dir} is in the way: it is not a directory`);
   }
-  return { dir, ...renderer.launch(role, dir) };
+  return { dir, hash, ...renderer.launch(role, dir) };
 }
 
 /**
@@ -1641,16 +2171,40 @@ function entries(dir: string): string[] {
   return readdirSync(dir).sort();
 }
 
-/** `parent/name` as a real directory, made 0700 if missing; a symlink or a file is refused. */
+/**
+ * `parent/name` as a real directory, made if missing; a symlink or a file is
+ * refused. Then 0700, whatever it was: one made before, by hand or by an older
+ * build, is made private too.
+ */
 function privateDir(parent: string, name?: string): string {
   const dir = name === undefined ? parent : join(parent, name);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (!lstatSync(dir).isDirectory()) throw new Error(`${dir} is not a directory`);
+  chmodSync(dir, 0o700);
   return dir;
 }
 
-/** Every regular file under a skill's directory, but any `.env`; its SKILL.md must be one. */
-function readSkill(skill: Role['skills'][number]): SkillFiles {
+/** What a package has taken so far, counted as its skills are walked. */
+interface Budget {
+  role: string;
+  files: number;
+  bytes: number;
+}
+
+function tooMany(b: Budget): Error {
+  return new Error(`role ${b.role}'s package would hold ${b.files} files; at most ${MAX_PACKAGE_FILES} are rendered`);
+}
+
+function tooBig(b: Budget): Error {
+  return new Error(`role ${b.role}'s package would be ${b.bytes} bytes; at most ${MAX_PACKAGE_BYTES} are rendered`);
+}
+
+/**
+ * Every regular file under a skill's directory, but any `.env`; its SKILL.md must
+ * be one. Each file is counted against the budget before it is read, and the
+ * walk stops at the first that passes either limit.
+ */
+function readSkill(skill: Role['skills'][number], budget: Budget): SkillFiles {
   if (lstatSync(skill.path, { throwIfNoEntry: false })?.isFile() !== true) {
     throw new Error(`${skill.path} is not a regular file`);
   }
@@ -1659,22 +2213,27 @@ function readSkill(skill: Role['skills'][number]): SkillFiles {
     for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const path = join(dir, entry.name);
       const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
-      if (entry.isDirectory()) walk(path, rel);
-      else if (entry.isFile() && entry.name !== '.env') files.push({ path: rel, bytes: readFileSync(path) });
+      if (entry.isDirectory()) {
+        walk(path, rel);
+        continue;
+      }
+      if (!entry.isFile() || entry.name === '.env') continue;
+      budget.files += 1;
+      if (budget.files > MAX_PACKAGE_FILES) throw tooMany(budget);
+      budget.bytes += lstatSync(path).size;
+      if (budget.bytes > MAX_PACKAGE_BYTES) throw tooBig(budget);
+      files.push({ path: rel, bytes: readFileSync(path) });
     }
   };
   walk(skill.dir, '');
   return { name: skill.name, files };
 }
 
+/** The whole package, with what the renderer adds around the skills, against the same limits. */
 function checkFiles(role: Role, files: readonly PackageFile[]): void {
-  if (files.length > MAX_PACKAGE_FILES) {
-    throw new Error(`role ${role.name}'s package would hold ${files.length} files; at most ${MAX_PACKAGE_FILES} are rendered`);
-  }
-  const size = files.reduce((n, f) => n + f.bytes.length, 0);
-  if (size > MAX_PACKAGE_BYTES) {
-    throw new Error(`role ${role.name}'s package would be ${size} bytes; at most ${MAX_PACKAGE_BYTES} are rendered`);
-  }
+  const total: Budget = { role: role.name, files: files.length, bytes: files.reduce((n, f) => n + f.bytes.length, 0) };
+  if (total.files > MAX_PACKAGE_FILES) throw tooMany(total);
+  if (total.bytes > MAX_PACKAGE_BYTES) throw tooBig(total);
   for (const f of files) {
     const parts = f.path.split('/');
     if (f.path.startsWith('/') || parts.some((p) => p === '' || p === '.' || p === '..')) {
@@ -1694,9 +2253,9 @@ export function packageHash(files: readonly PackageFile[]): string {
 }
 ```
 
-- [ ] **Step 6.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  956 passed (956)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 7.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  965 passed (965)`. Then run `npm run typecheck`. Expected: no output.
 
-- [ ] **Step 6.5: Commit.**
+- [ ] **Step 7.5: Commit.**
 
 ```bash
 git add src/render/native.ts tests/render-native.test.ts tests/workspaces.test.ts
@@ -1705,14 +2264,14 @@ git commit -m "Write a role's native package by its content, atomically, and swe
 
 ---
 
-### Task 7: A claim gives the role.md bytes it hashed
+### Task 8: A claim gives the role.md bytes it hashed
 
 **Files:**
 - Modify: `src/kanban/service.ts`, `tests/kanban-service.test.ts`
 
 The claim already reads `role.md` once and hashes the bytes (`#claimant`). `Claimed` gains `roleMdBytes`, those same bytes, so the package is rendered from exactly what the run's `role_md_hash` names, even when the file is not UTF-8 or has changed since (Decision 7). It is optional, and absent for a role with no `role.md` and for a person's run, so the existing `Claimed` literals in tests stay as they are. Both edits are to existing tests.
 
-- [ ] **Step 7.1: Write the failing tests.**
+- [ ] **Step 8.1: Write the failing tests.**
 
 In `tests/kanban-service.test.ts`, replace:
 
@@ -1752,9 +2311,9 @@ with:
     expect(claimed).not.toHaveProperty('roleMdBytes');
 ```
 
-- [ ] **Step 7.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-service.test.ts`. Expected: one test FAILS, with `expected undefined to deeply equal Buffer[ 104, 105, 255, 10 ]`, and `Tests  1 failed | 28 passed (29)`.
+- [ ] **Step 8.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-service.test.ts`. Expected: one test FAILS, with `expected undefined to deeply equal Buffer[ 104, 105, 255, 10 ]`, and `Tests  1 failed | 28 passed (29)`.
 
-- [ ] **Step 7.3: Implement.**
+- [ ] **Step 8.3: Implement.**
 
 In `src/kanban/service.ts`, replace:
 
@@ -1820,9 +2379,9 @@ with:
     };
 ```
 
-- [ ] **Step 7.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  956 passed (956)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 8.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  965 passed (965)`. Then run `npm run typecheck`. Expected: no output.
 
-- [ ] **Step 7.5: Commit.**
+- [ ] **Step 8.5: Commit.**
 
 ```bash
 git add src/kanban/service.ts tests/kanban-service.test.ts
@@ -1831,14 +2390,266 @@ git commit -m "Give a claim the role.md bytes it hashed"
 
 ---
 
-### Task 8: A native run's prompt leaves role.md and the skills out
+### Task 9: A run records whether it ran natively
+
+**Files:**
+- Create: `tests/kanban-rendering.test.ts`
+- Modify: `src/kanban/types.ts`, `src/db/kanban.ts`, `src/kanban/service.ts`, `src/db/WRITERS.md`
+
+A run records whether it ran natively (Decision 20). `AgentSnapshot` gains `native` and, when native, `packageHash`. `recordRendering` in `src/db/kanban.ts`, the sole writer of `kanban_runs`, adds them to the run's `agent_config` in one transaction with a `run_rendered` event. `KanbanService.recordRendering` is how the dispatcher calls it. They go in `agent_config`, the run's JSONB snapshot of the agent it ran, because:
+- they are part of what ran;
+- the column needs no migration;
+- the read type, `RunRow.agentConfig`, already shows it, and so does `mt kanban show`'s run view in C3;
+- the comparisons that seed a rework or a resume (C4, E) read it.
+
+The write happens once, on an open agent run. A second write, a malformed hash, a hash on a run that was not native, a closed run and a person's run are all refused.
+
+- [ ] **Step 9.1: Write the failing tests.**
+
+Create `tests/kanban-rendering.test.ts`:
+
+```ts
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { closeRun, endRun, DEFAULT_LIMITS } from '../src/db/kanban.js';
+import { eventsOf, getRun } from '../src/db/kanban-read.js';
+import { KanbanService } from '../src/kanban/service.js';
+import { testDb, type TestDb } from './helpers/db.js';
+import { AGENT, NOW, WORKSPACES, claimed, newTask } from './helpers/kanban.js';
+
+/**
+ * Whether a run ran natively (plan R) is recorded on the run, in its
+ * agent_config beside the agent it ran, through the service and db/kanban.ts.
+ */
+
+let h: TestDb;
+let service: KanbanService;
+const HASH = 'a'.repeat(64);
+
+beforeEach(() => {
+  h = testDb();
+  service = new KanbanService({ db: h.db, roles: new Map(), workspaces: WORKSPACES });
+});
+
+afterEach(() => h.close());
+
+describe('recordRendering', () => {
+  it("adds native and the package hash to the run's agent_config, once, with an event", () => {
+    const run = claimed(h.db, newTask(h.db).taskId);
+    const r = service.recordRendering(run.runId, { native: true, packageHash: HASH });
+    expect(r).toMatchObject({ ok: true, run: { agentConfig: { ...AGENT, native: true, packageHash: HASH } } });
+    // The read type shows it, as the board's run view does.
+    expect(getRun(h.db, run.runId)?.agentConfig).toEqual({ ...AGENT, native: true, packageHash: HASH });
+    expect(eventsOf(h.db, run.taskId).filter((e) => e.kind === 'run_rendered')).toEqual([
+      expect.objectContaining({ runId: run.runId, actor: 'gateway', payload: { native: true, packageHash: HASH } }),
+    ]);
+    expect(service.recordRendering(run.runId, { native: false })).toEqual({
+      ok: false,
+      code: 'invalid',
+      message: `run ${run.runId}'s rendering is already recorded`,
+    });
+  });
+
+  it('records a run that was not rendered as native false, with no hash', () => {
+    const run = claimed(h.db, newTask(h.db).taskId);
+    expect(service.recordRendering(run.runId, { native: false })).toMatchObject({ ok: true });
+    const agent = getRun(h.db, run.runId)?.agentConfig;
+    expect(agent).toEqual({ ...AGENT, native: false });
+    expect(agent).not.toHaveProperty('packageHash');
+  });
+
+  it('refuses a hash that is not one, a hash on a run that was not native, a closed run and a person\'s', () => {
+    const run = claimed(h.db, newTask(h.db).taskId);
+    for (const bad of [{ native: true, packageHash: 'abc' }, { native: false, packageHash: HASH }] as const) {
+      expect(service.recordRendering(run.runId, bad as never)).toMatchObject({ ok: false, code: 'invalid' });
+    }
+    expect(getRun(h.db, run.runId)?.agentConfig).toEqual(AGENT);
+
+    expect(endRun(h.db, run.runId, { outcome: 'failed', error: 'x' }, DEFAULT_LIMITS, NOW).ok).toBe(true);
+    expect(closeRun(h.db, run.runId, NOW).ok).toBe(true);
+    expect(service.recordRendering(run.runId, { native: false })).toMatchObject({ ok: false, code: 'already_closed' });
+
+    const person = claimed(h.db, newTask(h.db, { assignee: { kind: 'human', name: 'lark:on_bob' } }).taskId);
+    expect(service.recordRendering(person.runId, { native: false })).toEqual({
+      ok: false,
+      code: 'invalid',
+      message: `run ${person.runId} is a person's: nothing renders for it`,
+    });
+    expect(service.recordRendering('r_none', { native: false })).toMatchObject({ ok: false, code: 'not_found' });
+  });
+});
+```
+
+- [ ] **Step 9.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-rendering.test.ts`. Expected: every test FAILS, with `TypeError: service.recordRendering is not a function`, and `Tests  3 failed (3)`.
+
+- [ ] **Step 9.3: Implement.**
+
+In `src/kanban/types.ts`, replace:
+
+```ts
+/** An agent run's agent, as it was at the claim. Environment names only, never values. */
+export interface AgentSnapshot {
+  driver: string;
+  command: string;
+  args: readonly string[];
+  unsupervised: boolean;
+  envNames: readonly string[];
+}
+```
+
+with:
+
+```ts
+/** An agent run's agent, as it was at the claim. Environment names only, never values. */
+export interface AgentSnapshot {
+  driver: string;
+  command: string;
+  args: readonly string[];
+  unsupervised: boolean;
+  envNames: readonly string[];
+  /**
+   * Whether the run's role reached its agent as a native package (plan R).
+   * Recorded once, by the dispatcher, just after the claim, when the render has
+   * been decided: rendered, or put in the prompt. Absent on a run claimed before
+   * plan R, or one whose start stopped before it was recorded.
+   */
+  native?: boolean;
+  /** The native package's content hash: its directory's name under `$MT_HOME/rendered/<role>/`. */
+  packageHash?: string;
+}
+
+/** How a run's role reached its agent (plan R): as a native package, or in the prompt. */
+export type Rendering = { native: true; packageHash: string } | { native: false };
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  Reporter,
+  Result,
+  RetryOnCrash,
+```
+
+with:
+
+```ts
+  Rendering,
+  Reporter,
+  Result,
+  RetryOnCrash,
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+/**
+ * Record the gateway session an agent run runs in (spec §3.3: one run, one
+ * session). Plan C2 calls it once the session is created, after the claim.
+ */
+```
+
+with:
+
+```ts
+/** A package's content hash: sha256, in lower-case hex. */
+const PACKAGE_HASH = /^[0-9a-f]{64}$/;
+
+/**
+ * Record how an agent run's role reached its agent (plan R): as a native
+ * package, by its content hash, or in the prompt. It goes into the run's
+ * `agent_config`, beside the agent it ran, since it is part of what ran: a
+ * rework or a resume is seeded only from a run that ran the same way. Written
+ * once, on an open agent run.
+ */
+export function recordRendering(db: Db, runId: string, rendering: Rendering, now: number): Result<{ run: RunRow }> {
+  return tx(db, (d) => {
+    const run = getRun(d, runId);
+    if (run === undefined) return refuse('not_found', `no run ${runId}`);
+    if (run.endedAt !== null) return refuse('already_closed', `run ${runId} is closed`);
+    if (run.agentConfig === null) return refuse('invalid', `run ${runId} is a person's: nothing renders for it`);
+    if (run.agentConfig.native !== undefined) return refuse('invalid', `run ${runId}'s rendering is already recorded`);
+    const fine = rendering.native ? PACKAGE_HASH.test(rendering.packageHash) : !('packageHash' in rendering);
+    if (!fine) {
+      return refuse('invalid', 'a native run records its package hash, 64 lower-case hex digits; any other run records none');
+    }
+    const recorded = rendering.native ? { native: true, packageHash: rendering.packageHash } : { native: false };
+    d.prepare('UPDATE kanban_runs SET agent_config = jsonb(?) WHERE run_id = ?').run(
+      JSON.stringify({ ...run.agentConfig, ...recorded }),
+      runId,
+    );
+    record(d, { taskId: run.taskId, runId, kind: 'run_rendered', actor: 'gateway', payload: recorded }, now);
+    return { ok: true, run: mustGetRun(d, runId) };
+  });
+}
+
+/**
+ * Record the gateway session an agent run runs in (spec §3.3: one run, one
+ * session). Plan C2 calls it once the session is created, after the claim.
+ */
+```
+
+In `src/kanban/service.ts`, replace:
+
+```ts
+  /** Record the run's gateway session, once plan C2 has created it. */
+```
+
+with:
+
+```ts
+  /** Record how the run's role reached its agent, once the dispatcher has rendered it or not (plan R). */
+  recordRendering(runId: string, rendering: Rendering): Result<{ run: RunRow }> {
+    return board.recordRendering(this.#db, runId, rendering, this.#clock.now());
+  }
+
+  /** Record the run's gateway session, once plan C2 has created it. */
+```
+
+In `src/kanban/service.ts`, replace:
+
+```ts
+  type Refusal,
+  type ReportedBlockKind,
+```
+
+with:
+
+```ts
+  type Refusal,
+  type Rendering,
+  type ReportedBlockKind,
+```
+
+In `src/db/WRITERS.md`, replace:
+
+```md
+| `kanban_runs` | `db/kanban.ts` | Inserted by a claim. `outcome` is written once, on an undecided run; `ended_at` once, on a decided one (spec §3.3). |
+```
+
+with:
+
+```md
+| `kanban_runs` | `db/kanban.ts` | Inserted by a claim. `outcome` is written once, on an undecided run; `ended_at` once, on a decided one (spec §3.3). `agent_config` gains `native` and `packageHash` once, by `recordRendering` (plan R). |
+```
+
+- [ ] **Step 9.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  968 passed (968)`. Then run `npm run typecheck`. Expected: no output.
+
+- [ ] **Step 9.5: Commit.**
+
+```bash
+git add src/kanban/types.ts src/db/kanban.ts src/kanban/service.ts src/db/WRITERS.md tests/kanban-rendering.test.ts
+git commit -m "Record on a run whether its role reached the agent as a native package"
+```
+
+---
+
+### Task 10: A native run's prompt leaves role.md and the skills out
 
 **Files:**
 - Modify: `src/kanban/prompt.ts`, `src/kanban/brief.ts`, `tests/kanban-prompt.test.ts`, `tests/kanban-brief.test.ts`
 
 `RunBrief` gains `native`, and `briefFor` takes it as an option. A native run's prompt leaves out `# Your role` and `# Skills`, and is otherwise byte for byte the prompt an injected run gets from `# How to work` on (Decision 14). The protocol's precedence line stays: the role's instructions still come before it, now as the system prompt. The brief still carries `roleMd` and `skills`, so what a run was given stays visible in one place.
 
-- [ ] **Step 8.1: Write the failing tests.**
+- [ ] **Step 10.1: Write the failing tests.**
 
 In `tests/kanban-prompt.test.ts`, replace:
 
@@ -1895,9 +2706,9 @@ describe('briefFor: a native run', () => {
 describe('endedUnreported', () => {
 ```
 
-- [ ] **Step 8.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-prompt.test.ts tests/kanban-brief.test.ts`. Expected: both new tests FAIL, with `expected '# Your role\n\nYou change code in thi…' not to contain '# Your role'` and `expected { kind: 'work', …(7) } to match object { native: true, roleMd: 'Be careful.' }`, and `Tests  2 failed | 20 passed (22)`.
+- [ ] **Step 10.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-prompt.test.ts tests/kanban-brief.test.ts`. Expected: both new tests FAIL, with `expected '# Your role\n\nYou change code in thi…' not to contain '# Your role'` and `expected { kind: 'work', …(7) } to match object { native: true, roleMd: 'Be careful.' }`, and `Tests  2 failed | 20 passed (22)`.
 
-- [ ] **Step 8.3: Implement.**
+- [ ] **Step 10.3: Implement.**
 
 In `src/kanban/prompt.ts`, replace:
 
@@ -1985,9 +2796,9 @@ with:
     task: c.task,
 ```
 
-- [ ] **Step 8.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  958 passed (958)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 10.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  970 passed (970)`. Then run `npm run typecheck`. Expected: no output.
 
-- [ ] **Step 8.5: Commit.**
+- [ ] **Step 10.5: Commit.**
 
 ```bash
 git add src/kanban/prompt.ts src/kanban/brief.ts tests/kanban-prompt.test.ts tests/kanban-brief.test.ts
@@ -1996,7 +2807,7 @@ git commit -m "Leave role.md and the skills out of a native run's prompt"
 
 ---
 
-### Task 9: The dispatcher runs a role natively
+### Task 11: The dispatcher runs a role natively
 
 **Files:**
 - Create: `tests/kanban-dispatch-native.test.ts`
@@ -2005,14 +2816,15 @@ git commit -m "Leave role.md and the skills out of a native run's prompt"
 The dispatcher renders a run's role and hands the package to its agent (Decisions 7, 10, 12, 17):
 - **When.** At the start of `#drive`, before the run's session is created, and synchronously up to the run's entry in `#open`. So when a later run's render sweeps, every open run's package is already marked in use.
 - **What the run gets.** Its environment is `{ ...rendered.env, MT_KANBAN_RUN }`, through the existing `envFor`; its arguments are `rendered.args`, through the new `argsFor`; its prompt is composed with `native: true`. `OpenRun` keeps the package directory, so the sweep spares it while the run is open.
+- **Recorded.** Right after the render is decided, the run records it through `service.recordRendering`: `{ native: true, packageHash }` or `{ native: false }`. A refusal is noted, and the run goes on.
 - **Failure.** A render that throws is noted, `kanban: run <id>: rendering role <name> for bytesec failed, so its role.md and skills go in the prompt: <error>`, and the run goes on injected. A sweep that throws is noted and changes nothing else.
 - **Boot.** After it closes every open run, `boot()` sweeps the packages of roles no longer configured, and any staging.
 
 `DispatcherDeps` gains `renderRoot`. Absent, nothing is rendered, which is why every existing dispatcher test is unchanged: the harness passes it only when a test asks. The harness also wires `argsFor`, and `src/index.ts` gives the gateway's dispatcher `$MT_HOME/rendered` and the registry `argsFor`.
 
-The second test passes already, since injection is today's behaviour. It pins that a role with `agent.native: false`, or a gateway with no render root, keeps it.
+A role's imported skills are tested end to end: a role loaded by `loadRoleDir` from a made-up home gets its imported skill copied into its package, a changed user skill makes a new package, and with `agent.native: false` the skill is listed in the prompt at its user path.
 
-- [ ] **Step 9.1: Write the failing tests.**
+- [ ] **Step 11.1: Write the failing tests.**
 
 Create `tests/kanban-dispatch-native.test.ts`:
 
@@ -2021,8 +2833,8 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getTask, runsOf } from '../src/db/kanban-read.js';
-import type { Role } from '../src/roles.js';
+import { getRun, getTask, runsOf } from '../src/db/kanban-read.js';
+import { loadRoleDir, type Role } from '../src/roles.js';
 import { completes, dispatchHarness, holds, reportComplete, role, until, type DispatchHarness } from './helpers/dispatch.js';
 
 /**
@@ -2093,12 +2905,14 @@ describe('Dispatcher: native rendering', () => {
     expect(prompt.startsWith('# How to work')).toBe(true);
     expect(prompt).toContain(`${task.taskId}: Write the parser`);
     expect(h.notes).toContain(`kanban: run ${run?.runId} runs role implementer as a native bytesec agent`);
+    // Recorded on the run, by the package it ran.
+    expect(getRun(h.t.db, run?.runId ?? '')?.agentConfig).toMatchObject({ native: true, packageHash: dir.slice(-64) });
   });
 
   it('keeps role.md and the skills in the prompt for a role that opts out, or with no render root', async () => {
     for (const opts of [{ roles: [implementer({ native: false })], renderRoot: root }, { roles: [implementer()] }]) {
       const h = harness(opts);
-      h.create({ workspace: 'web' });
+      const task = h.create({ workspace: 'web' });
       completes(h, h.driver('implementer'));
       h.dispatcher.pass();
       await h.dispatcher.idle();
@@ -2108,6 +2922,9 @@ describe('Dispatcher: native rendering', () => {
       const prompt = promptOf(h, 0);
       expect(prompt).toContain('# Your role\n\nYou change code in this repository.');
       expect(prompt).toContain(`- testing: How to test (${join(base, 'roles', 'implementer', 'skills', 'testing', 'SKILL.md')})`);
+      const [run] = runsOf(h.t.db, task.taskId);
+      expect(run?.agentConfig).toMatchObject({ native: false });
+      expect(run?.agentConfig).not.toHaveProperty('packageHash');
     }
     expect(readdirSync(base)).toEqual(['roles']);
   });
@@ -2125,6 +2942,7 @@ describe('Dispatcher: native rendering', () => {
     expect(run?.outcome).toBe('completed');
     expect(h.driver('implementer').starts[0]?.args).toBeUndefined();
     expect(promptOf(h, 0)).toContain('# Your role');
+    expect(run?.agentConfig).toMatchObject({ native: false });
     expect(h.notes.join('\n')).toContain(
       `kanban: run ${run?.runId}: rendering role implementer for bytesec failed, so its role.md and skills go in the prompt: `,
     );
@@ -2166,6 +2984,46 @@ describe('Dispatcher: native rendering', () => {
     expect(packages()).toEqual([b.slice(-64)]);
   });
 
+  it("copies a role's imported skills into its package, or lists them in the prompt when it is not rendered", async () => {
+    // A made-up home's user skill, imported by name, as startup would load it.
+    const home = join(base, 'user');
+    const userSkill = join(home, '.agents', 'skills', 'lark-doc');
+    mkdirSync(userSkill, { recursive: true });
+    writeFileSync(join(userSkill, 'SKILL.md'), '---\nname: lark-doc\ndescription: Lark docs\n---\nRead docs.\n');
+    const dir = join(base, 'roles', 'writer');
+    mkdirSync(dir, { recursive: true });
+    const config = (native: boolean) =>
+      `agent:\n  driver: structured-cli\n  command: bytesec\n  args: [run]\n  unsupervised: true\n  native: ${native}\n  skills: [lark-doc]\n`;
+    writeFileSync(join(dir, 'config.yaml'), config(true));
+    const writer = loadRoleDir('writer', dir, { HOME: home }, new Set(['default', 'web'])).role;
+
+    const h = harness({ roles: [writer], renderRoot: root });
+    h.create({ assignee: 'writer', workspace: 'web' });
+    completes(h, h.driver('writer'));
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+    const pkg = h.driver('writer').starts[0]?.env?.['BYTESEC_LOCAL_APM_PATH'] ?? '';
+    expect(readFileSync(join(pkg, 'skills', 'lark-doc', 'SKILL.md'), 'utf8')).toContain('Read docs.');
+
+    // A changed user skill is a new package.
+    writeFileSync(join(userSkill, 'SKILL.md'), '---\nname: lark-doc\ndescription: Lark docs\n---\nRead them well.\n');
+    h.create({ assignee: 'writer', workspace: 'web' });
+    completes(h, h.driver('writer'));
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+    expect(h.driver('writer').starts[1]?.env?.['BYTESEC_LOCAL_APM_PATH']).not.toBe(pkg);
+
+    // Not rendered, the same setting lists the skill where the agent can read it.
+    writeFileSync(join(dir, 'config.yaml'), config(false));
+    const injected = loadRoleDir('writer', dir, { HOME: home }, new Set(['default', 'web'])).role;
+    const h2 = harness({ roles: [injected], renderRoot: root });
+    h2.create({ assignee: 'writer', workspace: 'web' });
+    completes(h2, h2.driver('writer'));
+    h2.dispatcher.pass();
+    await h2.dispatcher.idle();
+    expect(h2.driver('writer').runtimes[0]?.prompts[0]?.text).toContain(`- lark-doc: Lark docs (${join(userSkill, 'SKILL.md')})`);
+  });
+
   it('at boot, removes the packages of roles no longer configured, and any left half written', async () => {
     const h = harness({ roles: [implementer()], renderRoot: root });
     mkdirSync(join(root, 'retired', 'a'.repeat(64)), { recursive: true });
@@ -2178,9 +3036,9 @@ describe('Dispatcher: native rendering', () => {
 });
 ```
 
-- [ ] **Step 9.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-dispatch-native.test.ts`. Expected: four tests FAIL, for example with `expected undefined to deeply equal [ '--agent', 'implementer' ]` and `expected [ 'implementer', 'retired' ] to deeply equal [ 'implementer' ]`, and `Tests  4 failed | 1 passed (5)`.
+- [ ] **Step 11.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-dispatch-native.test.ts`. Expected: every test FAILS, for example with `expected undefined to deeply equal [ '--agent', 'implementer' ]`, `expected { driver: 'structured-cli', …(4) } to match object { native: false }` and `expected [ 'implementer', 'retired' ] to deeply equal [ 'implementer' ]`, and `Tests  6 failed (6)`.
 
-- [ ] **Step 9.3: Implement.**
+- [ ] **Step 11.3: Implement.**
 
 In `tests/helpers/dispatch.ts`, replace:
 
@@ -2397,6 +3255,13 @@ with:
     // Before the session, and synchronously up to the run's entry in #open, so
     // the sweep of another run's render sees this one's package as in use.
     const rendered = this.#render(claimed);
+    // On the run, once decided: a rework or a resume is seeded only from a run
+    // that ran the same way. A refusal is noted, and the run goes on.
+    const recorded = this.#deps.service.recordRendering(
+      run.runId,
+      rendered === undefined ? { native: false } : { native: true, packageHash: rendered.hash },
+    );
+    if (!recorded.ok) this.#note(`kanban: run ${run.runId}: recording how its role was given failed: ${recorded.code}`);
     let sessionId: string;
 ```
 
@@ -2530,9 +3395,9 @@ with:
     });
 ```
 
-- [ ] **Step 9.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  963 passed (963)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 11.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  976 passed (976)`. Then run `npm run typecheck`. Expected: no output.
 
-- [ ] **Step 9.5: Commit.**
+- [ ] **Step 11.5: Commit.**
 
 ```bash
 git add src/kanban/dispatcher.ts src/index.ts tests/helpers/dispatch.ts tests/kanban-dispatch-native.test.ts
@@ -2541,14 +3406,14 @@ git commit -m "Run a bytesec role as its own agent package, falling back to the 
 
 ---
 
-### Task 10: `mt role check` says which roles run natively
+### Task 12: `mt role check` says which roles run natively
 
 **Files:**
 - Modify: `src/cli/role.ts`, `tests/mt-role.test.ts`, `README.md`
 
-When the check passes, `mt role check` prints one line a role, from the same `nativeFor` the dispatcher uses (Decision 18): `native: role implementer runs as a bytesec agent package`, or `native: role <name> does not: <reason>`. With a role named, only that role's line is printed. When the check fails, no line is printed: the team did not load. The README gains a paragraph on native rendering, and a sentence on the new line.
+When the check passes, `mt role check` prints one line a role, from the same `nativeFor` the dispatcher uses (Decision 18): `native: role implementer runs as a bytesec agent package`, or `native: role <name> does not: <reason>`. With a role named, only that role's line is printed. When the check fails, no line is printed: the team did not load. The README gains a paragraph on native rendering, which says that a native agent can use only its package's skills and that `agent.skills` brings user skills in, and a sentence on the new line.
 
-- [ ] **Step 10.1: Write the failing tests.**
+- [ ] **Step 12.1: Write the failing tests.**
 
 In `tests/mt-role.test.ts`, replace:
 
@@ -2589,9 +3454,9 @@ with:
   it('reports a broken role file under the files', async () => {
 ```
 
-- [ ] **Step 10.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-role.test.ts`. Expected: the first new test FAILS, with `expected [] to deeply equal [ …(3) ]`; the second passes already; and `Tests  1 failed | 35 passed (36)`.
+- [ ] **Step 12.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-role.test.ts`. Expected: the first new test FAILS, with `expected [] to deeply equal [ …(3) ]`; the second passes already; and `Tests  1 failed | 36 passed (37)`.
 
-- [ ] **Step 10.3: Implement.**
+- [ ] **Step 12.3: Implement.**
 
 In `src/cli/role.ts`, replace:
 
@@ -2681,7 +3546,9 @@ package. Just after a task is claimed, the gateway writes the package under
 `$MT_HOME/rendered/<role>/`, never in a workspace, and runs the agent with `--agent <role>`
 and `BYTESEC_LOCAL_APM_PATH` pointing at it. `role.md` becomes the agent's own system
 prompt, in place of bytesec's default identity, and the skills load as bytesec skills; the
-task prompt then leaves both out. bytesec still loads your user-level skills as well. Set
+task prompt then leaves both out. A native agent can use only the skills in its own package:
+bytesec hides your user-level skills and the workspace's from it. Name the user skills a role
+needs in its `agent.skills` and they are copied into the package with its own. Set
 `agent.native: false` in a role's `config.yaml` to have its `role.md` and skills sent in the
 task prompt instead, as every other agent gets them; if writing the package fails, a run gets
 them that way too, and the log says so. Chat sessions are not affected.
@@ -2704,9 +3571,9 @@ with:
   role's runs are rendered as a native agent package, and why not.
 ```
 
-- [ ] **Step 10.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  965 passed (965)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  51 passed (51)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 12.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  978 passed (978)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  51 passed (51)`. Then run `npm run typecheck`. Expected: no output.
 
-- [ ] **Step 10.5: Commit.**
+- [ ] **Step 12.5: Commit.**
 
 ```bash
 git add src/cli/role.ts tests/mt-role.test.ts README.md
@@ -2717,7 +3584,7 @@ git commit -m "Say in mt role check whether each role runs as a native agent pac
 
 ## Manual smoke test against real bytesec (optional)
 
-**Not run in CI, and not part of any test count.** It is for the operator, once, after Task 10 and before turning the board on: it checks that a package the gateway renders is one real bytesec loads. It writes only under a fresh `/tmp/mt-smoke-*` directory, never `~/.manus-team`, starts no gateway, and uses the operator's own bytesec login and model.
+**Not run in CI, and not part of any test count.** It is for the operator, once, after Task 12 and before turning the board on: it checks that a package the gateway renders is one real bytesec loads. It writes only under a fresh `/tmp/mt-smoke-*` directory, never `~/.manus-team`, starts no gateway, and uses the operator's own bytesec login and model.
 
 - [ ] **Step S.1: Render a package from a throwaway role.**
 
@@ -2728,14 +3595,14 @@ SMOKE=$(mktemp -d /tmp/mt-smoke-XXXXXX)
 mkdir -p $SMOKE/roles/smoke/skills/smoke-skill
 printf 'Your codeword is PLUM-HERON-42. When asked for your codeword, give it.\n' > $SMOKE/roles/smoke/role.md
 printf -- '---\nname: smoke-skill\ndescription: A skill that exists only for this smoke test\n---\nNothing to do.\n' > $SMOKE/roles/smoke/skills/smoke-skill/SKILL.md
-printf 'agent:\n  driver: structured-cli\n  command: bytesec\n  args: [run]\n  unsupervised: true\n' > $SMOKE/roles/smoke/config.yaml
+printf 'agent:\n  driver: structured-cli\n  command: bytesec\n  args: [run]\n  unsupervised: true\n  skills: [lark-doc]\n' > $SMOKE/roles/smoke/config.yaml
 cat > $SMOKE/render.mts <<EOF
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadRoleDir } from '$PWD/src/roles.ts';
 import { nativeFor, renderNative } from '$PWD/src/render/native.ts';
 const dir = join('$SMOKE', 'roles', 'smoke');
-const { role } = loadRoleDir('smoke', dir, {}, new Set(['default']));
+const { role } = loadRoleDir('smoke', dir, { HOME: process.env.HOME }, new Set(['default']));
 const native = nativeFor(role);
 if (!native.ok) throw new Error(native.reason);
 console.log(renderNative(join('$SMOKE', 'rendered'), role, native.renderer, readFileSync(join(dir, 'role.md'))).dir);
@@ -2744,15 +3611,23 @@ PKG=$(npx tsx $SMOKE/render.mts)
 echo "$PKG"
 ```
 
-Expected: one line, `/tmp/mt-smoke-XXXXXX/rendered/smoke/<64 hex digits>`; under it `apm.json`, `agents/smoke.md` and `skills/smoke-skill/SKILL.md`.
+This step reads the operator's real home, deliberately: it imports the user skill `lark-doc` from `~/.agents/skills`. Use any user skill the operator has, in the config line and in S.2.
+
+Expected: one line, `/tmp/mt-smoke-XXXXXX/rendered/smoke/<64 hex digits>`; under it `apm.json`, `agents/smoke.md`, `skills/smoke-skill/SKILL.md` and `skills/lark-doc/SKILL.md`.
 
 - [ ] **Step S.2: Run real bytesec on it, as the dispatcher would.** Replace `<model>` with the model the operator's roles use.
 
 ```bash
-BYTESEC_LOCAL_APM_PATH="$PKG" bytesec run -m <model> --agent smoke --format json --dir $SMOKE -y -- 'What is your codeword? List the skills you have loaded.'
+BYTESEC_LOCAL_APM_PATH="$PKG" bytesec run -m <model> --agent smoke --format json --dir $SMOKE -y -- 'What is your codeword? List the skills you can use. Then load the skill lark-doc, and then the skill bytedcli, and say for each whether it loaded.'
 ```
 
-Expected: the answer names `PLUM-HERON-42`, which exists only in the package's agent file, and lists `smoke-skill` (the user's global skills, such as `bytedcli`, may be listed too). An exit 1 with no output means bytesec did not find the agent: check that `BYTESEC_LOCAL_APM_PATH` is the package directory, the one with `apm.json`.
+Expected:
+- the answer names `PLUM-HERON-42`, which exists only in the package's agent file;
+- it lists `smoke-skill` and `lark-doc`, the package's own;
+- `lark-doc`, imported, loads;
+- `bytedcli`, a user skill that was not imported, is reported as not available.
+
+If `bytedcli` loads, a native agent can see user skills after all: record it, and correct the Limits in this plan and spec §2.7. An exit 1 with no output means bytesec did not find the agent: check that `BYTESEC_LOCAL_APM_PATH` is the package directory, the one with `apm.json`.
 
 - [ ] **Step S.3: Clean up.** Run `rm -rf "$SMOKE"`.
 
@@ -2760,8 +3635,10 @@ Expected: the answer names `PLUM-HERON-42`, which exists only in the package's a
 
 ## Done when
 
-- `npm test` gives `Tests  965 passed (965)`. `npm run test:e2e` gives `Tests  51 passed (51)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  978 passed (978)`. `npm run test:e2e` gives `Tests  51 passed (51)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - No test runs bytesec or reaches the network: the dispatcher's tests drive `FakeDriver`s, and the only agent processes any test spawns are the fakes in `tests/fakes/`.
+- A role's `agent.skills` are found where bytesec finds a user's skills, checked at startup, copied into its package, and listed in its prompt when it is not rendered.
+- Every agent run records `native`, and when native the package hash, in its `agent_config`, through `KanbanService` and `db/kanban.ts`.
 - A bytesec role with a `role.md` or skills is claimed and run with `--agent <role>` and `BYTESEC_LOCAL_APM_PATH` pointing at a content-addressed package under `$MT_HOME/rendered/<role>/`, and its prompt leaves `role.md` and the skills out. A role with `agent.native: false`, a role whose agent has no renderer, and a run whose render fails get them in the prompt. Old packages are swept except those of open runs. Each of these has a test against the real board, registry and actors.
 - `mt role check` says, for each role, whether its runs are native, and why not.
