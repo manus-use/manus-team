@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ConfigError, loadConfig, type GatewayConfig } from '../src/config.js';
 import { migrate, openDb } from '../src/db/open.js';
-import { createGateway, registerConfiguredSecrets } from '../src/index.js';
+import { createGateway, findingsOn, registerConfiguredSecrets } from '../src/index.js';
 import { loadTeam, type Team } from '../src/team.js';
 import { MASK, clearSecrets, redactKnownSecrets } from '../src/secrets.js';
 
@@ -116,5 +116,39 @@ describe('createGateway', () => {
       // Safe without start(): disconnecting a channel that never connected is a no-op.
       await gateway.stop();
     }
+  });
+});
+
+describe('the board, at startup', () => {
+  it('builds no dispatcher unless kanban.enabled is set: chat runs as it did', async () => {
+    const gateway = await createGateway(config, team);
+    try {
+      expect(gateway.dispatcher).toBeUndefined();
+    } finally {
+      await gateway.stop();
+    }
+  });
+
+  it('builds the dispatcher when kanban.enabled is set', async () => {
+    const gateway = await createGateway({ ...config, kanban: { ...config.kanban, enabled: true } }, team);
+    try {
+      expect(gateway.dispatcher).toBeDefined();
+    } finally {
+      await gateway.stop();
+    }
+  });
+
+  it("posts boot findings to the chat channel's bindings only: a kanban binding's conversation is a task", () => {
+    const lark = { channel: 'lark', appId: 'cli_app', conversationId: 'oc_chat', threadId: '' };
+    const kanban = { channel: 'kanban', appId: 'cli_app', conversationId: 'k_task', threadId: 'r_run' };
+    const findings = [
+      { sessionId: 's_chat', message: 'chat', held: false, bindings: [lark] },
+      { sessionId: 's_run', message: 'run', held: true, bindings: [kanban] },
+      { sessionId: 's_both', message: 'both', held: false, bindings: [kanban, lark] },
+    ];
+    expect(findingsOn('lark', findings)).toEqual([
+      { sessionId: 's_chat', message: 'chat', held: false, bindings: [lark] },
+      { sessionId: 's_both', message: 'both', held: false, bindings: [lark] },
+    ]);
   });
 });

@@ -10,11 +10,15 @@ import { LarkInbound } from './channel/lark/inbound.js';
 import { buildRoleDrivers } from './driver/build.js';
 import { Authorizer } from './policy/auth.js';
 import { Router } from './core/router.js';
-import { DEFAULT_ROLE, DEFAULT_WORKSPACE, SessionRegistry } from './core/registry.js';
+import { DEFAULT_ROLE, DEFAULT_WORKSPACE, SessionRegistry, type BootFinding } from './core/registry.js';
 import { NamedWorkspaces } from './core/workspace.js';
 import { replyUuid } from './core/ids.js';
 import { systemClock } from './time.js';
 import { addSecrets, redactKnownSecrets } from './secrets.js';
+import { Dispatcher } from './kanban/dispatcher.js';
+import { KanbanService } from './kanban/service.js';
+import { KanbanSink } from './kanban/sink.js';
+import type { Channel } from './channel/types.js';
 
 /**
  * Wiring, and the boot order.
@@ -38,6 +42,20 @@ export interface Gateway {
   start(): Promise<void>;
   stop(): Promise<void>;
   readonly db: Db;
+  /** The board's dispatcher, when `kanban.enabled` is set. */
+  readonly dispatcher: Dispatcher | undefined;
+}
+
+/**
+ * The boot findings to post on one channel, each with only its bindings there
+ * (spec §8.4 step 2). A finding for a kanban run's session is bound on the
+ * `kanban` channel, whose conversation id is a task id, not a chat: the
+ * dispatcher handles those sessions instead.
+ */
+export function findingsOn(channelId: string, findings: readonly BootFinding[]): BootFinding[] {
+  return findings
+    .map((f) => ({ ...f, bindings: f.bindings.filter((key) => key.channel === channelId) }))
+    .filter((f) => f.bindings.length > 0);
 }
 
 /**
@@ -130,16 +148,45 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     allowMentionAll: config.auth.allowMentionAll,
   });
 
+  // The registry asks the dispatcher, which needs the registry, so it is read late.
+  let dispatcher: Dispatcher | undefined;
   const registry = new SessionRegistry({
     db,
     drivers,
-    // Lark only, until plan C adds the kanban sink.
-    channels: new Map([[adapter.id, adapter]]),
+    // A chat's session posts to Lark; a kanban run's into the sink (spec §2.4 item 4).
+    channels: new Map<string, Channel>([
+      [adapter.id, adapter],
+      ['kanban', new KanbanSink()],
+    ]),
+    envFor: (sessionId) => dispatcher?.envFor(sessionId),
+    pinned: (sessionId) => dispatcher?.pinned(sessionId) ?? false,
     workspaces: new NamedWorkspaces(team.workspaces),
     appId: config.lark.appId,
     maxLive: config.maxLiveSessions,
     note,
   });
+
+  // Off until the board can be used: nothing can create a task before plan D,
+  // and no agent can report before plan C3 (spec §12).
+  if (config.kanban.enabled) {
+    const { failureLimit, transientLimit, transientCooldownS } = config.kanban;
+    const service = new KanbanService({
+      db,
+      roles: team.roles,
+      workspaces: new Set(team.workspaces.keys()),
+      limits: { failureLimit, transientLimit, transientCooldownS },
+    });
+    dispatcher = new Dispatcher({
+      db,
+      service,
+      sessions: registry,
+      roles: team.roles,
+      appId: config.lark.appId,
+      settings: config.kanban,
+      note,
+    });
+    note(`kanban: dispatching up to ${config.kanban.maxRunning} agent run(s) at once`);
+  }
 
   const router = new Router({
     db,
@@ -163,12 +210,15 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
 
   return {
     db,
+    dispatcher,
 
     async start(): Promise<void> {
       // Before connecting. Reconciling against a channel that is already delivering
       // means deciding what happened to the last turn while the next one runs.
       const findings = registry.reconcileBoot();
       note(`reconciled ${findings.length} session(s) needing attention`);
+      // Then every run the restart killed is closed, before anything can claim (spec §8.4).
+      await dispatcher?.boot();
 
       await adapter.connect();
       inbound.start();
@@ -177,7 +227,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // Only now, because saying it requires a connection. Failing to deliver a
       // finding must not prevent the gateway from starting -- the session is
       // already held, and refusing to start would remove the only way to look at it.
-      for (const finding of findings) {
+      for (const finding of findingsOn(adapter.id, findings)) {
         for (const key of finding.bindings) {
           try {
             await adapter.sendText(
@@ -208,6 +258,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
         60_000,
       );
       housekeeping.unref();
+      dispatcher?.start();
     },
 
     async stop(): Promise<void> {
@@ -215,6 +266,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       stopped = true;
 
       if (housekeeping !== undefined) clearInterval(housekeeping);
+      // No more claims; the runs still open are ended by the next boot.
+      dispatcher?.stop();
       // Stop taking work before draining it, or the drain never finishes.
       inbound.stop();
       await adapter.disconnect().catch((err: unknown) => {
