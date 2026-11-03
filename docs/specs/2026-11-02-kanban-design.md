@@ -502,8 +502,13 @@ with a join, not by correlating two files.
 
 - **Cycles are refused** at insert, by walking parents from `parent_id`. A cycle is a pair of
   tasks that can never become ready, and nothing would ever say why.
-- **A link onto a task with an open run is refused.** The dependency gate is evaluated when a
-  task becomes ready; adding a parent to a running task cannot un-start it.
+- **A link onto a task with an open run, or past its parents gate, is refused.** The dependency
+  gate is evaluated when a task becomes ready; adding a parent to a running task cannot un-start it,
+  and a task in review, blocked from review, done or archived has passed the gate, so a parent added
+  then could never hold it back — a review would wait on it forever.
+- **Parents may also come from a dependency block** (§5.4): the block names them, and they are linked
+  in the block's own transaction, after the reporting run is decided. That is the one way a parent is
+  added to a task in review: the reviewer's own block, which holds the review until they are done.
 
 ### 3.3 `kanban_runs` — one attempt
 
@@ -587,7 +592,8 @@ What a person sees is computed, by one pure function, from the phase and two fac
 | `open` | some parent is not `done`/`archived` | **todo** |
 | `open` | all parents done, no undecided run | **ready** |
 | `open` | an undecided run | **running** |
-| `review` | no undecided `review` run | **review** (waiting for a reviewer) |
+| `review` | some parent is not `done`/`archived` (a reviewer's dependency block, §5.4) | **todo** |
+| `review` | all parents done, no undecided `review` run | **review** (waiting for a reviewer) |
 | `review` | an undecided `review` run | **reviewing** |
 | `blocked` / `done` / `archived` | | as is |
 
@@ -659,7 +665,8 @@ for the follow-up.
 | `open` (running) | `review` | `review` — the work run ends `review_requested` |
 | `review` (reviewing) | reviewer `complete` | `done` |
 | `review` (reviewing) | reviewer `changes` | `open` (ready) — the next claim is rework (§5.3) |
-| `open` (running) / `review` (reviewing) | `block`, kind `dependency` | `open` (todo) (§5.4) |
+| `open` (running) | `block`, kind `dependency` | `open` (todo) — the parents it names are linked (§5.4) |
+| `review` (reviewing) | `block`, kind `dependency` | `review` (todo) — the parents it names are linked; the reviewer is claimed again once they are done (§5.4) |
 | `open` (running) / `review` (reviewing) | `block`, any other kind | `blocked`, `blocked_from` = the phase it left |
 | `blocked` | `unblock` | `blocked_from` |
 | running or reviewing | run fails, budget remains (§8.2) | same phase, no open run — claimed again |
@@ -673,7 +680,8 @@ for the follow-up.
 | any but `archived` | `archive` | `archived` — an undecided run ends `superseded`; a decided one is closed |
 
 Completing a task whose parents are not all done is refused. Parents can only be unfinished if a
-link was added after the task started, which §3.2 prevents; the check is the backstop.
+link was added after the task started, which §3.2 prevents, or if a reviewer's dependency block
+added them, which holds the review until they are done; the check is the backstop.
 
 **Every path to `done` goes through one `complete` operation**, and it runs the task's gates (§7.7):
 an agent's `mt kanban complete`, a reviewer role's `complete`, a person's `/kanban done` or Done
@@ -739,9 +747,17 @@ opposite case, and starts clean (§8.3).
 
 `block` takes a kind:
 
-- **`dependency`** — waiting on another task. The task returns to `open` and is gated by its
-  parents; the worker links the prerequisite as a parent first. It never sits in `blocked`,
-  because no person needs to act.
+- **`dependency`** — waiting on another task. The block names the prerequisites in `parents`, and
+  they are linked as the task's parents in the block's own transaction (§3.2) — not by a separate
+  link first, which the open run would refuse. It never sits in `blocked`, because no person needs
+  to act; the task keeps its phase and is gated by its parents:
+  - from an implementer's work run, it stays `open` (todo), and its next work claim waits for them;
+  - from a reviewer's review run, it stays `review` (todo), and the reviewer is claimed again once
+    they are done. The implementer's work is done, and only the review was waiting, so it is not
+    redone.
+
+  A dependency block that leaves nothing unfinished to wait on is refused: the task would be
+  claimable again at once.
 - **`needs_input`** — a decision or information only a person can supply.
 - **`capability`** — something the worker cannot do here: access, a tool, infrastructure.
 - **`transient`** — expected to clear by itself.
@@ -911,7 +927,7 @@ mt kanban show                      # this task + worker context, as JSON
 mt kanban complete   < handoff.json # {summary, metadata}
 mt kanban review     < handoff.json # {summary, metadata, reviewer?}
 mt kanban changes    < reason.json  # reviewer only: {reason}
-mt kanban block      < block.json   # {kind, reason}
+mt kanban block      < block.json   # {kind, reason, parents} — parents for kind dependency (§5.4)
 mt kanban comment    < comment.json # {body, task_id?}
 mt kanban create     < task.json    # {title, body, contract?, assignee, workspace?, parents?, idempotency_key?}
 mt kanban link       < link.json    # {parent_id, child_id}
@@ -1334,7 +1350,7 @@ board.
 | Sessions | workspace name written to `sessions.workspace_id` at create and used on every actor rebuild; empty legacy value resolves to `default`; legacy driver id resolves to the role `default`; `sessions.agent_id` holds the role name |
 | Derived status | pure function; table of phase × parents × runs |
 | Transitions | every legal move, and every illegal one refused, against a real SQLite |
-| Links | cycle refusal; link onto a task with an open run refused |
+| Links | cycle refusal; link onto a task with an open run, or past its parents gate, refused; a dependency block's parents linked with it, from a work run (task stays open) and from a review run (task stays in review, its next review claim waiting on them) |
 | Classifier | a table of real error strings → classes, including the 400 that was transient |
 | Dispatcher | fake driver: claim race (two passes, one run); one open agent run per workspace, parallel across workspaces, `max_running`; workspace resolved at a claim while null — explicit, else the role's explicit one, else the parents' common one, else `default` — and reused by review, retry and later gates; `/kanban workspace` refused once the workspace is non-null; an agent claim on a task a person left null re-applies the rules; an unknown workspace refused at create; a removed workspace makes its tasks unresolvable; cooldown and doubling; stranded notice once, never for queued tasks; max runtime → `timed_out`, but a decided run past the limit keeps its outcome; a reporting run holds its workspace until it closes; dispatcher-cancel reason wins over the classifier |
 | Prompt | `role.md`, skills list, protocol, task and context, in order; the run records `role_md_hash` and `agent_config` |

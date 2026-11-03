@@ -5,12 +5,12 @@
 **Goal:** The kanban board exists, with no agent runs and no socket yet: tasks with dependency links, comments, assignees and a completion contract; one stored phase with one writer, and a derived display status; every transition of spec §5.1; runs as rows, opened by a claim and decided by a report or by an ending; and a service API that plans C2, C3 and D call.
 
 **Architecture:**
-- **Schema.** Migration `003_kanban.sql` creates every kanban table of spec §3, including gates and subscriptions, so that no later plan migrates again. The database itself refuses what the lifecycle forbids: two open runs on one task, a stored `running`, a closed run with no outcome.
+- **Schema.** Migration `003_kanban.sql` creates every kanban table of spec §3, including gates and subscriptions, so that no later plan migrates again. The database itself refuses what the lifecycle forbids: two open runs on one task, two runs with one token, a stored `running`, a closed run with no outcome.
 - **One writer.** `src/db/kanban.ts` is the only module that writes a `kanban_` table. `phase` changes only through its named transitions: `claim`, `complete`, `requestReview`, `requestChanges`, `block`, `unblock`, `stop`, `endRun`, `assign`, `assignReviewer`, `archive`. Each one reads the task inside its transaction and refuses an illegal move. A refused change rolls back whatever it had written. Every change writes one `kanban_events` row in the same transaction.
 - **Reads.** `src/db/kanban-read.ts` decodes rows and builds the view `show` returns.
 - **Derived status.** `src/kanban/status.ts` is one pure function from the phase, the parents and the undecided run (spec §4.1).
 - **Workspace rules.** `src/kanban/workspace.ts` is one pure function for the four rules of spec §2.3. The claim gathers the facts inside its transaction and calls it.
-- **Masking on write.** Free text and the string values of event payloads go through F's `redactKnownSecrets` and `redactValues` before they are stored (spec §10.1 layer 3).
+- **Masking on write.** Free text and the string values of event payloads go through F's `redactKnownSecrets` and `redactValues` before they are stored (spec §10.1 layer 3). The board's ids and names are exempted for its own payloads only.
 - **The service.** `src/kanban/service.ts` checks what rows cannot: configured roles and workspaces, the shape of input from chat or an agent's JSON, and who may be given work. Until plan D it refuses people and supervised roles. It resolves the role at a claim, including its `role.md`, and passes everything else to `db/kanban.ts`.
 
 **Tech Stack:** TypeScript (Node 22, ESM/NodeNext, strict, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`), vitest, better-sqlite3.
@@ -38,40 +38,49 @@
 
 ## Decisions the spec left open
 
-Each is the reading most consistent with the rest of the spec.
+Each is the reading most consistent with the rest of the spec. Decisions 1 and 2 were confirmed by the user, and the spec now says them (§3.2, §4.1, §5.1, §5.4, §7.3).
 
-1. **A dependency block links its prerequisites itself.** §5.4 says the worker "links the prerequisite as a parent first". §3.2 refuses a link onto a task with an open run, and the worker's own run is open. So a `dependency` block names the tasks it waits on, in `parents`. They are linked in the block's own transaction, after the run is decided, so the link cannot un-start anything. A dependency block that leaves nothing unfinished to wait on is refused: the task would be ready again at once. Plan C3's `mt kanban block` JSON gains an optional `parents`.
-2. **An archived parent counts as finished**, both for readiness and for completion. §4.1 says "done/archived"; §5.1 says "parents are not all done". An archived parent will never be done, so reading §5.1 strictly would strand its children forever.
-3. **`block_kind` and `block_reason` are set only by a block that enters `blocked`.** That is every kind except `dependency`, which never sits in `blocked` (§5.4). A dependency block leaves the last kind as it was, and is never counted as a recurrence. The schema's `block_kind` check leaves out `dependency`.
-4. **`/kanban assign` on a task in review.** §5.1 says "running or reviewing … the next claim goes to the new assignee", and the next claim in `review` goes to the reviewer. So there are two operations:
+1. **A dependency block names its prerequisites.** The spec used to say the worker "links the prerequisite as a parent first", but §3.2 refuses a link onto a task with an open run, and the worker's own run is open. So the block report carries `parents`. They are linked in the block's own transaction, after the run is decided, so the link cannot un-start anything. A dependency block that leaves nothing unfinished to wait on is refused: the task would be claimable again at once. Plan C3's `mt kanban block` JSON is `{kind, reason, parents}`.
+2. **A reviewer's dependency block keeps the task in review.** The review run is decided `blocked`, the task stays in phase `review`, and the parents are linked. The implementer's work is done; only the review was waiting, so it is not redone.
+   - **Claimable:** a review claim, like a work claim, needs every parent finished. Once they are, the reviewer is claimed again.
+   - **Shown:** `todo`. The status means "held back by a parent that is not done", in `open` or in `review`: nobody can act until the parent is. `review` keeps meaning "waiting for a reviewer", so `/kanban list review` lists only reviews someone can start.
+   - **Stored:** nothing new. The phase is still the only lifecycle column, and `block` writes it, here by not changing it.
+
+   An implementer's dependency block stays as before: the task stays `open`, shown as `todo`.
+3. **No link onto a task past its parents gate.** A public `link` is refused, with `illegal_transition`, onto a task in review, blocked from review, done or archived. A parent added then could never hold it back, and a review would wait on it forever. Only a dependency block links onto a task in review, through the internal `linkIn`, which the public `link` checks the phase before calling.
+4. **An archived parent counts as finished**, both for readiness and for completion. §4.1 says "done/archived"; §5.1 says "parents are not all done". An archived parent will never be done, so reading §5.1 strictly would strand its children forever.
+5. **`block_kind` and `block_reason` are set only by a block that enters `blocked`.** That is every kind except `dependency`, which never sits in `blocked` (§5.4). A dependency block leaves the last kind as it was, and is never counted as a recurrence. The schema's `block_kind` check leaves out `dependency`.
+6. **`/kanban assign` on a task in review.** §5.1 says "running or reviewing … the next claim goes to the new assignee", and the next claim in `review` goes to the reviewer. So there are two operations:
    - `assign` sets the assignee and supersedes an open **work** run;
    - `assignReviewer` sets the reviewer and supersedes an open **review** run.
 
-   Plan D maps the chat command onto them. Assigning the current assignee again changes nothing.
-5. **Where a reason is stored.** §3.3 has no reason column.
-   - A reviewer's `changes` reason is stored as the review run's `summary`. The rework's prompt reads it from there.
+   Plan D maps `/kanban assign` onto `assignReviewer` while the task is in review, and onto `assign` otherwise. Assigning the current assignee again changes nothing.
+7. **Where a reason is stored.** §3.3 has no reason column.
+   - A reviewer's `changes` reason is stored as the review run's `summary`. The rework's prompt reads it from there. With no review run (a person's changes), the reason is only in the `changes_requested` event; C4 reads it from there.
    - A block's reason is stored on the task, in `block_reason`, and also as the blocking run's `summary`.
-6. **`created_from_task` is set whenever a run creates a task**, as provenance. Rule 3 of §2.3 uses it only when the task has no parents.
-7. **Seeding a rework needs something to resume.** §5.3 says `seeded_from_run` names "the run whose provider session was actually resumed". So it is set only when the work run's session observed a provider session id, as well as running the same driver, command and arguments. A rework is a work claim that directly follows a review run ending `changes_requested`.
-8. **"Any other outcome resets `consecutive_transient`"** (§8.2) means every run outcome except `rate_limited`, including reports, `cancelled` and `superseded`.
-9. **The order of the breaker's checks.**
-   - For `rate_limited`, the transient limit is checked before `if-no-side-effects`: at the limit there is no retry to hold back.
-   - `interrupted` is not counted, and is held for a person under `if-no-side-effects` when the run had side effects (§8.3, §8.4).
-   - `terminal_provider` is not counted either.
-10. **A person's report** (complete, review, changes or block) is accepted with no open run. With an open person's run, it decides that run. While an agent run is open it is refused, as §5.1 says. Which person may act is plan D's to check.
-11. **The settings.** `kanban.failure_limit`, `transient_limit` and `transient_cooldown_s` are not parsed from config in C1. They are a `KanbanLimits` parameter, defaulting to the spec's values (2, 10, 300 s). Plan C2 reads the `kanban:` section.
-12. **Two of the dispatcher's skips are also refused inside the claim's transaction**, as a backstop against a racing pass: a cooldown still running, and a workspace with an open agent run. `max_running` stays the dispatcher's (C2).
-13. **`skipped_unassignable` is written once** (§4.2). That means once until any other event is written on the task, so a pass every minute adds nothing to the log.
-14. **`role.md` is read once, by the service's claim.** It is hashed into the run and returned, so that C2 composes the prompt from exactly the text whose hash the run records. A role.md or skill file that cannot be read makes the role unassignable (§2.1).
-15. **People and supervised roles** are refused by the service by default, at creation, at assignment, as a review report's reviewer, and at a claim. Plan D passes `people` (with the talk-tier check of §4.2) and `supervisedRoles: true`. A person is named `lark:<union_id>`. Any other name containing `:` is refused as invalid.
-16. **More free text is masked.** On top of the fields §10.1 lists, the completion contract's fields and a block's reason are masked on write too: they are free text and are shown to agents.
-17. **`/kanban stop` on a run that has already reported** writes nothing. The run is returned, and plan C2 cancels its turn and then calls `closeRun`.
-18. **`endRun` refuses a person's run.** A person's run has no process to end, and never times out (§4.2).
+8. **`created_from_task` is set whenever a run creates a task**, as provenance. Rule 3 of §2.3 uses it only when the task has no parents.
+9. **Seeding a rework needs something to resume.** §5.3 says `seeded_from_run` names "the run whose provider session was actually resumed". So it is set only when the work run's session observed a provider session id, as well as running the same driver, command and arguments. A rework is a work claim that directly follows a review run ending `changes_requested`.
+10. **"Any other outcome resets `consecutive_transient`"** (§8.2) means every run outcome except `rate_limited`, including reports, `cancelled` and `superseded`.
+11. **The order of the breaker's checks.**
+    - For `rate_limited`, the transient limit is checked before `if-no-side-effects`: at the limit there is no retry to hold back.
+    - `interrupted` is not counted, and is held for a person under `if-no-side-effects` when the run had side effects (§8.3, §8.4).
+    - `terminal_provider` is not counted either.
+12. **Unblocking a throttled run held for a person keeps `consecutive_transient`.** A `rate_limited` run under `if-no-side-effects` that changed things blocks as `needs_input`, with the count below the limit. §8.2 resets the count only when a `transient` block is unblocked, because there the next throttle would block the task again at once. Here it would not: the next throttle continues the count and its doubling cooldown, and any other outcome resets it. A person looking at the side effects has not fixed the throttling.
+13. **A person's report** (complete, review, changes or block) is accepted with no open run. With an open person's run, it decides that run. While an agent run is open it is refused, as §5.1 says. Which person may act is plan D's to check.
+14. **The settings.** `kanban.failure_limit`, `transient_limit` and `transient_cooldown_s` are not parsed from config in C1. They are a `KanbanLimits` parameter, defaulting to the spec's values (2, 10, 300 s). Plan C2 reads the `kanban:` section.
+15. **Two of the dispatcher's skips are also refused inside the claim's transaction**, as a backstop against a racing pass: a cooldown still running, and a workspace with an open agent run. `max_running` stays the dispatcher's (C2).
+16. **`skipped_unassignable` is written once** (§4.2). That means once until any other event is written on the task, so a pass every minute adds nothing to the log.
+17. **`role.md` is read once, by the service's claim.** It is hashed into the run and returned, so that C2 composes the prompt from exactly the text whose hash the run records. A role.md or skill file that cannot be read makes the role unassignable (§2.1).
+18. **People and supervised roles** are refused by the service by default, at creation, at assignment, as a review report's reviewer, and at a claim. Plan D passes `people` (with the talk-tier check of §4.2) and `supervisedRoles: true`. A person is named `lark:<union_id>`. Any other name containing `:` is refused as invalid.
+19. **More free text is masked.** On top of the fields §10.1 lists, the completion contract's fields and a block's reason are masked on write too: they are free text and are shown to agents.
+20. **The board's identifying keys are its own.** `kanban_events` payloads keep their ids and names (`taskId`, `runId`, `parentId`, `assignee`, `reviewer`, `workspace` and others) unmasked, through an extra-keys argument to `redactValues` that only `db/kanban.ts` passes. They are not added to the global `IDENTIFYING_KEYS`, which also exempts keys in session events and approvals, whose payloads an agent shapes.
+21. **`/kanban stop` on a run that has already reported** writes nothing. The run is returned, and plan C2 cancels its turn and then calls `closeRun`.
+22. **`endRun` refuses a person's run.** A person's run has no process to end, and never times out (§4.2).
 
 ## Out of scope (later plans)
 
 - **Plan C2, agent runs:**
-  - the dispatcher: passes, ordering by priority then age, `max_running`, the sweep, and noticing stranded tasks (`stranded_after_s`, `stranded_notified_at`);
+  - the dispatcher: passes, ordering by priority then age, `max_running`, the sweep, and noticing stranded tasks (`stranded_after_s`; setting `stranded_notified_at`, which a claim clears);
   - creating a run's session on the sink channel, then `attachSession`;
   - prompt composition, and layer 2 masking of the composed context and `last_output`;
   - the failure classifier, which supplies `endRun`'s outcome;
@@ -81,9 +90,10 @@ Each is the reading most consistent with the rest of the spec.
   - parsing the `kanban:` config section;
   - the `submissions` count.
 - **Plan C3, the worker CLI:**
-  - minting the run token and storing its `token_hash`;
+  - minting the run token and storing its `token_hash`, which the schema keeps unique;
   - registering the token with the masker, reference-counted;
-  - the `0600` socket and the `mt kanban` commands, which map onto this service;
+  - the `0600` socket and the `mt kanban` commands, which map onto this service, with `block` taking `{kind, reason, parents}`;
+  - namespacing a worker's `idempotency_key` by its task (`run-task:<task_id>:<key>`), so that two runs' keys cannot collide with each other or with chat's;
   - creating a task from a run, which inherits the run's task's subscriptions;
   - stop nudges, and forwarding comments to an undecided run;
   - capturing `reported_commit` and `reported_dirty` before a report.
@@ -106,7 +116,7 @@ Each is the reading most consistent with the rest of the spec.
 | `schema/003_kanban.sql` (create) | every kanban table of spec §3 |
 | `src/db/WRITERS.md` (modify) | `db/kanban.ts` owns every `kanban_` table |
 | `src/core/ids.ts` (modify) | `newTaskId`, `newRunId` |
-| `src/secrets.ts` (modify) | the board's ids and assignee names are identifying keys |
+| `src/secrets.ts` (modify) | `redactValues` takes extra identifying keys for one caller |
 | `src/kanban/types.ts` (create) | phases, block kinds, outcomes, rows, refusals |
 | `src/kanban/status.ts` (create) | `displayStatus`, the derived status |
 | `src/kanban/workspace.ts` (create) | `resolveTaskWorkspace`, the four rules |
@@ -195,7 +205,7 @@ Every kanban table of spec §3 is created here, including `kanban_gates` (writte
 
 The database refuses what the lifecycle forbids, as a backstop under `db/kanban.ts`'s own checks:
 - **one open run per task**, by a partial unique index. Two claims racing then fail at the database instead of starting two agents (spec §3.3);
-- **one run per session**, by a second partial unique index;
+- **one run per session**, and **one run per token hash**, by two more partial unique indexes. The worker CLI finds a run by its token's hash (plan C3);
 - **a stored `running`**: only the five phases are allowed;
 - **`blocked` without `blocked_from`**, or `blocked_from` on a task that is not blocked;
 - **a closed run with no outcome**;
@@ -288,6 +298,15 @@ describe('migration 003', () => {
     run('r_2', 'k_1', 2);
   });
 
+  it('refuses two runs with one token hash', () => {
+    // The worker CLI finds a run by its token's hash (plan C3).
+    task('k_1');
+    task('k_2');
+    run('r_1', 'k_1', 1, { token_hash: 'hash-of-token' });
+    expect(() => run('r_2', 'k_2', 1, { token_hash: 'hash-of-token' })).toThrow(/UNIQUE constraint failed/);
+    run('r_3', 'k_2', 1);
+  });
+
   it('refuses rows that break the lifecycle', () => {
     expect(() => task('k_a', { phase: 'running' })).toThrow(/CHECK constraint failed/);
     expect(() => task('k_b', { phase: 'blocked' })).toThrow(/CHECK constraint failed/);
@@ -308,7 +327,7 @@ describe('migration 003', () => {
 });
 ```
 
-- [ ] **Step 2.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/kanban-schema.test.ts`. Expected: all 4 FAIL. The first fails with `expected 2 to be 3`; the others with `no such table: kanban_tasks`.
+- [ ] **Step 2.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/kanban-schema.test.ts`. Expected: all 5 FAIL. The first fails with `expected 2 to be 3`; the others with `no such table: kanban_tasks`.
 
 - [ ] **Step 2.3: Implement.** Create `schema/003_kanban.sql`:
 
@@ -418,6 +437,8 @@ CREATE TABLE kanban_runs (
 CREATE UNIQUE INDEX idx_kanban_runs_one_open ON kanban_runs(task_id) WHERE ended_at IS NULL;
 -- One gateway session belongs to at most one run.
 CREATE UNIQUE INDEX idx_kanban_runs_session ON kanban_runs(session_id) WHERE session_id IS NOT NULL;
+-- The worker CLI finds a run by its token's hash (plan C3); no two runs share one.
+CREATE UNIQUE INDEX idx_kanban_runs_token ON kanban_runs(token_hash) WHERE token_hash IS NOT NULL;
 -- The per-workspace limit counts open agent runs (§6.3).
 CREATE INDEX idx_kanban_runs_open_ws ON kanban_runs(workspace)
   WHERE ended_at IS NULL AND assignee_kind = 'role';
@@ -492,7 +513,7 @@ UPDATE schema_version SET version = 3;
 | `kanban_gates`, `kanban_subscriptions` | `db/kanban.ts` | No writer until plans C4 (gates) and D (subscriptions); they add their functions to `db/kanban.ts`. |
 ```
 
-- [ ] **Step 2.5: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  596 passed (596)`. Then run `npm run typecheck`. Expected: no output. Then run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  49 passed (49)`: the migration runs for every database the end-to-end tests open.
+- [ ] **Step 2.5: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  597 passed (597)`. Then run `npm run typecheck`. Expected: no output. Then run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  49 passed (49)`: the migration runs for every database the end-to-end tests open.
 
 - [ ] **Step 2.6: Commit.**
 
@@ -508,7 +529,7 @@ git commit -m "Add the kanban tables, with the database refusing what the lifecy
 **Files:**
 - Create: `src/kanban/types.ts`, `src/kanban/status.ts`, `tests/kanban-status.test.ts`
 
-`phase` is the only stored lifecycle state. What a person sees is computed from it, from whether every parent is finished, and from the kind of the task's **undecided** run (spec §4.1). It follows the undecided run, not the open one: a run that has reported is no longer working on the task, even while its process finishes.
+`phase` is the only stored lifecycle state. What a person sees is computed from it, from whether every parent is finished, and from the kind of the task's **undecided** run (spec §4.1). It follows the undecided run, not the open one: a run that has reported is no longer working on the task, even while its process finishes. A task held back by a parent that is not done shows `todo`, in `open` or, after a reviewer's dependency block, in `review` (Decision 2).
 
 `types.ts` holds every type and constant the rest of the plan uses. Later tasks only import from it.
 
@@ -531,6 +552,11 @@ describe('displayStatus', () => {
   it('shows a task in review as waiting for a reviewer until a review run is undecided on it', () => {
     expect(displayStatus({ phase: 'review', parentsFinished: true, undecidedRun: undefined })).toBe('review');
     expect(displayStatus({ phase: 'review', parentsFinished: true, undecidedRun: 'review' })).toBe('reviewing');
+  });
+
+  it('shows a review waiting on a parent as todo, since nobody can act on it yet', () => {
+    // A reviewer's dependency block adds parents to a task in review (spec §5.4).
+    expect(displayStatus({ phase: 'review', parentsFinished: false, undecidedRun: undefined })).toBe('todo');
   });
 
   it('shows blocked, done and archived as they are, whatever else is true', () => {
@@ -772,7 +798,10 @@ export type DisplayStatus = 'todo' | 'ready' | 'running' | 'review' | 'reviewing
 
 export interface StatusFacts {
   phase: Phase;
-  /** Every parent is done or archived. True for a task with no parents. */
+  /**
+   * Every parent is done or archived. True for a task with no parents. A task
+   * held back by a parent shows todo, in `open` or in `review`.
+   */
   parentsFinished: boolean;
   /**
    * The kind of the task's undecided run, if it has one. Undecided, not open: a
@@ -788,7 +817,10 @@ export function displayStatus(f: StatusFacts): DisplayStatus {
       if (f.undecidedRun !== undefined) return 'running';
       return f.parentsFinished ? 'ready' : 'todo';
     case 'review':
-      return f.undecidedRun === 'review' ? 'reviewing' : 'review';
+      // A reviewer's dependency block leaves the review waiting on new parents
+      // (spec §5.4): todo, because nobody can act until they are done.
+      if (f.undecidedRun === 'review') return 'reviewing';
+      return f.parentsFinished ? 'review' : 'todo';
     case 'blocked':
     case 'done':
     case 'archived':
@@ -797,7 +829,7 @@ export function displayStatus(f: StatusFacts): DisplayStatus {
 }
 ```
 
-- [ ] **Step 3.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  600 passed (600)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 3.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  602 passed (602)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 3.5: Commit.**
 
@@ -912,7 +944,7 @@ export function resolveTaskWorkspace(f: WorkspaceFacts): WorkspaceResolution {
 }
 ```
 
-- [ ] **Step 4.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  606 passed (606)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 4.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  608 passed (608)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 4.5: Commit.**
 
@@ -923,12 +955,12 @@ git commit -m "Decide a task's workspace by the four rules"
 
 ---
 
-### Task 5: The board's ids and names are identifying keys
+### Task 5: Extra identifying keys for one caller's payloads
 
 **Files:**
 - Modify: `src/secrets.ts`, `tests/secrets.test.ts`
 
-`kanban_events` payloads are masked value by value with `redactValues` (Task 6 onwards). Spec §10.1 leaves identifying values alone, "ids, idempotency keys, workspace and assignee names". `workspace` is already in `IDENTIFYING_KEYS`. The board's own keys join it, so that a role name or an id that happens to equal a known secret is not turned into `••••` in the log.
+`kanban_events` payloads are masked value by value with `redactValues` (Task 6 onwards). Spec §10.1 leaves identifying values alone: "ids, idempotency keys, workspace and assignee names". The board's keys (`taskId`, `assignee` and the rest) must therefore stay as they are in its payloads. They are **not** added to the global `IDENTIFYING_KEYS`: that set also exempts keys in session events and approval payloads, whose shape an agent controls, so an agent could hide a secret under a key named `assignee`. Instead `redactValues` takes an optional set of extra keys, which only `db/kanban.ts` passes (Decision 20).
 
 - [ ] **Step 5.1: Write the failing test.** In `tests/secrets.test.ts`, inside `describe('redactValues', ...)`, directly after the end of the test "still walks an object or array under an identifying key":
 
@@ -942,56 +974,81 @@ git commit -m "Decide a task's workspace by the four rules"
 add:
 
 ```ts
-  it("leaves the board's ids and assignee names alone", () => {
+  it('leaves the keys a caller names as identifying alone, for that call only', () => {
     addSecrets(['implementer-12345']);
-    const ids = {
-      taskId: 'implementer-12345',
-      runId: 'implementer-12345',
-      parentId: 'implementer-12345',
-      childId: 'implementer-12345',
-      createdFromTask: 'implementer-12345',
-      seededFromRun: 'implementer-12345',
+    const payload = { assignee: 'implementer-12345', taskId: 'implementer-12345', summary: 'implementer-12345' };
+    expect(redactValues(payload, new Set(['assignee', 'taskId']))).toEqual({
       assignee: 'implementer-12345',
-      reviewer: 'implementer-12345',
-    };
-    expect(redactValues({ ...ids, summary: 'implementer-12345' })).toEqual({ ...ids, summary: MASK });
+      taskId: 'implementer-12345',
+      summary: MASK,
+    });
+    expect(redactValues(payload)).toEqual({ assignee: MASK, taskId: MASK, summary: MASK });
   });
 ```
 
-- [ ] **Step 5.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/secrets.test.ts`. Expected: the new test FAILS with `expected { taskId: '••••', runId: '••••', …(7) } to deeply equal { taskId: 'implementer-12345', …(8) }`, and `Tests  1 failed | 15 passed (16)`.
+- [ ] **Step 5.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/secrets.test.ts`. Expected: the new test FAILS with `expected { assignee: '••••', …(2) } to deeply equal { assignee: 'implementer-12345', …(2) }`, and `Tests  1 failed | 15 passed (16)`.
 
-- [ ] **Step 5.3: Implement.** In `src/secrets.ts`, at the end of `IDENTIFYING_KEYS`, replace
+- [ ] **Step 5.3: Implement.** In `src/secrets.ts`, replace the last line of `redactValues`'s doc comment, and everything after it to the end of `walk`:
 
 ```ts
-  'resolvedBy',
-  'resolvedVia',
-]);
+ * Returns the input itself when there is nothing to mask.
+ */
+export function redactValues(value: unknown): unknown {
+  if (ordered.length === 0) return value;
+  return walk(value);
+}
+
+function walk(value: unknown): unknown {
+  if (typeof value === 'string') return redactKnownSecrets(value);
+  if (Array.isArray(value)) return value.map(walk);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, inner] of Object.entries(value)) {
+      out[key] = IDENTIFYING_KEYS.has(key) && typeof inner === 'string' ? inner : walk(inner);
+    }
+    return out;
+  }
+  return value;
+}
 ```
 
 with:
 
 ```ts
-  'resolvedBy',
-  'resolvedVia',
-  // The board's (spec §3): its ids, and the names of who a task is assigned to.
-  'taskId',
-  'runId',
-  'parentId',
-  'childId',
-  'createdFromTask',
-  'seededFromRun',
-  'assignee',
-  'reviewer',
-]);
+ * Returns the input itself when there is nothing to mask.
+ *
+ * `alsoIdentifying` names more keys to leave alone, for one writer's payloads:
+ * the board's ids and assignee names (db/kanban.ts). They are not added to
+ * IDENTIFYING_KEYS, which also exempts keys in session events and approvals,
+ * whose payloads an agent shapes.
+ */
+export function redactValues(value: unknown, alsoIdentifying?: ReadonlySet<string>): unknown {
+  if (ordered.length === 0) return value;
+  return walk(value, alsoIdentifying);
+}
+
+function walk(value: unknown, also: ReadonlySet<string> | undefined): unknown {
+  if (typeof value === 'string') return redactKnownSecrets(value);
+  if (Array.isArray(value)) return value.map((inner) => walk(inner, also));
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, inner] of Object.entries(value)) {
+      const identifying = IDENTIFYING_KEYS.has(key) || also?.has(key) === true;
+      out[key] = identifying && typeof inner === 'string' ? inner : walk(inner, also);
+    }
+    return out;
+  }
+  return value;
+}
 ```
 
-- [ ] **Step 5.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  607 passed (607)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 5.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  609 passed (609)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 5.5: Commit.**
 
 ```bash
 git add src/secrets.ts tests/secrets.test.ts
-git commit -m "Leave the board's ids and assignee names unmasked in payloads"
+git commit -m "Let one caller name more identifying keys for its payloads"
 ```
 
 ---
@@ -1006,7 +1063,7 @@ git commit -m "Leave the board's ids and assignee names unmasked in payloads"
 `kanban.ts` starts with what every transition shares:
 - **`refuse`**, a refusal as a value. Nearly every refusal is something a person in chat or an agent through `mt kanban` must be told.
 - **`tx`**, `txImmediate` for a change that may be refused. A refusal returned inside it rolls back whatever the change had already written.
-- **`record`**, which writes one `kanban_events` row, masked value by value.
+- **`record`**, which writes one `kanban_events` row, masked value by value, with `BOARD_KEYS` as the extra identifying keys (Task 5).
 
 Later tasks append sections to this file, and replace its imports as they need more.
 
@@ -1580,6 +1637,24 @@ function tx<T extends object>(db: Db, fn: (d: Db) => Result<T>): Result<T> {
   }
 }
 
+/**
+ * Keys in the board's payloads that identify rather than say something: its ids,
+ * and the names of who and where. Passed to redactValues for these payloads only:
+ * session events and approvals carry agent-controlled keys, which must not be
+ * exempted the same way.
+ */
+const BOARD_KEYS: ReadonlySet<string> = new Set([
+  'taskId',
+  'runId',
+  'parentId',
+  'childId',
+  'createdFromTask',
+  'seededFromRun',
+  'assignee',
+  'reviewer',
+  'workspace',
+]);
+
 /** One row of the board's log, masked value by value. */
 function record(
   d: Db,
@@ -1589,7 +1664,7 @@ function record(
   d.prepare(
     `INSERT INTO kanban_events (task_id, run_id, kind, actor, payload, created_at)
      VALUES (?, ?, ?, ?, jsonb(?), ?)`,
-  ).run(e.taskId, e.runId ?? null, e.kind, e.actor, JSON.stringify(redactValues(e.payload)), now);
+  ).run(e.taskId, e.runId ?? null, e.kind, e.actor, JSON.stringify(redactValues(e.payload, BOARD_KEYS)), now);
 }
 
 const mask = redactKnownSecrets;
@@ -1723,7 +1798,7 @@ function insertComment(d: Db, taskId: string, author: string, body: string, now:
 }
 ```
 
-- [ ] **Step 6.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  616 passed (616)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 6.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  618 passed (618)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 6.5: Commit.**
 
@@ -1747,11 +1822,11 @@ A claim opens a run (spec §5.1, §6.2 step 3):
 It runs in one transaction, so what it was decided on is still true when the run is inserted. It refuses:
 - a task with an open run. The partial unique index backs this up;
 - a claimant the task is no longer for (`stale`): the service resolved the role outside the transaction;
-- a work claim with a parent not finished;
+- any claim, work or review, with a parent not finished. A review gets new parents from a reviewer's dependency block (Decision 2);
 - a claim during a cooldown;
 - for an agent, a workspace that cannot be resolved, is no longer configured, or already has an open agent run (spec §6.3). A person's run holds no workspace.
 
-A null workspace is resolved by Task 4's rules and fixed on the task in the same transaction. A rework claim records `seeded_from_run` (spec §5.3; Decision 7). Its test needs reports, so it is in Task 9. So are the tests of the parents' rule, which need finished parents.
+A null workspace is resolved by Task 4's rules and fixed on the task, and `stranded_notified_at` is cleared (spec §3.1), in the same `UPDATE`. A rework claim records `seeded_from_run` (spec §5.3; Decision 9). Its test needs reports, so it is in Task 9. So are the tests of the parents' rule, which need finished parents.
 
 `attachSession` records the gateway session plan C2 creates for an agent run, after the claim.
 
@@ -2109,7 +2184,8 @@ export function claim(db: Db, input: ClaimInput, now: number): Result<{ run: Run
       throw new Error('a claim carries an agent exactly when it is for a role');
     }
     const parents = parentsOf(d, task.taskId);
-    if (kind === 'work' && !parents.every((p) => isFinished(p.phase))) {
+    // A review waits on its parents too: a reviewer's dependency block adds them (spec §5.4).
+    if (!parents.every((p) => isFinished(p.phase))) {
       return refuse('not_claimable', `task ${task.taskId} is waiting on a parent that is not done`);
     }
     if (task.cooldownUntil !== null && task.cooldownUntil > now) {
@@ -2169,9 +2245,11 @@ export function claim(db: Db, input: ClaimInput, now: number): Result<{ run: Run
       input.tokenHash ?? null,
       now,
     );
-    if (workspace !== task.workspace) {
-      d.prepare('UPDATE kanban_tasks SET workspace = ? WHERE task_id = ?').run(workspace, task.taskId);
-    }
+    // A claimed task is no longer stranded (spec §3.1).
+    d.prepare('UPDATE kanban_tasks SET workspace = ?, stranded_notified_at = NULL WHERE task_id = ?').run(
+      workspace,
+      task.taskId,
+    );
     record(
       d,
       {
@@ -2235,7 +2313,7 @@ export function attachSession(db: Db, runId: string, sessionId: string, now: num
 }
 ```
 
-- [ ] **Step 7.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  626 passed (626)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 7.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  628 passed (628)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 7.5: Commit.**
 
@@ -2252,11 +2330,12 @@ git commit -m "Claim a task: open its run and fix its workspace in one transacti
 - Modify: `src/db/kanban.ts`
 - Create: `tests/kanban-links.test.ts`
 
-Spec §3.2. Two refusals:
-- **A cycle**, found by walking up from the parent with a recursive query. A cycle is two tasks that can never become ready, with nothing to say why.
-- **A child with an open run.** The dependency gate is evaluated when a task becomes ready, and a parent added to a running task cannot un-start it.
+Spec §3.2. The public `link` refuses:
+- **a child past its parents gate**, that is in review, blocked from review, done or archived (Decision 3), with `illegal_transition`. The gate is evaluated when a task becomes ready, so a parent added later could never hold it back. A review would then wait on it forever. Task 9 tests the review case, once a task can reach review;
+- **a child with an open run**, for the same reason;
+- **a cycle**, found by walking up from the parent with a recursive query. A cycle is two tasks that can never become ready, with nothing to say why.
 
-Linking a pair that is already linked changes nothing. `linkIn` takes an optional `blockingRun`, the run that has just reported a dependency block on the child (Task 10, Decision 1).
+Linking a pair that is already linked changes nothing. The link itself is the internal `linkIn`, which a dependency block also calls (Task 10), on a task in `open` or `review`, with the run that has just reported the block (Decisions 1 and 2).
 
 - [ ] **Step 8.1: Write the failing tests.** Create `tests/kanban-links.test.ts`:
 
@@ -2346,19 +2425,33 @@ describe('link', () => {
  * again changes nothing.
  *
  * Refused:
+ * - a child past its parents gate -- in review, blocked from review, done or
+ *   archived: the gate is evaluated when a task becomes ready, so a parent added
+ *   now could never hold it back, and a review would wait on it forever;
+ * - a child with an open run, for the same reason;
  * - a cycle, found by walking up from the parent: two tasks that can never become
- *   ready, and nothing would ever say why;
- * - a child with an open run: the dependency gate is evaluated when a task
- *   becomes ready, and adding a parent to a running task cannot un-start it.
+ *   ready, and nothing would ever say why.
  */
 export function link(db: Db, parentId: string, childId: string, by: string, now: number): Result<{ added: boolean }> {
-  return tx(db, (d) => linkIn(d, parentId, childId, by, now));
+  return tx(db, (d) => {
+    if (getTask(d, parentId) === undefined) return refuse('not_found', `no task ${parentId}`);
+    const child = getTask(d, childId);
+    if (child === undefined) return refuse('not_found', `no task ${childId}`);
+    if (child.phase !== 'open' && !(child.phase === 'blocked' && child.blockedFrom === 'open')) {
+      return refuse(
+        'illegal_transition',
+        `task ${childId} is ${child.phase}; a parent added now could not hold it back`,
+      );
+    }
+    return linkIn(d, parentId, childId, by, now);
+  });
 }
 
 /**
- * `blockingRun` is the run that has just reported a dependency block on the
- * child: it is decided, so linking the prerequisites it names cannot un-start
- * anything, even while its process is still finishing.
+ * The link itself, once the child's phase allows it. A dependency block calls it
+ * directly (spec §5.4), on a task in `open` or `review`, with `blockingRun` the
+ * run that has just reported the block: that run is decided, so the parents it
+ * names hold back the next claim, not the run.
  */
 function linkIn(
   d: Db,
@@ -2368,9 +2461,7 @@ function linkIn(
   now: number,
   blockingRun?: string,
 ): Result<{ added: boolean }> {
-  for (const id of [parentId, childId]) {
-    if (getTask(d, id) === undefined) return refuse('not_found', `no task ${id}`);
-  }
+  if (getTask(d, parentId) === undefined) return refuse('not_found', `no task ${parentId}`);
   if (parentId === childId) return refuse('cycle', `task ${childId} cannot be its own parent`);
   const exists = d
     .prepare<[string, string], { n: number }>('SELECT 1 AS n FROM kanban_links WHERE parent_id = ? AND child_id = ?')
@@ -2402,13 +2493,13 @@ function linkIn(
 }
 ```
 
-- [ ] **Step 8.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  631 passed (631)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 8.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  633 passed (633)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 8.5: Commit.**
 
 ```bash
 git add src/db/kanban.ts tests/kanban-links.test.ts
-git commit -m "Link tasks, refusing cycles and links onto a running task"
+git commit -m "Link tasks, refusing cycles and links a task can no longer wait on"
 ```
 
 ---
@@ -2428,18 +2519,20 @@ Who may report (spec §5.1, §7.2):
 - **A person's report** decides the open person's run, if there is one. It is refused while an agent run is open. The message says to stop the run if it is still undecided, or to wait if it has reported and is finishing.
 
 What each report changes:
-- **`complete`** resets the breaker's counters, and is the only report that does. It refuses a task with an unfinished parent; this is the backstop for Task 8.
+- **`complete`**, from a work run or a review run, resets the breaker's counters, and is the only report that does. It refuses a task with an unfinished parent: the backstop for Task 8, and what holds a review that a reviewer's dependency block left waiting.
 - **`requestReview`** needs a reviewer, named in the report or already on the task.
-- **`requestChanges`** stores its reason as the review run's summary (Decision 5).
-- **Any outcome but `rate_limited`** resets `consecutive_transient` (Decision 8).
+- **`requestChanges`** stores its reason as the review run's summary (Decision 7).
+- **Any outcome but `rate_limited`** resets `consecutive_transient` (Decision 10).
 
 `closeRun` refuses an undecided run. What ended it must be recorded first, by a report or, from Task 11, by `endRun`.
+
+The tests also cover two moves Task 8 and Task 7 implemented: a public link onto a task in review is refused, and an agent claim re-applies the workspace rules when a person's claim left the workspace null (spec §2.3).
 
 - [ ] **Step 9.1: Write the failing tests.** Create `tests/kanban-reports.test.ts`:
 
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { attachSession, claim, closeRun, complete, requestChanges, requestReview } from '../src/db/kanban.js';
+import { attachSession, claim, closeRun, complete, link, requestChanges, requestReview } from '../src/db/kanban.js';
 import { eventsOf, getRun, getTask, runsOf, taskView } from '../src/db/kanban-read.js';
 import { createSession } from '../src/db/sessions.js';
 import type { Reporter, RunRow } from '../src/kanban/types.js';
@@ -2600,6 +2693,34 @@ describe('complete', () => {
   });
 });
 
+describe('a review run', () => {
+  it("completes the task on the reviewer's complete", () => {
+    const task = newTask(h.db, { reviewer: REVIEWER });
+    const work = claimed(h.db, task.taskId);
+    ok(requestReview(h.db, task.taskId, asRun(work), { summary: 'v1' }, NOW));
+    ok(closeRun(h.db, work.runId, NOW));
+    const review = claimed(h.db, task.taskId);
+    expect(complete(h.db, task.taskId, asRun(review), { summary: 'approved' }, NOW + 1)).toMatchObject({
+      ok: true,
+      task: { phase: 'done', closedAt: NOW + 1 },
+      run: { runId: review.runId, kind: 'review', outcome: 'completed', summary: 'approved' },
+    });
+  });
+
+  it('refuses a public link onto a task in review: a parent added now could not hold it back', () => {
+    const parent = newTask(h.db);
+    const task = newTask(h.db, { reviewer: REVIEWER });
+    const work = claimed(h.db, task.taskId);
+    ok(requestReview(h.db, task.taskId, asRun(work), { summary: 'v1' }, NOW));
+    ok(closeRun(h.db, work.runId, NOW));
+    expect(link(h.db, parent.taskId, task.taskId, ALICE, NOW)).toEqual({
+      ok: false,
+      code: 'illegal_transition',
+      message: `task ${task.taskId} is review; a parent added now could not hold it back`,
+    });
+  });
+});
+
 describe('requestReview', () => {
   it("moves the task to review, with a reviewer the report names replacing the task's", () => {
     const task = newTask(h.db, { reviewer: REVIEWER });
@@ -2746,10 +2867,25 @@ describe('a workspace from the parents', () => {
     expect(claimed(h.db, personTask.taskId)).toMatchObject({ workspace: null, agentConfig: null });
     expect(getTask(h.db, personTask.taskId)?.workspace).toBeNull();
   });
+
+  it('is resolved afresh by an agent claim after a person left it null', () => {
+    const web = doneIn('web');
+    const api = doneIn('api');
+    const task = newTask(h.db, { parents: [web, api], assignee: BOB, reviewer: REVIEWER });
+    claimed(h.db, task.taskId);
+    ok(requestReview(h.db, task.taskId, asPerson('lark:on_bob'), { summary: 'have a look' }, NOW));
+    expect(getTask(h.db, task.taskId)?.workspace).toBeNull();
+    // The rules apply again: the parents still disagree, so only the role's own workspace settles it.
+    expect(
+      claim(h.db, { taskId: task.taskId, claimant: claimantFor(h.db, task.taskId), workspaces: WORKSPACES }, NOW),
+    ).toMatchObject({ ok: false, code: 'unassignable' });
+    expect(claimed(h.db, task.taskId, { roleWorkspace: 'docs' })).toMatchObject({ kind: 'review', workspace: 'docs' });
+    expect(getTask(h.db, task.taskId)?.workspace).toBe('docs');
+  });
 });
 ```
 
-- [ ] **Step 9.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/kanban-reports.test.ts`. Expected: all 15 FAIL, for example with `(0 , complete) is not a function`.
+- [ ] **Step 9.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/kanban-reports.test.ts`. Expected: all 18 FAIL, for example with `(0 , complete) is not a function`.
 
 - [ ] **Step 9.3: Implement.** Replace the imports at the top of `src/db/kanban.ts`, that is everything above the header comment that begins `/**` / ` * The board's only writer`, with:
 
@@ -3057,7 +3193,7 @@ export function closeRun(db: Db, runId: string, now: number): Result<{ run: RunR
 }
 ```
 
-- [ ] **Step 9.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  646 passed (646)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 9.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  651 passed (651)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 9.5: Commit.**
 
@@ -3077,20 +3213,24 @@ git commit -m "Report complete, review and changes, and close a decided run"
 Spec §5.1 and §5.4.
 - **A block of any kind but `dependency`** moves the task to `blocked`, with `blocked_from` set to the phase it left.
 - **A block of the same kind as the last one** increments `block_recurrences`. The kind survives unblock, and only completion resets the count.
-- **A `dependency` block** returns the task to `open`, held back by the parents it names, which are linked in the same transaction (Decision 1).
+- **A `dependency` block** links the parents it names in the same transaction (Decision 1), through `linkIn`, and leaves the phase as it was:
+  - from a work run the task stays `open`, shown `todo`;
+  - from a review run it stays `review`, shown `todo`, and the reviewer is claimed again once the parents are done (Decision 2). The implementer's work is done; only the review was waiting.
+
+  Since the phase does not move, there is nothing to write before the parents check: `linkIn` accepts the task in either phase, and a refused block rolls back the links.
 - **`unblock`** returns the task to `blocked_from`. For a `gave_up` block it resets the failure count, and for a `transient` block the throttling count (spec §8.2).
-- **`stop`** cancels an undecided run and blocks the task as `needs_input`, rather than leaving it ready to be dispatched again at once. On a run that has already reported it writes nothing (Decision 17).
+- **`stop`** cancels an undecided run and blocks the task as `needs_input`, rather than leaving it ready to be dispatched again at once. On a run that has already reported it writes nothing (Decision 21).
 
 - [ ] **Step 10.1: Write the failing tests.** Create `tests/kanban-block.test.ts`:
 
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { block, closeRun, complete, requestReview, stop, unblock } from '../src/db/kanban.js';
+import { block, claim, closeRun, complete, requestReview, stop, unblock } from '../src/db/kanban.js';
 import { commentsOf, eventsOf, getRun, getTask, parentsOf, taskView } from '../src/db/kanban-read.js';
 import type { Reporter, RunRow } from '../src/kanban/types.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
-import { ALICE, NOW, claimed, newTask } from './helpers/kanban.js';
+import { ALICE, NOW, WORKSPACES, claimantFor, claimed, newTask } from './helpers/kanban.js';
 
 let h: TestDb;
 
@@ -3173,6 +3313,45 @@ describe('block', () => {
     expect(r).toMatchObject({ ok: true, task: { phase: 'open', blockKind: null }, run: { outcome: 'blocked' } });
     expect(parentsOf(h.db, task.taskId).map((t) => t.title)).toEqual(['prerequisite']);
     expect(taskView(h.db, task.taskId)?.status).toBe('todo');
+  });
+
+  it("keeps a reviewer's dependency block in review, and claims the reviewer again once the parents are done", () => {
+    // The implementer's work is done; only the review was waiting.
+    const prerequisite = newTask(h.db, { title: 'prerequisite', assignee: BOB });
+    const task = newTask(h.db, { reviewer: { kind: 'role', name: 'reviewer' } });
+    const work = claimed(h.db, task.taskId);
+    ok(requestReview(h.db, task.taskId, asRun(work), { summary: 'v1' }, NOW));
+    ok(closeRun(h.db, work.runId, NOW));
+    const review = claimed(h.db, task.taskId);
+    const r = block(
+      h.db,
+      task.taskId,
+      asRun(review),
+      { kind: 'dependency', reason: 'needs the API docs first', parents: [prerequisite.taskId] },
+      NOW,
+    );
+    expect(r).toMatchObject({ ok: true, task: { phase: 'review', blockKind: null }, run: { outcome: 'blocked' } });
+    expect(parentsOf(h.db, task.taskId).map((t) => t.title)).toEqual(['prerequisite']);
+    expect(taskView(h.db, task.taskId)?.status).toBe('todo');
+    ok(closeRun(h.db, review.runId, NOW));
+    expect(
+      claim(h.db, { taskId: task.taskId, claimant: claimantFor(h.db, task.taskId), workspaces: WORKSPACES }, NOW),
+    ).toEqual({
+      ok: false,
+      code: 'not_claimable',
+      message: `task ${task.taskId} is waiting on a parent that is not done`,
+    });
+    ok(
+      complete(
+        h.db,
+        prerequisite.taskId,
+        { kind: 'person', principal: 'lark:on_bob' },
+        { summary: 'docs written' },
+        NOW,
+      ),
+    );
+    expect(taskView(h.db, task.taskId)?.status).toBe('review');
+    expect(claimed(h.db, task.taskId)).toMatchObject({ kind: 'review', attempt: 3, assignee: { name: 'reviewer' } });
   });
 
   it('refuses a dependency block with nothing unfinished to wait on, and writes nothing', () => {
@@ -3262,7 +3441,7 @@ describe('stop', () => {
 });
 ```
 
-- [ ] **Step 10.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/kanban-block.test.ts`. Expected: all 10 FAIL, for example with `(0 , block) is not a function`.
+- [ ] **Step 10.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/kanban-block.test.ts`. Expected: all 11 FAIL, for example with `(0 , block) is not a function`.
 
 - [ ] **Step 10.3: Implement.** Replace the imports at the top of `src/db/kanban.ts`, that is everything above the header comment that begins `/**` / ` * The board's only writer`, with:
 
@@ -3339,10 +3518,16 @@ function enterBlocked(d: Db, task: TaskRow, kind: Exclude<BlockKind, 'dependency
 /**
  * A worker's or person's `block` (spec §5.1, §5.4).
  *
- * `dependency` never sits in `blocked`, since no person needs to act: the task
- * returns to `open`, held back by the parents the report names, which are linked
- * here. A dependency block that leaves nothing unfinished to wait on is refused:
- * the task would be ready again at once.
+ * `dependency` never sits in `blocked`, since no person needs to act. The task
+ * keeps its phase, and the parents the report names are linked here, so its next
+ * claim waits for them:
+ * - from a work run it stays `open`, shown as todo;
+ * - from a review run it stays `review`, shown as todo, and the reviewer is
+ *   claimed again once the parents are done. The implementer's work is done; only
+ *   the review was waiting, so it is not redone.
+ *
+ * A dependency block that leaves nothing unfinished to wait on is refused: the
+ * task would be claimable again at once.
  */
 export function block(
   db: Db,
@@ -3365,7 +3550,6 @@ export function block(
       if (parentsOf(d, taskId).every((p) => isFinished(p.phase))) {
         return refuse('invalid', `a dependency block must name a task ${taskId} waits on that is not done`);
       }
-      d.prepare("UPDATE kanban_tasks SET phase = 'open' WHERE task_id = ?").run(taskId);
       record(
         d,
         {
@@ -3455,13 +3639,13 @@ export function stop(db: Db, taskId: string, by: string, now: number): Result<{ 
 }
 ```
 
-- [ ] **Step 10.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  656 passed (656)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 10.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  662 passed (662)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 10.5: Commit.**
 
 ```bash
 git add src/db/kanban.ts tests/kanban-block.test.ts
-git commit -m "Block, unblock and stop a task"
+git commit -m "Block, unblock and stop a task, keeping a reviewer's dependency block in review"
 ```
 
 ---
@@ -3472,15 +3656,24 @@ git commit -m "Block, unblock and stop a task"
 - Modify: `src/db/kanban.ts`
 - Create: `tests/kanban-runs.test.ts`
 
-`endRun` is the run-outcome transition plan C2 calls. It takes the classifier's outcome (§8.1), or the dispatcher's own, `timed_out` or `interrupted`, which the dispatcher records before it cancels the turn (§6.4). It applies §5.1's failure rows and §8.2's counting.
+`endRun` is the run-outcome transition plan C2 calls. It takes the classifier's outcome (§8.1), or the dispatcher's own, `timed_out` or `interrupted`, which the dispatcher records before it cancels the turn (§6.4). It applies §5.1's failure rows and §8.2's counting, to work and review runs alike: a failing review run is counted and the task stays in review.
 
-It acts only on an undecided run. A decided run's outcome is never overwritten (§3.3), so a runtime limit or a restart arriving just after a report cannot turn a completed task's run into a failure. The run stays open; `closeRun` closes it when its turn has ended. `hadSideEffects` is C2's to work out from the session log and the role's `readOnlyTools`.
+It acts only on an undecided run. A decided run's outcome is never overwritten (§3.3), so a runtime limit or a restart arriving just after a report cannot turn a completed task's run into a failure. The run stays open; `closeRun` closes it when its turn has ended. `hadSideEffects` is C2's to work out from the session log and the role's `readOnlyTools`. A throttled run held for a person keeps its throttling count across the unblock (Decision 12).
 
 - [ ] **Step 11.1: Write the failing tests.** Create `tests/kanban-runs.test.ts`:
 
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DEFAULT_LIMITS, claim, closeRun, complete, endRun, unblock, type RunEnding } from '../src/db/kanban.js';
+import {
+  DEFAULT_LIMITS,
+  claim,
+  closeRun,
+  complete,
+  endRun,
+  requestReview,
+  unblock,
+  type RunEnding,
+} from '../src/db/kanban.js';
 import { eventsOf, getRun, getTask } from '../src/db/kanban-read.js';
 import type { NewTask } from '../src/db/kanban.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
@@ -3567,6 +3760,19 @@ describe('endRun', () => {
     });
   });
 
+  it('counts a failing review run, and leaves the task in review for the reviewer', () => {
+    const id = task({ reviewer: { kind: 'role', name: 'reviewer' } });
+    const work = claimed(h.db, id);
+    ok(requestReview(h.db, id, { kind: 'run', runId: work.runId }, { summary: 'v1' }, NOW));
+    ok(closeRun(h.db, work.runId, NOW));
+    expect(attempt(id, { outcome: 'crashed' })).toMatchObject({
+      next: 'retry',
+      run: { kind: 'review', outcome: 'crashed' },
+      task: { phase: 'review', consecutiveFailures: 1 },
+    });
+    expect(claimed(h.db, id)).toMatchObject({ kind: 'review', attempt: 3 });
+  });
+
   it('resets the failure count on completion, and on unblocking a task that gave up', () => {
     const a = task();
     attempt(a, { outcome: 'protocol_violation' });
@@ -3650,9 +3856,10 @@ describe('endRun', () => {
     });
     expect(attempt(task(careful), { outcome: 'failed', hadSideEffects: false }).next).toBe('retry');
     expect(attempt(task(careful), { outcome: 'interrupted', hadSideEffects: true }).task.blockKind).toBe('needs_input');
-    expect(attempt(task(careful), { outcome: 'rate_limited', hadSideEffects: true }).task.blockKind).toBe(
-      'needs_input',
-    );
+    const throttled = attempt(task(careful), { outcome: 'rate_limited', hadSideEffects: true }).task;
+    expect(throttled).toMatchObject({ blockKind: 'needs_input', consecutiveTransient: 1 });
+    // Unblocking it is not unblocking a transient block: the throttling count stands (spec §8.2).
+    expect(ok(unblock(h.db, throttled.taskId, ALICE, undefined, NOW)).task.consecutiveTransient).toBe(1);
     expect(attempt(task(), { outcome: 'failed', hadSideEffects: true }).next).toBe('retry');
   });
 
@@ -3686,7 +3893,7 @@ describe('endRun', () => {
 });
 ```
 
-- [ ] **Step 11.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/kanban-runs.test.ts`. Expected: all 12 FAIL with `(0 , endRun) is not a function`.
+- [ ] **Step 11.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/kanban-runs.test.ts`. Expected: all 13 FAIL with `(0 , endRun) is not a function`.
 
 - [ ] **Step 11.3: Implement.** Replace the imports at the top of `src/db/kanban.ts`, that is everything above the header comment that begins `/**` / ` * The board's only writer`, with:
 
@@ -3871,7 +4078,7 @@ export function endRun(
 }
 ```
 
-- [ ] **Step 11.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  668 passed (668)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 11.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  675 passed (675)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 11.5: Commit.**
 
@@ -3889,10 +4096,10 @@ git commit -m "Record why a run ended without a report, and what the breaker doe
 - Create: `tests/kanban-assign.test.ts`
 
 These leave the phase alone, except `archive`.
-- **`assign` and `assignReviewer`** (Decision 4) supersede the open run whose claimant they replace. An undecided run ends `superseded`. A decided one keeps its outcome and is returned, so C2 can close it.
+- **`assign` and `assignReviewer`** (Decision 6) supersede the open run whose claimant they replace. An undecided run ends `superseded`. A decided one keeps its outcome and is returned, so C2 can close it.
 - **`setWorkspace`** sets a null workspace in any phase, and is refused once the workspace is fixed (spec §2.3).
-- **`archive`** works from any phase but `archived`. An archived parent no longer holds its children back (Decision 2).
-- **`noteUnassignable`** records a task nobody can be given once (spec §4.2, Decision 13).
+- **`archive`** works from any phase but `archived`, superseding an undecided run and returning a decided one still open. An archived parent no longer holds its children back (Decision 4).
+- **`noteUnassignable`** records a task nobody can be given once (spec §4.2, Decision 16).
 
 - [ ] **Step 12.1: Write the failing tests.** Create `tests/kanban-assign.test.ts`:
 
@@ -4037,6 +4244,17 @@ describe('archive', () => {
     });
   });
 
+  it('archives a task whose run has reported, keeping its outcome, and returns the run to be closed', () => {
+    const task = newTask(h.db, { reviewer: REVIEWER });
+    const run = claimed(h.db, task.taskId);
+    ok(requestReview(h.db, task.taskId, asRun(run), { summary: 'v1' }, NOW));
+    expect(archive(h.db, task.taskId, ALICE, NOW)).toMatchObject({
+      ok: true,
+      task: { phase: 'archived' },
+      run: { runId: run.runId, outcome: 'review_requested', endedAt: null },
+    });
+  });
+
   it('keeps the time a done task was done', () => {
     const task = newTask(h.db);
     ok(complete(h.db, task.taskId, { kind: 'person', principal: ALICE }, { summary: 'x' }, NOW));
@@ -4065,7 +4283,7 @@ describe('noteUnassignable', () => {
 });
 ```
 
-- [ ] **Step 12.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/kanban-assign.test.ts`. Expected: all 9 FAIL, for example with `(0 , assign) is not a function`.
+- [ ] **Step 12.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/kanban-assign.test.ts`. Expected: all 10 FAIL, for example with `(0 , assign) is not a function`.
 
 - [ ] **Step 12.3: Implement.** Append to the end of `src/db/kanban.ts`. It needs no new imports.
 
@@ -4211,7 +4429,7 @@ export function noteUnassignable(db: Db, taskId: string, reason: string, now: nu
 }
 ```
 
-- [ ] **Step 12.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  677 passed (677)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 12.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  685 passed (685)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 12.5: Commit.**
 
@@ -4229,12 +4447,12 @@ git commit -m "Reassign, set a workspace, archive, and note an unassignable task
 
 `KanbanService` is what plans C2, C3 and D call. It is built from the team's roles and the configured workspace names, and checks what the rows cannot:
 - **Names.** A named role or workspace must be configured. An unknown one is refused at creation (spec §9.1).
-- **Who may be given work** (spec §4.2, §12). A role whose agent is supervised is refused, and so is a person, until plan D passes `people` and `supervisedRoles` (Decision 15).
+- **Who may be given work** (spec §4.2, §12). A role whose agent is supervised is refused, and so is a person, until plan D passes `people` and `supervisedRoles` (Decision 18).
 - **Input shape.** Input arrives from chat or from an agent's JSON, so its shape is checked here: the title, the contract's five text fields, the limits.
 
 A claim resolves the role as it is now:
 - a role removed since the task was created makes the task unassignable;
-- `role.md` is read again, so an edit takes effect from the next run (spec §2.1), hashed into the run, and returned for C2's prompt (Decision 14);
+- `role.md` is read again, so an edit takes effect from the next run (spec §2.1), hashed into the run, and returned for C2's prompt (Decision 17);
 - a skill file that cannot be read makes the role unassignable too.
 
 Anything that does not resolve is noted once, as `skipped_unassignable`, and never sent to a fallback. The run records the role's agent as driver, command, arguments and the *names* of its environment variables, never their values (spec §3.3).
@@ -4789,7 +5007,7 @@ export class KanbanService {
 }
 ```
 
-- [ ] **Step 13.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  687 passed (687)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 13.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  695 passed (695)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 13.5: Commit.**
 
@@ -4808,6 +5026,8 @@ git commit -m "Add the kanban service: who may be given work, and claims"
 These are the remaining operations C3 and D call: link, set a workspace, comment, the three reports, block, unblock, stop, archive, show, and follow-ups. Each checks its input, then calls `db/kanban.ts`. Two of them do more than pass through:
 - **`requestReview`** checks a reviewer named in the report like any assignee. Until plan D that refuses a person, as spec §12 says `mt kanban review` must.
 - **`followUp`** is how new work on a done task is created (spec §4.4). A done task is never reopened, because its summary is what its children were given as their handoff.
+
+`block` takes its kind as text and `parents` for a dependency block, the shape of C3's `{kind, reason, parents}`.
 
 - [ ] **Step 14.1: Write the failing tests.** In `tests/kanban-service.test.ts`:
   - directly after `import { eventsOf } from '../src/db/kanban-read.js';`, add:
@@ -5091,7 +5311,7 @@ const REPORTABLE: readonly ReportedBlockKind[] = BLOCK_KINDS.filter((k): k is Re
   }
 ```
 
-- [ ] **Step 14.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  694 passed (694)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 14.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  702 passed (702)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 14.5: Commit.**
 
@@ -5101,7 +5321,7 @@ git commit -m "Finish the kanban service API"
 ```
 
 - [ ] **Step 14.6: Run everything.** Run:
-  - `npm test 2>&1 | tail -4`: expect `Tests  694 passed (694)`;
+  - `npm test 2>&1 | tail -4`: expect `Tests  702 passed (702)`;
   - `npm run test:e2e 2>&1 | tail -4`: expect `Tests  49 passed (49)`;
   - `npm run typecheck`: expect no output;
   - `git grep -n -E "UPDATE kanban_|INSERT INTO kanban_" -- src`: expect matches in `src/db/kanban.ts` only, since it is the one writer;
@@ -5113,7 +5333,7 @@ git commit -m "Finish the kanban service API"
 
 ## Done when
 
-- `npm test` gives `Tests  694 passed (694)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  702 passed (702)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table (Step 14.6), and `src/db/WRITERS.md` says so.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - Every transition of spec §5.1 that does not need an agent, a dispatcher or a socket has a function in `db/kanban.ts` and a test, and `KanbanService` exposes it.
