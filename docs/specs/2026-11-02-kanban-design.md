@@ -117,9 +117,11 @@ workspaces:
 ### 2.1 A role's `config.yaml`
 
 **Which entries are roles.** A role is a directory under `$MT_HOME/roles/` whose name matches the
-role grammar: `^[a-z][a-z0-9-]{0,39}$` — lowercase, so `Reviewer` and `reviewer` cannot both
-exist; no `/`, `.` or `..`, so a name can never leave the roles directory; no `:`, so a role can
-never be mistaken for a person's principal (`lark:…`). Entries starting with `.` (`.git`,
+role grammar: `^[a-z](?:[a-z0-9-]{0,38}[a-z0-9])?$` — lowercase, so `Reviewer` and `reviewer`
+cannot both exist; no `/`, `.` or `..`, so a name can never leave the roles directory; no `:`, so a
+role can never be mistaken for a person's principal (`lark:…`); and no `-` at the end, so a role's
+name is also a valid bytesec agent package name (`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`), which native
+rendering (§2.7) names its package after. At most 40 characters. Entries starting with `.` (`.git`,
 `.DS_Store`) are ignored, so the directory can be under version control. Any other entry — a file,
 or a directory with a non-conforming name — is reported once at startup and otherwise ignored.
 **The driver ids (`acp`, `structured-cli`, and any the driver registry declares) are reserved** and
@@ -135,8 +137,8 @@ called `acp` would make those rows ambiguous.
 
 **The `agent` block** carries the fields the gateway's `agent:` block does today — `driver`,
 `command`, `args`, `unsupervised`, `passEnv` — validated by the same rules, including the refusal of
-anything in the file that looks like a credential: secrets go in the role's `.env` (§2.5). Two more,
-both optional:
+anything in the file that looks like a credential: secrets go in the role's `.env` (§2.5). Three
+more, all optional:
 
 - **`readOnlyTools`** — the agent's tool names that only read. Used by
   `retry_on_crash: if-no-side-effects` (§8.3). A tool not on the list is treated as having side
@@ -145,9 +147,12 @@ both optional:
   agent, not globally.
 - **`maskExempt`** — environment variable names whose values are not secret, so the masker
   (§10.1) leaves them alone.
+- **`native`** — `false` keeps the role's `role.md` and skills in the task prompt (§7.1) even though
+  its agent has a renderer (§2.7). Unset, or `true`, a role whose agent has one runs natively.
 
-The gateway's legacy `agent:` block accepts both keys too, so a deployment that has not moved to
-`roles/` gets the same behaviour.
+The gateway's legacy `agent:` block accepts `readOnlyTools` and `maskExempt` too, so a deployment
+that has not moved to `roles/` gets the same behaviour. It does not accept `native`: its role has no
+`role.md` and no skills, so there is nothing to render.
 
 **The role `default`, and the existing `agent:` block.** Chat sessions use the role `default`, and
 so does a task assigned to `default`. It is either a directory `roles/default/`, or — when there is
@@ -188,18 +193,20 @@ without its instructions.
   not the same model marking its own work.
 
 **`role.md`** — the role's standing work instructions ("you change code in this repository; run the
-tests before you report"). Delivered by the gateway at the head of every task prompt (§7.1). It is
-not a personality or an identity, and nothing reads it as one: it is text the agent is given, which
-is also why it works with any agent.
+tests before you report"). Delivered by the gateway at the head of every task prompt (§7.1), or, for
+a role whose agent has a renderer, as that agent's own system prompt (§2.7). It is not a personality
+or an identity, and nothing reads it as one: it is text the agent is given, which is also why it
+works with any agent.
 
 **Skills.** A skill is a directory, `skills/<name>/`, holding a `SKILL.md` whose front matter gives
 a `name` — the same as the directory's — and a one-line `description`; anything else the skill
 needs (`references/`, scripts) sits beside it. That is the format bytesec agent packages and Claude
 Code both use, so a skill written once works with either, an existing bytesec skill can be copied in
-unchanged, and plan R can install skills natively. Until a role's coding agent has a renderer
-(plan R), the task prompt **lists** each skill's name, description and the absolute path of its
-`SKILL.md`, and the agent opens a skill when it is relevant. That keeps skills from spending the
-context window until they are needed, and works with any agent that can read a file.
+unchanged, and a renderer can install skills natively (§2.7). For a role whose coding agent has no
+renderer, or which opts out, the task prompt **lists** each skill's name, description and the
+absolute path of its `SKILL.md`, and the agent opens a skill when it is relevant. That keeps skills
+from spending the context window until they are needed, and works with any agent that can read a
+file.
 
 **Tools.** A role may declare `allow` and `deny` lists. Only the coding agent can *enforce* them —
 the gateway sees tool calls after the fact, or, on a supervised agent, as approval requests it could
@@ -218,7 +225,7 @@ enforce them.
   in, and `~` is not expanded. Each is realpath-resolved **at startup** and must exist and be a
   directory — a change from today, where the one directory is resolved on first use; a typo now
   fails the start instead of the first task.
-- **Workspace names follow the role grammar** (§2.1): `^[a-z][a-z0-9-]{0,39}$`. A name becomes a
+- **Workspace names follow the role grammar** (§2.1): `^[a-z](?:[a-z0-9-]{0,38}[a-z0-9])?$`. A name becomes a
   path (`mt workspace add --clone` writes to `$MT_HOME/workspaces/<name>`), so `../roles` must be
   impossible; it arrives from chat (`/kanban workspace`, `workspace:` lines); and it has no `:`, so a
   worktree id (`wt:…`, below) can never equal a configured name. Enforced at startup and by
@@ -320,7 +327,11 @@ yet:
    the CLI driver's environment is fixed when the driver is built. `StartOptions` gains `env`, merged
    over the agent's environment at spawn. The actor builds `StartOptions` itself, so this is **the one
    change to the actor**: `SessionActorDeps` gains `env`, which the actor passes to every start. This
-   is how a run's `MT_KANBAN_*` variables (§7.2) reach the agent.
+   is how a run's `MT_KANBAN_*` variables (§7.2) reach the agent. Plan R adds `args` beside it, in
+   `StartOptions` and `SessionActorDeps`, the same way: extra arguments for the session's agent,
+   which the structured-CLI driver puts after the configured `args` and before its own flags, and
+   which the ACP driver refuses. The registry asks for them with `argsFor`, after `envFor`. They are
+   how a native run's `--agent <role>` reaches its agent (§2.7).
 
    **Who holds the environment.** The token exists only in memory — only its hash is stored — so the
    dispatcher holds each open run's environment, and the registry asks it for a session's environment
@@ -433,6 +444,10 @@ fresh install) has no registrations. A deployment with no config file (environme
   - the parts that depend on the environment — `passEnv` names being set, and whether `MT_AGENT_*`
     overrides conflict with `roles/default/` — checked against **this shell's** environment and
     reported separately, with a note that the service's environment may differ.
+
+  When the check passes it also says, one line a role, whether the role's runs are rendered
+  natively (§2.7), and if not, why: `native: role implementer runs as a bytesec agent package`, or
+  `native: role default does not: it has no role.md and no skills`.
 - **`workspace add`** adds the name to `workspaces:` in the gateway's `config.yaml`, editing the file
   in place so its comments survive. Before writing, it runs **every check startup runs on workspaces
   (§2.3)** — absolute, existing, a directory, not at or above `$MT_HOME` or the database, not sharing
@@ -454,6 +469,65 @@ fresh install) has no registrations. A deployment with no config file (environme
 - Not taken from comparable tools, deliberately: a role is not its own command (roles are run by the
   board, not by hand); a role has no memory of its own (each vendor agent keeps its own); a role has
   no bot token or gateway of its own (there is one gateway).
+
+### 2.7 Native rendering (plan R)
+
+A role whose coding agent has a **renderer** is delivered to that agent in the agent's own format:
+`role.md` as its system prompt, its skills through the agent's own skill loading. The task prompt
+then leaves both out (§7.1), so they are not sent twice. In v1 only bytesec has a renderer; Claude
+Code's comes later behind the same interface. Every other agent keeps prompt injection, which stays
+the fallback.
+
+- **Which roles.** A role is rendered when all of these hold: its agent is **bytesec** — driver
+  `structured-cli` and a command whose basename is `bytesec` (the structured-CLI driver speaks only
+  bytesec's `run --format json`, and a wrapper with another name may not pass `--agent` or the
+  environment on); it has a `role.md` or at least one skill; it does not set `agent.native: false`;
+  and bytesec's renderer does not refuse it. The renderer refuses a role named `bytesec-agent`
+  (bytesec runs its built-in agent under that name), a role whose `agent.args` already pass
+  `--agent`, a role whose environment already sets `BYTESEC_LOCAL_APM_PATH` or
+  `OPENCODE_LOCAL_APM_PATH`, and a role with a skill whose name bytesec's own skill-name rule refuses
+  (lowercase letters, digits and single `-`, not at either end, at most 64 characters). The role
+  `default` made from the `agent:` block has no `role.md` and no skills, so it is never rendered.
+  **Chat sessions are never rendered**: rendering is per kanban run, and chat never received
+  `role.md` either.
+- **What a role becomes.** A bytesec agent package, laid out as a real one is: `apm.json`
+  (`{"name": "<role>", "description": "...", "source": "default", "path": ""}`), `agents/<role>.md`
+  (front matter `name`, `description`, `mode: primary`, then the `role.md` bytes the claim read,
+  unchanged), and `skills/<skill>/…`, every regular file of each skill.
+- **Where, and when.** Just after the claim, from the same `role.md` bytes the claim hashed, into
+  `$MT_HOME/rendered/<role>/<hash>/`, which is itself the package. It is inside the gateway's home,
+  so never in a workspace (§2.3: no workspace may contain the home, and inside it only
+  `workspaces/<name>` may be one), and nothing is ever written into a repository. The hash is of the
+  package's own files — paths and bytes — so it covers `role.md` and every skill file: runs on
+  different versions of a role's files get different directories, and a finished package is reused,
+  never rewritten. It is written in a dot-directory and renamed into place, with `0700` directories
+  and `0600` files. Only regular files are copied, never a symlink, and never a `.env`; a `SKILL.md`
+  that is not a regular file fails the render. A package over 16 MiB or 2,000 files fails it too.
+- **How the run uses it.** The run's environment gains `BYTESEC_LOCAL_APM_PATH=<package dir>`, and
+  its agent's arguments gain `--agent <role>`, both held by the dispatcher with the rest of the run's
+  environment (§2.4 item 3). Each run points at its own role's single package: bytesec 0.7.4, pointed
+  at a directory of packages, exits 1 and prints nothing. `BYTESEC_NO_GLOBAL_APM` is not set.
+- **Old packages.** When a role is rendered, its other packages are removed, except those of runs
+  still open; so a role keeps its newest package, and every running agent keeps its own. At boot,
+  when nothing is open, the packages of roles no longer configured, and any half-written one, are
+  removed.
+- **Failure falls back.** A render that fails — the disk, permissions, a package too large — is
+  noted in the log, and the run goes on with `role.md` and the skills in its prompt. The files were
+  readable at the claim, so the run can still be told everything, and failing it would count a disk
+  problem against the task's `failure_limit`. A sweep that fails is noted and changes nothing else.
+- **What `mode: primary` does to bytesec's own instructions.** Read from bytesec 0.7.4's code: the
+  agent file's body takes the place of bytesec's default identity paragraph in the system prompt;
+  bytesec's provider prompt, its tool and workspace guidelines and its environment section are kept
+  around it. `mode` only says the agent may be run directly. Behaviour on real coding tasks under a
+  `role.md` persona is not yet measured, so `agent.native: false` is the operator's escape hatch.
+- **Limits, stated so they are not assumed.** bytesec still loads the user's own global skills
+  beside the package's: `BYTESEC_NO_GLOBAL_APM=1` did not hide them. `bytesec agent list` does not
+  show a package given by `BYTESEC_LOCAL_APM_PATH`, so the gateway cannot verify a render by listing
+  it. A bytesec that no longer finds the package fails the run's turn, which is classified like any
+  other failure (§8.1); the fallback covers a render that fails, not an agent that rejects it.
+- **The run's record.** A run records the hash of the `role.md` it was given (§3.3), as before. Its
+  `agent_config` is taken at the claim, before the render, and does not say whether the run was
+  native; the log does.
 
 ---
 
@@ -878,9 +952,10 @@ The task prompt is composed, in this order, of:
 2. **The skills** — for each of the role's skills, its name, description and the absolute path of its
    `SKILL.md`, and the instruction to read one when it applies.
 
-   For a role whose coding agent has a renderer (plan R), `role.md` and the skills are delivered in
+   For a role whose coding agent has a renderer (§2.7), `role.md` and the skills are delivered in
    the agent's own format instead — `role.md` as its system prompt, the skills through its own skill
-   loading — and are left out of the task prompt.
+   loading — and are left out of the task prompt; everything from the protocol on is unchanged. A
+   role that sets `agent.native: false`, or whose render fails, gets them here instead.
 3. **The protocol** for the run's kind. It comes after `role.md` and says it takes precedence:
    a role's instructions may shape *how* work is done, not whether it is reported. That precedence is
    an instruction to the model, not something the gateway can enforce; the nudges (§7.5) and the
@@ -1287,6 +1362,11 @@ redelivered event is one message.
 - **Workspaces are named, never given as paths** (§2.3), so creating a task cannot aim an agent at an
   arbitrary directory.
 - **Tool policies are enforced or refused, never silently ignored** (§2.2).
+- **Rendered packages hold only the operator's files** (§2.7): `role.md` and the skills, never a
+  `.env`, in `0700` directories under the gateway's home. They are not masked, as `role.md` and the
+  skills are not masked in a prompt: a secret an operator typed into `role.md` reaches the agent
+  either way, and the masker still masks it in what the agent writes back if it is a known value.
+  The package's path is not a secret.
 - **A role's `.env`** is the only file the gateway reads secrets from, and it is `0600`, never cloned,
   gitignored, masked, and given only to that role's agent (§2.5). Every agent runs as the same OS
   user, so one could still read another role's `.env` from disk; that boundary needs per-role users
@@ -1385,7 +1465,7 @@ board.
 | Rename | the home defaults to `~/.manus-team`; `passEnv` and role `.env` refuse `MT_*` and `LARK_*` |
 | Config | role directories and workspaces resolve; with no `roles/default/`, the `agent:` block and its `MT_AGENT_*` overrides become the role `default`, and apply to nothing else; both a `roles/default/` and an `agent:` block fails; neither fails; `workspace:` becomes workspace `default`; relative or missing workspace paths fail; a role with a missing or invalid `config.yaml` or an unknown workspace fails; a `tools` policy the role's agent cannot enforce fails; an unreadable `role.md` or skill fails startup and later makes the role unresolvable |
 | Role `.env` | created empty and `0600` with a `.gitignore`; never copied by `--clone-from`; group- or world-readable, symlinked, or foreign-owned fails startup and `role check`, and is not chmod-ed; the format's accepted and refused lines; `MT_*`, `LARK_*` and `PATH` refused; a missing `.env` valid; values reach only that role's agent; the same variable in `.env` and `passEnv` fails; values masked |
-| Role and workspace names | the grammar enforced for roles at discovery and by `role create`, and for workspaces at startup and by `workspace add` (`../x`, `A`, `a:b` refused); a workspace equal to or containing `$MT_HOME` or a relocated database refused; inside `$MT_HOME` only `workspaces/<name>` allowed; two names on one realpath, and one workspace nested in another, refused at startup and by `workspace add`; driver ids reserved; dot-entries ignored; other entries reported and ignored |
+| Role and workspace names | the grammar enforced for roles at discovery and by `role create`, and for workspaces at startup and by `workspace add` (`../x`, `A`, `a:b`, `x-` refused); a workspace equal to or containing `$MT_HOME` or a relocated database refused; inside `$MT_HOME` only `workspaces/<name>` allowed; two names on one realpath, and one workspace nested in another, refused at startup and by `workspace add`; driver ids reserved; dot-entries ignored; other entries reported and ignored |
 | Role and workspace CLI | `role create default` migrating a legacy `default` and printing the cutover and the `MT_AGENT_ENV_*` names; `role create` from `default` and from `--clone-from`, refusing an existing name, never copying `.env` or `MT_AGENT_ENV_*` values; `role check` reports what startup would; `role check` reporting environment-dependent results separately; `workspace add` keeps the config file's comments, refuses a name registered to another directory and a directory containing `$MT_HOME`, refuses without a config file, a name already in `workspaces:`, and `default` while `workspace:` is set; reads the database at an `MT_DB` location, and treats a missing one as empty; `--clone` uses `--`, refuses an existing target, and leaves nothing behind on failure; none of them touch the socket |
 | Sessions | workspace name written to `sessions.workspace_id` at create and used on every actor rebuild; empty legacy value resolves to `default`; legacy driver id resolves to the role `default`; `sessions.agent_id` holds the role name |
 | Derived status | pure function; table of phase × parents × runs |
@@ -1393,7 +1473,8 @@ board.
 | Links | cycle refusal; link onto a task with an open run, or past its parents gate, refused; a dependency block's parents linked with it, from a work run (task stays open) and from a review run (task stays in review, its next review claim waiting on them) |
 | Classifier | a table of real error strings → classes, including the 400 that was transient |
 | Dispatcher | fake driver: claim race (two passes, one run); one open agent run per workspace, parallel across workspaces, `max_running`; workspace resolved at a claim while null — explicit, else the role's explicit one, else the parents' common one, else `default` — and reused by review, retry and later gates; `/kanban workspace` refused once the workspace is non-null; an agent claim on a task a person left null re-applies the rules; an unknown workspace refused at create; a removed workspace makes its tasks unresolvable; cooldown and doubling; stranded notice once, never for queued tasks; max runtime → `timed_out`, but a decided run past the limit keeps its outcome; a reporting run holds its workspace until it closes; dispatcher-cancel reason wins over the classifier |
-| Prompt | `role.md`, skills list, protocol, task and context, in order; the run records `role_md_hash` and `agent_config` |
+| Prompt | `role.md`, skills list, protocol, task and context, in order; the run records `role_md_hash` and `agent_config`; a native run's prompt without `role.md` and the skills, and otherwise the same |
+| Native rendering | which roles are rendered, and each reason one is not; the package's layout and `role.md`'s bytes unchanged; content-addressed, reused, never rewritten; atomic, `0700`, regular files only, no `.env`; a too-large package and a symlinked `SKILL.md` refused; old packages swept but those of open runs, and unconfigured roles' at boot; `--agent` and `BYTESEC_LOCAL_APM_PATH` reaching the fake CLI agent's argv and environment on every turn; the ACP driver refusing per-session arguments; a failed render falling back to the prompt with a note; `mt role check`'s line; no test runs real bytesec |
 | Retry | `failure_limit` 2 → one retry; `gave_up` and its unblock reset; `rate_limited` not counted; `if-no-side-effects` against `readOnlyTools`; the retry's context containing the previous run's tool calls |
 | Review | reviewer `changes` → rework run seeded from the work run when their `agent_config` matches, unseeded otherwise; a failing review run counted and retried; `review` with no reviewer refused |
 | Worker CLI | handler tests over JSON; token scope; `already_reported`; `run_superseded`; gates refusing completion; gates not seeing the token |
@@ -1409,10 +1490,11 @@ board.
 
 ## 12. Plans
 
-Separate implementation plans. Each ends with everything built so far working and tested. Order: A, A2, B, F, C,
-D, then R; E is independent once B is done. B is delivered as B1 (roles and workspaces in
+Separate implementation plans. Each ends with everything built so far working and tested. Order: A, A2, B, F, C1,
+C2, R, C3, C4, then D; E is independent once B is done. B is delivered as B1 (roles and workspaces in
 configuration), B2 (the session layer) and B3 (the `mt` commands). C is delivered as C1 (the board),
-C2 (agent runs), C3 (the worker CLI) and C4 (review, rework and gates), in that order. **Before F**,
+C2 (agent runs), C3 (the worker CLI) and C4 (review, rework and gates), in that order; R comes
+between C2 and C3, so the runs C3 makes reportable already get their role natively. **Before F**,
 the `lark-interaction-fixes` branch is merged: F changes the escapers, and `forMarkdown` is on that
 branch.
 
@@ -1427,7 +1509,7 @@ branch.
 | **C4. Review, rework and gates** | same-task review and rework, quality gates, the reported commit (§5.3, §7.7, §7.8); refusing gates that contain a known secret; a crash handler whose output is masked | C3 |
 | **D. Lark** | `/kanban` commands; person targets; card `kind` routing; task, review and blocked cards; the group notice; subscriptions | C4 |
 | **E. Native resume** | the CLI driver captures the provider session id and passes `--session` (architecture §6.3), with transcript replay as the fallback | B; independent of C and D |
-| **R. Native rendering** | starts with a spike: where `bytesec run --agent` looks up a package (the workspace's `apm/packages/`, or a global install), so rendering never writes into a workspace repository. Then a renderer per coding agent: for bytesec, a role becomes an agent package — `role.md` as `agents/<role>.md` (`mode: primary`), its `skills/` copied — in a directory the gateway manages, run with `--agent`; Claude Code's later. Prompt injection (§7.1) stays the fallback for an agent with no renderer | B2 |
+| **R. Native rendering** | the spike, done on bytesec 0.7.4: `BYTESEC_LOCAL_APM_PATH=<one package dir>` with `bytesec run --agent <name>` loads that package's agent, whose body becomes the system prompt, and its skills; a directory of packages fails silently; the user's global skills still load. Then (§2.7): the role grammar tightened so a name cannot end in `-`; `agent.native`; `StartOptions.args` and the registry's `argsFor`; a renderer interface with bytesec's renderer; content-addressed, atomic packages under `$MT_HOME/rendered`, swept; the dispatcher rendering just after the claim and falling back to prompt injection when a render fails; the prompt leaving `role.md` and the skills out of a native run; `mt role check` saying which roles run natively. Claude Code's renderer is later. Prompt injection (§7.1) stays the fallback | B2, C2 |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D, nothing can deliver a card to a person, so **plan C refuses human assignees and
