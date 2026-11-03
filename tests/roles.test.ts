@@ -162,7 +162,16 @@ describe('loadRoleDir: skills imported by name', () => {
     role('r', `${AGENT}  skills: [lark-base]\n`);
     expect(load('r', HOME()).role.skills[0]?.dir).toBe(real);
     rmSync(real, { recursive: true });
-    expect(() => load('r', HOME())).toThrow(/a symlinked skill directory is not followed/);
+    expect(() => load('r', HOME())).toThrow(/\(a symlinked skill directory or SKILL\.md is not followed\)/);
+  });
+
+  it('does not follow a symlinked SKILL.md in a real skill directory, and goes on to the next', () => {
+    const real = userSkill('.agents/skills', 'lark-sheets', 'from agents');
+    const trae = join(rolesDir, 'home', '.trae', 'skills', 'lark-sheets');
+    mkdirSync(trae, { recursive: true });
+    symlinkSync(join(real, 'SKILL.md'), join(trae, 'SKILL.md'));
+    role('r', `${AGENT}  skills: [lark-sheets]\n`);
+    expect(load('r', HOME()).role.skills[0]).toMatchObject({ dir: real, description: 'from agents' });
   });
 
   it('refuses a name it cannot find, naming the role, and finds nothing without a home', () => {

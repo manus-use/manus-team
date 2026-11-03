@@ -312,13 +312,6 @@ function readRoleMd(dir: string): string | undefined {
 }
 
 /**
- * Skills: each `skills/<name>/` directory holding a `SKILL.md` whose front matter
- * gives a `name` (its directory's) and a one-line `description`, with anything else
- * the skill needs beside it -- the format bytesec agent packages and Claude Code
- * both use, so a skill works with either and can be rendered natively later
- * (spec §2.2, plan R). Anything else in `skills/` is reported and ignored.
- */
-/**
  * The user-level skill directories bytesec 0.7.4 loads for an agent that is not
  * a package's, in the order a role's `agent.skills` are looked up: the first
  * that holds a name wins. bytesec scans `~/.claude`, `~/.agents`, `~/.coco` and
@@ -375,7 +368,7 @@ function importSkills(role: string, configPath: string, names: readonly string[]
     if (dir === undefined) {
       throw new ConfigError(
         `role ${role}: agent.skills names ${name}, which is in none of ${roots.join(', ')} ` +
-          '(a symlinked skill directory is not followed)',
+          '(a symlinked skill directory or SKILL.md is not followed)',
       );
     }
     out.push(readSkillDir(dir, name));
@@ -383,6 +376,13 @@ function importSkills(role: string, configPath: string, names: readonly string[]
   return out;
 }
 
+/**
+ * Skills: each `skills/<name>/` directory holding a `SKILL.md` whose front matter
+ * gives a `name` (its directory's) and a one-line `description`, with anything else
+ * the skill needs beside it -- the format bytesec agent packages and Claude Code
+ * both use, so a skill works with either and can be rendered natively later
+ * (spec §2.2, plan R). Anything else in `skills/` is reported and ignored.
+ */
 function readSkills(dir: string): { skills: Skill[]; notes: string[] } {
   const skillsDir = join(dir, 'skills');
   let entries;
