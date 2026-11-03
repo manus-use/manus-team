@@ -105,8 +105,11 @@ Each is the reading most consistent with the rest of the spec. Decisions 1–4 c
 
 ### Known limitations, not fixed here
 
-- A sweep can record `timed_out` while the driver is still starting, and the prompt still goes out once it has. In C3 that agent's reports get `run_superseded`.
-- `stop()` does not wait for an archive already in flight. If the database closes first, the only result is a line in the log; the next boot closes the run.
+- A sweep can record `timed_out` while the driver is still starting inside `submit`, and the prompt still goes out once it has. A run decided while its actor was being built gets no prompt (see Review follow-ups); one decided after `submit` began does. In C3 that agent's reports get `run_superseded`.
+- The gateway's `stop()` waits at most 5 s for the dispatcher's work. A start that never returns is not drained, so an archive behind it can still meet a closed database: the only result is a line in the log, and the next boot closes the run.
+- At capacity, a role task is skipped before `claim`, so a role task nobody can be given is not reported stranded until a `max_running` slot frees up.
+- No test covers a failing first sweep in `start()` being noted, or `start()` running `boot()` before the first pass with the flag on. Plan D adds one when it turns the flag on.
+- A run whose session would not archive is closed anyway, so its session can stay bound at the run's key (on the `kanban` channel, where nothing routes) and, if the registry's release did not get that far, unarchived. Only a deliberate `/attach` by id reaches it.
 - The classifier can misread tool output that reaches `agent_error`, such as `gh`'s "HTTP 401", npm's 403, or "disk quota exceeded". It reads only `agent_error` text, which today is the agent's own errors and stderr.
 - A secret split across two separate stored pieces, such as two comments, is not masked: the prompt puts a label, a newline or an indent between them, which breaks the exact match. This is inherent to matching known values exactly; a secret is caught only where it is stored whole.
 - `src/driver/cli/driver.ts` drops stderr lines that start with `{`. A provider error that bytesec logs as JSON therefore never reaches `agent_error` or the classifier, and the run falls back to `crashed` (an ambiguous terminal) or `failed`, and is counted.
@@ -4756,11 +4759,30 @@ Made after Tasks 1–12, from their review. They add 63 unit tests (830 → 893)
 
 **Known limitations, added above.** A secret split across two stored pieces; stderr lines starting with `{` dropped by the CLI driver before the classifier sees them.
 
+### After Tasks 13–15
+
+From the review of Tasks 13–15 and an earlier registry review. They add 14 unit tests (908 → 922).
+
+**Dispatcher (`src/kanban/dispatcher.ts`).**
+- *A failed archive no longer leaves the run open.* `#close` catches an `archive` that rejects, notes it by ids only (`kanban: run <runId>: archiving its session <sessionId> failed; closing the run anyway`), releases the session if it is still live, and still closes the run, unpins it and passes. Decision 21 holds: archive first when it works, and a process death between the two is the next boot's.
+- *One claim error no longer stops the pass.* Each task's claim and dispatch is in its own try/catch, noted as `kanban: claiming <taskId> failed: <msg>`; reading the claimable tasks is caught too. `pass()` never throws.
+- *Refusals are noted.* Every `endRun` goes through `#end`, which notes a refusal as `kanban: run <runId> not ended: <code>`. A refused end leaves the run undecided, so its `closeRun` is refused as `undecided`, noted as `kanban: run <runId> not closed: undecided; it stays open until the gateway restarts`; it is unpinned, and the next boot ends it `interrupted`. No fallback ending is tried: the only refusals that leave a run undecided are `invalid` ones, which are bugs, and a second guess at an outcome would hide them. Other close refusals are noted by code.
+- *Notes cannot throw.* The dispatcher wraps its `note` so one that throws is swallowed, and `#track`'s `finally` chain ends in a `catch`, so no rejection is left unhandled.
+- *`boot()` archives first, and never rejects.* For each run it archives the session, then ends and closes the run, as `#close` does, each step caught and noted, so one run's failure does not stop the others or the gateway's start. `envFor`'s refused rebuild uses the same path. `#interrupt` notes "closed after a restart" only when the close succeeded, and the refusal code otherwise.
+- *No prompt to a run decided while its actor was built.* After `actorFor` returns, `#run` re-reads the run; one a sweep ended `timed_out` meanwhile gets no prompt and is closed.
+- *`idle(boundMs?)`* resolves `true` once drained, or `false` when the bound comes first.
+
+**Gateway (`src/index.ts`).** `stop()` waits up to 5 s for `dispatcher.idle()` after `registry.closeAll()` and before `db.close()`, and notes when the bound came first. It already passed its masked `note` to the dispatcher.
+
+**Registry (`src/core/registry.ts`).** `archive` revokes every binding of the session (`bindingsForSession`), so a Lark thread `/attach` pointed at a run's session is unbound too. The bindings are revoked first, then the state set and the event appended, each in its owner's transaction. One transaction was not used: `txImmediate` does not nest, so it would mean a function writing `channel_bindings`, `sessions` and `events` together, outside their sole writers (src/db/WRITERS.md). Revoking first means a failure part way leaves a session nothing routes to, rather than an archived session a chat thread could still wake.
+
+**Tests.** `completes` in tests/helpers/dispatch.ts reports for the run its own start was given (`MT_KANBAN_RUN`, now on the fake driver's `TurnControl` as `env`), so one role can run in two workspaces at once; `reportComplete` takes a run id, or a driver while it has one run at a time. `endedUnreported`'s test lists `terminal_provider` as true and `changes_requested` as false.
+
 ---
 
 ## Done when
 
-- `npm test` gives `Tests  908 passed (908)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  922 passed (922)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table, and only `src/kanban/service.ts` imports it (Step 15.6, and the guard in `tests/kanban-service.test.ts`).
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - A task assigned to a role is claimed, run as a fresh session on the sink channel, and closed when its turn ends. It has one agent run per workspace and no more than `max_running` agent runs open. A run that ends unreported is classified, counted and retried in a new session told what the last one did. A restart closes every open run. A run past its limit ends `timed_out`. Each of these has a test against the real board, registry and actors.

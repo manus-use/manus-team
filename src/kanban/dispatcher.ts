@@ -120,10 +120,9 @@ export class Dispatcher {
     if (open !== undefined) return open.env;
     const run = runBySession(this.#deps.db, sessionId);
     if (run === undefined || run.endedAt !== null) return undefined;
-    this.#interrupt(run);
-    this.#track(this.#deps.sessions.archive(runKey(this.#deps.appId, run), 'its environment did not survive a restart'));
+    this.#track(this.#endLost(run, 'its environment did not survive a restart'));
     throw new Error(
-      `run ${run.runId} has ended interrupted: its environment did not survive a restart, so its agent could not report`,
+      `run ${run.runId} is being ended interrupted: its environment did not survive a restart, so its agent could not report`,
     );
   }
 
@@ -134,17 +133,41 @@ export class Dispatcher {
    * again subject to retry_on_crash. A decided one keeps its outcome. Either way
    * it is closed, its session archived and its binding revoked: never resumed, as
    * a new run gets a new session. A person's run holds no process, and is left.
+   *
+   * Never rejects: a run that fails is noted and the rest go on, since the
+   * gateway's start -- chat included -- waits on this.
    */
   async boot(): Promise<void> {
-    for (const run of openRuns(this.#deps.db)) {
+    let runs: RunRow[];
+    try {
+      runs = openRuns(this.#deps.db);
+    } catch (err) {
+      this.#note(`kanban: reading the open runs after a restart failed: ${message(err)}`);
+      return;
+    }
+    for (const run of runs) {
       if (run.agentConfig === null) continue;
+      await this.#endLost(run, 'the gateway restarted; the run is over');
+    }
+  }
+
+  /**
+   * A run whose process is gone: archive its session, then end and close the run.
+   * In that order, as #close does, so a process that dies between the two leaves
+   * an open run the next boot sees, not a closed one whose session is still
+   * bound. An archive that fails does not keep the run open; neither step throws.
+   */
+  async #endLost(run: RunRow, reason: string): Promise<void> {
+    try {
+      await this.#deps.sessions.archive(runKey(this.#deps.appId, run), reason);
+    } catch {
+      // The error is not quoted: it can carry an agent's stderr.
+      this.#note(`kanban: run ${run.runId}: archiving its session ${run.sessionId ?? 'none'} failed after a restart`);
+    }
+    try {
       this.#interrupt(run);
-      try {
-        await this.#deps.sessions.archive(runKey(this.#deps.appId, run), 'the gateway restarted; the run is over');
-      } catch {
-        // The run is closed already; one session that would not archive must not stop the rest.
-        this.#note(`kanban: run ${run.runId}: archiving its session ${run.sessionId ?? 'none'} failed after a restart`);
-      }
+    } catch (err) {
+      this.#note(`kanban: ending run ${run.runId} after a restart failed: ${message(err)}`);
     }
   }
 
@@ -316,9 +339,26 @@ export class Dispatcher {
     }
   }
 
-  /** Wait until no run is being started or waited on. For tests and shutdown. */
-  async idle(): Promise<void> {
-    while (this.#inflight.size > 0) await Promise.allSettled([...this.#inflight]);
+  /**
+   * Wait until no run is being started or waited on, or at most `boundMs`. For
+   * tests and shutdown: true once drained, false when the bound came first -- a
+   * start that never returns is never drained (spec §6.4 leaves that to the actor).
+   */
+  async idle(boundMs?: number): Promise<boolean> {
+    const drained = (async () => {
+      while (this.#inflight.size > 0) await Promise.allSettled([...this.#inflight]);
+      return true;
+    })();
+    if (boundMs === undefined) return drained;
+    let timer: NodeJS.Timeout | undefined;
+    const bound = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), boundMs);
+    });
+    try {
+      return await Promise.race([drained, bound]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   #track(work: Promise<void>): void {
@@ -363,7 +403,7 @@ export class Dispatcher {
     }
     this.#open.set(sessionId, { runId: run.runId, key, env: { MT_KANBAN_RUN: run.runId }, cancelling: false, released: false });
 
-    let terminal: TurnTerminal;
+    let terminal: TurnTerminal | 'decided';
     let thrown: string | undefined;
     try {
       const counted = this.#deps.service.countSubmission(run.runId);
@@ -372,15 +412,26 @@ export class Dispatcher {
       const actor = await this.#deps.sessions.actorFor(sessionId, key);
       // Stopped while the actor was built: start no agent the shutdown will not close.
       if (this.#stopped) return;
-      // Its own key per prompt (spec §7.5): the actor deduplicates turns on it.
-      terminal = await actor.submit({
-        messageId: `kanban:${run.runId}:${counted.n}`,
-        appId: this.#deps.appId,
-        input: { text: prompt, paths: [] },
-      });
+      // Decided while the actor was built -- a sweep found it past its limit --
+      // so there is nothing for its agent to do: no prompt is sent.
+      if (getRun(this.#deps.db, run.runId)?.outcome !== null) {
+        terminal = 'decided';
+      } else {
+        // Its own key per prompt (spec §7.5): the actor deduplicates turns on it.
+        terminal = await actor.submit({
+          messageId: `kanban:${run.runId}:${counted.n}`,
+          appId: this.#deps.appId,
+          input: { text: prompt, paths: [] },
+        });
+      }
     } catch (err) {
       terminal = 'failed';
       thrown = message(err);
+    }
+    if (terminal === 'decided') {
+      this.#note(`kanban: run ${run.runId} was decided while its agent was being built; no prompt was sent`);
+      await this.#close(run.runId, key, sessionId);
+      return;
     }
     await this.#turnEnded(sessionId, terminal, thrown);
   }

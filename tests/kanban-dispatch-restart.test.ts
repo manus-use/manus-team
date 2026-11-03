@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { bindingsForSession } from '../src/db/bindings.js';
-import { getTask, openRunOf, runsOf } from '../src/db/kanban-read.js';
+import { getRun, getTask, openRunOf, openRuns, runsOf } from '../src/db/kanban-read.js';
 import { getSession, setExecution } from '../src/db/sessions.js';
 import { runKey } from '../src/kanban/dispatcher.js';
 import { ALICE, claimed, newTask } from './helpers/kanban.js';
@@ -130,12 +130,80 @@ describe('Dispatcher: a gateway restart (spec §8.4)', () => {
     const h = after(open[0] as DispatchHarness);
 
     await expect(h.registry.actorFor(sessionId, runKey(APP, run))).rejects.toThrow(
-      `run ${run.runId} has ended interrupted: its environment did not survive a restart`,
+      `run ${run.runId} is being ended interrupted: its environment did not survive a restart`,
     );
     await h.dispatcher.idle();
     expect(runsOf(h.t.db, task.taskId)[0]).toMatchObject({ outcome: 'interrupted' });
     expect(openRunOf(h.t.db, task.taskId)).toBeUndefined();
     expect(getSession(h.t.db, sessionId)?.state).toBe('archived');
     expect(h.driver('implementer').starts).toEqual([]);
+  });
+});
+
+/** Two runs working when the process dies: in web and in api, as the implementer. */
+async function beforeTwo(): Promise<DispatchHarness> {
+  const h = dispatchHarness();
+  open.push(h);
+  h.create({ title: 'web', workspace: 'web' });
+  h.create({ title: 'api', workspace: 'api' });
+  const implementer = h.driver('implementer');
+  let running = 0;
+  for (let i = 0; i < 2; i += 1) {
+    implementer.scripts.push(async () => {
+      running += 1;
+      await new Promise<void>(() => undefined);
+    });
+  }
+  h.dispatcher.pass();
+  await until(() => running === 2, 'both runs to be working');
+  for (const run of openRuns(h.t.db)) setExecution(h.t.db, run.sessionId ?? '', 'previous-boot:0', 'implementer');
+  h.dispatcher.stop();
+  return h;
+}
+
+describe('Dispatcher: a restart, when something fails', () => {
+  it("archives each run's session before it closes the run, as a run's own close does", async () => {
+    const h0 = await beforeTwo();
+    const h = after(h0);
+    const archive = h.registry.archive.bind(h.registry);
+    const openWhenArchived: boolean[] = [];
+    vi.spyOn(h.registry, 'archive').mockImplementation(async (key, reason) => {
+      openWhenArchived.push(getRun(h.t.db, key.threadId)?.endedAt === null);
+      return archive(key, reason);
+    });
+
+    await h.dispatcher.boot();
+    expect(openWhenArchived).toEqual([true, true]);
+    expect(openRuns(h.t.db)).toEqual([]);
+  });
+
+  it('goes on to the other runs when one fails, and never rejects', async () => {
+    const h0 = await beforeTwo();
+    const h = after(h0);
+    const [first, second] = openRuns(h.t.db);
+    vi.spyOn(h.registry, 'archive').mockRejectedValueOnce(new Error('the agent would not close'));
+
+    await expect(h.dispatcher.boot()).resolves.toBeUndefined();
+    expect(openRuns(h.t.db)).toEqual([]);
+    expect(h.notes).toContain(
+      `kanban: run ${first?.runId}: archiving its session ${first?.sessionId} failed after a restart`,
+    );
+    expect(h.notes).toContain(`kanban: run ${second?.runId} closed after a restart`);
+  });
+
+  it('notes a run it could not close by its refusal, and one that threw, and goes on', async () => {
+    const h0 = await beforeTwo();
+    const h = after(h0);
+    const [first, second] = openRuns(h.t.db);
+    vi.spyOn(h.service, 'closeRun')
+      .mockReturnValueOnce({ ok: false, code: 'not_found', message: 'gone' })
+      .mockImplementationOnce(() => {
+        throw new Error('SQLITE_IOERR');
+      });
+
+    await expect(h.dispatcher.boot()).resolves.toBeUndefined();
+    expect(h.notes).toContain(`kanban: run ${first?.runId} not closed after a restart: not_found`);
+    expect(h.notes).toContain(`kanban: ending run ${second?.runId} after a restart failed: SQLITE_IOERR`);
+    expect(h.notes.some((n) => n.endsWith('closed after a restart'))).toBe(false);
   });
 });

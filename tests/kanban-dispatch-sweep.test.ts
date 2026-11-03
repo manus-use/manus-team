@@ -226,3 +226,46 @@ describe('Dispatcher: start and stop', () => {
     expect(runsOf(h.t.db, third.taskId)).toEqual([]);
   });
 });
+
+describe('Dispatcher: a run timed out while its agent was being built', () => {
+  it('sends no prompt to a run the sweep ended while its actor was built, and closes it', async () => {
+    const h = harness();
+    const task = h.create({ workspace: 'web', maxRuntimeS: 60 });
+    const actorFor = h.registry.actorFor.bind(h.registry);
+    vi.spyOn(h.registry, 'actorFor').mockImplementation(async (sessionId, key) => {
+      h.clock.advance(MINUTE);
+      h.dispatcher.sweep();
+      return actorFor(sessionId, key);
+    });
+
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+
+    const [run] = runsOf(h.t.db, task.taskId);
+    expect(run?.outcome).toBe('timed_out');
+    expect(run?.endedAt).not.toBeNull();
+    expect(h.driver('implementer').starts).toEqual([]);
+    expect(h.dispatcher.pinned(run?.sessionId ?? '')).toBe(false);
+    expect(getSession(h.t.db, run?.sessionId ?? '')?.state).toBe('archived');
+  });
+});
+
+describe('Dispatcher: idle, bounded', () => {
+  it('gives up waiting after the bound on a start that never returns, and says so', async () => {
+    const h = harness();
+    h.create({ workspace: 'web' });
+    h.driver('implementer').onStart = () => new Promise<void>(() => undefined);
+
+    h.dispatcher.pass();
+    await expect(h.dispatcher.idle(20)).resolves.toBe(false);
+  });
+
+  it('says it drained when the work ends within the bound', async () => {
+    const h = harness();
+    h.create({ workspace: 'web' });
+    completes(h, h.driver('implementer'));
+
+    h.dispatcher.pass();
+    await expect(h.dispatcher.idle(5_000)).resolves.toBe(true);
+  });
+});

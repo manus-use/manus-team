@@ -67,6 +67,9 @@ export function registerConfiguredSecrets(config: GatewayConfig, team: Team): vo
   addSecrets([config.lark.appSecret, ...[...team.roles.values()].flatMap((role) => role.secretValues)]);
 }
 
+/** How long a shutdown waits for the dispatcher's work before it closes the database. */
+const SHUTDOWN_DRAIN_MS = 5_000;
+
 export async function createGateway(config: GatewayConfig, team: Team): Promise<Gateway> {
   // Every secret the gateway itself holds, masked wherever text leaves it (spec
   // §10.1). Before anything can print, the notes below included, or store agent
@@ -277,6 +280,12 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // channel -- so this runs after disconnect only because the SDK's send path
       // survives it; a failed final write is logged, not fatal.
       await registry.closeAll();
+      // Then what the dispatcher still has running -- an archive, a close -- so
+      // none of it touches the database after it is closed. Bounded: a start that
+      // never returns is never drained, and must not hold the shutdown.
+      if ((await dispatcher?.idle(SHUTDOWN_DRAIN_MS)) === false) {
+        note('kanban: stopped with run work still pending; the next boot ends those runs');
+      }
       db.close();
     },
   };

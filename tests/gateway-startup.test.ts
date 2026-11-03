@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigError, loadConfig, type GatewayConfig } from '../src/config.js';
 import { migrate, openDb } from '../src/db/open.js';
 import { createGateway, findingsOn, registerConfiguredSecrets } from '../src/index.js';
@@ -127,6 +127,24 @@ describe('the board, at startup', () => {
     } finally {
       await gateway.stop();
     }
+  });
+
+  it("waits, for a few seconds at most, for the dispatcher's work before it closes the database", async () => {
+    const gateway = await createGateway({ ...config, kanban: { ...config.kanban, enabled: true } }, team);
+    const dispatcher = gateway.dispatcher;
+    if (dispatcher === undefined) throw new Error('no dispatcher');
+    const waited: Array<{ boundMs: number | undefined; dbOpen: boolean }> = [];
+    vi.spyOn(dispatcher, 'idle').mockImplementation(async (boundMs) => {
+      waited.push({ boundMs, dbOpen: gateway.db.open });
+      return false;
+    });
+
+    await gateway.stop();
+    expect(waited).toHaveLength(1);
+    expect(waited[0]?.dbOpen).toBe(true);
+    expect(waited[0]?.boundMs).toBeGreaterThan(0);
+    expect(waited[0]?.boundMs).toBeLessThanOrEqual(10_000);
+    expect(gateway.db.open).toBe(false);
   });
 
   it('builds the dispatcher when kanban.enabled is set', async () => {
