@@ -351,6 +351,45 @@ describe('mt role create --own-workspace', () => {
     noLeftovers();
   });
 
+  it.skipIf(process.getuid?.() === 0)('refuses a recorded name before writing anything', async () => {
+    fx = mtFixture();
+    // Outside the home, so the database can still be read once the home is read-only.
+    const dbPath = join(fx.root, 'gateway.db');
+    const db = openDb(dbPath);
+    migrate(db, SCHEMA_DIR);
+    registerWorkspaces(db, new Map([['researcher', '/elsewhere']]), 0);
+    db.close();
+    const before = snapshot('researcher');
+    // A read-only home: any write before the refusal would fail instead.
+    chmodSync(fx.home, 0o500);
+    let r;
+    try {
+      r = await fx.run(['role', 'create', 'researcher', '--own-workspace'], { env: { MT_DB: dbPath } });
+    } finally {
+      chmodSync(fx.home, 0o700);
+    }
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/workspace researcher is \/elsewhere/);
+    expect(snapshot('researcher')).toEqual(before);
+    expect(existsSync(join(fx.home, 'workspaces'))).toBe(false);
+    expect(existsSync(join(fx.home, 'roles'))).toBe(false);
+  });
+
+  it('refuses a symlinked workspaces directory, and creates nothing at its target', async () => {
+    fx = mtFixture();
+    const outside = join(fx.root, 'outside');
+    mkdirSync(outside);
+    symlinkSync(outside, join(fx.home, 'workspaces'));
+    const before = readFileSync(fx.configPath, 'utf8');
+    const r = await fx.run(['role', 'create', 'researcher', '--own-workspace']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/workspaces is a symlink; workspaces under the gateway's home must be real directories/);
+    expect(readdirSync(outside)).toEqual([]);
+    expect(readFileSync(fx.configPath, 'utf8')).toBe(before);
+    expect(lstatSync(join(fx.home, 'roles', 'researcher'), { throwIfNoEntry: false })).toBeUndefined();
+    noLeftovers();
+  });
+
   it('refuses when there is no config file, and creates nothing', async () => {
     fx = mtFixture();
     rmSync(fx.configPath);

@@ -80,6 +80,37 @@ export function checkFinalWorkspace(ws: NewWorkspace, path: string): { real: str
 }
 
 /**
+ * Refuses `$MT_HOME/workspaces` when it is there and is not a real directory: a
+ * symlink would put a new workspace, and the path recorded for it, outside the home.
+ */
+export function workspacesParentProblem(home: string): string | undefined {
+  const parent = join(home, 'workspaces');
+  const stat = lstatSync(parent, { throwIfNoEntry: false });
+  if (stat === undefined) return undefined;
+  if (stat.isSymbolicLink()) return `${parent} is a symlink; workspaces under the gateway's home must be real directories`;
+  if (!stat.isDirectory()) return `${parent} is not a directory; workspaces under the gateway's home must be real directories`;
+  return undefined;
+}
+
+/**
+ * Where `$MT_HOME/workspaces/<name>` will be once made, as a real path, for a
+ * check before anything is written.
+ */
+export function expectedWorkspacePath(home: string, name: string): string {
+  for (const [dir, rest] of [
+    [join(home, 'workspaces'), [name]],
+    [home, ['workspaces', name]],
+  ] as const) {
+    try {
+      return join(realpathSync(dir), ...rest);
+    } catch {
+      // Not there yet: try the directory above.
+    }
+  }
+  return join(home, 'workspaces', name);
+}
+
+/**
  * Adds `name: path` under `workspaces:` and writes the config file in place,
  * keeping its comments and mode. Throws if the file cannot be written; the file
  * is then as it was.
@@ -122,7 +153,12 @@ export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): P
     path = target.path;
   } else {
     const parent = join(settings.home, 'workspaces');
+    const before = workspacesParentProblem(settings.home);
+    if (before !== undefined) return refuse(io, before);
     mkdirSync(parent, { recursive: true, mode: 0o700 });
+    // Again once it exists: one put there since the check above is refused too.
+    const after = workspacesParentProblem(settings.home);
+    if (after !== undefined) return refuse(io, after);
     path = join(realpathSync(parent), name);
     // lstat, so a symlink -- even a dangling one -- counts as being there.
     if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) return refuse(io, `${path} already exists`);

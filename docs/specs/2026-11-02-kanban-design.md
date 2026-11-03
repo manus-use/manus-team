@@ -411,7 +411,9 @@ fresh install) has no registrations. A deployment with no config file (environme
   with `default`, whose copy source is fixed.
 - `--own-workspace` also creates `$MT_HOME/workspaces/<name>`, adds it to `workspaces:`, and sets the
   role's `workspace:` to it — for a role that does not work on a repository; without it a role's tasks
-  follow their parents' workspace, which is what a reviewer needs.
+  follow their parents' workspace, which is what a reviewer needs. A `$MT_HOME/workspaces` that is a
+  symlink, or not a directory, is refused before anything is written, so the new directory and the
+  path recorded for it cannot land outside `$MT_HOME`.
 - **Copying from the legacy `default`.** The agent is the `agent:` block with any `MT_AGENT_COMMAND`,
   `MT_AGENT_ARGS`, `MT_AGENT_DRIVER` and `MT_AGENT_UNSUPERVISED` overrides **set in the shell the
   command runs in**, and the command prints which were applied — the shell may not be the service's.
@@ -441,7 +443,8 @@ fresh install) has no registrations. A deployment with no config file (environme
   with the same note as `role check` that the service's environment may differ.
 - **`workspace add --clone <git-url>`** runs `git clone -- <url> <dir>` — the `--` so a URL starting
   with `-` cannot be read as an option — into `$MT_HOME/workspaces/<name>`. It refuses if that
-  directory exists. If the clone fails, the partial directory is removed and `config.yaml` is not
+  directory exists, and refuses a `$MT_HOME/workspaces` that is a symlink or not a directory, so the
+  clone and the path recorded for it cannot land outside `$MT_HOME`. If the clone fails, the partial directory is removed and `config.yaml` is not
   touched. Any URL `git` accepts is allowed, including transports that run commands: the command runs
   as the operator, who could run `git` directly, so restricting URLs would add no protection.
 - **These commands only write files.** They do not talk to the gateway's socket and take no

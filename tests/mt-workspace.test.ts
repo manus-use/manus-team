@@ -213,6 +213,26 @@ describe('mt workspace add --clone', () => {
     expect(calls).toEqual([]);
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
   });
+
+  it('refuses a symlinked workspaces directory, without running git, and creates nothing at its target', async () => {
+    fx = mtFixture();
+    const outside = join(fx.root, 'outside');
+    mkdirSync(outside);
+    symlinkSync(outside, join(fx.home, 'workspaces'));
+    const before = readFileSync(fx.configPath, 'utf8');
+    const calls: (readonly string[])[] = [];
+    const git: Git = async (args) => {
+      calls.push(args);
+      mkdirSync(args[3] ?? '', { recursive: true });
+      return { code: 0, stderr: '' };
+    };
+    const r = await fx.run(['workspace', 'add', 'docs', '--clone', 'https://example.invalid/x.git'], { git });
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/workspaces is a symlink; workspaces under the gateway's home must be real directories/);
+    expect(calls).toEqual([]);
+    expect(readdirSync(outside)).toEqual([]);
+    expect(readFileSync(fx.configPath, 'utf8')).toBe(before);
+  });
 });
 
 describe('mt workspace list', () => {

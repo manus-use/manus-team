@@ -25,7 +25,16 @@ import { isReservedRoleName, nameProblem } from '../names.js';
 import { discoverRoles, gatewayOwnsVariable } from '../roles.js';
 import { loadTeam } from '../team.js';
 import { refuse, table, type MtIo } from './mt.js';
-import { addedMessage, addToConfig, checkFinalWorkspace, checkNewWorkspace, restoreConfig, type NewWorkspace } from './workspace.js';
+import {
+  addedMessage,
+  addToConfig,
+  checkFinalWorkspace,
+  checkNewWorkspace,
+  expectedWorkspacePath,
+  restoreConfig,
+  workspacesParentProblem,
+  type NewWorkspace,
+} from './workspace.js';
 
 /** `mt role list`: every role, its driver, where it comes from, and its description. */
 export function roleList(io: MtIo): number {
@@ -157,6 +166,12 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
   if (opts.ownWorkspace === true) {
     const ws = checkNewWorkspace(name, settings, io.env);
     if ('error' in ws) return refuse(io, ws.error);
+    const parentProblem = workspacesParentProblem(settings.home);
+    if (parentProblem !== undefined) return refuse(io, parentProblem);
+    const expected = expectedWorkspacePath(settings.home, name);
+    if (ws.recorded !== undefined && ws.recorded !== expected) {
+      return refuse(io, movedMessage(name, ws.recorded, expected));
+    }
     const path = join(settings.home, 'workspaces', name);
     // lstat, so a symlink -- even a dangling one -- counts as being there.
     if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) return refuse(io, `${path} already exists`);
@@ -177,10 +192,11 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
   };
   const madeRoles = mkdirSync(rolesDir, { recursive: true, mode: 0o700 });
   if (madeRoles !== undefined && own !== undefined) undo.push(() => rmSync(madeRoles, { recursive: true, force: true }));
-  // Dot-named, so discoverRoles ignores it until the rename puts it in place.
-  const staging = mkdtempSync(join(rolesDir, `.${name}-`));
-  undo.push(() => rmSync(staging, { recursive: true, force: true }));
   try {
+    // Dot-named, so discoverRoles ignores it until the rename puts it in place.
+    // Inside the try, so a failure here still undoes a roles/ made above.
+    const staging = mkdtempSync(join(rolesDir, `.${name}-`));
+    undo.push(() => rmSync(staging, { recursive: true, force: true }));
     writeFileSync(join(staging, 'config.yaml'), configText);
     // Symlinks are never followed, as discoverRoles and loadRoleDir never follow
     // them: a link would copy whatever it points at into the new role. config.yaml
@@ -254,6 +270,9 @@ function addOwnWorkspace(own: OwnWorkspace, undo: (() => void)[]): string | unde
   try {
     const madeParent = mkdirSync(parent, { recursive: true, mode: 0o700 });
     if (madeParent !== undefined) undo.push(() => rmSync(madeParent, { recursive: true, force: true }));
+    // Again once it exists: one put there since the check before any write is refused too.
+    const parentProblem = workspacesParentProblem(ws.settings.home);
+    if (parentProblem !== undefined) return parentProblem;
     path = join(realpathSync(parent), ws.name);
     // Not recursive, so one made since the check above is refused, not taken over.
     mkdirSync(path, { mode: 0o700 });
