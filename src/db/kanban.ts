@@ -1222,10 +1222,21 @@ export function archive(
  * A ready task nobody can be given (spec §4.2) is never dropped and never sent to
  * a fallback: it is recorded, once -- until something else happens to the task,
  * so a dispatcher pass every minute does not fill its log.
+ *
+ * Only a task that could otherwise be claimed now: in open or review, its parents
+ * finished, no cooldown, no open run. A task still waiting gets no event; it is
+ * noted when it is ready, if nobody can take it then.
  */
 export function noteUnassignable(db: Db, taskId: string, reason: string, now: number): Result<{ written: boolean }> {
   return tx(db, (d) => {
-    if (getTask(d, taskId) === undefined) return refuse('not_found', `no task ${taskId}`);
+    const task = getTask(d, taskId);
+    if (task === undefined) return refuse('not_found', `no task ${taskId}`);
+    const claimable =
+      (task.phase === 'open' || task.phase === 'review') &&
+      openRunOf(d, taskId) === undefined &&
+      (task.cooldownUntil === null || task.cooldownUntil <= now) &&
+      parentsOf(d, taskId).every((p) => isFinished(p.phase));
+    if (!claimable) return { ok: true, written: false };
     const last = d
       .prepare<[string], { kind: string }>('SELECT kind FROM kanban_events WHERE task_id = ? ORDER BY id DESC LIMIT 1')
       .get(taskId);

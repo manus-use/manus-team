@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eventsOf } from '../src/db/kanban-read.js';
 import { createSession } from '../src/db/sessions.js';
@@ -92,13 +93,13 @@ describe('KanbanService: who may be given work', () => {
     expect(s.create(request({ assignee: 'implementr' }))).toEqual({
       ok: false,
       code: 'unknown_role',
-      message: 'role implementr is not configured',
+      message: 'role "implementr" is not configured',
     });
     expect(s.create(request({ reviewer: 'nobody' }))).toMatchObject({ ok: false, code: 'unknown_role' });
     expect(s.create(request({ workspace: 'wbe' }))).toEqual({
       ok: false,
       code: 'unknown_workspace',
-      message: 'workspace wbe is not configured',
+      message: 'workspace "wbe" is not configured',
     });
   });
 
@@ -107,7 +108,7 @@ describe('KanbanService: who may be given work', () => {
       ok: false,
       code: 'supervised_role',
       message:
-        "role supervised's agent is supervised; its approval requests would reach nobody until the board is in Lark",
+        'role "supervised" has a supervised agent; its approval requests would reach nobody until the board is in Lark',
     });
     expect(service({ supervisedRoles: true }).create(request({ assignee: 'supervised' })).ok).toBe(true);
   });
@@ -117,7 +118,8 @@ describe('KanbanService: who may be given work', () => {
       ok: false,
       code: 'person_not_assignable',
       message:
-        'lark:on_bob cannot be given work yet: nothing can deliver a task card to a person until the board is in Lark',
+        '"lark:on_bob" cannot be given work yet: ' +
+        'nothing can deliver a task card to a person until the board is in Lark',
     });
     expect(service().create(request({ reviewer: 'lark:on_bob' }))).toMatchObject({ code: 'person_not_assignable' });
     const withPeople = service({ people: { canTalk: (p) => p === 'lark:on_bob' } });
@@ -128,7 +130,7 @@ describe('KanbanService: who may be given work', () => {
     expect(withPeople.create(request({ assignee: 'lark:on_eve' }))).toEqual({
       ok: false,
       code: 'person_not_assignable',
-      message: 'lark:on_eve does not have talk tier, so cannot be given work',
+      message: '"lark:on_eve" does not have talk tier, so cannot be given work',
     });
     expect(withPeople.create(request({ assignee: 'slack:U1' }))).toMatchObject({ ok: false, code: 'invalid' });
   });
@@ -139,7 +141,7 @@ describe('KanbanService: who may be given work', () => {
     expect(s.create(request({ contract: { done_when: 'x' } as never }))).toEqual({
       ok: false,
       code: 'invalid',
-      message: 'unknown contract field done_when',
+      message: 'unknown contract field "done_when"',
     });
     expect(s.create(request({ contract: { outcome: 3 } as never }))).toMatchObject({ code: 'invalid' });
     expect(s.create(request({ failureLimit: 0 }))).toMatchObject({ code: 'invalid' });
@@ -167,6 +169,7 @@ describe('KanbanService: claims and the runs they open', () => {
       startedAt: clock.now(),
     });
     expect(r.roleMd).toBe('You change code in this repository.\n');
+    expect(r.role?.name).toBe('implementer');
     expect(JSON.stringify(r.run)).not.toContain('sk-role-12345678');
   });
 
@@ -182,7 +185,7 @@ describe('KanbanService: claims and the runs they open', () => {
     expect(without.claim(task.taskId)).toEqual({
       ok: false,
       code: 'unassignable',
-      message: 'role implementer is not configured',
+      message: 'role "implementer" is not configured',
     });
     expect(without.claim(task.taskId)).toMatchObject({ code: 'unassignable' });
     expect(eventsOf(h.db, task.taskId).filter((e) => e.kind === 'skipped_unassignable')).toHaveLength(1);
@@ -194,14 +197,61 @@ describe('KanbanService: claims and the runs they open', () => {
     expect(unreadable.claim(task.taskId)).toMatchObject({
       ok: false,
       code: 'unassignable',
-      message: expect.stringMatching(/^role implementer's files cannot be read: ENOENT/),
+      message: expect.stringMatching(/^the files of role "implementer" cannot be read: ENOENT/),
     });
+  });
+
+  it('hashes the bytes of role.md, which need not be UTF-8', () => {
+    const md = join(dir, 'role.md');
+    const bytes = Buffer.from([0x68, 0x69, 0xff, 0x0a]);
+    writeFileSync(md, bytes);
+    const implementer = role('implementer', { roleMdPath: md });
+    const s = service({ roles: new Map([['implementer', implementer]]) });
+    const r = ok(s.claim(ok(s.create(request())).task.taskId));
+    expect(r.run.roleMdHash).toBe(createHash('sha256').update(bytes).digest('hex'));
+    expect(r.roleMd).toBe('hi\uFFFD\n');
+    expect(r.role).toBe(implementer);
+  });
+
+  it('leaves a task unassignable when role.md or a SKILL.md is a directory', () => {
+    const task = ok(service().create(request())).task;
+    const md = join(dir, 'role.md');
+    mkdirSync(md);
+    const mdIsDir = service({ roles: new Map([['implementer', role('implementer', { roleMdPath: md })]]) });
+    expect(mdIsDir.claim(task.taskId)).toMatchObject({ ok: false, code: 'unassignable' });
+    const skill = join(dir, 'skills', 'parse', 'SKILL.md');
+    mkdirSync(skill, { recursive: true });
+    const skills = [{ name: 'parse', description: 'parses', dir: dirname(skill), path: skill }];
+    const skillIsDir = service({ roles: new Map([['implementer', role('implementer', { skills })]]) });
+    expect(skillIsDir.claim(task.taskId)).toEqual({
+      ok: false,
+      code: 'unassignable',
+      message: `the files of role "implementer" cannot be read: ${skill} is not a file`,
+    });
+  });
+
+  it('notes a task unassignable only when it could otherwise be claimed', () => {
+    const s = service();
+    const parent = ok(s.create(request({ title: 'parent' }))).task;
+    const todo = ok(s.create(request({ title: 'todo', parents: [parent.taskId] }))).task;
+    const running = ok(s.create(request({ title: 'running' }))).task;
+    ok(s.claim(running.taskId));
+    const without = service({ roles: new Map() });
+    expect(without.claim(todo.taskId)).toMatchObject({ ok: false, code: 'unassignable' });
+    expect(without.claim(running.taskId)).toMatchObject({ ok: false, code: 'unassignable' });
+    for (const t of [todo, running]) {
+      expect(eventsOf(h.db, t.taskId).filter((e) => e.kind === 'skipped_unassignable')).toEqual([]);
+    }
   });
 
   it("claims a person's task once people can be reached, with no agent", () => {
     const s = service({ people: { canTalk: () => true } });
     const task = ok(s.create(request({ assignee: 'lark:on_bob' }))).task;
-    expect(ok(s.claim(task.taskId))).toMatchObject({ run: { agentConfig: null, roleMdHash: null }, roleMd: undefined });
+    expect(ok(s.claim(task.taskId))).toMatchObject({
+      run: { agentConfig: null, roleMdHash: null },
+      roleMd: undefined,
+      role: undefined,
+    });
   });
 
   it('ends and closes runs with its limits', () => {
@@ -276,7 +326,7 @@ describe('KanbanService: the rest of the board', () => {
     expect(s.setWorkspace(task.taskId, 'nowhere', ALICE)).toEqual({
       ok: false,
       code: 'unknown_workspace',
-      message: 'workspace nowhere is not configured',
+      message: 'workspace "nowhere" is not configured',
     });
     expect(s.setWorkspace(task.taskId, 'web', ALICE)).toMatchObject({ ok: true, task: { workspace: 'web' } });
   });
@@ -298,7 +348,7 @@ describe('KanbanService: the rest of the board', () => {
     expect(s.block(task.taskId, by, { kind: 'bored', reason: 'x' })).toEqual({
       ok: false,
       code: 'invalid',
-      message: 'unknown block kind bored (one of dependency, needs_input, capability, transient)',
+      message: 'unknown block kind "bored" (one of dependency, needs_input, capability, transient)',
     });
     expect(s.block(task.taskId, by, { kind: 'needs_input', reason: '' })).toMatchObject({ code: 'invalid' });
     expect(s.requestChanges(task.taskId, by, ' ')).toMatchObject({ code: 'invalid' });
@@ -526,5 +576,20 @@ describe('KanbanService: idempotency keys', () => {
       ok: false,
       code: 'invalid',
     });
+  });
+});
+
+describe('the board has one writer', () => {
+  it('is reached only through the service: nothing else in src imports db/kanban.js', () => {
+    const src = fileURLToPath(new URL('../src', import.meta.url));
+    const writer = join(src, 'db', 'kanban.js');
+    const importers = readdirSync(src, { recursive: true, encoding: 'utf8' })
+      .filter((f) => f.endsWith('.ts'))
+      .filter((f) =>
+        [...readFileSync(join(src, f), 'utf8').matchAll(/(?:from|import\()\s*['"]([^'"]+)['"]/g)].some(
+          (m) => m[1] !== undefined && resolve(dirname(join(src, f)), m[1]) === writer,
+        ),
+      );
+    expect(importers).toEqual([join('kanban', 'service.ts')]);
   });
 });

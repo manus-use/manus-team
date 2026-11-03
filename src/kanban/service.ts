@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { accessSync, constants, readFileSync } from 'node:fs';
+import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import type { Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
 import { getRun, getTask, taskView, type TaskView } from '../db/kanban-read.js';
@@ -80,6 +80,11 @@ export interface Claimed {
   task: TaskRow;
   /** The role.md whose hash the run records, for plan C2's prompt; undefined without one. */
   roleMd: string | undefined;
+  /**
+   * The role the claim resolved, whose files were just checked: plan C2's prompt
+   * uses its skills, not a later lookup's. Undefined for a person's run.
+   */
+  role: Role | undefined;
 }
 
 /** The kinds a worker or a person may report; gave_up is the breaker's. */
@@ -117,6 +122,11 @@ function isTextList(v: unknown): v is readonly string[] {
 /** Absent, or a whole number SQLite stores exactly, at least `min`. */
 function isWhole(n: unknown, min: number): boolean {
   return n === undefined || (Number.isSafeInteger(n) && (n as number) >= min);
+}
+
+/** Throws unless the path is a regular file: a directory where role.md or a SKILL.md was is not one. */
+function regularFile(path: string): void {
+  if (!statSync(path).isFile()) throw new Error(`${path} is not a file`);
 }
 
 /** A refusal unless every id given is text. */
@@ -185,7 +195,7 @@ export class KanbanService {
     const contract = this.#contract(req.contract);
     if (!contract.ok) return contract;
     if (req.workspace !== undefined && !this.#workspaces.has(req.workspace)) {
-      return board.refuse('unknown_workspace', `workspace ${req.workspace} is not configured`);
+      return board.refuse('unknown_workspace', `workspace ${JSON.stringify(req.workspace)} is not configured`);
     }
     if (
       !isWhole(req.priority, Number.MIN_SAFE_INTEGER) ||
@@ -271,7 +281,13 @@ export class KanbanService {
       if (r.code === 'unassignable') board.noteUnassignable(this.#db, taskId, r.message, now);
       return r;
     }
-    return { ok: true, run: r.run, task: r.task, roleMd: resolved.ok ? resolved.roleMd : undefined };
+    return {
+      ok: true,
+      run: r.run,
+      task: r.task,
+      roleMd: resolved.ok ? resolved.roleMd : undefined,
+      role: resolved.ok ? resolved.role : undefined,
+    };
   }
 
   /** Record the run's gateway session, once plan C2 has created it. */
@@ -324,7 +340,7 @@ export class KanbanService {
     if (ids !== undefined) return ids;
     if (!isText(workspace)) return board.refuse('invalid', 'a workspace is a name');
     if (!this.#workspaces.has(workspace)) {
-      return board.refuse('unknown_workspace', `workspace ${workspace} is not configured`);
+      return board.refuse('unknown_workspace', `workspace ${JSON.stringify(workspace)} is not configured`);
     }
     return board.setWorkspace(this.#db, taskId, workspace, by, this.#clock.now());
   }
@@ -382,7 +398,7 @@ export class KanbanService {
         'invalid',
         report.kind === 'gave_up'
           ? "gave_up is set by the board's breaker, never reported"
-          : `unknown block kind ${report.kind} (one of ${REPORTABLE.join(', ')})`,
+          : `unknown block kind ${JSON.stringify(report.kind)} (one of ${REPORTABLE.join(', ')})`,
       );
     }
     if (!isText(report.reason) || report.reason.trim() === '') {
@@ -427,7 +443,7 @@ export class KanbanService {
   }
 
   /** Who the next claim is for, resolved against the team as it is now. */
-  #claimant(task: TaskRow): Result<{ claimant: board.Claimant; roleMd: string | undefined }> {
+  #claimant(task: TaskRow): Result<{ claimant: board.Claimant; roleMd: string | undefined; role: Role | undefined }> {
     const who = task.phase === 'review' ? task.reviewer : task.assignee;
     if (who === null) {
       return board.refuse(
@@ -437,29 +453,37 @@ export class KanbanService {
     }
     if (who.kind === 'human') {
       if (this.#people === undefined) {
-        return board.refuse('unassignable', `task ${task.taskId} is for ${who.name}, and people cannot take work yet`);
+        return board.refuse(
+          'unassignable',
+          `task ${task.taskId} is for ${JSON.stringify(who.name)}, and people cannot take work yet`,
+        );
       }
       return {
         ok: true,
         claimant: { assignee: who, agentConfig: null, roleWorkspace: undefined, roleMdHash: null },
         roleMd: undefined,
+        role: undefined,
       };
     }
+    const name = JSON.stringify(who.name);
     const role = this.#roles.get(who.name);
-    if (role === undefined) return board.refuse('unassignable', `role ${who.name} is not configured`);
+    if (role === undefined) return board.refuse('unassignable', `role ${name} is not configured`);
     if (!role.agent.unsupervised && !this.#supervisedRoles) {
-      return board.refuse(
-        'unassignable',
-        `role ${who.name}'s agent is supervised, and its approvals could reach nobody`,
-      );
+      return board.refuse('unassignable', `role ${name} has a supervised agent, whose approvals could reach nobody`);
     }
-    let roleMd: string | undefined;
+    let bytes: Buffer | undefined;
     try {
-      roleMd = role.roleMdPath === undefined ? undefined : readFileSync(role.roleMdPath, 'utf8');
-      for (const skill of role.skills) accessSync(skill.path, constants.R_OK);
+      if (role.roleMdPath !== undefined) {
+        regularFile(role.roleMdPath);
+        bytes = readFileSync(role.roleMdPath);
+      }
+      for (const skill of role.skills) {
+        regularFile(skill.path);
+        accessSync(skill.path, constants.R_OK);
+      }
     } catch (err) {
       // A file that existed at startup and is gone now: not a run without its instructions.
-      return board.refuse('unassignable', `role ${who.name}'s files cannot be read: ${(err as Error).message}`);
+      return board.refuse('unassignable', `the files of role ${name} cannot be read: ${(err as Error).message}`);
     }
     return {
       ok: true,
@@ -467,9 +491,11 @@ export class KanbanService {
         assignee: who,
         agentConfig: agentSnapshot(role),
         roleWorkspace: role.workspace,
-        roleMdHash: roleMd === undefined ? null : createHash('sha256').update(roleMd, 'utf8').digest('hex'),
+        // The bytes the agent is given, not a decoding of them.
+        roleMdHash: bytes === undefined ? null : createHash('sha256').update(bytes).digest('hex'),
       },
-      roleMd,
+      roleMd: bytes?.toString('utf8'),
+      role,
     };
   }
 
@@ -480,28 +506,30 @@ export class KanbanService {
   #assignable(name: unknown): Result<{ assignee: Assignee }> {
     if (!isText(name)) return board.refuse('invalid', 'an assignee or reviewer is a role name or a person, as text');
     if (name.trim() === '') return board.refuse('invalid', 'an assignee or reviewer needs a name');
+    // Echoed quoted: a name is the caller's text, and may hold anything.
+    const quoted = JSON.stringify(name);
     if (name.includes(':')) {
       if (!PERSON.test(name)) {
-        return board.refuse('invalid', `${JSON.stringify(name)} is neither a role name nor a person (lark:<union_id>)`);
+        return board.refuse('invalid', `${quoted} is neither a role name nor a person (lark:<union_id>)`);
       }
       if (this.#people === undefined) {
         return board.refuse(
           'person_not_assignable',
-          `${name} cannot be given work yet: nothing can deliver a task card to a person until the board is in Lark`,
+          `${quoted} cannot be given work yet: nothing can deliver a task card to a person until the board is in Lark`,
         );
       }
       if (!this.#people.canTalk(name)) {
         // Being assigned is permission to report on the task.
-        return board.refuse('person_not_assignable', `${name} does not have talk tier, so cannot be given work`);
+        return board.refuse('person_not_assignable', `${quoted} does not have talk tier, so cannot be given work`);
       }
       return { ok: true, assignee: { kind: 'human', name } };
     }
     const role = this.#roles.get(name);
-    if (role === undefined) return board.refuse('unknown_role', `role ${name} is not configured`);
+    if (role === undefined) return board.refuse('unknown_role', `role ${quoted} is not configured`);
     if (!role.agent.unsupervised && !this.#supervisedRoles) {
       return board.refuse(
         'supervised_role',
-        `role ${name}'s agent is supervised; its approval requests would reach nobody until the board is in Lark`,
+        `role ${quoted} has a supervised agent; its approval requests would reach nobody until the board is in Lark`,
       );
     }
     return { ok: true, assignee: { kind: 'role', name } };
@@ -537,8 +565,8 @@ export class KanbanService {
     const contract: Contract = {};
     for (const [key, value] of Object.entries(raw)) {
       const field = CONTRACT_FIELDS.find((f) => f === key);
-      if (field === undefined) return board.refuse('invalid', `unknown contract field ${key}`);
-      if (typeof value !== 'string') return board.refuse('invalid', `contract field ${key} must be text`);
+      if (field === undefined) return board.refuse('invalid', `unknown contract field ${JSON.stringify(key)}`);
+      if (typeof value !== 'string') return board.refuse('invalid', `contract field ${field} must be text`);
       contract[field] = value;
     }
     return { ok: true, contract };
