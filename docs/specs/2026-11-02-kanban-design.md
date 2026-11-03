@@ -652,6 +652,10 @@ any new evidence (a failing CI log, a bug report) goes in the new task's body.
 rewrites the input to work that already ran. A child link keeps both the history and the reason
 for the follow-up.
 
+For a task that went through review, the handoff its children are given is the implementer's — the
+summary and metadata of its latest work run that ended `review_requested` — not the reviewer's
+approval.
+
 ---
 
 ## 5. Lifecycle
@@ -891,7 +895,8 @@ The task prompt is composed, in this order, of:
      specific, actionable reason; `block` only for a problem the implementer cannot fix.
 4. **The task** — title, body, contract, and the result of the last gate run if there is one.
 5. **The worker context:**
-   - each parent's latest completion summary and metadata, verbatim;
+   - each parent's latest completion summary and metadata, verbatim — for a reviewed parent, the
+     implementer's handoff (§4.4);
    - prior attempts on this task: outcome, summary, error, last output — and for a failed, crashed
      or interrupted attempt, **the tool calls it made**, read from its session's event log (§8.3);
    - for rework, the reviewer's reason and the implementer's previous handoff;

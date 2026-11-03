@@ -69,6 +69,36 @@ describe('toolCallsOf', () => {
     ]);
   });
 
+  it('keeps a call whose update arrived before its tool_call, in arrival order', () => {
+    log(
+      submitted('t_1'),
+      tool('t_1', 'c1', 'read', 'completed'),
+      update('t_1', 'c2', 'in_progress'),
+      tool('t_1', 'c3', 'grep', 'completed'),
+    );
+    // Dropped, a run whose only write arrived this way would look read-only.
+    expect(toolCallsOf(h.db, S)).toEqual([
+      { toolCallId: 'c1', title: 'read', status: 'completed' },
+      { toolCallId: 'c2', title: 'tool', status: 'in_progress' },
+      { toolCallId: 'c3', title: 'grep', status: 'completed' },
+    ]);
+    expect(hadSideEffects(toolCallsOf(h.db, S), ['read', 'grep'])).toBe(true);
+  });
+
+  it('lets a later tool_call for the same id fill in its title, but not clear what is known', () => {
+    log(
+      submitted('t_1'),
+      update('t_1', 'c1', 'in_progress'),
+      tool('t_1', 'c1', 'bash', ''),
+      tool('t_1', 'c2', 'edit', 'completed'),
+      { type: 'tool_call', actor: 'agent', turnId: 't_1', payload: { toolCallId: 'c2', title: '', raw: {} } },
+    );
+    expect(toolCallsOf(h.db, S)).toEqual([
+      { toolCallId: 'c1', title: 'bash', status: 'in_progress' },
+      { toolCallId: 'c2', title: 'edit', status: 'completed' },
+    ]);
+  });
+
   it('is empty for a session that made none', () => {
     log(submitted('t_1'), said('t_1', 'nothing to do'));
     expect(toolCallsOf(h.db, S)).toEqual([]);

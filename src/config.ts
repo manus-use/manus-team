@@ -152,6 +152,23 @@ const KANBAN_NUMBERS = {
 } as const;
 
 /**
+ * The most each numeric key may be. Two are bounds the code needs: above
+ * setInterval's limit (about 24.8 days) Node fires the sweep's timer every
+ * millisecond, and endRun caps a cooldown at an hour, so a longer first cooldown
+ * would never apply. The rest are past any sane setting, so a slipped digit is an
+ * error at startup rather than a board that never gives up or never notices.
+ */
+const KANBAN_MAXIMA: Readonly<Record<keyof typeof KANBAN_NUMBERS, number>> = {
+  max_running: 256,
+  failure_limit: 100,
+  transient_limit: 1000,
+  transient_cooldown_s: 3600,
+  default_max_runtime_s: 7 * 24 * 60 * 60,
+  sweep_interval_s: 3600,
+  stranded_after_s: 30 * 24 * 60 * 60,
+};
+
+/**
  * What `loadTeam` and the `mt` commands need: where the gateway's files are, the
  * workspaces, and the legacy agent block. No Lark settings and no owner, so an
  * operator can create a role from a shell that holds no gateway credentials.
@@ -209,13 +226,15 @@ export function loadConfig(
 
   const allowTalk = envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk;
   const allowOperate = envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate;
-  const maxLiveSessions = envInteger(env, 'MT_MAX_LIVE_SESSIONS') ?? file.maxLiveSessions ?? 8;
+  const liveFromEnv = envInteger(env, 'MT_MAX_LIVE_SESSIONS');
+  const maxLiveSessions = liveFromEnv ?? file.maxLiveSessions ?? 8;
   const maxRunning = file.kanban.maxRunning ?? maxLiveSessions;
   if (maxRunning > maxLiveSessions) {
     // A run is a session, and its actor is pinned while it is open (spec §6.3):
     // more runs than live sessions would hold the gateway over its cap.
+    const liveName = liveFromEnv === undefined ? 'maxLiveSessions' : 'MT_MAX_LIVE_SESSIONS';
     throw new ConfigError(
-      `kanban.max_running (${maxRunning}) is above maxLiveSessions (${maxLiveSessions}); ` +
+      `kanban.max_running (${maxRunning}) is above ${liveName} (${maxLiveSessions}); ` +
         'a run is a live session, so the two limits must not disagree',
     );
   }
@@ -689,7 +708,10 @@ function parseFile(path: string, text: string): FileConfig {
   if (enabled !== undefined) out.kanban.enabled = enabled;
   for (const [key, setting] of Object.entries(KANBAN_NUMBERS)) {
     const n = positiveInt(path, `kanban.${key}`, kanbanRaw[key]);
-    if (n !== undefined) out.kanban[setting] = n;
+    if (n === undefined) continue;
+    const max = KANBAN_MAXIMA[key as keyof typeof KANBAN_NUMBERS];
+    if (n > max) throw new ConfigError(`${path}: kanban.${key} must be at most ${max}, got ${n}`);
+    out.kanban[setting] = n;
   }
 
   return out;

@@ -380,6 +380,10 @@ export interface Completion {
  * The task's latest completion: its `completed` event, and the run's summary and
  * metadata when a run completed it. A person's completion has no run, and its
  * summary is the event's. Undefined if the task was never completed.
+ *
+ * A review run's summary is the reviewer's approval ("LGTM"), not the work: when
+ * the completing run is a review, the handoff is the latest work run that asked
+ * for review, as the reviewer was given it (spec §4.4).
  */
 export function latestCompletion(db: Db, taskId: string): Completion | undefined {
   const event = db
@@ -389,8 +393,21 @@ export function latestCompletion(db: Db, taskId: string): Completion | undefined
     )
     .get(taskId);
   if (event === undefined) return undefined;
-  const run = event.run_id === null ? undefined : getRun(db, event.run_id);
+  let run = event.run_id === null ? undefined : getRun(db, event.run_id);
+  if (run?.kind === 'review') run = latestReviewRequested(db, taskId) ?? run;
   if (run !== undefined) return { summary: run.summary ?? '', metadata: run.metadata, runId: run.runId };
   const payload = json(event.payload) as { summary?: unknown };
   return { summary: typeof payload.summary === 'string' ? payload.summary : '', metadata: null, runId: null };
+}
+
+/** The task's latest work run that ended asking for review: the handoff a reviewer reviewed. */
+function latestReviewRequested(db: Db, taskId: string): RunRow | undefined {
+  const row = db
+    .prepare<[string], RunRaw>(
+      `SELECT ${RUN_COLS} FROM kanban_runs
+        WHERE task_id = ? AND kind = 'work' AND outcome = 'review_requested'
+        ORDER BY attempt DESC LIMIT 1`,
+    )
+    .get(taskId);
+  return row === undefined ? undefined : decodeRun(row);
 }

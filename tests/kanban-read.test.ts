@@ -1,5 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { attachSession, closeRun, complete, endRun, DEFAULT_LIMITS, link } from '../src/db/kanban.js';
+import {
+  archive,
+  attachSession,
+  block,
+  closeRun,
+  complete,
+  endRun,
+  DEFAULT_LIMITS,
+  link,
+  requestChanges,
+  requestReview,
+} from '../src/db/kanban.js';
 import {
   claimableTasks,
   latestCompletion,
@@ -18,6 +29,16 @@ beforeEach(() => {
 });
 
 afterEach(() => h.close());
+
+const REVIEWER = { kind: 'role', name: 'reviewer' } as const;
+
+/** A work run that asks for review, closed: the task waits in review for its reviewer. */
+function reviewRequested(taskId: string, summary: string, metadata: unknown = null, now = NOW): string {
+  const run = claimed(h.db, taskId, {}, now);
+  expect(requestReview(h.db, taskId, { kind: 'run', runId: run.runId }, { summary, metadata }, now).ok).toBe(true);
+  expect(closeRun(h.db, run.runId, now).ok).toBe(true);
+  return run.runId;
+}
 
 function session(id: string): string {
   createSession(h.db, { id, agentId: 'implementer', workspaceId: 'default', ownerPrincipal: 'kanban' }, NOW);
@@ -86,6 +107,42 @@ describe('claimableTasks', () => {
     expect(complete(h.db, parent.taskId, { kind: 'person', principal: ALICE }, { summary: 'did it' }, NOW).ok).toBe(true);
     expect(claimableTasks(h.db, NOW).map((t) => t.title)).toEqual(['child']);
   });
+
+  it('lists a task waiting in review for its reviewer', () => {
+    const task = newTask(h.db, { title: 'in review', reviewer: REVIEWER });
+    reviewRequested(task.taskId, 'implemented');
+    expect(claimableTasks(h.db, NOW).map((t) => [t.title, t.phase])).toEqual([['in review', 'review']]);
+  });
+
+  it('leaves out a task whose run has reported but is not closed', () => {
+    const task = newTask(h.db, { title: 'reported', reviewer: REVIEWER });
+    const run = claimed(h.db, task.taskId);
+    expect(requestReview(h.db, task.taskId, { kind: 'run', runId: run.runId }, { summary: 'done' }, NOW).ok).toBe(true);
+    // In review, but its work run still holds the workspace.
+    expect(claimableTasks(h.db, NOW)).toEqual([]);
+    expect(closeRun(h.db, run.runId, NOW).ok).toBe(true);
+    expect(claimableTasks(h.db, NOW).map((t) => t.title)).toEqual(['reported']);
+  });
+
+  it('leaves out blocked and done tasks', () => {
+    const blocked = newTask(h.db, { title: 'blocked', workspace: 'web' });
+    const run = claimed(h.db, blocked.taskId);
+    expect(
+      block(h.db, blocked.taskId, { kind: 'run', runId: run.runId }, { kind: 'needs_input', reason: 'which format?' }, NOW).ok,
+    ).toBe(true);
+    expect(closeRun(h.db, run.runId, NOW).ok).toBe(true);
+    const done = newTask(h.db, { title: 'done', workspace: 'api' });
+    expect(complete(h.db, done.taskId, { kind: 'person', principal: ALICE }, { summary: 'by hand' }, NOW).ok).toBe(true);
+    newTask(h.db, { title: 'ready' });
+    expect(claimableTasks(h.db, NOW).map((t) => t.title)).toEqual(['ready']);
+  });
+
+  it('lists a task whose parent was archived', () => {
+    const parent = newTask(h.db, { title: 'parent' });
+    newTask(h.db, { title: 'child', parents: [parent.taskId] });
+    expect(archive(h.db, parent.taskId, ALICE, NOW).ok).toBe(true);
+    expect(claimableTasks(h.db, NOW).map((t) => t.title)).toEqual(['child']);
+  });
 });
 
 describe('latestCompletion', () => {
@@ -102,6 +159,22 @@ describe('latestCompletion', () => {
     const task = newTask(h.db);
     expect(complete(h.db, task.taskId, { kind: 'person', principal: ALICE }, { summary: 'by hand' }, NOW).ok).toBe(true);
     expect(latestCompletion(h.db, task.taskId)).toEqual({ summary: 'by hand', metadata: null, runId: null });
+  });
+
+  it("gives the implementer's handoff, not the reviewer's approval, for a task that went through review", () => {
+    const task = newTask(h.db, { reviewer: REVIEWER });
+    reviewRequested(task.taskId, 'first try', { pr: 1 });
+    const review1 = claimed(h.db, task.taskId);
+    expect(requestChanges(h.db, task.taskId, { kind: 'run', runId: review1.runId }, 'handle the BOM', NOW).ok).toBe(true);
+    expect(closeRun(h.db, review1.runId, NOW).ok).toBe(true);
+    const rework = reviewRequested(task.taskId, 'parses with or without a BOM', { pr: 2 });
+    const review2 = claimed(h.db, task.taskId);
+    expect(complete(h.db, task.taskId, { kind: 'run', runId: review2.runId }, { summary: 'LGTM' }, NOW).ok).toBe(true);
+    expect(latestCompletion(h.db, task.taskId)).toEqual({
+      summary: 'parses with or without a BOM',
+      metadata: { pr: 2 },
+      runId: rework,
+    });
   });
 
   it('is undefined for a task never completed', () => {

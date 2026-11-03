@@ -724,4 +724,54 @@ describe('loadConfig: the kanban section', () => {
     );
     expect(load({}, yamlFile({ maxLiveSessions: 4, kanban: { max_running: 4 } })).kanban.maxRunning).toBe(4);
   });
+
+  it('names MT_MAX_LIVE_SESSIONS when that is where the session limit came from', () => {
+    expect(() => load({ MT_MAX_LIVE_SESSIONS: '2' }, yamlFile({ maxLiveSessions: 8, kanban: { max_running: 5 } }))).toThrow(
+      'kanban.max_running (5) is above MT_MAX_LIVE_SESSIONS (2)',
+    );
+  });
+
+  it('refuses a value above its bound, naming the bound', () => {
+    // Above setInterval's limit Node runs the timer every millisecond: the sweep would never stop.
+    expect(() => load({}, yamlFile({ kanban: { sweep_interval_s: 2_147_484 } }))).toThrow(
+      'kanban.sweep_interval_s must be at most 3600, got 2147484',
+    );
+    // endRun caps a cooldown at an hour, so a longer first cooldown would never apply.
+    expect(() => load({}, yamlFile({ kanban: { transient_cooldown_s: 3601 } }))).toThrow(
+      'kanban.transient_cooldown_s must be at most 3600',
+    );
+    expect(() => load({}, yamlFile({ maxLiveSessions: 300, kanban: { max_running: 257 } }))).toThrow(
+      'kanban.max_running must be at most 256',
+    );
+    expect(() => load({}, yamlFile({ kanban: { failure_limit: 101 } }))).toThrow('kanban.failure_limit must be at most 100');
+    expect(() => load({}, yamlFile({ kanban: { transient_limit: 1001 } }))).toThrow(
+      'kanban.transient_limit must be at most 1000',
+    );
+    expect(() => load({}, yamlFile({ kanban: { default_max_runtime_s: 7 * 86_400 + 1 } }))).toThrow(
+      'kanban.default_max_runtime_s must be at most 604800',
+    );
+    expect(() => load({}, yamlFile({ kanban: { stranded_after_s: 30 * 86_400 + 1 } }))).toThrow(
+      'kanban.stranded_after_s must be at most 2592000',
+    );
+  });
+
+  it('accepts every bound itself', () => {
+    const cfg = load(
+      {},
+      yamlFile({
+        maxLiveSessions: 256,
+        kanban: {
+          max_running: 256,
+          failure_limit: 100,
+          transient_limit: 1000,
+          transient_cooldown_s: 3600,
+          default_max_runtime_s: 7 * 86_400,
+          sweep_interval_s: 3600,
+          stranded_after_s: 30 * 86_400,
+        },
+      }),
+    );
+    expect(cfg.kanban.sweepIntervalS).toBe(3600);
+    expect(cfg.kanban.maxRunning).toBe(256);
+  });
 });

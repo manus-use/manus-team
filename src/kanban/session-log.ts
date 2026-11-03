@@ -29,20 +29,31 @@ function text(payload: unknown, key: string): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-/** Every tool call the session made, in order, each with its latest status. */
+/**
+ * Every tool call the session made, in the order each was first heard of, each
+ * with its latest status.
+ *
+ * An update for a call not yet seen creates it, titled `tool`, which no role
+ * lists as read-only: dropped, a write whose only record is an update would make
+ * the run look read-only, the unsafe side of `if-no-side-effects`. Either kind
+ * of event sets only the fields it carries; an empty title or status leaves the
+ * known one as it was.
+ */
 export function toolCallsOf(db: Db, sessionId: string): ToolCall[] {
   const calls = new Map<string, ToolCall>();
   for (const event of eventsOf(db, sessionId)) {
+    if (event.type !== 'tool_call' && event.type !== 'tool_call_update') continue;
     const id = text(event.payload, 'toolCallId');
     if (id === undefined) continue;
-    if (event.type === 'tool_call') {
-      const title = text(event.payload, 'title') ?? 'tool';
-      calls.set(id, { toolCallId: id, title, status: text(event.payload, 'status') ?? '' });
-    } else if (event.type === 'tool_call_update') {
-      const call = calls.get(id);
-      const status = text(event.payload, 'status');
-      if (call !== undefined && status !== undefined && status !== '') call.status = status;
+    let call = calls.get(id);
+    if (call === undefined) {
+      call = { toolCallId: id, title: 'tool', status: '' };
+      calls.set(id, call);
     }
+    const title = text(event.payload, 'title');
+    if (title !== undefined && title !== '') call.title = title;
+    const status = text(event.payload, 'status');
+    if (status !== undefined && status !== '') call.status = status;
   }
   return [...calls.values()];
 }
