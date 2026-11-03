@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -13,7 +14,9 @@ import {
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
+import { loadTeamSettings } from '../src/config.js';
 import { loadRoleDir } from '../src/roles.js';
+import { loadTeam } from '../src/team.js';
 import { migrate, openDb } from '../src/db/open.js';
 import { registerWorkspaces } from '../src/db/workspaces.js';
 import { SCHEMA_DIR } from './helpers/db.js';
@@ -253,6 +256,158 @@ describe('mt role create', () => {
     }
     expect(r.out).toContain('  API_KEY=...');
     expect(r.out).not.toMatch(/not-for-printing/);
+  });
+});
+
+describe('mt role create --own-workspace', () => {
+  /** What a failed run must leave exactly as it was. */
+  function snapshot(name: string): { config: string; role: boolean; workspace: boolean } {
+    return {
+      config: readFileSync(fx.configPath, 'utf8'),
+      role: lstatSync(join(fx.home, 'roles', name), { throwIfNoEntry: false }) !== undefined,
+      workspace: lstatSync(join(fx.home, 'workspaces', name), { throwIfNoEntry: false }) !== undefined,
+    };
+  }
+
+  /** No staged role directory and no temporary config file left over. */
+  function noLeftovers(): void {
+    const roles = join(fx.home, 'roles');
+    if (existsSync(roles)) expect(readdirSync(roles).filter((e) => e.startsWith('.'))).toEqual([]);
+    expect(readdirSync(fx.home).filter((e) => e.includes('.mt-'))).toEqual([]);
+  }
+
+  it('creates the workspace, adds it to the config keeping its comments, and points the role at it', async () => {
+    fx = mtFixture();
+    const r = await fx.run(['role', 'create', 'researcher', '--own-workspace']);
+    expect(r.code, r.err).toBe(0);
+    const dir = join(fx.home, 'workspaces', 'researcher');
+    expect(statSync(dir).isDirectory()).toBe(true);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    const text = readFileSync(fx.configPath, 'utf8');
+    expect(text).toMatch(/# test config/);
+    expect((parseYaml(text) as { workspaces: Record<string, string> }).workspaces['researcher']).toBe(dir);
+    const config = parseYaml(readFileSync(join(fx.home, 'roles', 'researcher', 'config.yaml'), 'utf8')) as {
+      workspace?: string;
+    };
+    expect(config.workspace).toBe('researcher');
+    expect(r.out).toMatch(/created role researcher/);
+    expect(r.out).toMatch(/added workspace researcher/);
+    expect(r.out).toMatch(/own workspace, not in their parents' checkout/);
+
+    const settings = loadTeamSettings(fx.env);
+    const team = loadTeam(settings, fx.env);
+    expect(team.roles.get('researcher')?.workspace).toBe('researcher');
+    expect(team.workspaces.get('researcher')).toBe(dir);
+  });
+
+  it('refuses the role default', async () => {
+    fx = mtFixture();
+    const before = snapshot('default');
+    const r = await fx.run(['role', 'create', 'default', '--own-workspace']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/the role default works in the workspace default/);
+    expect(snapshot('default')).toEqual(before);
+  });
+
+  it('refuses a name already among the workspaces, and leaves nothing behind', async () => {
+    fx = mtFixture();
+    const docs = join(fx.root, 'docs');
+    mkdirSync(docs);
+    expect((await fx.run(['workspace', 'add', 'docs', docs])).code).toBe(0);
+    const before = snapshot('docs');
+    const r = await fx.run(['role', 'create', 'docs', '--own-workspace']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/workspace docs is already in/);
+    expect(snapshot('docs')).toEqual({ ...before, role: false, workspace: false });
+    noLeftovers();
+  });
+
+  it('refuses when the workspace directory exists, even as a dangling symlink, and leaves it', async () => {
+    fx = mtFixture();
+    const parent = join(fx.home, 'workspaces');
+    mkdirSync(parent);
+    symlinkSync(join(fx.root, 'nowhere'), join(parent, 'researcher'));
+    const before = snapshot('researcher');
+    const r = await fx.run(['role', 'create', 'researcher', '--own-workspace']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/already exists/);
+    expect(snapshot('researcher')).toEqual({ ...before, role: false });
+    expect(lstatSync(join(parent, 'researcher')).isSymbolicLink()).toBe(true);
+    noLeftovers();
+  });
+
+  it('refuses a name the database recorded for another directory, and leaves nothing behind', async () => {
+    fx = mtFixture();
+    const db = openDb(join(fx.home, 'gateway.db'));
+    migrate(db, SCHEMA_DIR);
+    registerWorkspaces(db, new Map([['researcher', '/elsewhere']]), 0);
+    db.close();
+    const before = snapshot('researcher');
+    const r = await fx.run(['role', 'create', 'researcher', '--own-workspace']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/workspace researcher is \/elsewhere/);
+    expect(snapshot('researcher')).toEqual(before);
+    expect(existsSync(join(fx.home, 'workspaces'))).toBe(false);
+    noLeftovers();
+  });
+
+  it('refuses when there is no config file, and creates nothing', async () => {
+    fx = mtFixture();
+    rmSync(fx.configPath);
+    const r = await fx.run(['role', 'create', 'researcher', '--own-workspace'], {
+      env: { MT_WORKSPACE: fx.workspace, MT_AGENT_COMMAND: 'bytesec' },
+    });
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/no config file/);
+    expect(readdirSync(fx.home)).toEqual([]);
+  });
+
+  it.skipIf(process.getuid?.() === 0)('undoes everything when the config file cannot be written', async () => {
+    fx = mtFixture();
+    // Both parents exist and stay writable; only the home itself, where the
+    // config file's temporary copy goes, is read-only.
+    mkdirSync(join(fx.home, 'roles'));
+    mkdirSync(join(fx.home, 'workspaces'));
+    const before = snapshot('researcher');
+    chmodSync(fx.home, 0o500);
+    let r;
+    try {
+      r = await fx.run(['role', 'create', 'researcher', '--own-workspace']);
+    } finally {
+      chmodSync(fx.home, 0o700);
+    }
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/^mt: cannot write/);
+    expect(snapshot('researcher')).toEqual(before);
+    expect(readdirSync(join(fx.home, 'roles'))).toEqual([]);
+    expect(readdirSync(join(fx.home, 'workspaces'))).toEqual([]);
+    noLeftovers();
+  });
+
+  it.skipIf(process.getuid?.() === 0)('leaves nothing when the workspace directory cannot be made', async () => {
+    fx = mtFixture();
+    mkdirSync(join(fx.home, 'roles'));
+    chmodSync(fx.home, 0o500);
+    let r;
+    try {
+      r = await fx.run(['role', 'create', 'researcher', '--own-workspace']);
+    } finally {
+      chmodSync(fx.home, 0o700);
+    }
+    // The home is read-only, so the workspaces directory cannot be made: refused, nothing made.
+    expect(r.code).toBe(1);
+    expect(existsSync(join(fx.home, 'workspaces'))).toBe(false);
+    expect(readdirSync(join(fx.home, 'roles'))).toEqual([]);
+  });
+
+  it('replaces the workspace of a config copied with --clone-from', async () => {
+    fx = mtFixture();
+    roleDir('impl', `# keep me\nworkspace: default\n${ACP_AGENT}`);
+    const r = await fx.run(['role', 'create', 'writer', '--clone-from', 'impl', '--own-workspace']);
+    expect(r.code, r.err).toBe(0);
+    const text = readFileSync(join(fx.home, 'roles', 'writer', 'config.yaml'), 'utf8');
+    expect(text).toMatch(/# keep me/);
+    expect((parseYaml(text) as { workspace: string }).workspace).toBe('writer');
   });
 });
 

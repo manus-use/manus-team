@@ -13,8 +13,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { isMap, parseDocument, type Node } from 'yaml';
-import { loadTeamSettings } from '../config.js';
+import { isMap, parseDocument, type Document, type Node } from 'yaml';
+import { loadTeamSettings, type Env, type TeamSettings } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { nameProblem } from '../names.js';
 import { resolveWorkspaces } from '../workspaces.js';
@@ -22,34 +22,99 @@ import { refuse, table, type Git, type MtIo } from './mt.js';
 
 export type AddTarget = { path: string } | { cloneUrl: string };
 
+/** What the checks before any write found, for the checks and the write that follow. */
+export interface NewWorkspace {
+  name: string;
+  settings: TeamSettings;
+  configPath: string;
+  /** The config file as read, to put back if a later step fails. */
+  text: string;
+  doc: Document;
+  /** The directory the database recorded for the name, if any. */
+  recorded: string | undefined;
+}
+
+/**
+ * The checks `workspace add` makes before it touches anything: a config file to
+ * add to, a name in the grammar, and a name not already among the workspaces.
+ */
+export function checkNewWorkspace(name: string, settings: TeamSettings, env: Env): NewWorkspace | { error: string } {
+  if (settings.configPath === undefined) {
+    const named = env['MT_CONFIG']?.trim() ?? '';
+    return {
+      error:
+        `there is no config file (looked for ${named === '' ? join(settings.home, 'config.yaml') : named}); ` +
+        'create one, then add workspaces to it',
+    };
+  }
+  const configPath = settings.configPath;
+  const problem = nameProblem('workspace', name);
+  if (problem !== undefined) return { error: problem };
+
+  const text = readFileSync(configPath, 'utf8');
+  const doc = parseDocument(text);
+  if (settings.workspaces[name] !== undefined) {
+    const single = name === 'default' && (doc.has('workspace') || (env['MT_WORKSPACE'] ?? '') !== '');
+    return {
+      error: single
+        ? "the workspace default is already set by workspace: in the config file, or by MT_WORKSPACE in this shell (the service's environment may differ)"
+        : `workspace ${name} is already in ${configPath}`,
+    };
+  }
+  const recorded = registrationsAt(settings.dbPath).get(name);
+  return { name, settings, configPath, text, doc, recorded };
+}
+
+/**
+ * The checks on the final set of workspaces, once `path` exists: everything the
+ * next start would refuse (spec §2.3), and a name the database recorded for
+ * another directory. Returns the real path.
+ */
+export function checkFinalWorkspace(ws: NewWorkspace, path: string): { real: string } | { error: string } {
+  const { name, settings, recorded } = ws;
+  const resolved = resolveWorkspaces({ ...settings.workspaces, [name]: path }, settings.home, settings.dbPath);
+  if ('error' in resolved) return { error: resolved.error };
+  const real = resolved.workspaces.get(name) ?? path;
+  if (recorded !== undefined && recorded !== real) return { error: movedMessage(name, recorded, real) };
+  return { real };
+}
+
+/**
+ * Adds `name: path` under `workspaces:` and writes the config file in place,
+ * keeping its comments and mode. Throws if the file cannot be written; the file
+ * is then as it was.
+ */
+export function addToConfig(ws: NewWorkspace, path: string): void {
+  const { doc } = ws;
+  // `workspaces:` with no value parses as null, and setIn cannot add to it. Any
+  // other non-map was already refused by loadTeamSettings, so this replaces only
+  // a missing or empty key.
+  if (!isMap(doc.get('workspaces'))) {
+    const empty = doc.get('workspaces', true) as Node | undefined;
+    const map = doc.createNode({});
+    // `workspaces:  # note` hangs the note on the null value; keep it, above the
+    // entries, where it still reads as the key's.
+    const notes = [empty?.commentBefore, empty?.comment].filter((c): c is string => c != null && c !== '');
+    if (notes.length > 0) map.commentBefore = notes.join('\n');
+    doc.set('workspaces', map);
+  }
+  doc.setIn(['workspaces', ws.name], path);
+  writeInPlace(ws.configPath, String(doc));
+}
+
+/** Puts back the config file `addToConfig` changed. */
+export function restoreConfig(ws: NewWorkspace): void {
+  writeInPlace(ws.configPath, ws.text);
+}
+
 /** `mt workspace add` (spec §2.6). Refuses anything the next start would refuse. */
 export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): Promise<number> {
   // Names and paths only, so an unset agent.passEnv name is no reason to fail
   // (see LoadOptions.unsetPassEnv).
   const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
-  if (settings.configPath === undefined) {
-    const named = io.env['MT_CONFIG']?.trim() ?? '';
-    return refuse(
-      io,
-      `there is no config file (looked for ${named === '' ? join(settings.home, 'config.yaml') : named}); ` +
-        'create one, then add workspaces to it',
-    );
-  }
-  const configPath = settings.configPath;
-  const problem = nameProblem('workspace', name);
-  if (problem !== undefined) return refuse(io, problem);
-
-  const doc = parseDocument(readFileSync(configPath, 'utf8'));
-  if (settings.workspaces[name] !== undefined) {
-    const single = name === 'default' && (doc.has('workspace') || (io.env['MT_WORKSPACE'] ?? '') !== '');
-    return refuse(
-      io,
-      single
-        ? "the workspace default is already set by workspace: in the config file, or by MT_WORKSPACE in this shell (the service's environment may differ)"
-        : `workspace ${name} is already in ${configPath}`,
-    );
-  }
-  const recorded = registrationsAt(settings.dbPath).get(name);
+  const ws = checkNewWorkspace(name, settings, io.env);
+  if ('error' in ws) return refuse(io, ws.error);
+  const { configPath, recorded } = ws;
 
   let path: string;
   let cloned: string | undefined;
@@ -76,38 +141,23 @@ export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): P
     if (cloned !== undefined) rmSync(cloned, { recursive: true, force: true });
   };
 
-  const resolved = resolveWorkspaces({ ...settings.workspaces, [name]: path }, settings.home, settings.dbPath);
-  if ('error' in resolved) {
+  const final = checkFinalWorkspace(ws, path);
+  if ('error' in final) {
     undo();
-    return refuse(io, resolved.error);
+    return refuse(io, final.error);
   }
-  const real = resolved.workspaces.get(name) ?? path;
-  if (recorded !== undefined && recorded !== real) {
-    undo();
-    return refuse(io, movedMessage(name, recorded, real));
-  }
-
-  // `workspaces:` with no value parses as null, and setIn cannot add to it. Any
-  // other non-map was already refused by loadTeamSettings, so this replaces only
-  // a missing or empty key.
-  if (!isMap(doc.get('workspaces'))) {
-    const empty = doc.get('workspaces', true) as Node | undefined;
-    const map = doc.createNode({});
-    // `workspaces:  # note` hangs the note on the null value; keep it, above the
-    // entries, where it still reads as the key's.
-    const notes = [empty?.commentBefore, empty?.comment].filter((c): c is string => c != null && c !== '');
-    if (notes.length > 0) map.commentBefore = notes.join('\n');
-    doc.set('workspaces', map);
-  }
-  doc.setIn(['workspaces', name], path);
   try {
-    writeInPlace(configPath, String(doc));
+    addToConfig(ws, path);
   } catch (err) {
     undo();
     return refuse(io, `cannot write ${configPath}: ${(err as Error).message}`);
   }
-  io.out(`added workspace ${name} (${real}) to ${configPath}; the gateway uses it from its next start`);
+  io.out(addedMessage(name, final.real, configPath));
   return 0;
+}
+
+export function addedMessage(name: string, real: string, configPath: string): string {
+  return `added workspace ${name} (${real}) to ${configPath}; the gateway uses it from its next start`;
 }
 
 /** `mt workspace list`: each workspace, and whether the gateway has registered it. */

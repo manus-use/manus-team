@@ -1,9 +1,11 @@
 import {
+  chmodSync,
   cpSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -23,6 +25,7 @@ import { isReservedRoleName, nameProblem } from '../names.js';
 import { discoverRoles, gatewayOwnsVariable } from '../roles.js';
 import { loadTeam } from '../team.js';
 import { refuse, table, type MtIo } from './mt.js';
+import { addedMessage, addToConfig, checkFinalWorkspace, checkNewWorkspace, restoreConfig, type NewWorkspace } from './workspace.js';
 
 /** `mt role list`: every role, its driver, where it comes from, and its description. */
 export function roleList(io: MtIo): number {
@@ -73,6 +76,8 @@ function starterRoleMd(name: string): string {
 export interface CreateOptions {
   cloneFrom?: string | undefined;
   description?: string | undefined;
+  /** Give the role a workspace of its own, `$MT_HOME/workspaces/<name>`. */
+  ownWorkspace?: boolean | undefined;
 }
 
 /** `mt role create` (spec §2.6). */
@@ -82,6 +87,9 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
   if (isReservedRoleName(name)) return refuse(io, `role name ${name} is reserved: it is a driver id`);
   if (name === DEFAULT_ROLE && opts.cloneFrom !== undefined) {
     return refuse(io, 'the role default is always made from the agent: block; --clone-from cannot be used with it');
+  }
+  if (name === DEFAULT_ROLE && opts.ownWorkspace === true) {
+    return refuse(io, 'the role default works in the workspace default; --own-workspace cannot be used with it');
   }
   if (opts.cloneFrom !== undefined) {
     // A name, never a path: `--clone-from ../x` must not read outside roles/.
@@ -122,12 +130,14 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
   } else {
     return refuse(io, `there is no role ${source} to copy from`);
   }
-  if (opts.description !== undefined) {
+  if (opts.description !== undefined || opts.ownWorkspace === true) {
     const doc = parseDocument(configText);
     if (doc.errors.length > 0 || !isMap(doc.contents)) {
       return refuse(io, `${source}'s config.yaml is not a valid role config; run mt role check ${source}`);
     }
-    doc.set('description', opts.description);
+    if (opts.description !== undefined) doc.set('description', opts.description);
+    else if (opts.cloneFrom === undefined && !legacy) doc.delete('description');
+    if (opts.ownWorkspace === true) doc.set('workspace', name);
     configText = String(doc);
   } else if (opts.cloneFrom === undefined && !legacy) {
     // A description says what one role is for, so a role made from default does
@@ -142,9 +152,34 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
   // role.md and skills/ come with --clone-from; copying from default takes config.yaml only.
   const copyDir = opts.cloneFrom === undefined ? undefined : sourceDir;
 
-  mkdirSync(rolesDir, { recursive: true, mode: 0o700 });
+  // Every check that needs nothing written, before anything is.
+  let own: OwnWorkspace | undefined;
+  if (opts.ownWorkspace === true) {
+    const ws = checkNewWorkspace(name, settings, io.env);
+    if ('error' in ws) return refuse(io, ws.error);
+    const path = join(settings.home, 'workspaces', name);
+    // lstat, so a symlink -- even a dangling one -- counts as being there.
+    if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) return refuse(io, `${path} already exists`);
+    own = { ws, real: path };
+  }
+
+  // Each step is undone, newest first, if a later one fails; only what this run made.
+  const undo: (() => void)[] = [];
+  // Every step is tried, so one that fails does not leave the others' work behind.
+  const undoAll = (): void => {
+    for (const step of undo.reverse()) {
+      try {
+        step();
+      } catch (err) {
+        io.err(`mt: could not undo a step: ${(err as Error).message}`);
+      }
+    }
+  };
+  const madeRoles = mkdirSync(rolesDir, { recursive: true, mode: 0o700 });
+  if (madeRoles !== undefined && own !== undefined) undo.push(() => rmSync(madeRoles, { recursive: true, force: true }));
   // Dot-named, so discoverRoles ignores it until the rename puts it in place.
   const staging = mkdtempSync(join(rolesDir, `.${name}-`));
+  undo.push(() => rmSync(staging, { recursive: true, force: true }));
   try {
     writeFileSync(join(staging, 'config.yaml'), configText);
     // Symlinks are never followed, as discoverRoles and loadRoleDir never follow
@@ -177,17 +212,67 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
     // refresh token gets revoked for the other.
     writeFileSync(join(staging, '.env'), '', { mode: 0o600, flag: 'wx' });
     writeFileSync(join(staging, '.gitignore'), '.env\n');
+    if (own !== undefined) {
+      const problem = addOwnWorkspace(own, undo);
+      if (problem !== undefined) {
+        undoAll();
+        return refuse(io, problem);
+      }
+    }
     renameSync(staging, dir);
   } catch (err) {
-    rmSync(staging, { recursive: true, force: true });
+    undoAll();
     throw err;
   }
 
   io.out(`created role ${name} at ${dir}, with config.yaml from ${legacy ? 'the agent: block' : `role ${source}`}`);
   if (legacy) reportLegacyCopy(dir, io);
   if (name === DEFAULT_ROLE) reportCutover(dir, settings.configPath, io);
+  if (own !== undefined) {
+    io.out(addedMessage(name, own.real, own.ws.configPath));
+    io.out(`note: tasks assigned to role ${name} will run in its own workspace, not in their parents' checkout`);
+  }
   io.out(`check it with: mt role check ${name}`);
   return 0;
+}
+
+interface OwnWorkspace {
+  ws: NewWorkspace;
+  /** `$MT_HOME/workspaces/<name>`, real once it has been made. */
+  real: string;
+}
+
+/**
+ * Makes the role's workspace directory, checks the final set of workspaces and
+ * writes the config file, pushing an undo for each step done. Returns a refusal,
+ * or undefined when all of it was done.
+ */
+function addOwnWorkspace(own: OwnWorkspace, undo: (() => void)[]): string | undefined {
+  const { ws } = own;
+  const parent = join(ws.settings.home, 'workspaces');
+  let path: string;
+  try {
+    const madeParent = mkdirSync(parent, { recursive: true, mode: 0o700 });
+    if (madeParent !== undefined) undo.push(() => rmSync(madeParent, { recursive: true, force: true }));
+    path = join(realpathSync(parent), ws.name);
+    // Not recursive, so one made since the check above is refused, not taken over.
+    mkdirSync(path, { mode: 0o700 });
+  } catch (err) {
+    return `cannot create ${join(parent, ws.name)}: ${(err as Error).message}`;
+  }
+  undo.push(() => rmSync(path, { recursive: true, force: true }));
+  // The umask narrows the mode given to mkdir.
+  chmodSync(path, 0o700);
+  const final = checkFinalWorkspace(ws, path);
+  if ('error' in final) return final.error;
+  try {
+    addToConfig(ws, path);
+  } catch (err) {
+    return `cannot write ${ws.configPath}: ${(err as Error).message}`;
+  }
+  undo.push(() => restoreConfig(ws));
+  own.real = final.real;
+  return undefined;
 }
 
 function renderAgentConfig(agent: AgentConfig): string {

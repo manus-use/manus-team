@@ -389,7 +389,7 @@ the environment, or in a role's `.env` — `0600`, never cloned, masked".
 ### 2.6 The `mt role` and `mt workspace` commands
 
 ```
-mt role create <name> [--clone-from <role>] [--description "..."]
+mt role create <name> [--clone-from <role>] [--description "..."] [--own-workspace]
 mt role list
 mt role check [<name>]                      # the startup validation, without restarting
 mt workspace add <name> <absolute-path>
@@ -409,6 +409,9 @@ fresh install) has no registrations. A deployment with no config file (environme
   `skills/`, an empty `0600` `.env`, and the `.gitignore`. It refuses a name that exists — except
   `default` while that role still comes from the `agent:` block (below); `--clone-from` is refused
   with `default`, whose copy source is fixed.
+- `--own-workspace` also creates `$MT_HOME/workspaces/<name>`, adds it to `workspaces:`, and sets the
+  role's `workspace:` to it — for a role that does not work on a repository; without it a role's tasks
+  follow their parents' workspace, which is what a reviewer needs.
 - **Copying from the legacy `default`.** The agent is the `agent:` block with any `MT_AGENT_COMMAND`,
   `MT_AGENT_ARGS`, `MT_AGENT_DRIVER` and `MT_AGENT_UNSUPERVISED` overrides **set in the shell the
   command runs in**, and the command prints which were applied — the shell may not be the service's.

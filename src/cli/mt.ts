@@ -25,7 +25,7 @@ export interface MtIo {
 
 const USAGE = [
   'usage:',
-  '  mt role create <name> [--clone-from <role>] [--description "..."]',
+  '  mt role create <name> [--clone-from <role>] [--description "..."] [--own-workspace]',
   '  mt role list',
   '  mt role check [<name>]',
   '  mt workspace add <name> <absolute-path>',
@@ -82,10 +82,15 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       const { values, positionals } = parse(rest, {
         'clone-from': { type: 'string' },
         description: { type: 'string' },
+        'own-workspace': { type: 'boolean' },
       });
       const [name, extra] = positionals;
       if (name === undefined || extra !== undefined) throw new UsageError('role create takes one name');
-      return roleCreate(name, { cloneFrom: values['clone-from'], description: values.description }, io);
+      return roleCreate(name, {
+          cloneFrom: values['clone-from'],
+          description: values.description,
+          ownWorkspace: values['own-workspace'],
+        }, io);
     }
     if (group === 'role' && command === 'check') {
       const [name, extra] = parse(rest, {}).positionals;

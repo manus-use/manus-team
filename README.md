@@ -192,7 +192,7 @@ including `MT_AGENT_ENV_*`: any of them still counts as a second definition of t
 `mt` creates and checks roles and workspaces. In a checkout, run it as `npm run -s mt -- …`.
 
 ```
-mt role create <name> [--clone-from <role>] [--description "..."]
+mt role create <name> [--clone-from <role>] [--description "..."] [--own-workspace]
 mt role list
 mt role check [<name>]
 mt workspace add <name> <absolute-path>
@@ -208,6 +208,9 @@ never contacts the gateway; changes take effect at the next start.
   `role.md`, `skills/`, an empty `0600` `.env` and a `.gitignore`. A `.env` is never copied.
   `mt role create default` moves an `agent:` block into `roles/default/` and prints the steps
   that finish the move.
+  `--own-workspace` also creates `$MT_HOME/workspaces/<name>`, adds it to `workspaces:` and sets
+  the role's `workspace:` to it, for a role that does not work on a repository; without it, a
+  role's tasks follow their parents' workspace, which is what a reviewer needs.
 - `role check` runs the startup checks, and reports what comes from this shell's environment
   separately: the service's environment may differ.
 - `workspace add` edits `workspaces:` in the config file, keeping its comments, and refuses
