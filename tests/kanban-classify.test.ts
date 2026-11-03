@@ -44,6 +44,75 @@ const CASES: ReadonlyArray<[TurnTerminal, string, FailureClass]> = [
   ['failed', 'fatal: Authentication failed for https://example.invalid/repo.git', 'failed'],
   ['failed', 'Error: Test timed out in 5000ms.', 'failed'],
   ['ambiguous', 'API Error: 403 {"type":"error","error":{"type":"permission_error"}}', 'terminal_provider'],
+
+  // A subscription's usage window: throttling, not a failure of the task.
+  ['ambiguous', 'Claude AI usage limit reached|1762200000', 'rate_limited'],
+  ['failed', '5-hour limit reached ∙ resets 3pm', 'rate_limited'],
+  ['failed', 'Claude usage limit reached. Your limit will reset at 3pm', 'rate_limited'],
+  // Bedrock's throttling and its own outages.
+  ['failed', 'ThrottlingException: Rate exceeded', 'rate_limited'],
+  ['failed', 'ServiceUnavailableException: Bedrock is unable to process your request.', 'rate_limited'],
+  ['failed', 'InternalServerException: The server encountered an error processing your request.', 'rate_limited'],
+  ['failed', 'ModelTimeoutException', 'rate_limited'],
+  ['failed', 'ModelNotReadyException: Model is not ready', 'rate_limited'],
+  ['failed', 'ServiceQuotaExceededException', 'rate_limited'],
+  ['failed', 'Error code: 429 - insufficient_quota', 'rate_limited'],
+  ['failed', 'insufficient_quota', 'rate_limited'],
+  // The network between the agent and the provider.
+  ['ambiguous', 'getaddrinfo ENOTFOUND api.example.invalid', 'rate_limited'],
+  ['ambiguous', 'write EPIPE', 'rate_limited'],
+  ['ambiguous', 'connect ENETUNREACH 10.0.0.1:443', 'rate_limited'],
+  ['ambiguous', 'connect EHOSTUNREACH 10.0.0.1:443', 'rate_limited'],
+  ['ambiguous', 'read ECONNABORTED', 'rate_limited'],
+  ['ambiguous', 'UND_ERR_HEADERS_TIMEOUT', 'rate_limited'],
+  ['ambiguous', 'SocketError: other side closed', 'rate_limited'],
+  ['ambiguous', 'Client network socket disconnected before secure TLS connection was established', 'rate_limited'],
+  ['ambiguous', 'Error: Premature close', 'rate_limited'],
+  ['failed', 'Connection refused', 'rate_limited'],
+  ['failed', 'stream disconnected before completion: error sending request for url (https://api.example.invalid/v1)', 'rate_limited'],
+  // bytesec's own retries, spent: the provider would not answer.
+  ['failed', 'Error [model-retry] attempt failed attempt=5/5 retryable=true', 'rate_limited'],
+  // ...but an attempt with retries left is not the last word.
+  ['failed', 'Error [model-retry] attempt failed attempt=2/5 retryable=true', 'failed'],
+
+  // A model that does not exist, or that this account cannot use.
+  ['failed', 'API Error: 404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-opus-9"}}', 'terminal_provider'],
+  [
+    'failed',
+    "There's an issue with the selected model (claude-x). It may not exist or you may not have access to it.",
+    'terminal_provider',
+  ],
+  ['failed', 'ValidationException: The provided model identifier is invalid.', 'terminal_provider'],
+  [
+    'failed',
+    "ValidationException: Invocation of model ID anthropic.model-x with on-demand throughput isn't supported.",
+    'terminal_provider',
+  ],
+  ['failed', 'Unknown model: claude-x', 'terminal_provider'],
+  // Credentials that are gone.
+  ['ambiguous', 'OAuth token revoked · Please run /login', 'terminal_provider'],
+  ['failed', 'CredentialsProviderError: Could not load credentials from any providers', 'terminal_provider'],
+  ['failed', 'ExpiredToken: The security token included in the request is expired', 'terminal_provider'],
+  ['failed', 'InvalidSignatureException: The request signature we calculated does not match', 'terminal_provider'],
+  ['failed', 'Token is expired. To refresh this SSO session run aws sso login with the corresponding profile.', 'terminal_provider'],
+  ['failed', 'Error loading SSO Token: Token for my-sso is expired', 'terminal_provider'],
+  ['failed', 'This organization has been disabled.', 'terminal_provider'],
+  // An expired token that is not the provider's: a test's own JWT.
+  ['failed', 'AssertionError: jwt Token is expired in the fixture', 'failed'],
+
+  // Files, commands and fields named "model" are not the provider's model.
+  ['failed', "error: path 'src/model.py' does not exist in 'HEAD'", 'failed'],
+  ['failed', 'sh: model: command not found', 'failed'],
+  ['failed', 'Error: file models/model.ts not found', 'failed'],
+  ['failed', 'model src/model.py not found', 'failed'],
+  ['failed', 'unknown model field "foo" in schema', 'failed'],
+  // A test about authorization is not the provider refusing.
+  ['failed', 'Test "handles unauthorized users" failed', 'failed'],
+  // Words that only look like throttling.
+  ['failed', 'Error: 503 tests passed', 'failed'],
+  ['failed', "Cannot find name 'quota'", 'failed'],
+  ['failed', 'read timeout in test fixture', 'failed'],
+  ['ambiguous', 'read ETIMEDOUT', 'rate_limited'],
 ];
 
 describe('classifyFailure', () => {

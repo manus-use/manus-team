@@ -1069,8 +1069,8 @@ are checked **in this order, first match wins**:
 
 | # | Class | Recognized by | Response |
 |---|---|---|---|
-| 1 | `terminal_provider` | error text: 401, 403, "unauthorized", "authentication", model not found | **block at once** as `capability`: every retry would hit the same wall |
-| 2 | `rate_limited` | error text: 429, "rate limit", "quota", 5xx, connection reset or timeout to the provider | cooldown, transient counter |
+| 1 | `terminal_provider` | error text: 401, 403, `authentication_error`, an invalid API key, credentials expired, revoked or missing (Bedrock's `ExpiredToken`, `InvalidSignatureException`; an SSO token expired; "OAuth token revoked"), a disabled organization, a model id that is not found, does not exist or is invalid | **block at once** as `capability`: every retry would hit the same wall |
+| 2 | `rate_limited` | error text: 429, "rate limit", "rate exceeded", a usage limit reached, a quota exceeded or insufficient, 5xx, Bedrock's throttling and unavailable exceptions, a connection reset, refused or closed, an unreachable or unresolved host, a timeout to the provider, an agent's own retries spent | cooldown, transient counter |
 | 3 | `crashed` | terminal `ambiguous` — the runtime exited without finishing | counted |
 | 4 | `failed` | everything else — **including 400** | counted |
 
@@ -1085,6 +1085,11 @@ would have turned a three-minute blip into a task waiting on a person.
 
 The classifier is one pure function over `(terminal, error text)` with a table of tests built from
 real error strings, so a new provider's wording is a test case and a line.
+
+The patterns match the provider's wording, not a word that also turns up in a test run or a tool's
+output: the bare word "unauthorized" (a test named "handles unauthorized users"), a file or a command
+named `model`, a count after `Error:` ("503 tests passed"), and a bare "quota" or "read timeout" are
+not provider errors.
 
 ### 8.2 Counting
 
