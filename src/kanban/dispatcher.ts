@@ -1,6 +1,6 @@
 import type { SessionRegistry } from '../core/registry.js';
 import type { Db } from '../db/open.js';
-import { claimableTasks, getRun, openAgentRunCount } from '../db/kanban-read.js';
+import { claimableTasks, getRun, getTask, openAgentRunCount } from '../db/kanban-read.js';
 import { getSession } from '../db/sessions.js';
 import type { Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
@@ -68,6 +68,10 @@ interface OpenRun {
   key: BindingKey;
   /** The run's environment, held only here (spec §2.4 item 3). */
   env: Readonly<Record<string, string>>;
+  /** Its turn has been cancelled for running past its limit: once is enough. */
+  cancelling: boolean;
+  /** Its session has been released because its turn ignored the cancel. */
+  released: boolean;
 }
 
 function message(err: unknown): string {
@@ -82,6 +86,10 @@ export class Dispatcher {
   readonly #open = new Map<string, OpenRun>();
   /** Runs being started or waited on, so a test or a shutdown can wait for them. */
   readonly #inflight = new Set<Promise<void>>();
+  /** What the last pass found nobody could be given, and why: the sweep's stranded candidates. */
+  #unassignable = new Map<string, string>();
+  #timer: NodeJS.Timeout | undefined;
+  #stopped = false;
 
   constructor(deps: DispatcherDeps) {
     this.#deps = deps;
@@ -109,6 +117,8 @@ export class Dispatcher {
    * before it opened. Runs go on in the background; `idle()` waits for them.
    */
   pass(): void {
+    if (this.#stopped) return;
+    const unassignable = new Map<string, string>();
     for (const task of claimableTasks(this.#deps.db, this.#clock.now())) {
       const who = task.phase === 'review' ? task.reviewer : task.assignee;
       // Counted from the board, so a run opened earlier in this pass counts. A
@@ -117,8 +127,110 @@ export class Dispatcher {
       const claimed = this.#deps.service.claim(task.taskId);
       // Refusals are the board's to record: the claim notes a task nobody can be
       // given; a busy workspace or a racing claim leaves it for the next pass.
-      if (!claimed.ok) continue;
+      if (!claimed.ok) {
+        if (claimed.code === 'unassignable') unassignable.set(task.taskId, claimed.message);
+        continue;
+      }
       this.#track(this.#run(claimed));
+    }
+    this.#unassignable = unassignable;
+  }
+
+  /**
+   * The sweep (spec §6.1), for what only time changes: runs past their runtime
+   * limit, cooldowns that have ended -- the pass claims those -- and tasks that
+   * have sat unclaimable long enough to be reported stranded.
+   */
+  sweep(): void {
+    if (this.#stopped) return;
+    this.#limitRuntimes();
+    this.pass();
+    this.#noteStranded();
+  }
+
+  /** Sweep every `sweepIntervalS`, starting now. */
+  start(): void {
+    if (this.#timer !== undefined || this.#stopped) return;
+    this.#timer = setInterval(() => this.#sweepNoting(), this.#deps.settings.sweepIntervalS * 1000);
+    this.#timer.unref();
+    // Caught here too: the gateway calls start() after it has connected, and a
+    // failed first sweep must not fail the start.
+    this.#sweepNoting();
+  }
+
+  #sweepNoting(): void {
+    try {
+      this.sweep();
+    } catch (err) {
+      this.#note(`kanban: sweep failed: ${message(err)}`);
+    }
+  }
+
+  /**
+   * Stop: no more passes, and nothing more recorded. Open runs stay open; their
+   * agents die with the gateway, and the next boot ends them (spec §8.4).
+   */
+  stop(): void {
+    this.#stopped = true;
+    if (this.#timer !== undefined) clearInterval(this.#timer);
+    this.#timer = undefined;
+  }
+
+  /**
+   * Cancel the turn of a run past `max_runtime_s` (spec §8.5): wall-clock,
+   * whatever it is doing, for the run that is busy and getting nowhere. An
+   * undecided run ends `timed_out`, recorded before the turn is cancelled, so it
+   * is the run's outcome and not the classifier's (spec §6.4). A decided run past
+   * the limit keeps its outcome, and is closed once its turn ends.
+   */
+  #limitRuntimes(): void {
+    const now = this.#clock.now();
+    for (const [sessionId, open] of this.#open) {
+      const run = getRun(this.#deps.db, open.runId);
+      if (run === undefined || run.endedAt !== null) continue;
+      if (open.cancelling) {
+        // Cancelled a sweep ago and still open: its agent ignored the cancel, which
+        // ACP leaves to the agent. Releasing the session ends the process; the run,
+        // decided before the cancel, is closed, and its workspace freed.
+        if (!open.released) {
+          open.released = true;
+          this.#note(`kanban: run ${run.runId} ignored its cancel; releasing its session`);
+          this.#track(this.#release(sessionId, open));
+        }
+        continue;
+      }
+      const limitS = getTask(this.#deps.db, run.taskId)?.maxRuntimeS ?? this.#deps.settings.defaultMaxRuntimeS;
+      if (now - run.startedAt < limitS * 1000) continue;
+      if (run.outcome === null) {
+        this.#deps.service.endRun(run.runId, {
+          outcome: 'timed_out',
+          error: `the run passed its limit of ${limitS} s`,
+          lastOutput: lastTurnOf(this.#deps.db, sessionId).output,
+          ...this.#sideEffects(run, sessionId),
+        });
+      }
+      // Only a running agent can be cancelled. One still starting is cancelled by
+      // a later sweep, once it has a runtime.
+      const actor = this.#deps.sessions.liveActor(sessionId);
+      if (actor?.presence !== 'live') continue;
+      open.cancelling = true;
+      this.#note(`kanban: run ${run.runId} passed its runtime limit; cancelling its turn`);
+      void actor.cancel();
+    }
+  }
+
+  /** End a turn that ignored its cancel by releasing its session, and close its run. */
+  async #release(sessionId: string, open: OpenRun): Promise<void> {
+    await this.#deps.sessions.release(sessionId);
+    await this.#close(open.runId, open.key, sessionId);
+  }
+
+  /** Tell, once, about each task the last pass found nobody to give to, if it has waited long enough (spec §4.2). */
+  #noteStranded(): void {
+    const cutoff = this.#clock.now() - this.#deps.settings.strandedAfterS * 1000;
+    for (const [taskId, reason] of this.#unassignable) {
+      const noted = this.#deps.service.noteStranded(taskId, reason, cutoff);
+      if (noted.ok && noted.written) this.#note(`kanban: task ${taskId} is stranded`);
     }
   }
 
@@ -166,7 +278,7 @@ export class Dispatcher {
       await this.#close(run.runId, key);
       return;
     }
-    this.#open.set(sessionId, { runId: run.runId, key, env: { MT_KANBAN_RUN: run.runId } });
+    this.#open.set(sessionId, { runId: run.runId, key, env: { MT_KANBAN_RUN: run.runId }, cancelling: false, released: false });
 
     let terminal: TurnTerminal;
     let thrown: string | undefined;
@@ -175,6 +287,8 @@ export class Dispatcher {
       if (!counted.ok) throw new Error(counted.message);
       const prompt = composePrompt(briefFor(this.#deps.db, claimed));
       const actor = await this.#deps.sessions.actorFor(sessionId, key);
+      // Stopped while the actor was built: start no agent the shutdown will not close.
+      if (this.#stopped) return;
       // Its own key per prompt (spec §7.5): the actor deduplicates turns on it.
       terminal = await actor.submit({
         messageId: `kanban:${run.runId}:${counted.n}`,
@@ -207,7 +321,8 @@ export class Dispatcher {
    */
   async #turnEnded(sessionId: string, terminal: TurnTerminal, thrown: string | undefined): Promise<void> {
     const open = this.#open.get(sessionId);
-    if (open === undefined) return;
+    // Stopped: the gateway is shutting down, and the next boot ends the run.
+    if (open === undefined || this.#stopped) return;
     const run = getRun(this.#deps.db, open.runId);
     if (run !== undefined && run.outcome === null) {
       const turn = lastTurnOf(this.#deps.db, sessionId);
@@ -241,10 +356,12 @@ export class Dispatcher {
    * Archive the run's session, then close the run, and look for the next claim:
    * its workspace is free. Archived first, so a process that dies between the two
    * leaves a decided run open, which the next boot closes (spec §8.4), rather
-   * than a closed run whose session is still bound.
+   * than a closed run whose session is still bound. Stopped in between, the run is
+   * left for that boot too: the database may be closing.
    */
   async #close(runId: string, key: BindingKey, sessionId?: string): Promise<void> {
     await this.#deps.sessions.archive(key, 'the run is over');
+    if (this.#stopped) return;
     const closed = this.#deps.service.closeRun(runId);
     if (closed.ok) this.#note(`kanban: run ${runId} closed, ${closed.run.outcome ?? 'undecided'}`);
     if (sessionId !== undefined) this.#open.delete(sessionId);
