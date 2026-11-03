@@ -86,7 +86,7 @@ function tx<T extends object>(db: Db, fn: (d: Db) => Result<T>): Result<T> {
 
 /**
  * Keys in the board's payloads that identify rather than say something: its ids,
- * and the names of who and where. Passed to redactValues for these payloads only:
+ * the names of who and where, and a rendered package's content hash. Passed to redactValues for these payloads only:
  * session events and approvals carry agent-controlled keys, which must not be
  * exempted the same way.
  */
@@ -102,6 +102,7 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'reviewer',
   'reviewerKind',
   'workspace',
+  'packageHash',
 ]);
 
 /** One row of the board's log, masked value by value. */

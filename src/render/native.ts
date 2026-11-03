@@ -1,16 +1,21 @@
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  closeSync,
+  constants,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
+  openSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { NAME_PATTERN } from '../names.js';
 import type { Role } from '../roles.js';
 import { bytesecRenderer } from './bytesec.js';
 import type { Launch, PackageFile, Renderer, SkillFiles } from './types.js';
@@ -30,12 +35,16 @@ import type { Launch, PackageFile, Renderer, SkillFiles } from './types.js';
  * package is never rewritten: one that exists is used as it is.
  *
  * **Atomic.** A package is written in a dot-directory beside it and renamed into
- * place, so a directory with a hash name is always complete.
+ * place, so a directory with a hash name is always complete. When another
+ * render put the same hash in place first, the staging is dropped and that
+ * package used: the same hash is the same content.
  *
  * **Only regular files.** A skill's symlinks, FIFOs and sockets are not copied,
- * as `mt role create` copies none; nor is any `.env`. A SKILL.md that is not a
- * regular file fails the render: the skill would arrive without it. This holds
- * for the skills a role imports by name as for its own: both are in
+ * as `mt role create` copies none; nor is any `.env`, file or directory. Each
+ * file is opened without following a link and checked on its descriptor, so
+ * the file read is the one checked. A skill directory, or a SKILL.md, that is
+ * not a real one fails the render: it may have been replaced since startup.
+ * This holds for the skills a role imports by name as for its own: both are in
  * `role.skills`.
  *
  * **Bounded.** A package may hold at most MAX_PACKAGE_FILES files and
@@ -54,6 +63,7 @@ export const MAX_PACKAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_PACKAGE_FILES = 2000;
 
 const STAGING = '.stage-';
+const READ_CHUNK = 1024 * 1024;
 
 export type Native = { ok: true; renderer: Renderer } | { ok: false; reason: string };
 
@@ -106,7 +116,10 @@ export function renderNative(root: string, role: Role, renderer: Renderer, roleM
       renameSync(staging, dir);
     } catch (err) {
       rmSync(staging, { recursive: true, force: true });
-      throw err;
+      // A concurrent render of the same content got there first: use its package.
+      const code = (err as NodeJS.ErrnoException).code;
+      const raced = (code === 'ENOTEMPTY' || code === 'EEXIST') && lstatSync(dir, { throwIfNoEntry: false })?.isDirectory();
+      if (raced !== true) throw err;
     }
   } else if (!existing.isDirectory()) {
     throw new Error(`${dir} is in the way: it is not a directory`);
@@ -120,6 +133,7 @@ export function renderNative(root: string, role: Role, renderer: Renderer, roleM
  * mid-write. A role's newest package therefore stays until its next render.
  */
 export function sweepRole(root: string, roleName: string, keep: ReadonlySet<string>): void {
+  if (!NAME_PATTERN.test(roleName) || !realDir(root)) return;
   const roleDir = join(root, roleName);
   for (const entry of entries(roleDir)) {
     const path = join(roleDir, entry);
@@ -133,6 +147,7 @@ export function sweepRole(root: string, roleName: string, keep: ReadonlySet<stri
  * each role's other old packages go at its next render.
  */
 export function sweepRoles(root: string, roles: ReadonlySet<string>): void {
+  if (!realDir(root)) return;
   for (const entry of entries(root)) {
     const path = join(root, entry);
     if (!roles.has(entry)) {
@@ -145,11 +160,14 @@ export function sweepRoles(root: string, roles: ReadonlySet<string>): void {
   }
 }
 
+/** Whether `dir` is a directory itself, not a symlink to one. */
+function realDir(dir: string): boolean {
+  return lstatSync(dir, { throwIfNoEntry: false })?.isDirectory() === true;
+}
+
 /** A directory's entries, or none when it is missing. Never follows a symlink. */
 function entries(dir: string): string[] {
-  const stat = lstatSync(dir, { throwIfNoEntry: false });
-  if (stat === undefined || !stat.isDirectory()) return [];
-  return readdirSync(dir).sort();
+  return realDir(dir) ? readdirSync(dir).sort() : [];
 }
 
 /**
@@ -181,33 +199,72 @@ function tooBig(b: Budget): Error {
 }
 
 /**
- * Every regular file under a skill's directory, but any `.env`; its SKILL.md must
- * be one. Each file is counted against the budget before it is read, and the
- * walk stops at the first that passes either limit.
+ * Every regular file under a skill's directory, but any `.env`; the directory
+ * must be a real one, and its SKILL.md a regular file. Each file is counted
+ * against the budget as it is read, and the walk stops at the first that
+ * passes either limit.
  */
 function readSkill(skill: Role['skills'][number], budget: Budget): SkillFiles {
+  if (!realDir(skill.dir)) throw new Error(`${skill.dir} is not a directory`);
   if (lstatSync(skill.path, { throwIfNoEntry: false })?.isFile() !== true) {
     throw new Error(`${skill.path} is not a regular file`);
   }
   const files: PackageFile[] = [];
   const walk = (dir: string, prefix: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name === '.env') continue;
       const path = join(dir, entry.name);
       const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
       if (entry.isDirectory()) {
         walk(path, rel);
         continue;
       }
-      if (!entry.isFile() || entry.name === '.env') continue;
-      budget.files += 1;
-      if (budget.files > MAX_PACKAGE_FILES) throw tooMany(budget);
-      budget.bytes += lstatSync(path).size;
-      if (budget.bytes > MAX_PACKAGE_BYTES) throw tooBig(budget);
-      files.push({ path: rel, bytes: readFileSync(path) });
+      if (!entry.isFile()) continue;
+      const bytes = readRegular(path, budget);
+      if (bytes !== undefined) files.push({ path: rel, bytes });
     }
   };
   walk(skill.dir, '');
   return { name: skill.name, files };
+}
+
+/**
+ * A regular file's bytes, counted against the budget, or undefined when it is
+ * no longer one: the Dirent said it was, but it may have been swapped since.
+ * Opened once without following a link, and checked and read on that
+ * descriptor (as roles.ts reads a .env); O_NONBLOCK keeps a FIFO from hanging
+ * the open. At most the bytes left in the budget plus one are read, so a file
+ * that grows cannot take more.
+ */
+function readRegular(path: string, budget: Budget): Buffer | undefined {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'ENOENT' || code === 'ENXIO') return undefined;
+    throw err;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return undefined;
+    budget.files += 1;
+    if (budget.files > MAX_PACKAGE_FILES) throw tooMany(budget);
+    const cap = MAX_PACKAGE_BYTES - budget.bytes + 1;
+    const chunks: Buffer[] = [];
+    let got = 0;
+    while (got < cap) {
+      const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK, cap - got));
+      const n = readSync(fd, chunk, 0, chunk.length, null);
+      if (n === 0) break;
+      chunks.push(chunk.subarray(0, n));
+      got += n;
+    }
+    budget.bytes += got;
+    if (budget.bytes > MAX_PACKAGE_BYTES) throw tooBig(budget);
+    return Buffer.concat(chunks, got);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** The whole package, with what the renderer adds around the skills, against the same limits. */

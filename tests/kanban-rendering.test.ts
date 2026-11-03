@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { closeRun, endRun, DEFAULT_LIMITS } from '../src/db/kanban.js';
 import { eventsOf, getRun } from '../src/db/kanban-read.js';
 import { KanbanService } from '../src/kanban/service.js';
+import { addSecrets, clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
 import { AGENT, NOW, WORKSPACES, claimed, newTask } from './helpers/kanban.js';
 
@@ -12,17 +13,24 @@ import { AGENT, NOW, WORKSPACES, claimed, newTask } from './helpers/kanban.js';
 
 let h: TestDb;
 let service: KanbanService;
-const HASH = 'a'.repeat(64);
+const HASH = '3f9c2a7be41d08f5c6a9e2b7d4f10c83e5a6b9d2f7c4e1a08b3d6f9c2e5a7b41';
+/** A known secret that happens to occur inside HASH: the event keeps the hash whole. */
+const SECRET_IN_HASH = HASH.slice(20, 36);
 
 beforeEach(() => {
+  clearSecrets();
+  addSecrets([SECRET_IN_HASH]);
   h = testDb();
   service = new KanbanService({ db: h.db, roles: new Map(), workspaces: WORKSPACES });
 });
 
-afterEach(() => h.close());
+afterEach(() => {
+  h.close();
+  clearSecrets();
+});
 
 describe('recordRendering', () => {
-  it("adds native and the package hash to the run's agent_config, once, with an event", () => {
+  it("adds native and the package hash to the run's agent_config, once, with an event that does not mask the hash", () => {
     const run = claimed(h.db, newTask(h.db).taskId);
     const r = service.recordRendering(run.runId, { native: true, packageHash: HASH });
     expect(r).toMatchObject({ ok: true, run: { agentConfig: { ...AGENT, native: true, packageHash: HASH } } });

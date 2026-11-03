@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   lstatSync,
@@ -6,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -13,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentConfig } from '../src/config.js';
 import { bytesecRenderer } from '../src/render/bytesec.js';
 import {
@@ -32,6 +34,30 @@ import type { Role } from '../src/roles.js';
  * atomic, regular files only, private; and removing the ones nothing uses.
  */
 
+/**
+ * Hooks into node:fs as the renderer sees it, to change the disk between two of
+ * its steps: after a directory is listed, and after its staging is made. Each
+ * test that sets one has it cleared after.
+ */
+const fsHooks: { afterList?: (dir: string) => void; afterStaging?: (staging: string) => void } = {};
+
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...real,
+    readdirSync: ((dir: string, options?: unknown) => {
+      const out = real.readdirSync(dir, options as never);
+      fsHooks.afterList?.(dir);
+      return out;
+    }) as typeof real.readdirSync,
+    mkdtempSync: ((prefix: string, options?: unknown) => {
+      const out = real.mkdtempSync(prefix, options as never);
+      fsHooks.afterStaging?.(out as string);
+      return out;
+    }) as typeof real.mkdtempSync,
+  };
+});
+
 let base: string;
 let root: string;
 
@@ -40,7 +66,11 @@ beforeEach(() => {
   root = join(base, 'home', 'rendered');
 });
 
-afterEach(() => rmSync(base, { recursive: true, force: true }));
+afterEach(() => {
+  delete fsHooks.afterList;
+  delete fsHooks.afterStaging;
+  rmSync(base, { recursive: true, force: true });
+});
 
 /** A role directory on disk, with a role.md and one skill. */
 function roleOnDisk(name = 'implementer', agent: Partial<AgentConfig> = {}): Role {
@@ -230,6 +260,79 @@ describe('renderNative', () => {
     expect(readdirSync(join(base, 'elsewhere'))).toEqual([]);
   });
 
+  it('refuses a skill directory replaced by a symlink after boot, and copies nothing from where it points', () => {
+    const r = roleOnDisk();
+    const skillDir = r.skills[0]?.dir ?? '';
+    const target = join(base, 'target');
+    mkdirSync(target);
+    writeFileSync(join(target, 'SKILL.md'), '---\nname: testing\ndescription: d\n---\n');
+    writeFileSync(join(target, 'secret.txt'), 'not the role');
+    rmSync(skillDir, { recursive: true });
+    symlinkSync(target, skillDir);
+    expect(() => renderNative(root, r, bytesecRenderer, md(r))).toThrow(`${skillDir} is not a directory`);
+    expect(lstatSync(root, { throwIfNoEntry: false })).toBeUndefined();
+  });
+
+  it('skips a directory named .env as it does a file, and copies .env.local and the like', () => {
+    const r = roleOnDisk();
+    const skillDir = r.skills[0]?.dir ?? '';
+    mkdirSync(join(skillDir, '.env'));
+    writeFileSync(join(skillDir, '.env', 'token'), 'TOKEN=x');
+    writeFileSync(join(skillDir, 'references', '.env'), 'TOKEN=y');
+    writeFileSync(join(skillDir, '.env.local'), 'LOCAL=1');
+    const out = renderNative(root, r, bytesecRenderer, md(r));
+    expect(tree(join(out.dir, 'skills', 'testing'))).toEqual([
+      '.env.local',
+      'SKILL.md',
+      'references/',
+      'references/ci.md',
+    ]);
+  });
+
+  it('reads only the file it checked: one swapped for a symlink after the listing is not followed', () => {
+    const r = roleOnDisk();
+    const skillDir = r.skills[0]?.dir ?? '';
+    writeFileSync(join(base, 'outside.txt'), 'not the role');
+    writeFileSync(join(skillDir, 'swap.txt'), 'listed as a file');
+    fsHooks.afterList = (dir) => {
+      if (dir !== skillDir || lstatSync(join(skillDir, 'swap.txt')).isSymbolicLink()) return;
+      rmSync(join(skillDir, 'swap.txt'));
+      symlinkSync(join(base, 'outside.txt'), join(skillDir, 'swap.txt'));
+    };
+    const out = renderNative(root, r, bytesecRenderer, md(r));
+    expect(tree(join(out.dir, 'skills', 'testing'))).toEqual(['SKILL.md', 'references/', 'references/ci.md']);
+  });
+
+  it('skips a FIFO, even one swapped in for a file after the listing, without hanging on it', () => {
+    const r = roleOnDisk();
+    const skillDir = r.skills[0]?.dir ?? '';
+    execFileSync('mkfifo', [join(skillDir, 'notes.md')]);
+    writeFileSync(join(skillDir, 'swap.md'), 'listed as a file');
+    fsHooks.afterList = (dir) => {
+      if (dir !== skillDir || !lstatSync(join(skillDir, 'swap.md')).isFile()) return;
+      rmSync(join(skillDir, 'swap.md'));
+      execFileSync('mkfifo', [join(skillDir, 'swap.md')]);
+    };
+    const out = renderNative(root, r, bytesecRenderer, md(r));
+    expect(tree(join(out.dir, 'skills', 'testing'))).toEqual(['SKILL.md', 'references/', 'references/ci.md']);
+  });
+
+  it('uses the package a concurrent render put in place first, and leaves no staging', () => {
+    const r = roleOnDisk();
+    const expected = renderNative(join(base, 'reference'), r, bytesecRenderer, md(r));
+    fsHooks.afterStaging = (staging) => {
+      delete fsHooks.afterStaging;
+      // Another render of the same content finishes while this one writes.
+      const other = mkdtempSync(join(staging, '..', '.stage-'));
+      execFileSync('cp', ['-R', `${expected.dir}/.`, other]);
+      renameSync(other, join(staging, '..', expected.hash));
+    };
+    const out = renderNative(root, r, bytesecRenderer, md(r));
+    expect(out.dir).toBe(join(root, 'implementer', expected.hash));
+    expect(readdirSync(join(root, 'implementer'))).toEqual([expected.hash]);
+    expect(tree(out.dir)).toEqual(tree(expected.dir));
+  });
+
   it('hashes paths and bytes so that moving bytes between files changes it', () => {
     const a = packageHash([{ path: 'a', bytes: Buffer.from('bc') }]);
     expect(packageHash([{ path: 'ab', bytes: Buffer.from('c') }])).not.toBe(a);
@@ -265,5 +368,25 @@ describe('sweeping old packages', () => {
     expect(readdirSync(join(root, 'implementer'))).toEqual([kept.dir.slice(-64)]);
     // Before anything was ever rendered: nothing to do.
     expect(() => sweepRoles(join(base, 'absent'), new Set())).not.toThrow();
+  });
+
+  it('sweeps nothing through a render directory that is a symlink', () => {
+    const elsewhere = join(base, 'elsewhere');
+    mkdirSync(join(elsewhere, 'implementer', 'old'), { recursive: true });
+    mkdirSync(join(elsewhere, 'retired'));
+    mkdirSync(join(base, 'home'), { recursive: true });
+    symlinkSync(elsewhere, root);
+    sweepRole(root, 'implementer', new Set());
+    sweepRoles(root, new Set());
+    expect(tree(elsewhere)).toEqual(['implementer/', 'implementer/old/', 'retired/']);
+  });
+
+  it('refuses a role name that is not one, so a sweep cannot leave the render directory', () => {
+    renderNative(root, roleOnDisk(), bytesecRenderer, Buffer.from('x\n'));
+    writeFileSync(join(base, 'home', 'config.yaml'), 'keep me');
+    for (const name of ['..', '.', '', 'a/b', '../home']) sweepRole(root, name, new Set());
+    expect(readdirSync(join(base, 'home')).sort()).toEqual(['config.yaml', 'rendered']);
+    expect(readdirSync(root)).toEqual(['implementer']);
+    expect(readdirSync(join(root, 'implementer'))).toHaveLength(1);
   });
 });
