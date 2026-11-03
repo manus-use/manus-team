@@ -6,16 +6,18 @@ import { KNOWN_DRIVERS } from './driver/registry.js';
  * A name becomes a path (`roles/<name>/`, `workspaces/<name>/`), a value typed
  * in chat, and a key in the database, so it cannot contain `/`, `.` or `..`
  * (which would leave its directory), `:` (which would look like a person's
- * principal, `lark:…`), or upper case (two names differing only by case).
+ * principal, `lark:…`), or upper case (two names differing only by case). It
+ * may not end in `-`, so a role's name is also a valid bytesec package name
+ * (`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`), which native rendering needs.
  */
-export const NAME_PATTERN = /^[a-z][a-z0-9-]{0,39}$/;
+export const NAME_PATTERN = /^[a-z](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 
 /** Why `name` is not a valid role or workspace name, or undefined if it is. */
 export function nameProblem(kind: 'role' | 'workspace', name: string): string | undefined {
   if (NAME_PATTERN.test(name)) return undefined;
   return (
     `${kind} name ${JSON.stringify(name)} must be lowercase letters, digits and '-', ` +
-    'start with a letter, and be at most 40 characters'
+    "start with a letter, not end with '-', and be at most 40 characters"
   );
 }
 

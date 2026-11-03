@@ -9,8 +9,14 @@ import { isReservedRoleName, nameProblem } from '../src/names.js';
  */
 describe('nameProblem', () => {
   it('accepts lowercase letters, digits and hyphens, starting with a letter', () => {
-    for (const name of ['default', 'implementer', 'docs-writer', 'r2', 'a'.repeat(40)]) {
+    for (const name of ['default', 'implementer', 'docs-writer', 'r2', 'a', 'a--b', 'a'.repeat(40)]) {
       expect(nameProblem('role', name)).toBeUndefined();
+    }
+  });
+
+  it("refuses a name ending in '-', which bytesec would refuse as an agent's name", () => {
+    for (const name of ['x-', 'docs-', `${'a'.repeat(39)}-`]) {
+      expect(nameProblem('role', name)).toMatch(/role name .* must be lowercase .*not end with '-'/);
     }
   });
 

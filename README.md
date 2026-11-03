@@ -164,7 +164,7 @@ agent:
 The role `default` runs chat sessions. It is `roles/default/` if that exists, and otherwise
 the gateway's own `agent:` block (in the table above); having both, or neither, stops the
 gateway at startup. Role and workspace names are lowercase letters, digits and `-`, start
-with a letter, and are at most 40 characters; `acp` and `structured-cli` are reserved as
+with a letter, do not end with `-`, and are at most 40 characters; `acp` and `structured-cli` are reserved as
 role names. A directory under `roles/` with a reserved name stops the gateway at startup;
 one with any other invalid name is skipped, with a note in the startup log, and one whose
 name starts with `.` is skipped silently. In this build every chat session runs the role
