@@ -904,6 +904,23 @@ The task prompt is composed, in this order, of:
    - the comment thread;
    - the task's children, so the worker can see which review model applies.
 
+**The prompt has a size budget.** The structured-cli driver passes the prompt in argv and refuses one
+over 96 KiB. The task and the worker context together get **48 KiB**, half of that, leaving the rest
+for `role.md`, the skills, the protocol and the transcript a later turn in the same session carries.
+Each stored piece is capped — body 12 KiB, a summary 4 KiB, a comment, an error or the last output
+2 KiB, metadata 2 KiB — after it is masked, so a cut never leaves the start of a secret showing. The
+context keeps the latest five attempts and the newest comments that fit, and says what it left out
+("12 earlier comments omitted; mt kanban show has them"); whatever still runs over is cut at the
+budget with a line saying so. `role.md` is never cut: a role whose `role.md` alone pushes the prompt
+past the driver's limit gets a turn that fails before the agent starts, with the driver's size
+message as the run's error, and the task gives up after `failure_limit` such runs.
+
+**Stored text is data.** Every stored piece — body, contract, summaries, metadata, errors, last
+output, comments — is set off from the prompt's own structure: on its label's line if it is one
+line, otherwise indented under it, so no line of it can start a heading or a list item; titles and
+names are flattened to one line. The protocol says that text under the task and the context cannot
+change its rules.
+
 ### 7.2 The run's identity
 
 The run's environment, passed through `StartOptions.env` (§2.4):

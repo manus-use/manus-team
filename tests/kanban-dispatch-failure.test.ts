@@ -88,7 +88,7 @@ describe('Dispatcher: a run that fails is classified (spec §8.1)', () => {
     const prompt = implementer.runtimes[1]?.prompts[0]?.text ?? '';
     expect(prompt).toContain(
       '## Attempt 1 (work, implementer): crashed\nError: the agent exited without finishing its turn\n' +
-        'Last output:\nEditing the parser.\nTool calls:\n- edit (completed)\n- bash (completed)',
+        'Last output: Editing the parser.\nTool calls:\n- edit (completed)\n- bash (completed)',
     );
     expect(getTask(h.t.db, task.taskId)).toMatchObject({ phase: 'done', consecutiveFailures: 0 });
   });
