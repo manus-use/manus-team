@@ -1355,19 +1355,24 @@ board.
 
 Separate implementation plans. Each ends with everything built so far working and tested. Order: A, A2, B, F, C,
 D, then R; E is independent once B is done. B is delivered as B1 (roles and workspaces in
-configuration), B2 (the session layer) and B3 (the `mt` commands). **Before F**, the `lark-interaction-fixes` branch is merged: F changes
-the escapers, and `forMarkdown` is on that branch.
+configuration), B2 (the session layer) and B3 (the `mt` commands). C is delivered as C1 (the board),
+C2 (agent runs), C3 (the worker CLI) and C4 (review, rework and gates), in that order. **Before F**,
+the `lark-interaction-fixes` branch is merged: F changes the escapers, and `forMarkdown` is on that
+branch.
 
 | Plan | Contents | Depends on |
 |---|---|---|
 | **A. Rename** | the repository to `manus-team` (§13) | — |
 | **A2. Finish the rename** | the environment variables renamed to `MT_*` in configuration, tests and docs; the home default `~/.manus-team`; `passEnv` refusing `MT_*` and `LARK_*`; `src/identity.ts`'s comment (§13) | A |
 | **B. Roles and workspaces** | role directories (`config.yaml`, `role.md`, `skills/`, `.env` with its safeguards) and `workspaces:`, with the legacy `agent:` / `workspace:` as `default`; the `mt` binary and its `mt role` and `mt workspace` commands; a driver per role; `sessions.agent_id` as the role name; a workspace per session; `StartOptions.env`; a channel per binding; seeding a session's provider session id; tool-policy enforcement check; the README's credentials rule (§2) | A2 |
-| **C. Kernel** | migration `003`; transitions and derived status; classifier; prompt composition; the socket and the `mt kanban` commands; the dispatcher — passes, per-workspace limit, nudges, retries, rework, gates, restart handling; with F's masker: registering and removing worker tokens, masking composed worker context and `last_output` (layer 2), masking kanban free text and `kanban_events` on write (layer 3), and refusing gates that contain a secret | B, F |
-| **D. Lark** | `/kanban` commands; person targets; card `kind` routing; task, review and blocked cards; the group notice; subscriptions | C |
+| **C1. The board** | migration `003`, with every kanban table (§3); the one stored phase with one writer, and the derived display status (§4.1); transitions (§5.1); assignees (§4.2); the completion contract (§4.3); follow-ups (§4.4); blocking and unblocking (§5.4); resolving a task's workspace at a claim (§2.3); run rows and their outcomes, without agents; with F's masker, masking kanban free text and `kanban_events` on write (layer 3); the service API the later plans call. No agent runs and no socket | B, F |
+| **C2. Agent runs** | the dispatcher — passes, the per-workspace limit, `max_running`; a run as a session on the sink channel; prompt composition, with F's masker on the composed worker context and `last_output` (layer 2); how a run ends; the failure classifier; retries; restart handling and the runtime limit (§6, §7.1, §7.4, §8) | C1, F |
+| **C3. The worker CLI** | the run's token, added to F's masker when the run is claimed and removed when it closes, reference-counted so that removing it never unmasks a configured secret with the same value; the `0600` socket; the `mt kanban` commands; stop nudges; reports after the run is closed (§7.2, §7.3, §7.5, §7.6) | C2 |
+| **C4. Review, rework and gates** | same-task review and rework, quality gates, the reported commit (§5.3, §7.7, §7.8); refusing gates that contain a known secret; a crash handler whose output is masked | C3 |
+| **D. Lark** | `/kanban` commands; person targets; card `kind` routing; task, review and blocked cards; the group notice; subscriptions | C4 |
 | **E. Native resume** | the CLI driver captures the provider session id and passes `--session` (architecture §6.3), with transcript replay as the fallback | B; independent of C and D |
 | **R. Native rendering** | starts with a spike: where `bytesec run --agent` looks up a package (the workspace's `apm/packages/`, or a global install), so rendering never writes into a workspace repository. Then a renderer per coding agent: for bytesec, a role becomes an agent package — `role.md` as `agents/<role>.md` (`mode: primary`), its `skills/` copied — in a directory the gateway manages, run with `--agent`; Claude Code's later. Prompt injection (§7.1) stays the fallback for an agent with no renderer | B2 |
-| **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C | B (the resolved agent environments); best done before C, since it protects chat sessions too |
+| **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D, nothing can deliver a card to a person, so **plan C refuses human assignees and
 reviewers** at creation and in `mt kanban review`, and **refuses roles whose agent is supervised**,
