@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { ConfigError, loadConfig, type GatewayConfig } from './config.js';
 import { loadTeam, type Team } from './team.js';
 import { migrate, openDb, type Db } from './db/open.js';
@@ -162,6 +162,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       ['kanban', new KanbanSink()],
     ]),
     envFor: (sessionId) => dispatcher?.envFor(sessionId),
+    argsFor: (sessionId) => dispatcher?.argsFor(sessionId),
     pinned: (sessionId) => dispatcher?.pinned(sessionId) ?? false,
     workspaces: new NamedWorkspaces(team.workspaces),
     appId: config.lark.appId,
@@ -187,6 +188,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       appId: config.lark.appId,
       settings: config.kanban,
       note,
+      // Outside every workspace: none may contain the home (spec §2.3).
+      renderRoot: join(config.home, 'rendered'),
     });
     note(`kanban: dispatching up to ${config.kanban.maxRunning} agent run(s) at once`);
   }

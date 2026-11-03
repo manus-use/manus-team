@@ -3,6 +3,7 @@ import { bindingsOnChannel } from '../db/bindings.js';
 import type { Db } from '../db/open.js';
 import { claimableTasks, getRun, getTask, openAgentRunCount, openRuns, runBySession } from '../db/kanban-read.js';
 import { getSession } from '../db/sessions.js';
+import { nativeFor, renderNative, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
 import type { Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, Principal, TurnTerminal } from '../types.js';
@@ -29,6 +30,15 @@ import type { RunRow } from './types.js';
  * **One agent run is one gateway session** (spec §3.3), created for the run,
  * bound on the `kanban` channel at (task id, run id), and archived when the run
  * closes: a retry or a rework is a new run in a new session.
+ *
+ * **A role with a renderer runs natively** (plan R). Just after the claim, from
+ * the role.md bytes the claim read, the role is rendered as its agent's own
+ * package under `renderRoot`; the run is given the package through its
+ * environment and arguments, and its prompt leaves role.md and the skills out.
+ * A render that fails is noted and the run goes on with them in its prompt
+ * instead (spec §7.1): the role's files were readable at the claim, so the run
+ * can still be told everything, and failing it would count a disk problem
+ * against the task.
  */
 
 export interface DispatcherSettings {
@@ -53,6 +63,12 @@ export interface DispatcherDeps {
   clock?: Clock;
   /** Metadata only: ids, outcomes, counts. Never task text or agent output. */
   note?: (line: string) => void;
+  /**
+   * Where roles are rendered as native agent packages: `$MT_HOME/rendered`
+   * (plan R). Absent, nothing is, and every run's role.md and skills go in its
+   * prompt.
+   */
+  renderRoot?: string;
 }
 
 /** Who a run's session belongs to: the board, not a person in a chat. */
@@ -78,6 +94,10 @@ interface OpenRun extends RunHandle {
   sessionId: string;
   /** The run's environment, held only here (spec §2.4 item 3). */
   env: Readonly<Record<string, string>>;
+  /** Its agent's own arguments: `--agent <role>` for a native run (plan R), else none. */
+  args: readonly string[];
+  /** The native package it runs, kept from the sweep while the run is open. */
+  packageDir: string | undefined;
   /** Its turn has been cancelled for running past its limit: once is enough. */
   cancelling: boolean;
   /** Its session has been released because its turn ignored the cancel. */
@@ -162,6 +182,21 @@ export class Dispatcher {
       await this.#endLost(run, 'the gateway restarted; the run is over');
     }
     await this.#archiveLeftovers();
+    this.#sweepRenders();
+  }
+
+  /**
+   * After a restart nothing is open, so no package is in use: those of roles no
+   * longer configured, and any half-written one, are removed (plan R).
+   */
+  #sweepRenders(): void {
+    const root = this.#deps.renderRoot;
+    if (root === undefined) return;
+    try {
+      sweepRoles(root, new Set(this.#deps.roles.keys()));
+    } catch (err) {
+      this.#note(`kanban: sweeping the rendered packages after a restart failed: ${message(err)}`);
+    }
   }
 
   /**
@@ -240,6 +275,16 @@ export class Dispatcher {
   #end(runId: string, ending: Parameters<KanbanService['endRun']>[1]): void {
     const ended = this.#deps.service.endRun(runId, ending);
     if (!ended.ok) this.#note(`kanban: run ${runId} not ended: ${ended.code}`);
+  }
+
+  /**
+   * A session's own arguments, for the registry to give its agent: an open
+   * native run's `--agent <role>` (plan R). Asked after `envFor`, which has
+   * already refused a run this process did not start.
+   */
+  argsFor(sessionId: string): readonly string[] | undefined {
+    const args = this.#open.get(sessionId)?.args;
+    return args === undefined || args.length === 0 ? undefined : args;
   }
 
   /** An open run's actor is never retired to make room (spec §2.4 item 3). */
@@ -431,6 +476,16 @@ export class Dispatcher {
   async #drive(claimed: Claimed, handle: RunHandle): Promise<void> {
     const { run } = claimed;
     const key = handle.key;
+    // Before the session, and synchronously up to the run's entry in #open, so
+    // the sweep of another run's render sees this one's package as in use.
+    const rendered = this.#render(claimed);
+    // On the run, once decided: a rework or a resume is seeded only from a run
+    // that ran the same way. A refusal is noted, and the run goes on.
+    const recorded = this.#deps.service.recordRendering(
+      run.runId,
+      rendered === undefined ? { native: false } : { native: true, packageHash: rendered.hash },
+    );
+    if (!recorded.ok) this.#note(`kanban: run ${run.runId}: recording how its role was given failed: ${recorded.code}`);
     let sessionId: string;
     try {
       if (run.workspace === null) throw new Error(`run ${run.runId} has no workspace`);
@@ -457,7 +512,9 @@ export class Dispatcher {
     handle.sessionId = sessionId;
     const open: OpenRun = Object.assign(handle, {
       sessionId,
-      env: { MT_KANBAN_RUN: run.runId },
+      env: { ...rendered?.env, MT_KANBAN_RUN: run.runId },
+      args: rendered?.args ?? [],
+      packageDir: rendered?.dir,
       cancelling: false,
       released: false,
     });
@@ -468,7 +525,7 @@ export class Dispatcher {
     try {
       const counted = this.#deps.service.countSubmission(run.runId);
       if (!counted.ok) throw new Error(counted.message);
-      const prompt = composePrompt(briefFor(this.#deps.db, claimed));
+      const prompt = composePrompt(briefFor(this.#deps.db, claimed, { native: rendered !== undefined }));
       const actor = await this.#deps.sessions.actorFor(sessionId, key);
       // Stopped while the actor was built: start no agent the shutdown will not close.
       if (this.#stopped) return;
@@ -494,6 +551,41 @@ export class Dispatcher {
       return;
     }
     await this.#turnEnded(sessionId, terminal, thrown);
+  }
+
+  /**
+   * Render the run's role as its agent's native package (plan R), or undefined
+   * when it is not rendered: no render root, a person's run, a role with no
+   * renderer or one that opted out -- or a render that failed, which is noted.
+   * Then the role's packages that neither this run nor an open one uses are
+   * removed, so a role keeps its newest package and those still running.
+   */
+  #render(claimed: Claimed): Rendered | undefined {
+    const root = this.#deps.renderRoot;
+    const role = claimed.role;
+    if (root === undefined || role === undefined) return undefined;
+    const native = nativeFor(role);
+    if (!native.ok) return undefined;
+    const runId = claimed.run.runId;
+    let rendered: Rendered;
+    try {
+      rendered = renderNative(root, role, native.renderer, claimed.roleMdBytes);
+    } catch (err) {
+      this.#note(
+        `kanban: run ${runId}: rendering role ${role.name} for ${native.renderer.id} failed, ` +
+          `so its role.md and skills go in the prompt: ${message(err)}`,
+      );
+      return undefined;
+    }
+    const inUse = new Set([rendered.dir]);
+    for (const open of this.#open.values()) if (open.packageDir !== undefined) inUse.add(open.packageDir);
+    try {
+      sweepRole(root, role.name, inUse);
+    } catch (err) {
+      this.#note(`kanban: sweeping the old packages of role ${role.name} failed: ${message(err)}`);
+    }
+    this.#note(`kanban: run ${runId} runs role ${role.name} as a native ${native.renderer.id} agent`);
+    return rendered;
   }
 
   /**

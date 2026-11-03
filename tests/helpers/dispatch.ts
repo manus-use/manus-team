@@ -72,6 +72,8 @@ export interface HarnessOptions {
   /** Another harness's database: a second gateway process, after a restart. */
   t?: TestDb;
   clock?: ManualClock;
+  /** Where roles are rendered natively; absent, none is. */
+  renderRoot?: string;
 }
 
 export const DEFAULT_ROLES: readonly Role[] = [
@@ -99,6 +101,7 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
       ['kanban', new KanbanSink(() => clock.now())],
     ]),
     envFor: (sessionId) => dispatcher?.envFor(sessionId),
+    argsFor: (sessionId) => dispatcher?.argsFor(sessionId),
     pinned: (sessionId) => dispatcher?.pinned(sessionId) ?? false,
     workspaces: new NamedWorkspaces(workspaces),
     appId: APP,
@@ -115,6 +118,7 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
     settings: { maxRunning: 8, defaultMaxRuntimeS: 4 * 3600, strandedAfterS: 1800, sweepIntervalS: 60, ...opts.settings },
     clock,
     note: (line) => notes.push(line),
+    ...(opts.renderRoot === undefined ? {} : { renderRoot: opts.renderRoot }),
   });
   return {
     t,
