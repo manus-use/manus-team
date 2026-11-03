@@ -625,7 +625,9 @@ session status already follows (`core/status.ts`, channel spec §7), for the sam
   (§2.3). Neither workspace case holds a human task (§2.3, §7.7). The task stays ready and a `skipped_unassignable`
   event is written once. It is never silently dropped and never sent to a fallback assignee, which
   would run work under an identity nobody chose. Once it has been ready and unclaimed for
-  `kanban.stranded_after_s` (default 30 min, measured from the latest event that made it ready), its
+  `kanban.stranded_after_s` (default 30 min, measured from when a pass first found it ready and
+  unclaimable — its `skipped_unassignable` event — with nothing written on the task since: most events
+  that make a task ready are on other tasks, or are no event at all, such as a cooldown ending), its
   subscribers are told it is stranded and why, once — `stranded_notified_at` records that the notice
   went out. Only tasks that *cannot* be claimed are stranded; a ready task waiting its turn behind
   the per-workspace limit (§6.3) is queued, not stranded, and is never reported as such.
@@ -786,6 +788,11 @@ or unblocked, a run ended, a review requested — and on a sweep every `kanban.s
 (default 60 s) for the things only time changes: cooldowns ending, runtimes exceeded, tasks
 becoming stranded.
 
+The `kanban.*` settings this document names are written in the config file in camelCase, like every
+other key in it: `kanban.failureLimit`, `kanban.maxRunning`, `kanban.sweepIntervalS` and so on. They
+are set in the file only, with no environment overrides: a run's own environment is `MT_KANBAN_*`
+(§7.2), and a gateway setting under that prefix would read as one of a run's variables.
+
 ### 6.2 A pass
 
 1. Collect claimable tasks with **no open run of any kind**: **ready** (§4.1) for work, **review**
@@ -805,7 +812,8 @@ becoming stranded.
 Two agents editing one checkout overwrite each other without either noticing. So **a workspace has
 at most one open agent run at a time.** Tasks in different workspaces run in parallel, up to
 `kanban.max_running` (default `maxLiveSessions`, which already caps live runtimes — a run is a
-session, and the two limits must not disagree). Human runs are not limited.
+session, and the two limits must not disagree, so a `max_running` above `maxLiveSessions` is refused at
+startup). Human runs are not limited.
 
 A board that fills every live slot leaves no room for chat sessions: open runs' actors are pinned
 (§2.4), and the registry's capacity eviction goes over its cap rather than refusing a chat session
@@ -957,6 +965,10 @@ When the actor resolves a submission with the turn's terminal, the dispatcher lo
 - **No report, and the turn completed:** a stop nudge (§7.5).
 - **No report, and the dispatcher cancelled the turn:** the outcome it recorded first (§6.4).
 - **No report, and the turn failed or was ambiguous:** classified (§8.1).
+
+However the run ended, once it is closed its session is archived and its `kanban` binding revoked, as
+at boot (§8.4): one run is one session, so the session is never used again, and a stale approval card
+for it resolves to "no longer bound".
 
 ### 7.5 Stop nudges
 
@@ -1392,7 +1404,9 @@ branch.
 
 Until plan D, nothing can deliver a card to a person, so **plan C refuses human assignees and
 reviewers** at creation and in `mt kanban review`, and **refuses roles whose agent is supervised**,
-whose approval cards would have nowhere to go until subscriptions exist. C's kernel implements and
+whose approval cards would have nowhere to go until subscriptions exist. And **the dispatcher runs
+only when `kanban.enabled` is set**, off by default, from plan C2 until the board can be used: before
+C3 an agent cannot report, and before D nobody can create a task. C's kernel implements and
 tests human runs and approval forwarding through its service API, and D turns them on.
 
 Nor can a person create a task before D: `/kanban new` arrives there, and every `mt kanban` command
