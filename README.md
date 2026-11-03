@@ -179,6 +179,19 @@ name starts with `.` is skipped silently. In this build every chat session runs 
 `default` in the workspace `default`; other roles are loaded and checked at startup, and
 run once tasks arrive.
 
+**Native rendering.** A role whose agent is bytesec (driver `structured-cli`, command
+`bytesec`) and which has a `role.md` or skills runs each board task as a bytesec agent
+package. Just after a task is claimed, the gateway writes the package under
+`$MT_HOME/rendered/<role>/`, never in a workspace, and runs the agent with `--agent <role>`
+and `BYTESEC_LOCAL_APM_PATH` pointing at it. `role.md` becomes the agent's own system
+prompt, in place of bytesec's default identity, and the skills load as bytesec skills; the
+task prompt then leaves both out. A native agent can use only the skills in its own package:
+bytesec hides your user-level skills and the workspace's from it. Name the user skills a role
+needs in its `agent.skills` and they are copied into the package with its own. Set
+`agent.native: false` in a role's `config.yaml` to have its `role.md` and skills sent in the
+task prompt instead, as every other agent gets them; if writing the package fails, a run gets
+them that way too, and the log says so. Chat sessions are not affected.
+
 **Workspaces** are named directories in the config file:
 
 ```yaml
@@ -226,7 +239,8 @@ never contacts the gateway; changes take effect at the next start.
   the role's `workspace:` to it, for a role that does not work on a repository; without it, a
   role's tasks follow their parents' workspace, which is what a reviewer needs.
 - `role check` runs the startup checks, and reports what comes from this shell's environment
-  separately: the service's environment may differ.
+  separately: the service's environment may differ. It says, a line a role, whether the
+  role's runs are rendered as a native agent package, and why not.
 - `workspace add` edits `workspaces:` in the config file, keeping its comments, and refuses
   anything the next start would refuse. `--clone` clones into `$MT_HOME/workspaces/<name>`.
 

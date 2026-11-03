@@ -473,6 +473,33 @@ describe('mt role check', () => {
     expect((await fx.run(['role', 'check'], { env: { HOME: home } })).code).toBe(0);
   });
 
+  it('says, a line a role, whether its runs get role.md and skills as a native agent package', async () => {
+    fx = mtFixture();
+    roleDir('implementer', 'agent:\n  driver: structured-cli\n  command: bytesec\n  args: [run]\n  unsupervised: true\n');
+    writeFileSync(join(fx.home, 'roles', 'implementer', 'role.md'), 'You change code.\n');
+    roleDir('injected', 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n  native: false\n');
+    writeFileSync(join(fx.home, 'roles', 'injected', 'role.md'), 'You change code.\n');
+    const all = await fx.run(['role', 'check']);
+    expect(all.code, all.out).toBe(0);
+    expect(all.out.split('\n').filter((l) => l.startsWith('native: '))).toEqual([
+      'native: role default does not: it has no role.md and no skills',
+      'native: role implementer runs as a bytesec agent package',
+      'native: role injected does not: agent.native is false',
+    ]);
+    const one = await fx.run(['role', 'check', 'implementer']);
+    expect(one.out.split('\n').filter((l) => l.startsWith('native: '))).toEqual([
+      'native: role implementer runs as a bytesec agent package',
+    ]);
+  });
+
+  it('says nothing about rendering when the check fails', async () => {
+    fx = mtFixture();
+    roleDir('broken', 'agent: [\n');
+    const r = await fx.run(['role', 'check']);
+    expect(r.code).toBe(1);
+    expect(r.out).not.toMatch(/^native: /m);
+  });
+
   it('reports a broken role file under the files', async () => {
     fx = mtFixture();
     roleDir('broken', 'agent: [\n');

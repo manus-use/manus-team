@@ -22,7 +22,8 @@ import {
 } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { isReservedRoleName, nameProblem } from '../names.js';
-import { discoverRoles, gatewayOwnsVariable } from '../roles.js';
+import { nativeFor } from '../render/native.js';
+import { discoverRoles, gatewayOwnsVariable, type Role } from '../roles.js';
 import { loadTeam } from '../team.js';
 import { refuse, table, type MtIo } from './mt.js';
 import {
@@ -352,6 +353,8 @@ interface Attempt {
   unset: string[];
   /** What startup would log: entries under roles/ that were ignored, and why. */
   notes: readonly string[];
+  /** The roles checked, when the check passed: whether each is rendered natively is reported. */
+  roles?: readonly Role[];
 }
 
 /** One run of the startup validation against `env`. Never throws a ConfigError. */
@@ -377,7 +380,8 @@ function attemptAll(env: Env, only: string | undefined): Attempt {
       const was = recorded.get(name);
       if (was !== undefined && was !== path) return { error: movedMessage(name, was, path), unset, notes };
     }
-    return { unset, notes };
+    const roles = [...team.roles.values()].filter((r) => only === undefined || r.name === only);
+    return { unset, notes, roles: roles.sort((a, b) => a.name.localeCompare(b.name)) };
   } catch (err) {
     if (err instanceof ConfigError) return { error: err.message, unset, notes };
     throw err;
@@ -415,6 +419,15 @@ export function roleCheck(only: string | undefined, io: MtIo): number {
   }
   report('files', files, io);
   report("this shell's environment", environment, io);
+  // One line a role: whether its runs get role.md and skills natively (plan R).
+  for (const role of real.roles ?? []) {
+    const native = nativeFor(role);
+    io.out(
+      native.ok
+        ? `native: role ${role.name} runs as a ${native.renderer.id} agent package`
+        : `native: role ${role.name} does not: ${native.reason}`,
+    );
+  }
   for (const note of real.notes) io.out(`note: ${note}`);
   io.out("note: the environment was checked in this shell; the service's environment may differ");
   return files.length + environment.length === 0 ? 0 : 1;
