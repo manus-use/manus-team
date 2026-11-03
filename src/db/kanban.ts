@@ -3,17 +3,22 @@ import { txImmediate } from './open.js';
 import { newRunId, newTaskId } from '../core/ids.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import { resolveTaskWorkspace } from '../kanban/workspace.js';
+import { REPORTED_OUTCOMES } from '../kanban/types.js';
 import type {
+  ActivePhase,
   AgentSnapshot,
   Assignee,
   CommentRow,
   Contract,
   CreatedVia,
+  Phase,
   Refusal,
   RefusalCode,
+  Reporter,
   Result,
   RetryOnCrash,
   RunKind,
+  RunOutcome,
   RunRow,
   TaskRow,
 } from '../kanban/types.js';
@@ -501,4 +506,267 @@ function linkIn(
   d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)').run(parentId, childId, now);
   record(d, { taskId: childId, kind: 'linked', actor: by, payload: { parentId } }, now);
   return { ok: true, added: true };
+}
+
+// ---------------------------------------------------------------------------
+// Reports: complete, review, changes
+// ---------------------------------------------------------------------------
+
+/** A worker's or a person's handoff (spec §7.3). */
+export interface Handoff {
+  summary: string;
+  metadata?: unknown;
+  /** For an agent's report in a git workspace (spec §7.8), captured before this transaction. */
+  reportedCommit?: string | null;
+  reportedDirty?: boolean | null;
+}
+
+export function actorOf(by: Reporter): string {
+  return by.kind === 'run' ? `run:${by.runId}` : by.principal;
+}
+
+/**
+ * The run a report decides, if any.
+ *
+ * A run reports only through its own run, while that is open and undecided: once
+ * it has reported, a second report is `already_reported`; once anything else has
+ * decided it, or it is closed, `run_superseded` (spec §7.2).
+ *
+ * A person's report decides the open human run, if there is one. While an agent
+ * run is open it is refused (spec §5.1): gates would run against a checkout the
+ * agent is still changing, and the agent's own later report would contradict
+ * the person's.
+ */
+function reportingRun(d: Db, task: TaskRow, by: Reporter): Result<{ run: RunRow | undefined }> {
+  if (by.kind === 'run') {
+    const run = getRun(d, by.runId);
+    if (run === undefined) return refuse('not_found', `no run ${by.runId}`);
+    if (run.taskId !== task.taskId) {
+      return refuse('wrong_task', `run ${run.runId} is on task ${run.taskId}, not ${task.taskId}`);
+    }
+    if (run.endedAt !== null) return refuse('run_superseded', `run ${run.runId} is over`);
+    if (run.outcome !== null) {
+      return (REPORTED_OUTCOMES as readonly string[]).includes(run.outcome)
+        ? refuse('already_reported', `run ${run.runId} has already reported (${run.outcome})`)
+        : refuse('run_superseded', `run ${run.runId} has ended (${run.outcome})`);
+    }
+    return { ok: true, run };
+  }
+  const open = openRunOf(d, task.taskId);
+  if (open === undefined) return { ok: true, run: undefined };
+  if (open.assignee.kind === 'role') {
+    return refuse(
+      'agent_run_open',
+      open.outcome === null
+        ? `task ${task.taskId} has an agent run working on it (${open.runId}); stop it first`
+        : `task ${task.taskId}'s agent run ${open.runId} has reported and is finishing; wait for it to finish`,
+    );
+  }
+  return { ok: true, run: open };
+}
+
+/** The phase a run of this kind works in. */
+function phaseOfKind(kind: RunKind): ActivePhase {
+  return kind === 'work' ? 'open' : 'review';
+}
+
+/**
+ * Set an undecided run's outcome. A person's run is closed at the same moment:
+ * there is no process to finish (spec §3.3). Any outcome but `rate_limited`
+ * resets the task's throttling counter (spec §8.2).
+ */
+function decide(
+  d: Db,
+  run: RunRow,
+  outcome: RunOutcome,
+  fields: {
+    summary?: string | null;
+    metadata?: unknown;
+    reportedCommit?: string | null;
+    reportedDirty?: boolean | null;
+    error?: string | null;
+    lastOutput?: string | null;
+  },
+  now: number,
+): void {
+  const agent = run.agentConfig !== null;
+  const changed = d
+    .prepare(
+      `UPDATE kanban_runs
+          SET outcome = ?, summary = ?, metadata = jsonb(?), reported_commit = ?, reported_dirty = ?,
+              error = ?, last_output = ?, ended_at = ?
+        WHERE run_id = ? AND outcome IS NULL`,
+    )
+    .run(
+      outcome,
+      fields.summary === undefined || fields.summary === null ? null : mask(fields.summary),
+      fields.metadata === undefined ? null : JSON.stringify(redactValues(fields.metadata)),
+      agent ? (fields.reportedCommit ?? null) : null,
+      agent && fields.reportedDirty !== undefined && fields.reportedDirty !== null
+        ? Number(fields.reportedDirty)
+        : null,
+      fields.error === undefined || fields.error === null ? null : mask(fields.error),
+      fields.lastOutput === undefined || fields.lastOutput === null ? null : mask(fields.lastOutput),
+      agent ? null : now,
+      run.runId,
+    ).changes;
+  if (changed !== 1) throw new Error(`run ${run.runId} was decided twice`);
+  if (outcome !== 'rate_limited') {
+    d.prepare('UPDATE kanban_tasks SET consecutive_transient = 0 WHERE task_id = ?').run(run.taskId);
+  }
+}
+
+/**
+ * Report on the task as the run or person given, after the checks every report
+ * shares: the reporter may report, the task is in a phase this report applies
+ * to, and a run's kind fits that phase.
+ */
+function reporting(
+  d: Db,
+  taskId: string,
+  by: Reporter,
+  phases: readonly ActivePhase[],
+  what: string,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  const task = getTask(d, taskId);
+  if (task === undefined) return refuse('not_found', `no task ${taskId}`);
+  const r = reportingRun(d, task, by);
+  if (!r.ok) return r;
+  if (!(phases as readonly Phase[]).includes(task.phase)) {
+    return refuse('illegal_transition', `task ${taskId} is ${task.phase}, so it cannot ${what}`);
+  }
+  if (r.run !== undefined && phaseOfKind(r.run.kind) !== task.phase) {
+    return refuse('illegal_transition', `a ${r.run.kind} run cannot ${what}`);
+  }
+  return { ok: true, task, run: r.run };
+}
+
+/**
+ * The one way to `done` (spec §5.1): an agent's or reviewer's `complete`, a
+ * person's done or approval. Gates run before it, from plan C4.
+ *
+ * Completion resets the breaker's counters, and is the only report that does
+ * (spec §3.1). A task whose parents are not all finished is refused: only a link
+ * added after it started could cause that, which link() prevents; this is the
+ * backstop.
+ */
+export function complete(
+  db: Db,
+  taskId: string,
+  by: Reporter,
+  handoff: Handoff,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  return tx(db, (d) => {
+    const r = reporting(d, taskId, by, ['open', 'review'], 'be completed');
+    if (!r.ok) return r;
+    if (!parentsOf(d, taskId).every((p) => isFinished(p.phase))) {
+      return refuse('parents_unfinished', `task ${taskId} has a parent that is not done`);
+    }
+    if (r.run !== undefined) decide(d, r.run, 'completed', handoff, now);
+    d.prepare(
+      `UPDATE kanban_tasks
+          SET phase = 'done', closed_at = ?, consecutive_failures = 0, consecutive_transient = 0,
+              block_recurrences = 0, cooldown_until = NULL
+        WHERE task_id = ?`,
+    ).run(now, taskId);
+    record(
+      d,
+      {
+        taskId,
+        runId: r.run?.runId ?? null,
+        kind: 'completed',
+        actor: actorOf(by),
+        payload: { summary: handoff.summary },
+      },
+      now,
+    );
+    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+  });
+}
+
+/**
+ * Same-task review (spec §5.3). A reviewer named in the report replaces the
+ * task's; with none named anywhere it is refused, since a task in review with
+ * nobody to review it is stranded under another label. Gates run before it,
+ * from plan C4.
+ */
+export function requestReview(
+  db: Db,
+  taskId: string,
+  by: Reporter,
+  handoff: Handoff & { reviewer?: Assignee },
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  return tx(db, (d) => {
+    const r = reporting(d, taskId, by, ['open'], 'ask for review');
+    if (!r.ok) return r;
+    const reviewer = handoff.reviewer ?? r.task.reviewer;
+    if (reviewer === null) return refuse('no_reviewer', `nobody is named to review task ${taskId}`);
+    if (r.run !== undefined) decide(d, r.run, 'review_requested', handoff, now);
+    d.prepare("UPDATE kanban_tasks SET phase = 'review', reviewer_kind = ?, reviewer = ? WHERE task_id = ?").run(
+      reviewer.kind,
+      reviewer.name,
+      taskId,
+    );
+    record(
+      d,
+      {
+        taskId,
+        runId: r.run?.runId ?? null,
+        kind: 'review_requested',
+        actor: actorOf(by),
+        payload: { summary: handoff.summary, reviewer: reviewer.name },
+      },
+      now,
+    );
+    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+  });
+}
+
+/**
+ * A reviewer's `changes` (spec §5.3): the task returns to open, and its next
+ * claim is the rework. The reason is the review run's summary, which the
+ * rework's prompt carries.
+ */
+export function requestChanges(
+  db: Db,
+  taskId: string,
+  by: Reporter,
+  reason: string,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  return tx(db, (d) => {
+    const r = reporting(d, taskId, by, ['review'], 'have changes requested');
+    if (!r.ok) return r;
+    if (r.run !== undefined) decide(d, r.run, 'changes_requested', { summary: reason }, now);
+    d.prepare("UPDATE kanban_tasks SET phase = 'open' WHERE task_id = ?").run(taskId);
+    record(
+      d,
+      { taskId, runId: r.run?.runId ?? null, kind: 'changes_requested', actor: actorOf(by), payload: { reason } },
+      now,
+    );
+    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+  });
+}
+
+/**
+ * Close a decided run: its session's last turn has ended, the agent process is
+ * gone, and the workspace is free (spec §3.3). An undecided run is refused: what
+ * ended it must be recorded first, by a report or by endRun().
+ */
+export function closeRun(db: Db, runId: string, now: number): Result<{ run: RunRow }> {
+  return tx(db, (d) => {
+    const run = getRun(d, runId);
+    if (run === undefined) return refuse('not_found', `no run ${runId}`);
+    if (run.endedAt !== null) return refuse('already_closed', `run ${runId} is already closed`);
+    if (run.outcome === null) return refuse('undecided', `run ${runId} has no outcome yet; record one first`);
+    d.prepare('UPDATE kanban_runs SET ended_at = ? WHERE run_id = ?').run(now, runId);
+    record(
+      d,
+      { taskId: run.taskId, runId, kind: 'run_closed', actor: 'gateway', payload: { outcome: run.outcome } },
+      now,
+    );
+    return { ok: true, run: mustGetRun(d, runId) };
+  });
 }
