@@ -426,3 +426,79 @@ export function attachSession(db: Db, runId: string, sessionId: string, now: num
     return { ok: true, run: mustGetRun(d, runId) };
   });
 }
+
+// ---------------------------------------------------------------------------
+// Links
+// ---------------------------------------------------------------------------
+
+/**
+ * Make `parentId` a parent of `childId` (spec §3.2). Linking an existing pair
+ * again changes nothing.
+ *
+ * Refused:
+ * - a child past its parents gate -- in review, blocked from review, done or
+ *   archived: the gate is evaluated when a task becomes ready, so a parent added
+ *   now could never hold it back, and a review would wait on it forever;
+ * - a child with an open run, for the same reason;
+ * - a cycle, found by walking up from the parent: two tasks that can never become
+ *   ready, and nothing would ever say why.
+ */
+export function link(db: Db, parentId: string, childId: string, by: string, now: number): Result<{ added: boolean }> {
+  return tx(db, (d) => {
+    if (getTask(d, parentId) === undefined) return refuse('not_found', `no task ${parentId}`);
+    const child = getTask(d, childId);
+    if (child === undefined) return refuse('not_found', `no task ${childId}`);
+    if (child.phase !== 'open' && !(child.phase === 'blocked' && child.blockedFrom === 'open')) {
+      return refuse(
+        'illegal_transition',
+        `task ${childId} is ${child.phase}; a parent added now could not hold it back`,
+      );
+    }
+    return linkIn(d, parentId, childId, by, now);
+  });
+}
+
+/**
+ * The link itself, once the child's phase allows it. A dependency block calls it
+ * directly (spec §5.4), on a task in `open` or `review`, with `blockingRun` the
+ * run that has just reported the block: that run is decided, so the parents it
+ * names hold back the next claim, not the run.
+ */
+function linkIn(
+  d: Db,
+  parentId: string,
+  childId: string,
+  by: string,
+  now: number,
+  blockingRun?: string,
+): Result<{ added: boolean }> {
+  if (getTask(d, parentId) === undefined) return refuse('not_found', `no task ${parentId}`);
+  if (parentId === childId) return refuse('cycle', `task ${childId} cannot be its own parent`);
+  const exists = d
+    .prepare<[string, string], { n: number }>('SELECT 1 AS n FROM kanban_links WHERE parent_id = ? AND child_id = ?')
+    .get(parentId, childId);
+  if (exists !== undefined) return { ok: true, added: false };
+  const cycle = d
+    .prepare<[string, string], { n: number }>(
+      `WITH RECURSIVE up(id) AS (
+         SELECT ?
+         UNION
+         SELECT l.parent_id FROM kanban_links l JOIN up ON l.child_id = up.id
+       )
+       SELECT 1 AS n FROM up WHERE id = ? LIMIT 1`,
+    )
+    .get(parentId, childId);
+  if (cycle !== undefined) {
+    return refuse('cycle', `task ${childId} is already upstream of ${parentId}; the link would make a cycle`);
+  }
+  const open = openRunOf(d, childId);
+  if (open !== undefined && open.runId !== blockingRun) {
+    return refuse(
+      'run_open',
+      `task ${childId} has an open run, ${open.runId}; a parent added now could not hold it back`,
+    );
+  }
+  d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)').run(parentId, childId, now);
+  record(d, { taskId: childId, kind: 'linked', actor: by, payload: { parentId } }, now);
+  return { ok: true, added: true };
+}
