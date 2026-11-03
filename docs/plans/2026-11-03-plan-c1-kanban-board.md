@@ -113,6 +113,22 @@ Each is the reading most consistent with the rest of the spec. Decisions 1 and 2
   - size limits on the text a person sends: title, body, contract, summary.
 - **The README.** It changes when the board can be used, in C3 or D. C1 has no surface a person can reach.
 
+### What later plans need from the board
+
+C1 does not have these; the plans that use them add them to `db/kanban-read.ts` or `db/kanban.ts`.
+
+- **C2:**
+  - a listing of every open run, for restart handling;
+  - finding a run by its session id;
+  - a count of open agent runs, for `max_running`;
+  - a writer for `stranded_notified_at`;
+  - a task in its cooldown still shows `ready`, so the dispatcher must check `cooldownUntil` itself, or rely on the claim refusing it as `not_claimable`;
+  - the rework seed trusts `sessions.provider_session_id`, which may be a seeded hint rather than an id the session observed: C2 decides whether a second rework may resume from a hint nobody confirmed.
+- **C3:**
+  - finding a run by its token hash;
+  - a writer for `submissions`.
+- **D:** a list view, with each task's display status.
+
 ## File structure
 
 | File | Responsibility |
@@ -5337,7 +5353,7 @@ git commit -m "Finish the kanban service API"
 
 ## Done when
 
-- `npm test` gives `Tests  724 passed (724)` (702 after Task 14; 22 more from the review follow-ups). `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  729 passed (729)` (702 after Task 14; 27 more from the review follow-ups). `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table (Step 14.6), and `src/db/WRITERS.md` says so.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - Every transition of spec §5.1 that does not need an agent, a dispatcher or a socket has a function in `db/kanban.ts` and a test, and `KanbanService` exposes it.
@@ -5375,3 +5391,14 @@ Made after Tasks 1–14, from the reviews of the service, the schema, masking, e
 **Missing tests, added.** The cooldown refusal, and the claim succeeding at exactly `cooldown_until`; a review claim refused while a parent is unfinished; a diamond (a→b, a→c, b→d, c→d), where linking a onto d is allowed and d onto a is a cycle; a new link onto a done child refused.
 
 **Out of scope, noted above.** Text size limits are C3's and D's. C2 needs a ready-task listing, and each parent's latest summary for the prompt. C3 no longer namespaces keys: the service does.
+
+**Final review.**
+- A run's metadata is masked by `maskDeep` in `db/kanban.ts`, which masks every string whatever its key, and every key: `redactValues` left a value under a globally identifying key such as `sessionId` alone, and never masked keys. Tested with a secret under `sessionId`, `idempotencyKey` and `messageId`, and as a key. No event payload carries metadata, so `record()` is unchanged.
+- `reportedCommit` must match `/^[0-9a-f]{7,64}$/`, or the service refuses the report as `invalid`; `db/kanban.ts` also masks it on write. Tested: a secret is refused, a 40-digit id is stored, and a secret written straight through `db/kanban.ts` is masked.
+- An idempotency key holding a known secret is refused as `invalid`: keys identify, so they are stored unmasked.
+- `endRun` refuses, as `invalid`, an outcome not in `ENDED_OUTCOMES`, at runtime. Tested with `completed`.
+- `block` refuses `parents` on any kind but `dependency`.
+- `create` refuses a `createdBy` that is not text, and a `createdVia` that is not a chat with text `channel`, `appId`, `conversationId` and `threadId`, or a run with a text `runId`. These cases are in the table-driven malformed-input test, with the commit and block cases.
+- `types.ts` says a dependency block keeps the task's phase, open or review; it said the task returned to open.
+- `actorOf`, `PHASES` and `SUPERSEDING_OUTCOMES` are no longer exported: nothing outside their files, tests included, used them.
+- What C2, C3 and D need from the board is listed under "Out of scope".
