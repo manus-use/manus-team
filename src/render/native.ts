@@ -31,8 +31,10 @@ import type { Launch, PackageFile, Renderer, SkillFiles } from './types.js';
  *
  * **Content-addressed.** The hash is of the package's own files, so it covers
  * role.md, every skill file, and whatever the renderer writes around them. Two
- * runs on two versions of a role's files get two directories, and a finished
- * package is never rewritten: one that exists is used as it is.
+ * runs on two versions of a role's files get two directories. One that exists
+ * is used once it is checked against what would be written: an agent runs as
+ * the same user and could edit it, so one whose files differ, or that has any
+ * more or fewer, is staged afresh and swapped in for it.
  *
  * **Atomic.** A package is written in a dot-directory beside it and renamed into
  * place, so a directory with a hash name is always complete. When another
@@ -56,7 +58,7 @@ import type { Launch, PackageFile, Renderer, SkillFiles } from './types.js';
  */
 
 /** The renderers, in the order they are asked. */
-export const RENDERERS: readonly Renderer[] = [bytesecRenderer];
+const RENDERERS: readonly Renderer[] = [bytesecRenderer];
 
 /** The most a package may hold: rendering reads it whole at each claim. */
 export const MAX_PACKAGE_BYTES = 16 * 1024 * 1024;
@@ -106,13 +108,8 @@ export function renderNative(root: string, role: Role, renderer: Renderer, roleM
   const dir = join(roleDir, hash);
   const existing = lstatSync(dir, { throwIfNoEntry: false });
   if (existing === undefined) {
-    const staging = mkdtempSync(join(roleDir, STAGING));
+    const staging = stage(roleDir, files);
     try {
-      for (const f of files) {
-        const path = join(staging, ...f.path.split('/'));
-        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-        writeFileSync(path, f.bytes, { mode: 0o600, flag: 'wx' });
-      }
       renameSync(staging, dir);
     } catch (err) {
       rmSync(staging, { recursive: true, force: true });
@@ -123,8 +120,76 @@ export function renderNative(root: string, role: Role, renderer: Renderer, roleM
     }
   } else if (!existing.isDirectory()) {
     throw new Error(`${dir} is in the way: it is not a directory`);
+  } else if (!holds(dir, files)) {
+    // Changed since it was written: an agent runs as the same user, and could
+    // edit it. A fresh copy is staged and swapped in for it.
+    const staging = stage(roleDir, files);
+    const aside = `${staging}-old`;
+    try {
+      renameSync(dir, aside);
+      renameSync(staging, dir);
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+      rmSync(aside, { recursive: true, force: true });
+    }
   }
   return { dir, hash, ...renderer.launch(role, dir) };
+}
+
+/**
+ * Write `files` in a new staging directory under `roleDir`, and return it; on
+ * a failure part way, remove it and throw.
+ */
+function stage(roleDir: string, files: readonly PackageFile[]): string {
+  const staging = mkdtempSync(join(roleDir, STAGING));
+  try {
+    for (const f of files) {
+      const path = join(staging, ...f.path.split('/'));
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      writeFileSync(path, f.bytes, { mode: 0o600, flag: 'wx' });
+    }
+  } catch (err) {
+    rmSync(staging, { recursive: true, force: true });
+    throw err;
+  }
+  return staging;
+}
+
+/**
+ * Whether the package at `dir` holds exactly `files`: the same paths, with
+ * the same bytes, as regular files, and no other file, directory or link.
+ * Each file is read no further than one byte past what it should hold.
+ */
+function holds(dir: string, files: readonly PackageFile[]): boolean {
+  const want = new Map(files.map((f) => [f.path, f.bytes]));
+  const dirs = new Set<string>();
+  for (const f of files) {
+    const parts = f.path.split('/');
+    for (let i = 1; i < parts.length; i += 1) dirs.add(parts.slice(0, i).join('/'));
+  }
+  const walk = (at: string, prefix: string): boolean => {
+    for (const entry of readdirSync(at, { withFileTypes: true })) {
+      const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const path = join(at, entry.name);
+      if (entry.isDirectory()) {
+        if (!dirs.delete(rel) || !realDir(path) || !walk(path, rel)) return false;
+        continue;
+      }
+      const bytes = want.get(rel);
+      if (bytes === undefined || !entry.isFile()) return false;
+      want.delete(rel);
+      const budget: Budget = { role: '', files: 0, bytes: MAX_PACKAGE_BYTES - bytes.length };
+      let got: Buffer | undefined;
+      try {
+        got = readRegular(path, budget);
+      } catch {
+        return false;
+      }
+      if (got === undefined || !got.equals(bytes)) return false;
+    }
+    return true;
+  };
+  return walk(dir, '') && want.size === 0 && dirs.size === 0;
 }
 
 /**
@@ -216,7 +281,8 @@ function readSkill(skill: Role['skills'][number], budget: Budget): SkillFiles {
       const path = join(dir, entry.name);
       const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
       if (entry.isDirectory()) {
-        walk(path, rel);
+        // Checked again: it may have been swapped for a symlink since the listing.
+        if (realDir(path)) walk(path, rel);
         continue;
       }
       if (!entry.isFile()) continue;
