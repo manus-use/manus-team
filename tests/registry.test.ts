@@ -75,6 +75,7 @@ function harness(
     drivers?: Record<string, FakeDriver>;
     channels?: Record<string, FakeChannel>;
     envFor?: (sessionId: string) => Readonly<Record<string, string>> | undefined;
+    argsFor?: (sessionId: string) => readonly string[] | undefined;
     pinned?: (sessionId: string) => boolean;
   } = {},
 ): Harness {
@@ -91,6 +92,7 @@ function harness(
     drivers: new Map<string, FakeDriver>([['default', driver], ...Object.entries(extra.drivers ?? {})]),
     channels: new Map<string, FakeChannel>([['lark', channel], ...Object.entries(extra.channels ?? {})]),
     ...(extra.envFor === undefined ? {} : { envFor: extra.envFor }),
+    ...(extra.argsFor === undefined ? {} : { argsFor: extra.argsFor }),
     ...(extra.pinned === undefined ? {} : { pinned: extra.pinned }),
     workspaces,
     appId: 'cli_app',
@@ -680,6 +682,35 @@ describe('sessions beyond chat', () => {
     expect(asked).toEqual([session.id, session.id]);
     expect(h.driver.starts[0]?.env).toEqual({ MT_KANBAN_RUN: 'r_1' });
     expect(h.driver.starts[1]?.env).toEqual({ MT_KANBAN_RUN: 'r_2' });
+  });
+
+  it("asks for the session's own arguments on every build, and passes them to the start", async () => {
+    // A kanban run's --agent, for its role's native package (plan R).
+    let builds = 0;
+    const h = harness(DEFAULT_MAX_LIVE, {
+      argsFor: () => {
+        builds += 1;
+        return ['--agent', `role-${builds}`];
+      },
+    });
+    const session = h.registry.bindOrCreate(key(), OWNER).session;
+    const first = await h.registry.actorFor(session.id, key());
+    await first.submit({ messageId: 'om_a', appId: 'cli_app', input: { text: 'hi', paths: [] } });
+    await h.registry.release(session.id);
+    const second = await h.registry.actorFor(session.id, key());
+    await second.submit({ messageId: 'om_a2', appId: 'cli_app', input: { text: 'again', paths: [] } });
+    expect(h.driver.starts.map((s) => s.args)).toEqual([
+      ['--agent', 'role-1'],
+      ['--agent', 'role-2'],
+    ]);
+  });
+
+  it('starts an agent with no arguments of its own when nothing gives any', async () => {
+    const h = harness();
+    const session = h.registry.bindOrCreate(key(), OWNER).session;
+    const actor = await h.registry.actorFor(session.id, key());
+    await actor.submit({ messageId: 'om_n', appId: 'cli_app', input: { text: 'hi', paths: [] } });
+    expect(h.driver.starts[0]?.args).toBeUndefined();
   });
 
   it('creates a session as a role, in a workspace, seeded from another session', async () => {

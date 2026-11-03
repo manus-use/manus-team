@@ -94,6 +94,12 @@ export interface SessionRegistryDeps {
    */
   envFor?: (sessionId: string) => Readonly<Record<string, string>> | undefined;
   /**
+   * Extra arguments for a session's agent, asked on every actor build, after
+   * `envFor`: a kanban run's `--agent <role>` when its role was rendered as a
+   * native agent package (plan R). Held by the dispatcher, as the environment is.
+   */
+  argsFor?: (sessionId: string) => readonly string[] | undefined;
+  /**
    * Sessions never retired as idle to make room: an open kanban run's (spec §2.4
    * item 3), so it cannot be rebuilt between one turn and the next. The registry
    * goes over its cap instead, as it does for busy actors.
@@ -178,6 +184,7 @@ export class SessionRegistry {
     // With the checks, before #makeRoom: the dispatcher refuses a run's session
     // whose environment did not survive a restart (spec §2.4 item 3).
     const env = this.#deps.envFor?.(sessionId);
+    const args = this.#deps.argsFor?.(sessionId);
 
     await this.#makeRoom();
 
@@ -192,6 +199,7 @@ export class SessionRegistry {
       target,
       cwd: workspace.cwd,
       ...(env === undefined ? {} : { env }),
+      ...(args === undefined ? {} : { args }),
       clock: this.#clock,
       note: (line) => this.#note(`[${sessionId}] ${line}`),
     });

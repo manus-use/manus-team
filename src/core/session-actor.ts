@@ -140,6 +140,8 @@ export interface SessionActorDeps {
   cwd: string;
   /** Extra environment for this session's agent, passed to every start (spec §2.4 item 3). */
   env?: Readonly<Record<string, string>> | undefined;
+  /** Extra arguments for this session's agent, passed to every start (plan R). */
+  args?: readonly string[] | undefined;
   clock?: Clock;
   /** Metadata-only progress hook. Never given agent text or user content. */
   note?: (line: string) => void;
@@ -161,6 +163,7 @@ export class SessionActor {
   readonly #key: BindingKey;
   readonly #cwd: string;
   readonly #env: Readonly<Record<string, string>> | undefined;
+  readonly #args: readonly string[] | undefined;
   readonly #clock: Clock;
   readonly #note: (line: string) => void;
   readonly #cardWriter: CardWriter;
@@ -180,6 +183,7 @@ export class SessionActor {
     this.#key = deps.key;
     this.#cwd = deps.cwd;
     this.#env = deps.env;
+    this.#args = deps.args;
     this.#clock = deps.clock ?? systemClock;
     this.#note = deps.note ?? (() => undefined);
 
@@ -824,6 +828,7 @@ export class SessionActor {
         providerSessionId: session.providerSessionId ?? undefined,
         replay: replay.length === 0 ? undefined : replay,
         env: this.#env,
+        args: this.#args,
       });
       this.#runtime = runtime;
 
