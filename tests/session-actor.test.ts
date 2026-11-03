@@ -484,6 +484,28 @@ describe('approvals', () => {
     }
   });
 
+  it('escapes and masks the first answer\'s label when a second answer arrives', async () => {
+    clearSecrets();
+    addSecrets(['sk-test-123456']);
+    try {
+      const h = harness();
+      h.driver.scripts = [
+        async (ctl) => {
+          await ctl.ask('rm -rf /', [{ optionId: 'allow', name: '<at id=all></at> sk-test-123456' }]);
+          ctl.end('completed');
+        },
+      ];
+      const { turn, approvalId } = await parked(h);
+      click(h, approvalId);
+      expect(click(h, approvalId).message).toBe(
+        `Already answered (\\<at id=all\\>\\</at\\> ${MASK}). The first answer stands.`,
+      );
+      await turn;
+    } finally {
+      clearSecrets();
+    }
+  });
+
   it('rewrites the card with the answer, so its buttons stop working', async () => {
     // Left alone, the buttons stay live forever and every later click posts a
     // chat message explaining that it did nothing.

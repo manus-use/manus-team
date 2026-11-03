@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -17,6 +17,7 @@ let root: string;
 let config: GatewayConfig;
 let team: Team;
 let workspace: string;
+let startupEnv: Record<string, string | undefined>;
 
 beforeEach(() => {
   clearSecrets();
@@ -27,7 +28,7 @@ beforeEach(() => {
   workspace = join(root, 'repo');
   mkdirSync(home);
   mkdirSync(workspace);
-  const env: Record<string, string | undefined> = {
+  startupEnv = {
     MT_HOME: home,
     MT_DB: join(home, 'gateway.db'),
     MT_WORKSPACE: workspace,
@@ -38,8 +39,8 @@ beforeEach(() => {
     MT_AGENT_DRIVER: 'structured-cli',
     MT_AGENT_UNSUPERVISED: 'true',
   };
-  config = loadConfig(env, () => undefined);
-  team = loadTeam(config, env);
+  config = loadConfig(startupEnv, () => undefined);
+  team = loadTeam(config, startupEnv);
 });
 
 afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -57,6 +58,24 @@ describe('registerConfiguredSecrets', () => {
   // main() calls it before createGateway, so an error raised in between is masked too.
   it('knows the Lark app secret without a gateway being created', () => {
     registerConfiguredSecrets(config, team);
+    expect(redactKnownSecrets(`x ${config.lark.appSecret} y`)).toBe(`x ${MASK} y`);
+  });
+
+  it("knows a role's .env values and the Lark app secret, but not a maskExempt value", () => {
+    const dir = join(config.home, 'roles', 'reviewer');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'config.yaml'),
+      'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n' +
+        '  passEnv: [BASE_URL]\n  maskExempt: [BASE_URL]\n',
+    );
+    writeFileSync(join(dir, '.env'), 'API_KEY=sk-role-12345678\n');
+    chmodSync(join(dir, '.env'), 0o600);
+    const withRole = loadTeam(config, { ...startupEnv, BASE_URL: 'https://example.invalid/v1' });
+
+    registerConfiguredSecrets(config, withRole);
+    expect(redactKnownSecrets('key sk-role-12345678')).toBe(`key ${MASK}`);
+    expect(redactKnownSecrets('url https://example.invalid/v1')).toBe('url https://example.invalid/v1');
     expect(redactKnownSecrets(`x ${config.lark.appSecret} y`)).toBe(`x ${MASK} y`);
   });
 });

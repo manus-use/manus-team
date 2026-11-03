@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CARD_TEXT_BUDGET,
   RETRY_AFTER_TOOLS_HINT,
@@ -340,12 +340,40 @@ describe('renderCard: known secrets', () => {
     expect(view.text).not.toContain('sk-te');
   });
 
-  it('does not show the end of a secret that contains a control character', () => {
+  it('does not show the start of a secret when a control character follows it', () => {
     const view = renderCard([
       ev('turn_submitted', { text: 'hi' }),
       ev('agent_message_chunk', { text: 'the key is sk-test-12\u0007' }),
     ]);
     expect(view.text).not.toContain('sk-te');
+  });
+
+  it('drops the start of a secret on a final render, when the turn ended part-way through it', () => {
+    const view = renderCard([
+      ev('turn_submitted', { text: 'hi' }),
+      ev('agent_message_chunk', { text: 'done: sk-te' }),
+      ev('turn_ended', { terminal: 'completed' }),
+    ]);
+    expect(view.text).toContain('done:');
+    expect(view.text).not.toContain('sk-te');
+  });
+});
+
+describe('renderCard: secrets that do not occur', () => {
+  beforeEach(() => clearSecrets());
+  afterEach(() => clearSecrets());
+
+  it('renders exactly as it would with no secrets known', () => {
+    const events = [
+      ev('turn_submitted', { text: 'hi' }),
+      ev('agent_message_chunk', { text: '## Result\n\nSome **bold** text and `code`.' }),
+      ev('tool_call', { toolCallId: 'c1', title: 'Read main.ts', status: 'completed' }),
+      ev('agent_error', { message: 'responses API stream error 400', retryable: true }),
+      ev('turn_ended', { terminal: 'failed' }),
+    ];
+    const plain = renderCard(events);
+    addSecrets(['unrelated-secret-1', 'another-unrelated-2']);
+    expect(renderCard(events)).toEqual(plain);
   });
 });
 

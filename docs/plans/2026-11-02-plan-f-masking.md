@@ -761,7 +761,7 @@ git commit -m "Say what the gateway masks"
 
 ## Done when
 
-- `npm test` gives `Tests  574 passed (574)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  579 passed (579)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - No escaper is bypassed on the way to chat (Step 6.4).
 
@@ -776,3 +776,7 @@ git commit -m "Say what the gateway masks"
 - `registerConfiguredSecrets` is exported from `src/index.ts` and called from both `main()`, right after `loadTeam`, and `createGateway`, before its startup notes. `src/main.ts` masks the configuration error line too.
 - `redactValues` leaves only a string directly under an identifying key alone; an object or array there is still walked.
 - `removeSecrets` notes that plan C must reference-count, or keep configured secrets apart, before it removes worker tokens.
+- Final-review tests: a final render drops a secret's trailing start (spec §11); `registerConfiguredSecrets` registers a role's `.env` value and the Lark secret but not a maskExempt value; a card renders identically when the known secrets do not occur in it; a secret containing `"` and `\` is masked through `appendEvent` and `readEvents`; the "Already answered (…)" toast is escaped and masked. Each was checked to fail with the code it covers broken.
+- `redactKnownSecrets` extends the last span when one secret's next occurrence overlaps or touches it, so a run of overlapping matches is one span, not one per match. Results are unchanged.
+- `forms()` notes that a value whose control-stripped form is under MIN_SECRET_LENGTH is registered only in its raw form.
+- `main()`'s comment says it registers the secrets itself, without relying on `createGateway`'s order; the `note` comment says why its line is masked; `secretValues` mentions maskExempt; `src/channel/render.ts` imports `stripControl` from `src/text.ts`; a render test's title now says what it tests.

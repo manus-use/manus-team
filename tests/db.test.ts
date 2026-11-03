@@ -545,6 +545,21 @@ describe('masking on write', () => {
     expect(event?.payload).toEqual({ toolCallId: 'sk-test-123456', title: `cat ${MASK}` });
   });
 
+  it('masks a secret containing a quote and a backslash, through storage and back', () => {
+    const secret = 'sk"quo\\te-123456';
+    addSecrets([secret]);
+    appendEvent(
+      h.db,
+      's_1',
+      { type: 'agent_error', actor: 'agent', payload: { message: `failed with ${secret} set` } },
+      NOW,
+    );
+    const [event] = readEvents(h.db, 's_1', 0, lastSeq(h.db, 's_1'));
+    const message = (event?.payload as { message: string }).message;
+    expect(message).toContain(MASK);
+    expect(message).not.toContain(secret);
+  });
+
   it("keeps a person's turn_submitted input as given, since replay re-sends it", () => {
     const payload = { text: 'use sk-test-123456', paths: ['/tmp/sk-test-123456'], messageId: 'om_1', replyTo: 'om_0' };
     appendEvent(h.db, 's_1', { type: 'turn_submitted', actor: 'user', payload }, NOW);
