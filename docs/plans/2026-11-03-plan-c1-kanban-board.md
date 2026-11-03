@@ -88,7 +88,9 @@ Each is the reading most consistent with the rest of the spec. Decisions 1 and 2
   - closing runs when their turn ends;
   - restart handling, the runtime limit and its `max_runtime_s`;
   - parsing the `kanban:` config section;
-  - the `submissions` count.
+  - the `submissions` count;
+  - a listing of ready tasks for the dispatcher to claim from, which C1 does not have;
+  - each parent's latest summary, read for the prompt's handoff section.
 - **Plan C3, the worker CLI:**
   - minting the run token and storing its `token_hash`, which the schema keeps unique;
   - registering the token with the masker, reference-counted;
@@ -96,7 +98,8 @@ Each is the reading most consistent with the rest of the spec. Decisions 1 and 2
   - passing a worker's `idempotency_key` through unchanged: the service already stores a run's key as `run-task:<its run's task_id>:<key>` and refuses a `lark:` key from anyone but chat, so two runs' keys cannot collide with each other or with chat's;
   - creating a task from a run, which inherits the run's task's subscriptions;
   - stop nudges, and forwarding comments to an undecided run;
-  - capturing `reported_commit` and `reported_dirty` before a report.
+  - capturing `reported_commit` and `reported_dirty` before a report;
+  - size limits on the text a worker sends: title, body, contract, summary.
 - **Plan C4, review, rework and gates:**
   - running gates inside `complete` and `requestReview`;
   - refusing a gate that contains a known secret;
@@ -106,7 +109,8 @@ Each is the reading most consistent with the rest of the spec. Decisions 1 and 2
   - the `/kanban` commands and cards;
   - which person may act on which task;
   - subscriptions, and notifications such as the block-recurrence warning at `block_recurrence_limit`;
-  - turning on `people` and `supervisedRoles`.
+  - turning on `people` and `supervisedRoles`;
+  - size limits on the text a person sends: title, body, contract, summary.
 - **The README.** It changes when the board can be used, in C3 or D. C1 has no surface a person can reach.
 
 ## File structure
@@ -5333,7 +5337,41 @@ git commit -m "Finish the kanban service API"
 
 ## Done when
 
-- `npm test` gives `Tests  702 passed (702)`. `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  724 passed (724)` (702 after Task 14; 22 more from the review follow-ups). `npm run test:e2e` gives `Tests  49 passed (49)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table (Step 14.6), and `src/db/WRITERS.md` says so.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - Every transition of spec §5.1 that does not need an agent, a dispatcher or a socket has a function in `db/kanban.ts` and a test, and `KanbanService` exposes it.
+
+## Review follow-ups
+
+Made after Tasks 1–14, from the reviews of the service, the schema, masking, events and reports. Migration 003 had never been applied anywhere real, so it was edited in place; there is no migration 004. Task 2's SQL above is the original; `schema/003_kanban.sql` is current.
+
+**Malformed input (service).** Every `KanbanService` entry point checks the types of what it was sent and refuses a wrong one as `invalid`, never throwing and never writing: a title that is not text or is missing; an assignee or reviewer that is not text, is null, or is empty (also in `requestReview`); a body, comment, block reason or changes reason that is not text; `parents` that is not a list of strings; an idempotency key that is not text; a contract value that is not text; a priority, failure limit or runtime that is not a safe integer (`Number.isSafeInteger`); task ids that are not text; a handoff with no text summary, or a `reportedCommit` or `reportedDirty` of the wrong type. One table-driven test feeds each bad shape to each entry point and checks that nothing was written.
+
+**Idempotency keys (service).** `create`, and so `followUp`, stores a run's key as `run-task:<its run's task_id>:<key>`. A `lark:` key is refused unless the creator is chat, and a key starting `run-task:` is refused from anyone, since it is the board's own. Tests: an agent's `lark:om_1` is refused; two runs on different tasks using one key get different tasks; a run repeating its key gets its own task back; a chat's key used by a run does not return the chat's task.
+
+**Schema (003).** `reported_dirty` is `CHECK (reported_dirty IN (0, 1))`. `kanban_runs` has `CHECK (assignee_kind = 'role' OR session_id IS NULL)`: a person's run has no session. `tests/kanban-schema.test.ts` now also covers the session-uniqueness index, the role⇔`agent_config` CHECK, and the assignee and reviewer kind/name pair CHECKs.
+
+**Masking.** The contract is masked value by value with `redactKnownSecrets`, not through `redactValues`, which leaves a value under a globally identifying key (such as `workspace`) alone. Tested with a secret under `workspace` in a contract.
+
+**Events.** `created`, `assignee_set`, `reviewer_set` and `review_requested` record the kind (`assigneeKind`, `reviewerKind`: `role` or `human`) beside the name; both keys are in `BOARD_KEYS`.
+
+**Reports (`db/kanban.ts`).**
+- `requestReview` refuses `parents_unfinished` while a parent is unfinished, as `complete` does. Tested with a person reporting, with no open run, on an open task whose parent is unfinished.
+- `link` checks for an existing pair first, so re-linking one changes nothing in any phase. Tested on a done child and a child in review.
+
+**`endRun`.** A missing `hadSideEffects` is taken as true, so an `if-no-side-effects` task stops for a person (`needs_input`, "may have changed things") rather than being retried blind. It stays optional in the type, documented as unknown-means-true.
+
+**Service minors.**
+- `noteUnassignable` writes only for a task that could otherwise be claimed: in open or review, parents finished, no cooldown, no open run. The check is in `db/kanban.ts`, inside its transaction; the claim is still refused `unassignable`. Tested with a todo task and a running task whose role was removed.
+- An empty or blank name is `invalid`, not `unknown_role`.
+- Names, workspaces, block kinds and contract fields the caller sent are echoed in refusals with `JSON.stringify`, and so in `skipped_unassignable` reasons.
+- role.md and each SKILL.md must be regular files (`statSync().isFile()`) as well as readable; a directory leaves the task unassignable.
+- role.md's bytes are hashed, and decoded separately for the returned text. Tested with bytes that are not UTF-8.
+- A blank or whitespace summary from a run is refused in `complete` and `requestReview` as `invalid`. A person's may be empty.
+- `Claimed` returns the `Role` the claim resolved, so plan C2's prompt uses the skills that were checked.
+- A test scans `src/**/*.ts` and checks that only `src/kanban/service.ts` imports `db/kanban.js`.
+
+**Missing tests, added.** The cooldown refusal, and the claim succeeding at exactly `cooldown_until`; a review claim refused while a parent is unfinished; a diamond (a→b, a→c, b→d, c→d), where linking a onto d is allowed and d onto a is a cycle; a new link onto a done child refused.
+
+**Out of scope, noted above.** Text size limits are C3's and D's. C2 needs a ready-task listing, and each parent's latest summary for the prompt. C3 no longer namespaces keys: the service does.
