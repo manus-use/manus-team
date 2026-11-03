@@ -12,6 +12,7 @@ import type {
   CommentRow,
   Contract,
   CreatedVia,
+  EndedOutcome,
   Phase,
   Refusal,
   RefusalCode,
@@ -921,5 +922,142 @@ export function stop(db: Db, taskId: string, by: string, now: number): Result<{ 
       now,
     );
     return { ok: true, task: mustGet(d, taskId), run: mustGetRun(d, open.runId) };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Runs that end without a report
+// ---------------------------------------------------------------------------
+
+/** The `kanban:` settings the breaker uses (spec §8.2). */
+export interface KanbanLimits {
+  /** Counted failures that block a task as gave_up, unless the task sets its own. */
+  failureLimit: number;
+  /** Consecutive throttled runs that block a task as transient. */
+  transientLimit: number;
+  /** The first cooldown after a throttled run; it doubles each time, up to an hour. */
+  transientCooldownS: number;
+}
+
+export const DEFAULT_LIMITS: KanbanLimits = { failureLimit: 2, transientLimit: 10, transientCooldownS: 300 };
+
+const MAX_COOLDOWN_S = 60 * 60;
+
+export interface RunEnding {
+  outcome: EndedOutcome;
+  error?: string | null;
+  lastOutput?: string | null;
+  /**
+   * The run made a tool call outside its role's readOnlyTools (spec §8.3). Plan
+   * C2 reads the tool calls from the run's session log.
+   */
+  hadSideEffects?: boolean;
+}
+
+/** What happens to the task next: claimed again, claimed again after a cooldown, or blocked. */
+export type NextStep = 'retry' | 'cooldown' | 'blocked';
+
+/**
+ * Record why an agent run ended without a report, and what it means for the task
+ * (spec §5.1, §5.2, §8.2, §8.3). Plan C2 calls it with the classifier's outcome,
+ * or with its own -- `timed_out`, `interrupted` -- having recorded it before it
+ * cancels the turn.
+ *
+ * Only an undecided run: a decided run's outcome is never overwritten, so a
+ * restart or a runtime limit arriving just after a report cannot turn a
+ * completed task's run into a failure. The run stays open; closeRun() closes it
+ * when its turn has ended.
+ *
+ * - `failed`, `crashed`, `timed_out`, `protocol_violation` are counted. At the
+ *   task's failure limit it blocks as `gave_up`; below it, it is claimed again.
+ * - `rate_limited` is not counted, so a long quota window cannot use up a task's
+ *   retries. It holds the task in a cooldown that doubles each time, up to an
+ *   hour, and blocks it as `transient` at the limit.
+ * - `terminal_provider` blocks at once as `capability`: every retry would hit the
+ *   same wall.
+ * - `interrupted` is not counted: the task did nothing wrong.
+ *
+ * With `retry_on_crash: if-no-side-effects`, a run that changed things blocks as
+ * `needs_input` instead of being retried, so a person looks first.
+ */
+export function endRun(
+  db: Db,
+  runId: string,
+  ending: RunEnding,
+  limits: KanbanLimits,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow; next: NextStep }> {
+  return tx(db, (d) => {
+    const run = getRun(d, runId);
+    if (run === undefined) return refuse('not_found', `no run ${runId}`);
+    if (run.endedAt !== null) return refuse('already_closed', `run ${runId} is closed`);
+    if (run.outcome !== null) {
+      return refuse('already_decided', `run ${runId} already has its outcome (${run.outcome}), which stands`);
+    }
+    if (run.agentConfig === null) return refuse('invalid', `run ${runId} is a person's: it has no process to end`);
+    const before = mustGet(d, run.taskId);
+    decide(d, run, ending.outcome, { error: ending.error ?? null, lastOutput: ending.lastOutput ?? null }, now);
+
+    const cautious = before.retryOnCrash === 'if-no-side-effects' && ending.hadSideEffects === true;
+    const careful = `the run ended ${ending.outcome} after changing things; look before it is retried`;
+    let next: NextStep = 'retry';
+    let blockAs: { kind: Exclude<BlockKind, 'dependency'>; reason: string } | undefined;
+    switch (ending.outcome) {
+      case 'terminal_provider':
+        blockAs = { kind: 'capability', reason: ending.error ?? 'the provider refused the credentials or the model' };
+        break;
+      case 'rate_limited': {
+        const n = before.consecutiveTransient + 1;
+        d.prepare('UPDATE kanban_tasks SET consecutive_transient = ? WHERE task_id = ?').run(n, run.taskId);
+        if (n >= limits.transientLimit) {
+          blockAs = { kind: 'transient', reason: `throttled ${n} times in a row` };
+        } else if (cautious) {
+          blockAs = { kind: 'needs_input', reason: careful };
+        } else {
+          const seconds = Math.min(limits.transientCooldownS * 2 ** (n - 1), MAX_COOLDOWN_S);
+          d.prepare('UPDATE kanban_tasks SET cooldown_until = ? WHERE task_id = ?').run(
+            now + seconds * 1000,
+            run.taskId,
+          );
+          next = 'cooldown';
+        }
+        break;
+      }
+      case 'interrupted':
+        if (cautious) blockAs = { kind: 'needs_input', reason: careful };
+        break;
+      case 'failed':
+      case 'crashed':
+      case 'timed_out':
+      case 'protocol_violation': {
+        const failures = before.consecutiveFailures + 1;
+        d.prepare('UPDATE kanban_tasks SET consecutive_failures = ? WHERE task_id = ?').run(failures, run.taskId);
+        if (failures >= (before.failureLimit ?? limits.failureLimit)) {
+          blockAs = {
+            kind: 'gave_up',
+            reason: `failed ${failures} times; last ${ending.outcome}${ending.error ? `: ${ending.error}` : ''}`,
+          };
+        } else if (cautious) {
+          blockAs = { kind: 'needs_input', reason: careful };
+        }
+        break;
+      }
+    }
+    if (blockAs !== undefined) {
+      enterBlocked(d, mustGet(d, run.taskId), blockAs.kind, blockAs.reason);
+      next = 'blocked';
+    }
+    record(
+      d,
+      {
+        taskId: run.taskId,
+        runId,
+        kind: 'run_ended',
+        actor: 'gateway',
+        payload: { outcome: ending.outcome, error: ending.error ?? null, next, blockKind: blockAs?.kind ?? null },
+      },
+      now,
+    );
+    return { ok: true, task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next };
   });
 }
