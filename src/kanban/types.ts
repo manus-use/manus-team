@@ -8,7 +8,7 @@
  */
 
 /** The only stored lifecycle state (spec §4.1). */
-export const PHASES = ['open', 'review', 'blocked', 'done', 'archived'] as const;
+const PHASES = ['open', 'review', 'blocked', 'done', 'archived'] as const;
 export type Phase = (typeof PHASES)[number];
 
 /** The phases a block can return to. */
@@ -16,7 +16,8 @@ export type ActivePhase = 'open' | 'review';
 
 /**
  * Why a task is blocked (spec §5.4). `dependency` never sits in `blocked`: the
- * task returns to `open`, gated by its parents. `gave_up` is the breaker's.
+ * task keeps its phase, open or review, and its next claim waits for the parents
+ * the block names. `gave_up` is the breaker's.
  */
 export const BLOCK_KINDS = ['dependency', 'needs_input', 'capability', 'transient', 'gave_up'] as const;
 export type BlockKind = (typeof BLOCK_KINDS)[number];
@@ -41,7 +42,7 @@ export const ENDED_OUTCOMES = [
   'interrupted',
 ] as const;
 /** Recorded by a person's action, not by the run: `/kanban stop`, assign, archive. */
-export const SUPERSEDING_OUTCOMES = ['cancelled', 'superseded'] as const;
+const SUPERSEDING_OUTCOMES = ['cancelled', 'superseded'] as const;
 
 export type ReportedOutcome = (typeof REPORTED_OUTCOMES)[number];
 export type EndedOutcome = (typeof ENDED_OUTCOMES)[number];

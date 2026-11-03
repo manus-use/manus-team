@@ -236,4 +236,14 @@ describe('endRun', () => {
       message: `run ${run.runId} is a person's: it has no process to end`,
     });
   });
+
+  it("refuses an outcome that is not one a run ends with, leaving the run undecided", () => {
+    const id = task();
+    const run = claimed(h.db, id);
+    const before = eventsOf(h.db, id).length;
+    const ending = { outcome: 'completed' } as unknown as RunEnding;
+    expect(endRun(h.db, run.runId, ending, DEFAULT_LIMITS, NOW)).toMatchObject({ ok: false, code: 'invalid' });
+    expect(getRun(h.db, run.runId)?.outcome).toBeNull();
+    expect(eventsOf(h.db, id)).toHaveLength(before);
+  });
 });

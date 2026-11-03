@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eventsOf } from '../src/db/kanban-read.js';
 import { createSession } from '../src/db/sessions.js';
+import { addSecrets, clearSecrets } from '../src/secrets.js';
 import { KanbanService, type CreateRequest, type KanbanServiceDeps } from '../src/kanban/service.js';
 import type { AgentConfig } from '../src/config.js';
 import type { Role } from '../src/roles.js';
@@ -17,12 +18,14 @@ let dir: string;
 let clock: ManualClock;
 
 beforeEach(() => {
+  clearSecrets();
   h = testDb();
   dir = mkdtempSync(join(tmpdir(), 'mt-kanban-'));
   clock = new ManualClock();
 });
 
 afterEach(() => {
+  clearSecrets();
   h.close();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -442,6 +445,25 @@ describe('KanbanService: malformed input', () => {
       ['create: contract value null', () => s.create(request({ contract: bad({ outcome: null }) }))],
       ['create: contract text', () => s.create(request({ contract: bad('x') }))],
       ['create: contract a list', () => s.create(request({ contract: bad([]) }))],
+      ['create: createdBy a number', () => s.create(request({ createdBy: bad(3) }))],
+      ['create: createdBy missing', () => s.create(request({ createdBy: bad(undefined) }))],
+      ['create: createdVia null', () => s.create(request({ createdVia: bad(null) }))],
+      ['create: createdVia text', () => s.create(request({ createdVia: bad('chat') }))],
+      ['create: createdVia a list', () => s.create(request({ createdVia: bad([]) }))],
+      ['create: createdVia unknown kind', () => s.create(request({ createdVia: bad({ kind: 'email' }) }))],
+      ['create: createdVia run id a number', () => s.create(request({ createdVia: bad({ kind: 'run', runId: 3 }) }))],
+      [
+        'create: createdVia chat channel a number',
+        () => s.create(request({ createdVia: bad({ ...VIA, channel: 3 }) })),
+      ],
+      [
+        'create: createdVia chat without a thread',
+        () => s.create(request({ createdVia: bad({ ...VIA, threadId: undefined }) })),
+      ],
+      [
+        'create: createdVia with a key and a run id a number',
+        () => s.create(request({ idempotencyKey: 'k', createdVia: bad({ kind: 'run', runId: {} }) })),
+      ],
       ['followUp: title a number', () => s.followUp(done.taskId, request({ title: bad(3) }))],
       ['followUp: parents a string', () => s.followUp(done.taskId, request({ parents: bad(open.taskId) }))],
       ['followUp: task id an object', () => s.followUp(bad({}), request())],
@@ -462,6 +484,12 @@ describe('KanbanService: malformed input', () => {
       ['complete: no handoff', () => s.complete(open.taskId, by, bad(null))],
       ['complete: commit a number', () => s.complete(open.taskId, by, { summary: 'x', reportedCommit: bad(3) })],
       ['complete: dirty text', () => s.complete(open.taskId, by, { summary: 'x', reportedDirty: bad('yes') })],
+      ['complete: commit not a commit id', () => s.complete(open.taskId, by, { summary: 'x', reportedCommit: 'HEAD' })],
+      ['complete: commit too short', () => s.complete(open.taskId, by, { summary: 'x', reportedCommit: 'abc12' })],
+      [
+        'requestReview: commit upper case',
+        () => s.requestReview(open.taskId, by, { summary: 'x', reportedCommit: 'ABCDEF1234567' }),
+      ],
       ['requestReview: summary a number', () => s.requestReview(open.taskId, by, { summary: bad(3) })],
       ['requestReview: summary blank', () => s.requestReview(open.taskId, by, { summary: '\n' })],
       ['requestReview: reviewer a number', () => s.requestReview(open.taskId, by, { summary: 'x', reviewer: bad(3) })],
@@ -481,6 +509,14 @@ describe('KanbanService: malformed input', () => {
         () => s.block(open.taskId, by, { kind: 'dependency', reason: 'x', parents: bad([3]) }),
       ],
       ['block: no report', () => s.block(open.taskId, by, bad(null))],
+      [
+        'block: parents on a needs_input block',
+        () => s.block(open.taskId, by, { kind: 'needs_input', reason: 'x', parents: [done.taskId] }),
+      ],
+      [
+        'block: parents on a capability block',
+        () => s.block(open.taskId, by, { kind: 'capability', reason: 'x', parents: [] }),
+      ],
       ['unblock: comment a number', () => s.unblock(open.taskId, ALICE, bad(3))],
       ['link: parent a number', () => s.link(bad(3), open.taskId, ALICE)],
       ['link: child an object', () => s.link(done.taskId, bad({}), ALICE)],
@@ -576,6 +612,29 @@ describe('KanbanService: idempotency keys', () => {
       ok: false,
       code: 'invalid',
     });
+  });
+});
+
+describe('KanbanService: secrets in what a reporter or creator sends', () => {
+  it('refuses a reported commit that is a secret, and stores a commit id', () => {
+    addSecrets(['sk-test-123456']);
+    const s = service();
+    const task = ok(s.create(request())).task;
+    const by = { kind: 'run', runId: ok(s.claim(task.taskId)).run.runId } as const;
+    expect(s.complete(task.taskId, by, { summary: 'done', reportedCommit: 'sk-test-123456' })).toMatchObject({
+      ok: false,
+      code: 'invalid',
+    });
+    const sha = '0123456789abcdef0123456789abcdef01234567';
+    expect(ok(s.complete(task.taskId, by, { summary: 'done', reportedCommit: sha })).run?.reportedCommit).toBe(sha);
+  });
+
+  it('refuses an idempotency key that holds a known secret, and writes nothing', () => {
+    addSecrets(['sk-test-123456']);
+    const s = service();
+    expect(s.create(request({ idempotencyKey: 'step-sk-test-123456' }))).toMatchObject({ ok: false, code: 'invalid' });
+    expect(h.db.prepare<[], { n: number }>('SELECT count(*) AS n FROM kanban_tasks').get()?.n).toBe(0);
+    expect(s.create(request({ idempotencyKey: 'step-1' }))).toMatchObject({ ok: true, existing: false });
   });
 });
 

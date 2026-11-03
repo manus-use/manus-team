@@ -3,6 +3,7 @@ import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import type { Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
 import { getRun, getTask, taskView, type TaskView } from '../db/kanban-read.js';
+import { redactKnownSecrets } from '../secrets.js';
 import type { Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
 import {
@@ -134,6 +135,23 @@ function idsRefused(...ids: unknown[]): Refusal | undefined {
   return ids.every(isText) ? undefined : board.refuse('invalid', 'task ids are text');
 }
 
+/** A commit id, abbreviated or whole, SHA-1 or SHA-256. */
+const COMMIT = /^[0-9a-f]{7,64}$/;
+
+/** A refusal unless createdVia is one of the two shapes, with text fields. */
+function createdViaRefused(via: unknown): Refusal | undefined {
+  const fine =
+    isRecord(via) &&
+    (via.kind === 'run'
+      ? isText(via.runId)
+      : via.kind === 'chat' &&
+        isText(via.channel) &&
+        isText(via.appId) &&
+        isText(via.conversationId) &&
+        isText(via.threadId));
+  return fine ? undefined : board.refuse('invalid', 'created_via is a chat, with text fields, or a run id');
+}
+
 /** A refusal unless the handoff has a text summary, and its report fields their types. */
 function handoffRefused(by: Reporter, handoff: unknown): Refusal | undefined {
   if (!isRecord(handoff) || !isText(handoff.summary)) {
@@ -144,8 +162,9 @@ function handoffRefused(by: Reporter, handoff: unknown): Refusal | undefined {
     return board.refuse('invalid', 'a report needs a summary of what was done');
   }
   const { reportedCommit: commit, reportedDirty: dirty } = handoff;
-  if (commit !== undefined && commit !== null && !isText(commit)) {
-    return board.refuse('invalid', 'reported_commit is text');
+  if (commit !== undefined && commit !== null && !(isText(commit) && COMMIT.test(commit))) {
+    // Not echoed: it is the reporter's text, and may be anything.
+    return board.refuse('invalid', 'reported_commit is a commit id: 7 to 64 lower-case hex digits');
   }
   if (dirty !== undefined && dirty !== null && typeof dirty !== 'boolean') {
     return board.refuse('invalid', 'reported_dirty is true or false');
@@ -187,6 +206,9 @@ export class KanbanService {
   create(req: CreateRequest): Result<{ task: TaskRow; existing: boolean }> {
     if (!isRecord(req)) return board.refuse('invalid', 'a task to create is an object');
     if (!isText(req.title) || req.title.trim() === '') return board.refuse('invalid', 'a task needs a title');
+    if (!isText(req.createdBy)) return board.refuse('invalid', 'created_by is text');
+    const via = createdViaRefused(req.createdVia);
+    if (via !== undefined) return via;
     if (req.body !== undefined && !isText(req.body)) return board.refuse('invalid', 'a body is text');
     if (req.workspace !== undefined && !isText(req.workspace)) return board.refuse('invalid', 'a workspace is a name');
     if (req.parents !== undefined && !isTextList(req.parents)) {
@@ -407,6 +429,9 @@ export class KanbanService {
     if (report.parents !== undefined && !isTextList(report.parents)) {
       return board.refuse('invalid', 'parents are a list of task ids');
     }
+    if (report.parents !== undefined && kind !== 'dependency') {
+      return board.refuse('invalid', `only a dependency block names parents, not ${kind}`);
+    }
     return board.block(
       this.#db,
       taskId,
@@ -544,6 +569,8 @@ export class KanbanService {
     const key: unknown = req.idempotencyKey;
     if (key === undefined) return { ok: true, key: null };
     if (!isText(key) || key === '') return board.refuse('invalid', 'an idempotency key is non-empty text');
+    // Stored, and not masked: it identifies. So it may not carry a secret.
+    if (redactKnownSecrets(key) !== key) return board.refuse('invalid', 'an idempotency key holds a known secret');
     if (key.startsWith(RUN_KEY)) {
       return board.refuse('invalid', `an idempotency key starting ${RUN_KEY} is the board's own`);
     }

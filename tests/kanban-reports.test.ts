@@ -87,6 +87,33 @@ describe('complete', () => {
     expect(eventsOf(h.db, task.taskId).at(-1)?.payload).toEqual({ summary: `rotated ${MASK}` });
   });
 
+  it('masks metadata under any key, and in its keys, since an agent shapes it', () => {
+    addSecrets(['sk-test-123456']);
+    const task = newTask(h.db);
+    const run = claimed(h.db, task.taskId);
+    const metadata = {
+      sessionId: 'sk-test-123456',
+      idempotencyKey: ['sk-test-123456'],
+      'sk-test-123456': { messageId: 'sk-test-123456', files: 2 },
+    };
+    const r = ok(complete(h.db, task.taskId, asRun(run), { summary: 'done', metadata }, NOW));
+    const stored = JSON.stringify(getRun(h.db, run.runId)?.metadata);
+    expect(stored).not.toContain('sk-test-123456');
+    expect(r.run?.metadata).toEqual({
+      sessionId: MASK,
+      idempotencyKey: [MASK],
+      [MASK]: { messageId: MASK, files: 2 },
+    });
+  });
+
+  it('masks a reported commit on write', () => {
+    addSecrets(['sk-test-123456']);
+    const task = newTask(h.db);
+    const run = claimed(h.db, task.taskId);
+    const r = ok(complete(h.db, task.taskId, asRun(run), { summary: 'done', reportedCommit: 'sk-test-123456' }, NOW));
+    expect(r.run?.reportedCommit).toBe(MASK);
+  });
+
   it('keeps the reporting run open, holding its workspace, until it is closed', () => {
     // The agent usually keeps going after it reports, in the same checkout.
     const task = newTask(h.db);

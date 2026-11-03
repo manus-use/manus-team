@@ -3,7 +3,7 @@ import { txImmediate } from './open.js';
 import { newRunId, newTaskId } from '../core/ids.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import { resolveTaskWorkspace } from '../kanban/workspace.js';
-import { REPORTED_OUTCOMES } from '../kanban/types.js';
+import { ENDED_OUTCOMES, REPORTED_OUTCOMES } from '../kanban/types.js';
 import type {
   ActivePhase,
   AgentSnapshot,
@@ -49,8 +49,8 @@ import {
  * service's (kanban/service.ts), which knows the team.
  *
  * Free text -- titles, bodies, the contract, summaries, metadata, reasons,
- * comments, errors, output -- and every event payload's string values are masked
- * before they are stored (spec §10.1 layer 3). Best effort: a secret split
+ * comments, errors, output, reported commits -- and every event payload's string
+ * values are masked before they are stored (spec §10.1 layer 3). Best effort: a secret split
  * across two writes matches neither; the escapers are the authoritative layer.
  * Ids, names and idempotency keys are not masked: they identify.
  */
@@ -123,6 +123,20 @@ const mask = redactKnownSecrets;
  */
 function maskContract(contract: Contract): Contract {
   return Object.fromEntries(Object.entries(contract).map(([field, value]) => [field, mask(value)]));
+}
+
+/**
+ * A run's metadata is free-form JSON an agent shapes, so nothing in it identifies:
+ * every string is masked whatever its key, and so is every key. Not redactValues,
+ * which leaves a value under a globally identifying key such as `sessionId` alone.
+ */
+function maskDeep(value: unknown): unknown {
+  if (typeof value === 'string') return mask(value);
+  if (Array.isArray(value)) return value.map(maskDeep);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [mask(key), maskDeep(inner)]));
+  }
+  return value;
 }
 
 function mustGet(d: Db, taskId: string): TaskRow {
@@ -542,7 +556,7 @@ export interface Handoff {
   reportedDirty?: boolean | null;
 }
 
-export function actorOf(by: Reporter): string {
+function actorOf(by: Reporter): string {
   return by.kind === 'run' ? `run:${by.runId}` : by.principal;
 }
 
@@ -621,8 +635,11 @@ function decide(
     .run(
       outcome,
       fields.summary === undefined || fields.summary === null ? null : mask(fields.summary),
-      fields.metadata === undefined ? null : JSON.stringify(redactValues(fields.metadata)),
-      agent ? (fields.reportedCommit ?? null) : null,
+      fields.metadata === undefined ? null : JSON.stringify(maskDeep(fields.metadata)),
+      // The service accepts only a commit id; masked anyway, should another caller not.
+      agent && fields.reportedCommit !== undefined && fields.reportedCommit !== null
+        ? mask(fields.reportedCommit)
+        : null,
       agent && fields.reportedDirty !== undefined && fields.reportedDirty !== null
         ? Number(fields.reportedDirty)
         : null,
@@ -1019,6 +1036,10 @@ export function endRun(
       return refuse('already_decided', `run ${runId} already has its outcome (${run.outcome}), which stands`);
     }
     if (run.agentConfig === null) return refuse('invalid', `run ${runId} is a person's: it has no process to end`);
+    // Checked at runtime too: a report's outcome recorded here would skip that report's checks.
+    if (!(ENDED_OUTCOMES as readonly unknown[]).includes(ending.outcome)) {
+      return refuse('invalid', `${JSON.stringify(ending.outcome)} is not an outcome a run ends with unreported`);
+    }
     const before = mustGet(d, run.taskId);
     decide(d, run, ending.outcome, { error: ending.error ?? null, lastOutput: ending.lastOutput ?? null }, now);
 
