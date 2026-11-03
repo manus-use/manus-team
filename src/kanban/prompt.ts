@@ -5,7 +5,10 @@ import { CONTRACT_FIELDS, type CommentRow, type RunKind, type RunRow, type TaskR
 
 /**
  * A run's task prompt (spec §7.1), composed in this order: the role, its skills,
- * the protocol for the run's kind, the task, and the worker context.
+ * the protocol for the run's kind, the task, and the worker context. A run whose
+ * role was rendered as a native agent package (plan R) has its role.md as the
+ * agent's system prompt and its skills loaded by the agent, so its prompt leaves
+ * both out rather than send them twice; the rest is the same.
  *
  * The protocol comes after role.md and says it takes precedence: a role's
  * instructions may shape how work is done, not whether it is reported. That is an
@@ -97,6 +100,8 @@ export interface RunBrief {
   /** The role.md text, as the claim read the file whose hash the run records; undefined without one. */
   roleMd: string | undefined;
   skills: readonly Skill[];
+  /** The role reached the agent as a native package: role.md and the skills are not in the prompt. */
+  native?: boolean;
   task: TaskRow;
   parents: readonly ParentHandoff[];
   attempts: readonly Attempt[];
@@ -391,8 +396,9 @@ function told(b: RunBrief): string {
 
 export function composePrompt(b: RunBrief): string {
   const head: string[] = [];
-  if (b.roleMd !== undefined && b.roleMd.trim() !== '') head.push('# Your role', '', b.roleMd.trim(), '');
-  if (b.skills.length > 0) {
+  const injected = b.native !== true;
+  if (injected && b.roleMd !== undefined && b.roleMd.trim() !== '') head.push('# Your role', '', b.roleMd.trim(), '');
+  if (injected && b.skills.length > 0) {
     head.push('# Skills', '', 'Read a skill\'s SKILL.md when it applies to what you are doing:');
     for (const s of b.skills) head.push(`- ${s.name}: ${s.description} (${s.path})`);
     head.push('');

@@ -112,6 +112,16 @@ describe('briefFor', () => {
   });
 });
 
+describe('briefFor: a native run', () => {
+  it("says so, and still carries the role's files, which the prompt then leaves out", () => {
+    const task = newTask(h.db);
+    const run = claimed(h.db, task.taskId);
+    const c = { run, task, roleMd: 'Be careful.', role: ROLE };
+    expect(briefFor(h.db, c, { native: true })).toMatchObject({ native: true, roleMd: 'Be careful.' });
+    expect(briefFor(h.db, c)).not.toHaveProperty('native');
+  });
+});
+
 describe('endedUnreported', () => {
   it('is true for the outcomes of a run that ended without a report, and for nothing else', () => {
     const task = newTask(h.db);

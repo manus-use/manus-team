@@ -92,6 +92,27 @@ describe('composePrompt', () => {
     expect(prompt).toContain('take precedence over them');
   });
 
+  it('leaves out the role and the skills a native run was given as its agent package, and keeps the rest', () => {
+    const native = composePrompt(
+      brief({
+        roleMd: 'You change code in this repository.\n',
+        skills: [{ name: 'testing', description: 'How to test here', dir: '/r/skills/testing', path: '/r/skills/testing/SKILL.md' }],
+        native: true,
+      }),
+    );
+    expect(native).not.toContain('# Your role');
+    expect(native).not.toContain('You change code in this repository.');
+    expect(native).not.toContain('# Skills');
+    expect(native).not.toContain('/r/skills/testing/SKILL.md');
+    expect(native.startsWith('# How to work')).toBe(true);
+    const order = ['# How to work', '# The task', '# Context'].map((h) => at(native, h));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(native).toContain('take precedence over them');
+    // Everything after the role and the skills is what an injected prompt has.
+    const injected = composePrompt(brief({ roleMd: 'You change code in this repository.\n' }));
+    expect(injected.slice(injected.indexOf('# How to work'))).toBe(native);
+  });
+
   it('leaves out the role and skills a role does not have', () => {
     const prompt = composePrompt(brief());
     expect(prompt).not.toContain('# Your role');

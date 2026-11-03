@@ -20,7 +20,8 @@ export function endedUnreported(run: RunRow): boolean {
   return run.outcome !== null && (ENDED_OUTCOMES as readonly string[]).includes(run.outcome);
 }
 
-export function briefFor(db: Db, c: Claimed): RunBrief {
+/** `native`: the run's role was rendered as a native agent package, so its prompt leaves role.md and the skills out. */
+export function briefFor(db: Db, c: Claimed, opts: { native?: boolean } = {}): RunBrief {
   const taskId = c.task.taskId;
   const parents: ParentHandoff[] = parentsOf(db, taskId).map((task) => {
     const done = latestCompletion(db, task.taskId);
@@ -36,6 +37,7 @@ export function briefFor(db: Db, c: Claimed): RunBrief {
     kind: c.run.kind,
     roleMd: c.roleMd,
     skills: c.role?.skills ?? [],
+    ...(opts.native === true ? { native: true } : {}),
     task: c.task,
     parents,
     attempts,
