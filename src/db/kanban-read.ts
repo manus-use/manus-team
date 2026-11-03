@@ -1,0 +1,313 @@
+import type { Db } from './open.js';
+import { displayStatus, type DisplayStatus } from '../kanban/status.js';
+import type {
+  ActivePhase,
+  AgentSnapshot,
+  Assignee,
+  CommentRow,
+  Contract,
+  CreatedVia,
+  KanbanEvent,
+  Phase,
+  RetryOnCrash,
+  RunKind,
+  RunOutcome,
+  RunRow,
+  TaskRow,
+} from '../kanban/types.js';
+
+/**
+ * Reading the board. Reads only: every write is db/kanban.ts's (WRITERS.md).
+ *
+ * Each function takes a `Db`, so db/kanban.ts calls them with the connection of
+ * its open transaction, and a read that a decision rests on is made under the
+ * write lock.
+ */
+
+type Json = string | Buffer | Uint8Array;
+
+function json(v: Json): unknown {
+  return JSON.parse(typeof v === 'string' ? v : Buffer.from(v).toString('utf8')) as unknown;
+}
+
+function assignee(kind: string | null, name: string | null): Assignee | null {
+  return kind === null || name === null ? null : { kind: kind as Assignee['kind'], name };
+}
+
+interface TaskRaw {
+  task_id: string;
+  title: string;
+  body: string;
+  contract: Json;
+  assignee_kind: string | null;
+  assignee: string | null;
+  reviewer_kind: string | null;
+  reviewer: string | null;
+  workspace: string | null;
+  phase: string;
+  blocked_from: string | null;
+  block_kind: string | null;
+  block_reason: string | null;
+  priority: number;
+  idempotency_key: string | null;
+  failure_limit: number | null;
+  retry_on_crash: string;
+  max_runtime_s: number | null;
+  consecutive_failures: number;
+  consecutive_transient: number;
+  cooldown_until: number | null;
+  block_recurrences: number;
+  stranded_notified_at: number | null;
+  created_by: string;
+  created_via: Json;
+  created_at: number;
+  closed_at: number | null;
+  created_from_task: string | null;
+}
+
+function decodeTask(r: TaskRaw): TaskRow {
+  return {
+    taskId: r.task_id,
+    title: r.title,
+    body: r.body,
+    contract: json(r.contract) as Contract,
+    assignee: assignee(r.assignee_kind, r.assignee),
+    reviewer: assignee(r.reviewer_kind, r.reviewer),
+    workspace: r.workspace,
+    phase: r.phase as Phase,
+    blockedFrom: r.blocked_from as ActivePhase | null,
+    blockKind: r.block_kind as TaskRow['blockKind'],
+    blockReason: r.block_reason,
+    priority: r.priority,
+    idempotencyKey: r.idempotency_key,
+    failureLimit: r.failure_limit,
+    retryOnCrash: r.retry_on_crash as RetryOnCrash,
+    maxRuntimeS: r.max_runtime_s,
+    consecutiveFailures: r.consecutive_failures,
+    consecutiveTransient: r.consecutive_transient,
+    cooldownUntil: r.cooldown_until,
+    blockRecurrences: r.block_recurrences,
+    strandedNotifiedAt: r.stranded_notified_at,
+    createdBy: r.created_by,
+    createdVia: json(r.created_via) as CreatedVia,
+    createdAt: r.created_at,
+    closedAt: r.closed_at,
+    createdFromTask: r.created_from_task,
+  };
+}
+
+const TASK_COLS = `task_id, title, body, json(contract) AS contract, assignee_kind, assignee,
+  reviewer_kind, reviewer, workspace, phase, blocked_from, block_kind, block_reason, priority,
+  idempotency_key, failure_limit, retry_on_crash, max_runtime_s, consecutive_failures,
+  consecutive_transient, cooldown_until, block_recurrences, stranded_notified_at, created_by,
+  json(created_via) AS created_via, created_at, closed_at, created_from_task`;
+
+interface RunRaw {
+  run_id: string;
+  task_id: string;
+  attempt: number;
+  kind: string;
+  assignee_kind: string;
+  assignee: string;
+  agent_config: Json | null;
+  workspace: string | null;
+  role_md_hash: string | null;
+  session_id: string | null;
+  seeded_from_run: string | null;
+  token_hash: string | null;
+  outcome: string | null;
+  summary: string | null;
+  metadata: Json | null;
+  reported_commit: string | null;
+  reported_dirty: number | null;
+  error: string | null;
+  last_output: string | null;
+  submissions: number;
+  started_at: number;
+  ended_at: number | null;
+}
+
+function decodeRun(r: RunRaw): RunRow {
+  return {
+    runId: r.run_id,
+    taskId: r.task_id,
+    attempt: r.attempt,
+    kind: r.kind as RunKind,
+    assignee: { kind: r.assignee_kind as Assignee['kind'], name: r.assignee },
+    agentConfig: r.agent_config === null ? null : (json(r.agent_config) as AgentSnapshot),
+    workspace: r.workspace,
+    roleMdHash: r.role_md_hash,
+    sessionId: r.session_id,
+    seededFromRun: r.seeded_from_run,
+    tokenHash: r.token_hash,
+    outcome: r.outcome as RunOutcome | null,
+    summary: r.summary,
+    metadata: r.metadata === null ? null : json(r.metadata),
+    reportedCommit: r.reported_commit,
+    reportedDirty: r.reported_dirty === null ? null : r.reported_dirty === 1,
+    error: r.error,
+    lastOutput: r.last_output,
+    submissions: r.submissions,
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+  };
+}
+
+const RUN_COLS = `run_id, task_id, attempt, kind, assignee_kind, assignee,
+  json(agent_config) AS agent_config, workspace, role_md_hash, session_id, seeded_from_run,
+  token_hash, outcome, summary, json(metadata) AS metadata, reported_commit, reported_dirty,
+  error, last_output, submissions, started_at, ended_at`;
+
+interface CommentRaw {
+  id: number;
+  task_id: string;
+  author: string;
+  body: string;
+  created_at: number;
+}
+
+function decodeComment(r: CommentRaw): CommentRow {
+  return { id: r.id, taskId: r.task_id, author: r.author, body: r.body, createdAt: r.created_at };
+}
+
+interface EventRaw {
+  id: number;
+  task_id: string;
+  run_id: string | null;
+  kind: string;
+  actor: string;
+  payload: Json;
+  created_at: number;
+}
+
+function decodeEvent(r: EventRaw): KanbanEvent {
+  return {
+    id: r.id,
+    taskId: r.task_id,
+    runId: r.run_id,
+    kind: r.kind,
+    actor: r.actor,
+    payload: json(r.payload),
+    createdAt: r.created_at,
+  };
+}
+
+export function getTask(db: Db, taskId: string): TaskRow | undefined {
+  const row = db.prepare<[string], TaskRaw>(`SELECT ${TASK_COLS} FROM kanban_tasks WHERE task_id = ?`).get(taskId);
+  return row === undefined ? undefined : decodeTask(row);
+}
+
+export function getTaskByKey(db: Db, idempotencyKey: string): TaskRow | undefined {
+  const row = db
+    .prepare<[string], TaskRaw>(`SELECT ${TASK_COLS} FROM kanban_tasks WHERE idempotency_key = ?`)
+    .get(idempotencyKey);
+  return row === undefined ? undefined : decodeTask(row);
+}
+
+export function parentsOf(db: Db, taskId: string): TaskRow[] {
+  return db
+    .prepare<[string], TaskRaw>(
+      `SELECT ${TASK_COLS} FROM kanban_tasks
+        WHERE task_id IN (SELECT parent_id FROM kanban_links WHERE child_id = ?)
+        ORDER BY created_at, rowid`,
+    )
+    .all(taskId)
+    .map(decodeTask);
+}
+
+export function childrenOf(db: Db, taskId: string): TaskRow[] {
+  return db
+    .prepare<[string], TaskRaw>(
+      `SELECT ${TASK_COLS} FROM kanban_tasks
+        WHERE task_id IN (SELECT child_id FROM kanban_links WHERE parent_id = ?)
+        ORDER BY created_at, rowid`,
+    )
+    .all(taskId)
+    .map(decodeTask);
+}
+
+/** Done or archived: a parent that no longer holds its children back (spec §4.1). */
+export function isFinished(phase: Phase): boolean {
+  return phase === 'done' || phase === 'archived';
+}
+
+export function getRun(db: Db, runId: string): RunRow | undefined {
+  const row = db.prepare<[string], RunRaw>(`SELECT ${RUN_COLS} FROM kanban_runs WHERE run_id = ?`).get(runId);
+  return row === undefined ? undefined : decodeRun(row);
+}
+
+/** Every run on the task, oldest attempt first. */
+export function runsOf(db: Db, taskId: string): RunRow[] {
+  return db
+    .prepare<[string], RunRaw>(`SELECT ${RUN_COLS} FROM kanban_runs WHERE task_id = ? ORDER BY attempt`)
+    .all(taskId)
+    .map(decodeRun);
+}
+
+/** The task's open run, if any: at most one, by the partial unique index. */
+export function openRunOf(db: Db, taskId: string): RunRow | undefined {
+  const row = db
+    .prepare<[string], RunRaw>(`SELECT ${RUN_COLS} FROM kanban_runs WHERE task_id = ? AND ended_at IS NULL`)
+    .get(taskId);
+  return row === undefined ? undefined : decodeRun(row);
+}
+
+/** The open agent run in a workspace, if any: the one-per-workspace limit (spec §6.3). */
+export function openAgentRunIn(db: Db, workspace: string): RunRow | undefined {
+  const row = db
+    .prepare<[string], RunRaw>(
+      `SELECT ${RUN_COLS} FROM kanban_runs
+        WHERE workspace = ? AND ended_at IS NULL AND assignee_kind = 'role'`,
+    )
+    .get(workspace);
+  return row === undefined ? undefined : decodeRun(row);
+}
+
+export function commentsOf(db: Db, taskId: string): CommentRow[] {
+  return db
+    .prepare<[string], CommentRaw>(
+      'SELECT id, task_id, author, body, created_at FROM kanban_comments WHERE task_id = ? ORDER BY id',
+    )
+    .all(taskId)
+    .map(decodeComment);
+}
+
+export function eventsOf(db: Db, taskId: string): KanbanEvent[] {
+  return db
+    .prepare<[string], EventRaw>(
+      `SELECT id, task_id, run_id, kind, actor, json(payload) AS payload, created_at
+         FROM kanban_events WHERE task_id = ? ORDER BY id`,
+    )
+    .all(taskId)
+    .map(decodeEvent);
+}
+
+/** The task as `/kanban show` and `mt kanban show` present it. */
+export interface TaskView {
+  task: TaskRow;
+  status: DisplayStatus;
+  parents: TaskRow[];
+  children: TaskRow[];
+  runs: RunRow[];
+  comments: CommentRow[];
+}
+
+export function taskView(db: Db, taskId: string): TaskView | undefined {
+  const task = getTask(db, taskId);
+  if (task === undefined) return undefined;
+  const parents = parentsOf(db, taskId);
+  const runs = runsOf(db, taskId);
+  const undecided = runs.find((r) => r.outcome === null);
+  return {
+    task,
+    status: displayStatus({
+      phase: task.phase,
+      parentsFinished: parents.every((p) => isFinished(p.phase)),
+      undecidedRun: undecided?.kind,
+    }),
+    parents,
+    children: childrenOf(db, taskId),
+    runs,
+    comments: commentsOf(db, taskId),
+  };
+}
