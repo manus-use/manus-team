@@ -64,7 +64,7 @@ function run(
 
 describe('migration 003', () => {
   it('creates every kanban table, all STRICT', () => {
-    // 004 adds a column to kanban_comments; every table is 003's.
+    // 004 adds a column to kanban_comments and an index; every table is 003's.
     expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(4);
     const tables = h.db
       .prepare<[], { name: string; strict: number }>(
@@ -155,5 +155,17 @@ describe('migration 003', () => {
     expect(() => task('k_3', { reviewer_kind: 'human' })).toThrow(/CHECK constraint failed/);
     expect(() => task('k_4', { reviewer: 'lark:on_bob' })).toThrow(/CHECK constraint failed/);
     task('k_5', { assignee_kind: 'role', assignee: 'implementer', reviewer_kind: 'human', reviewer: 'lark:on_bob' });
+  });
+});
+
+describe('migration 004', () => {
+  it("reads a bot's subscriptions by its account through an index, not a scan of every subscription", () => {
+    const plan = h.db
+      .prepare<[], { detail: string }>(
+        "EXPLAIN QUERY PLAN SELECT id FROM kanban_subscriptions s WHERE s.account_id = 'cli_app'",
+      )
+      .all()
+      .map((r) => r.detail);
+    expect(plan).toEqual([expect.stringMatching(/USING (COVERING )?INDEX idx_kanban_subscriptions_account/)]);
   });
 });
