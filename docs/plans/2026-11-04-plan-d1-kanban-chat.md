@@ -2,22 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The board can be used from Lark for tasks given to roles. An operator types `/kanban new` in any chat the bot is in, with field lines for the assignee, the workspace, the parents and the contract, and the dispatcher runs the task on the role's agent at once. Every `/kanban` command a role's task needs — `list`, `show`, `assign`, `link`, `workspace`, `comment`, `unblock`, `stop`, `archive`, `gate add|list|remove` and `help` — goes through `KanbanService` and nothing else, at the tiers of spec §9.1, and is never refused because the chat's own session is busy. The chat a task was created in follows it, and the tasks its runs create: it hears when one is done, needs review, blocks, is retried after a failure, gives up or is stranded, once, delivered from a cursor kept in the database, so the notices due while the gateway was down are sent when it is back. Everything shown is escaped and masked, gate commands included. A task is any work — research, a document, an operation in Lark, a chore, code — and nothing here assumes git: a workspace is a directory. People are still refused as assignees and reviewers, and the commands for their own tasks say they arrive in plan D2. With `kanban.enabled` unset, chat is unchanged, and `/kanban` says the board is off.
+**Goal:** The board can be used from Lark for tasks given to roles. An operator types `/kanban new` in any chat the bot is in, with field lines for the assignee, the workspace, the parents and the contract, and the dispatcher runs the task on the role's agent at once. Every `/kanban` command a role's task needs — `list`, `show`, `assign`, `link`, `workspace`, `comment`, `unblock`, `stop`, `archive`, `gate add|list|remove` and `help` — goes through `KanbanService` and nothing else, at the tiers of spec §9.1, and is never refused because the chat's own session is busy. Anyone at talk tier may comment on a task and everyone sees the comments, but only an operator's comment steers the task's agent. The chat a task was created in follows it, and the tasks its runs create: it hears when one is done, needs review, blocks, is retried after a failure, gives up or is stranded — at most one message a round per chat or thread, listing that round's notices in order — delivered from cursors kept in the database, so the notices due while the gateway was down are sent when it is back. A chat the bot can no longer post to is let go of until a restart, rather than retried forever. Everything shown is escaped and masked, gate commands included. A task is any work — research, a document, an operation in Lark, a chore, code — and nothing here assumes git: a workspace is a directory. People are still refused as assignees and reviewers, and the commands for their own tasks say they arrive "in a later update" (plan D2). With `kanban.enabled` unset, chat is unchanged, and `/kanban` says the board is off.
 
 **Architecture:**
 - **The setting** (`src/config.ts`): `kanban.block_recurrence_limit`, spec §5.4's, read as the other `kanban:` numbers are: default 2, at most 100, file only.
-- **Subscriptions** (`db/kanban.ts` `createTask`, `advanceSubscription`; `db/kanban-read.ts` `subscriptionsOf`, `dueSubscriptions`, `eventsAfter`): `createTask` subscribes the chat a task is created in, or copies the subscriptions of the task whose run created it, in its own transaction. A cursor moves forward only and writes no event. `run_ended` carries the block's reason, so its notice can say why.
+- **Subscriptions** (`db/kanban.ts` `createTask`, `advanceSubscription`; `db/kanban-read.ts` `subscriptionsOf`, `dueSubscriptions`, `eventsAfter`): `createTask` subscribes the chat a task is created in, or copies the subscriptions of the task whose run created it, in its own transaction. A cursor moves forward only and writes no event. `run_ended` carries the block's reason and recurrence count, so its notice says what was true when it happened.
+- **Comments that steer** (`schema/004_comment_steers.sql`, `db/kanban.ts` `addComment`, `db/kanban-read.ts` `commentsOf`, `KanbanService.comment`, `kanban/brief.ts`, `kanban/dispatcher.ts`): a `steers` column, 1 by default; a talk-tier person's comment from chat is stored with 0, shown to people, and never forwarded to a run or put in a run's prompt.
 - **The board, listed** (`db/kanban-read.ts` `boardList`, `KanbanService.list`): every task with its derived status, for `/kanban list`.
-- **Parsing** (`src/kanban/chat-parse.ts`): `parseKanban`, pure, turns what follows `/kanban` into a command, or the usage line to show.
-- **Rendering** (`src/kanban/chat-render.ts`): the help, the list, `show`, the gate list and each notice, pure given the secret set. A piece is masked and cut before it is escaped; free text keeps its markdown through `forMarkdown`, quoted under its label; labels go through `forDisplay`.
-- **The commands** (`src/kanban/chat.ts`): `KanbanChat.run` checks the sender's tier, records who acted as `lark:<union_id>`, refuses a person or a supervised role with what D2 brings, calls the service, and tells the dispatcher: a pass after a change, and the cancel of an agent run's turn that the change decided.
+- **Parsing** (`src/kanban/chat-parse.ts`): `parseKanban`, pure, turns what follows `/kanban` into a command, or the usage line to show; `isPerson` tells a person from a role.
+- **Rendering** (`src/kanban/chat-render.ts`): the help, the list, `show`, the gate list and each notice, pure given the secret set. A piece is masked before anything else is done to it — spaces collapsed, trimmed, cut — then escaped; free text keeps its markdown through `forMarkdown`, quoted under its label, with a fence line neutralized; an agent's output is shown from its end; labels go through `forDisplay`.
+- **The commands** (`src/kanban/chat.ts`): `KanbanChat.run` checks the sender's tier, records who acted as `lark:<union_id>`, refuses a person or a supervised role as arriving in a later update, holds a new task to the worker CLI's size limits, calls the service, and tells the dispatcher: a pass after a change, and the cancel of an agent run's turn that the change decided.
 - **The router** (`src/core/commands.ts`, `src/core/router.ts`): `/kanban` is a command at talk tier, multiline, needing no session and never refused mid-turn; the router hands it to `RouterDeps.kanban`, or says the board is off, and masks the whole reply.
-- **Notices** (`src/kanban/notices.ts`, `core/ids.ts` `noticeUuid`): the `Notifier` delivers each subscription's events past its cursor, in order, every 2 s and one round at a time; a send that fails is retried after a pause that doubles to five minutes; the uuid is derived from the subscription and the event.
+- **Notices** (`src/kanban/notices.ts`, `core/ids.ts` `noticeBatchUuid`): every 2 s, one round at a time, the `Notifier` sends each conversation with due notices one message, in event order, at most 20 notices, and moves each subscription's cursor once the send succeeded; the uuid is derived from the set of (subscription, event) pairs. A failed send is retried after a pause that doubles to five minutes; one refused for good, or failing three times at five minutes, drops its notices, says so once, and the conversation is let go of until a restart. One conversation or subscription that throws holds up no other, and a round sends to at most ten conversations.
 - **Wiring** (`src/index.ts`): behind `kanban.enabled`, the router gets the commands and the gateway a notifier, started once the channel is connected and stopped before it disconnects.
 
 **Tech Stack:** TypeScript (Node 22, ESM/NodeNext, strict, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`), vitest, better-sqlite3.
 
-**Spec:** `docs/specs/2026-11-02-kanban-design.md` §4.2, §5.4, §7.5, §7.7, §9.1, §9.3, §9.4, §10, §11 and the D1 and D2 rows of §12, as amended in the same commit as this plan.
+**Spec:** `docs/specs/2026-11-02-kanban-design.md` §3.4, §4.2, §5.4, §7.5, §7.7, §9.1, §9.3, §9.4, §10, §11 and the D1 and D2 rows of §12, as amended in the same commit as this plan.
 
 ---
 
@@ -40,56 +41,61 @@
 - **No real agent, no network, no real home.** No test runs bytesec or reaches Lark. The end-to-end test runs the fake CLI agent through the real CLI driver, with its home, socket and workspace under a fresh `mkdtemp` directory, realpath'd.
 - **Unit tests start no process.** The board's chat and its notices start none; only `tests/kanban-chat.e2e.ts` does, in the e2e project.
 - **The import guard.** `tests/kanban-service.test.ts` checks that only `src/kanban/service.ts` imports `src/db/kanban.js`. `KanbanChat` calls the service only; the `Notifier` reads through `db/kanban-read.js` and moves its cursors through the service.
+- **One migration.** `schema/004_comment_steers.sql` adds one column, with a default, so every existing row keeps its meaning; `db/kanban.ts` stays its only writer.
 - **Nothing assumes git or code.** A task is any work and a workspace any directory: no step here reads a repository, and the test tasks are documents, surveys and chores as often as code.
 
 ## Decisions the spec left open
 
-Each is the reading most consistent with the rest of the spec. The user decided three before this plan: D is split into D1 and D2 (Decision 1), `kanban.enabled` stays off by default (Decision 2), and a task is any work (Decision 3). Those marked *To confirm* change what a person in chat sees or can do, and are proposed rather than decided. All of them are in the spec now (§4.2, §5.4, §7.7, §9.1, §9.3, §9.4, §12), amended in the same commit as this plan.
+Each is the reading most consistent with the rest of the spec. *The user's decision* marks those the user made, before this plan or on review of its first draft; the rest are proposed, with the reason. All of them are in the spec now (§3.4, §4.2, §5.4, §7.5, §7.7, §9.1, §9.3, §9.4, §12), amended in the same commit as this plan.
 
 1. **D is D1, then D2.** *The user's decision.* D1 is every `/kanban` command a role's task needs, and a chat's subscriptions and their notices, so that tasks given to roles are usable from Lark. D2 is people: direct-message cards with Done, Block, Approve and Request changes; the person send target by union_id; card `kind` routing; the group one-line notice; `/kanban done`, `block` and `review` by a human assignee, `approve` and `changes` by a person reviewer; approval forwarding for supervised roles; and refusing a person's report beside another task's agent run (`workspace_busy`, spec §7.7).
-2. **The board stays opt-in.** *The user's decision.* `kanban.enabled` is off by default after D1 and D2. With it unset, the gateway builds no service, dispatcher, socket or notifier, as before, and chat without `/kanban` is unchanged.
+2. **The board stays opt-in.** *The user's decision.* `kanban.enabled` is off by default after D1 and D2. With it unset, the gateway builds no service, dispatcher, socket, chat commands or notifier, as before, and chat without `/kanban` is unchanged.
 3. **A task is any work.** *The user's decision.* Nothing in D1 reads a repository or assumes code: a workspace is a directory, a gate any command, and the help and the README say so.
-4. **`/kanban` with the board off answers that it is off.** The command is always registered; with no board, the router answers "The task board is off on this gateway. An operator turns it on with `kanban.enabled: true` in config.yaml, and a restart." and opens no session. *Why:* without it, `/kanban` would be "Unknown command", which reads as a typo, on the very gateway whose operator has to be told what to change. Leaving the command out of the table when the board is off was rejected: the table is static, and `/help` would then differ between gateways for a reason it cannot show.
-5. **The person-only commands are answered, not left out.** `/kanban done`, `block`, `review`, `approve` and `changes` parse, and are answered "`/kanban done` is for a person's own task, and arrives in plan D2 with people as assignees and reviewers. For now tasks go to roles, whose agents report for themselves." *Why:* the spec's table lists them, so people will try them; "Unknown command" would send them looking for a typo, and reserving the verbs now means D2 changes their answer, not the parser. **`approve` and `changes` by an operator who is not the named reviewer** — spec §9.1's "operate, or the named reviewer" — are deferred with the rest to D2. *To confirm:* the user's D2 list names them "by a person reviewer"; an operator approving a role-reviewed task from chat is not named either way.
-6. **A person named as assignee or reviewer is refused before the service sees it.** A name starting `@` — Lark's text gives an @-mention as `@Name` — or `lark:` is answered "Naming a person as an assignee or reviewer arrives in plan D2. For now a task is given to a role: name it as a bare word, such as `implementer`." *Why:* `InboundMessage` carries no mention ids yet (the SDK's `mentions` are not copied into it), so D1 cannot tell who was mentioned, only that someone was; the service's own `person_not_assignable` says "until the board is in Lark", which is no longer the reason. D2 adds the mentioned users' ids to the inbound message.
-7. **A supervised role is still refused, saying why in D1's words.** The service's `supervised_role` refusal is answered as "role "x" has a supervised agent; its approval requests cannot be forwarded to a chat yet. That arrives in plan D2." The service is not changed: D2 turns `supervisedRoles` on.
-8. **Who acted is `lark:<union_id>`.** The board's principal for a person (spec §3.1), and what D2 assigns people as. A sender whose message carried no union_id may `list`, `show`, `gate list` and see the help, and is refused anything that records who acted: "Lark did not say who you are (no union_id came with the message), and the board records who changes it. Ask the operator to check the app can read user ids." *Why:* `open_id` is app-scoped, and recording it would give one person two identities on the board. Lark sends union_id with every message event, so the refusal is for a misconfigured app, not a common case.
-9. **Tiers.** `/kanban` is registered at talk tier, and each command that changes the board checks operator tier itself, naming the command it refused: "`/kanban assign` changes the board, and needs operator permission." Talk: `help`, `list`, `show`, `comment`, `gate list`. Operate: `new`, `assign`, `link`, `workspace`, `unblock`, `stop`, `archive`, `gate add`, `gate remove` (spec §9.1, §10). *To confirm:* **`gate list` at talk tier**, because `/kanban show`, which is talk, shows the same gates, masked; making it operator would only hide from `gate list` what `show` already gives.
-10. **`/kanban new`'s grammar** (spec §9.1). The title is the rest of the first line, or the next line when the verb stands alone. A field line is its label at the very start of the line, in any case, then a colon and a value; an indented line, or one that only mentions a label, stays body. Field lines may come anywhere among the body's lines. Each field may be given once, except `parent:`, which takes task ids separated by spaces or commas and may be repeated. `verify:` fills `verification`, `stop when:` fills `stop_when`. A field given twice, or with no value, is refused with the label. A task with no assignee may be created, and the reply says how to assign it: the spec does not require one, and the stranded notice covers it if nobody does. The message id is the idempotency key, `lark:<message_id>`, the chat key the service already reserves (`CHAT_KEY`), so a redelivery past the router's own dedup still makes one task.
-11. **`/kanban list`.** Without a status, the tasks someone may still act on — running, reviewing, review, ready, todo, blocked — grouped in that order; with a status, only those; `all` lists every task, done and archived ones included. At most 30 lines, then "… and N more". *Why:* done and archived tasks only grow, and a board that lists them by default is unreadable within a week.
-12. **`/kanban show`** gives the title, id and status; assignee, reviewer and workspace; the block, if blocked; parents and children with their phases; the body; the contract; the gates, masked; the last five runs, one line each with the summary or error; the latest run's output (its last 2,000 characters, cut to 800); and the last five comments. Each piece has a cap, and the router cuts a whole reply at 4,000 characters, saying so.
-13. **`/kanban gate add <task> [--timeout <s>] <command>`.** The rest of the message after the task id and the optional timeout is the command, as written, line breaks kept: a gate is a shell command, and re-joining words would change its quoting (C4's `mt kanban gate add` joins argv only because a shell split it). `gate list <task>` and `gate remove <task> <gate>` complete the set. The definer is `lark:<union_id>`. The service checks the command — size, NUL, known secrets — as for `mt`.
-14. **Rendering** (spec §9.3). Every piece of task text is masked and cut to its length before it is escaped, so a cut leaves no start of a secret and splits no escape. A body, a summary, a comment and an agent's output keep their markdown through `forMarkdown` and are quoted, `> ` on each line, under their label, so none of their lines starts a heading or a list; titles, names, reasons, errors and gate commands go through `forDisplay`. Task ids the board minted are shown as code; anything else a sender typed is escaped. The router masks each whole reply once more, and the notifier each notice: masking is idempotent, and it covers the board's own words and ids.
-15. **After a change, the dispatcher is told.** `KanbanChat` calls `changed()` — the dispatcher's `pass()` — after `new`, `assign`, `workspace`, `unblock`, `stop` and `archive`, so a task starts without waiting for the sweep; and `cancel(runId)` — the dispatcher's `cancel`, which C2 left for D — for an agent run that `assign`, `stop` or `archive` decided while it was open, so its turn is cancelled and the run closed. `comment` tells neither: the dispatcher already forwards a person's comment to an undecided run when its turn ends (spec §7.5). A hook that throws is swallowed: the sweep finds the work within a minute.
-16. **Subscriptions are written by `createTask`, in its transaction, with no event.** The chat's binding key — channel, app, chat, thread — for a task created in chat; for a task a run created, a copy of every subscription of the run's task (spec §7.3), which is how "the tasks created from it" (§9.4) is read. Cursors start at 0. *Why no event:* the subscription is part of the creation, which already writes `created`. `INSERT OR IGNORE` on the table's unique key, so a copied subscription cannot collide.
-17. **What a subscriber hears** (spec §9.4). `completed`, with the summary; `review_requested`, with the reviewer; `blocked` of any kind but `dependency`; `stopped`, which blocks as `needs_input`; `run_ended` that retries after `failed`, `crashed`, `timed_out`, `protocol_violation` or `interrupted`; `run_ended` that blocks — "gave up" for `gave_up`, otherwise as a block; and `stranded`. Not: a throttled run's cooldown (it clears by itself, and blocks as `transient` at its limit, which is heard), `changes_requested` (the rework starts by itself), comments, claims, links, gates, archives. A block's notice says how to unblock, or, once the task has blocked for the same kind `kanban.block_recurrence_limit` times after an unblock, to rewrite it instead (spec §5.4). *To confirm:* **`interrupted` as "retrying after a failure"**: after a restart every open run is interrupted and retried, and its chat hears so; the alternative is silence for a retry the task did nothing to cause.
-18. **`run_ended` carries `blockReason`.** The breaker's reason ("failed 2 times; last crashed: …") was on the task only, and a notice delivered later — after a restart, say — would read whatever the task says by then. The payload is a JSON object, so the key is added with no migration, and the events written before it show the block's kind with no reason.
-19. **Delivery is a projection from the cursor, polled** (spec §9.4). The `Notifier` runs a round every 2 s (`NOTICE_POLL_MS`), one at a time: every subscription of this bot with an event past its cursor, then each one's events in order — at most 100 a round. A notice is sent, then the cursor moves to it, through `KanbanService.advanceSubscription`; an event that is no notice only moves the cursor. *Why a poll:* the board is written from chat, the worker socket and the dispatcher, and from inside `endRun` and `noteStranded`; hooking each would be a second list to keep in step with every writer, and missing one would lose a notice silently. The read when nothing is due is one indexed query.
-20. **Delivery survives a restart because the cursors are in the database.** The first round runs when the gateway has connected, from the stored cursors, so what the chats missed while it was down is sent by the code that sends in normal running. A notice sent just before a stop, whose cursor had not moved, is sent again with the same uuid, `noticeUuid(appId, subscription, event)`. The Lark adapter does not pass a send's uuid to Lark (its documented gap), so until it does that one notice can show twice; it is never lost. The gateway stops the notifier with the dispatcher, and waits for its round before it disconnects.
-21. **A send that fails** leaves the cursor and holds that subscription back for 2 s, doubling to at most five minutes (`NOTICE_BACKOFF_MAX_MS`), while the others go on; each failure is noted with the task and subscription ids, never the text. A subscription whose channel is not configured is held back the same way.
-22. **`kanban.block_recurrence_limit` is a setting now.** Spec §5.4 names it; C's config refused it "before it does anything". Default 2, at most 100, file only, like the other `kanban:` numbers.
-23. **Words a person sees name "plan D2".** *To confirm.* The user asked that the refusals say the feature arrives in D2, and they do. A person in chat may not know what plan D2 is; "in a later update" is the alternative, one string each in `src/kanban/chat.ts` and `src/kanban/chat-render.ts`.
+4. **Words a person sees say "a later update", never "plan D2".** *The user's decision.* "Assigning a task to a person, or naming one as its reviewer, arrives in a later update." The plan and the spec still name D2; no reply, notice or help text does.
+5. **`/kanban` with the board off answers that it is off.** The command is always registered; with no board, the router answers "The task board is off on this gateway. An operator turns it on with `kanban.enabled: true` in config.yaml, and a restart." and opens no session. *Why:* without it, `/kanban` would be "Unknown command", which reads as a typo, on the very gateway whose operator has to be told what to change.
+6. **The person-only commands are answered, not left out.** `/kanban done`, `block`, `review`, `approve` and `changes` parse, and are answered "`/kanban done` is for a person's own task, and arrives in a later update, with people as assignees and reviewers. For now tasks go to roles, whose agents report for themselves." *Why:* the spec's table lists them, so people will try them, and reserving the verbs now means D2 changes their answer, not the parser. **An operator's `approve` or `changes` on a role-reviewed task** arrives in D2 with the rest. *The user's decision.*
+7. **A person named as assignee or reviewer is refused before the service sees it.** A name starting `@` — Lark's text gives an @-mention as `@Name` — or `lark:` is answered with Decision 4's sentence. `isPerson` is checked before `/kanban assign` counts its words, so `assign k_1 @Alice Smith` gets that answer, not a usage error. *Why:* `InboundMessage` carries no mention ids yet, so D1 cannot tell who was mentioned, only that someone was; the service's own `person_not_assignable` says "until the board is in Lark", which is no longer the reason. D2 adds the mentioned users' ids to the inbound message.
+8. **A supervised role is still refused, in D1's words.** The service's `supervised_role` refusal is answered as "role "x" has a supervised agent; its approval requests cannot be forwarded to a chat yet. That arrives in a later update." The service is unchanged: D2 turns `supervisedRoles` on.
+9. **Who acted is `lark:<union_id>`.** The board's principal for a person (spec §3.1), and what D2 assigns people as. A sender whose message carried no union_id may `list`, `show`, `gate list` and see the help, and is refused anything that records who acted. *Why:* `open_id` is app-scoped, and recording it would give one person two identities on the board.
+10. **Tiers.** `/kanban` is registered at talk tier, and each command that changes the board checks operator tier itself, naming the command it refused: "`/kanban assign` changes the board, and needs operator permission." Talk: `help`, `list`, `show`, `comment`, `gate list`. Operate: `new`, `assign`, `link`, `workspace`, `unblock`, `stop`, `archive`, `gate add`, `gate remove` (spec §9.1, §10). **`gate list` is talk tier**, as `/kanban show`, which shows the same gates masked, is. *The user's decision.*
+11. **A talk-tier comment is stored, not forwarded.** *The user's decision.* Anyone at talk tier may comment, and everyone sees comments in `/kanban show`. Only a comment that *steers* is forwarded to an undecided agent run (spec §7.5) or put in a run's prompt — or in `mt kanban show`, which reads the same brief. A run's comment steers, as before (and is still never forwarded back to a run); an operator's steers, from chat or with an unblock; a talk-tier person's does not. D2 adds the named assignee and reviewer. **How it is stored:** migration `004_comment_steers.sql` adds `kanban_comments.steers`, `INTEGER NOT NULL DEFAULT 1`, so every comment written before it — from runs, and from the service's own callers — keeps steering; `addComment` takes it, `db/kanban.ts` stays the only writer, and the `commented` event records `steers: false` when it is false, leaving every existing payload as it was. `commentsOf(db, task, { steering: true })` is the read the prompt and the dispatcher use; `/kanban show` reads them all. A column was chosen over a field in the event's JSON because the readers read the comments table, not the log.
+12. **`/kanban new`'s grammar** (spec §9.1). The arguments' line breaks are normalized first: a CRLF or a lone CR is a newline. The title is the rest of the first line, or the next line when the verb stands alone; a title that is itself a field line (`assignee: x`) is refused, as the title is missing. A field line is its label at the very start of the line, in any case, then a colon and a value; an indented line, or one that only mentions a label, stays body. Field lines may come anywhere among the body's lines. Each field may be given once, except `parent:`, which takes task ids separated by spaces or commas and may be repeated. `verify:` fills `verification`, `stop when:` fills `stop_when`. A field given twice, or with no value, is refused with the label. A task with no assignee may be created, and the reply says how to assign it. The message id is the idempotency key, `lark:<message_id>`, the chat key the service already reserves, so a redelivery past the router's own dedup still makes one task.
+13. **A task from chat has the worker CLI's size limits.** A title of at most 512 bytes ("A title is at most 512 bytes; put the rest in the body."), a body of at most 64 KiB, and each contract field at most 8 KiB: C3's `WORKER_LIMITS`, checked in `KanbanChat` before the service. *Why:* a task should have the same limits whoever made it, and `mt kanban create` already has these; putting a new, smaller cap in `KanbanService.create` would change what C3's workers may send for no gain. Replies show a title cut to 200 characters regardless.
+14. **`/kanban list`.** Without a status, the tasks someone may still act on — running, reviewing, review, ready, todo, blocked — grouped in that order; with a status, only those; `all` lists every task. At most 30 lines, then "… and N more".
+15. **`/kanban show`** gives the title, id and status; assignee, reviewer and workspace; the block, if blocked; parents and children; the body; the contract; the gates, masked; the last five runs; **the end of the latest run's output** — masked whole, then its last 800 characters, after "… (earlier output cut)", since what an agent said last is what matters; and the last five comments. Each piece has a cap, and the router cuts a whole reply at 4,000 characters, saying so.
+16. **`/kanban assign` to the current assignee** answers "`k_…` is already assigned to role x." and changes nothing — no event, no pass.
+17. **`/kanban gate add <task> [--timeout <s>] <command>`.** The rest of the message after the task id and the optional timeout is the command, as written, line breaks kept. `gate list <task>` and `gate remove <task> <gate>` complete the set. The definer is `lark:<union_id>`.
+18. **Rendering** (spec §9.3). Every piece of task text is masked first — before its spaces are collapsed into one line, before it is trimmed or cut — so no reshaping can hide a secret from the masker, a secret holding a line break included; only then is it escaped. A body, a summary, a comment and an agent's output keep their markdown through `forMarkdown` and are quoted, `> ` on each line, under their label; a line opening a code fence, three or more backticks or tildes, has its first one escaped, so the text can neither open nor close a fence. Links in that text are kept: `forMarkdown` neutralizes Feishu's tags, and a link cannot mention anyone. Titles, names, reasons, errors and gate commands go through `forDisplay`. The router masks each whole reply once more, and the notifier each message.
+19. **After a change, the dispatcher is told.** `KanbanChat` calls `changed()` — the dispatcher's `pass()` — after `new`, `assign`, `workspace`, `unblock`, `stop` and `archive`; and `cancel(runId)` for an agent run that `assign`, `stop` or `archive` decided while it was open, so its turn is cancelled and the run closed. `comment` tells neither: the dispatcher forwards a steering comment when the run's turn ends (spec §7.5).
+20. **Subscriptions are written by `createTask`, in its transaction, with no event.** The chat's binding key for a task created in chat; for a task a run created, a copy of every subscription of the run's task (spec §7.3), which is how "the tasks created from it" (§9.4) is read. Cursors start at 0.
+21. **What a subscriber hears** (spec §9.4). `completed`; `review_requested`; `blocked` of any kind but `dependency`; `stopped`; `run_ended` that retries after `failed`, `crashed`, `timed_out` or `protocol_violation`; `run_ended` that blocks — "gave up" for `gave_up`, otherwise as a block; and `stranded`. **A run interrupted by a gateway restart is retried quietly.** *The user's decision.* Not heard either: a throttled run's cooldown, `changes_requested`, comments, claims, links, gates, archives. A block's notice says how to unblock, or, at `kanban.block_recurrence_limit`, to rewrite the task (spec §5.4), by the recurrence count the event recorded — the `blocked`, `stopped` and now `run_ended` payloads carry it — not the task's count when the notice is sent.
+22. **`run_ended` carries `blockReason` and `blockRecurrences`.** A notice delivered later — after a restart, say — tells what was true when the run ended. JSON keys, no migration; earlier events read as no reason and no recurrence.
+23. **Notices are batched per conversation.** *The user's decision.* Each round sends a conversation — a chat, or a thread — at most one message: the round's notices for all its subscriptions, in event order, at most 20 (`BATCH_NOTICES`) and 3,800 characters, then "… and N more, in the next message." Each subscription's cursor moves, only once the send succeeded, to its last event the message covered, notices or not. The uuid is per batch, `noticeBatchUuid(appId, pairs)`, a hash of the sorted set of (subscription, event) pairs, so the same batch sent again keeps its uuid.
+24. **Delivery is a projection from the cursors, polled.** A round runs every 2 s, one at a time. *Why a poll:* the board is written from chat, the worker socket and the dispatcher, and from inside `endRun` and `noteStranded`; hooking each would be a second list to keep in step with every writer. Across a restart, the cursors are in the database, so the first round after connecting catches up by the same code; a batch sent just before a stop, whose cursors had not moved, is sent again with the same uuid. The Lark adapter does not pass the uuid to Lark yet, so that batch can show twice.
+25. **A conversation that cannot be reached is let go of.** A failed send moves no cursor and holds the conversation back 2 s, doubling to five minutes. A send refused as not retryable (`ChannelError.retryable` false: the bot removed, the chat gone), or the third failure in a row at five minutes (`DEAD_AFTER`), drops the notices it held — the cursors move past them — logs one line naming the conversation, its tasks and the dropped events, and marks the conversation dead until the gateway restarts: its later notices are passed over, unsent, without another line. A round sends to at most ten conversations (`ROUND_SENDS`), the most behind first, so the first round after a restart does not try every dead conversation at once. A subscription that cannot be read — its task not on the board — or a conversation whose channel cannot be looked up is held back by itself, and the rest of the round goes on.
+26. **`kanban.block_recurrence_limit` is a setting now.** Spec §5.4 names it; C's config refused it "before it does anything". Default 2, at most 100, file only.
 
 ## Out of scope (plan D2 and later)
 
-- **Plan D2:** everything in Decision 1; a person's `/kanban done`, `block`, `review`, `approve` and `changes`, through the service's asynchronous `complete` and `requestReview`, with a gate refusal's output shown through the escapers and `dispatcher.pass()` after it; the review card's "review commit …" from `describeReported`; the Unblock button on a blocked notice (spec §9.2); the mentioned users' ids on `InboundMessage`; approval cards for kanban runs forwarded to the task's first subscription (`KanbanSink`).
-- **The Lark adapter's uuid.** Passing a send's uuid to Lark, so a notice redelivered after a restart is deduplicated by the platform, needs the SDK to expose it (the adapter's known gap).
+- **Plan D2:** everything in Decision 1; a person's `/kanban done`, `block`, `review`, `approve` and `changes`, and an operator's `approve` and `changes`, through the service's asynchronous `complete` and `requestReview`, with a gate refusal's output shown through the escapers and `dispatcher.pass()` after it; the named assignee's and reviewer's comments steering; the review card's "review commit …" from `describeReported`; the Unblock button on a blocked notice (spec §9.2); the mentioned users' ids on `InboundMessage`; approval cards for kanban runs forwarded to the task's first subscription (`KanbanSink`).
+- **The Lark adapter's uuid.** Passing a send's uuid to Lark, so a batch redelivered after a restart is deduplicated by the platform, needs the SDK to expose it.
 - **Allowlists.** A subscription keeps receiving notices if its chat is later removed from `auth.chats`; the notifier does not consult the authorizer.
 
 ### Known limitations, not fixed here
 
-- A notice sent just before the gateway stops, whose cursor had not moved, is sent again after the restart, and shows twice until the adapter passes the uuid on (Decision 20).
+- A batch sent just before the gateway stops, whose cursors had not moved, is sent again after the restart, and shows twice until the adapter passes the uuid on (Decision 24).
+- A conversation let go of drops the notices it held, and passes over its later ones until the next restart; the log says which were dropped. One that recovers by itself is not heard from again until then (Decision 25). After each restart a dead conversation is tried once more, at most ten conversations a round.
+- Subscriptions are never deleted, so each round's scan grows with the tasks ever created. The scan is one query whose `EXISTS` uses the events' `(task_id, id)` index, and a delivered subscription of an archived task has nothing past its cursor; skipping such rows outright would need a delivered flag, a second thing to keep in step with the cursor, so it is not done.
 - A task created in a thread is followed by that thread only; nothing yet subscribes another chat to it.
-- A notice is at most a 2 s poll behind the event, plus the backoff of a subscription whose sends have failed.
-- A busy board's catch-up after a long outage sends up to 100 notices per subscription per round, in order; a chat that missed a day may get many at once.
-- `/kanban list` reads every task's parents and runs, one query each: fine for a board of hundreds, slow for one of tens of thousands.
+- A notice is at most a 2 s poll behind its event, plus any pause after a failed send, plus the rounds a busy conversation's batches take.
+- `/kanban list` reads every task's parents and runs, one query each: fine for a board of hundreds, slow for tens of thousands.
 
 ### What D2 needs
 
 - `KanbanChat` answers the `later` verbs in one place: D2 replaces that branch with the reports, through `complete` and `requestReview`, awaited, and their tiers (spec §9.1: the named assignee or reviewer at talk tier).
-- `isPerson` and `PEOPLE_LATER` are where an @-mention becomes a principal, once `InboundMessage` carries the mentioned ids; the service's `people` dependency turns persons on.
+- `isPerson` (`src/kanban/chat-parse.ts`) and `PEOPLE_LATER` are where an @-mention becomes a principal, once `InboundMessage` carries the mentioned ids; the service's `people` dependency turns persons on.
+- A named assignee's or reviewer's comment passes `steers: true` (Decision 11).
 - The `Notifier` delivers through `Channel.sendText`; D2's cards and the group notice go through the same subscriptions, and its approval forwarding through the task's first one (`subscriptionsOf(...)[0]`).
-- `renderNotice` is where a blocked notice gains its Unblock button.
 
 ## File structure
 
@@ -97,22 +103,24 @@ Each is the reading most consistent with the rest of the spec. The user decided 
 |---|---|
 | `src/config.ts` (modify) | `kanban.block_recurrence_limit` |
 | `src/kanban/types.ts` (modify) | `SubscriptionRow` |
-| `src/db/kanban-read.ts` (modify) | `eventsAfter`, `subscriptionsOf`, `dueSubscriptions`, `boardList`, `BoardEntry` |
-| `src/db/kanban.ts` (modify) | subscriptions in `createTask`; `advanceSubscription`; `run_ended`'s `blockReason` |
-| `src/db/WRITERS.md` (modify) | `kanban_subscriptions`'s writer |
-| `src/kanban/service.ts` (modify) | `list`, `advanceSubscription` |
-| `src/kanban/chat-parse.ts` (create) | `parseKanban`, `USAGE`, `LIST_FILTERS`, `LATER_VERBS` |
+| `schema/004_comment_steers.sql` (create) | `kanban_comments.steers` |
+| `src/db/kanban-read.ts` (modify) | `eventsAfter`, `subscriptionsOf`, `dueSubscriptions`, `boardList`, `BoardEntry`; `commentsOf`'s `steering` |
+| `src/db/kanban.ts` (modify) | subscriptions in `createTask`; `advanceSubscription`; `run_ended`'s `blockReason` and `blockRecurrences`; `addComment`'s `steers` |
+| `src/db/WRITERS.md` (modify) | `kanban_subscriptions`'s writer; `kanban_comments.steers` |
+| `src/kanban/service.ts` (modify) | `list`, `advanceSubscription`; `comment`'s `steers` |
+| `src/kanban/brief.ts`, `src/kanban/dispatcher.ts` (modify) | only steering comments in a prompt, and forwarded |
+| `src/kanban/chat-parse.ts` (create) | `parseKanban`, `isPerson`, `USAGE`, `LIST_FILTERS`, `LATER_VERBS` |
 | `src/kanban/chat-render.ts` (create) | `renderHelp`, `renderList`, `renderShow`, `renderGates`, `renderNotice` |
 | `src/kanban/chat.ts` (create) | `KanbanChat`, `principalOf` |
 | `src/core/commands.ts`, `src/core/router.ts` (modify) | the `/kanban` command; `KanbanCommands`, `RouterDeps.kanban`, `KANBAN_OFF` |
-| `src/core/ids.ts` (modify) | `noticeUuid` |
-| `src/kanban/notices.ts` (create) | `Notifier`, `NOTICE_POLL_MS`, `NOTICE_BACKOFF_MAX_MS` |
+| `src/core/ids.ts` (modify) | `noticeBatchUuid` |
+| `src/kanban/notices.ts` (create) | `Notifier`, `NOTICE_POLL_MS`, `NOTICE_BACKOFF_MAX_MS`, `DEAD_AFTER`, `BATCH_NOTICES`, `ROUND_SENDS` |
 | `src/index.ts` (modify) | the commands and the notifier behind `kanban.enabled` |
 | `README.md` (modify) | the board from Lark |
-| `tests/kanban-subscriptions.test.ts`, `tests/kanban-chat-parse.test.ts`, `tests/kanban-chat-render.test.ts`, `tests/kanban-chat.test.ts`, `tests/kanban-notices.test.ts`, `tests/kanban-chat.e2e.ts` (create) | |
-| `tests/config.test.ts`, `tests/router.test.ts`, `tests/commands.test.ts`, `tests/ids.test.ts`, `tests/gateway-startup.test.ts` (modify) | |
+| `tests/kanban-subscriptions.test.ts`, `tests/kanban-comment-steering.test.ts`, `tests/kanban-chat-parse.test.ts`, `tests/kanban-chat-render.test.ts`, `tests/kanban-chat.test.ts`, `tests/kanban-notices.test.ts`, `tests/kanban-chat.e2e.ts` (create) | |
+| `tests/config.test.ts`, `tests/kanban-schema.test.ts`, `tests/router.test.ts`, `tests/commands.test.ts`, `tests/ids.test.ts`, `tests/gateway-startup.test.ts` (modify) | |
 
-Running counts, unit then end to end: Task 1 1152 / 70, Task 2 1159, Task 3 1166, Task 4 1177, Task 5 1186, Task 6 1191, Task 7 1198, Task 8 1199, Task 9 1199 / 72, Task 10 1199 / 72.
+Running counts, unit then end to end: Task 1 1152 / 70, Task 2 1159, Task 3 1163, Task 4 1171, Task 5 1185, Task 6 1194, Task 7 1199, Task 8 1211, Task 9 1212, Task 10 1212 / 72, Task 11 1212 / 72.
 
 ---
 
@@ -121,7 +129,7 @@ Running counts, unit then end to end: Task 1 1152 / 70, Task 2 1159, Task 3 1166
 **Files:**
 - Modify: `src/config.ts`, `tests/config.test.ts`
 
-Spec §5.4 names `kanban.block_recurrence_limit`, the number of same-kind blocks after an unblock at which a blocked notice stops inviting another unblock. Plan C refused the key until something used it; the notices of Task 4 do (Decision 22). It is read like the other `kanban:` numbers: snake_case in the file, a positive whole number, a ceiling, no environment override.
+Spec §5.4 names `kanban.block_recurrence_limit`, the number of same-kind blocks after an unblock at which a blocked notice stops inviting another unblock. Plan C refused the key until something used it; the notices of Task 5 do (Decision 26). It is read like the other `kanban:` numbers: snake_case in the file, a positive whole number, a ceiling, no environment override.
 
 - [ ] **Step 1.1: Write the failing tests.**
 
@@ -329,7 +337,7 @@ git commit -m "Read kanban.block_recurrence_limit, the count of blocks of one ki
 - Create: `tests/kanban-subscriptions.test.ts`
 - Modify: `src/kanban/types.ts`, `src/db/kanban-read.ts`, `src/db/kanban.ts`, `src/kanban/service.ts`, `src/db/WRITERS.md`
 
-`kanban_subscriptions` exists since migration 003 with no writer. `createTask` now subscribes, in its own transaction: the chat a task is created in, or every chat following the task whose run created it (spec §7.3, §9.4; Decision 16). `advanceSubscription` moves a cursor forward only and writes no event — an event would itself be past the cursor. The reads a notifier needs come with it: `subscriptionsOf`, `dueSubscriptions` and `eventsAfter`. `run_ended` gains `blockReason`, so a notice delivered later says why the task blocked (Decision 18). And `boardList`, through `KanbanService.list`, gives `/kanban list` every task with its derived status.
+`kanban_subscriptions` exists since migration 003 with no writer. `createTask` now subscribes, in its own transaction: the chat a task is created in, or every chat following the task whose run created it (spec §7.3, §9.4; Decision 20). `advanceSubscription` moves a cursor forward only and writes no event — an event would itself be past the cursor. The reads a notifier needs come with it: `subscriptionsOf`, `dueSubscriptions` and `eventsAfter`. `run_ended` gains `blockReason` and `blockRecurrences`, so a notice delivered later says what was true when the run ended (Decision 22). And `boardList`, through `KanbanService.list`, gives `/kanban list` every task with its derived status.
 
 - [ ] **Step 2.1: Write the failing tests.**
 
@@ -450,7 +458,7 @@ describe('subscriptions', () => {
     expect(endRun(h.db, run.runId, { outcome: 'failed', error: 'exit 1' }, DEFAULT_LIMITS, NOW).ok).toBe(true);
     expect(eventsOf(h.db, task.taskId).at(-1)).toMatchObject({
       kind: 'run_ended',
-      payload: { next: 'blocked', blockKind: 'gave_up', blockReason: 'failed 1 times; last failed: exit 1' },
+      payload: { next: 'blocked', blockKind: 'gave_up', blockReason: 'failed 1 times; last failed: exit 1', blockRecurrences: 0 },
     });
   });
 });
@@ -742,6 +750,25 @@ export function advanceSubscription(db: Db, subscriptionId: number, cursor: numb
 In `src/db/kanban.ts`, replace:
 
 ```ts
+    if (blockAs !== undefined) {
+      enterBlocked(d, mustGet(d, run.taskId), blockAs.kind, blockAs.reason);
+      next = 'blocked';
+    }
+```
+
+with:
+
+```ts
+    let recurrences: number | null = null;
+    if (blockAs !== undefined) {
+      recurrences = enterBlocked(d, mustGet(d, run.taskId), blockAs.kind, blockAs.reason);
+      next = 'blocked';
+    }
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
         payload: { outcome: ending.outcome, error: ending.error ?? null, next, blockKind: blockAs?.kind ?? null },
 ```
 
@@ -753,8 +780,9 @@ with:
           error: ending.error ?? null,
           next,
           blockKind: blockAs?.kind ?? null,
-          // For the blocked notice (spec §9.4): what the task's block_reason says now.
+          // For the blocked notice (spec §9.4): why, and how often it has recurred, as of now.
           blockReason: blockAs?.reason ?? null,
+          blockRecurrences: recurrences,
         },
 ```
 
@@ -828,14 +856,358 @@ git commit -m "Subscribe the chat a task is created in, and the chats following 
 
 ---
 
-### Task 3: Parsing `/kanban`
+### Task 3: Comments that steer, and comments for people
+
+**Files:**
+- Create: `schema/004_comment_steers.sql`, `tests/kanban-comment-steering.test.ts`
+- Modify: `src/db/kanban.ts`, `src/db/kanban-read.ts`, `src/kanban/service.ts`, `src/kanban/brief.ts`, `src/kanban/dispatcher.ts`, `src/db/WRITERS.md`, `tests/kanban-schema.test.ts`
+
+Anyone at talk tier may comment from chat, but only a comment that steers reaches an agent (spec §7.5, §9.1; Decision 11). Migration 004 adds `kanban_comments.steers`, 1 by default, so every existing comment keeps steering. `addComment` and `KanbanService.comment` take it; the `commented` event records `steers: false` only when it is false. The task prompt's brief — which `mt kanban show` gives too — and the dispatcher's forwarded comments read `commentsOf(db, task, { steering: true })`; `/kanban show` reads every comment.
+
+- [ ] **Step 3.1: Write the failing tests.**
+
+Create `tests/kanban-comment-steering.test.ts`:
+
+```ts
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { commentsOf, eventsOf } from '../src/db/kanban-read.js';
+import { briefFor } from '../src/kanban/brief.js';
+import { clearSecrets } from '../src/secrets.js';
+import { dispatchHarness, reportComplete, type DispatchHarness } from './helpers/dispatch.js';
+import type { FakeDriver } from './helpers/driver.js';
+import { ALICE } from './helpers/kanban.js';
+
+/**
+ * Which comments steer an agent (spec §7.5, §9.1): a run's and an operator's do;
+ * a talk-tier person's, from chat, is stored and shown to people only -- never
+ * forwarded to a run, never in a run's prompt.
+ */
+
+const BOB = 'lark:on_bob';
+const open: DispatchHarness[] = [];
+
+function harness(nudgeLimit = 1): DispatchHarness {
+  const h = dispatchHarness({ settings: { nudgeLimit } });
+  open.push(h);
+  return h;
+}
+
+beforeEach(() => clearSecrets());
+afterEach(() => {
+  clearSecrets();
+  while (open.length > 0) open.pop()?.close();
+});
+
+const prompts = (d: FakeDriver) => d.lastRuntime?.prompts.map((p) => p.text) ?? [];
+
+describe('comments that steer', () => {
+  it('stores a comment that may not steer, records so on its event, and keeps it from the steering reads', () => {
+    const h = harness();
+    const task = h.create({ workspace: 'web' });
+    expect(h.service.comment(task.taskId, 'use the 2024 list', ALICE).ok).toBe(true);
+    expect(h.service.comment(task.taskId, 'I think 2023 is better', BOB, { steers: false }).ok).toBe(true);
+    expect(commentsOf(h.t.db, task.taskId).map((c) => c.body)).toEqual(['use the 2024 list', 'I think 2023 is better']);
+    expect(commentsOf(h.t.db, task.taskId, { steering: true }).map((c) => c.body)).toEqual(['use the 2024 list']);
+    expect(eventsOf(h.t.db, task.taskId).filter((e) => e.kind === 'commented').map((e) => e.payload)).toEqual([
+      { body: 'use the 2024 list' },
+      { body: 'I think 2023 is better', steers: false },
+    ]);
+  });
+
+  it("leaves a comment that may not steer out of a run's prompt", () => {
+    const h = harness();
+    const task = h.create({ workspace: 'web' });
+    h.service.comment(task.taskId, 'from the operator', ALICE);
+    h.service.comment(task.taskId, 'from a bystander', BOB, { steers: false });
+    const claimed = h.service.claim(task.taskId);
+    if (!claimed.ok) throw new Error(claimed.message);
+    expect(briefFor(h.t.db, claimed).comments.map((c) => c.body)).toEqual(['from the operator']);
+  });
+
+  it('forwards only the comments that steer to a run whose turn ended without a report', async () => {
+    const h = harness(1);
+    const task = h.create({ workspace: 'web' });
+    const implementer = h.driver('implementer');
+    implementer.scripts.push((ctl) => {
+      h.service.comment(task.taskId, 'a bystander says use v1', BOB, { steers: false });
+      h.service.comment(task.taskId, 'the operator says use v2', ALICE);
+      ctl.emit({ kind: 'message-chunk', text: 'Which API?' });
+      ctl.end('completed');
+    });
+    implementer.scripts.push(async (ctl) => {
+      await reportComplete(h, ctl.env?.['MT_KANBAN_RUN'] ?? '');
+      ctl.end('completed');
+    });
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+    const [, forwarded] = prompts(implementer);
+    expect(forwarded).toContain('the operator says use v2');
+    expect(forwarded).not.toContain('bystander');
+  });
+
+  it('forwards nothing, and sends a nudge, when the only new comment may not steer', async () => {
+    const h = harness(1);
+    const task = h.create({ workspace: 'web', failureLimit: 1 });
+    const implementer = h.driver('implementer');
+    implementer.scripts.push((ctl) => {
+      h.service.comment(task.taskId, 'just watching', BOB, { steers: false });
+      ctl.end('completed');
+    });
+    implementer.scripts.push((ctl) => ctl.end('completed'));
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+    const sent = prompts(implementer);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toContain('(reminder 1 of 1)');
+    expect(sent.join('\n')).not.toContain('just watching');
+  });
+});
+```
+
+In `tests/kanban-schema.test.ts`, replace:
+
+```ts
+    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(3);
+```
+
+with:
+
+```ts
+    // 004 adds a column to kanban_comments; every table is 003's.
+    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(4);
+```
+
+
+- [ ] **Step 3.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-comment-steering.test.ts tests/kanban-schema.test.ts`. Expected: five FAIL — the four new ones, as every comment still steers (`expected [ 'use the 2024 list', …(1) ] to deeply equal [ 'use the 2024 list' ]`, the same for the brief, the forwarded prompt containing `'bystander'`, and three prompts where a nudge was the second of two), and the schema test with `expected 3 to be 4`. `Tests  5 failed | 8 passed (13)`.
+
+- [ ] **Step 3.3: Implement.**
+
+Create `schema/004_comment_steers.sql`:
+
+```
+-- manus-team migration 004: which comments may steer an agent
+-- See docs/specs/2026-11-02-kanban-design.md §7.5, §9.1.
+--
+-- Anyone at talk tier may comment on a task from chat, and everyone sees the
+-- comments in /kanban show. Only a comment that may steer -- a run's, or an
+-- operator's -- is forwarded to an undecided agent run or put in a run's
+-- prompt. Every comment written before this migration came from a run or
+-- through the service's tests, so they keep steering. db/kanban.ts stays the
+-- only writer (src/db/WRITERS.md).
+ALTER TABLE kanban_comments ADD COLUMN steers INTEGER NOT NULL DEFAULT 1 CHECK (steers IN (0, 1));
+
+UPDATE schema_version SET version = 4;
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+/** A comment, on a task in any phase. The dispatcher forwards a person's to an undecided run (spec §7.5). */
+export function addComment(
+  db: Db,
+  taskId: string,
+  author: string,
+  body: string,
+  now: number,
+): Result<{ comment: CommentRow }> {
+  return tx(db, (d) => {
+    if (getTask(d, taskId) === undefined) return refuse('not_found', `no task ${taskId}`);
+    return { ok: true, comment: insertComment(d, taskId, author, body, now) };
+  });
+}
+
+function insertComment(d: Db, taskId: string, author: string, body: string, now: number): CommentRow {
+  const masked = mask(body);
+  const { lastInsertRowid } = d
+    .prepare('INSERT INTO kanban_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)')
+    .run(taskId, author, masked, now);
+  record(d, { taskId, kind: 'commented', actor: author, payload: { body } }, now);
+  return { id: Number(lastInsertRowid), taskId, author, body: masked, createdAt: now };
+}
+```
+
+with:
+
+```ts
+/**
+ * A comment, on a task in any phase. The dispatcher forwards a person's to an
+ * undecided run (spec §7.5) -- if it `steers`: a talk-tier comment from chat is
+ * stored for people to read, and never given to an agent (spec §9.1).
+ */
+export function addComment(
+  db: Db,
+  taskId: string,
+  author: string,
+  body: string,
+  now: number,
+  steers = true,
+): Result<{ comment: CommentRow }> {
+  return tx(db, (d) => {
+    if (getTask(d, taskId) === undefined) return refuse('not_found', `no task ${taskId}`);
+    return { ok: true, comment: insertComment(d, taskId, author, body, now, steers) };
+  });
+}
+
+function insertComment(d: Db, taskId: string, author: string, body: string, now: number, steers = true): CommentRow {
+  const masked = mask(body);
+  const { lastInsertRowid } = d
+    .prepare('INSERT INTO kanban_comments (task_id, author, body, created_at, steers) VALUES (?, ?, ?, ?, ?)')
+    .run(taskId, author, masked, now, steers ? 1 : 0);
+  // `steers` is recorded only when it is false, so a comment that steers reads as it always did.
+  record(d, { taskId, kind: 'commented', actor: author, payload: steers ? { body } : { body, steers: false } }, now);
+  return { id: Number(lastInsertRowid), taskId, author, body: masked, createdAt: now };
+}
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    if (comment !== undefined && comment !== '') insertComment(d, taskId, by, comment, now);
+```
+
+with:
+
+```ts
+    // An unblock is an operator's, so its comment steers the next run.
+    if (comment !== undefined && comment !== '') insertComment(d, taskId, by, comment, now);
+```
+
+In `src/db/kanban-read.ts`, replace:
+
+```ts
+export function commentsOf(db: Db, taskId: string): CommentRow[] {
+  return db
+    .prepare<[string], CommentRaw>(
+      'SELECT id, task_id, author, body, created_at FROM kanban_comments WHERE task_id = ? ORDER BY id',
+    )
+    .all(taskId)
+    .map(decodeComment);
+}
+```
+
+with:
+
+```ts
+/**
+ * The task's comments, oldest first. `steering`: only those that may steer an
+ * agent -- a run's, or an operator's -- which are what a run's prompt and a
+ * forwarded comment carry (spec §7.5, §9.1). Without it, every comment, as
+ * `/kanban show` gives them to people.
+ */
+export function commentsOf(db: Db, taskId: string, opts: { steering?: boolean } = {}): CommentRow[] {
+  return db
+    .prepare<[string], CommentRaw>(
+      `SELECT id, task_id, author, body, created_at FROM kanban_comments
+        WHERE task_id = ?${opts.steering === true ? ' AND steers = 1' : ''} ORDER BY id`,
+    )
+    .all(taskId)
+    .map(decodeComment);
+}
+```
+
+In `src/kanban/brief.ts`, replace:
+
+```ts
+    comments: commentsOf(db, taskId),
+```
+
+with:
+
+```ts
+    // Only comments that may steer: a talk-tier comment is for people (spec §9.1).
+    comments: commentsOf(db, taskId, { steering: true }),
+```
+
+In `src/kanban/dispatcher.ts`, replace:
+
+```ts
+   * dispatcher has stopped. The comments of runs, its own included, are not
+   * forwarded: a person's word is what beats a reminder.
+   */
+```
+
+with:
+
+```ts
+   * dispatcher has stopped. The comments of runs, its own included, are not
+   * forwarded: a person's word is what beats a reminder. Nor are those that may
+   * not steer an agent: a talk-tier person's, which is for people (spec §9.1).
+   */
+```
+
+In `src/kanban/dispatcher.ts`, replace:
+
+```ts
+    const fresh = commentsOf(this.#deps.db, run.taskId).filter(
+```
+
+with:
+
+```ts
+    const fresh = commentsOf(this.#deps.db, run.taskId, { steering: true }).filter(
+```
+
+In `src/kanban/service.ts`, replace:
+
+```ts
+  comment(taskId: string, body: string, by: string): Result<{ comment: CommentRow }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!isText(body) || body.trim() === '') return board.refuse('invalid', 'a comment needs text');
+    return board.addComment(this.#db, taskId, by, body, this.#clock.now());
+  }
+```
+
+with:
+
+```ts
+  /**
+   * A comment (spec §7.5). `steers: false` -- a talk-tier person's, from chat --
+   * is stored and shown to people, and never given to an agent (spec §9.1). A
+   * run's, and an operator's, steer.
+   */
+  comment(taskId: string, body: string, by: string, opts: { steers?: boolean } = {}): Result<{ comment: CommentRow }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!isText(body) || body.trim() === '') return board.refuse('invalid', 'a comment needs text');
+    return board.addComment(this.#db, taskId, by, body, this.#clock.now(), opts.steers ?? true);
+  }
+```
+
+In `src/db/WRITERS.md`, replace:
+
+```md
+| `kanban_comments` | `db/kanban.ts` | Rows are added, never updated. |
+```
+
+with:
+
+```md
+| `kanban_comments` | `db/kanban.ts` | Rows are added, never updated. `steers` (migration 004) is set at the insert: 0 for a talk-tier person's comment from chat, which is shown to people and given to no agent. |
+```
+
+
+- [ ] **Step 3.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-comment-steering.test.ts tests/kanban-schema.test.ts tests/kanban-nudge.test.ts tests/kanban-prompt.test.ts`. Expected: `Tests  13 passed (13)` for the first two files; with the nudge and prompt suites, which are unchanged since every comment they write steers, every test passes.
+
+- [ ] **Step 3.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1163 passed (1163)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
+
+- [ ] **Step 3.6: Commit.**
+
+```bash
+git add schema/004_comment_steers.sql src/db/kanban.ts src/db/kanban-read.ts src/kanban/service.ts src/kanban/brief.ts src/kanban/dispatcher.ts src/db/WRITERS.md tests/kanban-comment-steering.test.ts tests/kanban-schema.test.ts
+git commit -m "Mark which comments may steer an agent, so a talk-tier person's comment is shown to people and never forwarded to a run or put in its prompt"
+```
+
+---
+
+### Task 4: Parsing `/kanban`
 
 **Files:**
 - Create: `src/kanban/chat-parse.ts`, `tests/kanban-chat-parse.test.ts`
 
-What follows `/kanban`, as the router passes it — the whole argument, line breaks kept — parsed into a command, or the usage line to show (spec §9.1; Decisions 5, 10, 11, 13). Pure: tiers, identity and the board are Task 5's. The person-only verbs parse as `later`, so they are answered rather than unknown.
+What follows `/kanban`, as the router passes it — the whole argument, line breaks kept — parsed into a command, or the usage line to show (spec §9.1; Decisions 6, 7, 12, 14, 17). Pure: tiers, identity and the board are Task 6's. Line breaks are normalized first; a title that is a field line is refused; the person-only verbs parse as `later`; and `assign` keeps a person's name whole, spaces and all, for the refusal Task 6 gives.
 
-- [ ] **Step 3.1: Write the failing tests.**
+- [ ] **Step 4.1: Write the failing tests.**
 
 Create `tests/kanban-chat-parse.test.ts`:
 
@@ -896,8 +1268,19 @@ describe('/kanban new', () => {
     });
   });
 
-  it('refuses no title, a field given twice, and a field with no value', () => {
+  it('reads a CRLF or a lone CR as a line break', () => {
+    expect(parseKanban('new Notes\r\nassignee: docs-writer\rThe body.')).toMatchObject({
+      ok: true,
+      command: { title: 'Notes', assignee: 'docs-writer', body: 'The body.' },
+    });
+  });
+
+  it('refuses no title, a field line where the title goes, a field given twice, and a field with no value', () => {
     expect(parseKanban('new')).toMatchObject({ ok: false, usage: expect.stringContaining('Put the title on the first line') });
+    expect(parseKanban('new\nassignee: docs-writer\nWrite it')).toMatchObject({
+      ok: false,
+      usage: expect.stringContaining('The first line is the title, before any field line.'),
+    });
     expect(parseKanban('new t\nassignee: a\nassignee: b')).toEqual({ ok: false, usage: '`assignee:` is given twice.' });
     expect(parseKanban('new t\nverify:')).toEqual({ ok: false, usage: '`verify:` needs a value.' });
   });
@@ -916,6 +1299,11 @@ describe('the other /kanban commands', () => {
     expect(parseKanban('assign k_1 reviewer')).toEqual({
       ok: true,
       command: { verb: 'assign', taskId: 'k_1', assignee: 'reviewer' },
+    });
+    // A person, whose name may hold a space, is kept whole for the refusal that says it arrives later.
+    expect(parseKanban('assign k_1 @Alice Smith')).toEqual({
+      ok: true,
+      command: { verb: 'assign', taskId: 'k_1', assignee: '@Alice Smith' },
     });
     expect(parseKanban('link k_1 k_2')).toEqual({ ok: true, command: { verb: 'link', parentId: 'k_1', childId: 'k_2' } });
     expect(parseKanban('workspace k_1 docs')).toEqual({
@@ -946,7 +1334,7 @@ describe('the other /kanban commands', () => {
     expect(parseKanban('gate remove k_1 3')).toEqual({ ok: true, command: { verb: 'gate remove', taskId: 'k_1', gateId: 3 } });
   });
 
-  it("names the people's commands, which arrive in plan D2", () => {
+  it("names the people's commands, which arrive in a later update", () => {
     for (const name of ['done', 'block', 'review', 'approve', 'changes']) {
       expect(parseKanban(`${name} k_1 looks good`)).toEqual({ ok: true, command: { verb: 'later', name } });
     }
@@ -981,9 +1369,9 @@ describe('the other /kanban commands', () => {
 ```
 
 
-- [ ] **Step 3.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-chat-parse.test.ts`. Expected: the file FAILS to load, with `Error: Cannot find module '../src/kanban/chat-parse.js'`. `Tests  no tests`.
+- [ ] **Step 4.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-chat-parse.test.ts`. Expected: the file FAILS to load, with `Error: Cannot find module '../src/kanban/chat-parse.js'`. `Tests  no tests`.
 
-- [ ] **Step 3.3: Implement.**
+- [ ] **Step 4.3: Implement.**
 
 Create `src/kanban/chat-parse.ts`:
 
@@ -1082,6 +1470,14 @@ type FieldLabel = keyof typeof FIELDS;
 
 const FIELD_LINE = /^(assignee|reviewer|workspace|parent|outcome|verify|constraints|boundaries|stop when)[ \t]*:[ \t]*(.*)$/i;
 
+/**
+ * A name that is a person, not a role: an @-mention, which Lark's text gives as
+ * `@Name`, or a principal typed out. Roles are bare words (spec §9.1).
+ */
+export function isPerson(name: string): boolean {
+  return name.startsWith('@') || name.toLowerCase().startsWith('lark:');
+}
+
 function usage(verb: keyof typeof USAGE): ParsedKanban {
   return { ok: false, usage: `Usage: \`${USAGE[verb]}\`` };
 }
@@ -1103,7 +1499,8 @@ function words(text: string, n: number): string[] | undefined {
  * kept: `/kanban new` and `/kanban comment` take several lines.
  */
 export function parseKanban(arg: string): ParsedKanban {
-  const [rawVerb, rest] = shift(arg);
+  // One kind of line break from here on: a pasted CRLF, or a lone CR, is a newline.
+  const [rawVerb, rest] = shift(arg.replace(/\r\n?/g, '\n'));
   const verb = rawVerb.toLowerCase();
   switch (verb) {
     case '':
@@ -1126,6 +1523,11 @@ export function parseKanban(arg: string): ParsedKanban {
       return w?.[0] === undefined ? usage(verb) : { ok: true, command: { verb, taskId: w[0] } };
     }
     case 'assign': {
+      // A person's name may hold spaces (`@Alice Smith`): kept whole, for the refusal that names what arrives later.
+      const [taskId, who] = shift(rest);
+      if (taskId !== '' && isPerson(who.trim())) {
+        return { ok: true, command: { verb: 'assign', taskId, assignee: who.trim() } };
+      }
       const w = words(rest, 2);
       if (w?.[0] === undefined || w[1] === undefined) return usage('assign');
       return { ok: true, command: { verb: 'assign', taskId: w[0], assignee: w[1] } };
@@ -1197,9 +1599,12 @@ function parseGate(text: string): ParsedKanban {
  * line one or more task ids.
  */
 function parseNew(text: string): ParsedKanban {
-  const [first = '', ...lines] = text.split(/\r?\n/);
+  const [first = '', ...lines] = text.split('\n');
   const title = first.trim();
   if (title === '') return { ok: false, usage: `Put the title on the first line. Usage: \`${USAGE.new}\`` };
+  if (FIELD_LINE.test(title)) {
+    return { ok: false, usage: `The first line is the title, before any field line. Usage: \`${USAGE.new}\`` };
+  }
   const seen = new Set<FieldLabel>();
   const out: NewTaskCommand = { verb: 'new', title, body: '', parents: [], contract: {} };
   const body: string[] = [];
@@ -1228,11 +1633,11 @@ function parseNew(text: string): ParsedKanban {
 ```
 
 
-- [ ] **Step 3.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-chat-parse.test.ts`. Expected: `Tests  7 passed (7)`.
+- [ ] **Step 4.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-chat-parse.test.ts`. Expected: `Tests  8 passed (8)`.
 
-- [ ] **Step 3.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1166 passed (1166)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 4.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1171 passed (1171)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 3.6: Commit.**
+- [ ] **Step 4.6: Commit.**
 
 ```bash
 git add src/kanban/chat-parse.ts tests/kanban-chat-parse.test.ts
@@ -1241,18 +1646,18 @@ git commit -m "Parse what follows /kanban in chat: a new task's field lines and 
 
 ---
 
-### Task 4: What the board says in chat, and its notices
+### Task 5: What the board says in chat, and its notices
 
 **Files:**
 - Create: `src/kanban/chat-render.ts`, `tests/kanban-chat-render.test.ts`
 
-The text of `/kanban help`, `list`, `show` and `gate list`, and of each notice a subscription hears (spec §9.3, §9.4; Decisions 11, 12, 14, 17). Pure, given the secret set. Every piece of task text is masked and cut before it is escaped; free text keeps its markdown, quoted under its label; labels and gate commands are escaped whole, and a gate command defined before a secret became known is still shown masked (spec §7.7).
+The text of `/kanban help`, `list`, `show` and `gate list`, and of each notice (spec §9.3, §9.4; Decisions 4, 14, 15, 18, 21). Pure, given the secret set. Every piece is masked before anything else is done to it — a title's spaces collapsed, a body trimmed and cut — and only then escaped; free text keeps its markdown, quoted under its label, with a fence line neutralized; the latest output is shown from its end; a gate command defined before a secret became known is shown masked (spec §7.7). A notice reads the recurrence count its event recorded, and a restart's interruption is no notice.
 
-- [ ] **Step 4.1: Write the failing tests.**
+- [ ] **Step 5.1: Write the failing tests.**
 
 Create `tests/kanban-chat-render.test.ts`:
 
-```ts
+````ts
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { addComment, addGate, block, complete, createTask, endRun, DEFAULT_LIMITS } from '../src/db/kanban.js';
 import { boardList, eventsOf, getTask, taskView } from '../src/db/kanban-read.js';
@@ -1296,7 +1701,7 @@ function task(taskId: string): TaskRow {
 const LIMIT = { blockRecurrenceLimit: 2 };
 
 describe('/kanban help', () => {
-  it('lists every command with the tier it needs, and says people arrive in plan D2', () => {
+  it('lists every command with the tier it needs, and says people arrive in a later update', () => {
     const help = renderHelp();
     for (const verb of ['new', 'list', 'show', 'assign', 'link', 'workspace', 'comment', 'unblock', 'stop', 'archive']) {
       expect(help).toContain(`/kanban ${verb}`);
@@ -1304,7 +1709,8 @@ describe('/kanban help', () => {
     expect(help).toContain('`/kanban gate add <task> [--timeout <seconds>] <command>` (operator)');
     expect(help).toContain('`/kanban list');
     expect(help).toContain('(anyone allowed)');
-    expect(help).toContain('plan D2');
+    expect(help).toContain('arrives in a later update');
+    expect(help).not.toContain('D2');
   });
 });
 
@@ -1382,6 +1788,44 @@ describe('/kanban show', () => {
     ]);
   });
 
+  it("shows the end of the latest output, masked whole before it is cut, and marks the cut", () => {
+    addSecrets(['sk-tail-1234567890']);
+    const k = newTask(h.db);
+    const run = claimed(h.db, k.taskId);
+    // The secret straddles where an 800-character tail would begin.
+    const output = `${'a'.repeat(400)}sk-tail-1234567890${'b'.repeat(790)}END-OF-OUTPUT`;
+    expect(endRun(h.db, run.runId, { outcome: 'failed', lastOutput: output }, DEFAULT_LIMITS, NOW).ok).toBe(true);
+    const view = taskView(h.db, k.taskId);
+    if (view === undefined) throw new Error('no view');
+    const text = renderShow(view, []);
+    expect(text).toContain('> … (earlier output cut)\n> ');
+    expect(text).toContain('END-OF-OUTPUT');
+    expect(text).not.toContain('aaaa');
+    for (const piece of ['sk-tail', 'tail-123', '1234567890']) expect(text).not.toContain(piece);
+  });
+
+  it('masks a secret holding a line break in a title, before the title is made one line', () => {
+    addSecrets(['sk-multi\nline-123456']);
+    const k = newTask(h.db, { title: 'Rotate sk-multi\nline-123456 today' });
+    const view = taskView(h.db, k.taskId);
+    if (view === undefined) throw new Error('no view');
+    expect(renderShow(view, []).split('\n')[0]).toBe(`**Rotate ${MASK} today** \`${k.taskId}\` — ready`);
+    expect(renderList(boardList(h.db), undefined)).toContain(`— Rotate ${MASK} today ·`);
+  });
+
+  it('escapes a line that would open or close a code fence inside a quoted body', () => {
+    const k = newTask(h.db, { body: 'before\n```\n~~~~ tilde\n  ```js\nafter' });
+    const view = taskView(h.db, k.taskId);
+    if (view === undefined) throw new Error('no view');
+    expect(renderShow(view, []).split('\n').slice(2, 7)).toEqual([
+      '> before',
+      '> \\```',
+      '> \\~~~~ tilde',
+      '>   \\```js',
+      '> after',
+    ]);
+  });
+
   it('masks a secret before it cuts a long piece, so no start of it shows', () => {
     addSecrets(['sk-split-1234567890']);
     const k = newTask(h.db, { body: `${'x'.repeat(1490)}sk-split-1234567890 and more` });
@@ -1439,6 +1883,8 @@ describe('notices', () => {
     const event = (kind: string, payload: unknown): KanbanEvent => ({ ...last(k.taskId), kind, payload });
     expect(renderNotice(event('blocked', { kind: 'dependency', reason: 'waits', parents: [] }), t, LIMIT)).toBeUndefined();
     expect(renderNotice(event('run_ended', { outcome: 'rate_limited', next: 'cooldown' }), t, LIMIT)).toBeUndefined();
+    // A restart's interruption is retried quietly: the task did nothing wrong.
+    expect(renderNotice(event('run_ended', { outcome: 'interrupted', next: 'retry' }), t, LIMIT)).toBeUndefined();
     for (const kind of ['created', 'claimed', 'commented', 'linked', 'gates_ran', 'archived', 'changes_requested']) {
       expect(renderNotice(event(kind, {}), t, LIMIT)).toBeUndefined();
     }
@@ -1461,7 +1907,22 @@ describe('notices', () => {
     ).toBe(`Gave up — ${name}: failed 2 times; last failed\n\`/kanban unblock ${k.taskId} [comment]\` gives it a fresh set of attempts.`);
     expect(
       renderNotice(event('run_ended', { outcome: 'terminal_provider', next: 'blocked', blockKind: 'capability', blockReason: '401' }), t, LIMIT),
-    ).toMatch(/^Blocked \(capability\) — .*: 401\n/);
+    ).toMatch(/^Blocked \(capability\) — .*: 401\n`\/kanban unblock/);
+    // The recurrences the event recorded, not the task's count now.
+    expect(
+      renderNotice(
+        event('run_ended', { outcome: 'failed', next: 'blocked', blockKind: 'needs_input', blockReason: 'look first', blockRecurrences: 2 }),
+        { ...t, blockRecurrences: 0 },
+        LIMIT,
+      ),
+    ).toContain('It keeps blocking for the same reason (2 times after an unblock)');
+    expect(
+      renderNotice(
+        event('run_ended', { outcome: 'failed', next: 'blocked', blockKind: 'needs_input', blockReason: 'look first', blockRecurrences: 0 }),
+        { ...t, blockRecurrences: 5 },
+        LIMIT,
+      ),
+    ).toContain('once it can go on');
     expect(renderNotice(event('stopped', { blockRecurrences: 0 }, ALICE), t, LIMIT)).toMatch(
       /^Blocked \(needs\\_input\) — .*: stopped by lark:on\\_alice\n/,
     );
@@ -1481,12 +1942,12 @@ describe('notices', () => {
     expect(renderNotice(event, created.task, LIMIT)).toContain(`key ${MASK} refused`);
   });
 });
-```
+````
 
 
-- [ ] **Step 4.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-chat-render.test.ts`. Expected: the file FAILS to load, with `Error: Cannot find module '../src/kanban/chat-render.js'`. `Tests  no tests`.
+- [ ] **Step 5.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-chat-render.test.ts`. Expected: the file FAILS to load, with `Error: Cannot find module '../src/kanban/chat-render.js'`. `Tests  no tests`.
 
-- [ ] **Step 4.3: Implement.**
+- [ ] **Step 5.3: Implement.**
 
 Create `src/kanban/chat-render.ts`:
 
@@ -1513,22 +1974,45 @@ import type { Assignee, GateRow, KanbanEvent, RunRow, TaskRow } from './types.js
  * §7.7). The router masks each whole reply once more.
  */
 
-/** Masked, control characters stripped, and cut to `max` characters: ready for an escaper. */
-function clip(text: string, max: number): string {
-  return truncate(redactKnownSecrets(stripControl(text)), max);
+/**
+ * Control characters stripped and known secrets masked: the first thing done to
+ * any piece, before it is reshaped -- spaces collapsed, trimmed, cut -- since a
+ * reshaped secret no longer matches.
+ */
+function masked(text: string): string {
+  return redactKnownSecrets(stripControl(text));
 }
 
-/** A label: one line, every markdown character escaped. */
+/** A label: masked, then one line, cut, and every markdown character escaped. */
 function label(text: string, max = 200): string {
-  return forDisplay(clip(text.replace(/\s+/g, ' ').trim(), max));
+  return forDisplay(truncate(masked(text).replace(/\s+/g, ' ').trim(), max));
 }
 
-/** Free text that keeps its markdown, indented under its label so it cannot start a heading. */
-function block(text: string, max: number): string {
-  return forMarkdown(clip(text.trim(), max))
+/**
+ * Free text that keeps its markdown, quoted under its label so none of its lines
+ * starts a heading or a list. A line opening a code fence -- three or more
+ * backticks or tildes -- has its first one escaped, so the text cannot open or
+ * close a fence around what follows it.
+ */
+function quoted(text: string): string {
+  return forMarkdown(text)
     .split('\n')
-    .map((line) => `> ${line}`)
+    .map((line) => `> ${line.replace(/^(\s*)([`~]{3,})/, (_all, space: string, run: string) => `${space}\\${run}`)}`)
     .join('\n');
+}
+
+/** Free text from its start: masked, then cut to `max` characters, then quoted. */
+function block(text: string, max: number): string {
+  return quoted(truncate(masked(text).trim(), max));
+}
+
+/**
+ * Free text from its end, as an agent's output is read: masked whole first, so
+ * the cut cannot leave part of a secret, then its last `max` characters, marked.
+ */
+function tail(text: string, max: number): string {
+  const whole = masked(text).trim();
+  return quoted(whole.length <= max ? whole : `… (earlier output cut)\n${whole.slice(-max).trimStart()}`);
 }
 
 function who(a: Assignee | null): string {
@@ -1567,7 +2051,7 @@ export function renderHelp(): string {
   return [
     '**The task board.** A task is any work -- research, a document, an operation in Lark, a chore, a change to code -- given to a role, whose agent runs it in a workspace.',
     ...lines.map(([usage, tier]) => `\`${usage}\` (${tier})`),
-    'Assignees and reviewers are roles for now: naming a person, with an @-mention, arrives in plan D2, with `/kanban done`, `block`, `review`, `approve` and `changes`.',
+    'Assignees and reviewers are roles for now: naming a person, with an @-mention, arrives in a later update, with `/kanban done`, `block`, `review`, `approve` and `changes`.',
     'The chat a task is created in hears when it is done, needs review, blocks, is retried after a failure, gives up, or is stranded.',
   ].join('\n');
 }
@@ -1630,7 +2114,7 @@ export function renderShow(view: TaskView, gates: readonly GateRow[]): string {
     for (const run of view.runs.slice(-5)) out.push(runLine(run));
     const last = view.runs.at(-1);
     const output = last?.lastOutput ?? null;
-    if (output !== null && output.trim() !== '') out.push('Latest output:', block(output.slice(-2000), 800));
+    if (output !== null && output.trim() !== '') out.push('Latest output:', tail(output, 800));
   }
   if (view.comments.length > 0) {
     const shown = view.comments.slice(-5);
@@ -1649,8 +2133,12 @@ export function renderGates(taskId: string, gates: readonly GateRow[]): string {
   ].join('\n');
 }
 
-/** The outcomes a retry follows that are failures to tell a subscriber of (spec §9.4). */
-const RETRIED: ReadonlySet<string> = new Set(['failed', 'crashed', 'timed_out', 'protocol_violation', 'interrupted']);
+/**
+ * The outcomes a retry follows that are failures to tell a subscriber of (spec
+ * §9.4). Not `interrupted`: a run the gateway's restart ended is retried quietly,
+ * as the task did nothing wrong.
+ */
+const RETRIED: ReadonlySet<string> = new Set(['failed', 'crashed', 'timed_out', 'protocol_violation']);
 
 function text(payload: Record<string, unknown>, key: string): string {
   const v = payload[key];
@@ -1678,7 +2166,8 @@ function blockedLine(task: TaskRow, kind: string, reason: string, recurrences: n
 export function renderNotice(event: KanbanEvent, task: TaskRow, opts: { blockRecurrenceLimit: number }): string | undefined {
   const p = (typeof event.payload === 'object' && event.payload !== null ? event.payload : {}) as Record<string, unknown>;
   const name = `**${label(task.title)}** ${id(task.taskId)}`;
-  const recurrences = typeof p['blockRecurrences'] === 'number' ? p['blockRecurrences'] : task.blockRecurrences;
+  // As the event recorded it, not as the task is now: a notice delivered late tells what was true then.
+  const recurrences = typeof p['blockRecurrences'] === 'number' ? p['blockRecurrences'] : 0;
   switch (event.kind) {
     case 'completed': {
       const summary = text(p, 'summary');
@@ -1709,7 +2198,7 @@ export function renderNotice(event: KanbanEvent, task: TaskRow, opts: { blockRec
       if (kind === 'gave_up') {
         return `Gave up — ${name}: ${label(reason, 800)}\n\`/kanban unblock ${task.taskId} [comment]\` gives it a fresh set of attempts.`;
       }
-      return blockedLine(task, kind, reason, task.blockRecurrences, opts.blockRecurrenceLimit);
+      return blockedLine(task, kind, reason, recurrences, opts.blockRecurrenceLimit);
     }
     case 'stranded':
       return `Stranded — ${name}: nobody can be given it: ${label(text(p, 'reason'), 500)}`;
@@ -1720,27 +2209,27 @@ export function renderNotice(event: KanbanEvent, task: TaskRow, opts: { blockRec
 ```
 
 
-- [ ] **Step 4.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-chat-render.test.ts`. Expected: `Tests  11 passed (11)`.
+- [ ] **Step 5.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-chat-render.test.ts`. Expected: `Tests  14 passed (14)`.
 
-- [ ] **Step 4.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1177 passed (1177)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 5.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1185 passed (1185)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 4.6: Commit.**
+- [ ] **Step 5.6: Commit.**
 
 ```bash
 git add src/kanban/chat-render.ts tests/kanban-chat-render.test.ts
-git commit -m "Render the board's chat replies and its subscription notices, escaped, with every piece masked before it is cut"
+git commit -m "Render the board's chat replies and its subscription notices, escaped, with every piece masked before it is reshaped or cut"
 ```
 
 ---
 
-### Task 5: The commands, through the service
+### Task 6: The commands, through the service
 
 **Files:**
 - Create: `src/kanban/chat.ts`, `tests/kanban-chat.test.ts`
 
-`KanbanChat.run` does a parsed command (spec §9.1, §10; Decisions 5–10, 15): it checks the sender's tier with the router's authorizer, records who acted as `lark:<union_id>`, refuses a person or a supervised role with what D2 brings, calls `KanbanService` and nothing else, and tells the dispatcher — a pass after a change, and the cancel of the agent run's turn a change decided. It touches no chat session.
+`KanbanChat.run` does a parsed command (spec §9.1, §10; Decisions 4–13, 16, 19): it checks the sender's tier with the router's authorizer, records who acted as `lark:<union_id>`, refuses a person or a supervised role as arriving in a later update, holds a new task to the worker CLI's limits, stores a talk-tier comment as one that does not steer, answers an assignment that changes nothing, calls `KanbanService` and nothing else, and tells the dispatcher. It touches no chat session.
 
-- [ ] **Step 5.1: Write the failing tests.**
+- [ ] **Step 6.1: Write the failing tests.**
 
 Create `tests/kanban-chat.test.ts`:
 
@@ -1758,7 +2247,7 @@ import { WORKSPACES } from './helpers/kanban.js';
 
 /**
  * /kanban in chat (spec §9.1): tiers, the identity the board records, the
- * refusals of what arrives in plan D2, and every change done through the
+ * refusals of what arrives in a later update (plan D2), and every change done through the
  * service, with the dispatcher told.
  */
 
@@ -1868,11 +2357,16 @@ describe('/kanban new', () => {
       'Not done: workspace "nowhere" is not configured',
     );
     for (const line of ['assignee: @Alice', 'reviewer: @Bob', 'assignee: lark:on_alice']) {
-      expect(await say(`new t\n${line}`)).toContain('Naming a person as an assignee or reviewer arrives in plan D2.');
+      expect(await say(`new t\n${line}`)).toBe(
+        'Assigning a task to a person, or naming one as its reviewer, arrives in a later update. ' +
+          'For now a task is given to a role: name it as a bare word, such as `implementer`.',
+      );
     }
     expect(await say('new t\nassignee: watched')).toBe(
-      'role "watched" has a supervised agent; its approval requests cannot be forwarded to a chat yet. That arrives in plan D2.',
+      'role "watched" has a supervised agent; its approval requests cannot be forwarded to a chat yet. That arrives in a later update.',
     );
+    expect(await say(`new ${'t'.repeat(513)}`)).toBe('A title is at most 512 bytes; put the rest in the body.');
+    expect(await say('new t\noutcome: ' + 'x'.repeat(8193))).toBe("The contract's outcome is at most 8192 bytes.");
     expect(taskCount()).toBe(0);
   });
 });
@@ -1883,8 +2377,17 @@ describe('tiers and identity', () => {
     expect(await say('list', GUEST)).toContain(taskId);
     expect(await say(`show ${taskId}`, GUEST)).toContain('**A task**');
     expect(await say(`gate list ${taskId}`, GUEST)).toBe(`Task \`${taskId}\` has no gates.`);
-    expect(await say(`comment ${taskId} the 2024 figures, please`, GUEST)).toContain('Comment added');
-    expect(commentsOf(t.db, taskId).map((c) => [c.author, c.body])).toEqual([['lark:on_guest', 'the 2024 figures, please']]);
+    expect(await say(`comment ${taskId} the 2024 figures, please`, GUEST)).toBe(
+      `Comment added to \`${taskId}\`, for people: \`/kanban show\` shows it. Only an operator's comment is given to the task's agent.`,
+    );
+    expect(await say(`comment ${taskId} use the 2023 figures`)).toContain('An agent working on it gets it');
+    expect(commentsOf(t.db, taskId).map((c) => [c.author, c.body])).toEqual([
+      ['lark:on_guest', 'the 2024 figures, please'],
+      ['lark:on_owner', 'use the 2023 figures'],
+    ]);
+    // Shown to people, and only the operator's steers the agent.
+    expect(commentsOf(t.db, taskId, { steering: true }).map((c) => c.author)).toEqual(['lark:on_owner']);
+    expect(await say(`show ${taskId}`, GUEST)).toContain('> the 2024 figures, please');
     const before = eventsOf(t.db, taskId).length;
     for (const arg of [
       'new Another',
@@ -1948,7 +2451,9 @@ describe('changing a task', () => {
     expect(await say(`workspace ${child} web`)).toBe(
       `Not done: task ${child.replace(/_/g, '\\_')} works in docs; a fixed workspace does not change`,
     );
-    expect(await say(`assign ${child} @Carol`)).toContain('arrives in plan D2');
+    expect(await say(`assign ${child} @Carol Jones`)).toContain('arrives in a later update');
+    expect(await say(`assign ${child} implementer`)).toBe(`\`${child}\` is already assigned to role implementer.`);
+    expect(eventsOf(t.db, child).some((e) => e.kind === 'assignee_set')).toBe(false);
   });
 
   it('defines, lists and removes gates as the sender, refusing one that holds a known secret, and shows them masked', async () => {
@@ -1975,10 +2480,10 @@ describe('changing a task', () => {
 describe('what chat cannot do yet', () => {
   it("answers the people's commands with when they arrive, and a wrong command line with its usage", async () => {
     expect(await say('done k_1 finished')).toBe(
-      "`/kanban done` is for a person's own task, and arrives in plan D2 with people as assignees and reviewers. " +
+      "`/kanban done` is for a person's own task, and arrives in a later update, with people as assignees and reviewers. " +
         'For now tasks go to roles, whose agents report for themselves.',
     );
-    expect(await say('approve k_1')).toContain('arrives in plan D2');
+    expect(await say('approve k_1')).toContain('arrives in a later update');
     expect(await say('show')).toBe('Usage: `/kanban show <task>`');
     expect(await say('show k_missing')).toBe('Not done: no task k\\_missing');
     expect(await say('')).toContain('**The task board.**');
@@ -1987,19 +2492,20 @@ describe('what chat cannot do yet', () => {
 ```
 
 
-- [ ] **Step 5.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-chat.test.ts`. Expected: the file FAILS to load, with `Error: Cannot find module '../src/kanban/chat.js'`. `Tests  no tests`.
+- [ ] **Step 6.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-chat.test.ts`. Expected: the file FAILS to load, with `Error: Cannot find module '../src/kanban/chat.js'`. `Tests  no tests`.
 
-- [ ] **Step 5.3: Implement.**
+- [ ] **Step 6.3: Implement.**
 
 Create `src/kanban/chat.ts`:
 
 ```ts
 import { forDisplay } from '../channel/escape.js';
 import type { BindingKey, InboundMessage, Principal, Tier } from '../types.js';
-import { parseKanban, type KanbanCommand, type LaterVerb, type NewTaskCommand } from './chat-parse.js';
+import { isPerson, parseKanban, type KanbanCommand, type LaterVerb, type NewTaskCommand } from './chat-parse.js';
 import { renderGates, renderHelp, renderList, renderShow } from './chat-render.js';
 import type { KanbanService } from './service.js';
 import type { Refusal, RunRow } from './types.js';
+import { WORKER_LIMITS } from './worker.js';
 
 /**
  * `/kanban` in chat (spec §9.1): a parsed command, checked against the sender's
@@ -2011,7 +2517,10 @@ import type { Refusal, RunRow } from './types.js';
  * knows people by; a sender whose union_id is unknown can read the board but not
  * change it. Until plan D2 the board gives work only to roles, so naming a
  * person is refused here, and the commands for people's own tasks are answered
- * with when they arrive.
+ * with when they arrive -- "in a later update", in words a person in chat knows.
+ *
+ * Anyone at talk tier may comment, and everyone sees comments in `/kanban show`;
+ * only an operator's may steer the task's agent (spec §9.1, §7.5).
  */
 
 export interface KanbanChatDeps {
@@ -2048,22 +2557,32 @@ export function principalOf(sender: Principal): string | undefined {
   return sender.unionId === null || sender.unionId === '' ? undefined : `lark:${sender.unionId}`;
 }
 
-/**
- * A name that is a person, not a role: an @-mention, which Lark's text gives as
- * `@Name`, or a principal typed out. Roles are bare words (spec §9.1).
- */
-function isPerson(name: string): boolean {
-  return name.startsWith('@') || name.toLowerCase().startsWith('lark:');
-}
-
 const PEOPLE_LATER =
-  'Naming a person as an assignee or reviewer arrives in plan D2. For now a task is given to a role: name it as a bare word, such as `implementer`.';
+  'Assigning a task to a person, or naming one as its reviewer, arrives in a later update. For now a task is given to a role: name it as a bare word, such as `implementer`.';
 
 function later(name: LaterVerb): string {
   return (
-    `\`/kanban ${name}\` is for a person's own task, and arrives in plan D2 with people as assignees and reviewers. ` +
+    `\`/kanban ${name}\` is for a person's own task, and arrives in a later update, with people as assignees and reviewers. ` +
     'For now tasks go to roles, whose agents report for themselves.'
   );
+}
+
+/**
+ * What `/kanban new` may hold: the limits a worker's `mt kanban create` has
+ * (C3's `WORKER_LIMITS`), so a task is the same size whoever made it.
+ */
+function oversized(command: NewTaskCommand): string | undefined {
+  const size = (text: string) => Buffer.byteLength(text, 'utf8');
+  if (size(command.title) > WORKER_LIMITS.title) {
+    return `A title is at most ${WORKER_LIMITS.title} bytes; put the rest in the body.`;
+  }
+  if (size(command.body) > WORKER_LIMITS.body) return `A body is at most ${WORKER_LIMITS.body} bytes.`;
+  for (const [field, value] of Object.entries(command.contract)) {
+    if (value !== undefined && size(value) > WORKER_LIMITS.contractField) {
+      return `The contract's ${forDisplay(field)} is at most ${WORKER_LIMITS.contractField} bytes.`;
+    }
+  }
+  return undefined;
 }
 
 /** A refusal, in words for chat: the board's message, escaped, with what D2 brings where that is the reason. */
@@ -2071,7 +2590,7 @@ function refused(r: Refusal): string {
   if (r.code === 'supervised_role') {
     return (
       `${forDisplay(r.message.replace(/;.*$/, ''))}; its approval requests cannot be forwarded to a chat yet. ` +
-      'That arrives in plan D2.'
+      'That arrives in a later update.'
     );
   }
   if (r.code === 'person_not_assignable') return PEOPLE_LATER;
@@ -2134,6 +2653,11 @@ export class KanbanChat {
         return this.#create(command, by, message, key);
       case 'assign': {
         if (isPerson(command.assignee)) return PEOPLE_LATER;
+        const now = service.show(command.taskId);
+        const current = now.ok ? now.view.task.assignee : null;
+        if (current?.kind === 'role' && current.name === command.assignee) {
+          return `${id(command.taskId)} is already assigned to role ${forDisplay(command.assignee)}.`;
+        }
         const r = service.assign(command.taskId, command.assignee, by);
         if (!r.ok) return refused(r);
         this.#decided(r.run);
@@ -2154,9 +2678,13 @@ export class KanbanChat {
         return `${id(command.taskId)} works in ${forDisplay(command.workspace)}.`;
       }
       case 'comment': {
-        const r = service.comment(command.taskId, command.text, by);
+        // Only an operator's comment may steer the task's agent; anyone's is shown to people (spec §9.1).
+        const steers = this.#deps.hasTier(message.sender, 'operate');
+        const r = service.comment(command.taskId, command.text, by, { steers });
         if (!r.ok) return refused(r);
-        return `Comment added to ${id(command.taskId)}. An agent working on it gets it when its current turn ends; otherwise the next run reads it.`;
+        return steers
+          ? `Comment added to ${id(command.taskId)}. An agent working on it gets it when its current turn ends; otherwise the next run reads it.`
+          : `Comment added to ${id(command.taskId)}, for people: \`/kanban show\` shows it. Only an operator's comment is given to the task's agent.`;
       }
       case 'unblock': {
         const r = service.unblock(command.taskId, by, command.comment);
@@ -2208,6 +2736,8 @@ export class KanbanChat {
     for (const name of [command.assignee, command.reviewer]) {
       if (name !== undefined && isPerson(name)) return PEOPLE_LATER;
     }
+    const tooBig = oversized(command);
+    if (tooBig !== undefined) return tooBig;
     const r = this.#deps.service.create({
       title: command.title,
       ...(command.body === '' ? {} : { body: command.body }),
@@ -2263,27 +2793,27 @@ export class KanbanChat {
 ```
 
 
-- [ ] **Step 5.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-chat.test.ts`. Expected: `Tests  9 passed (9)`. Run `npx vitest run --project unit tests/kanban-service.test.ts -t "one writer"`. Expected: `Tests  1 passed | …`: `src/kanban/chat.ts` does not import `db/kanban.js`.
+- [ ] **Step 6.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-chat.test.ts`. Expected: `Tests  9 passed (9)`. Run `npx vitest run --project unit tests/kanban-service.test.ts -t "one writer"`. Expected: `Tests  1 passed | …`: `src/kanban/chat.ts` does not import `db/kanban.js`.
 
-- [ ] **Step 5.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1186 passed (1186)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 6.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1194 passed (1194)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 5.6: Commit.**
+- [ ] **Step 6.6: Commit.**
 
 ```bash
 git add src/kanban/chat.ts tests/kanban-chat.test.ts
-git commit -m "Do the /kanban commands through the board's service, at the tier each needs, recording who acted, and refuse people until plan D2"
+git commit -m "Do the /kanban commands through the board's service, at the tier each needs, recording who acted, and refuse people until a later update"
 ```
 
 ---
 
-### Task 6: `/kanban` in the router
+### Task 7: `/kanban` in the router
 
 **Files:**
 - Modify: `src/core/commands.ts`, `src/core/router.ts`, `tests/router.test.ts`, `tests/commands.test.ts`
 
-`/kanban` joins the command table at talk tier, multiline, needing no session, and not mutating, so a busy session never refuses it (spec §9.1). The router hands it to `RouterDeps.kanban` — `KanbanCommands`, an interface in the router, so the core imports nothing from the board — or answers that the board is off (Decision 4). A board that throws is answered with the reason, escaped and masked, and noted. Every reply is masked whole before it is sent (Decision 14).
+`/kanban` joins the command table at talk tier, multiline, needing no session, and not mutating, so a busy session never refuses it (spec §9.1). The router hands it to `RouterDeps.kanban` — `KanbanCommands`, an interface in the router, so the core imports nothing from the board — or answers that the board is off (Decision 5). A board that throws is answered with the reason, escaped and masked, and noted. Every reply is masked whole before it is sent (Decision 18).
 
-- [ ] **Step 6.1: Write the failing tests.**
+- [ ] **Step 7.1: Write the failing tests.**
 
 In `tests/router.test.ts`, replace:
 
@@ -2445,9 +2975,9 @@ with:
 ```
 
 
-- [ ] **Step 6.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/router.test.ts tests/commands.test.ts`. Expected: five FAIL — the command table's with `/kanban did not parse`, and the router's four because `/kanban` is answered "Unknown command `/kanban`. Try `/help`." `Tests  5 failed | 76 passed (81)`.
+- [ ] **Step 7.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/router.test.ts tests/commands.test.ts`. Expected: five FAIL — the command table's with `/kanban did not parse`, and the router's four because `/kanban` is answered "Unknown command `/kanban`. Try `/help`." `Tests  5 failed | 76 passed (81)`.
 
-- [ ] **Step 6.3: Implement.**
+- [ ] **Step 7.3: Implement.**
 
 In `src/core/commands.ts`, replace:
 
@@ -2572,11 +3102,11 @@ with:
 ```
 
 
-- [ ] **Step 6.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/router.test.ts tests/commands.test.ts`. Expected: `Tests  81 passed (81)`.
+- [ ] **Step 7.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/router.test.ts tests/commands.test.ts`. Expected: `Tests  81 passed (81)`.
 
-- [ ] **Step 6.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1191 passed (1191)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 7.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1199 passed (1199)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 6.6: Commit.**
+- [ ] **Step 7.6: Commit.**
 
 ```bash
 git add src/core/commands.ts src/core/router.ts tests/router.test.ts tests/commands.test.ts
@@ -2585,15 +3115,15 @@ git commit -m "Route /kanban to the board's chat commands, never refused for a b
 
 ---
 
-### Task 7: Delivering notices
+### Task 8: Delivering notices, a batch per conversation
 
 **Files:**
 - Create: `src/kanban/notices.ts`, `tests/kanban-notices.test.ts`
 - Modify: `src/core/ids.ts`, `tests/ids.test.ts`
 
-The `Notifier` (spec §9.4; Decisions 19–21): a round every 2 s, one at a time, over this bot's subscriptions with an event past their cursor; each one's events in order, a notice sent and then the cursor moved, an event that is none only moving it. A send that fails keeps the cursor and holds that subscription back for a pause that doubles to five minutes. The uuid is `noticeUuid(appId, subscription, event)`, derived, so a notice sent again after a restart carries the first one's. A new `Notifier` over the same database is a restart: it knows only the cursors.
+The `Notifier` (spec §9.4; Decisions 23–25). Every 2 s, one round at a time, it groups this bot's due subscriptions by conversation and sends each at most one message — that round's notices, in event order, at most 20 — then moves each subscription's cursor past what the message covered. The uuid is `noticeBatchUuid(appId, pairs)`, from the set of (subscription, event) pairs, so a batch sent again after a restart keeps it. A failed send moves no cursor and holds its conversation back; one refused for good, or failing `DEAD_AFTER` times at five minutes, drops its notices with one log line and lets the conversation go until a restart. One conversation or subscription that throws holds up no other, and a round sends to at most ten conversations. A new `Notifier` over the same database is a restart: it knows only the cursors.
 
-- [ ] **Step 7.1: Write the failing tests.**
+- [ ] **Step 8.1: Write the failing tests.**
 
 In `tests/ids.test.ts`, replace:
 
@@ -2606,7 +3136,7 @@ with:
 
 ```ts
   newTurnId,
-  noticeUuid,
+  noticeBatchUuid,
   replyUuid,
 ```
 
@@ -2619,13 +3149,37 @@ describe('approvalNonce', () => {
 with:
 
 ```ts
-describe('noticeUuid', () => {
-  it('is the same for one subscription and event, after a restart too, and differs for any other', () => {
-    const a = noticeUuid('cli_app', 3, 41);
-    expect(noticeUuid('cli_app', 3, 41)).toBe(a);
+describe('noticeBatchUuid', () => {
+  it('is the same for the same set of pairs, in any order, after a restart too, and differs for any other set', () => {
+    const a = noticeBatchUuid('cli_app', [
+      [3, 41],
+      [5, 44],
+    ]);
+    expect(
+      noticeBatchUuid('cli_app', [
+        [5, 44],
+        [3, 41],
+      ]),
+    ).toBe(a);
     expect(a).toHaveLength(50);
-    expect(new Set([a, noticeUuid('cli_app', 4, 41), noticeUuid('cli_app', 3, 42), noticeUuid('cli_other', 3, 41)]).size).toBe(4);
-    // Never a control reply's or a session send's for the same numbers.
+    const others = [
+      noticeBatchUuid('cli_app', [[3, 41]]),
+      noticeBatchUuid('cli_app', [
+        [3, 41],
+        [5, 45],
+      ]),
+      // Not one pair's digits run into the next's.
+      noticeBatchUuid('cli_app', [
+        [3, 414],
+        [5, 4],
+      ]),
+      noticeBatchUuid('cli_other', [
+        [3, 41],
+        [5, 44],
+      ]),
+    ];
+    expect(new Set([a, ...others]).size).toBe(5);
+    // Never a control reply's or a session send's.
     expect(a).not.toBe(replyUuid('cli_app', '3', '41'));
     expect(a).not.toBe(sendUuid('cli_app', '3', 41));
   });
@@ -2638,9 +3192,10 @@ Create `tests/kanban-notices.test.ts`:
 
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { noticeUuid } from '../src/core/ids.js';
-import { eventsOf, subscriptionsOf } from '../src/db/kanban-read.js';
-import { NOTICE_POLL_MS, Notifier } from '../src/kanban/notices.js';
+import { ChannelError, type Channel } from '../src/channel/types.js';
+import { noticeBatchUuid } from '../src/core/ids.js';
+import { dueSubscriptions, eventsOf, subscriptionsOf } from '../src/db/kanban-read.js';
+import { BATCH_NOTICES, DEAD_AFTER, NOTICE_BACKOFF_MAX_MS, NOTICE_POLL_MS, Notifier } from '../src/kanban/notices.js';
 import { KanbanService } from '../src/kanban/service.js';
 import type { CreatedVia, TaskRow } from '../src/kanban/types.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
@@ -2650,12 +3205,15 @@ import { DEFAULT_ROLES } from './helpers/dispatch.js';
 import { ALICE, WORKSPACES } from './helpers/kanban.js';
 
 /**
- * Subscriptions' notices (spec §9.4): delivered in order from each
- * subscription's cursor, at least once, one uuid per subscription and event, and
- * caught up after a restart by the same code.
+ * Subscriptions' notices (spec §9.4): one message per conversation a round, in
+ * event order, the cursors moved once it is sent; at least once, with one uuid
+ * per batch; a conversation that cannot be reached let go of; and caught up
+ * after a restart by the same code.
  */
 
 const VIA: CreatedVia = { kind: 'chat', channel: 'lark', appId: 'cli_app', conversationId: 'oc_team', threadId: 'omt_topic' };
+const ELSEWHERE: CreatedVia = { kind: 'chat', channel: 'lark', appId: 'cli_app', conversationId: 'oc_other', threadId: '' };
+const BROKEN: CreatedVia = { kind: 'chat', channel: 'broken', appId: 'cli_app', conversationId: 'oc_other', threadId: '' };
 
 let t: TestDb;
 let clock: ManualClock;
@@ -2681,12 +3239,12 @@ afterEach(() => {
   t.close();
 });
 
-function notifier(appId = 'cli_app'): Notifier {
+function notifier(opts: { appId?: string; channels?: ReadonlyMap<string, Channel> } = {}): Notifier {
   return new Notifier({
     db: t.db,
     service,
-    channels: new Map([['lark', lark]]),
-    appId,
+    channels: opts.channels ?? new Map([['lark', lark]]),
+    appId: opts.appId ?? 'cli_app',
     blockRecurrenceLimit: 2,
     clock,
     note: (line) => notes.push(line),
@@ -2704,8 +3262,16 @@ async function done(task: TaskRow, summary: string): Promise<void> {
   if (!r.ok) throw new Error(r.message);
 }
 
+function eventId(task: TaskRow, kind: string): number {
+  return eventsOf(t.db, task.taskId).find((e) => e.kind === kind)?.id ?? 0;
+}
+
+function subId(task: TaskRow): number {
+  return subscriptionsOf(t.db, task.taskId)[0]?.id ?? 0;
+}
+
 describe('the notifier', () => {
-  it('sends each notice once, in order, to the chat and thread, passing over the events that are none', async () => {
+  it("sends a conversation one message a round, its subscriptions' notices in event order, passing over the rest", async () => {
     const a = create('Draft the notes');
     const b = create('Check the links');
     expect(service.comment(a.taskId, 'first draft by Friday', ALICE).ok).toBe(true);
@@ -2714,17 +3280,47 @@ describe('the notifier', () => {
     const n = notifier();
 
     expect(await n.deliver()).toBe(2);
-    expect(lark.texts.map((m) => [m.target, m.text.split('\n')[0]])).toEqual([
-      [{ chatId: 'oc_team', threadId: 'omt_topic' }, `Done — **Draft the notes** \`${a.taskId}\`:`],
-      [{ chatId: 'oc_team', threadId: 'omt_topic' }, `Blocked (needs\\_input) — **Check the links** \`${b.taskId}\`: which wiki?`],
+    expect(lark.texts).toHaveLength(1);
+    expect(lark.texts[0]?.target).toEqual({ chatId: 'oc_team', threadId: 'omt_topic' });
+    expect(lark.texts[0]?.text.split('\n\n')).toEqual([
+      `Blocked (needs\\_input) — **Check the links** \`${b.taskId}\`: which wiki?\n\`/kanban unblock ${b.taskId} [comment]\` once it can go on.`,
+      `Done — **Draft the notes** \`${a.taskId}\`:\n> merged`,
     ]);
-    const [subA] = subscriptionsOf(t.db, a.taskId);
-    const completed = eventsOf(t.db, a.taskId).find((e) => e.kind === 'completed');
-    expect(lark.texts[0]?.uuid).toBe(noticeUuid('cli_app', subA?.id ?? 0, completed?.id ?? 0));
-    // Every event, a notice or not, is behind the cursor now.
-    expect(subA?.cursor).toBe(eventsOf(t.db, a.taskId).at(-1)?.id);
+    expect(lark.texts[0]?.uuid).toBe(
+      noticeBatchUuid('cli_app', [
+        [subId(b), eventId(b, 'blocked')],
+        [subId(a), eventId(a, 'completed')],
+      ]),
+    );
+    // Every event, a notice or not, is behind its cursor now.
+    expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(eventsOf(t.db, a.taskId).at(-1)?.id);
+    expect(subscriptionsOf(t.db, b.taskId)[0]?.cursor).toBe(eventsOf(t.db, b.taskId).at(-1)?.id);
     expect(await n.deliver()).toBe(0);
-    expect(lark.texts).toHaveLength(2);
+    expect(lark.texts).toHaveLength(1);
+  });
+
+  it('sends at most a batch of notices a message, says more follow, and sends them in the next round', async () => {
+    const tasks = Array.from({ length: BATCH_NOTICES + 3 }, (_, i) => create(`task ${i}`));
+    for (const task of tasks) await done(task, 'ok');
+    const n = notifier();
+    expect(await n.deliver()).toBe(BATCH_NOTICES);
+    const first = lark.texts[0]?.text.split('\n\n') ?? [];
+    expect(first).toHaveLength(BATCH_NOTICES + 1);
+    expect(first.at(-1)).toBe('… and 3 more, in the next message.');
+    // The cursors moved past what was sent, and no further.
+    const last = tasks.at(-1);
+    if (last === undefined) throw new Error('no tasks');
+    expect(subscriptionsOf(t.db, last.taskId)[0]?.cursor).toBeLessThan(eventId(last, 'completed'));
+    expect(await n.deliver()).toBe(3);
+    expect(lark.texts[1]?.text.split('\n\n')).toHaveLength(3);
+    expect(await n.deliver()).toBe(0);
+  });
+
+  it('sends each conversation its own message', async () => {
+    await done(create('Here'), 'ok');
+    await done(create('There', ELSEWHERE), 'ok');
+    expect(await notifier().deliver()).toBe(2);
+    expect(lark.texts.map((m) => m.target.chatId).sort()).toEqual(['oc_other', 'oc_team']);
   });
 
   it("tells the chat following a task about the tasks that task's runs create", async () => {
@@ -2738,28 +3334,28 @@ describe('the notifier', () => {
       createdVia: { kind: 'run', runId: claimed.run.runId },
     });
     if (!child.ok) throw new Error(child.message);
-    await notifier().deliver();
-    expect(lark.texts).toHaveLength(0);
     expect(service.stop(parent.taskId, ALICE).ok).toBe(true);
     expect(service.closeRun(claimed.run.runId).ok).toBe(true);
     await done(child.task, 'booked');
     await notifier().deliver();
-    expect(lark.texts.map((m) => m.text.split('\n')[0])).toEqual([
-      `Blocked (needs\\_input) — **Plan the launch** \`${parent.taskId}\`: stopped by lark:on\\_alice`,
-      `Done — **Book the room** \`${child.task.taskId}\`:`,
+    expect(lark.texts.map((m) => m.text.split('\n\n').map((n) => n.split('\n')[0]))).toEqual([
+      [
+        `Blocked (needs\\_input) — **Plan the launch** \`${parent.taskId}\`: stopped by lark:on\\_alice`,
+        `Done — **Book the room** \`${child.task.taskId}\`:`,
+      ],
     ]);
   });
 
-  it('keeps the cursor where it is when a send fails, and tries again after a pause, sending it once', async () => {
+  it('keeps the cursors where they are when a send fails, and tries again after a pause, sending once', async () => {
     const a = create('Draft the notes');
     await done(a, 'merged');
     const n = notifier();
-    lark.failNext('sendText', new Error('chat not found'));
+    lark.failNext('sendText', new ChannelError(99991400, 'rate limited', true));
     expect(await n.deliver()).toBe(0);
     expect(notes.at(-1)).toBe(
-      `kanban: a notice for task ${a.taskId} to subscription ${subscriptionsOf(t.db, a.taskId)[0]?.id ?? 0} was not sent (chat not found); trying again in 2 s`,
+      `kanban: notices for oc_team/omt_topic (task ${a.taskId}) were not sent (rate limited (code 99991400)); trying again in 2 s`,
     );
-    expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBeLessThan(eventsOf(t.db, a.taskId).at(-1)?.id ?? 0);
+    expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(0);
     // Held back until the pause is over.
     expect(await n.deliver()).toBe(0);
     clock.advance(NOTICE_POLL_MS);
@@ -2768,13 +3364,97 @@ describe('the notifier', () => {
     expect(await n.deliver()).toBe(0);
   });
 
+  it('lets go of a conversation a send refuses for good: its notices dropped, said once, the rest passed over until a restart', async () => {
+    const a = create('Draft the notes');
+    const b = create('Check the links');
+    const elsewhere = create('Elsewhere', ELSEWHERE);
+    await done(a, 'merged');
+    await done(b, 'checked');
+    await done(elsewhere, 'ok');
+    // The team's thread is the first sent to: its subscriptions are the oldest.
+    lark.failNext('sendText', new ChannelError(230002, 'the bot is not in the chat', false));
+    const n = notifier();
+    expect(await n.deliver()).toBe(1);
+    expect(lark.texts.map((m) => m.target.chatId)).toEqual(['oc_other']);
+    const dropped = notes.filter((l) => l.includes('cannot be reached'));
+    expect(dropped).toEqual([
+      `kanban: oc_team/omt_topic (tasks ${a.taskId}, ${b.taskId}) cannot be reached (the bot is not in the chat (code 230002)); ` +
+        `dropping 2 notice(s) (${a.taskId}#${eventId(a, 'completed')}, ${b.taskId}#${eventId(b, 'completed')}) ` +
+        'and passing over its notices until the gateway restarts',
+    ]);
+    // Later notices are passed over without a send, or another line.
+    await done(create('Another'), 'ok');
+    expect(await n.deliver()).toBe(0);
+    expect(notes.filter((l) => l.includes('cannot be reached'))).toHaveLength(1);
+    expect(dueSubscriptions(t.db, 'cli_app')).toEqual([]);
+    // A restart tries the conversation again.
+    await done(create('After the restart'), 'ok');
+    expect(await notifier().deliver()).toBe(1);
+    expect(lark.texts.at(-1)?.target.chatId).toBe('oc_team');
+  });
+
+  it(`lets go of a conversation whose sends fail ${DEAD_AFTER} times in a row at the longest pause`, async () => {
+    const a = create('Draft the notes');
+    await done(a, 'merged');
+    const n = notifier();
+    let failures = 0;
+    for (;;) {
+      lark.failNext('sendText', new ChannelError(99991400, 'rate limited', true));
+      await n.deliver();
+      failures += 1;
+      if (notes.some((l) => l.includes('cannot be reached'))) break;
+      expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(0);
+      clock.advance(NOTICE_BACKOFF_MAX_MS);
+      if (failures > 20) throw new Error('never let go');
+    }
+    // Eight pauses of 2 s to 256 s, then DEAD_AFTER failures at five minutes, the last letting it go.
+    expect(failures).toBe(8 + DEAD_AFTER);
+    expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(eventsOf(t.db, a.taskId).at(-1)?.id);
+  });
+
+  it('keeps one subscription that cannot be read, or one conversation that throws, from holding up the rest', async () => {
+    const a = create('Draft the notes');
+    await done(a, 'merged');
+    // A subscription whose task is not on the board, in the same conversation.
+    t.db.pragma('foreign_keys = OFF');
+    t.db
+      .prepare(
+        `INSERT INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, created_at)
+         VALUES ('k_gone', 'lark', 'cli_app', 'oc_team', 'omt_topic', 0)`,
+      )
+      .run();
+    t.db
+      .prepare(
+        `INSERT INTO kanban_events (task_id, kind, actor, payload, created_at) VALUES ('k_gone', 'stranded', 'gateway', jsonb('{}'), 0)`,
+      )
+      .run();
+    t.db.pragma('foreign_keys = ON');
+    // And a conversation on a channel whose lookup throws.
+    const broken = create('On a broken channel', BROKEN);
+    await done(broken, 'ok');
+    const channels = new Map<string, Channel>([['lark', lark]]);
+    const get = channels.get.bind(channels);
+    channels.get = (id: string) => {
+      if (id === 'broken') throw new Error('the channel table is broken');
+      return get(id);
+    };
+    expect(await notifier({ channels }).deliver()).toBe(1);
+    expect(lark.texts.map((m) => m.text.split('\n')[0])).toEqual([`Done — **Draft the notes** \`${a.taskId}\`:`]);
+    expect(notes).toContain(
+      'kanban: notices for subscription 2 of task k_gone were not sent (task k_gone is not on the board); trying again in 2 s',
+    );
+    expect(notes).toContain(
+      `kanban: notices for oc_other (task ${broken.taskId}) were not sent (the channel table is broken); trying again in 2 s`,
+    );
+  });
+
   it('catches up after a restart from the cursors, sending again only what was not marked sent, with the same uuid', async () => {
     const a = create('Draft the notes');
     await done(a, 'merged');
     expect(await notifier().deliver()).toBe(1);
     // A new process: nothing is sent twice that was marked sent.
     expect(await notifier().deliver()).toBe(0);
-    // One that stopped after the send and before its cursor moved.
+    // One that stopped after the send and before its cursors moved.
     t.db.prepare('UPDATE kanban_subscriptions SET cursor = 0').run();
     expect(await notifier().deliver()).toBe(1);
     expect(lark.texts).toHaveLength(2);
@@ -2806,7 +3486,7 @@ describe('the notifier', () => {
     await n.idle();
     expect(await round).toBe(1);
     expect(await n.deliver()).toBe(0);
-    await done(create('Another'), 'done');
+    await done(create('Another'), 'ok');
     expect(await n.deliver()).toBe(0);
     expect(lark.texts).toHaveLength(1);
   });
@@ -2814,9 +3494,9 @@ describe('the notifier', () => {
 ```
 
 
-- [ ] **Step 7.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/ids.test.ts tests/kanban-notices.test.ts`. Expected: `tests/kanban-notices.test.ts` FAILS to load, with `Error: Cannot find module '../src/kanban/notices.js'`, and the `noticeUuid` test FAILS with `TypeError: (0 , noticeUuid) is not a function`. `Test Files  2 failed (2)`, `Tests  1 failed | 14 passed (15)`.
+- [ ] **Step 8.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/ids.test.ts tests/kanban-notices.test.ts`. Expected: `tests/kanban-notices.test.ts` FAILS to load, with `Error: Cannot find module '../src/kanban/notices.js'`, and the `noticeBatchUuid` test FAILS with `TypeError: (0 , noticeBatchUuid) is not a function`. `Test Files  2 failed (2)`, `Tests  1 failed | 14 passed (15)`.
 
-- [ ] **Step 7.3: Implement.**
+- [ ] **Step 8.3: Implement.**
 
 In `src/core/ids.ts`, replace:
 
@@ -2829,15 +3509,17 @@ with:
 
 ```ts
 /**
- * The `uuid` for a subscription's notice of one board event (spec §9.4).
+ * The `uuid` for one message of board notices (spec §9.4): a conversation's
+ * batch, covering these (subscription, event) pairs.
  *
- * Derived from the subscription and the event, so the notice a restart sends
- * again -- sent, and the gateway stopped before the cursor moved past it --
+ * Derived from the set of pairs, in any order, so the batch a restart sends
+ * again -- sent, and the gateway stopped before the cursors moved past it --
  * carries the uuid the first one did, and a channel that deduplicates by it
  * shows one message.
  */
-export function noticeUuid(appId: string, subscriptionId: number, eventId: number): string {
-  const canonical = [appId, 'kanban-notice', subscriptionId, eventId].join(SEP);
+export function noticeBatchUuid(appId: string, pairs: ReadonlyArray<readonly [number, number]>): string {
+  const covered = [...new Set(pairs.map(([sub, event]) => `${sub}:${event}`))].sort();
+  const canonical = [appId, 'kanban-notices', ...covered].join(SEP);
   return createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 50);
 }
 
@@ -2848,32 +3530,44 @@ export function noticeUuid(appId: string, subscriptionId: number, eventId: numbe
 Create `src/kanban/notices.ts`:
 
 ```ts
-import type { Channel } from '../channel/types.js';
-import { noticeUuid } from '../core/ids.js';
+import { ChannelError, type Channel, type SendTarget } from '../channel/types.js';
+import { noticeBatchUuid } from '../core/ids.js';
 import { dueSubscriptions, eventsAfter, getTask } from '../db/kanban-read.js';
 import type { Db } from '../db/open.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
 import { renderNotice } from './chat-render.js';
 import type { KanbanService } from './service.js';
-import type { SubscriptionRow } from './types.js';
+import type { KanbanEvent, SubscriptionRow } from './types.js';
 
 /**
  * Subscriptions' notices (spec §9.4): what a chat following a task hears.
  *
  * **Delivery is a projection over `kanban_events`, from a cursor.** Each round
- * reads the subscriptions with an event past their cursor and, for each, the
- * events in order: one that is a notice is sent, and the cursor moves past it
- * once the send succeeded; one that is not is passed over. After a restart the
- * first round starts from the cursors in the database, so catching up after an
- * outage is the same code as delivering in normal running.
+ * reads the subscriptions with an event past their cursor, groups them by the
+ * conversation -- chat, or thread -- they deliver to, and sends each
+ * conversation at most one message: that round's notices for all its
+ * subscriptions, in event order, at most `BATCH_NOTICES` of them. Once the send
+ * succeeded, each subscription's cursor moves past what the message covered,
+ * and past the events that are no notice. After a restart the first round
+ * starts from the cursors in the database, so catching up after an outage is the
+ * same code as delivering in normal running.
  *
- * **At least once.** A send that fails leaves the cursor where it is, and the
- * subscription is tried again after a pause that doubles, up to five minutes. A
- * notice sent just before the gateway stopped, whose cursor had not moved yet, is
- * sent again by the next round, with the same uuid -- one per subscription and
- * event -- so a channel that deduplicates by uuid shows it once. (The Lark
- * adapter does not pass the uuid on yet; see its note.)
+ * **At least once.** A send that fails moves no cursor. A batch's uuid is derived
+ * from the set of (subscription, event) pairs it covers, so the same batch sent
+ * again after a restart carries the same uuid, and a channel that deduplicates
+ * by uuid shows it once. (The Lark adapter does not pass the uuid on yet; see
+ * its note.)
+ *
+ * **A conversation that cannot be reached is let go of.** A send refused as not
+ * retryable -- the bot removed from the chat, the chat gone -- or failing
+ * `DEAD_AFTER` times in a row at the longest pause, drops the notices it held,
+ * says so once, and marks the conversation dead until the gateway restarts: its
+ * later events are passed over without a send. A send that fails otherwise holds
+ * the conversation back for a pause that doubles, up to five minutes, while the
+ * others go on. A round sends to at most `ROUND_SENDS` conversations, oldest
+ * pending notice first, so a restart that finds many conversations due -- dead
+ * ones among them -- spreads their sends over rounds rather than firing all at once.
  *
  * The board's writes come from chat, the worker socket and the dispatcher, so
  * rather than be told of each, the notifier looks every `NOTICE_POLL_MS`: a cheap
@@ -2882,8 +3576,16 @@ import type { SubscriptionRow } from './types.js';
 
 /** How often a round looks for notices to send. */
 export const NOTICE_POLL_MS = 2_000;
-/** The longest a subscription whose sends fail waits before it is tried again. */
+/** The longest a conversation whose sends fail waits before it is tried again. */
 export const NOTICE_BACKOFF_MAX_MS = 5 * 60_000;
+/** Failures in a row at the longest pause after which a conversation is let go of. */
+export const DEAD_AFTER = 3;
+/** Notices in one message; the rest follow in the next round. */
+export const BATCH_NOTICES = 20;
+/** Characters in one message, so a batch is not cut by the channel. */
+const BATCH_CHARS = 3_800;
+/** Conversations sent to in one round. */
+export const ROUND_SENDS = 10;
 /** Events read for one subscription in one round; the rest wait for the next. */
 const ROUND_EVENTS = 100;
 
@@ -2901,12 +3603,37 @@ export interface NotifierDeps {
   note?: (line: string) => void;
 }
 
+/** One conversation's due subscriptions, and what each has to say this round. */
+interface Conversation {
+  key: string;
+  channel: string;
+  target: SendTarget;
+  subs: SubscriptionRow[];
+}
+
+/** A subscription's events this round, and the notices among them. */
+interface Pending {
+  sub: SubscriptionRow;
+  events: KanbanEvent[];
+  notices: Array<{ event: KanbanEvent; text: string }>;
+}
+
+function conversationKey(sub: SubscriptionRow): string {
+  return [sub.channel, sub.conversationId, sub.threadId].join('\u0000');
+}
+
+function message(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export class Notifier {
   readonly #deps: NotifierDeps;
   readonly #clock: Clock;
   readonly #note: (line: string) => void;
-  /** A subscription whose last send failed: when it may be tried again, and the pause after that. */
-  readonly #backoff = new Map<number, { until: number; waitMs: number }>();
+  /** Held back after a failure: by conversation key, or by subscription id for one that could not be read. */
+  readonly #backoff = new Map<string, { until: number; waitMs: number; atMax: number }>();
+  /** Conversations let go of until the gateway restarts. */
+  readonly #dead = new Set<string>();
   #round: Promise<number> | undefined;
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
@@ -2953,7 +3680,7 @@ export class Notifier {
     if (this.#round !== undefined) return this.#round;
     const round = this.#deliverOnce()
       .catch((err: unknown) => {
-        this.#note(`kanban: delivering notices failed: ${err instanceof Error ? err.message : String(err)}`);
+        this.#note(`kanban: delivering notices failed: ${message(err)}`);
         return 0;
       })
       .finally(() => {
@@ -2965,84 +3692,201 @@ export class Notifier {
 
   async #deliverOnce(): Promise<number> {
     if (this.#stopped) return 0;
-    let sent = 0;
+    const byKey = new Map<string, Conversation>();
     for (const sub of dueSubscriptions(this.#deps.db, this.#deps.appId)) {
-      if (this.#stopped) break;
-      const held = this.#backoff.get(sub.id);
-      if (held !== undefined && this.#clock.now() < held.until) continue;
-      sent += await this.#deliverTo(sub);
+      const key = conversationKey(sub);
+      const c = byKey.get(key) ?? {
+        key,
+        channel: sub.channel,
+        target: { chatId: sub.conversationId, threadId: sub.threadId },
+        subs: [],
+      };
+      c.subs.push(sub);
+      byKey.set(key, c);
     }
-    return sent;
-  }
-
-  /** A subscription's events past its cursor, in order, until one fails to send. */
-  async #deliverTo(sub: SubscriptionRow): Promise<number> {
-    const channel = this.#deps.channels.get(sub.channel);
-    const task = getTask(this.#deps.db, sub.taskId);
-    if (channel === undefined || task === undefined) {
-      this.#fail(sub, `no channel ${sub.channel}`);
-      return 0;
-    }
+    // The most behind first, so a busy conversation cannot keep a quiet one waiting.
+    const conversations = [...byKey.values()].sort((a, b) => oldest(a) - oldest(b));
     let sent = 0;
-    for (const event of eventsAfter(this.#deps.db, sub.taskId, sub.cursor, ROUND_EVENTS)) {
+    let sends = 0;
+    for (const c of conversations) {
       if (this.#stopped) break;
-      const text = renderNotice(event, task, { blockRecurrenceLimit: this.#deps.blockRecurrenceLimit });
-      if (text !== undefined) {
-        try {
-          await channel.sendText(
-            { chatId: sub.conversationId, threadId: sub.threadId },
-            redactKnownSecrets(text),
-            noticeUuid(this.#deps.appId, sub.id, event.id),
-          );
-        } catch (err) {
-          this.#fail(sub, err instanceof Error ? err.message : String(err));
-          return sent;
-        }
-        sent += 1;
-      }
-      const moved = this.#deps.service.advanceSubscription(sub.id, event.id);
-      if (!moved.ok) {
-        this.#fail(sub, moved.message);
-        return sent;
+      if (this.#held(c.key)) continue;
+      try {
+        const r = await this.#deliverTo(c, sends < ROUND_SENDS);
+        sent += r.notices;
+        if (r.sent) sends += 1;
+      } catch (err) {
+        // One conversation's failure -- a read, a render -- is that conversation's.
+        this.#fail(c, err);
       }
     }
-    this.#backoff.delete(sub.id);
     return sent;
   }
 
-  /** Hold a subscription back for a while, doubling each time, and say so. */
-  #fail(sub: SubscriptionRow, why: string): void {
-    const waitMs = Math.min((this.#backoff.get(sub.id)?.waitMs ?? NOTICE_POLL_MS / 2) * 2, NOTICE_BACKOFF_MAX_MS);
-    this.#backoff.set(sub.id, { until: this.#clock.now() + waitMs, waitMs });
-    this.#note(
-      `kanban: a notice for task ${sub.taskId} to subscription ${sub.id} was not sent (${why}); trying again in ${Math.round(waitMs / 1000)} s`,
-    );
+  /**
+   * One conversation: its subscriptions' notices in event order, sent as one
+   * message when `maySend`, and every cursor moved past what that covered.
+   */
+  async #deliverTo(c: Conversation, maySend: boolean): Promise<{ notices: number; sent: boolean }> {
+    const pending: Pending[] = [];
+    for (const sub of c.subs) {
+      if (this.#held(`sub:${sub.id}`)) continue;
+      try {
+        pending.push(this.#read(sub));
+      } catch (err) {
+        // One subscription that cannot be read does not hold up its neighbours.
+        this.#holdBack(`sub:${sub.id}`, `subscription ${sub.id} of task ${sub.taskId}`, message(err));
+      }
+    }
+    const all = pending.flatMap((p) => p.notices.map((n) => ({ ...n, sub: p.sub }))).sort((a, b) => a.event.id - b.event.id);
+    if (this.#dead.has(c.key)) {
+      // Let go of until a restart: passed over, without a send.
+      this.#advanceAll(pending, Number.POSITIVE_INFINITY);
+      return { notices: 0, sent: false };
+    }
+    if (all.length === 0) {
+      this.#advanceAll(pending, Number.POSITIVE_INFINITY);
+      return { notices: 0, sent: false };
+    }
+    const channel = this.#deps.channels.get(c.channel);
+    if (channel === undefined) {
+      this.#holdBack(c.key, describe(c), `no channel ${c.channel}`);
+      return { notices: 0, sent: false };
+    }
+    if (!maySend) return { notices: 0, sent: false };
+    const batch: typeof all = [];
+    let chars = 0;
+    for (const n of all) {
+      if (batch.length >= BATCH_NOTICES || (batch.length > 0 && chars + n.text.length + 2 > BATCH_CHARS)) break;
+      batch.push(n);
+      chars += n.text.length + 2;
+    }
+    const more = all.length - batch.length;
+    const text = [...batch.map((n) => n.text), ...(more > 0 ? [`… and ${more} more, in the next message.`] : [])].join('\n\n');
+    // The last event the message covers: each cursor moves to it, notices or not.
+    const upTo = more > 0 ? (batch.at(-1)?.event.id ?? 0) : Number.POSITIVE_INFINITY;
+    try {
+      await channel.sendText(
+        c.target,
+        redactKnownSecrets(text),
+        noticeBatchUuid(
+          this.#deps.appId,
+          batch.map((n) => [n.sub.id, n.event.id]),
+        ),
+      );
+    } catch (err) {
+      this.#sendFailed(c, pending, err);
+      return { notices: 0, sent: true };
+    }
+    this.#backoff.delete(c.key);
+    this.#advanceAll(pending, upTo);
+    return { notices: batch.length, sent: true };
   }
+
+  /** A subscription's events past its cursor, and the notices among them. */
+  #read(sub: SubscriptionRow): Pending {
+    const task = getTask(this.#deps.db, sub.taskId);
+    if (task === undefined) throw new Error(`task ${sub.taskId} is not on the board`);
+    const events = eventsAfter(this.#deps.db, sub.taskId, sub.cursor, ROUND_EVENTS);
+    const notices: Pending['notices'] = [];
+    for (const event of events) {
+      const text = renderNotice(event, task, { blockRecurrenceLimit: this.#deps.blockRecurrenceLimit });
+      if (text !== undefined) notices.push({ event, text });
+    }
+    return { sub, events, notices };
+  }
+
+  /** Move each subscription's cursor to its last event at or before `upTo`. */
+  #advanceAll(pending: readonly Pending[], upTo: number): void {
+    for (const p of pending) {
+      const last = p.events.filter((e) => e.id <= upTo).at(-1);
+      if (last === undefined) continue;
+      const moved = this.#deps.service.advanceSubscription(p.sub.id, last.id);
+      if (!moved.ok) this.#holdBack(`sub:${p.sub.id}`, `subscription ${p.sub.id} of task ${p.sub.taskId}`, moved.message);
+    }
+  }
+
+  /**
+   * A send that failed: a refusal that will not change, or the last of
+   * `DEAD_AFTER` at the longest pause, lets the conversation go -- its notices
+   * dropped, said once -- and anything else holds it back for a while.
+   */
+  #sendFailed(c: Conversation, pending: readonly Pending[], err: unknown): void {
+    const permanent = err instanceof ChannelError && !err.retryable;
+    if (!permanent && next(this.#backoff.get(c.key)).atMax < DEAD_AFTER) {
+      this.#holdBack(c.key, describe(c), message(err));
+      return;
+    }
+    this.#dead.add(c.key);
+    this.#backoff.delete(c.key);
+    const dropped = pending.flatMap((p) => p.notices.map((n) => `${p.sub.taskId}#${n.event.id}`));
+    this.#note(
+      `kanban: ${describe(c)} cannot be reached (${message(err)}); dropping ${dropped.length} notice(s) ` +
+        `(${dropped.join(', ')}) and passing over its notices until the gateway restarts`,
+    );
+    this.#advanceAll(pending, Number.POSITIVE_INFINITY);
+  }
+
+  #fail(c: Conversation, err: unknown): void {
+    this.#holdBack(c.key, describe(c), message(err));
+  }
+
+  #held(key: string): boolean {
+    const held = this.#backoff.get(key);
+    return held !== undefined && this.#clock.now() < held.until;
+  }
+
+  /** Hold a conversation or a subscription back for a while, doubling each time, and say so. */
+  #holdBack(key: string, what: string, why: string): void {
+    const { waitMs, atMax } = next(this.#backoff.get(key));
+    this.#backoff.set(key, { until: this.#clock.now() + waitMs, waitMs, atMax });
+    this.#note(`kanban: notices for ${what} were not sent (${why}); trying again in ${Math.round(waitMs / 1000)} s`);
+  }
+}
+
+/**
+ * The pause after one more failure, doubling from 2 s to `NOTICE_BACKOFF_MAX_MS`,
+ * and how many failures in a row have come at that longest pause.
+ */
+function next(held: { waitMs: number; atMax: number } | undefined): { waitMs: number; atMax: number } {
+  const waitMs = Math.min((held?.waitMs ?? NOTICE_POLL_MS / 2) * 2, NOTICE_BACKOFF_MAX_MS);
+  return { waitMs, atMax: waitMs === NOTICE_BACKOFF_MAX_MS ? (held?.atMax ?? 0) + 1 : 0 };
+}
+
+/** How far behind a conversation is: the cursor of its most behind subscription. */
+function oldest(c: Conversation): number {
+  return Math.min(...c.subs.map((s) => s.cursor));
+}
+
+/** A conversation, by ids only: never task text. */
+function describe(c: Conversation): string {
+  const where = c.target.threadId === '' ? c.target.chatId : `${c.target.chatId}/${c.target.threadId}`;
+  return `${where} (task${c.subs.length === 1 ? '' : 's'} ${c.subs.map((s) => s.taskId).join(', ')})`;
 }
 ```
 
 
-- [ ] **Step 7.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/ids.test.ts tests/kanban-notices.test.ts`. Expected: `Tests  21 passed (21)`.
+- [ ] **Step 8.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/ids.test.ts tests/kanban-notices.test.ts`. Expected: `Tests  26 passed (26)`.
 
-- [ ] **Step 7.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1198 passed (1198)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 8.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1211 passed (1211)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 7.6: Commit.**
+- [ ] **Step 8.6: Commit.**
 
 ```bash
 git add src/core/ids.ts src/kanban/notices.ts tests/ids.test.ts tests/kanban-notices.test.ts
-git commit -m "Deliver each subscription's notices in order from its cursor, at least once, with one uuid per subscription and event, so a restart catches up"
+git commit -m "Deliver notices as one message per conversation a round, in event order, moving each cursor once it is sent, and let go of a conversation that cannot be reached"
 ```
 
 ---
 
-### Task 8: Wiring it into the gateway
+### Task 9: Wiring it into the gateway
 
 **Files:**
 - Modify: `src/index.ts`, `tests/gateway-startup.test.ts`
 
 Behind `kanban.enabled` and nowhere else (Decision 2): the router gets `KanbanChat`, over the same service as the worker socket, with the authorizer's tiers and the dispatcher's `pass` and `cancel`; the gateway gets a `Notifier` sending through the Lark adapter. The notifier starts once the channel is connected — its first round is the catch-up — stops with the dispatcher, and is waited for before the channel disconnects.
 
-- [ ] **Step 8.1: Write the failing test.**
+- [ ] **Step 9.1: Write the failing test.**
 
 In `tests/gateway-startup.test.ts`, replace:
 
@@ -3093,9 +3937,9 @@ with:
 ```
 
 
-- [ ] **Step 8.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/gateway-startup.test.ts`. Expected: the new test FAILS with `Error: no notifier`. `Tests  1 failed | 11 passed (12)`.
+- [ ] **Step 9.2: Run it to verify it fails.** Run `npx vitest run --project unit tests/gateway-startup.test.ts`. Expected: the new test FAILS with `Error: no notifier`. `Tests  1 failed | 11 passed (12)`.
 
-- [ ] **Step 8.3: Implement.**
+- [ ] **Step 9.3: Implement.**
 
 In `src/index.ts`, replace:
 
@@ -3267,11 +4111,11 @@ with:
 ```
 
 
-- [ ] **Step 8.4: Run it to verify it passes.** Run `npx vitest run --project unit tests/gateway-startup.test.ts`. Expected: `Tests  12 passed (12)`.
+- [ ] **Step 9.4: Run it to verify it passes.** Run `npx vitest run --project unit tests/gateway-startup.test.ts`. Expected: `Tests  12 passed (12)`.
 
-- [ ] **Step 8.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1199 passed (1199)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 9.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1212 passed (1212)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  70 passed (70)`. Then run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 8.6: Commit.**
+- [ ] **Step 9.6: Commit.**
 
 ```bash
 git add src/index.ts tests/gateway-startup.test.ts
@@ -3280,14 +4124,14 @@ git commit -m "Give the router the board's chat commands and start the notices o
 
 ---
 
-### Task 9: End to end: `/kanban new` from a thread, and the thread hears it is done
+### Task 10: End to end: `/kanban new` from a thread, and the thread hears it is done
 
 **Files:**
 - Create: `tests/kanban-chat.e2e.ts`
 
-D1's proof (spec §11, "Chat (D1)" and "Notices"). A person types `/kanban new` in a group's topic thread; the real router hands it to `KanbanChat`, which creates the task and tells the real dispatcher; the dispatcher runs it as a session whose agent is a real process — the fake CLI agent in its `kanban` mode, through the real CLI driver — which reports `mt kanban complete` through the shim and the real socket; and a `Notifier` sends the thread one notice of the completion, through a `FakeChannel` standing for Lark. A second round, and a new notifier standing for a restart, send nothing more. A second test runs the agent in its `crash` mode: the thread hears the retry, then the giving up.
+D1's proof (spec §11, "Chat (D1)" and "Notices"). A person types `/kanban new` in a group's topic thread; the real router hands it to `KanbanChat`, which creates the task and tells the real dispatcher; the dispatcher runs it as a session whose agent is a real process — the fake CLI agent in its `kanban` mode, through the real CLI driver — which reports `mt kanban complete` through the shim and the real socket; and a `Notifier` sends the thread one notice of the completion, through a `FakeChannel` standing for Lark. A second round, and a new notifier standing for a restart, send nothing more. A second test runs the agent in its `crash` mode: the thread hears the retry and the giving up, in one message.
 
-- [ ] **Step 9.1: Write the test.**
+- [ ] **Step 10.1: Write the test.**
 
 Create `tests/kanban-chat.e2e.ts`:
 
@@ -3503,8 +4347,10 @@ describe('the board from Lark, end to end', () => {
     expect(getTask(s.t.db, taskId)).toMatchObject({ phase: 'blocked', blockKind: 'gave_up' });
 
     const replies = s.lark.texts.length;
+    // Both in one message to the thread: a round sends a conversation one batch.
     expect(await s.notifier().deliver()).toBe(2);
-    const [retry, gaveUp] = s.lark.texts.slice(replies).map((m) => m.text);
+    expect(s.lark.texts.slice(replies)).toHaveLength(1);
+    const [retry, gaveUp] = (s.lark.texts.at(-1)?.text ?? '').split('\n\n');
     expect(retry).toMatch(new RegExp(`^Retrying — \\*\\*Flaky job\\*\\* \`${taskId}\`: the last attempt ended crashed`));
     expect(gaveUp).toMatch(new RegExp(`^Gave up — \\*\\*Flaky job\\*\\* \`${taskId}\`: failed 2 times; last crashed`));
   });
@@ -3512,11 +4358,11 @@ describe('the board from Lark, end to end', () => {
 ```
 
 
-- [ ] **Step 9.2: Run it to verify it passes.** Every piece it uses exists after Task 8, so this test is the integration check rather than a driver of new code. Run `npx vitest run --project e2e tests/kanban-chat.e2e.ts`. Expected: `Tests  2 passed (2)`. To see it fail first, stop new tasks being subscribed: in `src/db/kanban.ts`, comment out the line `subscribe(d, taskId, t.createdVia, createdFromTask, now);`. Expected: both tests FAIL, with `AssertionError: expected +0 to be 1 // Object.is equality` and `expected +0 to be 2`: the tasks ran, and nobody heard. `Tests  2 failed (2)`. Put the line back.
+- [ ] **Step 10.2: Run it to verify it passes.** Every piece it uses exists after Task 9, so this test is the integration check rather than a driver of new code. Run `npx vitest run --project e2e tests/kanban-chat.e2e.ts`. Expected: `Tests  2 passed (2)`. To see it fail first, stop new tasks being subscribed: in `src/db/kanban.ts`, comment out the line `subscribe(d, taskId, t.createdVia, createdFromTask, now);`. Expected: both tests FAIL, with `AssertionError: expected +0 to be 1 // Object.is equality` and `expected +0 to be 2`: the tasks ran, and nobody heard. `Tests  2 failed (2)`. Put the line back.
 
-- [ ] **Step 9.3: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1199 passed (1199)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 10.3: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1212 passed (1212)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 9.4: Commit.**
+- [ ] **Step 10.4: Commit.**
 
 ```bash
 git add tests/kanban-chat.e2e.ts
@@ -3525,14 +4371,14 @@ git commit -m "End to end: /kanban new from a thread runs a fake agent through t
 
 ---
 
-### Task 10: The README
+### Task 11: The README
 
 **Files:**
 - Modify: `README.md`
 
-The board from Lark: what a task is, `/kanban new`'s lines, every command with its tier, who is recorded, the notices and how they survive a restart, and what waits for D2; `kanban.enabled` as opt-in, and the new setting.
+The board from Lark: what a task is, `/kanban new`'s lines, every command with its tier, who is recorded, which comments reach an agent, the notices — batched, caught up after a restart, a dead chat let go of — and what waits for people; `kanban.enabled` as opt-in, and the new setting.
 
-- [ ] **Step 10.1: Edit.**
+- [ ] **Step 11.1: Edit.**
 
 In `README.md`, replace:
 
@@ -3614,7 +4460,7 @@ is supervised. The dispatcher looks for work as soon as the task is created.
 | `/kanban assign <task> <role>` | operate: an undecided run ends `superseded` |
 | `/kanban link <parent> <child>` | operate |
 | `/kanban workspace <task> <name>` | operate: refused once the workspace is fixed |
-| `/kanban comment <task> <text>` | talk: an agent working on the task gets it when its turn ends |
+| `/kanban comment <task> <text>` | talk: everyone sees it in `/kanban show`; an operator's also reaches the task's agent, when its turn ends or in its next run |
 | `/kanban unblock <task> [comment]` | operate |
 | `/kanban stop <task>` | operate: the run ends `cancelled`, and the task blocks |
 | `/kanban archive <task>` | operate |
@@ -3629,37 +4475,41 @@ anyone, and masked, gate commands included.
 
 **Notices.** The chat, or thread, a task was created in follows it, and the tasks its runs
 create. It hears when a task is done, needs review, blocks (with the kind and the reason),
-is retried after a failure, gives up, or is stranded with nobody able to take it. A task that
-keeps blocking for the same reason, `kanban.block_recurrence_limit` times after an unblock,
-is flagged for rewriting instead. Notices are delivered from a cursor kept in the database, so
-those due while the gateway was down are sent when it is back; a notice sent just before a
-stop may be sent twice.
+is retried after a failure, gives up, or is stranded with nobody able to take it. A run cut
+short by a gateway restart is retried quietly. A task that keeps blocking for the same reason,
+`kanban.block_recurrence_limit` times after an unblock, is flagged for rewriting instead. Each
+chat or thread gets at most one message every couple of seconds, listing what happened in
+order, 20 notices at most. Notices are delivered from a cursor kept in the database, so those
+due while the gateway was down are sent when it is back; a message sent just before a stop
+may be sent twice. A chat the bot can no longer post to — removed from it, or failing for
+several minutes running — is let go of until the next restart: its notices are dropped, and
+the gateway's log says which.
 
 **Not yet:** people as assignees or reviewers. Naming one, with an @-mention, is refused, and
-`/kanban done`, `block`, `review`, `approve` and `changes` say they arrive in plan D2, with
-cards to a person's direct messages.
+`/kanban done`, `block`, `review`, `approve` and `changes` say they arrive in a later update
+(plan D2), with cards to a person's direct messages.
 ````
 
 
-- [ ] **Step 10.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `npm test 2>&1 | tail -4`. Expected: `Tests  1199 passed (1199)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 11.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `npm test 2>&1 | tail -4`. Expected: `Tests  1212 passed (1212)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 10.3: Commit.**
+- [ ] **Step 11.3: Commit.**
 
 ```bash
 git add README.md
-git commit -m "Document the board from Lark: the /kanban commands and their tiers, notices and how they survive a restart, and what waits for people"
+git commit -m "Document the board from Lark: the /kanban commands and their tiers, which comments reach an agent, and how notices are batched and survive a restart"
 ```
 
 ---
 
 ## Done when
 
-- `npm test` gives `Tests  1199 passed (1199)`. `npm run test:e2e` gives `Tests  72 passed (72)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  1212 passed (1212)`. `npm run test:e2e` gives `Tests  72 passed (72)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table, and only `src/kanban/service.ts` imports it (the guard in `tests/kanban-service.test.ts`). `src/kanban/chat.ts`, `src/kanban/chat-render.ts`, `src/kanban/chat-parse.ts` and `src/kanban/notices.ts` write nothing.
-- `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
+- `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing, and no reply, notice or help text says "D2".
 - `/kanban new` typed in a thread creates a task through the service, recorded as `lark:<union_id>` and subscribed to by that thread; the dispatcher runs it at once on a fake agent process that reports through the real socket; and the thread hears, once, that it is done — and nothing more after a restart (`tests/kanban-chat.e2e.ts`).
-- Every `/kanban` command of spec §9.1 a role's task needs works at its tier; a talk-tier sender changes nothing; a person, a supervised role, an unknown role or workspace is refused at creation; the person-only commands answer that they arrive in D2 (`tests/kanban-chat.test.ts`).
+- Every `/kanban` command of spec §9.1 a role's task needs works at its tier; a talk-tier sender changes nothing, and its comment is shown to people and reaches no agent; a person, a supervised role, an unknown role or workspace, or an oversized task is refused at creation; the person-only commands answer that they arrive in a later update (`tests/kanban-chat.test.ts`, `tests/kanban-comment-steering.test.ts`).
 - `/kanban` is answered while the chat's session is busy, and says the board is off when `kanban.enabled` is unset, opening no session (`tests/router.test.ts`).
-- Every reply and notice is escaped and masked, gate commands included, and a cut never shows the start of a secret (`tests/kanban-chat-render.test.ts`).
-- A subscription hears completed, review requested, blocked with its kind and reason, retrying after a failure, gave up and stranded, in order, once; a failed send is retried after its pause; a restart catches up from the cursors (`tests/kanban-notices.test.ts`).
+- Every reply and notice is escaped and masked before it is reshaped, gate commands included; no cut shows part of a secret; a body cannot open a code fence; the latest output is shown from its end (`tests/kanban-chat-render.test.ts`).
+- A conversation hears at most one message a round, its notices in order; a failed send is retried after its pause; a conversation that cannot be reached is let go of with one log line; a restart catches up from the cursors with the same batch uuid (`tests/kanban-notices.test.ts`).
 - With `kanban.enabled` unset, the gateway builds no service, dispatcher, socket, chat commands or notifier.
