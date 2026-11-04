@@ -104,7 +104,7 @@ export interface Rework {
   reason: string;
   /** Who asked: a review run (`run:<id>`) or a person. */
   actor: string;
-  /** The implementer's previous handoff; undefined if none can be found. */
+  /** The assignee's previous handoff; undefined if none can be found. */
   handoff: ReviewRequest | undefined;
 }
 
@@ -141,7 +141,7 @@ const OTHER_COMMANDS = `Besides the reports:
 - \`mt kanban show\` prints this task and its context as JSON, in full: what is cut or left out below is there;
 - \`mt kanban comment < comment.json\`, with {"body": "..."}, adds a comment to the task`;
 
-const WORK_PROTOCOL = `You have one task, below. Orient yourself by reading the task and its context, then do the work in the current directory, which is the task's workspace.
+const WORK_PROTOCOL = `You have one task, below. Orient yourself by reading the task and its context, then do the work; the current directory is the task's workspace, for any files the work needs.
 
 Report through the \`mt kanban\` command, which reads JSON on stdin and answers in JSON (if it answers "unreachable", the gateway may be busy: try once more). Exactly one terminal report ends your run:
 - \`mt kanban complete < handoff.json\`, with {"summary": "...", "metadata": {...}}, when the task is done;
@@ -152,14 +152,14 @@ ${OTHER_COMMANDS};
 - \`mt kanban create < task.json\`, with {"title": "...", "body": "...", "assignee": ${WHO}}, and optionally "reviewer": ${WHO}, "contract", "workspace", "parents" (task ids) and "idempotency_key", creates a task;
 - \`mt kanban link < link.json\`, with {"parent_id": "...", "child_id": "..."}, makes one task wait on another; it only works on a task that has not started yet, so sequence follow-ups by creating them in order, each naming the earlier ones in "parents".
 
-Block only on genuine ambiguity, and say why. If one of the task's children below reviews this task, report complete rather than review. If you find follow-up work, create a task for it with \`mt kanban create\` rather than doing it. Never put a secret in a summary, metadata or comment. Stop once you have reported.`;
+When the task is done, the summary says what was done and where its results are, such as files, documents or links. Block only on genuine ambiguity, and say why. If one of the task's children below reviews this task, report complete rather than review. If you find follow-up work, create a task for it with \`mt kanban create\` rather than doing it. Never put a secret in a summary, metadata or comment. Stop once you have reported.`;
 
-const REVIEW_PROTOCOL = `You are reviewing one task, below. Review the implementer's handoff, under For your review, and the workspace -- the current directory -- against the task and its contract. If there is no For your review section, review the latest attempts under Context, and the workspace, instead. Do not change the workspace.
+const REVIEW_PROTOCOL = `You are reviewing one task, below. Review the handoff, under For your review, and the work it describes, against the task and its contract. That work is in the workspace -- the current directory -- and in anything the handoff points to, such as documents, links or messages. If there is no For your review section, review the latest attempts under Context, and the workspace, instead. Do not change the work under review.
 
 Report through the \`mt kanban\` command, which reads JSON on stdin and answers in JSON (if it answers "unreachable", the gateway may be busy: try once more). Exactly one terminal report ends your run:
 - \`mt kanban complete < handoff.json\`, with {"summary": "..."}, to approve;
 - \`mt kanban changes < reason.json\`, with {"reason": "..."}, a specific, actionable reason, to ask for changes;
-- \`mt kanban block < block.json\`, with {"kind": ${BLOCK_KINDS}, "reason": "..."}, and "parents" (task ids) for a dependency, only for a problem the implementer cannot fix.
+- \`mt kanban block < block.json\`, with {"kind": ${BLOCK_KINDS}, "reason": "..."}, and "parents" (task ids) for a dependency, only for a problem the assignee cannot fix.
 
 ${OTHER_COMMANDS}.
 
@@ -311,7 +311,7 @@ function handoffOf(h: ReviewRequest): string[] {
  */
 function handoffSection(b: RunBrief): string[] {
   if (b.kind === 'review' && b.review !== undefined) {
-    return ['', '## For your review', `The implementer's handoff, from ${flat(b.review.actor)}:`, ...handoffOf(b.review)];
+    return ['', '## For your review', `The handoff, from ${flat(b.review.actor)}:`, ...handoffOf(b.review)];
   }
   if (b.kind === 'work' && b.rework !== undefined) {
     const lines = [
@@ -515,7 +515,7 @@ export function composePrompt(b: RunBrief): string {
 function reports(kind: RunKind): string {
   return kind === 'work'
     ? '`mt kanban complete < handoff.json` if the task is done, or `mt kanban review < handoff.json` to have it reviewed, where handoff.json is {"summary": "...", "metadata": {...}}; or `mt kanban block < block.json` if you cannot go on, where block.json is {"kind": "...", "reason": "..."}'
-    : '`mt kanban complete < handoff.json` to approve, with {"summary": "..."}; `mt kanban changes < reason.json` to ask for changes, with {"reason": "..."}; or `mt kanban block < block.json` for a problem the implementer cannot fix, with {"kind": "...", "reason": "..."}';
+    : '`mt kanban complete < handoff.json` to approve, with {"summary": "..."}; `mt kanban changes < reason.json` to ask for changes, with {"reason": "..."}; or `mt kanban block < block.json` for a problem the assignee cannot fix, with {"kind": "...", "reason": "..."}';
 }
 
 const SHOW_AGAIN = 'If you no longer have the task in front of you, `mt kanban show` prints it and its context, as JSON.';

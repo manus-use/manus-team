@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CONTEXT_BUDGET_BYTES, PIECE_BYTES, composePrompt, type RunBrief } from '../src/kanban/prompt.js';
+import { CONTEXT_BUDGET_BYTES, PIECE_BYTES, composeNudge, composePrompt, type RunBrief } from '../src/kanban/prompt.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import type { RunRow, TaskRow } from '../src/kanban/types.js';
 import { AGENT, NOW, VIA } from './helpers/kanban.js';
@@ -126,9 +126,24 @@ describe('composePrompt', () => {
     expect(work).toContain('mt kanban review < handoff.json');
     expect(work).toContain('report complete rather than review');
     expect(work).not.toContain('mt kanban changes');
+    // Any work, not only code: the workspace is where its files go, and the handoff says where its results are.
+    expect(work).toContain(
+      "then do the work; the current directory is the task's workspace, for any files the work needs.",
+    );
+    expect(work).toContain(
+      'When the task is done, the summary says what was done and where its results are, such as files, documents or links.',
+    );
     const review = composePrompt(brief({ kind: 'review', task: task({ phase: 'review' }) }));
     expect(review).toContain('mt kanban changes < reason.json');
-    expect(review).toContain('Do not change the workspace.');
+    expect(review).toContain(
+      'Review the handoff, under For your review, and the work it describes, against the task and its contract. ' +
+        'That work is in the workspace -- the current directory -- and in anything the handoff points to, ' +
+        'such as documents, links or messages.',
+    );
+    expect(review).toContain('Do not change the work under review.');
+    expect(review).toContain('only for a problem the assignee cannot fix.');
+    for (const prompt of [work, review]) expect(prompt).not.toMatch(/implementer/i);
+    expect(composeNudge('review', 1, 2)).toContain('for a problem the assignee cannot fix');
     // A review with no handoff to show, as for a task sent to review by a person.
     expect(review).not.toContain('## For your review');
     expect(review).toContain(
@@ -440,11 +455,11 @@ describe('composePrompt: gates, review and rework', () => {
         },
       }),
     );
-    expect(prompt).toContain("Review the implementer's handoff, under For your review, and the workspace");
+    expect(prompt).toContain('Review the handoff, under For your review, and the work it describes');
     expect(prompt).toContain(
       [
         '## For your review',
-        "The implementer's handoff, from run:r_1:",
+        'The handoff, from run:r_1:',
         'Summary:',
         '    Parser written.',
         '    Tests added.',
@@ -455,6 +470,19 @@ describe('composePrompt: gates, review and rework', () => {
     // Before the attempts, so the budget's last cut, which keeps the start, keeps it.
     expect(at(prompt, '## For your review')).toBeLessThan(at(prompt, '## Attempt 1'));
     expect(at(prompt, '## For your review')).toBeLessThan(at(prompt, '## Comments'));
+  });
+
+  it('says no state for a handoff whose workspace is not a git repository', () => {
+    const prompt = composePrompt(
+      brief({
+        kind: 'review',
+        task: task({ phase: 'review' }),
+        review: { runId: 'r_1', actor: 'run:r_1', summary: 'Report written.', metadata: null, reportedCommit: null, reportedDirty: null },
+      }),
+    );
+    expect(prompt).toContain('Summary: Report written.');
+    expect(prompt).not.toContain('State:');
+    expect(prompt).not.toContain('no commit to review');
   });
 
   it('keeps the rework reason and the review handoff when the budget cuts the rest, and stays within it', () => {
