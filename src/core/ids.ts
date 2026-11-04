@@ -104,6 +104,21 @@ export function replyUuid(appId: string, messageId: string, purpose: string): st
 }
 
 /**
+ * The `uuid` for one message of board notices (spec §9.4): a conversation's
+ * batch, covering these (subscription, event) pairs.
+ *
+ * Derived from the set of pairs, in any order, so the batch a restart sends
+ * again -- sent, and the gateway stopped before the cursors moved past it --
+ * carries the uuid the first one did, and a channel that deduplicates by it
+ * shows one message.
+ */
+export function noticeBatchUuid(appId: string, pairs: ReadonlyArray<readonly [number, number]>): string {
+  const covered = [...new Set(pairs.map(([sub, event]) => `${sub}:${event}`))].sort();
+  const canonical = [appId, 'kanban-notices', ...covered].join(SEP);
+  return createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 50);
+}
+
+/**
  * The opaque value carried in a card button's `action.value`.
  *
  * This round-trips through the client and Lark does **not** verify it, so it is

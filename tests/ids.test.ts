@@ -7,6 +7,7 @@ import {
   newSessionId,
   newTaskId,
   newTurnId,
+  noticeBatchUuid,
   replyUuid,
   sendUuid,
   turnIdempotencyKey,
@@ -61,6 +62,42 @@ describe('replyUuid', () => {
     // Otherwise the second reply to one message is deduped away as a repeat of the
     // first.
     expect(replyUuid('cli_a', 'om_1', 'rejected')).not.toBe(replyUuid('cli_a', 'om_1', 'help'));
+  });
+});
+
+describe('noticeBatchUuid', () => {
+  it('is the same for the same set of pairs, in any order, after a restart too, and differs for any other set', () => {
+    const a = noticeBatchUuid('cli_app', [
+      [3, 41],
+      [5, 44],
+    ]);
+    expect(
+      noticeBatchUuid('cli_app', [
+        [5, 44],
+        [3, 41],
+      ]),
+    ).toBe(a);
+    expect(a).toHaveLength(50);
+    const others = [
+      noticeBatchUuid('cli_app', [[3, 41]]),
+      noticeBatchUuid('cli_app', [
+        [3, 41],
+        [5, 45],
+      ]),
+      // Not one pair's digits run into the next's.
+      noticeBatchUuid('cli_app', [
+        [3, 414],
+        [5, 4],
+      ]),
+      noticeBatchUuid('cli_other', [
+        [3, 41],
+        [5, 44],
+      ]),
+    ];
+    expect(new Set([a, ...others]).size).toBe(5);
+    // Never a control reply's or a session send's.
+    expect(a).not.toBe(replyUuid('cli_app', '3', '41'));
+    expect(a).not.toBe(sendUuid('cli_app', '3', 41));
   });
 });
 
