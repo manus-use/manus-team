@@ -20,15 +20,25 @@
  *   hang        stream one delta and then never finish
  *   unstreamed  stream nothing, put the whole answer in the summary
  *   weird       finish with a value nobody has a projection for
+ *   kanban      run `mt kanban show`, then report `mt kanban complete`, as a board
+ *               run's agent does: `mt` found on PATH, its input on stdin
+ *   kanban-late the same, but only once it has been nudged; before that it
+ *               narrates its next step and stops without reporting
  *
  * Every invocation appends its argv to `FAKE_CLI_LOG` as one JSON line. That file
  * is how a test sees the composed prompt -- which is the whole of this driver's
  * session handling, and otherwise invisible. The line also carries the one
  * environment variable a native package is named by, `BYTESEC_LOCAL_APM_PATH`,
- * as `apm` (null when unset).
+ * as `apm` (null when unset), and a board run's id, `MT_KANBAN_RUN`, as `run`.
+ *
+ * In the kanban modes it also writes the run's environment to `kanban-env.json`
+ * beside the log, token included: a test that later reports as a run whose
+ * process has gone needs it, and the token is a test's own.
  */
 
-import { appendFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { appendFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 const MODE = process.env['FAKE_CLI_MODE'] ?? 'basic';
 const LOG = process.env['FAKE_CLI_LOG'];
@@ -39,7 +49,37 @@ const prompt = dashdash === -1 ? '' : argv.slice(dashdash + 1).join(' ');
 
 if (LOG !== undefined) {
   const apm = process.env['BYTESEC_LOCAL_APM_PATH'] ?? null;
-  appendFileSync(LOG, `${JSON.stringify({ argv, prompt, apm })}\n`);
+  const run = process.env['MT_KANBAN_RUN'] ?? null;
+  appendFileSync(LOG, `${JSON.stringify({ argv, prompt, apm, run })}\n`);
+}
+
+/** `mt kanban <command>`, as an agent's shell runs it: by name, from PATH, JSON on stdin. */
+function mt(command, input) {
+  const r = spawnSync('mt', ['kanban', command], {
+    input: input === undefined ? '' : JSON.stringify(input),
+    encoding: 'utf8',
+    // Never longer than a turn should take: a socket nobody answers fails the turn.
+    timeout: 30_000,
+  });
+  return { status: r.status, answer: r.stdout.trim(), error: r.error?.message ?? r.stderr.trim() };
+}
+
+function kanbanRun() {
+  if (LOG !== undefined) {
+    const keep = ['MT_KANBAN_RUN', 'MT_KANBAN_TOKEN', 'MT_KANBAN_SOCKET', 'PATH'];
+    const env = Object.fromEntries(keep.map((k) => [k, process.env[k] ?? null]));
+    writeFileSync(join(dirname(LOG), 'kanban-env.json'), JSON.stringify(env));
+  }
+  const shown = mt('show');
+  let title = '?';
+  try {
+    title = JSON.parse(shown.answer).task.title;
+  } catch {
+    process.stderr.write(`mt kanban show failed: ${shown.error} ${shown.answer}\n`);
+  }
+  const done = mt('complete', { summary: `did: ${title}`, metadata: { by: 'cli-agent' } });
+  delta(`show: ${shown.status}; complete: ${done.answer}`);
+  summary('completed', `reported on ${title}`);
 }
 
 const SESSION = 'ses_fake_cli';
@@ -137,6 +177,21 @@ switch (MODE) {
     // Streams nothing at all. The answer exists only in the summary, and a card
     // reading "finished with no output" next to it would be a gateway bug.
     summary('completed', 'the whole answer, unstreamed');
+    break;
+  }
+
+  case 'kanban': {
+    kanbanRun();
+    break;
+  }
+
+  case 'kanban-late': {
+    if (prompt.includes('reminder 1 of')) {
+      kanbanRun();
+    } else {
+      delta('Next I will report.');
+      summary('completed', 'Next I will report.');
+    }
     break;
   }
 
