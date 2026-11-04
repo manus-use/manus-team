@@ -1,15 +1,20 @@
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { ConfigError, type Env } from '../config.js';
+import { kanbanCommand } from './kanban.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
 
 /**
- * `mt`: commands that create and check roles and workspaces (spec §2.6).
+ * `mt`: commands that create and check roles and workspaces (spec §2.6), and the
+ * worker CLI a board run reports through (spec §7.3).
  *
- * They only write files. They do not talk to the gateway and take no authority
- * from it, so they give an agent -- which runs as the same user and could edit the
- * same files by hand -- nothing it did not already have. A change takes effect at
- * the gateway's next start.
+ * The role and workspace commands only write files. They do not talk to the
+ * gateway and take no authority from it, so they give an agent -- which runs as
+ * the same user and could edit the same files by hand -- nothing it did not
+ * already have. A change takes effect at the gateway's next start.
+ *
+ * `mt kanban` is the one that talks to the gateway, through its socket, and only
+ * with the authority of a run's token, from the run's environment.
  */
 
 export type Git = (args: readonly string[]) => Promise<{ code: number; stderr: string }>;
@@ -21,6 +26,8 @@ export interface MtIo {
   err: (line: string) => void;
   /** Runs git; injectable so a failed clone can be tested. */
   git?: Git;
+  /** All of stdin, or undefined once it passes `maxBytes`: `mt kanban`'s input. */
+  stdin?: (maxBytes: number) => Promise<string | undefined>;
 }
 
 const USAGE = [
@@ -31,6 +38,7 @@ const USAGE = [
   '  mt workspace add <name> <absolute-path>',
   '  mt workspace add <name> --clone <git-url>',
   '  mt workspace list',
+  '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
 ].join('\n');
 
 class UsageError extends Error {}
@@ -107,6 +115,7 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       // reported as `mt: …` rather than escaping as a stack trace.
       return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, io);
     }
+    if (group === 'kanban') return await kanbanCommand(command, rest, io);
     if (group === 'workspace' && command === 'list') {
       expectNothing(parse(rest, {}).positionals, 'workspace list');
       return workspaceList(io);
