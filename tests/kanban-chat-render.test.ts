@@ -298,6 +298,11 @@ describe('notices', () => {
     expect(renderNotice(event('stopped', { blockRecurrences: 0 }, ALICE), t, LIMIT)).toMatch(
       /^Blocked \(needs\\_input\) — .*: stopped by lark:on\\_alice\n/,
     );
+    // A stop is a person's choice, not the task blocking again for the same reason: no rewrite suggested.
+    const stopped = renderNotice(event('stopped', { blockRecurrences: 5 }, ALICE), t, LIMIT);
+    expect(stopped).toBe(
+      `Blocked (needs\\_input) — ${name}: stopped by lark:on\\_alice\n\`/kanban unblock ${k.taskId} [comment]\` once it can go on.`,
+    );
     expect(renderNotice(event('review_requested', { summary: 'v1', reviewer: 'reviewer', reviewerKind: 'role' }), t, LIMIT)).toBe(
       `Review requested — ${name}, from role reviewer.`,
     );

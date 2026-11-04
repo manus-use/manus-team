@@ -250,7 +250,8 @@ export function renderNotice(event: KanbanEvent, task: TaskRow, opts: { blockRec
       return blockedLine(task, kind, text(p, 'reason'), recurrences, opts.blockRecurrenceLimit);
     }
     case 'stopped':
-      return blockedLine(task, 'needs_input', `stopped by ${event.actor}`, recurrences, opts.blockRecurrenceLimit);
+      // A person's stop, not the task blocking again by itself: never the suggestion to rewrite it.
+      return blockedLine(task, 'needs_input', `stopped by ${event.actor}`, 0, Number.POSITIVE_INFINITY);
     case 'run_ended': {
       const outcome = text(p, 'outcome');
       const error = text(p, 'error');
