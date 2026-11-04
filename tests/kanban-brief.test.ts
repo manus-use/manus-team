@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { appendEvent } from '../src/db/events.js';
 import {
   addComment,
+  addGate,
   archive,
   attachSession,
   block,
@@ -9,6 +10,9 @@ import {
   complete,
   DEFAULT_LIMITS,
   endRun,
+  recordGates,
+  requestChanges,
+  requestReview,
   unblock,
 } from '../src/db/kanban.js';
 import { createSession } from '../src/db/sessions.js';
@@ -133,5 +137,62 @@ describe('endedUnreported', () => {
     for (const outcome of ['completed', 'review_requested', 'changes_requested', 'blocked', 'cancelled', 'superseded'] as const) {
       expect(endedUnreported({ ...run, outcome })).toBe(false);
     }
+  });
+});
+
+describe('briefFor: gates, review and rework', () => {
+  const SHA = '0123456789abcdef0123456789abcdef01234567';
+  const REVIEWER = { kind: 'role', name: 'reviewer' } as const;
+
+  it("gathers the task's gates and their latest run", () => {
+    const task = newTask(h.db);
+    expect(addGate(h.db, task.taskId, { command: 'npm test', timeoutS: 60 }, ALICE, NOW).ok).toBe(true);
+    const result = { gateId: 1, command: 'npm test', exitCode: 1, signal: null, timedOut: false, durationMs: 3, output: 'FAIL' };
+    const by = { runId: null, actor: ALICE };
+    recordGates(h.db, task.taskId, by, 'complete', { passed: false, aborted: false, notRun: 0, results: [result] }, NOW);
+    const passed = { passed: true, aborted: false, notRun: 0, results: [{ ...result, exitCode: 0, output: '' }] };
+    recordGates(h.db, task.taskId, by, 'complete', passed, NOW + 1);
+    const run = claimed(h.db, task.taskId);
+    const brief = briefFor(h.db, { run, task, roleMd: undefined, role: ROLE });
+    expect(brief.gates).toEqual([expect.objectContaining({ command: 'npm test', timeoutS: 60, createdBy: ALICE })]);
+    expect(brief.lastGateRun).toMatchObject({ passed: true, actor: ALICE, at: NOW + 1, results: [{ exitCode: 0 }] });
+    expect(brief.review).toBeUndefined();
+    expect(brief.rework).toBeUndefined();
+  });
+
+  it('gives a review run the handoff it reviews, and a rework the reason and the handoff it revises', () => {
+    const task = newTask(h.db, { reviewer: REVIEWER });
+    const work = claimed(h.db, task.taskId);
+    const handoff = { summary: 'Parser written.', metadata: { pr: 7 }, reportedCommit: SHA, reportedDirty: false };
+    expect(requestReview(h.db, task.taskId, { kind: 'run', runId: work.runId }, handoff, NOW).ok).toBe(true);
+    expect(closeRun(h.db, work.runId, NOW).ok).toBe(true);
+    const review = claimed(h.db, task.taskId);
+    const asked = { runId: work.runId, actor: `run:${work.runId}`, ...handoff };
+    expect(briefFor(h.db, { run: review, task, roleMd: undefined, role: ROLE }).review).toEqual(asked);
+
+    expect(requestChanges(h.db, task.taskId, { kind: 'run', runId: review.runId }, 'Handle an empty file.', NOW).ok).toBe(true);
+    expect(closeRun(h.db, review.runId, NOW).ok).toBe(true);
+    const rework = claimed(h.db, task.taskId);
+    const brief = briefFor(h.db, { run: rework, task, roleMd: undefined, role: ROLE });
+    expect(brief.rework).toEqual({ reason: 'Handle an empty file.', actor: `run:${review.runId}`, handoff: asked });
+    expect(brief.review).toBeUndefined();
+  });
+
+  it("reads a person's request and changes from their events, and no rework once a review is asked for again", () => {
+    const task = newTask(h.db, { reviewer: REVIEWER });
+    const person = { kind: 'person', principal: ALICE } as const;
+    expect(requestReview(h.db, task.taskId, person, { summary: 'Have a look.' }, NOW).ok).toBe(true);
+    expect(requestChanges(h.db, task.taskId, person, 'Rename it.', NOW).ok).toBe(true);
+    const rework = claimed(h.db, task.taskId);
+    expect(briefFor(h.db, { run: rework, task, roleMd: undefined, role: ROLE }).rework).toEqual({
+      reason: 'Rename it.',
+      actor: ALICE,
+      handoff: { runId: null, actor: ALICE, summary: 'Have a look.', metadata: null, reportedCommit: null, reportedDirty: null },
+    });
+    expect(requestReview(h.db, task.taskId, { kind: 'run', runId: rework.runId }, { summary: 'Renamed.' }, NOW).ok).toBe(true);
+    expect(closeRun(h.db, rework.runId, NOW).ok).toBe(true);
+    const later = claimed(h.db, task.taskId);
+    expect(later.kind).toBe('review');
+    expect(briefFor(h.db, { run: later, task, roleMd: undefined, role: ROLE }).review).toMatchObject({ summary: 'Renamed.' });
   });
 });

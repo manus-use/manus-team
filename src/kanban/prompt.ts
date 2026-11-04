@@ -1,11 +1,15 @@
+import type { LastGateRun, ReviewRequest } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import type { Skill } from '../roles.js';
+import { describeReported } from './commit.js';
 import type { ToolCall } from './session-log.js';
-import { CONTRACT_FIELDS, type CommentRow, type RunKind, type RunRow, type TaskRow } from './types.js';
+import { CONTRACT_FIELDS, type CommentRow, type GateRow, type RunKind, type RunRow, type TaskRow } from './types.js';
 
 /**
  * A run's task prompt (spec §7.1), composed in this order: the role, its skills,
- * the protocol for the run's kind, the task, and the worker context. A run whose
+ * the protocol for the run's kind, the task -- with its gates and their last run
+ * -- and the worker context, which for a review holds the handoff it reviews, and
+ * for a rework the reviewer's reason and the handoff it revises. A run whose
  * role was rendered as a native agent package (plan R) has its role.md as the
  * agent's system prompt and its skills loaded by the agent, so its prompt leaves
  * both out rather than send them twice; the rest is the same.
@@ -95,6 +99,15 @@ export interface Attempt {
   toolCalls: readonly ToolCall[] | undefined;
 }
 
+/** A rework's reason to be (spec §5.3): what the reviewer asked, and the handoff they reviewed. */
+export interface Rework {
+  reason: string;
+  /** Who asked: a review run (`run:<id>`) or a person. */
+  actor: string;
+  /** The implementer's previous handoff; undefined if none can be found. */
+  handoff: ReviewRequest | undefined;
+}
+
 /** Everything a run's prompt is composed from. */
 export interface RunBrief {
   kind: RunKind;
@@ -108,6 +121,14 @@ export interface RunBrief {
   attempts: readonly Attempt[];
   comments: readonly CommentRow[];
   children: readonly TaskRow[];
+  /** The task's gates, in the order they run (spec §7.7). */
+  gates?: readonly GateRow[];
+  /** Their latest run, if they have run (spec §7.1, item 4). */
+  lastGateRun?: LastGateRun;
+  /** For a review run: the handoff it reviews. */
+  review?: ReviewRequest;
+  /** For a work run after a reviewer's changes: the rework's reason, and what it revises. */
+  rework?: Rework;
 }
 
 /** An assignee or a reviewer, as KanbanService takes one: a role name, or a person's principal. */
@@ -133,7 +154,7 @@ ${OTHER_COMMANDS};
 
 Block only on genuine ambiguity, and say why. If one of the task's children below reviews this task, report complete rather than review. If you find follow-up work, create a task for it with \`mt kanban create\` rather than doing it. Never put a secret in a summary, metadata or comment. Stop once you have reported.`;
 
-const REVIEW_PROTOCOL = `You are reviewing one task, below. Review the implementer's handoff, in the earlier attempts, and the workspace -- the current directory -- against the task and its contract. Do not change the workspace.
+const REVIEW_PROTOCOL = `You are reviewing one task, below. Review the implementer's handoff, under For your review, and the workspace -- the current directory -- against the task and its contract. Do not change the workspace.
 
 Report through the \`mt kanban\` command, which reads JSON on stdin and answers in JSON (if it answers "unreachable", the gateway may be busy: try once more). Exactly one terminal report ends your run:
 - \`mt kanban complete < handoff.json\`, with {"summary": "..."}, to approve;
@@ -219,7 +240,8 @@ function bytes(lines: readonly string[]): number {
   return Buffer.byteLength(lines.join('\n'), 'utf8') + 1;
 }
 
-function taskSection(task: TaskRow): string[] {
+function taskSection(b: RunBrief): string[] {
+  const { task } = b;
   const lines = ['# The task', '', `${task.taskId}: ${flat(task.title)}`];
   if (task.body !== '') lines.push('', ...indent(piece(task.body, PIECE_BYTES.body)));
   const contract = CONTRACT_FIELDS.filter((f) => task.contract[f] !== undefined);
@@ -229,7 +251,81 @@ function taskSection(task: TaskRow): string[] {
       lines.push(...labelled(`- ${CONTRACT_LABELS[field]}`, piece(task.contract[field] ?? '', PIECE_BYTES.contractField)));
     }
   }
+  return [...lines, ...gateLines(b)];
+}
+
+/** How one gate's run ended, in a few words. */
+function gateVerdict(r: LastGateRun['results'][number]): string {
+  if (r.timedOut) return 'ran past its timeout';
+  if (r.exitCode === 0) return 'passed';
+  if (r.exitCode !== null) return `exited ${r.exitCode}`;
+  return r.signal === null ? 'could not start' : `was ended by ${r.signal}`;
+}
+
+/**
+ * The task's gates and their last run (spec §7.1 item 4, §7.7): what will be run
+ * when the run reports, so the agent can run them first, and what failed last
+ * time, with the end of its output. Commands are one line each here; the output
+ * is stored text, set off as data.
+ */
+function gateLines(b: RunBrief): string[] {
+  const gates = b.gates ?? [];
+  const last = b.lastGateRun;
+  if (gates.length === 0 && last === undefined) return [];
+  const lines: string[] = [];
+  if (gates.length > 0) {
+    const total = gates.reduce((sum, g) => sum + g.timeoutS, 0);
+    lines.push(
+      '',
+      'Gates: `mt kanban complete` and `review` run these commands first, in the workspace, ' +
+        `and are refused unless each exits 0. A report waits for them, up to ${total} s together, ` +
+        'so give the command that long to answer.',
+    );
+    for (const g of gates) lines.push(`- ${flat(g.command)} (up to ${g.timeoutS} s)`);
+  }
+  if (last !== undefined) {
+    const status = last.passed ? 'passed' : last.aborted ? 'stopped, as the gateway stopped' : 'failed';
+    const notRun = last.notRun > 0 ? `; ${last.notRun} not run` : '';
+    lines.push('', `Last gate run, for ${last.for} by ${flat(last.actor)}: ${status}${notRun}`);
+    for (const r of last.results) {
+      lines.push(`- ${flat(r.command)}: ${gateVerdict(r)}`);
+      if (r.exitCode === 0 || r.output === '') continue;
+      lines.push(...indent(labelled('Output', piece(r.output, PIECE_BYTES.lastOutput, 'tail')).join('\n')));
+    }
+  }
   return lines;
+}
+
+/** A handoff for review: its summary, metadata, and the state its report recorded (spec §7.8). */
+function handoffOf(h: ReviewRequest): string[] {
+  const lines = labelled('Summary', piece(h.summary, PIECE_BYTES.summary));
+  if (h.metadata !== null && h.metadata !== undefined) lines.push(...labelled('Metadata', json(h.metadata)));
+  const state = describeReported(h);
+  if (state !== undefined) lines.push(`State: ${state}`);
+  return lines;
+}
+
+/**
+ * For a review run, the handoff it reviews; for a rework, why it is one and the
+ * handoff it revises (spec §5.3, §7.1). Bounded by the pieces' caps.
+ */
+function handoffSection(b: RunBrief): string[] {
+  if (b.kind === 'review' && b.review !== undefined) {
+    return ['', '## For your review', `The implementer's handoff, from ${flat(b.review.actor)}:`, ...handoffOf(b.review)];
+  }
+  if (b.kind === 'work' && b.rework !== undefined) {
+    const lines = [
+      '',
+      '## Changes requested',
+      `${flat(b.rework.actor)} reviewed this task and asked for changes. Make them, then report again:`,
+      ...labelled('Reason', piece(b.rework.reason, PIECE_BYTES.summary)),
+    ];
+    if (b.rework.handoff !== undefined) {
+      lines.push('', 'The previous handoff, which they reviewed:', ...handoffOf(b.rework.handoff));
+    }
+    return lines;
+  }
+  return [];
 }
 
 function attemptLines(a: Attempt): string[] {
@@ -329,8 +425,9 @@ function share(lines: readonly string[], reserve: number): number {
  * handoffs, can push the attempts, the thread or the children out.
  */
 function told(b: RunBrief): string {
-  const task = taskSection(b.task);
+  const task = taskSection(b);
   const children = childLines(b);
+  const handoff = handoffSection(b);
   const frame = ['', '# Context'];
   const parentHeader = b.parents.length === 0 ? [] : ['', 'The tasks this one depends on, and what each handed off:'];
   // The omission lines' own sizes are kept back, at their longest.
@@ -341,7 +438,8 @@ function told(b: RunBrief): string {
   const commentHeader = ['', '## Comments', `${b.comments.length} earlier comments omitted; ${SHOW}`];
   const commentShare =
     b.comments.length === 0 ? 0 : bytes(commentHeader) + share(b.comments.flatMap(commentLines), COMMENT_RESERVE_BYTES);
-  let left = CONTEXT_BUDGET_BYTES - bytes(task) - bytes(frame) - bytes(children);
+  let left =
+    CONTEXT_BUDGET_BYTES - bytes(task) - bytes(frame) - bytes(children) - (handoff.length === 0 ? 0 : bytes(handoff));
 
   // The latest attempts first, leaving the thread and the parents their shares.
   const recent = b.attempts.slice(-MAX_ATTEMPTS);
@@ -383,7 +481,7 @@ function told(b: RunBrief): string {
     if (omitted > 0) parentBlock.push(...parentsOmitted(omitted));
   }
 
-  const context = [...parentBlock, ...attemptBlock, ...commentBlock, ...children];
+  const context = [...parentBlock, ...attemptBlock, ...handoff, ...commentBlock, ...children];
   if (context.length === 0) context.push('', 'Nothing yet: no parents, earlier attempts, comments or children.');
   const text = redactKnownSecrets([...task, ...frame, ...context].join('\n'));
   if (Buffer.byteLength(text, 'utf8') <= CONTEXT_BUDGET_BYTES) return text;

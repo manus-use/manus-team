@@ -1,5 +1,5 @@
 import type { Db } from '../db/open.js';
-import { getTask, runByTokenHash, taskView } from '../db/kanban-read.js';
+import { getTask, runByTokenHash, taskView, type ReviewRequest } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { briefFor } from './brief.js';
 import type { KanbanService } from './service.js';
@@ -235,6 +235,18 @@ function who(a: Assignee | null): string | null {
   return a === null ? null : a.name;
 }
 
+/** A handoff for review, as show gives it, in snake_case like the input. */
+function handoffShown(h: ReviewRequest): Record<string, unknown> {
+  return {
+    by: h.actor,
+    run_id: h.runId,
+    summary: h.summary,
+    metadata: h.metadata,
+    reported_commit: h.reportedCommit,
+    reported_dirty: h.reportedDirty,
+  };
+}
+
 export class WorkerApi {
   readonly #db: Db;
   readonly #service: KanbanService;
@@ -426,8 +438,38 @@ export class WorkerApi {
         metadata: a.run.metadata,
         error: a.run.error,
         last_output: a.run.lastOutput,
+        reported_commit: a.run.reportedCommit,
+        reported_dirty: a.run.reportedDirty,
         ...(a.toolCalls === undefined ? {} : { tool_calls: a.toolCalls.map((c) => ({ title: c.title, status: c.status })) }),
       })),
+      gates: (brief.gates ?? []).map((g) => ({ gate_id: g.id, command: g.command, timeout_s: g.timeoutS })),
+      last_gate_run:
+        brief.lastGateRun === undefined
+          ? null
+          : {
+              for: brief.lastGateRun.for,
+              by: brief.lastGateRun.actor,
+              passed: brief.lastGateRun.passed,
+              aborted: brief.lastGateRun.aborted,
+              not_run: brief.lastGateRun.notRun,
+              results: brief.lastGateRun.results.map((r) => ({
+                command: r.command,
+                exit_code: r.exitCode,
+                signal: r.signal,
+                timed_out: r.timedOut,
+                duration_ms: r.durationMs,
+                output: r.output,
+              })),
+            },
+      review: brief.review === undefined ? null : handoffShown(brief.review),
+      rework:
+        brief.rework === undefined
+          ? null
+          : {
+              by: brief.rework.actor,
+              reason: brief.rework.reason,
+              handoff: brief.rework.handoff === undefined ? null : handoffShown(brief.rework.handoff),
+            },
       comments: brief.comments.map((c) => ({ author: c.author, body: c.body, created_at: c.createdAt })),
       children: brief.children.map((c) => ({
         task_id: c.taskId,

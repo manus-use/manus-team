@@ -343,3 +343,147 @@ describe('composePrompt', () => {
     expect(prompt).toContain(`Metadata: {"key":"${MASK}"}`);
   });
 });
+
+describe('composePrompt: gates, review and rework', () => {
+  const SHA = '0123456789abcdef0123456789abcdef01234567';
+  const gate = (id: number, command: string, timeoutS = 300) => ({
+    id,
+    taskId: 'k_task',
+    command,
+    timeoutS,
+    createdBy: 'lark:on_alice',
+    createdAt: NOW,
+  });
+
+  it("lists the task's gates and their last run, the failing gate's output masked and set off as data", () => {
+    addSecrets(['sk-live-1234567890']);
+    const prompt = composePrompt(
+      brief({
+        gates: [gate(1, 'npm run lint', 60), gate(2, 'npm test')],
+        lastGateRun: {
+          runId: 'r_1',
+          actor: 'run:r_1',
+          for: 'review',
+          passed: false,
+          aborted: false,
+          notRun: 0,
+          results: [
+            { gateId: 1, command: 'npm run lint', exitCode: 0, signal: null, timedOut: false, durationMs: 5, output: 'ok' },
+            {
+              gateId: 2,
+              command: 'npm test',
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              durationMs: 9,
+              output: '# FAIL parser\n- expected 2 with sk-live-1234567890',
+            },
+          ],
+          at: NOW,
+        },
+      }),
+    );
+    expect(prompt).toContain(
+      [
+        'Gates: `mt kanban complete` and `review` run these commands first, in the workspace, ' +
+          'and are refused unless each exits 0. A report waits for them, up to 360 s together, ' +
+          'so give the command that long to answer.',
+        '- npm run lint (up to 60 s)',
+        '- npm test (up to 300 s)',
+        '',
+        'Last gate run, for review by run:r_1: failed',
+        '- npm run lint: passed',
+        '- npm test: exited 1',
+        '    Output:',
+        '        # FAIL parser',
+        `        - expected 2 with ${MASK}`,
+      ].join('\n'),
+    );
+    expect(at(prompt, 'Gates:')).toBeLessThan(at(prompt, '# Context'));
+    expect(prompt).not.toContain('sk-live');
+  });
+
+  it('says how a last gate run that timed out, or was stopped, ended', () => {
+    const result = { gateId: 1, command: 'npm test', exitCode: null, signal: 'SIGTERM', durationMs: 1, output: '' };
+    const last = { runId: null, actor: 'lark:on_alice', for: 'complete' as const, passed: false, at: NOW };
+    const timedOut = composePrompt(
+      brief({ lastGateRun: { ...last, aborted: false, notRun: 2, results: [{ ...result, timedOut: true }] } }),
+    );
+    expect(timedOut).toContain(
+      'Last gate run, for complete by lark:on_alice: failed; 2 not run\n- npm test: ran past its timeout',
+    );
+    const stopped = composePrompt(
+      brief({ lastGateRun: { ...last, aborted: true, notRun: 0, results: [{ ...result, timedOut: false }] } }),
+    );
+    expect(stopped).toContain('stopped, as the gateway stopped\n- npm test: was ended by SIGTERM');
+  });
+
+  it('gives a review run the handoff it reviews and what to review, after the attempts and before the comments', () => {
+    const prompt = composePrompt(
+      brief({
+        kind: 'review',
+        task: task({ phase: 'review' }),
+        attempts: [{ run: run({ outcome: 'review_requested', summary: 'Parser written.' }), toolCalls: undefined }],
+        comments: [{ id: 1, taskId: 'k_task', author: 'lark:on_alice', body: 'Looks close.', createdAt: NOW }],
+        review: {
+          runId: 'r_1',
+          actor: 'run:r_1',
+          summary: 'Parser written.\nTests added.',
+          metadata: { files: ['src/parser.ts'] },
+          reportedCommit: SHA,
+          reportedDirty: true,
+        },
+      }),
+    );
+    expect(prompt).toContain("Review the implementer's handoff, under For your review, and the workspace");
+    expect(prompt).toContain(
+      [
+        '## For your review',
+        "The implementer's handoff, from run:r_1:",
+        'Summary:',
+        '    Parser written.',
+        '    Tests added.',
+        'Metadata: {"files":["src/parser.ts"]}',
+        `State: uncommitted changes on top of ${SHA}`,
+      ].join('\n'),
+    );
+    expect(at(prompt, '## Attempt 1')).toBeLessThan(at(prompt, '## For your review'));
+    expect(at(prompt, '## For your review')).toBeLessThan(at(prompt, '## Comments'));
+  });
+
+  it("gives a rework the reviewer's reason and the handoff it revises, each capped", () => {
+    const prompt = composePrompt(
+      brief({
+        rework: {
+          reason: 'Handle an empty file.',
+          actor: 'run:r_2',
+          handoff: {
+            runId: 'r_1',
+            actor: 'run:r_1',
+            summary: 'x'.repeat(PIECE_BYTES.summary + 10),
+            metadata: null,
+            reportedCommit: SHA,
+            reportedDirty: false,
+          },
+        },
+      }),
+    );
+    expect(prompt).toContain(
+      [
+        '## Changes requested',
+        'run:r_2 reviewed this task and asked for changes. Make them, then report again:',
+        'Reason: Handle an empty file.',
+        '',
+        'The previous handoff, which they reviewed:',
+        'Summary:',
+        `    ${'x'.repeat(PIECE_BYTES.summary)}`,
+        '    [cut; mt kanban show has all of it]',
+        `State: review commit ${SHA}`,
+      ].join('\n'),
+    );
+    // Neither section where it does not apply: a rework is a work run, a review a review run.
+    expect(composePrompt(brief({ kind: 'review', rework: { reason: 'r', actor: 'a', handoff: undefined } }))).not.toContain(
+      '## Changes requested',
+    );
+  });
+});

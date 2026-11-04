@@ -419,3 +419,66 @@ describe('worker API: answers', () => {
     expect(await answer).toMatchObject({ ok: true, phase: 'done' });
   });
 });
+
+describe('worker API: show, for gates, review and rework', () => {
+  it('shows the gates and their last run', async () => {
+    // A board whose gates run, over a runner that starts nothing: this one fails.
+    const service = new KanbanService({
+      db: b.t.db,
+      roles: new Map(DEFAULT_ROLES.map((r) => [r.name, r])),
+      workspaces: WORKSPACES,
+      clock: new ManualClock(),
+      checks: {
+        workspaceDirs: new Map([['web', '/ws/web']]),
+        env: {},
+        runGate: async () => ({ exitCode: 2, signal: null, timedOut: false, output: 'FAIL parser' }),
+        readCommit: async () => ({ commit: null, dirty: true }),
+      },
+    });
+    const api = new WorkerApi({ db: b.t.db, service });
+    const task = b.create();
+    expect(service.addGate(task.taskId, { command: 'npm test', timeoutS: 30 }, ALICE).ok).toBe(true);
+    const token = mintToken();
+    const claimed = service.claim(task.taskId, { tokenHash: hashToken(token) });
+    if (!claimed.ok) throw new Error(claimed.message);
+    const ask = (command: string, input: unknown = {}) => api.handle({ run: claimed.run.runId, token, command, input });
+    expect(await ask('complete', { summary: 'done' })).toMatchObject({ ok: false, code: 'gate_failed' });
+    expect(await ask('show')).toMatchObject({
+      ok: true,
+      gates: [{ gate_id: expect.any(Number), command: 'npm test', timeout_s: 30 }],
+      last_gate_run: {
+        for: 'complete',
+        by: `run:${claimed.run.runId}`,
+        passed: false,
+        aborted: false,
+        not_run: 0,
+        results: [{ command: 'npm test', exit_code: 2, signal: null, timed_out: false, duration_ms: 0, output: 'FAIL parser' }],
+      },
+      review: null,
+      rework: null,
+    });
+  });
+
+  it('shows the commit each attempt reported, and a rework its reason and previous handoff', async () => {
+    const task = b.create({ reviewer: 'reviewer' });
+    const work = b.claim(task.taskId);
+    expect(await work.ask('review', { summary: 'v1' })).toMatchObject({ ok: true });
+    b.service.closeRun(work.run.runId);
+    const review = b.claim(task.taskId);
+    expect(await review.ask('show')).toMatchObject({
+      review: { by: `run:${work.run.runId}`, run_id: work.run.runId, summary: 'v1', reported_commit: null, reported_dirty: null },
+      rework: null,
+    });
+    expect(await review.ask('changes', { reason: 'add a test' })).toMatchObject({ ok: true });
+    b.service.closeRun(review.run.runId);
+    const rework = b.claim(task.taskId);
+    expect(await rework.ask('show')).toMatchObject({
+      attempts: [
+        { attempt: 1, outcome: 'review_requested', reported_commit: null, reported_dirty: null },
+        { attempt: 2, outcome: 'changes_requested' },
+      ],
+      review: null,
+      rework: { by: `run:${review.run.runId}`, reason: 'add a test', handoff: { summary: 'v1' } },
+    });
+  });
+});

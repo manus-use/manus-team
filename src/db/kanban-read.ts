@@ -343,6 +343,79 @@ export function lastGateRun(db: Db, taskId: string): LastGateRun | undefined {
   return { ...payload, runId: row.run_id, actor: row.actor, at: row.created_at };
 }
 
+/** A request for same-task review (spec §5.3): the handoff a reviewer reviews, and a rework revises. */
+export interface ReviewRequest {
+  /** The work run that asked; null for a person. */
+  runId: string | null;
+  actor: string;
+  summary: string;
+  metadata: unknown;
+  /** What the run's report recorded of its workspace (spec §7.8); null for a person's. */
+  reportedCommit: string | null;
+  reportedDirty: boolean | null;
+}
+
+/**
+ * The task's latest request for review: its `review_requested` event, and the
+ * work run's handoff when a run asked. A person's request has only the event's
+ * summary.
+ */
+export function latestReviewRequest(db: Db, taskId: string): ReviewRequest | undefined {
+  const event = latestOf(db, taskId, ['review_requested']);
+  if (event === undefined) return undefined;
+  const run = event.run_id === null ? undefined : getRun(db, event.run_id);
+  if (run !== undefined) {
+    return {
+      runId: run.runId,
+      actor: event.actor,
+      summary: run.summary ?? '',
+      metadata: run.metadata,
+      reportedCommit: run.reportedCommit,
+      reportedDirty: run.reportedDirty,
+    };
+  }
+  const payload = json(event.payload) as { summary?: unknown };
+  return {
+    runId: null,
+    actor: event.actor,
+    summary: typeof payload.summary === 'string' ? payload.summary : '',
+    metadata: null,
+    reportedCommit: null,
+    reportedDirty: null,
+  };
+}
+
+/** Changes a reviewer asked for and nobody has yet answered with another review request: what a rework is for. */
+export interface ChangesAsked {
+  reason: string;
+  /** Who asked: a review run (`run:<id>`) or a person. */
+  actor: string;
+}
+
+/**
+ * The changes the task's next work run is to make (spec §5.3), if its latest
+ * review ended in them: the latest `changes_requested` event, unless a review
+ * was asked for since. Read from the event, which has the reason whether a review
+ * run or a person asked (C1 Decision 7).
+ */
+export function changesAsked(db: Db, taskId: string): ChangesAsked | undefined {
+  const event = latestOf(db, taskId, ['review_requested', 'changes_requested']);
+  if (event?.kind !== 'changes_requested') return undefined;
+  const payload = json(event.payload) as { reason?: unknown };
+  return { reason: typeof payload.reason === 'string' ? payload.reason : '', actor: event.actor };
+}
+
+/** The task's latest event of one of these kinds. */
+function latestOf(db: Db, taskId: string, kinds: readonly string[]): EventRaw | undefined {
+  return db
+    .prepare<string[], EventRaw>(
+      `SELECT id, task_id, run_id, kind, actor, json(payload) AS payload, created_at
+         FROM kanban_events WHERE task_id = ? AND kind IN (${kinds.map(() => '?').join(', ')})
+        ORDER BY id DESC LIMIT 1`,
+    )
+    .get(taskId, ...kinds);
+}
+
 /** The task as `/kanban show` and `mt kanban show` present it. */
 export interface TaskView {
   task: TaskRow;

@@ -1,5 +1,15 @@
 import type { Db } from '../db/open.js';
-import { childrenOf, commentsOf, latestCompletion, parentsOf, runsOf } from '../db/kanban-read.js';
+import {
+  changesAsked,
+  childrenOf,
+  commentsOf,
+  gatesOf,
+  lastGateRun,
+  latestCompletion,
+  latestReviewRequest,
+  parentsOf,
+  runsOf,
+} from '../db/kanban-read.js';
 import type { Attempt, ParentHandoff, RunBrief } from './prompt.js';
 import type { Claimed } from './service.js';
 import { toolCallsOf } from './session-log.js';
@@ -8,7 +18,9 @@ import { ENDED_OUTCOMES, type RunRow } from './types.js';
 /**
  * Gather what a run's prompt is composed from (spec §7.1), as the board holds it
  * when the run is claimed: each parent's latest handoff, every earlier attempt,
- * the comment thread and the children.
+ * the comment thread and the children; the task's gates and their last run; and
+ * for a review the handoff it reviews, for a rework the reviewer's reason and the
+ * handoff it revises (spec §5.3).
  */
 
 /**
@@ -33,6 +45,9 @@ export function briefFor(db: Db, c: Claimed, opts: { native?: boolean } = {}): R
       run,
       toolCalls: endedUnreported(run) && run.sessionId !== null ? toolCallsOf(db, run.sessionId) : undefined,
     }));
+  const last = lastGateRun(db, taskId);
+  const review = c.run.kind === 'review' ? latestReviewRequest(db, taskId) : undefined;
+  const changes = c.run.kind === 'work' ? changesAsked(db, taskId) : undefined;
   return {
     kind: c.run.kind,
     roleMd: c.roleMd,
@@ -43,5 +58,9 @@ export function briefFor(db: Db, c: Claimed, opts: { native?: boolean } = {}): R
     attempts,
     comments: commentsOf(db, taskId),
     children: childrenOf(db, taskId),
+    gates: gatesOf(db, taskId),
+    ...(last === undefined ? {} : { lastGateRun: last }),
+    ...(review === undefined ? {} : { review }),
+    ...(changes === undefined ? {} : { rework: { ...changes, handoff: latestReviewRequest(db, taskId) } }),
   };
 }
