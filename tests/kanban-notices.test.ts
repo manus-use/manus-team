@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChannelError, type Channel } from '../src/channel/types.js';
 import { noticeBatchUuid } from '../src/core/ids.js';
 import { dueSubscriptions, eventsOf, subscriptionsOf } from '../src/db/kanban-read.js';
@@ -293,6 +293,52 @@ describe('the notifier', () => {
     // Eight pauses of 2 s to 256 s, then DEAD_AFTER failures at five minutes, the last letting it go.
     expect(failures).toBe(8 + DEAD_AFTER);
     expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(eventsOf(t.db, a.taskId).at(-1)?.id);
+  });
+
+  it('never lets go of a conversation for network failures, however many, and catches up from its cursors once a send succeeds', async () => {
+    const a = create('Draft the notes');
+    await done(a, 'merged');
+    const n = notifier();
+    for (let i = 0; i < 20; i += 1) {
+      lark.failNext('sendText', new ChannelError(0, 'socket hang up', false));
+      expect(await n.deliver()).toBe(0);
+      expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(0);
+      clock.advance(NOTICE_BACKOFF_MAX_MS);
+    }
+    expect(notes.some((l) => l.includes('cannot be reached'))).toBe(false);
+    // What happened during the outage is told too, in the same message.
+    const b = create('Check the links');
+    await done(b, 'checked');
+    expect(await n.deliver()).toBe(2);
+    expect(lark.texts).toHaveLength(1);
+    expect(await n.deliver()).toBe(0);
+    expect(lark.texts).toHaveLength(1);
+  });
+
+  it('never lets go of a conversation for sends that time out, however many, and catches up from its cursors once one succeeds', async () => {
+    const a = create('Draft the notes');
+    await done(a, 'merged');
+    const n = notifier({ sendTimeoutMs: 5 });
+    let hung = 20;
+    const send = lark.sendText.bind(lark);
+    vi.spyOn(lark, 'sendText').mockImplementation((target, text, uuid) => {
+      if (hung <= 0) return send(target, text, uuid);
+      hung -= 1;
+      return new Promise(() => undefined);
+    });
+    for (let i = 0; i < 20; i += 1) {
+      expect(await n.deliver()).toBe(0);
+      expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(0);
+      clock.advance(NOTICE_BACKOFF_MAX_MS);
+    }
+    expect(notes.filter((l) => l.includes('the send took longer than 5 ms'))).toHaveLength(20);
+    expect(notes.some((l) => l.includes('cannot be reached'))).toBe(false);
+    const b = create('Check the links');
+    await done(b, 'checked');
+    expect(await n.deliver()).toBe(2);
+    expect(lark.texts).toHaveLength(1);
+    expect(await n.deliver()).toBe(0);
+    expect(lark.texts).toHaveLength(1);
   });
 
   it('keeps one subscription whose task is gone, or one conversation that throws, from holding up the rest', async () => {

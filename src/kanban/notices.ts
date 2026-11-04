@@ -28,8 +28,9 @@ import type { KanbanEvent, SubscriptionRow } from './types.js';
  * its note.)
  *
  * **A conversation that cannot be reached is let go of.** A send refused as
- * unreachable -- `UNREACHABLE_CODES`: the bot is not in the chat -- or failing
- * `DEAD_AFTER` times in a row at the longest pause, or a conversation on a
+ * unreachable -- `UNREACHABLE_CODES`: the bot is not in the chat -- or refused
+ * by the platform, with a nonzero code, `DEAD_AFTER` times in a row at the
+ * longest pause, or a conversation on a
  * channel this gateway has not got, drops the notices it held, says so once, and
  * marks the conversation dead until the gateway restarts: its later events are
  * passed over without a send. A subscription whose task is not on the board is
@@ -37,9 +38,12 @@ import type { KanbanEvent, SubscriptionRow } from './types.js';
  * batch was sent is said to be so, and that subscription's notices are sent
  * again after a pause; the others' cursors move. A send that fails otherwise holds
  * the conversation back for a pause that doubles, up to five minutes, while the
- * others go on: a network failure, which the Lark adapter reports as code 0 and
- * not retryable, and a refusal of one bad batch, are not a dead chat. A send that
- * takes longer than `NOTICE_SEND_MS` counts as a failed one. A round sends to at
+ * others go on: a refusal of one bad batch is not a dead chat. A network
+ * failure, which the Lark adapter reports as code 0 and not retryable, and a
+ * send that takes longer than `NOTICE_SEND_MS`, are the gateway's own outage,
+ * not the chat's: they hold the conversation at the longest pause for as long as
+ * they last and never let it go, so after the outage it catches up from its
+ * cursors. A round sends to at
  * most `ROUND_SENDS` conversations, the longest waiting first, so a restart that finds many conversations due -- dead
  * ones among them -- spreads their sends over rounds rather than firing all at once.
  *
@@ -52,7 +56,12 @@ import type { KanbanEvent, SubscriptionRow } from './types.js';
 export const NOTICE_POLL_MS = 2_000;
 /** The longest a conversation whose sends fail waits before it is tried again. */
 export const NOTICE_BACKOFF_MAX_MS = 5 * 60_000;
-/** Failures in a row at the longest pause after which a conversation is let go of. */
+/**
+ * Refusals in a row at the longest pause after which a conversation is let go
+ * of: only a `ChannelError` with a nonzero code counts. With pauses of 2 s
+ * doubling to 256 s, then two of five minutes, the eleventh refused send in a
+ * row lets it go: 1,110 s of pauses, about 19 minutes, after the first.
+ */
 export const DEAD_AFTER = 3;
 /** Notices in one message; the rest follow in the next round. */
 export const BATCH_NOTICES = 20;
@@ -389,14 +398,19 @@ export class Notifier {
 
   /**
    * A send that failed: a refusal that will not change, or the last of
-   * `DEAD_AFTER` at the longest pause, lets the conversation go -- its notices
-   * dropped, said once -- and anything else holds it back for a while.
+   * `DEAD_AFTER` refusals at the longest pause, lets the conversation go -- its
+   * notices dropped, said once -- and anything else holds it back for a while.
+   * Only the platform's refusal, a `ChannelError` with a nonzero code, counts
+   * toward `DEAD_AFTER`: a network failure (code 0), a send that timed out, or
+   * any other error is this gateway's outage, held at the longest pause for as
+   * long as it lasts and never let go of.
    */
   #sendFailed(c: Conversation, pending: readonly Pending[], err: unknown): void {
-    // Only a refusal that names the chat as unreachable; code 0 is a network failure.
-    const permanent = err instanceof ChannelError && UNREACHABLE_CODES.has(err.code);
-    if (!permanent && next(this.#backoff.get(c.key)).atMax < DEAD_AFTER) {
-      this.#holdBack(c.key, describe(c), message(err));
+    const refused = err instanceof ChannelError && err.code !== 0;
+    // Only a refusal that names the chat as unreachable.
+    const permanent = refused && UNREACHABLE_CODES.has(err.code);
+    if (!permanent && (!refused || next(this.#backoff.get(c.key), true).atMax < DEAD_AFTER)) {
+      this.#holdBack(c.key, describe(c), message(err), { counts: refused });
       return;
     }
     this.#letGo(c, pending, message(err));
@@ -428,8 +442,8 @@ export class Notifier {
    * and say so: that its notices were not sent, or, for a cursor that failed to
    * move after a send, that they were.
    */
-  #holdBack(key: string, what: string, why: string, opts: { sent?: boolean; advance?: boolean } = {}): void {
-    const { waitMs, atMax } = next(this.#backoff.get(key));
+  #holdBack(key: string, what: string, why: string, opts: { sent?: boolean; advance?: boolean; counts?: boolean } = {}): void {
+    const { waitMs, atMax } = next(this.#backoff.get(key), opts.counts !== false);
     this.#backoff.set(key, { until: this.#clock.now() + waitMs, waitMs, atMax, advance: opts.advance === true });
     const said = opts.sent === true ? 'sent; cursor not moved' : 'were not sent';
     this.#note(`kanban: notices for ${what} ${said} (${why}); trying again in ${Math.round(waitMs / 1000)} s`);
@@ -446,11 +460,13 @@ interface Backoff {
 
 /**
  * The pause after one more failure, doubling from 2 s to `NOTICE_BACKOFF_MAX_MS`,
- * and how many failures in a row have come at that longest pause.
+ * and how many failures in a row that `count` have come at that longest pause:
+ * one that does not count leaves the tally as it was.
  */
-function next(held: { waitMs: number; atMax: number } | undefined): { waitMs: number; atMax: number } {
+function next(held: { waitMs: number; atMax: number } | undefined, count: boolean): { waitMs: number; atMax: number } {
   const waitMs = Math.min((held?.waitMs ?? NOTICE_POLL_MS / 2) * 2, NOTICE_BACKOFF_MAX_MS);
-  return { waitMs, atMax: waitMs === NOTICE_BACKOFF_MAX_MS ? (held?.atMax ?? 0) + 1 : 0 };
+  if (waitMs !== NOTICE_BACKOFF_MAX_MS) return { waitMs, atMax: 0 };
+  return { waitMs, atMax: (held?.atMax ?? 0) + (count ? 1 : 0) };
 }
 
 /** How long a conversation has waited: its oldest pending event's id. */
