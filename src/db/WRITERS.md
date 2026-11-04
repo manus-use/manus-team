@@ -30,7 +30,7 @@ file is for.
 | `kanban_tasks` | `db/kanban.ts` | `phase` is written only by its named transitions, each of which checks the current phase (spec §4.1). `workspace` is written once, while null. |
 | `kanban_links` | `db/kanban.ts` | Added in the transaction that checks for a cycle and for an open run on the child (spec §3.2). Never deleted. |
 | `kanban_runs` | `db/kanban.ts` | Inserted by a claim. `outcome` is written once, on an undecided run; `ended_at` once, on a decided one (spec §3.3). `agent_config` gains `native` and `packageHash` once, by `recordRendering` (plan R). |
-| `kanban_comments` | `db/kanban.ts` | Rows are added, never updated. |
+| `kanban_comments` | `db/kanban.ts` | Rows are added, never updated. `steers` (migration 004) is set at the insert: 0 for a talk-tier person's comment from chat, which is shown to people and given to no agent. |
 | `kanban_events` | `db/kanban.ts` | Append-only, written in the transaction of the change it records. String values in `payload` are masked on write (spec §10.1). |
 | `kanban_gates` | `db/kanban.ts` | Added by `addGate` and deleted by `removeGate`, never updated: the command is stored as written, never masked (spec §10.1). The gateway and the `mt kanban gate` commands both write it, each through `KanbanService`. |
 | `kanban_subscriptions` | `db/kanban.ts` | Added by `createTask`, in its transaction: the chat a task is created in, or the subscriptions of the task whose run created it (spec §9.4). `cursor` is moved forward only, by `advanceSubscription`, which writes no event: it is the notifier's own cursor, as a binding's `cursor_seq` is the card writer's. Never deleted. |

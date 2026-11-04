@@ -707,13 +707,14 @@ export class Dispatcher {
    * use up a nudge; else the next nudge, while any are left. Nothing for a run
    * that is decided -- by its own report, or a sweep -- or released, or once the
    * dispatcher has stopped. The comments of runs, its own included, are not
-   * forwarded: a person's word is what beats a reminder.
+   * forwarded: a person's word is what beats a reminder. Nor are those that may
+   * not steer an agent: a talk-tier person's, which is for people (spec §9.1).
    */
   #followUp(open: OpenRun): string | undefined {
     if (this.#stopped || open.released || open.cancelling) return undefined;
     const run = getRun(this.#deps.db, open.runId);
     if (run === undefined || run.outcome !== null) return undefined;
-    const fresh = commentsOf(this.#deps.db, run.taskId).filter(
+    const fresh = commentsOf(this.#deps.db, run.taskId, { steering: true }).filter(
       (c) => c.id > open.seenComment && !c.author.startsWith('run:'),
     );
     if (fresh.length > 0) {

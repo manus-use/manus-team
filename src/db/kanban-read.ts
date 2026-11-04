@@ -265,10 +265,17 @@ export function openAgentRunIn(db: Db, workspace: string): RunRow | undefined {
   return row === undefined ? undefined : decodeRun(row);
 }
 
-export function commentsOf(db: Db, taskId: string): CommentRow[] {
+/**
+ * The task's comments, oldest first. `steering`: only those that may steer an
+ * agent -- a run's, or an operator's -- which are what a run's prompt and a
+ * forwarded comment carry (spec §7.5, §9.1). Without it, every comment, as
+ * `/kanban show` gives them to people.
+ */
+export function commentsOf(db: Db, taskId: string, opts: { steering?: boolean } = {}): CommentRow[] {
   return db
     .prepare<[string], CommentRaw>(
-      'SELECT id, task_id, author, body, created_at FROM kanban_comments WHERE task_id = ? ORDER BY id',
+      `SELECT id, task_id, author, body, created_at FROM kanban_comments
+        WHERE task_id = ?${opts.steering === true ? ' AND steers = 1' : ''} ORDER BY id`,
     )
     .all(taskId)
     .map(decodeComment);

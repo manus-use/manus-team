@@ -79,7 +79,7 @@ describe('briefFor', () => {
     expect(attachSession(h.db, first.runId, sessionWithCall('s_first', 'edit'), NOW).ok).toBe(true);
     expect(endRun(h.db, first.runId, { outcome: 'crashed', error: 'exited' }, DEFAULT_LIMITS, NOW).ok).toBe(true);
     expect(closeRun(h.db, first.runId, NOW).ok).toBe(true);
-    expect(addComment(h.db, task.taskId, ALICE, 'Mind the BOM.', NOW).ok).toBe(true);
+    expect(addComment(h.db, task.taskId, ALICE, 'Mind the BOM.', NOW, true).ok).toBe(true);
 
     const second = claimed(h.db, task.taskId);
     const brief = briefFor(h.db, { run: second, task, roleMd: 'Be careful.', role: ROLE });

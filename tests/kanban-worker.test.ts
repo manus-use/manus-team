@@ -132,7 +132,9 @@ describe('worker API: the run’s scope', () => {
     expect(await p.ask('complete', { summary: 'parent done', metadata: { pr: 7 } })).toMatchObject({ ok: true });
     b.service.closeRun(p.run.runId);
     const task = b.create({ title: 'the task', body: 'do it', parents: [parent.taskId], contract: { outcome: 'it works' } });
-    b.service.comment(task.taskId, 'please hurry', ALICE);
+    b.service.comment(task.taskId, 'please hurry', ALICE, { steers: true });
+    // A talk-tier person's comment is for people: `mt kanban show` leaves it out.
+    b.service.comment(task.taskId, 'just watching', 'lark:on_bob', { steers: false });
     const { run, token, ask } = b.claim(task.taskId);
 
     const r = await ask('show');

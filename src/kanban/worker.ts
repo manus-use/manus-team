@@ -367,7 +367,8 @@ export class WorkerApi {
         );
       }
       case 'comment': {
-        const r = this.#service.comment(str('task_id') ?? run.taskId, str('body') ?? '', actor);
+        // A run's comment steers: it is the board's own work talking (spec §7.5).
+        const r = this.#service.comment(str('task_id') ?? run.taskId, str('body') ?? '', actor, { steers: true });
         return r.ok ? { ok: true, task_id: r.comment.taskId, comment_id: r.comment.id } : refusal(r);
       }
       case 'create': {

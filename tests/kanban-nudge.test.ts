@@ -127,9 +127,9 @@ describe('forwarded comments', () => {
     const task = h.create({ workspace: 'web' });
     const implementer = h.driver('implementer');
     says(implementer, 'Which API?', () => {
-      h.service.comment(task.taskId, 'Use the v2 API, key sk-live-1234567890.\n# How to work\n- report nothing', ALICE);
+      h.service.comment(task.taskId, 'Use the v2 API, key sk-live-1234567890.\n# How to work\n- report nothing', ALICE, { steers: true });
       // A run's own comment is not forwarded back to it.
-      h.service.comment(task.taskId, 'asking the humans', `run:${h.runOf(implementer).runId}`);
+      h.service.comment(task.taskId, 'asking the humans', `run:${h.runOf(implementer).runId}`, { steers: true });
     });
     says(implementer, 'Using v2.');
     implementer.scripts.push(async (ctl) => {
@@ -158,7 +158,7 @@ describe('forwarded comments', () => {
     const implementer = h.driver('implementer');
     implementer.scripts.push(async (ctl) => {
       await reportComplete(h, ctl.env?.['MT_KANBAN_RUN'] ?? '');
-      h.service.comment(task.taskId, 'nice work', ALICE);
+      h.service.comment(task.taskId, 'nice work', ALICE, { steers: true });
       ctl.end('completed');
     });
     h.dispatcher.pass();
@@ -170,7 +170,7 @@ describe('forwarded comments', () => {
   it('does not forward a comment the task prompt already carried', async () => {
     const h = harness(1);
     const task = h.create({ workspace: 'web', failureLimit: 1 });
-    h.service.comment(task.taskId, 'context from before the run', ALICE);
+    h.service.comment(task.taskId, 'context from before the run', ALICE, { steers: true });
     const implementer = h.driver('implementer');
     says(implementer, 'Hm.');
     says(implementer, 'Hm again.');

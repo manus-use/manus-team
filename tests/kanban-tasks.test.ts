@@ -152,8 +152,8 @@ describe('addComment', () => {
   it('adds comments in order, masked, each with an event', () => {
     addSecrets(['sk-test-123456']);
     const task = create();
-    addComment(h.db, task.taskId, 'lark:on_alice', 'first', NOW);
-    const r = addComment(h.db, task.taskId, 'run:r_1', 'used sk-test-123456', NOW + 1);
+    addComment(h.db, task.taskId, 'lark:on_alice', 'first', NOW, true);
+    const r = addComment(h.db, task.taskId, 'run:r_1', 'used sk-test-123456', NOW + 1, true);
     expect(r).toMatchObject({ ok: true, comment: { author: 'run:r_1', body: `used ${MASK}` } });
     expect(commentsOf(h.db, task.taskId).map((c) => [c.author, c.body])).toEqual([
       ['lark:on_alice', 'first'],
@@ -167,7 +167,7 @@ describe('addComment', () => {
   });
 
   it('refuses a comment on an unknown task', () => {
-    expect(addComment(h.db, 'k_missing', 'lark:on_alice', 'hi', NOW)).toMatchObject({ ok: false, code: 'not_found' });
+    expect(addComment(h.db, 'k_missing', 'lark:on_alice', 'hi', NOW, true)).toMatchObject({ ok: false, code: 'not_found' });
   });
 });
 

@@ -571,11 +571,18 @@ export class KanbanService {
     return board.removeGate(this.#db, taskId, gateId, by, this.#clock.now());
   }
 
-  comment(taskId: string, body: string, by: string): Result<{ comment: CommentRow }> {
+  /**
+   * A comment (spec §7.5). `steers: false` -- a talk-tier person's, from chat --
+   * is stored and shown to people, and never given to an agent (spec §9.1). A
+   * run's, and an operator's, steer. Every caller says which: there is no default
+   * to fall back on when a new caller forgets.
+   */
+  comment(taskId: string, body: string, by: string, opts: { steers: boolean }): Result<{ comment: CommentRow }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
     if (!isText(body) || body.trim() === '') return board.refuse('invalid', 'a comment needs text');
-    return board.addComment(this.#db, taskId, by, body, this.#clock.now());
+    if (!isRecord(opts) || typeof opts.steers !== 'boolean') return board.refuse('invalid', 'a comment says whether it steers');
+    return board.addComment(this.#db, taskId, by, body, this.#clock.now(), opts.steers);
   }
 
   /**

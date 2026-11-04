@@ -89,7 +89,7 @@ describe('noteStranded', () => {
     const taskId = stranded();
     const cutoff = clock.now();
     clock.advance(MINUTE);
-    expect(service.comment(taskId, 'looking at it', ALICE).ok).toBe(true);
+    expect(service.comment(taskId, 'looking at it', ALICE, { steers: true }).ok).toBe(true);
     expect(service.noteStranded(taskId, 'role "gone" is not configured', cutoff + MINUTE)).toEqual({
       ok: true,
       written: false,

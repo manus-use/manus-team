@@ -293,26 +293,32 @@ export function advanceSubscription(db: Db, subscriptionId: number, cursor: numb
   });
 }
 
-/** A comment, on a task in any phase. The dispatcher forwards a person's to an undecided run (spec §7.5). */
+/**
+ * A comment, on a task in any phase. The dispatcher forwards a person's to an
+ * undecided run (spec §7.5) -- if it `steers`: a talk-tier comment from chat is
+ * stored for people to read, and never given to an agent (spec §9.1).
+ */
 export function addComment(
   db: Db,
   taskId: string,
   author: string,
   body: string,
   now: number,
+  steers: boolean,
 ): Result<{ comment: CommentRow }> {
   return tx(db, (d) => {
     if (getTask(d, taskId) === undefined) return refuse('not_found', `no task ${taskId}`);
-    return { ok: true, comment: insertComment(d, taskId, author, body, now) };
+    return { ok: true, comment: insertComment(d, taskId, author, body, now, steers) };
   });
 }
 
-function insertComment(d: Db, taskId: string, author: string, body: string, now: number): CommentRow {
+function insertComment(d: Db, taskId: string, author: string, body: string, now: number, steers: boolean): CommentRow {
   const masked = mask(body);
   const { lastInsertRowid } = d
-    .prepare('INSERT INTO kanban_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)')
-    .run(taskId, author, masked, now);
-  record(d, { taskId, kind: 'commented', actor: author, payload: { body } }, now);
+    .prepare('INSERT INTO kanban_comments (task_id, author, body, created_at, steers) VALUES (?, ?, ?, ?, ?)')
+    .run(taskId, author, masked, now, steers ? 1 : 0);
+  // `steers` is recorded only when it is false, so a comment that steers reads as it always did.
+  record(d, { taskId, kind: 'commented', actor: author, payload: steers ? { body } : { body, steers: false } }, now);
   return { id: Number(lastInsertRowid), taskId, author, body: masked, createdAt: now };
 }
 
@@ -1174,7 +1180,8 @@ export function unblock(
         WHERE task_id = ?`,
     ).run(taskId);
     record(d, { taskId, kind: 'unblocked', actor: by, payload: { kind: task.blockKind } }, now);
-    if (comment !== undefined && comment !== '') insertComment(d, taskId, by, comment, now);
+    // An unblock is an operator's, so its comment steers the next run.
+    if (comment !== undefined && comment !== '') insertComment(d, taskId, by, comment, now, true);
     return { ok: true, task: mustGet(d, taskId) };
   });
 }

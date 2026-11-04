@@ -285,7 +285,7 @@ describe('KanbanService: the rest of the board', () => {
       clock.now(),
     );
     ok(s.attachSession(run.runId, 's_run'));
-    ok(s.comment(task.taskId, 'remember the empty file', ALICE));
+    ok(s.comment(task.taskId, 'remember the empty file', ALICE, { steers: true }));
     clock.advance(60_000);
     ok(await s.complete(task.taskId, { kind: 'run', runId: run.runId }, { summary: 'parser written' }));
     ok(s.closeRun(run.runId));
@@ -342,7 +342,7 @@ describe('KanbanService: the rest of the board', () => {
     const s = service();
     const task = ok(s.create(request({ reviewer: 'reviewer' }))).task;
     const by = { kind: 'run', runId: ok(s.claim(task.taskId)).run.runId } as const;
-    expect(s.comment(task.taskId, '  ', ALICE)).toEqual({
+    expect(s.comment(task.taskId, '  ', ALICE, { steers: true })).toEqual({
       ok: false,
       code: 'invalid',
       message: 'a comment needs text',
@@ -478,10 +478,10 @@ describe('KanbanService: malformed input', () => {
       ['assignReviewer: a number', () => s.assignReviewer(open.taskId, bad(3), ALICE)],
       ['assignReviewer: null', () => s.assignReviewer(open.taskId, bad(null), ALICE)],
       ['claim: task id an object', () => s.claim(bad({}))],
-      ['comment: body a number', () => s.comment(open.taskId, bad(3), ALICE)],
-      ['comment: body an object', () => s.comment(open.taskId, bad({}), ALICE)],
-      ['comment: body null', () => s.comment(open.taskId, bad(null), ALICE)],
-      ['comment: task id an object', () => s.comment(bad({}), 'hi', ALICE)],
+      ['comment: body a number', () => s.comment(open.taskId, bad(3), ALICE, { steers: true })],
+      ['comment: body an object', () => s.comment(open.taskId, bad({}), ALICE, { steers: true })],
+      ['comment: body null', () => s.comment(open.taskId, bad(null), ALICE, { steers: true })],
+      ['comment: task id an object', () => s.comment(bad({}), 'hi', ALICE, { steers: true })],
       ['complete: summary a number', () => s.complete(open.taskId, by, { summary: bad(3) })],
       ['complete: summary null', () => s.complete(open.taskId, by, { summary: bad(null) })],
       ['complete: summary blank', () => s.complete(open.taskId, by, { summary: '  ' })],

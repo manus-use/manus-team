@@ -56,7 +56,8 @@ export function briefFor(db: Db, c: Claimed, opts: { native?: boolean } = {}): R
     task: c.task,
     parents,
     attempts,
-    comments: commentsOf(db, taskId),
+    // Only comments that may steer: a talk-tier comment is for people (spec §9.1).
+    comments: commentsOf(db, taskId, { steering: true }),
     children: childrenOf(db, taskId),
     gates: gatesOf(db, taskId),
     ...(last === undefined ? {} : { lastGateRun: last }),

@@ -171,7 +171,7 @@ describe('noteUnassignable', () => {
       ok: true,
       written: false,
     });
-    ok(addComment(h.db, task.taskId, ALICE, 'any news?', NOW));
+    ok(addComment(h.db, task.taskId, ALICE, 'any news?', NOW, true));
     expect(noteUnassignable(h.db, task.taskId, 'role gone is not configured', NOW)).toEqual({
       ok: true,
       written: true,
