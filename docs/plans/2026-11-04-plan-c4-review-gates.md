@@ -5,7 +5,8 @@
 **Goal:** A task's gates decide whether it is done. An operator defines a task's gates; every report that would take it to done or to review — an agent's `mt kanban complete` or `review`, a reviewer's approval, a person's completion — first runs them in the task's workspace, as processes the gateway waits for without stopping, and is refused with the failing command, its exit and the end of its output while one fails. A gate whose command holds a known secret is refused when it is defined. When an agent reports, the gateway records the commit it reported on and whether the tree had uncommitted changes. A review run is given the handoff it reviews and what to review; a rework is given the reviewer's reason and the handoff it revises, and resumes the implementer's conversation only when it would run under the same instructions. A crash is printed masked. With `kanban.enabled` unset, nothing changes for chat but the way a crash is printed.
 
 **Architecture:**
-- **Defining gates** (`KanbanService.addGate`, `db/kanban.ts` `addGate`, `db/kanban-read.ts` `gatesOf`): an operator action through the service API only, until plan D gives it a chat command. A command holding a known secret, and gates past `GATE_LIMITS`, are refused; a gate is stored as written, with who defined it.
+- **Defining gates** (`KanbanService.addGate`, `listGates`, `removeGate`; `db/kanban.ts` `addGate`, `removeGate`; `db/kanban-read.ts` `gatesOf`): an operator action, through the service. A command holding a known secret, in any form the shell would run it as, and gates past `GATE_LIMITS`, are refused; a gate is stored as written, with who defined it.
+- **The `mt kanban gate` commands** (`src/cli/gate.ts`): `add`, `list` and `remove`, the operator's way in before plan D's chat command. They open the gateway's database and call the same service, beside a running gateway.
 - **Reports are asynchronous** (`KanbanService.complete` and `requestReview`, `WorkerApi.handle` and `#act`): a gate is a process, awaited, so chat and other runs go on while a test suite runs.
 - **The gate runner** (`src/kanban/gates.ts`): `runGates` runs a task's gates in order until one fails, masking each one's output before it keeps its end; `spawnGate` is the real runner, `/bin/sh -c` in its own process group; `gateEnv` is the agent allowlist plus the role's values, never a run's token or socket.
 - **The reported commit** (`src/kanban/commit.ts`): `commitReader` reads `HEAD` and `git status --porcelain` asynchronously; `describeReported` says what a reviewer is to review.
@@ -39,26 +40,35 @@
 - **Finding edits.** Find each edit by its quoted text, not by line number. Every quoted text appears exactly once in its file at the point the step applies it. Apply a step's edits in the order given.
 - **The secret registry is process-wide.** Every test file that adds secrets, or runs a dispatcher (which adds tokens), calls `clearSecrets()` in `beforeEach` and `afterEach`.
 - **Tests use real SQLite** through `testDb()`, the real `SessionRegistry` and `SessionActor`, `FakeDriver` agents and a `ManualClock`. No mocks.
-- **No real agent, no network, no real home.** No test runs bytesec or reaches the network. Sockets, homes and repositories are under fresh `mkdtemp` directories, realpath'd (on macOS `/tmp` is `/private/tmp`). No test reads `~/.manus-team`, and every test that runs git gives it a made-up `HOME` and `GIT_CONFIG_NOSYSTEM=1`, so no configuration of the real home is read.
+- **No real agent, no network, no real home.** No test runs bytesec or reaches the network. Sockets, homes and repositories are under fresh `mkdtemp` directories, realpath'd (on macOS `/tmp` is `/private/tmp`). No test reads `~/.manus-team`. Every git a test runs gets a made-up `HOME` and no `XDG_CONFIG_HOME`, so no user's git configuration is read: the tests' own setup calls pass that environment with `GIT_CONFIG_NOSYSTEM=1` too, and the reader under test gets `PATH` and the made-up `HOME` only. The gateway's reader passes its environment through `buildEnv`, which drops `GIT_CONFIG_NOSYSTEM`, so in production git may read the system's `/etc/gitconfig`, which is not the home. The `mt kanban gate` tests give `mt` a made-up `HOME` as well.
 - **Unit tests start no process.** A gate and a commit read are processes, so the service takes its runner and its git as injectable functions (`ReportChecks.runGate`, `ReportChecks.readCommit`): the unit tests pass ones that start nothing, and the real ones are tested end to end (`tests/kanban-gates.e2e.ts`, `tests/kanban-commit.e2e.ts`, `tests/kanban-worker.e2e.ts`). So is the crash handler (`tests/crash.e2e.ts`).
 - **Never `spawnSync` anything the gateway waits on.** A gate, a git read and `mt kanban` against this process's socket are all spawned asynchronously: a blocked event loop would freeze chat, or never answer.
 - **The import guard.** `tests/kanban-service.test.ts` checks that only `src/kanban/service.ts` imports `src/db/kanban.js`. The prompt and the worker API read through `db/kanban-read.js`.
 
 ## Decisions the spec left open
 
-Each is the reading most consistent with the rest of the spec. Decisions 1, 3, 11 and 12 change what an operator or an agent sees, and **the user should confirm them**. Decisions 1–14 and 16 are now in the spec (§3.3, §3.4, §5.3, §7.1, §7.7, §7.8, §10, §10.1), amended in the same commit as this plan.
+Each is the reading most consistent with the rest of the spec. Decisions 1, 3, 11 and 12 change what an operator or an agent sees, and the user has decided them: Decision 1 as changed to `mt` commands and the service, the others as proposed. Decisions 1–14 and 16 are now in the spec (§3.3, §3.4, §5.3, §7.1, §7.7, §7.8, §10, §10.1), amended in the same commit as this plan.
 
-1. **Operators define gates through the service API only, until plan D.** *To confirm.* `KanbanService.addGate(taskId, { command, timeoutS? }, by)` is the one way in; D's `/kanban gate`, with operator tier, calls it. The alternatives were rejected:
-   - **An `mt kanban gate` command.** `mt` commands only write files and never talk to the socket (plan B3), so it would have to write the database itself, a second writer of a `kanban_` table. And it would trust whoever can run it: every agent runs as the gateway's user, so any agent could define a command the gateway then runs, with another role's credentials. That is the token-less way in spec §12 says plan C does not add.
-   - **Gates in the config file**, such as a `kanban.gates` key per workspace. That is a different model from the spec's — gates are a task's, in `kanban_gates` — and its keys would be read by nothing that exists yet but this.
+1. **Operators define gates with `mt kanban gate`, and through the service.** *The user's decision.* `KanbanService.addGate(taskId, { command, timeoutS? }, by)`, `listGates(taskId)` and `removeGate(taskId, gateId, by)` are the board's operations; plan D's `/kanban gate`, with operator tier, will call them, and so do three `mt` commands now:
+   - `mt kanban gate add <task_id> [--timeout <s>] -- <command…>`: the words after the task id are the command, joined with spaces as `ssh` joins them, so a command with its own quoting is passed quoted, as one word;
+   - `mt kanban gate list <task_id>`: id, timeout, who defined it, command;
+   - `mt kanban gate remove <task_id> <gate_id>`: removal is new, with a `gate_removed` event.
 
-   Nothing can create a task before plan D either, so C4 is proven, as C3 was, by its service API and its end-to-end tests. C4 adds no way to remove a gate: D's.
+   **How they reach the service.** They are operator commands, not worker commands: the socket only takes run tokens, and these do not use it. Each loads the settings and the team as `mt role check` does (`loadTeamSettings`, then `loadTeam`, with `passEnv` names unset in the shell collected rather than refused), opens the gateway's database at the settings' `dbPath` with `openDb` — never migrating it, and refusing a missing database or one with no board yet — and calls the service over it. `src/kanban/service.ts` stays the only importer of `db/kanban.js`; the CLI is a second process using the same module. SQLite in WAL mode lets the two processes share the file: the gateway's reads never wait on the CLI's write, and a write that meets the other's lock waits (`busy_timeout`) and retries (`txImmediate`), as the gateway's own writers do. `tests/mt-gate.test.ts` opens the database twice to show both; a write that never gets the lock is refused as "the board is busy … try again", having written nothing.
+
+   **The secrets they check.** The masker's registry is per process, so the CLI fills it as the gateway does, from what its shell can know: every role's environment values (`teamSecrets`, which `registerConfiguredSecrets` now uses too) and the Lark app secret when `LARK_APP_SECRET` is set — the gateway reads it from its environment only, never the file. A `passEnv` name unset in the shell is named on stderr as unchecked. Every other rule is the service's: the forms of Decision 2, the limits, the task's phase.
+
+   **Who defined it** is `operator:<login>`, the OS user's name (`os.userInfo()`, else `USER`). The shell cannot say which person typed the command, only which account ran it, and on a gateway host that account is the operator's; the `operator:` prefix keeps it apart from chat's `lark:` principals and a run's `run:`.
+
+   **The accident guard.** They refuse, exit 1, when `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set: "mt kanban gate add is an operator's command, not a board run's: …". It keeps an agent from defining gates by mistake. It is not a security boundary: every agent runs as the operator's user, and could unset the variables, as it could already edit `config.yaml` or a role's files. The README and spec §2.6 say so. Exit codes are `mt`'s: 0 done, 1 refused, 2 a wrong command line.
+
+   Gates in the config file were rejected: a different model from the spec's per-task gates, in `kanban_gates`.
 2. **What a gate may be** (`GATE_LIMITS`, in `src/kanban/types.ts`):
    - a command of non-empty text, at most 4 KiB, with no NUL;
    - a timeout, `timeout_s`, of 1 to 600 s, 300 when not given, as the schema's default;
    - at most 20 gates on a task, taking at most 600 s together;
    - only on a task that is not done or archived, where nothing would run it;
-   - never a command that holds a known secret (spec §10.1). It is refused, and not echoed, with: "the gate's command holds a known secret, and a gate is stored and run as written; pass the value through the agent's environment instead -- the role's .env, or agent.passEnv -- and name it in the command, as $NAME". A gate runs with its role's environment (Decision 8), so `$NAME` finds it.
+   - never a command that holds a known secret (spec §10.1) — as written, with its control characters stripped, as the escapers match it, or with the shell's quotes and backslashes taken out, so `sk\$x` and `'sk''x'`, which the shell runs as the secret, count too. It is refused, and not echoed, with: "the gate's command holds a known secret, and a gate is stored and run as written; pass the value through the agent's environment instead -- the role's .env, or agent.passEnv -- and name it in the command, as $NAME". A gate runs with its role's environment (Decision 8), so `$NAME` finds it.
 
    The command is stored as written, never masked (spec §10.1), with `created_by` and a `gate_added` event. The limits are checked inside the insert's transaction, so two operators adding at once cannot pass them.
 3. **The timeouts.** *To confirm.* A gate runs for at most 600 s, 300 when its definition gives none, as the schema's default; a task's gates for at most 600 s together; and `mt kanban` waits 15 minutes for an answer, up from C3's 10, so a report's answer outlasts its gates and the commit read with minutes to spare. The prompt tells the agent how long its task's gates may take together, so it can give the command that long (Decision 14).
@@ -79,7 +89,7 @@ Each is the reading most consistent with the rest of the spec. Decisions 1, 3, 1
 7. **How a gate runs** (`spawnGate`):
    - `/bin/sh -c <command>`, in the task's workspace, in its own process group, with stdin closed and stdout and stderr read together, keeping their last 64 KiB;
    - past its timeout, SIGTERM to the group, and SIGKILL two seconds later;
-   - once the shell has exited, whatever it left in its group is killed, so a background process holding the output open cannot keep the report waiting; one that left the group is let go of a second later, its output with it;
+   - once the shell has exited, its timeout is cleared — it ended in time, and what follows is not its own running past it — and whatever it left in its group is killed, so a background process holding the output open cannot keep the report waiting; one that left the group is let go of a second later, its output with it;
    - one that cannot start, a missing directory say, is a failed gate: "the gate could not start: …";
    - every running gate's group is killed on the process's `exit`, a crash's included, so none is left changing a checkout the next boot hands to an agent.
 
@@ -88,10 +98,11 @@ Each is the reading most consistent with the rest of the spec. Decisions 1, 3, 1
    - the environment is `buildEnv`'s allowlist of the gateway's own (`PATH`, `HOME` and the like, as every agent gets) plus the role's `agent.env` — its base environment, `.env` and `passEnv` values — with anything named `MT_KANBAN_*` removed (`gateEnv`). Never the gateway's own environment, and never built from `Dispatcher.envFor`, which holds the run's token and socket (C3's note);
    - the role is that of the task's latest agent run by attempt, the reporting run's if it is an agent's, else `default`; one no longer configured refuses the report, `gates_cannot_run`;
    - the workspace is the task's: a null one refuses with "… has gates and no workspace to run them in; set its workspace first", one no longer configured with its name. A task with no gates needs neither, so a person's task without a workspace still completes.
+   - a workspace directory that is gone refuses the report with "task …'s workspace directory … does not exist", rather than leave the runner to fail on `/bin/sh` (`ReportChecks.isDirectory`, the filesystem by default with the real runner);
    - A service built without `checks` — the board's own tests — runs no gates: a task that has some cannot complete there, "… has gates, and this gateway runs none".
 9. **Each run of a task's gates is one `gates_ran` event**, for spec §7.7's "each gate run is recorded as an event": one per report that ran them, with every result — command, exit code, signal, whether it timed out, its duration and its output — passed or not, stopped or not, and how many did not run. Its actor is the reporter, `run:<id>` or a person. Its string values are masked on write, as every payload is. `lastGateRun` reads the latest, for the prompt and `mt kanban show`.
 10. **The refusal.** `gate_failed`: "gate "npm test" exited 1; the report was not applied: fix it and report again" — or "ran past its 120 s", "was ended by SIGTERM", "could not start". `Refusal` gains an optional `gate` with the command, exit code, signal, whether it timed out, and the output; the worker API answers it as `gate: { command, exit_code, signal, timed_out, output }`. `gates_cannot_run` covers the cases of Decision 8 and the gateway stopping (Decision 13). The run stays undecided either way.
-11. **The gateway reads the reported commit itself.** *To confirm.* For an agent's `complete` or `review`, of either run kind, the service runs, in the run's workspace, `git rev-parse --verify --quiet HEAD^{commit}` and then `git --no-optional-locks status --porcelain`, each asynchronously, within 10 s, with only `buildEnv`'s allowlist of the gateway's environment, and before the gates, so a build a gate makes cannot make the tree look changed.
+11. **The gateway reads the reported commit itself.** *To confirm.* For an agent's `complete` or `review`, of either run kind, the service runs, in the run's workspace, `git rev-parse --verify --quiet HEAD^{commit}` and then `git --no-optional-locks status --porcelain`, each asynchronously, within 10 s, with only `buildEnv`'s allowlist of the gateway's environment and with `-c core.fsmonitor=false`, so a workspace's own configuration cannot make `git status` run a program, and before the gates, so a build a gate makes cannot make the tree look changed.
     - A whole commit id is `reported_commit`; a non-empty status, or a status that failed, makes `reported_dirty` true.
     - No `HEAD` — not a repository, no commit yet, git missing or failing — stores no commit and `reported_dirty` true. That is spec §7.8's "uncommitted; no commit to review", kept apart from both columns null, which is a report that recorded nothing: a person's, or one from before C4.
     - A person's report reads nothing. The service's check of a commit a caller passes in the handoff stays; one the gateway read replaces it.
@@ -102,6 +113,8 @@ Each is the reading most consistent with the rest of the spec. Decisions 1, 3, 1
     - `close()` stops listening, drops every connection that has not sent a request, aborts the signal, waits up to 10 s (`drainMs`) for the requests being handled to be answered, then drops whatever is left, noting how many went unanswered;
     - a report whose gates are running when the gateway stops has them killed, applies nothing, and answers `gates_cannot_run`, "the gateway is stopping, so the gates did not finish and the report was not applied; report again once it is back".
 
+    - the gateway's `stop()` closes the socket before it drains the dispatcher: the drain waits for a report in flight (Decision 6), and closing the socket is what stops it. A dispatcher that was stopped while it waited decides nothing; the next boot ends the run.
+
     The agent dies with the gateway anyway; what matters is that no client is left believing a report failed that was applied.
 14. **The prompt's new sections** (spec §7.1):
     - **in the task section**, the task's gates, one line each, flattened and with their timeouts, and how long a report may wait for them together; then the last gate run: whom it was for, whether it passed, each gate's verdict, and a failing gate's output, its last 2 KiB, indented under it as data;
@@ -110,13 +123,13 @@ Each is the reading most consistent with the rest of the spec. Decisions 1, 3, 1
 
     The reason is read from the `changes_requested` event, which holds it whether a review run or a person asked (C1 Decision 7). A work run is a rework while the latest of the task's `review_requested` and `changes_requested` events is a `changes_requested`, so a retry of a rework is still told why. The previous handoff is the latest `review_requested` event's: the asking run's summary, metadata and reported state, or a person's summary from the event. Both sections are bounded by the pieces' caps (a reason as a summary, 4 KiB) and sized before the attempts, so they are never cut out.
 15. **`mt kanban show` gives the same**: `gates`, `last_gate_run`, `review`, `rework`, and each attempt's `reported_commit` and `reported_dirty`, in snake_case, uncut.
-16. **The crash handler** (`src/crash.ts`): `installCrashHandlers()` is the first thing `src/main.ts` does, so it covers startup too. On `uncaughtException` and `unhandledRejection` it writes one line, "uncaught exception: …" or "unhandled rejection: …", with the error as `util.inspect` shows it — the stack and the error's own fields, as Node would — masked, then exits 1, the code Node uses for both. It drains and closes nothing: the process's state is unknown, and the next boot reconciles (spec §8.4). It changes only what a crash prints, for chat as for the board.
+16. **The crash handler** (`src/crash.ts`): `installCrashHandlers()` is the first thing `src/main.ts` does, so it covers startup too. On `uncaughtException` and `unhandledRejection` it writes one line, "uncaught exception: …" or "unhandled rejection: …", with the error as `util.inspect` shows it — the stack and the error's own fields, as Node would — masked, then exits 1, the code Node uses for both. It drains and closes nothing: the process's state is unknown, and the next boot reconciles (spec §8.4). It changes only what a crash prints, for chat as for the board. Two things change with it, deliberately: the line drops Node's own frame showing the source line and its `Node.js vXX` footer, and the handler overrides `--unhandled-rejections=warn` or `none`, so an unhandled rejection always ends the process.
 17. **No new settings.** The limits are constants, and `kanban.enabled` stays off. A report's checks are wired behind it, with the rest of the board, so merging C4 changes nothing for chat but the crash's line.
 
 ## Out of scope (later plans)
 
 - **Plan D:**
-  - `/kanban gate`, with operator tier, to define gates through `addGate`, list them and remove them;
+  - `/kanban gate`, with operator tier, calling the same `addGate`, `listGates` and `removeGate` as `mt kanban gate`;
   - a person's `/kanban done`, `/kanban approve` and Done button through `complete`, showing a gate refusal's `gate` in chat, through the escapers;
   - the review card's "review commit …", from `describeReported`;
   - `dispatcher.pass()` after a person's successful report.
@@ -134,10 +147,13 @@ Each is the reading most consistent with the rest of the spec. Decisions 1, 3, 1
 - A runtime limit can still end a run `timed_out` while its report's gates run; the report is then refused as `run_superseded`.
 - A person's approval runs the gates against the checkout as it is now, which another agent may have changed since (spec §6.3).
 - In production, git reads the gateway user's own git configuration, through `HOME`.
+- A workspace's clean filters still run on `git status`, as the gateway's user with the allowlisted environment: no more than the agent itself could do.
+- Some agents' shell tools cap a command at about 10 minutes — Claude Code's Bash tool, for example — which equals `totalTimeoutS`. A task at the full gate cap can outlast such a tool's wait; the report still lands, and the agent can see it in `mt kanban show`. The user kept the 600 s limit.
+- `mt kanban gate add` checks only the secrets its shell can know: a `passEnv` value set for the gateway's service and not in this shell, or a Lark app secret not exported here, is not caught. It says which names it could not check.
 
 ### What later plans need
 
-- **D:** `addGate` takes the operator's principal as `by`, and the operator-tier check is D's. A refusal's `gate` holds stored text: show it through the escapers. `describeReported(run)` is the card's line. `complete` and `requestReview` are asynchronous: await them, without a signal.
+- **D:** `addGate` and `removeGate` take the operator's principal as `by`, and the operator-tier check is D's. A refusal's `gate` holds stored text: show it through the escapers. `describeReported(run)` is the card's line. `complete` and `requestReview` are asynchronous: await them, without a signal.
 - **E:** seed a resume from `recordRendering`'s rule, or move the rule into a function both use.
 
 ## File structure
@@ -146,25 +162,27 @@ Each is the reading most consistent with the rest of the spec. Decisions 1, 3, 1
 |---|---|
 | `src/kanban/types.ts` (modify) | `GateRow`, `GATE_LIMITS`, `FailedGate`, `Refusal.gate`, the new refusal codes |
 | `src/db/kanban-read.ts` (modify) | `gatesOf`, `lastGateRun`, `latestReviewRequest`, `changesAsked` |
-| `src/db/kanban.ts` (modify) | `addGate`, `reportCheck`, `recordGates`; `recordRendering` settles the seed |
+| `src/db/kanban.ts` (modify) | `addGate`, `removeGate`, `reportCheck`, `recordGates`; `recordRendering` settles the seed |
 | `src/db/WRITERS.md` (modify) | `kanban_gates`'s writer |
 | `src/kanban/gates.ts` (create) | `runGates`, `spawnGate`, `gateEnv` |
 | `src/kanban/commit.ts` (create) | `commitReader`, `execGit`, `describeReported` |
-| `src/kanban/service.ts` (modify) | `addGate`; asynchronous `complete` and `requestReview`, with their checks; `ReportChecks` |
+| `src/kanban/service.ts` (modify) | `addGate`, `listGates`, `removeGate`; asynchronous `complete` and `requestReview`, with their checks; `ReportChecks` |
 | `src/kanban/worker.ts` (modify) | asynchronous `handle`; the signal; a refusal's `gate`; `show`'s new fields |
 | `src/kanban/socket.ts` (modify) | the handler's signal; draining on close |
 | `src/kanban/dispatcher.ts` (modify) | waiting for a report in flight; the session seeded from the run as `recordRendering` left it |
 | `src/kanban/brief.ts`, `src/kanban/prompt.ts` (modify) | gates, their last run, the review's handoff, the rework's reason |
 | `src/crash.ts` (create), `src/main.ts` (modify) | the masked crash handler |
-| `src/index.ts` (modify) | the service's checks; the socket's signal |
+| `src/index.ts` (modify) | the service's checks; the socket's signal; closing the socket before the dispatcher's drain |
+| `src/team.ts` (modify) | `teamSecrets` |
 | `src/cli/kanban.ts` (modify) | the 15-minute wait |
-| `README.md` (modify) | gates and the reported commit |
+| `src/cli/gate.ts` (create), `src/cli/mt.ts` (modify) | `mt kanban gate add`, `list` and `remove` |
+| `README.md` (modify) | gates, the gate commands and the reported commit |
 | `tests/fakes/cli-agent.mjs` (modify) | the `kanban-gated` mode |
 | `tests/helpers/dispatch.ts` (modify) | `reportComplete` asynchronous; `holds`' `first` awaited; `checks` |
-| `tests/kanban-gates.test.ts`, `tests/kanban-commit.test.ts`, `tests/kanban-report-checks.test.ts`, `tests/kanban-dispatch-gates.test.ts`, `tests/crash.test.ts`, `tests/kanban-gates.e2e.ts`, `tests/kanban-commit.e2e.ts`, `tests/crash.e2e.ts` (create) | |
+| `tests/kanban-gates.test.ts`, `tests/kanban-commit.test.ts`, `tests/kanban-report-checks.test.ts`, `tests/kanban-dispatch-gates.test.ts`, `tests/mt-gate.test.ts`, `tests/crash.test.ts`, `tests/kanban-gates.e2e.ts`, `tests/kanban-commit.e2e.ts`, `tests/crash.e2e.ts` (create) | |
 | `tests/kanban-service.test.ts`, `tests/kanban-worker.test.ts`, `tests/kanban-socket.test.ts`, `tests/kanban-rendering.test.ts`, `tests/kanban-dispatch-native.test.ts`, `tests/kanban-prompt.test.ts`, `tests/kanban-brief.test.ts`, `tests/mt-kanban.test.ts`, `tests/kanban-dispatcher.test.ts`, `tests/kanban-dispatch-sweep.test.ts`, `tests/kanban-dispatch-failure.test.ts`, `tests/kanban-dispatch-restart.test.ts`, `tests/kanban-token.test.ts`, `tests/kanban-nudge.test.ts`, `tests/kanban-worker.e2e.ts` (modify) | |
 
-Running counts, unit then end to end: Task 1 1069 / 53, Task 2 1071, Task 3 1076 / 61, Task 4 1080 / 63, Task 5 1094, Task 6 1097, Task 7 1099, Task 8 1102, Task 9 1111, Task 10 1115 / 65, Task 11 1116, Task 12 1116 / 66, Task 13 1116.
+Running counts, unit then end to end: Task 1 1071 / 53, Task 2 1073, Task 3 1078 / 61, Task 4 1082 / 64, Task 5 1097, Task 6 1100, Task 7 1102, Task 8 1105, Task 9 1114, Task 10 1118 / 66, Task 11 1119, Task 12 1127, Task 13 1127 / 67, Task 14 1127.
 
 ---
 
@@ -174,7 +192,7 @@ Running counts, unit then end to end: Task 1 1069 / 53, Task 2 1071, Task 3 1076
 - Create: `tests/kanban-gates.test.ts`
 - Modify: `src/db/WRITERS.md`, `src/db/kanban-read.ts`, `src/db/kanban.ts`, `src/kanban/service.ts`, `src/kanban/types.ts`
 
-Gates are an operator's (spec §7.7, §10; Decision 1), defined through the service, the one way in until plan D. `kanban_gates` exists since migration 003 and has had no writer: `db/kanban.ts` gains `addGate`, which checks the count and the timeouts together inside its transaction, and `db/kanban-read.ts` gains `gatesOf`. The service checks the command first: text, at most 4 KiB, no NUL, a timeout from 1 to 600 s, and no known secret (spec §10.1; Decisions 2 and 3).
+Gates are an operator's (spec §7.7, §10; Decision 1), defined through the service, the one way in until plan D. `kanban_gates` exists since migration 003 and has had no writer: `db/kanban.ts` gains `addGate`, which checks the count and the timeouts together inside its transaction, and `db/kanban-read.ts` gains `gatesOf`. The service checks the command first: text, at most 4 KiB, no NUL, a timeout from 1 to 600 s, and no known secret, in the forms the shell would run it as (spec §10.1; Decisions 2 and 3). `listGates` and `removeGate` complete the operator's set; removing writes a `gate_removed` event.
 
 - [ ] **Step 1.1: Write the failing tests.**
 
@@ -257,6 +275,41 @@ describe('defining gates', () => {
     expect(eventsOf(t.db, k.taskId).map((e) => e.kind)).toEqual(['created']);
   });
 
+  it('refuses a known secret the shell would run, written escaped, quoted apart or with a control character', () => {
+    addSecrets(['sk-live-1234$567890']);
+    const k = task();
+    for (const command of [
+      'curl -H "k: sk-live-1234\\$567890" https://ci',
+      "curl -H 'k: sk-live-1234''$567890' https://ci",
+      'curl -H "k: sk-live-1234\u0007$567890" https://ci',
+    ]) {
+      expect(s.addGate(k.taskId, { command }, ALICE)).toMatchObject({ ok: false, code: 'invalid' });
+    }
+    expect(count()).toBe(0);
+  });
+
+  it('lists and removes a gate, recording who removed it', () => {
+    const k = task();
+    const first = s.addGate(k.taskId, { command: 'npm test' }, ALICE);
+    const second = s.addGate(k.taskId, { command: 'npm run lint' }, ALICE);
+    if (!first.ok || !second.ok) throw new Error('not added');
+    expect(s.listGates(k.taskId)).toMatchObject({ ok: true, gates: [{ command: 'npm test' }, { command: 'npm run lint' }] });
+    expect(s.removeGate(k.taskId, first.gate.id, 'operator:alice')).toMatchObject({ ok: true, gate: { command: 'npm test' } });
+    expect(s.listGates(k.taskId)).toMatchObject({ ok: true, gates: [{ command: 'npm run lint' }] });
+    expect(eventsOf(t.db, k.taskId).at(-1)).toMatchObject({
+      kind: 'gate_removed',
+      actor: 'operator:alice',
+      payload: { gateId: first.gate.id, command: 'npm test' },
+    });
+    expect(s.removeGate(k.taskId, first.gate.id, ALICE)).toEqual({
+      ok: false,
+      code: 'not_found',
+      message: `task ${k.taskId} has no gate ${first.gate.id}`,
+    });
+    expect(s.removeGate(k.taskId, 0, ALICE)).toMatchObject({ ok: false, code: 'invalid' });
+    expect(s.listGates('k_missing')).toMatchObject({ ok: false, code: 'not_found' });
+  });
+
   it('refuses what is not a gate, and writes nothing', () => {
     const k = task();
     const bad = (v: unknown): never => v as never;
@@ -310,7 +363,7 @@ describe('defining gates', () => {
 });
 ```
 
-- [ ] **Step 1.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-gates.test.ts`. Expected: all five FAIL, with `TypeError: s.addGate is not a function`. `Tests  5 failed (5)`.
+- [ ] **Step 1.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-gates.test.ts`. Expected: all seven FAIL, with `TypeError: s.addGate is not a function`. `Tests  7 failed (7)`.
 
 - [ ] **Step 1.3: Implement.**
 
@@ -329,7 +382,7 @@ with:
 ```md
 | `kanban_comments` | `db/kanban.ts` | Rows are added, never updated. |
 | `kanban_events` | `db/kanban.ts` | Append-only, written in the transaction of the change it records. String values in `payload` are masked on write (spec §10.1). |
-| `kanban_gates` | `db/kanban.ts` | Added by `addGate`, never updated: the command is stored as written, never masked (spec §10.1). |
+| `kanban_gates` | `db/kanban.ts` | Added by `addGate` and deleted by `removeGate`, never updated: the command is stored as written, never masked (spec §10.1). The gateway and the `mt kanban gate` commands both write it, each through `KanbanService`. |
 | `kanban_subscriptions` | `db/kanban.ts` | No writer until plan D, which adds its functions to `db/kanban.ts`. |
 | `schema_version`, `user_version` | `db/open.ts` (`migrate`) | Migration files own the `schema_version` row contents; the runner owns `user_version`. |
 
@@ -527,11 +580,33 @@ export function addGate(
   });
 }
 
+/**
+ * Remove one of a task's gates, for an operator. The row goes; its `gate_removed`
+ * event keeps what it was and who removed it.
+ */
+export function removeGate(db: Db, taskId: string, gateId: number, by: string, now: number): Result<{ gate: GateRow }> {
+  return tx(db, (d) => {
+    if (getTask(d, taskId) === undefined) return refuse('not_found', `no task ${taskId}`);
+    const gate = gatesOf(d, taskId).find((g) => g.id === gateId);
+    if (gate === undefined) return refuse('not_found', `task ${taskId} has no gate ${gateId}`);
+    d.prepare('DELETE FROM kanban_gates WHERE id = ?').run(gateId);
+    record(d, { taskId, kind: 'gate_removed', actor: by, payload: { gateId, command: gate.command } }, now);
+    return { ok: true, gate };
+  });
+}
+
 ```
 
 In `src/kanban/service.ts`, replace:
 
 ```ts
+import type { Db } from '../db/open.js';
+import * as board from '../db/kanban.js';
+import { getRun, getTask, taskView, type TaskView } from '../db/kanban-read.js';
+import { redactKnownSecrets } from '../secrets.js';
+import type { Role } from '../roles.js';
+import { systemClock, type Clock } from '../time.js';
+import {
   BLOCK_KINDS,
   CONTRACT_FIELDS,
   type AgentSnapshot,
@@ -541,6 +616,14 @@ In `src/kanban/service.ts`, replace:
 with:
 
 ```ts
+import type { Db } from '../db/open.js';
+import * as board from '../db/kanban.js';
+import { gatesOf, getRun, getTask, taskView, type TaskView } from '../db/kanban-read.js';
+import { redactKnownSecrets } from '../secrets.js';
+import type { Role } from '../roles.js';
+import { stripControl } from '../text.js';
+import { systemClock, type Clock } from '../time.js';
+import {
   BLOCK_KINDS,
   CONTRACT_FIELDS,
   GATE_LIMITS,
@@ -565,6 +648,35 @@ with:
   type GateRow,
   type Refusal,
   type Rendering,
+```
+
+In `src/kanban/service.ts`, replace:
+
+```ts
+function regularFile(path: string): void {
+  if (!statSync(path).isFile()) throw new Error(`${path} is not a file`);
+}
+
+```
+
+with:
+
+```ts
+function regularFile(path: string): void {
+  if (!statSync(path).isFile()) throw new Error(`${path} is not a file`);
+}
+
+/**
+ * Whether a gate command holds a known secret (spec §10.1): as written, with its
+ * control characters stripped, as the escapers match it, and with the shell's
+ * quotes and backslashes taken out, so `sk\$x` or `'sk''x'` -- which the shell
+ * runs as the secret -- count as well.
+ */
+function holdsSecret(command: string): boolean {
+  const forms = [command, stripControl(command), command.replace(/['"\\]/g, '')];
+  return forms.some((form) => redactKnownSecrets(form) !== form);
+}
+
 ```
 
 In `src/kanban/service.ts`, replace:
@@ -606,7 +718,7 @@ with:
     if (size > GATE_LIMITS.commandBytes) {
       return board.refuse('invalid', `a gate command is ${size} bytes; it may be at most ${GATE_LIMITS.commandBytes}`);
     }
-    if (redactKnownSecrets(command) !== command) {
+    if (holdsSecret(command)) {
       // Not echoed: the refusal would carry the secret.
       return board.refuse(
         'invalid',
@@ -620,6 +732,26 @@ with:
       return board.refuse('invalid', `a gate's timeout is a whole number of seconds, from 1 to ${GATE_LIMITS.maxTimeoutS}`);
     }
     return board.addGate(this.#db, taskId, { command, timeoutS }, by, this.#clock.now());
+  }
+
+  /** The task's gates, in the order they run. */
+  listGates(taskId: string): Result<{ gates: GateRow[] }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (getTask(this.#db, taskId) === undefined) return board.refuse('not_found', `no task ${taskId}`);
+    return { ok: true, gates: gatesOf(this.#db, taskId) };
+  }
+
+  /**
+   * Remove one of a task's gates: an operator action, as defining one is. A report
+   * already running the task's gates runs the ones it read.
+   */
+  removeGate(taskId: string, gateId: number, by: string): Result<{ gate: GateRow }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!isText(by)) return board.refuse('invalid', 'who removes a gate is text');
+    if (!Number.isSafeInteger(gateId) || gateId < 1) return board.refuse('invalid', 'a gate id is a whole number');
+    return board.removeGate(this.#db, taskId, gateId, by, this.#clock.now());
   }
 
   comment(taskId: string, body: string, by: string): Result<{ comment: CommentRow }> {
@@ -678,7 +810,7 @@ export interface CommentRow {
   id: number;
 ```
 
-- [ ] **Step 1.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1069 passed (1069)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 1.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1071 passed (1071)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 1.5: Commit.**
 
@@ -1373,7 +1505,7 @@ with:
             ...metadata,
 ```
 
-- [ ] **Step 2.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1071 passed (1071)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 2.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1073 passed (1073)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 2.5: Commit.**
 
@@ -1390,7 +1522,7 @@ git commit -m "Make a report asynchronous, from the service to the worker API, s
 - Create: `src/kanban/gates.ts`, `tests/kanban-gates.e2e.ts`
 - Modify: `tests/kanban-gates.test.ts`
 
-`src/kanban/gates.ts` (Decisions 7 and 8): `runGates` runs a task's gates in order through an injected runner, stops at the first that fails, and masks each one's output before it keeps its last 4 KiB; `gateEnv` builds a gate's environment from the agent allowlist and its role's values, dropping anything named `MT_KANBAN_*`; `spawnGate` is the real runner. It runs `/bin/sh -c` in its own process group, so a timeout or a stop kills what the gate started; once the shell exits it kills what is left in the group, and lets go of the output a second later if something that left the group still holds it; and a hook on the process's `exit` kills every running gate's group, so a crash leaves none running in a checkout the next boot hands to an agent. The unit tests use a runner that starts nothing; `tests/kanban-gates.e2e.ts` runs the real one.
+`src/kanban/gates.ts` (Decisions 7 and 8): `runGates` runs a task's gates in order through an injected runner, stops at the first that fails, and masks each one's output before it keeps its last 4 KiB; `gateEnv` builds a gate's environment from the agent allowlist and its role's values, dropping anything named `MT_KANBAN_*`; `spawnGate` is the real runner. It runs `/bin/sh -c` in its own process group, so a timeout or a stop kills what the gate started; once the shell exits it clears the timeout, since the gate ended in time, kills what is left in the group, and lets go of the output a second later if something that left the group still holds it; and a hook on the process's `exit` kills every running gate's group, so a crash leaves none running in a checkout the next boot hands to an agent. The unit tests use a runner that starts nothing; `tests/kanban-gates.e2e.ts` runs the real one.
 
 - [ ] **Step 3.1: Write the failing tests.**
 
@@ -1453,14 +1585,15 @@ describe('spawnGate', () => {
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
-  it("does not wait for a process that left the gate's group holding its output", async () => {
+  it("does not wait for a process that left the gate's group holding its output, nor count that against the gate", async () => {
     const started = Date.now();
     // A child that makes itself a session of its own, then says so, keeping the gate's output open.
     const escape = `perl -MPOSIX -e 'POSIX::setsid(); open(my $f, ">", "escaped.pid"); print $f $$; close($f); sleep 30' &`;
+    // The timeout falls in the second the output is let go of: the gate itself ended in time.
     const r = await spawnGate(`${escape} while [ ! -s escaped.pid ]; do sleep 0.05; done; echo done`, {
       cwd: dir,
       env,
-      timeoutMs: 20_000,
+      timeoutMs: 700,
     });
     try {
       expect(r).toMatchObject({ exitCode: 0, timedOut: false, output: 'done\n' });
@@ -1949,6 +2082,8 @@ export const spawnGate: GateRunner = (command, opts) =>
     child.once('error', (err) => finish(`the gate could not start: ${err.message}`));
     child.once('exit', (code, signal) => {
       exited = { code, signal };
+      // It ended in time: what follows is not its own running past the timeout.
+      clearTimeout(timer);
       // What the gate left behind in its group, holding its output open.
       group('SIGKILL');
       letGo = setTimeout(() => {
@@ -1961,7 +2096,7 @@ export const spawnGate: GateRunner = (command, opts) =>
   });
 ```
 
-- [ ] **Step 3.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1076 passed (1076)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  61 passed (61)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 3.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1078 passed (1078)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  61 passed (61)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 3.5: Commit.**
 
@@ -1977,7 +2112,7 @@ git commit -m "Run a task's gates as processes, in order, in the workspace, with
 **Files:**
 - Create: `src/kanban/commit.ts`, `tests/kanban-commit.e2e.ts`, `tests/kanban-commit.test.ts`
 
-`src/kanban/commit.ts` (spec §7.8; Decision 11): `commitReader` reads `HEAD` and `git status --porcelain` through an injected `GitExec`, asynchronously; `execGit` is the real one, `execFile` with a 10 s timeout. No `HEAD` is no commit and uncommitted; a status that fails is uncommitted. `describeReported` is spec §7.8's wording. `tests/kanban-commit.e2e.ts` runs real git in temporary repositories, with a made-up home.
+`src/kanban/commit.ts` (spec §7.8; Decision 11): `commitReader` reads `HEAD` and `git status --porcelain` through an injected `GitExec`, asynchronously; `execGit` is the real one, `execFile` with a 10 s timeout and `-c core.fsmonitor=false`, so a workspace's own configuration cannot make `git status` run a program. No `HEAD` is no commit and uncommitted; a status that fails is uncommitted. `describeReported` is spec §7.8's wording. `tests/kanban-commit.e2e.ts` runs real git in temporary repositories, with a made-up home.
 
 - [ ] **Step 4.1: Write the failing tests.**
 
@@ -1985,7 +2120,7 @@ Create `tests/kanban-commit.e2e.ts`:
 
 ```ts
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -2026,6 +2161,21 @@ describe('commitReader with git', () => {
     expect(await read(repo, { env })).toEqual({ commit: head, dirty: false });
     writeFileSync(join(repo, 'a.txt'), 'two\n');
     expect(await read(repo, { env })).toEqual({ commit: head, dirty: true });
+  });
+
+  it("never runs the workspace's fsmonitor hook", async () => {
+    const repo = join(dir, 'hooked');
+    mkdirSync(repo);
+    sh(repo, 'init', '-q');
+    writeFileSync(join(repo, 'a.txt'), 'one\n');
+    sh(repo, 'add', 'a.txt');
+    sh(repo, 'commit', '-q', '-m', 'first');
+    const marker = join(dir, 'fsmonitor-ran');
+    const hook = join(dir, 'fsmonitor.sh');
+    writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o755 });
+    sh(repo, 'config', 'core.fsmonitor', hook);
+    expect(await commitReader()(repo, { env })).toMatchObject({ dirty: false });
+    expect(existsSync(marker)).toBe(false);
   });
 
   it('reads a directory that is not a repository, or one with no commit yet, as uncommitted with no commit', async () => {
@@ -2152,7 +2302,8 @@ export const execGit: GitExec = (args, opts) =>
   new Promise((resolve) => {
     execFile(
       'git',
-      [...args],
+      // A workspace's own configuration must not run a program: no fsmonitor hook.
+      ['-c', 'core.fsmonitor=false', ...args],
       {
         cwd: opts.cwd,
         env: { ...opts.env },
@@ -2203,7 +2354,7 @@ export function describeReported(state: { reportedCommit: string | null; reporte
 }
 ```
 
-- [ ] **Step 4.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1080 passed (1080)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  63 passed (63)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 4.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1082 passed (1082)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  64 passed (64)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 4.5: Commit.**
 
@@ -2220,7 +2371,7 @@ git commit -m "Read the commit a report was made on, and whether the tree had un
 - Create: `tests/kanban-report-checks.test.ts`
 - Modify: `src/db/kanban-read.ts`, `src/db/kanban.ts`, `src/kanban/service.ts`, `src/kanban/types.ts`, `src/kanban/worker.ts`
 
-The heart of C4 (spec §7.7, §7.8; Decisions 5, 6, 8–11). `KanbanService` gains `checks` (`ReportChecks`): the workspaces' directories, the gateway's environment, and the injectable runner and git. `complete` and `requestReview` go through `#report`: the board's checks without writing (`reportCheck`, new in `db/kanban.ts`), the commit for an agent's report, the gates, recorded as a `gates_ran` event (`recordGates`), and then the transition, which checks everything again. A report in flight is held in a map with its task's workspace, which refuses a second report on the task, a claim of the task, and a claim of another task in that workspace; `settled(taskId)` waits for it (Task 7 uses it). A refusal carries the failing gate (`Refusal.gate`), and the worker API answers it in snake_case. The worker API also passes an abort signal through to the service, which Task 6's socket gives it.
+The heart of C4 (spec §7.7, §7.8; Decisions 5, 6, 8–11). `KanbanService` gains `checks` (`ReportChecks`): the workspaces' directories, the gateway's environment, and the injectable runner and git. `complete` and `requestReview` go through `#report`: the board's checks without writing (`reportCheck`, new in `db/kanban.ts`), the commit for an agent's report, the gates, recorded as a `gates_ran` event (`recordGates`), and then the transition, which checks everything again. A report in flight is held in a map with its task's workspace, which refuses a second report on the task, a claim of the task, and a claim of another task in that workspace; `settled(taskId)` waits for it (Task 7 uses it). A refusal carries the failing gate (`Refusal.gate`), and the worker API answers it in snake_case. A workspace directory that is gone refuses the report by name, rather than let the runner fail on `/bin/sh`. The worker API also passes an abort signal through to the service, which Task 6's socket gives it.
 
 - [ ] **Step 5.1: Write the failing tests.**
 
@@ -2636,6 +2787,36 @@ describe('a report while the gateway stops', () => {
   });
 });
 
+describe("a workspace's directory that is gone", () => {
+  it('refuses the report, naming the directory, rather than run a gate that cannot start', async () => {
+    const task = g.create();
+    g.s.addGate(task.taskId, { command: 'npm test' }, ALICE);
+    const message = `task ${task.taskId}'s workspace directory /ws/web does not exist`;
+    const missing = new KanbanService({
+      db: g.t.db,
+      roles: ROLES,
+      workspaces: WORKSPACES,
+      checks: {
+        workspaceDirs: DIRS,
+        env: PARENT_ENV,
+        runGate: async () => ({ exitCode: 0, signal: null, timedOut: false, output: '' }),
+        isDirectory: () => false,
+      },
+    });
+    const refused = { ok: false, code: 'gates_cannot_run', message };
+    expect(await missing.complete(task.taskId, person, { summary: 'done' })).toEqual(refused);
+    // The real runner's default: the filesystem, which has no /ws/web. Nothing is started.
+    const real = new KanbanService({
+      db: g.t.db,
+      roles: ROLES,
+      workspaces: WORKSPACES,
+      checks: { workspaceDirs: DIRS, env: PARENT_ENV },
+    });
+    expect(await real.complete(task.taskId, person, { summary: 'done' })).toEqual(refused);
+    expect(getTask(g.t.db, task.taskId)?.phase).toBe('open');
+  });
+});
+
 describe('a gate refusal through the worker API', () => {
   it('carries the failing command, its exit code and the end of its output', async () => {
     const api = new WorkerApi({ db: g.t.db, service: g.s });
@@ -2656,7 +2837,7 @@ describe('a gate refusal through the worker API', () => {
 });
 ```
 
-- [ ] **Step 5.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-report-checks.test.ts`. Expected: all fourteen FAIL. The reports are accepted without their gates — `AssertionError: expected { ok: true, task: { …(26) }, …(1) } to deeply equal { ok: false, …(2) }` and the like — nothing is run (`AssertionError: expected [] to have a length of 1 but got +0`), `TypeError: g.s.settled is not a function`, and the four tests that hold a gate time out, `Error: Test timed out in 10000ms.`, since no gate ever runs to be released. `Tests  14 failed (14)`; the run takes about 40 s.
+- [ ] **Step 5.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-report-checks.test.ts`. Expected: all fifteen FAIL. The reports are accepted without their gates — `AssertionError: expected { ok: true, task: { …(26) }, …(1) } to deeply equal { ok: false, …(2) }` and the like — nothing is run (`AssertionError: expected [] to have a length of 1 but got +0`), `TypeError: g.s.settled is not a function`, and the four tests that hold a gate time out, `Error: Test timed out in 10000ms.`, since no gate ever runs to be released. `Tests  15 failed (15)`; the run takes about 40 s.
 
 - [ ] **Step 5.3: Implement.**
 
@@ -2835,9 +3016,10 @@ In `src/kanban/service.ts`, replace:
 ```ts
 import type { Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
-import { getRun, getTask, taskView, type TaskView } from '../db/kanban-read.js';
+import { gatesOf, getRun, getTask, taskView, type TaskView } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import type { Role } from '../roles.js';
+import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
 import {
   BLOCK_KINDS,
@@ -2852,6 +3034,7 @@ import { gatesOf, getRun, getTask, runsOf, taskView, type TaskView } from '../db
 import { buildEnv } from '../driver/env.js';
 import { redactKnownSecrets } from '../secrets.js';
 import type { Role } from '../roles.js';
+import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
@@ -2885,6 +3068,20 @@ export interface ReportChecks {
   env: Readonly<Record<string, string | undefined>>;
   runGate?: GateRunner;
   readCommit?: CommitReader;
+  /**
+   * Whether a workspace's directory is there to run gates in. Absent, the
+   * filesystem says, for the real runner; a runner given in its place stands in
+   * for the filesystem too.
+   */
+  isDirectory?: (dir: string) => boolean;
+}
+
+function directoryExists(dir: string): boolean {
+  try {
+    return statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 export interface KanbanServiceDeps {
@@ -3210,6 +3407,11 @@ with:
         `task ${id}'s gates run with the environment of role ${JSON.stringify(name)}, which is no longer configured`,
       );
     }
+    const isDirectory = checks.isDirectory ?? (checks.runGate === undefined ? directoryExists : () => true);
+    if (!isDirectory(cwd)) {
+      // Said plainly: the runner would only report /bin/sh missing.
+      return board.refuse('gates_cannot_run', `task ${id}'s workspace directory ${cwd} does not exist`);
+    }
     const ran = await runGates(gates, {
       cwd,
       env: gateEnv(role, checks.env),
@@ -3521,7 +3723,7 @@ function refusal(r: { ok: false; code: RefusalCode; message: string; gate?: Fail
 
 ```
 
-- [ ] **Step 5.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1094 passed (1094)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 5.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1097 passed (1097)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 5.5: Commit.**
 
@@ -3537,7 +3739,7 @@ git commit -m "Run a task's gates, and read the reported commit, before every co
 **Files:**
 - Modify: `src/index.ts`, `src/kanban/socket.ts`, `tests/kanban-report-checks.test.ts`, `tests/kanban-socket.test.ts`
 
-C3's note (Decision 13): `close()` dropped every connection, so a report could be applied while its client saw `unreachable`. `listenWorker`'s handler now gets an `AbortSignal`; `close()` stops listening, drops the connections that have sent no request, aborts the signal, waits up to `drainMs` for the requests being handled, then drops the rest and says how many went unanswered. The gateway passes the signal to the worker API, so a report whose gates are running is stopped, applies nothing, and is answered. The new test in `tests/kanban-report-checks.test.ts` passes already: the worker API took the signal in Task 5.
+C3's note (Decision 13): `close()` dropped every connection, so a report could be applied while its client saw `unreachable`. `listenWorker`'s handler now gets an `AbortSignal`; `close()` stops listening, drops the connections that have sent no request, aborts the signal, waits up to `drainMs` for the requests being handled, then drops the rest and says how many went unanswered. The gateway passes the signal to the worker API, so a report whose gates are running is stopped, applies nothing, and is answered; and its `stop()` now closes the socket before it drains the dispatcher, since that drain waits for such a report (Decision 13). The new test in `tests/kanban-report-checks.test.ts` passes already: the worker API took the signal in Task 5.
 
 - [ ] **Step 6.1: Write the failing tests.**
 
@@ -3641,7 +3843,7 @@ describe('worker socket: its path', () => {
   it('removes a stale socket of its own, and refuses a live one, a file, or a directory that is a symlink', async () => {
 ```
 
-- [ ] **Step 6.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-socket.test.ts tests/kanban-report-checks.test.ts`. Expected: the two new socket tests FAIL: the handler's answer is lost, `SyntaxError: Unexpected end of JSON input`, and nothing says a request went unanswered, `AssertionError: expected [] to deeply equal [ Array(1) ]`. `Tests  2 failed | 32 passed (34)`.
+- [ ] **Step 6.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-socket.test.ts tests/kanban-report-checks.test.ts`. Expected: the two new socket tests FAIL: the handler's answer is lost, `SyntaxError: Unexpected end of JSON input`, and nothing says a request went unanswered, `AssertionError: expected [] to deeply equal [ Array(1) ]`. `Tests  2 failed | 33 passed (35)`.
 
 - [ ] **Step 6.3: Implement.**
 
@@ -3664,6 +3866,47 @@ with:
         workerServer = await listenWorker(socket, (request, signal) => api.handle(request, { signal }), { note });
         note(`kanban: runs report through ${socket}`);
       }
+```
+
+In `src/index.ts`, replace:
+
+```ts
+      // survives it; a failed final write is logged, not fatal.
+      await registry.closeAll();
+      // Then what the dispatcher still has running -- an archive, a close -- so
+      // none of it touches the database after it is closed. Bounded: a start that
+```
+
+with:
+
+```ts
+      // survives it; a failed final write is logged, not fatal.
+      await registry.closeAll();
+      // No agent is left to report. A report still running its gates is stopped
+      // and answered here, before the dispatcher's drain, which waits for it.
+      await workerServer?.close();
+      // Then what the dispatcher still has running -- an archive, a close -- so
+      // none of it touches the database after it is closed. Bounded: a start that
+```
+
+In `src/index.ts`, replace:
+
+```ts
+        note('kanban: stopped with run work still pending; the next boot ends those runs');
+      }
+      // No agent is left to report; and none may reach a closed database.
+      await workerServer?.close();
+      db.close();
+      // Last: until here, this gateway still had the home's sessions and runs.
+```
+
+with:
+
+```ts
+        note('kanban: stopped with run work still pending; the next boot ends those runs');
+      }
+      db.close();
+      // Last: until here, this gateway still had the home's sessions and runs.
 ```
 
 In `src/kanban/socket.ts`, replace:
@@ -3894,7 +4137,7 @@ with:
     },
 ```
 
-- [ ] **Step 6.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1097 passed (1097)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 6.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1100 passed (1100)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 6.5: Commit.**
 
@@ -3911,7 +4154,7 @@ git commit -m "Drain the worker socket on close: a report still running its gate
 - Create: `tests/kanban-dispatch-gates.test.ts`
 - Modify: `src/kanban/dispatcher.ts`, `tests/helpers/dispatch.ts`
 
-An agent's shell may give up on `mt kanban` while the gates run — some agents bound a command to two minutes — and the agent may then end its turn. C3's dispatcher would nudge it, or end the run `protocol_violation` and free its workspace while the gates still run there. Now the dispatcher waits for the service to settle the task's report before it follows a turn up or decides the run (spec §7.7): the report may yet decide it. The dispatch harness takes `checks`, so a test can hold a gate.
+An agent's shell may give up on `mt kanban` while the gates run — some agents bound a command to two minutes — and the agent may then end its turn. C3's dispatcher would nudge it, or end the run `protocol_violation` and free its workspace while the gates still run there. Now the dispatcher waits for the service to settle the task's report before it follows a turn up or decides the run (spec §7.7): the report may yet decide it. A dispatcher stopped while it waited decides nothing: the next boot ends the run. The dispatch harness takes `checks`, so a test can hold a gate.
 
 - [ ] **Step 7.1: Write the failing tests.**
 
@@ -4116,11 +4359,13 @@ with:
     // gave up on `mt kanban` waiting for them. The report may yet decide the run,
     // and the run holds the workspace the gates run in, so it is waited for.
     await this.#deps.service.settled(open.key.conversationId);
+    // Stopped while it waited: the next boot ends the run.
+    if (this.#stopped) return;
     const run = getRun(this.#deps.db, open.runId);
     if (run !== undefined && run.outcome === null) {
 ```
 
-- [ ] **Step 7.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1099 passed (1099)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 7.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1102 passed (1102)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 7.5: Commit.**
 
@@ -4450,7 +4695,7 @@ with:
         role: run.assignee.name,
 ```
 
-- [ ] **Step 8.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1102 passed (1102)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 8.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1105 passed (1105)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 8.5: Commit.**
 
@@ -5438,7 +5683,7 @@ with:
       children: brief.children.map((c) => ({
 ```
 
-- [ ] **Step 9.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1111 passed (1111)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 9.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1114 passed (1114)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 9.5: Commit.**
 
@@ -5672,7 +5917,7 @@ try {
   await main();
 ```
 
-- [ ] **Step 10.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1115 passed (1115)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  65 passed (65)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 10.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1118 passed (1118)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  66 passed (66)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 10.5: Commit.**
 
@@ -5688,7 +5933,7 @@ git commit -m "Print a crash through the masker, and exit 1, instead of leaving 
 **Files:**
 - Modify: `src/cli/kanban.ts`, `src/index.ts`, `tests/mt-kanban.test.ts`
 
-Behind `kanban.enabled`, the gateway's service gets the workspaces' directories and the gateway's environment, so its reports run gates and read the commit (Decision 17); Task 6 already passes the socket's signal. `mt kanban` waits 15 minutes for an answer, up from 10, so it outlasts a task's gates together (Decision 3); the wait is exported, and a test holds it to that. The wiring itself is checked by the type checker and, end to end, by Task 12's stack, which is built the same way.
+Behind `kanban.enabled`, the gateway's service gets the workspaces' directories and the gateway's environment, so its reports run gates and read the commit (Decision 17); Task 6 already passes the socket's signal. `mt kanban` waits 15 minutes for an answer, up from 10, so it outlasts a task's gates together (Decision 3); the wait is exported, and a test holds it to that. The wiring itself is checked by the type checker and, end to end, by Task 13's stack, which is built the same way.
 
 - [ ] **Step 11.1: Write the failing tests.**
 
@@ -5800,7 +6045,7 @@ with:
     const socket = workerSocketPath(config.home);
 ```
 
-- [ ] **Step 11.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1116 passed (1116)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 11.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1119 passed (1119)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 11.5: Commit.**
 
@@ -5811,14 +6056,545 @@ git commit -m "Run gates and read the reported commit in the gateway, and have m
 
 ---
 
-### Task 12: End to end: a real gate refuses a report, then passes
+### Task 12: The `mt kanban gate` commands
+
+**Files:**
+- Create: `src/cli/gate.ts`, `tests/mt-gate.test.ts`
+- Modify: `src/cli/mt.ts`, `src/index.ts`, `src/team.ts`
+
+The operator's way to define gates before plan D (Decision 1): `mt kanban gate add <task_id> [--timeout <s>] -- <command…>`, `list <task_id>` and `remove <task_id> <gate_id>`, in `src/cli/gate.ts`. They are not worker commands, and do not use the socket. Each loads the team the way `mt role check` does (`loadTeamSettings`, then `loadTeam`, tolerating `passEnv` names unset in the shell and saying so), registers the secrets this shell can know as the gateway registers them (every role's values, through the new `teamSecrets`, and `LARK_APP_SECRET` if set), opens the gateway's database at the settings' `dbPath` without migrating it, and calls `KanbanService.addGate`, `listGates` or `removeGate`, recording the operator as `operator:<login>`. They refuse in a board run's shell (`MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` set). Two tests open the database twice, as the gateway and the shell would, and show WAL and the busy retry sharing it.
+
+- [ ] **Step 12.1: Write the failing tests.**
+
+Create `tests/mt-gate.test.ts`:
+
+```ts
+import { userInfo } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createTask } from '../src/db/kanban.js';
+import { eventsOf, gatesOf } from '../src/db/kanban-read.js';
+import { migrate, openDb, type Db } from '../src/db/open.js';
+import { KanbanService } from '../src/kanban/service.js';
+import { clearSecrets } from '../src/secrets.js';
+import { SCHEMA_DIR } from './helpers/db.js';
+import { ALICE, NOW, VIA } from './helpers/kanban.js';
+import { mtFixture, type MtFixture } from './helpers/mt.js';
+
+/**
+ * `mt kanban gate`: an operator defining gates from a shell, in the gateway's
+ * own database, through the board's service, beside a gateway that has it open.
+ */
+
+let f: MtFixture;
+/** The gateway's connection to its database. */
+let gateway: Db;
+let taskId: string;
+const ME = `operator:${userInfo().username}`;
+
+beforeEach(() => {
+  clearSecrets();
+  f = mtFixture((workspace) =>
+    [
+      `workspace: ${workspace}`,
+      'agent:',
+      '  driver: structured-cli',
+      '  command: bytesec',
+      '  unsupervised: true',
+      '  passEnv: [API_KEY]',
+      '',
+    ].join('\n'),
+  );
+  gateway = openDb(join(f.home, 'gateway.db'));
+  migrate(gateway, SCHEMA_DIR);
+  const r = createTask(gateway, { title: 'a task', workspace: 'default', createdBy: ALICE, createdVia: VIA }, NOW);
+  if (!r.ok) throw new Error(r.message);
+  taskId = r.task.taskId;
+});
+afterEach(() => {
+  clearSecrets();
+  gateway.close();
+  f.cleanup();
+});
+
+/** As the operator's shell runs it: a made-up home, and the role's key set. */
+function mt(argv: string[], env: Record<string, string | undefined> = {}) {
+  return f.run(['kanban', 'gate', ...argv], { env: { HOME: f.root, API_KEY: 'sk-live-1234567890', ...env } });
+}
+
+describe('mt kanban gate', () => {
+  it('adds, lists and removes a gate, as the operator, in the database the gateway has open', async () => {
+    const added = await mt(['add', taskId, '--timeout', '120', '--', 'npm', 'test', '--', '--grep', 'parser']);
+    expect(added).toMatchObject({ code: 0, err: '' });
+    const [gate] = gatesOf(gateway, taskId);
+    expect(gate).toMatchObject({ command: 'npm test -- --grep parser', timeoutS: 120, createdBy: ME });
+    expect(added.out).toBe(`added gate ${gate?.id}: npm test -- --grep parser (up to 120 s) to task ${taskId}`);
+
+    expect(await mt(['list', taskId])).toEqual({
+      code: 0,
+      out: [
+        `id  timeout  defined by${' '.repeat(ME.length - 10)}  command`,
+        `${gate?.id}   120 s    ${ME}  npm test -- --grep parser`,
+      ].join('\n'),
+      err: '',
+    });
+    expect(await mt(['remove', taskId, String(gate?.id)])).toMatchObject({
+      code: 0,
+      out: `removed gate ${gate?.id}: npm test -- --grep parser (up to 120 s) from task ${taskId}`,
+    });
+    expect(gatesOf(gateway, taskId)).toEqual([]);
+    expect(eventsOf(gateway, taskId).map((e) => [e.kind, e.actor])).toEqual([
+      ['created', ALICE],
+      ['gate_added', ME],
+      ['gate_removed', ME],
+    ]);
+    expect(await mt(['list', taskId])).toMatchObject({ code: 0, out: `task ${taskId} has no gates` });
+  });
+
+  it("refuses a command holding a secret the gateway knows: a role's value, or the Lark app secret", async () => {
+    expect(await mt(['add', taskId, '--', 'curl', '-H', 'k:sk-live-1234567890'])).toMatchObject({
+      code: 1,
+      err: expect.stringContaining("mt: the gate's command holds a known secret"),
+    });
+    const lark = await mt(['add', taskId, '--', 'echo', 'lark-secret-123'], { LARK_APP_SECRET: 'lark-secret-123' });
+    expect(lark).toMatchObject({ code: 1 });
+    expect(gatesOf(gateway, taskId)).toEqual([]);
+  });
+
+  it('says which of the role environment it could not check, when a passEnv name is unset in this shell', async () => {
+    const r = await mt(['add', taskId, '--', 'npm', 'test'], { API_KEY: undefined });
+    expect(r).toMatchObject({ code: 0 });
+    expect(r.err).toBe('mt: default: API_KEY not set in this shell, so a gate holding those values cannot be refused here');
+  });
+
+  it("refuses in a board run's shell: gates are an operator's", async () => {
+    for (const name of ['MT_KANBAN_RUN', 'MT_KANBAN_TOKEN']) {
+      expect(await mt(['add', taskId, '--', 'true'], { [name]: 'set' })).toEqual({
+        code: 1,
+        out: '',
+        err:
+          "mt: mt kanban gate add is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or " +
+          'MT_KANBAN_TOKEN set. Run it from your own shell',
+      });
+    }
+    expect(gatesOf(gateway, taskId)).toEqual([]);
+  });
+
+  it("refuses what the board refuses, and a missing board, with exit 1", async () => {
+    expect(await mt(['add', taskId, '--timeout', '601', '--', 'true'])).toMatchObject({ code: 1 });
+    expect(await mt(['add', 'k_missing', '--', 'true'])).toMatchObject({ code: 1, err: 'mt: no task k_missing' });
+    expect(await mt(['remove', taskId, '7'])).toMatchObject({ code: 1, err: `mt: task ${taskId} has no gate 7` });
+    gateway.close();
+    f.cleanup();
+    f = mtFixture();
+    gateway = openDb(join(f.root, 'unused.db'));
+    expect(await mt(['list', 'k_1'])).toMatchObject({
+      code: 1,
+      err: `mt: there is no board at ${join(f.home, 'gateway.db')}: the gateway creates its database when it first starts`,
+    });
+  });
+
+  it('answers a wrong command line with exit 2', async () => {
+    for (const argv of [
+      ['add', taskId],
+      ['add', taskId, '--timeout', 'soon', '--', 'true'],
+      ['remove', taskId, 'one'],
+      ['list'],
+      ['rename', taskId],
+    ]) {
+      expect((await mt(argv)).code).toBe(2);
+    }
+  });
+});
+
+describe('the board shared with a running gateway', () => {
+  it("writes beside the gateway's reads, which see it at once", () => {
+    const shell = openDb(join(f.home, 'gateway.db'));
+    try {
+      gateway.exec('BEGIN');
+      expect(gatesOf(gateway, taskId)).toEqual([]);
+      const s = new KanbanService({ db: shell, roles: new Map(), workspaces: new Set(['default']) });
+      expect(s.addGate(taskId, { command: 'npm test' }, ME).ok).toBe(true);
+      gateway.exec('COMMIT');
+      expect(gatesOf(gateway, taskId).map((g) => g.command)).toEqual(['npm test']);
+    } finally {
+      shell.close();
+    }
+  });
+
+  it("waits out the gateway's write, retrying, and writes nothing if it never ends", () => {
+    const shell = openDb(join(f.home, 'gateway.db'));
+    try {
+      shell.pragma('busy_timeout = 5');
+      const s = new KanbanService({ db: shell, roles: new Map(), workspaces: new Set(['default']) });
+      gateway.exec('BEGIN IMMEDIATE');
+      expect(() => s.addGate(taskId, { command: 'npm test' }, ME)).toThrow(/database is locked/);
+      gateway.exec('COMMIT');
+      expect(gatesOf(gateway, taskId)).toEqual([]);
+      expect(s.addGate(taskId, { command: 'npm test' }, ME).ok).toBe(true);
+    } finally {
+      shell.close();
+    }
+  });
+});
+```
+
+- [ ] **Step 12.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-gate.test.ts`. Expected: the five that run a gate command FAIL, each with exit 2 where it expects 0 or 1 (`AssertionError: expected { code: 2, …(2) } to match object { code: +0, err: '' }` and the like): `mt` does not know `kanban gate` yet, and the worker CLI answers it as a wrong command line. The exit-2 test and the two that use the service directly pass already. `Tests  5 failed | 3 passed (8)`.
+
+- [ ] **Step 12.3: Implement.**
+
+Create `src/cli/gate.ts`:
+
+```ts
+import { existsSync } from 'node:fs';
+import { userInfo } from 'node:os';
+import { loadTeamSettings } from '../config.js';
+import { openDb } from '../db/open.js';
+import { KanbanService } from '../kanban/service.js';
+import type { GateRow } from '../kanban/types.js';
+import { addSecrets } from '../secrets.js';
+import { loadTeam, teamSecrets } from '../team.js';
+import { refuse, table, type MtIo } from './mt.js';
+
+/**
+ * `mt kanban gate add|list|remove` (spec §2.6, §7.7): an operator defining a
+ * task's gates, from a shell, before the board is in chat.
+ *
+ * The one exception to "mt only writes files": these write the board's database,
+ * as a second process beside a running gateway, and always through
+ * `KanbanService`, the same calls chat's `/kanban gate` makes (plan D), so every
+ * rule holds -- the limits, and the refusal of a command holding a known secret.
+ * SQLite in WAL mode lets the two share the file: the gateway's reads never wait
+ * on this, and a write that meets the gateway's waits and retries, as the
+ * gateway's own writers do (`txImmediate`).
+ *
+ * The secrets checked are the ones this shell can know, registered as the
+ * gateway registers them: every role's environment values, and the Lark app
+ * secret when `LARK_APP_SECRET` is set here. A `passEnv` name unset in this shell
+ * is said to be unchecked.
+ *
+ * **Not a security boundary.** They refuse a board run's environment
+ * (`MT_KANBAN_RUN`, `MT_KANBAN_TOKEN`), so an agent does not define gates by
+ * accident. An agent runs as the operator's user and could unset those, as it
+ * could already edit config.yaml or a role's files.
+ */
+
+/** Who defined a gate from a shell: the operator, by their login. */
+export function operatorName(io: MtIo): string {
+  let login: string | undefined;
+  try {
+    login = userInfo().username;
+  } catch {
+    login = io.env['USER'];
+  }
+  return `operator:${login === undefined || login === '' ? 'unknown' : login}`;
+}
+
+interface Board {
+  service: KanbanService;
+  close(): void;
+}
+
+/** The board, as the gateway's own service over its database; or why not, already said. */
+function openBoard(io: MtIo, what: string): Board | number {
+  if (io.env['MT_KANBAN_RUN'] !== undefined || io.env['MT_KANBAN_TOKEN'] !== undefined) {
+    return refuse(
+      io,
+      `${what} is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or MT_KANBAN_TOKEN set. ` +
+        'Run it from your own shell',
+    );
+  }
+  const unset: string[] = [];
+  const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: unset });
+  const team = loadTeam(settings, io.env, { unsetPassEnv: unset });
+  const lark = io.env['LARK_APP_SECRET'];
+  addSecrets([...(lark === undefined || lark === '' ? [] : [lark]), ...teamSecrets(team)]);
+  if (unset.length > 0) {
+    io.err(`mt: ${unset.join(', ')} not set in this shell, so a gate holding those values cannot be refused here`);
+  }
+  if (!existsSync(settings.dbPath)) {
+    return refuse(io, `there is no board at ${settings.dbPath}: the gateway creates its database when it first starts`);
+  }
+  const db = openDb(settings.dbPath);
+  const migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kanban_gates'").get();
+  if (migrated === undefined) {
+    db.close();
+    return refuse(io, `the database at ${settings.dbPath} has no board yet: start the gateway once, so it is migrated`);
+  }
+  const service = new KanbanService({ db, roles: team.roles, workspaces: new Set(team.workspaces.keys()) });
+  return { service, close: () => db.close() };
+}
+
+/** A write the gateway held the lock through, every retry: not this command's fault. */
+function busy(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'SQLITE_BUSY' || (err instanceof Error && err.message.startsWith('write contention'));
+}
+
+function withBoard(io: MtIo, what: string, fn: (b: Board) => number): number {
+  const board = openBoard(io, what);
+  if (typeof board === 'number') return board;
+  try {
+    return fn(board);
+  } catch (err) {
+    if (busy(err)) return refuse(io, 'the board is busy: the gateway kept its database locked; try again');
+    throw err;
+  } finally {
+    board.close();
+  }
+}
+
+function describe(g: GateRow): string {
+  return `gate ${g.id}: ${g.command} (up to ${g.timeoutS} s)`;
+}
+
+/** `mt kanban gate add <task_id> [--timeout <s>] -- <command…>`. */
+export function gateAdd(taskId: string, command: string, timeoutS: number | undefined, io: MtIo): number {
+  return withBoard(io, 'mt kanban gate add', ({ service }) => {
+    const r = service.addGate(taskId, { command, ...(timeoutS === undefined ? {} : { timeoutS }) }, operatorName(io));
+    if (!r.ok) return refuse(io, r.message);
+    io.out(`added ${describe(r.gate)} to task ${taskId}`);
+    return 0;
+  });
+}
+
+/** `mt kanban gate list <task_id>`. */
+export function gateList(taskId: string, io: MtIo): number {
+  return withBoard(io, 'mt kanban gate list', ({ service }) => {
+    const r = service.listGates(taskId);
+    if (!r.ok) return refuse(io, r.message);
+    if (r.gates.length === 0) {
+      io.out(`task ${taskId} has no gates`);
+      return 0;
+    }
+    const rows = r.gates.map((g) => [String(g.id), `${g.timeoutS} s`, g.createdBy, g.command]);
+    for (const line of table([['id', 'timeout', 'defined by', 'command'], ...rows])) io.out(line);
+    return 0;
+  });
+}
+
+/** `mt kanban gate remove <task_id> <gate_id>`. */
+export function gateRemove(taskId: string, gateId: number, io: MtIo): number {
+  return withBoard(io, 'mt kanban gate remove', ({ service }) => {
+    const r = service.removeGate(taskId, gateId, operatorName(io));
+    if (!r.ok) return refuse(io, r.message);
+    io.out(`removed ${describe(r.gate)} from task ${taskId}`);
+    return 0;
+  });
+}
+```
+
+In `src/cli/mt.ts`, replace:
+
+```ts
+import { parseArgs, type ParseArgsConfig } from 'node:util';
+import { ConfigError, type Env } from '../config.js';
+import { kanbanCommand } from './kanban.js';
+import { roleCheck, roleCreate, roleList } from './role.js';
+```
+
+with:
+
+```ts
+import { parseArgs, type ParseArgsConfig } from 'node:util';
+import { ConfigError, type Env } from '../config.js';
+import { gateAdd, gateList, gateRemove } from './gate.js';
+import { kanbanCommand } from './kanban.js';
+import { roleCheck, roleCreate, roleList } from './role.js';
+```
+
+In `src/cli/mt.ts`, replace:
+
+```ts
+ * `mt kanban` is the one that talks to the gateway, through its socket, and only
+ * with the authority of a run's token, from the run's environment.
+ */
+
+```
+
+with:
+
+```ts
+ * `mt kanban` is the one that talks to the gateway, through its socket, and only
+ * with the authority of a run's token, from the run's environment.
+ *
+ * `mt kanban gate` is the operator's, and the one exception to writing files
+ * only: it writes the board's database, through the board's own service (spec §7.7).
+ */
+
+```
+
+In `src/cli/mt.ts`, replace:
+
+```ts
+  '  mt workspace list',
+  '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
+].join('\n');
+
+```
+
+with:
+
+```ts
+  '  mt workspace list',
+  '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
+  '  mt kanban gate add <task_id> [--timeout <s>] -- <command...>',
+  '  mt kanban gate list <task_id>',
+  '  mt kanban gate remove <task_id> <gate_id>',
+].join('\n');
+
+```
+
+In `src/cli/mt.ts`, replace:
+
+```ts
+  for (const row of rows) row.forEach((cell, i) => (widths[i] = Math.max(widths[i] ?? 0, cell.length)));
+  return rows.map((row) => row.map((cell, i) => cell.padEnd(widths[i] ?? 0)).join('  ').trimEnd());
+}
+
+```
+
+with:
+
+```ts
+  for (const row of rows) row.forEach((cell, i) => (widths[i] = Math.max(widths[i] ?? 0, cell.length)));
+  return rows.map((row) => row.map((cell, i) => cell.padEnd(widths[i] ?? 0)).join('  ').trimEnd());
+}
+
+/** `mt kanban gate …`: the operator's gate commands. A command's words are joined with spaces, as ssh joins them. */
+function gate(argv: readonly string[], io: MtIo): number {
+  const [sub, ...args] = argv;
+  if (sub === 'add') {
+    const { values, positionals } = parse(args, { timeout: { type: 'string' } });
+    const [taskId, ...words] = positionals;
+    if (taskId === undefined || words.length === 0) {
+      throw new UsageError('kanban gate add takes a task id, then -- and the command');
+    }
+    const timeout = values.timeout;
+    if (timeout !== undefined && !/^[0-9]+$/.test(timeout)) throw new UsageError('--timeout is a whole number of seconds');
+    return gateAdd(taskId, words.join(' '), timeout === undefined ? undefined : Number(timeout), io);
+  }
+  if (sub === 'list') {
+    const [taskId, extra] = parse(args, {}).positionals;
+    if (taskId === undefined || extra !== undefined) throw new UsageError('kanban gate list takes a task id');
+    return gateList(taskId, io);
+  }
+  if (sub === 'remove') {
+    const [taskId, gateId, extra] = parse(args, {}).positionals;
+    if (taskId === undefined || gateId === undefined || extra !== undefined || !/^[0-9]+$/.test(gateId)) {
+      throw new UsageError('kanban gate remove takes a task id and a gate id');
+    }
+    return gateRemove(taskId, Number(gateId), io);
+  }
+  throw new UsageError('kanban gate takes add, list or remove');
+}
+
+```
+
+In `src/cli/mt.ts`, replace:
+
+```ts
+      return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, io);
+    }
+    if (group === 'kanban') return await kanbanCommand(command, rest, io);
+    if (group === 'workspace' && command === 'list') {
+```
+
+with:
+
+```ts
+      return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, io);
+    }
+    if (group === 'kanban' && command === 'gate') return gate(rest, io);
+    if (group === 'kanban') return await kanbanCommand(command, rest, io);
+    if (group === 'workspace' && command === 'list') {
+```
+
+In `src/index.ts`, replace:
+
+```ts
+import { dirname, join } from 'node:path';
+import { ConfigError, loadConfig, type GatewayConfig } from './config.js';
+import { loadTeam, type Team } from './team.js';
+import { migrate, openDb, type Db } from './db/open.js';
+import { sweepSeen } from './db/dedup.js';
+```
+
+with:
+
+```ts
+import { dirname, join } from 'node:path';
+import { ConfigError, loadConfig, type GatewayConfig } from './config.js';
+import { loadTeam, teamSecrets, type Team } from './team.js';
+import { migrate, openDb, type Db } from './db/open.js';
+import { sweepSeen } from './db/dedup.js';
+```
+
+In `src/index.ts`, replace:
+
+```ts
+ */
+export function registerConfiguredSecrets(config: GatewayConfig, team: Team): void {
+  addSecrets([config.lark.appSecret, ...[...team.roles.values()].flatMap((role) => role.secretValues)]);
+}
+
+```
+
+with:
+
+```ts
+ */
+export function registerConfiguredSecrets(config: GatewayConfig, team: Team): void {
+  addSecrets([config.lark.appSecret, ...teamSecrets(team)]);
+}
+
+```
+
+In `src/team.ts`, replace:
+
+```ts
+  /** For the operator's log: entries under roles/ that were ignored, and why. */
+  notes: readonly string[];
+}
+
+```
+
+with:
+
+```ts
+  /** For the operator's log: entries under roles/ that were ignored, and why. */
+  notes: readonly string[];
+}
+
+/**
+ * Every secret value the team gives its agents, for the masker (spec §10.1): each
+ * role's, less its maskExempt names. The gateway adds its Lark secret to these.
+ */
+export function teamSecrets(team: Team): string[] {
+  return [...team.roles.values()].flatMap((role) => role.secretValues);
+}
+
+```
+
+- [ ] **Step 12.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1127 passed (1127)`. Then run `npm run typecheck`. Expected: no errors.
+
+- [ ] **Step 12.5: Commit.**
+
+```bash
+git add src/cli/gate.ts src/cli/mt.ts src/index.ts src/team.ts tests/mt-gate.test.ts
+git commit -m "Let an operator add, list and remove a task's gates with mt kanban gate, through the board's own service"
+```
+
+---
+
+### Task 13: End to end: a real gate refuses a report, then passes
 
 **Files:**
 - Modify: `tests/fakes/cli-agent.mjs`, `tests/kanban-worker.e2e.ts`
 
-C4's proof (spec §11, "Worker CLI" and "Reported commit"): the real dispatcher runs a task whose agent is a real process, the fake CLI agent through the real CLI driver, in a workspace that is a real git repository. The task has a real gate, `test -f gate-ok && echo …`. The agent runs `mt kanban complete` by name, through the shim and the real socket; the gate refuses it with its command and exit code; the agent writes `gate-ok` and reports again; the gate passes. The gate's output shows it had its role's key and neither the run's token nor its socket, and the run records the repository's `HEAD` and that the tree had uncommitted changes, the file the agent wrote.
+C4's proof (spec §11, "Worker CLI" and "Reported commit"): the real dispatcher runs a task whose agent is a real process, the fake CLI agent through the real CLI driver, in a workspace that is a real git repository. The task has a real gate, `test -f gate-ok && echo …`. The agent runs `mt kanban complete` by name, through the shim and the real socket; the gate refuses it with its command and exit code; the agent writes `gate-ok` and reports again; the gate passes. The gate's output shows it had its role's key, neither the run's token nor its socket, and the gateway's own `PATH` without the `mt` shim's directory; and the run records the repository's `HEAD` and that the tree had uncommitted changes, the file the agent wrote.
 
-- [ ] **Step 12.1: Write the test.**
+- [ ] **Step 13.1: Write the test.**
 
 In `tests/fakes/cli-agent.mjs`, replace:
 
@@ -6009,7 +6785,8 @@ with:
     git('commit', '-q', '-m', 'first');
     const head = git('rev-parse', 'HEAD');
     const taskId = create(s, 'Make the gate pass');
-    const gate = 'test -f gate-ok && echo "key=$GATE_KEY token=${MT_KANBAN_TOKEN:-none} socket=${MT_KANBAN_SOCKET:-none}"';
+    const gate =
+      'test -f gate-ok && echo "key=$GATE_KEY token=${MT_KANBAN_TOKEN:-none} socket=${MT_KANBAN_SOCKET:-none}" && echo "path=$PATH"';
     expect(s.service.addGate(taskId, { command: gate, timeoutS: 30 }, ALICE).ok).toBe(true);
 
     s.dispatcher.pass();
@@ -6033,18 +6810,24 @@ with:
     // Each run of the gate recorded; the one that passed had the role's key, and neither the token nor the socket.
     const ran = eventsOf(s.t.db, taskId).filter((e) => e.kind === 'gates_ran');
     expect(ran.map((e) => (e.payload as { passed: boolean }).passed)).toEqual([false, true]);
-    expect(ran[1]?.payload).toMatchObject({ results: [{ exitCode: 0, output: 'key=from-the-role token=none socket=none\n' }] });
+    const [passed] = (ran[1]?.payload as { results: Array<{ exitCode: number; output: string }> }).results;
+    expect(passed?.exitCode).toBe(0);
+    const [said, path] = (passed?.output ?? '').split('\n');
+    expect(said).toBe('key=from-the-role token=none socket=none');
+    // The gateway's own PATH, never a run's: the mt shim's directory is not on it.
+    expect(path).toBe(`path=${process.env['PATH'] ?? ''}`);
+    expect(path?.split(':')).not.toContain(join(s.dir, 'home', 'bin'));
   });
 
   it('an agent that stops without reporting is nudged in its own session, and then reports', async () => {
     const s = await build('kanban-late');
 ```
 
-- [ ] **Step 12.2: Run it to verify it passes.** Every piece it uses exists after Task 11, so this test is the integration check rather than a driver of new code. Run `npx vitest run --project e2e tests/kanban-worker.e2e.ts`. Expected: `Tests  3 passed (3)`. To see it fail first, give the stack's service no workspace directories: in `build`, change `workspaceDirs: new Map([['default', workspace]])` to `workspaceDirs: new Map()`. Expected: the new test FAILS, with `AssertionError: expected 'blocked' to be 'done' // Object.is equality`: both reports are refused as `gates_cannot_run`, the nudges run out and the task gives up. `Tests  1 failed | 2 passed (3)`. Change it back.
+- [ ] **Step 13.2: Run it to verify it passes.** Every piece it uses exists after Task 12, so this test is the integration check rather than a driver of new code. Run `npx vitest run --project e2e tests/kanban-worker.e2e.ts`. Expected: `Tests  3 passed (3)`. To see it fail first, give the stack's service no workspace directories: in `build`, change `workspaceDirs: new Map([['default', workspace]])` to `workspaceDirs: new Map()`. Expected: the new test FAILS, with `AssertionError: expected 'blocked' to be 'done' // Object.is equality`: both reports are refused as `gates_cannot_run`, the nudges run out and the task gives up. `Tests  1 failed | 2 passed (3)`. Change it back.
 
-- [ ] **Step 12.3: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1116 passed (1116)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  66 passed (66)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 13.3: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1127 passed (1127)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  67 passed (67)`. Then run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 12.4: Commit.**
+- [ ] **Step 13.4: Commit.**
 
 ```bash
 git add tests/fakes/cli-agent.mjs tests/kanban-worker.e2e.ts
@@ -6053,14 +6836,48 @@ git commit -m "End to end: a fake agent's report is refused by a real gate, and 
 
 ---
 
-### Task 13: The README
+### Task 14: The README
 
 **Files:**
 - Modify: `README.md`
 
-Gates, what they run with, their limits, the secret refusal, the reported commit and the longer wait, in the `mt kanban` section. Defining gates waits for the board's chat commands.
+Gates, what they run with, their limits, the secret refusal, the reported commit and the longer wait, in the `mt kanban` section; and the `mt kanban gate` commands, the one exception to `mt` writing files only, with the accident guard and why it is not a security boundary.
 
-- [ ] **Step 13.1: Edit.**
+- [ ] **Step 14.1: Edit.**
+
+In `README.md`, replace:
+
+````md
+mt workspace list
+mt kanban <show|complete|review|changes|block|comment|create|link> < input.json
+```
+
+The role and workspace commands find the home, config file and database the way the gateway
+does (`MT_HOME`, `MT_CONFIG`, `MT_DB`), from the shell they run in, and need no Lark settings.
+They only write files and never contact the gateway; changes take effect at the next start.
+
+- `role create` writes `config.yaml` (from the role `default`, or `--clone-from`), a starter
+````
+
+with:
+
+````md
+mt workspace list
+mt kanban <show|complete|review|changes|block|comment|create|link> < input.json
+mt kanban gate add <task_id> [--timeout <s>] -- <command...>
+mt kanban gate list <task_id>
+mt kanban gate remove <task_id> <gate_id>
+```
+
+The role, workspace and gate commands find the home, config file and database the way the
+gateway does (`MT_HOME`, `MT_CONFIG`, `MT_DB`), from the shell they run in, and need no Lark
+settings. The role and workspace commands only write files and never contact the gateway;
+changes take effect at the next start. The gate commands are the one exception: they write the
+board's database, beside a running gateway, through the board's own service, and take effect
+at once.
+
+- `role create` writes `config.yaml` (from the role `default`, or `--clone-from`), a starter
+````
 
 In `README.md`, replace:
 
@@ -6083,16 +6900,22 @@ with:
   with a run's token or socket, for up to 600 s each and 600 s together, so `mt kanban` waits
   up to 15 minutes for an answer. A gate whose command holds a known secret is refused: put
   the value in the role's `.env` or `agent.passEnv`, and name it in the command. Defining gates
-  is an operator's action, and comes with the board's chat commands. When an agent reports
+  is an operator's action: `mt kanban gate add` (the command's words after `--` are joined with
+  spaces; quote it to keep its own quoting), `list` and `remove`, which record you as
+  `operator:<your login>`. They check the secrets this shell knows: every role's values, and
+  the Lark app secret if `LARK_APP_SECRET` is set here. They refuse to run in a board run's
+  shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set, so an agent does not define gates by
+  accident; that is not a security boundary, since an agent runs as your user and could unset
+  them, as it could edit `config.yaml` or a role's files. When an agent reports
   `complete` or `review`, the gateway also records its workspace's `HEAD`, and whether the tree
   had uncommitted changes.
 
 ### Chat commands
 ```
 
-- [ ] **Step 13.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `npm test 2>&1 | tail -4`. Expected: `Tests  1116 passed (1116)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  66 passed (66)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 14.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `npm test 2>&1 | tail -4`. Expected: `Tests  1127 passed (1127)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  67 passed (67)`. Then run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 13.3: Commit.**
+- [ ] **Step 14.3: Commit.**
 
 ```bash
 git add README.md
@@ -6104,12 +6927,13 @@ git commit -m "Document gates, the reported commit and the longer wait in the RE
 
 ## Done when
 
-- `npm test` gives `Tests  1116 passed (1116)`. `npm run test:e2e` gives `Tests  66 passed (66)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  1127 passed (1127)`. `npm run test:e2e` gives `Tests  67 passed (67)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table, and only `src/kanban/service.ts` imports it (the guard in `tests/kanban-service.test.ts`). `src/kanban/worker.ts` and `src/kanban/gates.ts` write nothing.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - No `spawnSync` or `execSync` in `src/kanban/gates.ts`, `src/kanban/commit.ts` or `src/kanban/service.ts` (`git grep -n "Sync(" -- src/kanban/gates.ts src/kanban/commit.ts src/kanban/service.ts` lists only `readFileSync`, `accessSync` and `statSync`).
-- A fake agent process, started by the real dispatcher through the real CLI driver, reports `complete` through the real socket; the task's real gate refuses it with its command and exit; the agent fixes the workspace and reports again; the gate passes, with the role's key and neither the run's token nor its socket in its environment; and the run records the repository's `HEAD` and that the tree was dirty (`tests/kanban-worker.e2e.ts`).
-- A gate whose command holds a known secret is refused at creation. A gate's output is masked where it is stored, prompted and answered.
+- A fake agent process, started by the real dispatcher through the real CLI driver, reports `complete` through the real socket; the task's real gate refuses it with its command and exit; the agent fixes the workspace and reports again; the gate passes, with the role's key, neither the run's token nor its socket, and no `mt` shim directory on its `PATH`; and the run records the repository's `HEAD` and that the tree was dirty (`tests/kanban-worker.e2e.ts`).
+- An operator adds, lists and removes gates with `mt kanban gate`, beside a running gateway, recorded as `operator:<login>`; a board run's shell is refused (`tests/mt-gate.test.ts`).
+- A gate whose command holds a known secret, in any form the shell would run, is refused at creation, through the service and through `mt`. A gate's output is masked where it is stored, prompted and answered.
 - A rework resumes the work run's provider session only when both ran from the same native package, or both in the prompt.
 - A turn that ends while its report runs the gates is neither nudged nor decided until the report is answered (`tests/kanban-dispatch-gates.test.ts`).
 - An uncaught exception and an unhandled rejection are printed masked, and exit 1 (`tests/crash.e2e.ts`).

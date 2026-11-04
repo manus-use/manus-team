@@ -483,6 +483,12 @@ fresh install) has no registrations. A deployment with no config file (environme
   authority from it, so they give an agent — which runs as the same user and could edit the same
   files by hand — nothing it did not already have. A change takes effect at the next start, or the
   next claim for `role.md` and skills.
+- **The one exception: `mt kanban gate add|list|remove`** (§7.7). They write the board's database,
+  beside a running gateway, through the board's own service (`KanbanService`), which stays the only
+  user of `db/kanban.ts`; SQLite's WAL mode and busy retry let the two processes share the file. They
+  take effect at once. They refuse to run when `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set, so an agent
+  does not define gates by accident; that is not a security boundary, since an agent runs as the same
+  user and could unset them, as it could edit `config.yaml` or a role's files.
 - Not taken from comparable tools, deliberately: a role is not its own command (roles are run by the
   board, not by hand); a role has no memory of its own (each vendor agent keeps its own); a role has
   no bot token or gateway of its own (there is one gateway).
@@ -671,7 +677,8 @@ run. Nudges are further turns in the run's session (§7.5); rework is a new run 
   agents and people on a task. A retry reads the whole thread.
 - **`kanban_gates`** — `task_id`, `command`, `timeout_s` (default 300, at most 600), `created_by`,
   `created_at`. Shell commands that must exit 0 before the task may complete or go to review (§7.7):
-  at most 20 on a task, taking at most 600 s together. Stored as written, never masked (§10.1).
+  at most 20 on a task, taking at most 600 s together. Stored as written, never masked (§10.1); added
+  and removed by an operator, each with an event.
 - **`kanban_subscriptions`** — `task_id`, the channel binding key (channel, app, chat, thread),
   `cursor` (last `kanban_events.id` delivered). The same cursor discipline as a binding's
   `cursor_seq`: delivery is a projection over the log, and catch-up after an outage is the same
@@ -1189,8 +1196,10 @@ decided run's report is.
 - **The refusal.** `gate_failed` carries the gate's command, its exit code or signal, whether it timed
   out, and the last 4 KiB of its stdout and stderr together, masked before they are cut (§10.1).
   `gates_cannot_run` says why gates could not run at all: no workspace, a workspace or role no longer
-  configured, or the gateway stopping, which kills them and applies nothing. The worker socket tells a
-  report still running its gates when it closes, and sends its answer before the connection goes.
+  configured, its directory gone, or the gateway stopping, which kills them and applies nothing. The
+  worker socket tells a report still running its gates when it closes, and sends its answer before
+  the connection goes; the gateway closes the socket before it waits for the dispatcher, whose drain
+  waits for such a report.
 - **The record.** Each run of a task's gates is one `gates_ran` event, with every gate's result,
   passed or not.
 
@@ -1214,9 +1223,13 @@ laptop and on a server.
 
 Gates are deterministic where a contract is prose: a red test suite is evidence the task is not done,
 and no reviewer has to notice. Defining a gate requires **operator** tier: a gate is a shell command
-the gateway will execute. Until the board is in Lark (plan D), the service's `addGate` is the only way
-to define one: neither the worker CLI nor `mt` defines gates, since every agent runs as the gateway's
-user and could run either. A gate whose command holds a known secret is refused (§10.1).
+the gateway will execute. An operator defines, lists and removes gates with `mt kanban gate add`,
+`list` and `remove` (§2.6), recorded as `operator:<login>`, and from plan D with `/kanban gate`; both
+call the service's `addGate`, `listGates` and `removeGate`. The worker CLI has no gate command. A gate
+whose command holds a known secret is refused (§10.1) — as written, with control characters stripped,
+or with the shell's quotes and backslashes removed, since the shell runs `sk\$x` as `sk$x`. `mt`
+checks the secrets its own shell can know: every role's values, and the Lark app secret when
+`LARK_APP_SECRET` is set there.
 
 ### 7.8 The reported commit
 
@@ -1228,8 +1241,9 @@ the run, so they describe the state the report was made in. A person's report re
 is no agent state to pin. Outside a git repository, with no commit yet, or when git fails, there is
 no commit and the tree counts as uncommitted: `reported_commit` is null and `reported_dirty` true,
 which tells "no commit to review" apart from a report that recorded nothing. The reads are
-asynchronous, take no lock (`git --no-optional-locks status`), and get only the agent allowlist of
-the gateway's environment.
+asynchronous, take no lock (`git --no-optional-locks status`), run no fsmonitor hook
+(`-c core.fsmonitor=false`), and get only the agent allowlist of the gateway's environment. A
+workspace's clean filters still run, as the gateway's user: no more than its agent could do.
 
 The review card and the reviewer's context show them, and a human reviewer is told what to review:
 
@@ -1467,8 +1481,9 @@ redelivered event is one message.
   socket and nothing answers on it; gates run without
   the token (§7.7).
 - **Gates execute commands**, so they are operator-defined, run in the task's workspace as the
-  gateway's user, and recorded with who defined them (`created_by`, and a `gate_added` event). Until
-  plan D only the service API defines them (§7.7).
+  gateway's user, and recorded with who defined them (`created_by`, and a `gate_added` event). An
+  operator defines them with `mt kanban gate` and, from plan D, `/kanban gate`, both through the
+  service (§2.6, §7.7).
 - **No secrets in the handoff.** Summaries, metadata and comments are durable and shown in chat. The
   worker protocol says so, and known secrets are masked (§10.1).
 - **Agent-written task text cannot spoof a mention** (§9.3).
@@ -1604,7 +1619,7 @@ branch.
 | **C1. The board** | migration `003`, with every kanban table (§3); the one stored phase with one writer, and the derived display status (§4.1); transitions (§5.1); assignees (§4.2); the completion contract (§4.3); follow-ups (§4.4); blocking and unblocking (§5.4); resolving a task's workspace at a claim (§2.3); run rows and their outcomes, without agents; with F's masker, masking kanban free text and `kanban_events` on write (layer 3); the service API the later plans call. No agent runs and no socket | B, F |
 | **C2. Agent runs** | the dispatcher — passes, the per-workspace limit, `max_running`; a run as a session on the sink channel; prompt composition, with F's masker on the composed worker context and `last_output` (layer 2); how a run ends; the failure classifier; retries; restart handling and the runtime limit (§6, §7.1, §7.4, §8) | C1, F |
 | **C3. The worker CLI** | the run's token, added to F's masker when the run is claimed and removed when it closes, reference-counted so that removing it never unmasks a configured secret with the same value; the `0600` socket; the `mt kanban` commands; stop nudges; reports after the run is closed (§7.2, §7.3, §7.5, §7.6) | C2 |
-| **C4. Review, rework and gates** | same-task review and rework, with the rework's seed settled after the render; quality gates, run asynchronously in every report, and the worker socket draining on close; the reported commit (§5.3, §7.7, §7.8); refusing gates that contain a known secret; a crash handler whose output is masked | C3 |
+| **C4. Review, rework and gates** | same-task review and rework, with the rework's seed settled after the render; quality gates, run asynchronously in every report, and the worker socket draining on close; the reported commit (§5.3, §7.7, §7.8); refusing gates that contain a known secret; the operator's `mt kanban gate` commands; a crash handler whose output is masked | C3 |
 | **D. Lark** | `/kanban` commands; person targets; card `kind` routing; task, review and blocked cards; the group notice; subscriptions | C4 |
 | **E. Native resume** | the CLI driver captures the provider session id and passes `--session` (architecture §6.3), with transcript replay as the fallback | B; independent of C and D |
 | **R. Native rendering** | the spike, done on bytesec 0.7.4: `BYTESEC_LOCAL_APM_PATH=<one package dir>` with `bytesec run --agent <name>` loads that package's agent, whose body becomes the system prompt, and its skills; a directory of packages fails silently; a package's agent may use only the package's skills. Then (§2.7): the role grammar tightened so a name cannot end in `-`; `agent.native`; `agent.skills`, imported from where bytesec finds a user's skills, since a native agent sees only its package's; `StartOptions.args` and the registry's `argsFor`; a renderer interface with bytesec's renderer; content-addressed, atomic packages under `$MT_HOME/rendered`, swept; the dispatcher rendering just after the claim, recording on the run whether it is native and by which package, and falling back to prompt injection when a render fails; the prompt leaving `role.md` and the skills out of a native run; `mt role check` saying which roles run natively. Claude Code's renderer is later. Prompt injection (§7.1) stays the fallback | B2, C2 |
