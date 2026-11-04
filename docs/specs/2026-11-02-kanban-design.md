@@ -628,7 +628,7 @@ with a join, not by correlating two files.
 | `token_hash` | SHA-256 of the run's worker token (§7.2); the token itself is never stored |
 | `outcome` | null until decided; §5.2 |
 | `summary`, `metadata` | the handoff, as reported |
-| `reported_commit`, `reported_dirty` | for an agent's `complete` or `review` report in a git workspace: `HEAD`, and whether the tree had uncommitted changes, at the moment of the report (§7.8); null otherwise |
+| `reported_commit`, `reported_dirty` | for an agent's `complete` or `review` report: `HEAD`, and whether the tree had uncommitted changes, at the moment of the report (§7.8); outside a git repository, or when git fails, no commit and `reported_dirty` true; both null for a person's report |
 | `error`, `last_output` | for failures: the classified error, and the tail of the agent's last output |
 | `submissions` | prompts sent in this run: 1 for the task prompt, +1 per nudge or forwarded comment (§7.5) |
 | `started_at`, `ended_at` | `ended_at` is set when the run is **closed** (below) |
@@ -669,8 +669,9 @@ run. Nudges are further turns in the run's session (§7.5); rework is a new run 
 
 - **`kanban_comments`** — `task_id`, `author`, `body`, `created_at`. The conversation between the
   agents and people on a task. A retry reads the whole thread.
-- **`kanban_gates`** — `task_id`, `command`, `timeout_s` (default 300), `created_by`. Shell commands
-  that must exit 0 before the task may complete (§7.7).
+- **`kanban_gates`** — `task_id`, `command`, `timeout_s` (default 300, at most 600), `created_by`,
+  `created_at`. Shell commands that must exit 0 before the task may complete or go to review (§7.7):
+  at most 20 on a task, taking at most 600 s together. Stored as written, never masked (§10.1).
 - **`kanban_subscriptions`** — `task_id`, the channel binding key (channel, app, chat, thread),
   `cursor` (last `kanban_events.id` delivered). The same cursor discipline as a binding's
   `cursor_seq`: delivery is a projection over the log, and catch-up after an outage is the same
@@ -853,6 +854,13 @@ role on another agent gets the full prompt and a fresh conversation, and its `se
 null — the column names the run whose provider session was actually resumed, not the one before. A failed or crashed run is the
 opposite case, and starts clean (§8.3).
 
+The claim can compare only the agents: how the rework's role reaches its agent (§2.7) is decided by
+the render just after it. So the seed is settled when the render is recorded, before the session is
+created: it is kept only if the work run was given its role the same way — natively from the same
+package (`packageHash`), or both in the prompt; a run from before plan R counts as not native — and is
+dropped otherwise. A `role.md` edited between the two runs gives the rework a new package, and so a
+fresh conversation: resuming under another system prompt would mix two sets of instructions.
+
 ### 5.4 Blocking
 
 `block` takes a kind:
@@ -995,17 +1003,21 @@ The task prompt is composed, in this order, of:
      your run; block only on genuine ambiguity, and say why; if a downstream review task exists,
      `complete` rather than `review`; if you find follow-up work, create a task for it rather than
      doing it; never put secrets in a summary, metadata or comment; stop once you have reported.
-   - *review*: review the implementer's handoff and the workspace against the task and its
-     contract; do not change the workspace; report `complete` to approve or `changes` with a
+   - *review*: review the implementer's handoff, given in its own section of the context, and the
+     workspace against the task and its contract; do not change the workspace; report `complete` to approve or `changes` with a
      specific, actionable reason; `block` only for a problem the implementer cannot fix.
-4. **The task** — title, body, contract, and the result of the last gate run if there is one.
+4. **The task** — title, body, contract, the task's gates (§7.7), one line each with its timeout, and
+   the result of the last gate run if there is one: who reported, whether it passed, each gate's exit,
+   and the end of a failing gate's output, set off as data.
 5. **The worker context:**
    - each parent's latest completion summary and metadata, verbatim — for a reviewed parent, the
      implementer's handoff (§4.4);
    - prior attempts on this task: outcome, summary, error, last output — and for a failed, crashed
      or interrupted attempt, **the tool calls it made**, read from its session's event log (§8.3);
-   - for rework, the reviewer's reason and the implementer's previous handoff;
-   - for review, the implementer's handoff;
+   - for rework, the reviewer's reason and the implementer's previous handoff, with what its report
+     recorded of the workspace (§7.8). A work run is a rework while the task's latest review ended in
+     `changes` and no review has been asked for since, so a retry of a rework is one too;
+   - for review, the implementer's handoff, and what to review (§7.8);
    - the comment thread;
    - the task's children, so the worker can see which review model applies.
 
@@ -1153,21 +1165,46 @@ undecided, and the agent can fix it and try again. A person whose completion is 
 output in chat. Each gate run is recorded as an event either way.
 
 Gates live in the kanban service's `complete` and `review` operations — the one place every caller
-goes through — not in the socket handler, which is only one of the callers. A human task's gates run
+goes through — not in the socket handler, which is only one of the callers. Both are asynchronous: a
+gate is a process the gateway waits for, never one that stops its event loop, which chat shares. A human task's gates run
 in its fixed workspace like any other task's (§2.3). A human task is never made unresolvable by its
 workspace, though: a person's run does not use the workspace, so a removed workspace only matters
 when there is a gate to run — and then the completion is refused with that reason, instead of the
 task being held from its assignee.
 
+**How a report runs them.** A report the board would refuse anyway — a second report, a person's
+while an agent works — runs none: the service asks the board first. Then, for an agent's report, the
+reported commit is read (§7.8); then the gates, one after another in the order they were defined,
+each as `/bin/sh -c` in its own process group with stdin closed, until one fails. A gate past its
+`timeout_s` is sent SIGTERM with its group, and SIGKILL two seconds later; one that cannot start
+fails. Then the transition, which checks everything again in its own transaction: the run may have
+been decided while the gates ran — a runtime limit, a supersession — and is then refused as any
+decided run's report is.
+
+- **One report at a time.** While a report's gates run, a second report on the task is refused
+  (`report_in_progress`) and the task is not claimed: the same gates would run twice in one checkout,
+  or an agent would start in a checkout being tested.
+- **A report waits for them.** So a task's gates may take at most 600 s together, and `mt kanban`
+  waits 15 minutes for its answer.
+- **The refusal.** `gate_failed` carries the gate's command, its exit code or signal, whether it timed
+  out, and the last 4 KiB of its stdout and stderr together, masked before they are cut (§10.1).
+  `gates_cannot_run` says why gates could not run at all: no workspace, a workspace or role no longer
+  configured, or the gateway stopping, which kills them and applies nothing. The worker socket tells a
+  report still running its gates when it closes, and sends its answer before the connection goes.
+- **The record.** Each run of a task's gates is one `gates_ran` event, with every gate's result,
+  passed or not.
+
 Gates run as the gateway's user, with **the environment of the role of the task's latest agent run**,
 by `attempt`, including the run making the report — its agent's base environment, `.env` and
-`passEnv` values — or of the role `default` if no agent has run on the task. If that role can no longer be resolved —
+`passEnv` values, on top of the short allowlist every agent gets from the gateway's environment
+(`PATH`, `HOME` and the like) — or of the role `default` if no agent has run on the task. If that role can no longer be resolved —
 its directory removed or now invalid — the completion is refused with that reason, as for a removed
 workspace, rather than running gates under another role's credentials. So an implementer's
 `review` runs gates as the implementer; a reviewer agent's `complete` runs them as the reviewer —
 with the reviewer's credentials, so a reviewer given only a read-only token runs gates with that
 token; and a person approving after an implementer's `review` runs them as the implementer. They never get the gateway's own environment, which holds its Lark
-secret, and never `MT_KANBAN_TOKEN`: a test suite has no business reporting on the board.
+secret, and never `MT_KANBAN_TOKEN` or `MT_KANBAN_SOCKET`: a test suite has no business reporting on
+the board.
 
 **Gates are not isolated from the network**, deliberately. They are commands an operator chose, in the
 same trust position as a cron job, not output from an agent. Denying the network would break ordinary
@@ -1177,15 +1214,22 @@ laptop and on a server.
 
 Gates are deterministic where a contract is prose: a red test suite is evidence the task is not done,
 and no reviewer has to notice. Defining a gate requires **operator** tier: a gate is a shell command
-the gateway will execute.
+the gateway will execute. Until the board is in Lark (plan D), the service's `addGate` is the only way
+to define one: neither the worker CLI nor `mt` defines gates, since every agent runs as the gateway's
+user and could run either. A gate whose command holds a known secret is refused (§10.1).
 
 ### 7.8 The reported commit
 
 When an **agent** reports `complete` or `review` — an implementer, or a reviewer agent approving with
 `complete` — the gateway records, on that run, `HEAD` (`git rev-parse HEAD`) as `reported_commit`
 and whether the working tree had uncommitted changes (`git status --porcelain` non-empty) as
-`reported_dirty`. Both are captured before the transaction that decides the run, so they describe
-the state the report was made in. A person's report records neither: there is no agent state to pin.
+`reported_dirty`. Both are captured before the gates run and before the transaction that decides
+the run, so they describe the state the report was made in. A person's report records neither: there
+is no agent state to pin. Outside a git repository, with no commit yet, or when git fails, there is
+no commit and the tree counts as uncommitted: `reported_commit` is null and `reported_dirty` true,
+which tells "no commit to review" apart from a report that recorded nothing. The reads are
+asynchronous, take no lock (`git --no-optional-locks status`), and get only the agent allowlist of
+the gateway's environment.
 
 The review card and the reviewer's context show them, and a human reviewer is told what to review:
 
@@ -1423,7 +1467,8 @@ redelivered event is one message.
   socket and nothing answers on it; gates run without
   the token (§7.7).
 - **Gates execute commands**, so they are operator-defined, run in the task's workspace as the
-  gateway's user, and recorded with who defined them.
+  gateway's user, and recorded with who defined them (`created_by`, and a `gate_added` event). Until
+  plan D only the service API defines them (§7.7).
 - **No secrets in the handoff.** Summaries, metadata and comments are durable and shown in chat. The
   worker protocol says so, and known secrets are masked (§10.1).
 - **Agent-written task text cannot spoof a mention** (§9.3).
@@ -1476,6 +1521,10 @@ projection is **pure given the secret set** — the claim in architecture §12 i
 and tests set the registry explicitly. A card already posted is never re-rendered because the set
 changed: removing a token only means later text may show a token that no longer works.
 
+**A crash.** An uncaught exception or an unhandled rejection is printed through `redactKnownSecrets`
+too, and the gateway exits 1, the code Node itself would use; Node's own report, which is not masked,
+is never printed.
+
 **Streaming.** A card re-renders while an answer streams in, so a secret whose first chunk has
 arrived and whose second has not would briefly show as a prefix. **Every** render therefore drops
 trailing text that is a prefix of a known secret, four characters or longer. On a render mid-stream
@@ -1525,13 +1574,13 @@ board.
 | Prompt | `role.md`, skills list, protocol, task and context, in order; the run records `role_md_hash` and `agent_config`; a native run's prompt without `role.md` and the skills, and otherwise the same; imported skills listed like the role's own |
 | Native rendering | `agent.skills` found in bytesec's order under a made-up home, a symlink not followed, an unknown, misnamed or duplicated-with-own name a startup error and a `role check` file problem, never the real home read; which roles are rendered, and each reason one is not; the package's layout and `role.md`'s bytes unchanged; content-addressed, reused, never rewritten; atomic, `0700`, regular files only, no `.env`; a too-large package and a symlinked `SKILL.md` refused; old packages swept but those of open runs, and unconfigured roles' at boot; `--agent` and `BYTESEC_LOCAL_APM_PATH` reaching the fake CLI agent's argv and environment on every turn; the ACP driver refusing per-session arguments; a failed render falling back to the prompt with a note; imported skills copied into the package and in its hash; the walk stopping at the file limit; a run's `native` and `packageHash` recorded once in `agent_config`; `mt role check`'s line; no test runs real bytesec |
 | Retry | `failure_limit` 2 → one retry; `gave_up` and its unblock reset; `rate_limited` not counted; `if-no-side-effects` against `readOnlyTools`; the retry's context containing the previous run's tool calls |
-| Review | reviewer `changes` → rework run seeded from the work run when their `agent_config` matches, unseeded otherwise; a failing review run counted and retried; `review` with no reviewer refused |
+| Review | reviewer `changes` → rework run seeded from the work run when their `agent_config` matches — driver, command and arguments, and the same native-ness and package hash — unseeded otherwise; the review's handoff and the rework's reason in their prompts; a failing review run counted and retried; `review` with no reviewer refused |
 | Worker CLI | handler tests over JSON; token scope; `already_reported`; `run_superseded`; gates refusing completion; gates not seeing the token |
 | Nudges | an agent that stops without reporting, then reports after one nudge; one that never does; distinct keys per submission; a comment replacing a nudge |
 | Restart | `reconcileBoot` then `interrupted`; a decided-but-open run keeps its outcome; kanban findings not posted to Lark; the old session archived |
 | Lark | tiers: a named assignee or reviewer acting with talk tier, a non-reviewer needing operator tier to approve, assigning to a person without talk tier refused; `/kanban review` from a human assignee, refused with gates while the workspace is null; `/kanban stop` on a decided-but-open run; `/kanban assign` mid-run; @-mention vs role assignees; person targets; the one-line group notice for a human task created in a group; card `kind` routing; a click on a superseded run's card refused |
 | Masking | a known value masked through each escaper, in composed worker context and `last_output`, and in stored free text and JSON string values; **a secret split across two message chunks masked on the card**; a secret containing `_` masked before escaping, and one containing `"` masked inside JSON; values under 8 characters and `maskExempt` names left alone; a worker token masked only while its run is open; `turn_submitted` input stored unmasked but shown masked; a gate containing a secret refused; a render withholding a trailing prefix of a secret, mid-stream and on a turn that ended part-way through one; ids inside payloads left unmasked; the registry gaining and losing a worker token with its run |
-| Reported commit | clean tree → commit; dirty tree → commit plus "uncommitted changes"; not a repo → "uncommitted"; recorded for a reviewer agent's `complete`, never for a person's report |
+| Reported commit | clean tree → commit; dirty tree → commit plus "uncommitted changes"; not a repo → "uncommitted; no commit to review"; recorded for a reviewer agent's `complete`, never for a person's report |
 | Workspaces | a name registered on first sight; a known name repointed to another directory fails startup; no workspace `default` fails startup; a downstream review task inherits its parents' common workspace, a role with its own workspace does not; an unclaimed archived parent ignored; parents in different workspaces make an agent task unresolvable, while a human one is claimed with a null workspace, has gated completion refused, and can then be given one by `/kanban workspace`; a worker-created follow-up uses its creating task's workspace without a link and is claimable at once; an agent claims a workspace while a person's review on another task there is open; a person's run leaves the workspace null and a later agent review claim re-applies the rules |
 | End to end | the fake CLI agent calling `mt kanban complete` through the real socket |
 
@@ -1555,7 +1604,7 @@ branch.
 | **C1. The board** | migration `003`, with every kanban table (§3); the one stored phase with one writer, and the derived display status (§4.1); transitions (§5.1); assignees (§4.2); the completion contract (§4.3); follow-ups (§4.4); blocking and unblocking (§5.4); resolving a task's workspace at a claim (§2.3); run rows and their outcomes, without agents; with F's masker, masking kanban free text and `kanban_events` on write (layer 3); the service API the later plans call. No agent runs and no socket | B, F |
 | **C2. Agent runs** | the dispatcher — passes, the per-workspace limit, `max_running`; a run as a session on the sink channel; prompt composition, with F's masker on the composed worker context and `last_output` (layer 2); how a run ends; the failure classifier; retries; restart handling and the runtime limit (§6, §7.1, §7.4, §8) | C1, F |
 | **C3. The worker CLI** | the run's token, added to F's masker when the run is claimed and removed when it closes, reference-counted so that removing it never unmasks a configured secret with the same value; the `0600` socket; the `mt kanban` commands; stop nudges; reports after the run is closed (§7.2, §7.3, §7.5, §7.6) | C2 |
-| **C4. Review, rework and gates** | same-task review and rework, quality gates, the reported commit (§5.3, §7.7, §7.8); refusing gates that contain a known secret; a crash handler whose output is masked | C3 |
+| **C4. Review, rework and gates** | same-task review and rework, with the rework's seed settled after the render; quality gates, run asynchronously in every report, and the worker socket draining on close; the reported commit (§5.3, §7.7, §7.8); refusing gates that contain a known secret; a crash handler whose output is masked | C3 |
 | **D. Lark** | `/kanban` commands; person targets; card `kind` routing; task, review and blocked cards; the group notice; subscriptions | C4 |
 | **E. Native resume** | the CLI driver captures the provider session id and passes `--session` (architecture §6.3), with transcript replay as the fallback | B; independent of C and D |
 | **R. Native rendering** | the spike, done on bytesec 0.7.4: `BYTESEC_LOCAL_APM_PATH=<one package dir>` with `bytesec run --agent <name>` loads that package's agent, whose body becomes the system prompt, and its skills; a directory of packages fails silently; a package's agent may use only the package's skills. Then (§2.7): the role grammar tightened so a name cannot end in `-`; `agent.native`; `agent.skills`, imported from where bytesec finds a user's skills, since a native agent sees only its package's; `StartOptions.args` and the registry's `argsFor`; a renderer interface with bytesec's renderer; content-addressed, atomic packages under `$MT_HOME/rendered`, swept; the dispatcher rendering just after the claim, recording on the run whether it is native and by which package, and falling back to prompt injection when a render fails; the prompt leaving `role.md` and the skills out of a native run; `mt role check` saying which roles run natively. Claude Code's renderer is later. Prompt injection (§7.1) stays the fallback | B2, C2 |
