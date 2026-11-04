@@ -1034,8 +1034,8 @@ The run's environment, passed through `StartOptions.env` (§2.4):
 |---|---|
 | `MT_KANBAN_RUN` | the run id |
 | `MT_KANBAN_TOKEN` | a random 256-bit token; only its hash is stored |
-| `MT_KANBAN_SOCKET` | the gateway's local socket |
-| `PATH` | with the directory of the `mt` binary prepended |
+| `MT_KANBAN_SOCKET` | the gateway's local socket (§10) |
+| `PATH` | with the directory of the gateway's `mt` prepended: `$MT_HOME/bin`, below |
 
 **The token is the run's authority, scoped to the run.** It can report on its own task, and comment
 on and create tasks; it cannot move any other task. It works while the run is open (§3.3):
@@ -1048,6 +1048,16 @@ on and create tasks; it cannot move any other task. It works while the run is op
   and **after the run is closed** however it was decided, nothing works: the worker gets
   `run_superseded` instead of acting on a task that has moved on without it.
 
+**The `mt` a run finds** is `$MT_HOME/bin/mt`, a two-line script the gateway writes at each start,
+which runs that gateway's own build of `mt` with the gateway's own node: `dist/mt.js` in an install,
+`src/mt.ts` through tsx in a checkout. Its directory holds nothing else, so putting it first on the
+PATH changes one name, and the agent always reports through the same version of the CLI as the
+gateway serving it. It is in the home, which no workspace may be or contain (§2.3), so nothing is
+written into a workspace.
+
+The token can link only the tasks its run's task created as the child: decomposition is between
+tasks a run created, and a link onto any other task would move it.
+
 **This is cooperative scoping, not confinement.** Every process the agent starts inherits the
 environment, and the token with it. A malicious workload in the workspace could use the token, within
 its scope, for as long as the run lives. The socket is created `0600`, so only the gateway's own user
@@ -1055,8 +1065,8 @@ can connect at all; that, not the token, is the boundary between users.
 
 ### 7.3 `mt kanban` — the worker CLI (new)
 
-Neither the `mt` binary nor the socket exists yet. The binary arrives in plan B, with the `mt role`
-and `mt workspace` commands; the socket and `mt kanban` arrive in plan C (§12).
+The `mt` binary arrived in plan B, with the `mt role` and `mt workspace` commands; the socket and
+`mt kanban` arrive in plan C3 (§12).
 
 ```
 mt kanban show                      # this task + worker context, as JSON
@@ -1065,7 +1075,7 @@ mt kanban review     < handoff.json # {summary, metadata, reviewer?}
 mt kanban changes    < reason.json  # reviewer only: {reason}
 mt kanban block      < block.json   # {kind, reason, parents} — parents for kind dependency (§5.4)
 mt kanban comment    < comment.json # {body, task_id?}
-mt kanban create     < task.json    # {title, body, contract?, assignee, workspace?, parents?, idempotency_key?}
+mt kanban create     < task.json    # {title, body, contract?, assignee, reviewer?, workspace?, parents?, idempotency_key?}
 mt kanban link       < link.json    # {parent_id, child_id}
 ```
 
@@ -1103,7 +1113,7 @@ for it resolves to "no longer bound".
 An agent that narrates its next step and stops without reporting is common, and usually the work is
 done and only the report is missing. So the dispatcher submits a short nudge into **the same
 session** — "you ended your turn without reporting; run `mt kanban complete`, `review` or `block`" —
-up to `kanban.nudge_limit` (default 2) times. If they run out, the run ends `protocol_violation`,
+up to `kanban.nudge_limit` (default 2, at most 10; 0 sends none) times. If they run out, the run ends `protocol_violation`,
 with the agent's last output recorded so the next attempt and the person reading the card see what
 it said.
 
@@ -1120,7 +1130,9 @@ it said.
   is submitted into the run's session in place of the next nudge, with the same key scheme, because a
   person speaking is better information than a reminder. On a decided run the comment is only
   stored: prompting an agent that has reported would start a turn with nothing to report, keep the
-  run from closing, and hold the workspace. The next run on the task reads it in the thread.
+  run from closing, and hold the workspace. The next run on the task reads it in the thread. A forwarded comment does not use up a nudge, and is sent when the run's turn ends, as a
+  nudge would be: a person speaking is not a reminder. A comment by a run, the run's own included, is
+  never forwarded.
 
 ### 7.6 Reports after the run is closed
 
@@ -1401,7 +1413,11 @@ redelivered event is one message.
   gitignored, masked, and given only to that role's agent (§2.5). Every agent runs as the same OS
   user, so one could still read another role's `.env` from disk; that boundary needs per-role users
   or containers.
-- **Worker tokens** are run-scoped and hashed at rest (§7.2); the socket is `0600`; gates run without
+- **Worker tokens** are run-scoped and hashed at rest (§7.2); the socket is `0600`, at
+  `$MT_HOME/run/kanban.sock` in a `0700` directory — or, when that path is too long for a socket
+  (104 bytes on macOS), in a `0700` directory of the gateway's user under the temporary directory,
+  named by the user and the home; a stale socket is removed only if it is the gateway user's own
+  socket and nothing answers on it; gates run without
   the token (§7.7).
 - **Gates execute commands**, so they are operator-defined, run in the task's workspace as the
   gateway's user, and recorded with who defined them.
