@@ -19,6 +19,14 @@ export interface Team {
   notes: readonly string[];
 }
 
+/**
+ * Every secret value the team gives its agents, for the masker (spec §10.1): each
+ * role's, less its maskExempt names. The gateway adds its Lark secret to these.
+ */
+export function teamSecrets(team: Team): string[] {
+  return [...team.roles.values()].flatMap((role) => role.secretValues);
+}
+
 export function loadTeam(config: TeamSettings, env: Env, opts: LoadOptions = {}): Team {
   const resolved = resolveWorkspaces(config.workspaces, config.home, config.dbPath);
   if ('error' in resolved) throw new ConfigError(resolved.error);

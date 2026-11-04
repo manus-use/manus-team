@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { ConfigError, loadConfig, type GatewayConfig } from './config.js';
-import { loadTeam, type Team } from './team.js';
+import { loadTeam, teamSecrets, type Team } from './team.js';
 import { migrate, openDb, type Db } from './db/open.js';
 import { sweepSeen } from './db/dedup.js';
 import { registerWorkspaces } from './db/workspaces.js';
@@ -67,7 +67,7 @@ export function findingsOn(channelId: string, findings: readonly BootFinding[]):
  * main() and createGateway call it.
  */
 export function registerConfiguredSecrets(config: GatewayConfig, team: Team): void {
-  addSecrets([config.lark.appSecret, ...[...team.roles.values()].flatMap((role) => role.secretValues)]);
+  addSecrets([config.lark.appSecret, ...teamSecrets(team)]);
 }
 
 /** How long a shutdown waits for the dispatcher's work before it closes the database. */

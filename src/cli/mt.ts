@@ -1,5 +1,6 @@
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { ConfigError, type Env } from '../config.js';
+import { gateAdd, gateList, gateRemove } from './gate.js';
 import { kanbanCommand } from './kanban.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
@@ -15,6 +16,9 @@ import { workspaceAdd, workspaceList } from './workspace.js';
  *
  * `mt kanban` is the one that talks to the gateway, through its socket, and only
  * with the authority of a run's token, from the run's environment.
+ *
+ * `mt kanban gate` is the operator's, and the one exception to writing files
+ * only: it writes the board's database, through the board's own service (spec §7.7).
  */
 
 export type Git = (args: readonly string[]) => Promise<{ code: number; stderr: string }>;
@@ -41,6 +45,9 @@ const USAGE = [
   '  mt workspace add <name> --clone <git-url>',
   '  mt workspace list',
   '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
+  '  mt kanban gate add <task_id> [--timeout <s>] -- <command...>',
+  '  mt kanban gate list <task_id>',
+  '  mt kanban gate remove <task_id> <gate_id>',
 ].join('\n');
 
 class UsageError extends Error {}
@@ -69,6 +76,34 @@ export function table(rows: readonly (readonly string[])[]): string[] {
   const widths: number[] = [];
   for (const row of rows) row.forEach((cell, i) => (widths[i] = Math.max(widths[i] ?? 0, cell.length)));
   return rows.map((row) => row.map((cell, i) => cell.padEnd(widths[i] ?? 0)).join('  ').trimEnd());
+}
+
+/** `mt kanban gate …`: the operator's gate commands. A command's words are joined with spaces, as ssh joins them. */
+function gate(argv: readonly string[], io: MtIo): number {
+  const [sub, ...args] = argv;
+  if (sub === 'add') {
+    const { values, positionals } = parse(args, { timeout: { type: 'string' } });
+    const [taskId, ...words] = positionals;
+    if (taskId === undefined || words.length === 0) {
+      throw new UsageError('kanban gate add takes a task id, then -- and the command');
+    }
+    const timeout = values.timeout;
+    if (timeout !== undefined && !/^[0-9]+$/.test(timeout)) throw new UsageError('--timeout is a whole number of seconds');
+    return gateAdd(taskId, words.join(' '), timeout === undefined ? undefined : Number(timeout), io);
+  }
+  if (sub === 'list') {
+    const [taskId, extra] = parse(args, {}).positionals;
+    if (taskId === undefined || extra !== undefined) throw new UsageError('kanban gate list takes a task id');
+    return gateList(taskId, io);
+  }
+  if (sub === 'remove') {
+    const [taskId, gateId, extra] = parse(args, {}).positionals;
+    if (taskId === undefined || gateId === undefined || extra !== undefined || !/^[0-9]+$/.test(gateId)) {
+      throw new UsageError('kanban gate remove takes a task id and a gate id');
+    }
+    return gateRemove(taskId, Number(gateId), io);
+  }
+  throw new UsageError('kanban gate takes add, list or remove');
 }
 
 /** Exit codes: 0 done, 1 refused or a check failed, 2 the command line was wrong. */
@@ -117,6 +152,7 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       // reported as `mt: …` rather than escaping as a stack trace.
       return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, io);
     }
+    if (group === 'kanban' && command === 'gate') return gate(rest, io);
     if (group === 'kanban') return await kanbanCommand(command, rest, io);
     if (group === 'workspace' && command === 'list') {
       expectNothing(parse(rest, {}).positionals, 'workspace list');
