@@ -671,6 +671,7 @@ describe('loadConfig: the kanban section', () => {
       sweepIntervalS: 60,
       strandedAfterS: 1_800,
       nudgeLimit: 2,
+      blockRecurrenceLimit: 2,
     });
     expect(load({ MT_MAX_LIVE_SESSIONS: '3' }).kanban.maxRunning).toBe(3);
   });
@@ -689,6 +690,7 @@ describe('loadConfig: the kanban section', () => {
           sweep_interval_s: 30,
           stranded_after_s: 120,
           nudge_limit: 1,
+          block_recurrence_limit: 3,
         },
       }),
     );
@@ -702,6 +704,7 @@ describe('loadConfig: the kanban section', () => {
       sweepIntervalS: 30,
       strandedAfterS: 120,
       nudgeLimit: 1,
+      blockRecurrenceLimit: 3,
     });
   });
 
@@ -709,10 +712,6 @@ describe('loadConfig: the kanban section', () => {
     // camelCase, as the rest of the file is, is not this section's spelling.
     expect(() => load({}, yamlFile({ kanban: { failureLimit: 3 } }))).toThrow(
       'unknown setting kanban.failureLimit (known: enabled, max_running, failure_limit',
-    );
-    // Plan D's setting is not accepted before it does anything.
-    expect(() => load({}, yamlFile({ kanban: { block_recurrence_limit: 2 } }))).toThrow(
-      'unknown setting kanban.block_recurrence_limit',
     );
   });
 
@@ -780,6 +779,19 @@ describe('loadConfig: the kanban section', () => {
     );
     expect(cfg.kanban.sweepIntervalS).toBe(3600);
     expect(cfg.kanban.maxRunning).toBe(256);
+  });
+});
+
+describe('loadConfig: kanban.block_recurrence_limit', () => {
+  it('is a positive whole number, at most 100, and is file only', () => {
+    expect(load({}, yamlFile({ kanban: { block_recurrence_limit: 1 } })).kanban.blockRecurrenceLimit).toBe(1);
+    expect(() => load({}, yamlFile({ kanban: { block_recurrence_limit: 0 } }))).toThrow(
+      'kanban.block_recurrence_limit must be a positive integer',
+    );
+    expect(() => load({}, yamlFile({ kanban: { block_recurrence_limit: 101 } }))).toThrow(
+      'kanban.block_recurrence_limit must be at most 100, got 101',
+    );
+    expect(load({ MT_KANBAN_BLOCK_RECURRENCE_LIMIT: '5' }).kanban.blockRecurrenceLimit).toBe(2);
   });
 });
 

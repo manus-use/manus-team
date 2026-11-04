@@ -137,6 +137,11 @@ export interface KanbanSettings {
   strandedAfterS: number;
   /** Reminders sent to a run whose turn ended without a report, before it is a protocol violation (spec §7.5). */
   nudgeLimit: number;
+  /**
+   * Blocks of the same kind in a row, unblocked in between, at which a blocked
+   * notice stops inviting another unblock and suggests rewriting the task (spec §5.4).
+   */
+  blockRecurrenceLimit: number;
 }
 
 export const KANBAN_DEFAULTS: Omit<KanbanSettings, 'maxRunning'> = {
@@ -148,6 +153,7 @@ export const KANBAN_DEFAULTS: Omit<KanbanSettings, 'maxRunning'> = {
   sweepIntervalS: 60,
   strandedAfterS: 30 * 60,
   nudgeLimit: 2,
+  blockRecurrenceLimit: 2,
 };
 
 /** The section's numeric keys, as the file spells them, and the setting each sets. */
@@ -160,6 +166,7 @@ const KANBAN_NUMBERS = {
   sweep_interval_s: 'sweepIntervalS',
   stranded_after_s: 'strandedAfterS',
   nudge_limit: 'nudgeLimit',
+  block_recurrence_limit: 'blockRecurrenceLimit',
 } as const;
 
 /**
@@ -178,6 +185,7 @@ const KANBAN_MAXIMA: Readonly<Record<keyof typeof KANBAN_NUMBERS, number>> = {
   sweep_interval_s: 3600,
   stranded_after_s: 30 * 24 * 60 * 60,
   nudge_limit: 10,
+  block_recurrence_limit: 100,
 };
 
 /** The numeric keys for which 0 is a setting: no reminder at all before a run that stopped without reporting is ended. */
@@ -300,6 +308,7 @@ export function loadConfig(
       sweepIntervalS: file.kanban.sweepIntervalS ?? KANBAN_DEFAULTS.sweepIntervalS,
       strandedAfterS: file.kanban.strandedAfterS ?? KANBAN_DEFAULTS.strandedAfterS,
       nudgeLimit: file.kanban.nudgeLimit ?? KANBAN_DEFAULTS.nudgeLimit,
+      blockRecurrenceLimit: file.kanban.blockRecurrenceLimit ?? KANBAN_DEFAULTS.blockRecurrenceLimit,
     },
   };
 }
