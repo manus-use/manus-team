@@ -135,6 +135,8 @@ export interface KanbanSettings {
   sweepIntervalS: number;
   /** How long a task nobody can be given waits before it is reported stranded (spec §4.2). */
   strandedAfterS: number;
+  /** Reminders sent to a run whose turn ended without a report, before it is a protocol violation (spec §7.5). */
+  nudgeLimit: number;
 }
 
 export const KANBAN_DEFAULTS: Omit<KanbanSettings, 'maxRunning'> = {
@@ -145,6 +147,7 @@ export const KANBAN_DEFAULTS: Omit<KanbanSettings, 'maxRunning'> = {
   defaultMaxRuntimeS: 4 * 60 * 60,
   sweepIntervalS: 60,
   strandedAfterS: 30 * 60,
+  nudgeLimit: 2,
 };
 
 /** The section's numeric keys, as the file spells them, and the setting each sets. */
@@ -156,6 +159,7 @@ const KANBAN_NUMBERS = {
   default_max_runtime_s: 'defaultMaxRuntimeS',
   sweep_interval_s: 'sweepIntervalS',
   stranded_after_s: 'strandedAfterS',
+  nudge_limit: 'nudgeLimit',
 } as const;
 
 /**
@@ -173,7 +177,11 @@ const KANBAN_MAXIMA: Readonly<Record<keyof typeof KANBAN_NUMBERS, number>> = {
   default_max_runtime_s: 7 * 24 * 60 * 60,
   sweep_interval_s: 3600,
   stranded_after_s: 30 * 24 * 60 * 60,
+  nudge_limit: 10,
 };
+
+/** The numeric keys for which 0 is a setting: no reminder at all before a run that stopped without reporting is ended. */
+const KANBAN_ZERO_ALLOWED: ReadonlySet<string> = new Set(['nudge_limit']);
 
 /**
  * What `loadTeam` and the `mt` commands need: where the gateway's files are, the
@@ -291,6 +299,7 @@ export function loadConfig(
       defaultMaxRuntimeS: file.kanban.defaultMaxRuntimeS ?? KANBAN_DEFAULTS.defaultMaxRuntimeS,
       sweepIntervalS: file.kanban.sweepIntervalS ?? KANBAN_DEFAULTS.sweepIntervalS,
       strandedAfterS: file.kanban.strandedAfterS ?? KANBAN_DEFAULTS.strandedAfterS,
+      nudgeLimit: file.kanban.nudgeLimit ?? KANBAN_DEFAULTS.nudgeLimit,
     },
   };
 }
@@ -714,7 +723,9 @@ function parseFile(path: string, text: string): FileConfig {
   const enabled = bool(path, 'kanban.enabled', kanbanRaw['enabled']);
   if (enabled !== undefined) out.kanban.enabled = enabled;
   for (const [key, setting] of Object.entries(KANBAN_NUMBERS)) {
-    const n = positiveInt(path, `kanban.${key}`, kanbanRaw[key]);
+    const n = KANBAN_ZERO_ALLOWED.has(key)
+      ? wholeNumber(path, `kanban.${key}`, kanbanRaw[key])
+      : positiveInt(path, `kanban.${key}`, kanbanRaw[key]);
     if (n === undefined) continue;
     const max = KANBAN_MAXIMA[key as keyof typeof KANBAN_NUMBERS];
     if (n > max) throw new ConfigError(`${path}: kanban.${key} must be at most ${max}, got ${n}`);
@@ -816,6 +827,14 @@ function positiveInt(path: string, key: string, value: unknown): number | undefi
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     throw new ConfigError(`${path}: ${key} must be a positive integer, got ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+function wholeNumber(path: string, key: string, value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new ConfigError(`${path}: ${key} must be a whole number, 0 or more, got ${JSON.stringify(value)}`);
   }
   return value;
 }

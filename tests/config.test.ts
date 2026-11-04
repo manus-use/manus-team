@@ -670,6 +670,7 @@ describe('loadConfig: the kanban section', () => {
       defaultMaxRuntimeS: 14_400,
       sweepIntervalS: 60,
       strandedAfterS: 1_800,
+      nudgeLimit: 2,
     });
     expect(load({ MT_MAX_LIVE_SESSIONS: '3' }).kanban.maxRunning).toBe(3);
   });
@@ -687,6 +688,7 @@ describe('loadConfig: the kanban section', () => {
           default_max_runtime_s: 600,
           sweep_interval_s: 30,
           stranded_after_s: 120,
+          nudge_limit: 1,
         },
       }),
     );
@@ -699,6 +701,7 @@ describe('loadConfig: the kanban section', () => {
       defaultMaxRuntimeS: 600,
       sweepIntervalS: 30,
       strandedAfterS: 120,
+      nudgeLimit: 1,
     });
   });
 
@@ -707,8 +710,7 @@ describe('loadConfig: the kanban section', () => {
     expect(() => load({}, yamlFile({ kanban: { failureLimit: 3 } }))).toThrow(
       'unknown setting kanban.failureLimit (known: enabled, max_running, failure_limit',
     );
-    // Plan C3's and plan D's settings are not accepted before they do anything.
-    expect(() => load({}, yamlFile({ kanban: { nudge_limit: 2 } }))).toThrow('unknown setting kanban.nudge_limit');
+    // Plan D's setting is not accepted before it does anything.
     expect(() => load({}, yamlFile({ kanban: { block_recurrence_limit: 2 } }))).toThrow(
       'unknown setting kanban.block_recurrence_limit',
     );
@@ -778,5 +780,21 @@ describe('loadConfig: the kanban section', () => {
     );
     expect(cfg.kanban.sweepIntervalS).toBe(3600);
     expect(cfg.kanban.maxRunning).toBe(256);
+  });
+});
+
+describe('loadConfig: kanban.nudge_limit', () => {
+  it('takes 0, meaning no reminder, and refuses a negative or a fraction', () => {
+    expect(load({}, yamlFile({ kanban: { nudge_limit: 0 } })).kanban.nudgeLimit).toBe(0);
+    expect(() => load({}, yamlFile({ kanban: { nudge_limit: -1 } }))).toThrow(
+      'kanban.nudge_limit must be a whole number, 0 or more, got -1',
+    );
+    expect(() => load({}, yamlFile({ kanban: { nudge_limit: 1.5 } }))).toThrow('kanban.nudge_limit must be a whole number');
+  });
+
+  it('refuses more than 10 reminders, and is file only', () => {
+    expect(() => load({}, yamlFile({ kanban: { nudge_limit: 11 } }))).toThrow('kanban.nudge_limit must be at most 10, got 11');
+    expect(load({}, yamlFile({ kanban: { nudge_limit: 10 } })).kanban.nudgeLimit).toBe(10);
+    expect(load({ MT_KANBAN_NUDGE_LIMIT: '5' }).kanban.nudgeLimit).toBe(2);
   });
 });

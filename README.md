@@ -121,6 +121,7 @@ itself, for instance in a file it reads, is not known to the gateway and is not 
 | `kanban.transient_limit`, `kanban.transient_cooldown_s` | — | A throttled run is retried after a cooldown, 300 s by default, doubling each time up to an hour; after 10 in a row the task blocks. At most 1000 in a row, and a first cooldown of at most 3600 s. |
 | `kanban.default_max_runtime_s` | — | A run's wall-clock limit unless its task sets one. Default 4 hours, at most 7 days. |
 | `kanban.sweep_interval_s`, `kanban.stranded_after_s` | — | How often the dispatcher checks runtimes, cooldowns and stranded tasks (default 60 s), and how long a task nobody can take waits before it is reported stranded (default 30 min). At most 3600 s and 30 days. |
+| `kanban.nudge_limit` | — | Reminders sent into a run whose turn ended without a report, before the run ends as a protocol violation. Default 2; 0 sends none. At most 10. |
 | `db`, `downloads` | `MT_DB`, `MT_DOWNLOAD_DIR` | Derived from `MT_HOME` unless set. |
 | — | `MT_HOME` | State directory, and where the config file is looked for. Default `~/.manus-team`. |
 
