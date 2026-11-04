@@ -127,11 +127,11 @@ Each is the reading most consistent with the rest of the spec. Decisions 5, 7 an
 - A role whose `passEnv` names `PATH` brings the gateway's PATH in through its `agent.env`, but the run's PATH still starts with the shim's directory.
 - A login shell the agent starts may reorder PATH (macOS's `path_helper`), so a system `mt`, such as Linux's `mt-st`, could win there.
 - A workspace can shadow the shim with its own `mt` only through `node_modules/.bin`, when the agent runs it through `npm` or `npx`.
-- A comment that arrives while the run's last nudge is being answered, after which the run still does not report, is not forwarded: the run ends `protocol_violation`, and the next attempt reads it in the thread.
+- Forwarded comments are sent even after the nudges run out: a person's comment that arrives while the run's last nudge is being answered is forwarded, and does not use up a nudge.
 
 ### What later plans need
 
-- **C4:** `KanbanService.complete` and `requestReview` are where gates go; the worker API needs no change, and the CLI already waits 10 minutes. Build a gate's environment from `roles`, never from `Dispatcher.envFor`.
+- **C4:** `KanbanService.complete` and `requestReview` are where gates go, and the CLI already waits 10 minutes. Gates must not be synchronous: a `spawnSync` would freeze the gateway, chat included. So C4 makes `KanbanService.complete` and `requestReview`, and `WorkerApi.handle` and `#act`, async; re-checks the run inside the transition, after the gates, since it may have been decided meanwhile; and adds in-flight request draining to the socket's `close()` (below). Build a gate's environment from `roles`, never from `Dispatcher.envFor`.
 - **D:** `dispatcher.cancel(runId)` after a superseding command; `dispatcher.pass()` after the others; subscriptions copied in `createTask` when `createdVia.kind === 'run'`.
 - **C4, the socket's close.** `close()` drops every connection, including those whose request is still being handled. Once C4 makes `complete` and `review` asynchronous (gates), a command could be applied while its client sees `unreachable`, and the retry the protocol asks for would then get `already_reported`. C4 should drain in-flight requests on close, or make an `already_reported` answer tell the worker that its first report was applied.
 
@@ -4403,15 +4403,25 @@ The review of the finished plan, and that of Tasks 1–3, found the following, f
 - **The README** says to keep nothing else in `$MT_HOME/bin`, which comes first on every run's PATH, and mentions the terminal refusal and the gateway lock.
 - **The dispatcher.** A role's run claimed without a token, which means the pass and the claim disagreed about the assignee, is noted instead of skipped silently; the next boot ends it. `#run`'s `finally` says why the shutdown path, which removes the token while the run is still open in the database, is a deliberate exception.
 
+The final review then found the following, fixed the same way:
+
+- **"Create, then link" cannot sequence follow-ups.** The worker API's `changed` hook runs `pass()` inside `create`, so a claimable child is claimed before `create` answers, and a later `link` onto it is refused with `run_open`. The work prompt, spec §7.2 and the README now say that `link` only works on a task that has not started yet, and that follow-ups are sequenced by creating them in order, each naming the earlier ones in `"parents"`.
+- **The shim is written once the home is held.** `createGateway` wrote `$MT_HOME/bin/mt` before the lock was taken, so a refused second gateway rewrote the running one's. The dispatcher is now given `join(config.home, 'bin')`, and `start()` calls `writeMtShim` right after `claimSocketPath` succeeds (`tests/gateway-startup.test.ts`, with the channel stubbed).
+- **A cancel made while the agent is starting is delivered.** `cancel()` on a run whose actor was not live yet marked it cancelling and returned false, and nothing sent the cancel. `OpenRun.cancelSent` records whether it reached the actor; the cancelling branch of `#limitRuntimes` sends it once the actor is live, at the next sweep, and gives the turn its grace from then (`tests/kanban-cancel.test.ts`).
+- **A second holder of the gateway lock leaves it alone.** When the lock already named this process, the second holder's `release()` removed the lock the first relied on. Only the `lockGateway` call that created the file now removes it (`tests/kanban-socket.test.ts`).
+- **The token scan reads blobs.** The end-to-end check that only the token's hash is stored decodes Buffer columns to UTF-8 instead of `JSON.stringify`-ing them.
+- **Exit codes are documented.** `mt kanban` exits 0 when done, 1 when refused, 2 for a wrong command line (README, spec §7.3).
+- Smaller fixes: a stray fence in the `#noteStranded` docblock, a stale comment about worker tokens in `src/index.ts`, and the known limitation and C4 note above.
+
 Known limitation: two gateways started at the same moment on a home whose last gateway died can both find its stale lock, and the later one's unlink can then remove the earlier one's fresh lock. The window is between reading the stale lock and removing it; a takeover that closes it needs a second lock of its own, and is not done here.
 
-Counts after: `Tests  1061 passed (1061)` unit, `Tests  53 passed (53)` end to end.
+Counts after the first review: `Tests  1061 passed (1061)` unit, `Tests  53 passed (53)` end to end. After the final review: `Tests  1064 passed (1064)` unit, `Tests  53 passed (53)` end to end.
 
 ---
 
 ## Done when
 
-- `npm test` gives `Tests  1061 passed (1061)`, after the review follow-ups. `npm run test:e2e` gives `Tests  53 passed (53)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  1064 passed (1064)`, after the review follow-ups. `npm run test:e2e` gives `Tests  53 passed (53)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table, and only `src/kanban/service.ts` imports it (the guard in `tests/kanban-service.test.ts`). `src/kanban/worker.ts` writes nothing.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - A fake agent process, started by the real dispatcher through the real CLI driver, reports `complete` by running `mt kanban` by name, through the shim, the real socket and the real worker API; and, stopping without a report, is nudged in its own session and then reports (`tests/kanban-worker.e2e.ts`).
