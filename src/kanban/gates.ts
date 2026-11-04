@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { buildEnv } from '../driver/env.js';
 import type { Role } from '../roles.js';
-import { redactKnownSecrets } from '../secrets.js';
+import { redactKnownSecrets, withholdSecretSuffix } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
 import type { GateRow } from './types.js';
 
@@ -20,7 +20,9 @@ import type { GateRow } from './types.js';
  * suite has no business reporting on the board.
  *
  * **Its output is masked** (spec §10.1) before it is cut to its last
- * GATE_OUTPUT_BYTES, so a cut cannot leave the start of a secret showing.
+ * GATE_OUTPUT_BYTES, so a cut cannot leave the start of a secret showing. The
+ * raw window read before that, its last RAW_OUTPUT_BYTES, is cut before masking,
+ * so `rawTail` drops the end of a secret that cut split.
  */
 
 /** What one gate process did. */
@@ -73,7 +75,9 @@ export interface GateRun {
 /** What is kept of a gate's output, in UTF-8 bytes, after masking. */
 export const GATE_OUTPUT_BYTES = 4 * 1024;
 /** What is read of a gate's output before masking: its last bytes. */
-const RAW_OUTPUT_BYTES = 64 * 1024;
+export const RAW_OUTPUT_BYTES = 64 * 1024;
+/** Begins the raw window when the output was longer than it. */
+const CUT_MARKER = '[earlier output cut]\n';
 /** How long a gate that was told to stop has before it is killed. */
 const KILL_GRACE_MS = 2_000;
 /**
@@ -115,6 +119,18 @@ function tailBytes(text: string, max: number): string {
 }
 
 /**
+ * The last RAW_OUTPUT_BYTES of what a gate wrote, as text, not yet masked. When
+ * the start was cut away, the cut may have split a secret, whose end would then
+ * escape the masker: leading text that ends a known secret is dropped, and the
+ * window begins with CUT_MARKER.
+ */
+export function rawTail(all: Buffer): string {
+  if (all.length <= RAW_OUTPUT_BYTES) return all.toString('utf8');
+  const tail = all.subarray(all.length - RAW_OUTPUT_BYTES).toString('utf8').replace(/^\uFFFD+/, '');
+  return `${CUT_MARKER}${withholdSecretSuffix(tail)}`;
+}
+
+/**
  * A gate's environment: the allowlist an agent gets from the gateway's own
  * environment, and its role's values. Nothing named `MT_KANBAN_*`, whatever put
  * it there.
@@ -147,12 +163,22 @@ export async function runGates(gates: readonly GateRow[], ctx: GateContext): Pro
       return { passed: false, aborted: true, results, notRun: gates.length - i };
     }
     const started = clock.now();
-    const exit = await ctx.runner(gate.command, {
-      cwd: ctx.cwd,
-      env: ctx.env,
-      timeoutMs: gate.timeoutS * 1000,
-      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
-    });
+    const exit = await ctx
+      .runner(gate.command, {
+        cwd: ctx.cwd,
+        env: ctx.env,
+        timeoutMs: gate.timeoutS * 1000,
+        ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+      })
+      // A runner should never reject; one that does fails its gate, which is recorded, masked, like any other.
+      .catch(
+        (err: unknown): GateExit => ({
+          exitCode: null,
+          signal: null,
+          timedOut: false,
+          output: `the gate could not run: ${err instanceof Error ? err.message : String(err)}`,
+        }),
+      );
     const result: GateResult = {
       gateId: gate.id,
       command: gate.command,
@@ -196,10 +222,7 @@ export const spawnGate: GateRunner = (command, opts) =>
       kept += chunk.length;
       while (chunks.length > 1 && kept - (chunks[0]?.length ?? 0) >= RAW_OUTPUT_BYTES) kept -= chunks.shift()?.length ?? 0;
     };
-    const text = (): string => {
-      const all = Buffer.concat(chunks);
-      return all.subarray(Math.max(0, all.length - RAW_OUTPUT_BYTES)).toString('utf8').replace(/^\uFFFD+/, '');
-    };
+    const text = (): string => rawTail(Buffer.concat(chunks));
 
     let child: ReturnType<typeof spawn>;
     try {
@@ -247,6 +270,8 @@ export const spawnGate: GateRunner = (command, opts) =>
       stop();
     }, opts.timeoutMs);
     opts.signal?.addEventListener('abort', stop, { once: true });
+    // A signal aborted before the listener was added never fires it.
+    if (opts.signal?.aborted === true) stop();
     child.stdout?.on('data', keep);
     child.stderr?.on('data', keep);
     child.once('error', (err) => finish(`the gate could not start: ${err.message}`));

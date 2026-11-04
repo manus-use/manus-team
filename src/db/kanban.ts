@@ -368,6 +368,12 @@ export interface ClaimInput {
   tokenHash?: string | null;
   /** The configured workspace names: an agent run in any other is unassignable. */
   workspaces: ReadonlySet<string>;
+  /**
+   * The workspaces whose gates a report is running now, each with the task
+   * reported on. A task's workspace may be resolved only here, so a claim whose
+   * workspace resolves to one of them is refused here, in the transaction.
+   */
+  reportingIn?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -436,6 +442,10 @@ export function claim(db: Db, input: ClaimInput, now: number): Result<{ run: Run
       } else {
         workspace = resolved.workspace;
       }
+    }
+    const testing = workspace === null ? undefined : input.reportingIn?.get(workspace);
+    if (testing !== undefined) {
+      return refuse('not_claimable', `workspace ${workspace ?? ''} is running the gates of a report on task ${testing}`);
     }
     if (agent) {
       if (workspace === null || !input.workspaces.has(workspace)) {

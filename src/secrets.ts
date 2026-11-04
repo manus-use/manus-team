@@ -201,6 +201,45 @@ export function withholdSecretPrefix(text: string): string {
 }
 
 /**
+ * withholdSecretPrefix's mirror, for text whose start was cut away: the last
+ * bytes of a gate's output. Leading text that is the end of a known secret is
+ * dropped, four characters or more, so a cut through a secret leaves none of it
+ * showing once the rest is masked.
+ *
+ * Apply this to raw text, before redactKnownSecrets, and mask what it returns. A
+ * complete secret is never cut part-way: when the cut falls inside one, it moves
+ * on to that secret's end.
+ */
+export function withholdSecretSuffix(text: string): string {
+  let cut = 0;
+  for (const secret of ordered) {
+    const floor = Math.max(cut, MIN_PREFIX_LENGTH - 1);
+    for (let n = Math.min(secret.length - 1, text.length); n > floor; n -= 1) {
+      if (text.startsWith(secret.slice(secret.length - n))) {
+        cut = n;
+        break;
+      }
+    }
+  }
+  if (cut === 0) return text;
+  let drop = cut;
+  // Each move is forwards, so this ends.
+  for (let moved = true; moved; ) {
+    moved = false;
+    for (const secret of ordered) {
+      // The last occurrence that could straddle the cut: starts before it, ends after.
+      if (drop === 0) continue;
+      const at = text.lastIndexOf(secret, drop - 1);
+      if (at !== -1 && at + secret.length > drop) {
+        drop = at + secret.length;
+        moved = true;
+      }
+    }
+  }
+  return text.slice(drop);
+}
+
+/**
  * Mask the string values of a JSON-shaped payload, value by value. Serialized
  * text is not masked, because JSON escaping changes a secret containing `"` or
  * `\` so that it no longer matches. A string directly under one of

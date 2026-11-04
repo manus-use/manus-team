@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { spawnGate } from '../src/kanban/gates.js';
+import { runGates, spawnGate } from '../src/kanban/gates.js';
+import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 
 /**
  * The real gate runner (spec §7.7): `/bin/sh -c`, in its own process group, in
@@ -93,6 +94,39 @@ describe('spawnGate', () => {
   it('stops a gate when the gateway stops', async () => {
     const stop = new AbortController();
     setTimeout(() => stop.abort(), 200);
+    const started = Date.now();
+    const r = await spawnGate('sleep 30', { cwd: dir, env, timeoutMs: 20_000, signal: stop.signal });
+    expect(r.timedOut).toBe(false);
+    expect(r.signal === 'SIGTERM' || r.exitCode === 143).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('leaves no fragment of a secret its 64 KiB window split', async () => {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const secret = Array.from({ length: 1000 }, (_, i) => alphabet[(i * 31 + i * i * 7) % alphabet.length]).join('');
+    clearSecrets();
+    addSecrets([secret]);
+    try {
+      // 70 lines of 1001 bytes: the window's edge falls inside one.
+      const run = await runGates([{ id: 1, taskId: 'k_1', command: `for i in $(seq 70); do echo ${secret}; done; exit 1`, timeoutS: 30, createdBy: 'operator:test', createdAt: 0 }], {
+        cwd: dir,
+        env,
+        runner: spawnGate,
+      });
+      const output = run.results[0]?.output ?? '';
+      expect(output.startsWith('[earlier output cut]\n')).toBe(true);
+      expect(output).toContain(MASK);
+      for (let i = 0; i + 8 <= secret.length; i += 1) {
+        if (output.includes(secret.slice(i, i + 8))) throw new Error(`a fragment at ${i} shows`);
+      }
+    } finally {
+      clearSecrets();
+    }
+  });
+
+  it('stops a gate at once when the gateway had stopped before it started', async () => {
+    const stop = new AbortController();
+    stop.abort();
     const started = Date.now();
     const r = await spawnGate('sleep 30', { cwd: dir, env, timeoutMs: 20_000, signal: stop.signal });
     expect(r.timedOut).toBe(false);

@@ -195,10 +195,14 @@ function regularFile(path: string): void {
  * Whether a gate command holds a known secret (spec §10.1): as written, with its
  * control characters stripped, as the escapers match it, and with the shell's
  * quotes and backslashes taken out, so `sk\$x` or `'sk''x'` -- which the shell
- * runs as the secret -- count as well.
+ * runs as the secret -- count as well. A backslash-newline, which the shell
+ * removes, is taken out first, and that form is matched with its control
+ * characters stripped too.
  */
 function holdsSecret(command: string): boolean {
-  const forms = [command, stripControl(command), command.replace(/['"\\]/g, '')];
+  // A backslash-newline is a continuation the shell removes, so it goes before the quotes do.
+  const unquoted = command.replace(/\\\r?\n/g, '').replace(/['"\\]/g, '');
+  const forms = [command, stripControl(command), unquoted, stripControl(unquoted)];
   return forms.some((form) => redactKnownSecrets(form) !== form);
 }
 
@@ -387,7 +391,13 @@ export class KanbanService {
     const r = resolved.ok
       ? board.claim(
           this.#db,
-          { taskId, claimant: resolved.claimant, tokenHash: opts.tokenHash ?? null, workspaces: this.#workspaces },
+          {
+            taskId,
+            claimant: resolved.claimant,
+            tokenHash: opts.tokenHash ?? null,
+            workspaces: this.#workspaces,
+            reportingIn: this.#reportingWorkspaces(),
+          },
           now,
         )
       : resolved;
@@ -412,6 +422,13 @@ export class KanbanService {
    */
   async settled(taskId: string): Promise<void> {
     await this.#reporting.get(taskId)?.done.catch(() => undefined);
+  }
+
+  /** Each workspace a report is running its checks in, with the task reported on. */
+  #reportingWorkspaces(): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const [taskId, r] of this.#reporting) if (r.workspace !== null) out.set(r.workspace, taskId);
+    return out;
   }
 
   /** A task whose report is running its checks in this workspace, if any. */
@@ -508,7 +525,7 @@ export class KanbanService {
   addGate(taskId: string, gate: { command: string; timeoutS?: number }, by: string): Result<{ gate: GateRow }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
-    if (!isText(by)) return board.refuse('invalid', 'who defines a gate is text');
+    if (!isText(by) || by.trim() === '') return board.refuse('invalid', 'who defines a gate is text, not blank');
     if (!isRecord(gate) || !isText(gate.command) || gate.command.trim() === '') {
       return board.refuse('invalid', 'a gate is a command, as text');
     }
@@ -549,7 +566,7 @@ export class KanbanService {
   removeGate(taskId: string, gateId: number, by: string): Result<{ gate: GateRow }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
-    if (!isText(by)) return board.refuse('invalid', 'who removes a gate is text');
+    if (!isText(by) || by.trim() === '') return board.refuse('invalid', 'who removes a gate is text, not blank');
     if (!Number.isSafeInteger(gateId) || gateId < 1) return board.refuse('invalid', 'a gate id is a whole number');
     return board.removeGate(this.#db, taskId, gateId, by, this.#clock.now());
   }
@@ -634,6 +651,15 @@ export class KanbanService {
     }
     const now = board.reportCheck(this.#db, taskId, by, kind, reviewer);
     if (!now.ok) return now;
+    // One report's checks in a workspace at a time: two reports' gates in one checkout would trip over each other.
+    const other = now.task.workspace === null ? undefined : this.#reportingIn(now.task.workspace);
+    if (other !== undefined) {
+      return board.refuse(
+        'report_in_progress',
+        `workspace ${now.task.workspace ?? ''} is running the gates of a report on another task, ${other}; ` +
+          'wait for that answer, then report again',
+      );
+    }
     const checked = (async (): Promise<Result<T>> => {
       const seen = await this.#observe(now.run, opts.signal);
       const gates = await this.#gates(now.task, by, now.run, kind, opts.signal);

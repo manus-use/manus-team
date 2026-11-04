@@ -7,6 +7,7 @@ import {
   redactValues,
   removeSecrets,
   withholdSecretPrefix,
+  withholdSecretSuffix,
 } from '../src/secrets.js';
 
 beforeEach(() => clearSecrets());
@@ -56,6 +57,31 @@ describe('withholdSecretPrefix', () => {
   it('keeps a complete secret that ends before the cut', () => {
     addSecrets(['abcdefgh', 'sk-test-123456']);
     expect(withholdSecretPrefix('k abcdefgh and sk-te')).toBe('k abcdefgh and ');
+  });
+});
+
+describe('withholdSecretSuffix', () => {
+  it('drops leading text that is the end of a secret, four characters or longer', () => {
+    addSecrets(['sk-test-123456']);
+    expect(withholdSecretSuffix('3456 is the key')).toBe(' is the key');
+    expect(withholdSecretSuffix('456 is the key')).toBe('456 is the key');
+    expect(withholdSecretSuffix('nothing here')).toBe('nothing here');
+  });
+
+  it('works on raw text, so a secret inside a longer one cannot hide the longer one', () => {
+    addSecrets(['longer-secret-value', 'longer-secret-value-abcdefgh']);
+    expect(withholdSecretSuffix('ret-value-abcdefgh k')).toBe(' k');
+  });
+
+  it('never cuts a complete secret part-way: the cut moves to its end', () => {
+    // The start of the complete one is the end of the other.
+    addSecrets(['abcdefgh', 'other-value-abcd']);
+    expect(withholdSecretSuffix('abcdefgh k')).toBe(' k');
+  });
+
+  it('keeps a complete secret that starts after the cut', () => {
+    addSecrets(['abcdefgh', 'sk-test-123456']);
+    expect(withholdSecretSuffix('3456 and abcdefgh k')).toBe(' and abcdefgh k');
   });
 });
 

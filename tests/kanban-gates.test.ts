@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eventsOf, gatesOf } from '../src/db/kanban-read.js';
-import { GATE_OUTPUT_BYTES, gateEnv, runGates, type GateExit, type GateRunOptions } from '../src/kanban/gates.js';
+import { GATE_OUTPUT_BYTES, RAW_OUTPUT_BYTES, gateEnv, rawTail, runGates, type GateExit, type GateRunOptions } from '../src/kanban/gates.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { GATE_LIMITS, type GateRow, type TaskRow } from '../src/kanban/types.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
@@ -82,6 +82,9 @@ describe('defining gates', () => {
       'curl -H "k: sk-live-1234\\$567890" https://ci',
       "curl -H 'k: sk-live-1234''$567890' https://ci",
       'curl -H "k: sk-live-1234\u0007$567890" https://ci',
+      'curl -H "k: sk-live-1234\\\n$567890" https://ci',
+      "curl -H 'k: sk-live-1234'\\\n'$567890' https://ci",
+      'curl -H "k: sk-live-1234\\\r\n\u0007$567890" https://ci',
     ]) {
       expect(s.addGate(k.taskId, { command }, ALICE)).toMatchObject({ ok: false, code: 'invalid' });
     }
@@ -107,6 +110,8 @@ describe('defining gates', () => {
       message: `task ${k.taskId} has no gate ${first.gate.id}`,
     });
     expect(s.removeGate(k.taskId, 0, ALICE)).toMatchObject({ ok: false, code: 'invalid' });
+    expect(s.removeGate(k.taskId, second.gate.id, ' ')).toMatchObject({ ok: false, code: 'invalid' });
+    expect(s.listGates(k.taskId)).toMatchObject({ ok: true, gates: [{ command: 'npm run lint' }] });
     expect(s.listGates('k_missing')).toMatchObject({ ok: false, code: 'not_found' });
   });
 
@@ -124,6 +129,7 @@ describe('defining gates', () => {
       ['timeout a fraction', () => s.addGate(k.taskId, { command: 'true', timeoutS: 1.5 }, ALICE)],
       ['timeout text', () => s.addGate(k.taskId, { command: 'true', timeoutS: bad('300') }, ALICE)],
       ['by a number', () => s.addGate(k.taskId, { command: 'true' }, bad(3))],
+      ['by blank', () => s.addGate(k.taskId, { command: 'true' }, '  ')],
       ['task id an object', () => s.addGate(bad({}), { command: 'true' }, ALICE)],
     ];
     for (const [what, call] of cases) {
@@ -226,6 +232,26 @@ describe('running gates', () => {
     expect(result?.output.endsWith(`the key is ${MASK}`)).toBe(true);
     expect(result?.output).not.toContain('sk-live');
     expect(Buffer.byteLength(result?.output ?? '', 'utf8')).toBe(GATE_OUTPUT_BYTES);
+  });
+
+  it('leaves no fragment of a secret the raw window split, and says the start was cut', async () => {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const secret = Array.from({ length: 1000 }, (_, i) => alphabet[(i * 31 + i * i * 7) % alphabet.length]).join('');
+    addSecrets([secret]);
+    // 1001 bytes a line: the window's edge falls inside a secret.
+    const raw = Buffer.from(`${secret}\n`.repeat(70), 'utf8');
+    expect((raw.length - RAW_OUTPUT_BYTES) % 1001).not.toBe(0);
+    const kept = rawTail(raw);
+    expect(kept.startsWith('[earlier output cut]\n')).toBe(true);
+    const { runner } = scripted({ a: { exitCode: 1, output: kept } });
+    const [result] = (await runGates(rows('a'), { cwd: '/ws', env: {}, runner })).results;
+    const output = result?.output ?? '';
+    expect(output).toContain(MASK);
+    for (let i = 0; i + 8 <= secret.length; i += 1) {
+      if (output.includes(secret.slice(i, i + 8))) throw new Error(`a fragment at ${i} shows`);
+    }
+    // A window that was not cut is kept whole, with no marker.
+    expect(rawTail(Buffer.from('all green\n'))).toBe('all green\n');
   });
 
   it('runs nothing more once the gateway is stopping, and says the run was stopped', async () => {

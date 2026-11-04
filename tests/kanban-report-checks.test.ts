@@ -303,7 +303,8 @@ describe('a report while its gates run', () => {
         `task ${task.taskId} is being reported on already, and its gates are running; ` +
         'wait for that answer, or see mt kanban show',
     });
-    const other = g.create();
+    // In another workspace: one report's gates run in a workspace at a time.
+    const other = g.create({ workspace: 'api' });
     g.s.addGate(other.taskId, { command: 'npm test' }, ALICE);
     const otherHeld = g.hold('npm test');
     const person1 = g.s.complete(other.taskId, person, { summary: 'done' });
@@ -337,6 +338,48 @@ describe('a report while its gates run', () => {
     held.release();
     expect((await report).ok).toBe(true);
     expect(g.s.claim(same.taskId).ok).toBe(true);
+  });
+
+  it('claims no task whose workspace, unset until the claim, resolves to the one whose gates are running', async () => {
+    const task = g.create({ workspace: 'default' });
+    g.s.addGate(task.taskId, { command: 'npm test' }, ALICE);
+    const held = g.hold('npm test');
+    const report = g.s.complete(task.taskId, person, { summary: 'done' });
+    await held.started;
+    const unset = g.s.create({ title: 'no workspace yet', assignee: 'implementer', createdBy: ALICE, createdVia: VIA });
+    if (!unset.ok) throw new Error(unset.message);
+    expect(unset.task.workspace).toBeNull();
+    expect(g.s.claim(unset.task.taskId)).toEqual({
+      ok: false,
+      code: 'not_claimable',
+      message: `workspace default is running the gates of a report on task ${task.taskId}`,
+    });
+    expect(getTask(g.t.db, unset.task.taskId)?.workspace).toBeNull();
+    held.release();
+    expect((await report).ok).toBe(true);
+    expect(g.s.claim(unset.task.taskId)).toMatchObject({ ok: true, run: { workspace: 'default' } });
+  });
+
+  it("refuses a report on another task in the workspace while one report's gates run there", async () => {
+    const task = g.create();
+    g.s.addGate(task.taskId, { command: 'npm test' }, ALICE);
+    const held = g.hold('npm test');
+    const report = g.s.complete(task.taskId, person, { summary: 'done' });
+    await held.started;
+    const same = g.create({ title: 'same checkout' });
+    g.s.addGate(same.taskId, { command: 'npm run lint' }, ALICE);
+    expect(await g.s.complete(same.taskId, person, { summary: 'done' })).toEqual({
+      ok: false,
+      code: 'report_in_progress',
+      message:
+        `workspace web is running the gates of a report on another task, ${task.taskId}; ` +
+        'wait for that answer, then report again',
+    });
+    expect(g.ran.map((r) => r.command)).toEqual(['npm test']);
+    expect(getTask(g.t.db, same.taskId)?.phase).toBe('open');
+    held.release();
+    expect((await report).ok).toBe(true);
+    expect(await g.s.complete(same.taskId, person, { summary: 'done' })).toMatchObject({ ok: true, task: { phase: 'done' } });
   });
 
   it('settles once the report is answered', async () => {
@@ -403,6 +446,39 @@ describe('a report while the gateway stops', () => {
       code: 'gates_cannot_run',
       message: 'the gateway is stopping, so the gates did not finish and the report was not applied; report again once it is back',
     });
+    expect(getRun(g.t.db, run.runId)?.outcome).toBeNull();
+  });
+});
+
+describe('a gate runner that throws', () => {
+  it('records a failed gate run, the error masked, and refuses the report as a failed gate', async () => {
+    addSecrets(['sk-live-1234567890']);
+    const task = g.create();
+    g.s.addGate(task.taskId, { command: 'npm test' }, ALICE);
+    g.s.addGate(task.taskId, { command: 'npm run lint' }, ALICE);
+    const run = g.claim(task.taskId);
+    const throwing = new KanbanService({
+      db: g.t.db,
+      roles: ROLES,
+      workspaces: WORKSPACES,
+      clock: new ManualClock(),
+      checks: {
+        workspaceDirs: DIRS,
+        env: PARENT_ENV,
+        runGate: async () => {
+          throw new Error('no runner for sk-live-1234567890');
+        },
+        readCommit: async () => g.state,
+      },
+    });
+    const output = `the gate could not run: no runner for ${MASK}`;
+    expect(await throwing.complete(task.taskId, as(run), { summary: 'done' })).toEqual({
+      ok: false,
+      code: 'gate_failed',
+      message: 'gate "npm test" could not start; the report was not applied: fix it and report again',
+      gate: { command: 'npm test', exitCode: null, signal: null, timedOut: false, output },
+    });
+    expect(lastGateRun(g.t.db, task.taskId)).toMatchObject({ passed: false, aborted: false, notRun: 1, results: [{ output }] });
     expect(getRun(g.t.db, run.runId)?.outcome).toBeNull();
   });
 });
