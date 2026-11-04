@@ -331,6 +331,16 @@ export function runBySession(db: Db, sessionId: string): RunRow | undefined {
 }
 
 /**
+ * The run a worker token belongs to, by the token's hash (spec §7.2): at most
+ * one, by the unique index on token_hash. Open or closed: what a closed run's
+ * token may still do is the worker API's to decide.
+ */
+export function runByTokenHash(db: Db, tokenHash: string): RunRow | undefined {
+  const row = db.prepare<[string], RunRaw>(`SELECT ${RUN_COLS} FROM kanban_runs WHERE token_hash = ?`).get(tokenHash);
+  return row === undefined ? undefined : decodeRun(row);
+}
+
+/**
  * Open agent runs, decided or not: what `kanban.maxRunning` counts (spec §6.3).
  * A run that has reported still has its process, and its live session.
  */

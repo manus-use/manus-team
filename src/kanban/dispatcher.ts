@@ -5,6 +5,7 @@ import { claimableTasks, getRun, getTask, openAgentRunCount, openRuns, runBySess
 import { getSession } from '../db/sessions.js';
 import { nativeFor, renderNative, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
 import type { Role } from '../roles.js';
+import { addSecrets, removeSecrets } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, Principal, TurnTerminal } from '../types.js';
 import { briefFor } from './brief.js';
@@ -13,6 +14,7 @@ import { composePrompt } from './prompt.js';
 import type { Claimed, KanbanService } from './service.js';
 import { hadSideEffects, lastTurnOf, toolCallsOf } from './session-log.js';
 import { KANBAN_CHANNEL } from './sink.js';
+import { hashToken, mintToken } from './token.js';
 import type { RunRow } from './types.js';
 
 /**
@@ -138,8 +140,8 @@ export class Dispatcher {
 
   /**
    * A session's environment, for the registry to give its agent (spec §2.4 item
-   * 3): an open run's `MT_KANBAN_RUN`, held in memory only. Plan C3 adds the
-   * run's token, its socket and the `mt` binary's directory.
+   * 3): an open run's `MT_KANBAN_RUN` and `MT_KANBAN_TOKEN` (spec §7.2), held in
+   * memory only.
    *
    * An open run's session this process did not start has lost its environment
    * with the process that did. It is not rebuilt: the run ends `interrupted`, and
@@ -315,19 +317,39 @@ export class Dispatcher {
         // Counted from the board, so a run opened earlier in this pass counts. A
         // person's run holds no process, and is not limited (spec §6.3).
         if (who?.kind === 'role' && openAgentRunCount(this.#deps.db) >= this.#deps.settings.maxRunning) continue;
-        const claimed = this.#deps.service.claim(task.taskId);
+        // An agent run gets a token (spec §7.2); a person's run reports through chat.
+        const token = who?.kind === 'role' ? mintToken() : undefined;
+        const claimed = this.#claim(task.taskId, token);
         // Refusals are the board's to record: the claim notes a task nobody can be
         // given; a busy workspace or a racing claim leaves it for the next pass.
         if (!claimed.ok) {
           if (claimed.code === 'unassignable') unassignable.set(task.taskId, claimed.message);
           continue;
         }
-        this.#track(this.#run(claimed));
+        this.#track(this.#run(claimed, token));
       } catch (err) {
         this.#note(`kanban: claiming ${task.taskId} failed: ${message(err)}`);
       }
     }
     this.#unassignable = unassignable;
+  }
+
+  /**
+   * Claim with the run's token, which joins the masker first (spec §10.1): from
+   * the moment the run exists, anything that prints the token -- its agent, an
+   * error, a note -- is masked. Only its hash reaches the board. A claim that is
+   * refused, or throws, takes the token back out.
+   */
+  #claim(taskId: string, token: string | undefined): ReturnType<KanbanService['claim']> {
+    if (token === undefined) return this.#deps.service.claim(taskId);
+    addSecrets([token]);
+    let claimed: ReturnType<KanbanService['claim']> | undefined;
+    try {
+      claimed = this.#deps.service.claim(taskId, { tokenHash: hashToken(token) });
+      return claimed;
+    } finally {
+      if (claimed?.ok !== true) removeSecrets([token]);
+    }
   }
 
   /**
@@ -456,24 +478,24 @@ export class Dispatcher {
    * task's workspace, bound at the run's key; then the task prompt, as the
    * session's first turn. Its end is handled when the turn ends (spec §7.4).
    */
-  async #run(claimed: Claimed): Promise<void> {
+  async #run(claimed: Claimed, token: string | undefined): Promise<void> {
     const { run } = claimed;
-    // A person's run is sent a card, from plan D; it holds no session.
-    if (run.assignee.kind !== 'role') return;
     const handle: RunHandle = { runId: run.runId, key: runKey(this.#deps.appId, run), closing: undefined };
     try {
-      await this.#drive(claimed, handle);
+      // A person's run is sent a card, from plan D; it holds no session.
+      if (run.assignee.kind === 'role' && token !== undefined) await this.#drive(claimed, handle, token);
     } finally {
       // The run's one cleanup, once its close -- by whoever asked for it -- is
-      // over: everything that must happen exactly once per run goes here. Plan C3
-      // removes the run's token from the masker here too.
+      // over: everything that must happen exactly once per run goes here. The
+      // token leaves the masker last: its run is closed, and its agent gone.
       await handle.closing?.catch(() => undefined);
       if (handle.sessionId !== undefined) this.#open.delete(handle.sessionId);
+      if (token !== undefined) removeSecrets([token]);
     }
   }
 
   /** The body of `#run`: start the session, send the prompt, and handle the turn's end. */
-  async #drive(claimed: Claimed, handle: RunHandle): Promise<void> {
+  async #drive(claimed: Claimed, handle: RunHandle, token: string): Promise<void> {
     const { run } = claimed;
     const key = handle.key;
     // Before the session, and synchronously up to the run's entry in #open, so
@@ -512,7 +534,7 @@ export class Dispatcher {
     handle.sessionId = sessionId;
     const open: OpenRun = Object.assign(handle, {
       sessionId,
-      env: { ...rendered?.env, MT_KANBAN_RUN: run.runId },
+      env: { ...rendered?.env, MT_KANBAN_RUN: run.runId, MT_KANBAN_TOKEN: token },
       args: rendered?.args ?? [],
       packageDir: rendered?.dir,
       cancelling: false,

@@ -87,7 +87,7 @@ describe('Dispatcher: native rendering', () => {
       await h.dispatcher.idle();
       const start = h.driver('implementer').starts[0];
       expect(start?.args).toBeUndefined();
-      expect(start?.env).toEqual({ MT_KANBAN_RUN: expect.any(String) });
+      expect(start?.env).toEqual({ MT_KANBAN_RUN: expect.any(String), MT_KANBAN_TOKEN: expect.any(String) });
       const prompt = promptOf(h, 0);
       expect(prompt).toContain('# Your role\n\nYou change code in this repository.');
       expect(prompt).toContain(`- testing: How to test (${join(base, 'roles', 'implementer', 'skills', 'testing', 'SKILL.md')})`);
