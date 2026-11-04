@@ -309,6 +309,40 @@ export function eventsOf(db: Db, taskId: string): KanbanEvent[] {
     .map(decodeEvent);
 }
 
+/** A report's run of the task's gates, as its `gates_ran` event recorded it (spec §7.7). */
+export interface LastGateRun {
+  /** The run that reported; null for a person. */
+  runId: string | null;
+  actor: string;
+  for: 'complete' | 'review';
+  passed: boolean;
+  aborted: boolean;
+  notRun: number;
+  results: Array<{
+    gateId: number;
+    command: string;
+    exitCode: number | null;
+    signal: string | null;
+    timedOut: boolean;
+    durationMs: number;
+    output: string;
+  }>;
+  at: number;
+}
+
+/** The latest run of the task's gates, if they ever ran: the prompt's "last gate run" (spec §7.1). */
+export function lastGateRun(db: Db, taskId: string): LastGateRun | undefined {
+  const row = db
+    .prepare<[string], EventRaw>(
+      `SELECT id, task_id, run_id, kind, actor, json(payload) AS payload, created_at
+         FROM kanban_events WHERE task_id = ? AND kind = 'gates_ran' ORDER BY id DESC LIMIT 1`,
+    )
+    .get(taskId);
+  if (row === undefined) return undefined;
+  const payload = json(row.payload) as Omit<LastGateRun, 'runId' | 'actor' | 'at'>;
+  return { ...payload, runId: row.run_id, actor: row.actor, at: row.created_at };
+}
+
 /** The task as `/kanban show` and `mt kanban show` present it. */
 export interface TaskView {
   task: TaskRow;

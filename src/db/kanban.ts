@@ -2,6 +2,7 @@ import type { Db } from './open.js';
 import { txImmediate } from './open.js';
 import { newRunId, newTaskId } from '../core/ids.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
+import type { GateRun } from '../kanban/gates.js';
 import { resolveTaskWorkspace } from '../kanban/workspace.js';
 import { ENDED_OUTCOMES, GATE_LIMITS, REPORTED_OUTCOMES } from '../kanban/types.js';
 import type {
@@ -785,8 +786,65 @@ function reporting(
 }
 
 /**
+ * Whether a report would be accepted now, checked as complete() and
+ * requestReview() check it, and writing nothing: the service asks before it runs
+ * a report's gates, so that a report the board would refuse -- a second report, a
+ * person's while an agent works -- runs none. The transition checks it all again
+ * in its own transaction, after the gates, since anything can change while they
+ * run: the run may be decided, the task archived.
+ */
+export function reportCheck(
+  db: Db,
+  taskId: string,
+  by: Reporter,
+  kind: 'complete' | 'review',
+  reviewer?: Assignee,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  const r =
+    kind === 'complete'
+      ? reporting(db, taskId, by, ['open', 'review'], 'be completed')
+      : reporting(db, taskId, by, ['open'], 'ask for review');
+  if (!r.ok) return r;
+  if (!parentsOf(db, taskId).every((p) => isFinished(p.phase))) {
+    return refuse('parents_unfinished', `task ${taskId} has a parent that is not done`);
+  }
+  if (kind === 'review' && (reviewer ?? r.task.reviewer) === null) {
+    return refuse('no_reviewer', `nobody is named to review task ${taskId}`);
+  }
+  return r;
+}
+
+/**
+ * Record a report's run of the task's gates (spec §7.7), passed or not: each is
+ * an event, whether the report then goes through or not. The output is masked,
+ * as every payload is.
+ */
+export function recordGates(
+  db: Db,
+  taskId: string,
+  by: { runId: string | null; actor: string },
+  kind: 'complete' | 'review',
+  ran: GateRun,
+  now: number,
+): void {
+  txImmediate(db, (d) =>
+    record(
+      d,
+      {
+        taskId,
+        runId: by.runId,
+        kind: 'gates_ran',
+        actor: by.actor,
+        payload: { for: kind, passed: ran.passed, aborted: ran.aborted, notRun: ran.notRun, results: ran.results },
+      },
+      now,
+    ),
+  );
+}
+
+/**
  * The one way to `done` (spec §5.1): an agent's or reviewer's `complete`, a
- * person's done or approval. Gates run before it, from plan C4.
+ * person's done or approval. The service runs the task's gates before it.
  *
  * Completion resets the breaker's counters, and is the only report that does
  * (spec §3.1). A task whose parents are not all finished is refused: only a link
@@ -833,7 +891,7 @@ export function complete(
  * task's; with none named anywhere it is refused, since a task in review with
  * nobody to review it is stranded under another label. A task whose parents are
  * not all finished is refused, as complete() refuses it: the work being reviewed
- * was meant to wait for them. Gates run before it, from plan C4.
+ * was meant to wait for them. The service runs the task's gates before it.
  */
 export function requestReview(
   db: Db,

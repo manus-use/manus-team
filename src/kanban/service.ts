@@ -2,11 +2,14 @@ import { createHash } from 'node:crypto';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import type { Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
-import { gatesOf, getRun, getTask, taskView, type TaskView } from '../db/kanban-read.js';
+import { gatesOf, getRun, getTask, runsOf, taskView, type TaskView } from '../db/kanban-read.js';
+import { buildEnv } from '../driver/env.js';
 import { redactKnownSecrets } from '../secrets.js';
 import type { Role } from '../roles.js';
 import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
+import { commitReader, type CommitReader } from './commit.js';
+import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import {
   BLOCK_KINDS,
   CONTRACT_FIELDS,
@@ -48,6 +51,34 @@ export interface People {
   canTalk(principal: string): boolean;
 }
 
+/**
+ * What a report's checks need (spec §7.7, §7.8): where each workspace is, and the
+ * gateway's own environment, of which a gate and git get only what an agent
+ * would. The runner and the reader are injected so the unit tests start no
+ * process; absent, they are the real ones.
+ */
+export interface ReportChecks {
+  /** Each configured workspace's directory, by name. */
+  workspaceDirs: ReadonlyMap<string, string>;
+  env: Readonly<Record<string, string | undefined>>;
+  runGate?: GateRunner;
+  readCommit?: CommitReader;
+  /**
+   * Whether a workspace's directory is there to run gates in. Absent, the
+   * filesystem says, for the real runner; a runner given in its place stands in
+   * for the filesystem too.
+   */
+  isDirectory?: (dir: string) => boolean;
+}
+
+function directoryExists(dir: string): boolean {
+  try {
+    return statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 export interface KanbanServiceDeps {
   db: Db;
   roles: ReadonlyMap<string, Role>;
@@ -58,6 +89,30 @@ export interface KanbanServiceDeps {
   people?: People;
   /** Accept roles whose agent asks for approval. Plan D's, once approvals reach a subscriber. */
   supervisedRoles?: boolean;
+  /**
+   * How a report's gates run and its commit is read. Absent -- tests of the board
+   * alone -- no commit is read, and a task with gates cannot complete.
+   */
+  checks?: ReportChecks;
+}
+
+/** A report's options: aborted when the gateway stops, which kills its gates and applies nothing. */
+export interface ReportOptions {
+  signal?: AbortSignal;
+}
+
+/** Whose environment a task's gates run with when no agent has run on it (spec §7.7). */
+const DEFAULT_ROLE = 'default';
+
+/** A report the gateway stopped in the middle of: nothing was applied. */
+const STOPPING =
+  'the gateway is stopping, so the gates did not finish and the report was not applied; report again once it is back';
+
+/** Why a gate refused the report, in a few words. */
+function verdict(r: GateResult, timeoutS: number): string {
+  if (r.timedOut) return `ran past its ${timeoutS} s`;
+  if (r.exitCode !== null) return `exited ${r.exitCode}`;
+  return r.signal === null ? 'could not start' : `was ended by ${r.signal}`;
 }
 
 /** A task to create, as a person or a worker asks for it. Names are not yet checked. */
@@ -205,6 +260,15 @@ export class KanbanService {
   readonly #limits: board.KanbanLimits;
   readonly #people: People | undefined;
   readonly #supervisedRoles: boolean;
+  readonly #checks: ReportChecks | undefined;
+  /**
+   * Tasks a report is running its checks for, with the task's workspace and the
+   * report's end. One at a time per task: a second report would run the same
+   * gates again, at once, in the same checkout. And no claim meanwhile, of the
+   * task or of another in that workspace, which would start an agent in a
+   * checkout being tested.
+   */
+  readonly #reporting = new Map<string, { workspace: string | null; done: Promise<unknown> }>();
 
   constructor(deps: KanbanServiceDeps) {
     this.#db = deps.db;
@@ -214,6 +278,7 @@ export class KanbanService {
     this.#limits = deps.limits ?? board.DEFAULT_LIMITS;
     this.#people = deps.people;
     this.#supervisedRoles = deps.supervisedRoles ?? false;
+    this.#checks = deps.checks;
   }
 
   /**
@@ -308,6 +373,16 @@ export class KanbanService {
     if (task.phase !== 'open' && task.phase !== 'review') {
       return board.refuse('illegal_transition', `task ${taskId} is ${task.phase}, so it cannot be claimed`);
     }
+    if (this.#reporting.has(taskId)) {
+      return board.refuse('not_claimable', `task ${taskId} is being reported on: its gates are running`);
+    }
+    const testing = task.workspace === null ? undefined : this.#reportingIn(task.workspace);
+    if (testing !== undefined) {
+      return board.refuse(
+        'not_claimable',
+        `workspace ${task.workspace ?? ''} is running the gates of a report on task ${testing}`,
+      );
+    }
     const resolved = this.#claimant(task);
     const r = resolved.ok
       ? board.claim(
@@ -328,6 +403,21 @@ export class KanbanService {
       ...(resolved.ok && resolved.roleMdBytes !== undefined ? { roleMdBytes: resolved.roleMdBytes } : {}),
       role: resolved.ok ? resolved.role : undefined,
     };
+  }
+
+  /**
+   * Once no report on the task is running its checks: at once, if none is. The
+   * dispatcher waits for it before it decides a run whose turn ended, since the
+   * report may be about to decide it.
+   */
+  async settled(taskId: string): Promise<void> {
+    await this.#reporting.get(taskId)?.done.catch(() => undefined);
+  }
+
+  /** A task whose report is running its checks in this workspace, if any. */
+  #reportingIn(workspace: string): string | undefined {
+    for (const [taskId, r] of this.#reporting) if (r.workspace === workspace) return taskId;
+    return undefined;
   }
 
   /** Record how the run's role reached its agent, once the dispatcher has rendered it or not (plan R). */
@@ -480,10 +570,13 @@ export class KanbanService {
     taskId: string,
     by: Reporter,
     handoff: board.Handoff,
+    opts: ReportOptions = {},
   ): Promise<Result<{ task: TaskRow; run: RunRow | undefined }>> {
     const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
     if (refused !== undefined) return refused;
-    return board.complete(this.#db, taskId, by, handoff, this.#clock.now());
+    return this.#report(taskId, by, 'complete', undefined, opts, (seen) =>
+      board.complete(this.#db, taskId, by, { ...handoff, ...seen }, this.#clock.now()),
+    );
   }
 
   /**
@@ -494,14 +587,164 @@ export class KanbanService {
     taskId: string,
     by: Reporter,
     handoff: board.Handoff & { reviewer?: string },
+    opts: ReportOptions = {},
   ): Promise<Result<{ task: TaskRow; run: RunRow | undefined }>> {
     const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
     if (refused !== undefined) return refused;
     const { reviewer, ...rest } = handoff;
-    if (reviewer === undefined) return board.requestReview(this.#db, taskId, by, rest, this.#clock.now());
-    const who = this.#assignable(reviewer);
-    if (!who.ok) return who;
-    return board.requestReview(this.#db, taskId, by, { ...rest, reviewer: who.assignee }, this.#clock.now());
+    let named: Assignee | undefined;
+    if (reviewer !== undefined) {
+      const who = this.#assignable(reviewer);
+      if (!who.ok) return who;
+      named = who.assignee;
+    }
+    return this.#report(taskId, by, 'review', named, opts, (seen) =>
+      board.requestReview(
+        this.#db,
+        taskId,
+        by,
+        { ...rest, ...seen, ...(named === undefined ? {} : { reviewer: named }) },
+        this.#clock.now(),
+      ),
+    );
+  }
+
+  /**
+   * A report's checks, then the report (spec §7.7, §7.8). First whether the board
+   * would take it now, so a report it would refuse runs nothing; then, for an
+   * agent's report, the state of its workspace, read before anything else can
+   * change it; then the task's gates, each recorded, and any failure refusing the
+   * report with the run left undecided, so the agent can fix it and report again.
+   * Then the transition, which checks everything again in its own transaction:
+   * the run may have been decided while the gates ran.
+   */
+  async #report<T extends object>(
+    taskId: string,
+    by: Reporter,
+    kind: 'complete' | 'review',
+    reviewer: Assignee | undefined,
+    opts: ReportOptions,
+    apply: (seen: { reportedCommit?: string | null; reportedDirty?: boolean | null }) => Result<T>,
+  ): Promise<Result<T>> {
+    if (this.#reporting.has(taskId)) {
+      return board.refuse(
+        'report_in_progress',
+        `task ${taskId} is being reported on already, and its gates are running; wait for that answer, or see mt kanban show`,
+      );
+    }
+    const now = board.reportCheck(this.#db, taskId, by, kind, reviewer);
+    if (!now.ok) return now;
+    const checked = (async (): Promise<Result<T>> => {
+      const seen = await this.#observe(now.run, opts.signal);
+      const gates = await this.#gates(now.task, by, now.run, kind, opts.signal);
+      if (!gates.ok) return gates;
+      // Stopped while the commit was read, with no gate to notice: what was read may be cut short.
+      if (opts.signal?.aborted === true) return board.refuse('gates_cannot_run', STOPPING);
+      return apply(seen);
+    })();
+    this.#reporting.set(taskId, { workspace: now.task.workspace, done: checked });
+    try {
+      return await checked;
+    } finally {
+      this.#reporting.delete(taskId);
+    }
+  }
+
+  /**
+   * The reported commit (spec §7.8): for an agent's report, its workspace's HEAD
+   * and whether the tree had uncommitted changes. A person's report records
+   * neither: there is no agent state to pin.
+   */
+  async #observe(
+    run: RunRow | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<{ reportedCommit?: string | null; reportedDirty?: boolean | null }> {
+    const checks = this.#checks;
+    if (checks === undefined || run === undefined || run.agentConfig === null || run.workspace === null) return {};
+    const dir = checks.workspaceDirs.get(run.workspace);
+    if (dir === undefined) return {};
+    const read = checks.readCommit ?? commitReader();
+    const state = await read(dir, { env: buildEnv(checks.env), ...(signal === undefined ? {} : { signal }) });
+    return { reportedCommit: state.commit, reportedDirty: state.dirty };
+  }
+
+  /**
+   * Run the task's gates, if it has any (spec §7.7): in its workspace, with the
+   * environment of the role of its latest agent run -- the reporting run's, if it
+   * is an agent's -- or of the role default if no agent has run on it. A gate that
+   * cannot run -- no workspace, a workspace or role no longer configured -- refuses
+   * the report with the reason, rather than running elsewhere or as someone else.
+   */
+  async #gates(
+    task: TaskRow,
+    by: Reporter,
+    run: RunRow | undefined,
+    kind: 'complete' | 'review',
+    signal: AbortSignal | undefined,
+  ): Promise<Result<object>> {
+    const gates = gatesOf(this.#db, task.taskId);
+    if (gates.length === 0) return { ok: true };
+    const id = task.taskId;
+    const checks = this.#checks;
+    if (checks === undefined) return board.refuse('gates_cannot_run', `task ${id} has gates, and this gateway runs none`);
+    if (task.workspace === null) {
+      return board.refuse('gates_cannot_run', `task ${id} has gates and no workspace to run them in; set its workspace first`);
+    }
+    const cwd = checks.workspaceDirs.get(task.workspace);
+    if (cwd === undefined) {
+      return board.refuse(
+        'gates_cannot_run',
+        `task ${id}'s workspace ${JSON.stringify(task.workspace)} is no longer configured, so its gates cannot run`,
+      );
+    }
+    const latest = runsOf(this.#db, id).findLast((r) => r.agentConfig !== null);
+    const name = latest?.assignee.name ?? DEFAULT_ROLE;
+    const role = this.#roles.get(name);
+    if (role === undefined) {
+      return board.refuse(
+        'gates_cannot_run',
+        `task ${id}'s gates run with the environment of role ${JSON.stringify(name)}, which is no longer configured`,
+      );
+    }
+    const isDirectory = checks.isDirectory ?? (checks.runGate === undefined ? directoryExists : () => true);
+    if (!isDirectory(cwd)) {
+      // Said plainly: the runner would only report /bin/sh missing.
+      return board.refuse('gates_cannot_run', `task ${id}'s workspace directory ${cwd} does not exist`);
+    }
+    const ran = await runGates(gates, {
+      cwd,
+      env: gateEnv(role, checks.env),
+      runner: checks.runGate ?? spawnGate,
+      clock: this.#clock,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    board.recordGates(
+      this.#db,
+      id,
+      { runId: run?.runId ?? null, actor: by.kind === 'run' ? `run:${by.runId}` : by.principal },
+      kind,
+      ran,
+      this.#clock.now(),
+    );
+    if (ran.passed) return { ok: true };
+    if (ran.aborted) return board.refuse('gates_cannot_run', STOPPING);
+    const failed = ran.results.at(-1);
+    if (failed === undefined) throw new Error('gates that did not pass ran none');
+    const timeoutS = gates.find((g) => g.id === failed.gateId)?.timeoutS ?? 0;
+    return {
+      ok: false,
+      code: 'gate_failed',
+      message:
+        `gate ${JSON.stringify(failed.command)} ${verdict(failed, timeoutS)}; ` +
+        'the report was not applied: fix it and report again',
+      gate: {
+        command: failed.command,
+        exitCode: failed.exitCode,
+        signal: failed.signal,
+        timedOut: failed.timedOut,
+        output: failed.output,
+      },
+    };
   }
 
   requestChanges(taskId: string, by: Reporter, reason: string): Result<{ task: TaskRow; run: RunRow | undefined }> {

@@ -4,7 +4,15 @@ import { redactKnownSecrets } from '../secrets.js';
 import { briefFor } from './brief.js';
 import type { KanbanService } from './service.js';
 import { hashToken, sameHash, TOKEN_PATTERN } from './token.js';
-import { REPORTED_OUTCOMES, type Assignee, type RefusalCode, type Reporter, type Result, type RunRow } from './types.js';
+import {
+  REPORTED_OUTCOMES,
+  type Assignee,
+  type FailedGate,
+  type RefusalCode,
+  type Reporter,
+  type Result,
+  type RunRow,
+} from './types.js';
 
 /**
  * The worker API (spec §7.3): what `mt kanban` asks of the board, as JSON in and
@@ -50,7 +58,20 @@ export type WorkerCode =
   /** Something failed that the request did not cause. */
   | 'internal';
 
-export type WorkerResponse = ({ ok: true } & Record<string, unknown>) | { ok: false; code: WorkerCode; message: string };
+export type WorkerResponse =
+  | ({ ok: true } & Record<string, unknown>)
+  | {
+      ok: false;
+      code: WorkerCode;
+      message: string;
+      /** For `gate_failed` (spec §7.7): the failing command, its exit, and the end of its output. */
+      gate?: { command: string; exit_code: number | null; signal: string | null; timed_out: boolean; output: string };
+    };
+
+/** A request's options: aborted when the gateway stops, as the socket closes. */
+export interface HandleOptions {
+  signal?: AbortSignal;
+}
 
 export interface WorkerApiDeps {
   db: Db;
@@ -236,16 +257,16 @@ export class WorkerApi {
    * One request, as the socket parsed it. Never rejects. Asynchronous, since a
    * report waits for its task's gates (spec §7.7).
    */
-  async handle(raw: unknown): Promise<WorkerResponse> {
+  async handle(raw: unknown, opts: HandleOptions = {}): Promise<WorkerResponse> {
     try {
-      return await this.#handle(raw);
+      return await this.#handle(raw, opts);
     } catch {
       // Not quoted: an error here can carry anything, the request included.
       return refused('internal', 'the gateway failed to handle the request; it was not applied unless show says so');
     }
   }
 
-  async #handle(raw: unknown): Promise<WorkerResponse> {
+  async #handle(raw: unknown, opts: HandleOptions): Promise<WorkerResponse> {
     if (!isRecord(raw)) return refused('bad_request', 'a request is a JSON object');
     for (const key of Object.keys(raw)) {
       if (!ENVELOPE.includes(key)) return refused('bad_request', `a request has only ${ENVELOPE.join(', ')}`);
@@ -286,30 +307,39 @@ export class WorkerApi {
     if (!isRecord(input)) return refused('invalid', `${command} reads a JSON object on stdin`);
     const bad = badInput(command, input);
     if (bad !== undefined) return bad;
-    const r = await this.#act(command, run, input);
+    const r = await this.#act(command, run, input, opts);
     if (r.ok && command !== 'show') this.#changed();
     return r;
   }
 
-  async #act(command: WorkerCommand, run: RunRow, input: Record<string, unknown>): Promise<WorkerResponse> {
+  async #act(
+    command: WorkerCommand,
+    run: RunRow,
+    input: Record<string, unknown>,
+    opts: HandleOptions,
+  ): Promise<WorkerResponse> {
     const by: Reporter = { kind: 'run', runId: run.runId };
     const actor = `run:${run.runId}`;
     const str = (key: string): string | undefined => (typeof input[key] === 'string' ? (input[key] as string) : undefined);
     const ids = (key: string): readonly string[] | undefined => input[key] as readonly string[] | undefined;
     const metadata = input['metadata'] === undefined || input['metadata'] === null ? {} : { metadata: input['metadata'] };
+    const signal = opts.signal === undefined ? {} : { signal: opts.signal };
     switch (command) {
       case 'show':
         return this.#show(run);
       case 'complete':
-        return reported(await this.#service.complete(run.taskId, by, { summary: str('summary') ?? '', ...metadata }));
+        return reported(
+          await this.#service.complete(run.taskId, by, { summary: str('summary') ?? '', ...metadata }, signal),
+        );
       case 'review': {
         const reviewer = str('reviewer');
         return reported(
-          await this.#service.requestReview(run.taskId, by, {
-            summary: str('summary') ?? '',
-            ...metadata,
-            ...(reviewer === undefined ? {} : { reviewer }),
-          }),
+          await this.#service.requestReview(
+            run.taskId,
+            by,
+            { summary: str('summary') ?? '', ...metadata, ...(reviewer === undefined ? {} : { reviewer }) },
+            signal,
+          ),
         );
       }
       case 'changes':
@@ -409,8 +439,15 @@ export class WorkerApi {
   }
 }
 
-function refusal(r: { ok: false; code: RefusalCode; message: string }): WorkerResponse {
-  return { ok: false, code: r.code, message: r.message };
+function refusal(r: { ok: false; code: RefusalCode; message: string; gate?: FailedGate }): WorkerResponse {
+  if (r.gate === undefined) return { ok: false, code: r.code, message: r.message };
+  const g = r.gate;
+  return {
+    ok: false,
+    code: r.code,
+    message: r.message,
+    gate: { command: g.command, exit_code: g.exitCode, signal: g.signal, timed_out: g.timedOut, output: g.output },
+  };
 }
 
 /** A report's answer: where the task is now, and the run's outcome. */

@@ -240,12 +240,30 @@ export type RefusalCode =
   | 'already_decided'
   | 'undecided'
   | 'already_closed'
-  | 'no_open_run';
+  | 'no_open_run'
+  /** A gate exited non-zero or ran past its timeout: the report was not applied (spec §7.7). */
+  | 'gate_failed'
+  /** The task has gates that cannot run now: no workspace, or no role to run them as, or the gateway stopping. */
+  | 'gates_cannot_run'
+  /** A report on the task is still running its gates. */
+  | 'report_in_progress';
+
+/** The gate that refused a report, as the reporter is shown it (spec §7.7). */
+export interface FailedGate {
+  command: string;
+  exitCode: number | null;
+  signal: string | null;
+  timedOut: boolean;
+  /** The end of its output, masked. */
+  output: string;
+}
 
 export interface Refusal {
   ok: false;
   code: RefusalCode;
   message: string;
+  /** For `gate_failed`: the gate, its exit and the end of its output. */
+  gate?: FailedGate;
 }
 
 export type Result<T extends object> = ({ ok: true } & T) | Refusal;
