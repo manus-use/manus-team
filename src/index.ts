@@ -315,6 +315,12 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       dispatcher?.stop();
       // Stop taking work before draining it, or the drain never finishes.
       inbound.stop();
+      // Then the worker socket: a report still running its gates is stopped and
+      // answered, applying nothing, while its agent is still there to be told --
+      // before the sessions close and their turns end. The dispatcher, stopped
+      // above, decides no run whose turn ends from here on: the next boot ends
+      // them (spec §8.4), so the stop itself never fails a run.
+      await workerServer?.close();
       await adapter.disconnect().catch((err: unknown) => {
         note(`disconnect failed: ${err instanceof Error ? err.message : String(err)}`);
       });
@@ -322,9 +328,6 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // channel -- so this runs after disconnect only because the SDK's send path
       // survives it; a failed final write is logged, not fatal.
       await registry.closeAll();
-      // No agent is left to report. A report still running its gates is stopped
-      // and answered here, before the dispatcher's drain, which waits for it.
-      await workerServer?.close();
       // Then what the dispatcher still has running -- an archive, a close -- so
       // none of it touches the database after it is closed. Bounded: a start that
       // never returns is never drained, and must not hold the shutdown.

@@ -3,7 +3,7 @@ import { getTask, runsOf } from '../src/db/kanban-read.js';
 import type { GateExit } from '../src/kanban/gates.js';
 import { clearSecrets } from '../src/secrets.js';
 import { ALICE } from './helpers/kanban.js';
-import { dispatchHarness, role, until, type DispatchHarness } from './helpers/dispatch.js';
+import { dispatchHarness, holds, role, until, type DispatchHarness } from './helpers/dispatch.js';
 
 /**
  * A run whose turn ends while its report is running the task's gates (spec
@@ -84,5 +84,44 @@ describe('a turn that ends while its report runs the gates', () => {
     const [run] = runsOf(h.t.db, task.taskId);
     expect(run).toMatchObject({ outcome: 'protocol_violation', submissions: 2 });
     expect(implementer.lastRuntime?.prompts[1]?.text).toContain('(reminder 1 of 1)');
+  });
+
+  it('decides nothing when the gateway stops while the report runs the gates, whichever closes first: the next boot ends the run', async () => {
+    for (const sessionsFirst of [false, true]) {
+      const { h, started, release } = gated(1);
+      const task = h.create({ workspace: 'web' });
+      expect(h.service.addGate(task.taskId, { command: 'npm test' }, ALICE).ok).toBe(true);
+      const implementer = h.driver('implementer');
+      const held = holds(implementer);
+      // Closing the session kills the agent: its turn ends failed, as a dying process's does.
+      implementer.onClose = () => held.end('failed');
+      const stopping = new AbortController();
+      let report: Promise<{ ok: boolean; code?: string }> | undefined;
+      h.dispatcher.pass();
+      await until(() => held.started, 'the turn to start');
+      const runId = h.runOf(implementer).runId;
+      // As the worker socket hands a report the gateway's stop signal.
+      report = h.service.complete(task.taskId, { kind: 'run', runId }, { summary: 'done' }, { signal: stopping.signal });
+      await until(started, 'the gates to run');
+
+      // The gateway's stop, in its order: no more claims or decisions first.
+      h.dispatcher.stop();
+      const abortReports = async () => {
+        stopping.abort();
+        release({ exitCode: null, signal: 'SIGTERM' });
+        expect(await report).toMatchObject({ ok: false, code: 'gates_cannot_run' });
+      };
+      if (sessionsFirst) {
+        await h.registry.closeAll();
+        await abortReports();
+      } else {
+        await abortReports();
+        await h.registry.closeAll();
+      }
+      expect(await h.dispatcher.idle(5_000)).toBe(true);
+      const [run] = runsOf(h.t.db, task.taskId);
+      expect([sessionsFirst, run?.outcome, run?.submissions]).toEqual([sessionsFirst, null, 1]);
+      expect(getTask(h.t.db, task.taskId)?.phase).toBe('open');
+    }
   });
 });
