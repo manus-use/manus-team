@@ -128,6 +128,11 @@ interface OpenRun extends RunHandle {
   nudges: number;
   /** The newest comment its agent has been given, in its prompt or forwarded: later ones are forwarded. */
   seenComment: number;
+  /**
+   * For a turn `cancel()` asked to stop: not released before this time, a sweep
+   * interval on, the grace a timed-out turn gets between two sweeps.
+   */
+  releaseAfter?: number;
 }
 
 /** The newest comment's id, or 0 for none. */
@@ -443,7 +448,7 @@ export class Dispatcher {
         // Cancelled a sweep ago and still open: its agent ignored the cancel, which
         // ACP leaves to the agent. Releasing the session ends the process; the run,
         // decided before the cancel, is closed, and its workspace freed.
-        if (!open.released) {
+        if (!open.released && (open.releaseAfter === undefined || now >= open.releaseAfter)) {
           open.released = true;
           this.#note(`kanban: run ${run.runId} ignored its cancel; releasing its session`);
           this.#track(this.#close(open, { releaseFirst: true }));
@@ -470,7 +475,37 @@ export class Dispatcher {
     }
   }
 
-  /** Tell, once, about each task the last pass found nobody to give to, if it has waited long enough (spec §4.2). */
+  /**
+   * Cancel the turn of a run the board decided without it: a reassignment or an
+   * archive superseded it, or a person stopped it (spec §5.1). Its workspace and
+   * its max_running slot come back now, not whenever its agent stops. Plan D
+   * calls it after the service's assign, assignReviewer, stop and archive.
+   *
+   * The outcome is the board's already, so the turn's end only closes the run.
+   * An undecided run is not cancelled here: what ended it must be recorded first
+   * (spec §6.4). A turn that ignores the cancel has its session released by the
+   * first sweep once `sweep_interval_s` has passed since the cancel, the grace a
+   * timed-out turn gets. The run is marked cancelling even when there is no live
+   * turn to stop yet -- false is returned then -- so a run still starting gets no
+   * prompt, and is released the same way if its start never ends. True when a
+   * running turn was asked to stop.
+   */
+  cancel(runId: string): boolean {
+    const open = [...this.#open.values()].find((o) => o.runId === runId);
+    if (open === undefined || open.cancelling) return false;
+    const outcome = getRun(this.#deps.db, runId)?.outcome;
+    if (outcome === null || outcome === undefined) return false;
+    open.cancelling = true;
+    open.releaseAfter = this.#clock.now() + this.#deps.settings.sweepIntervalS * 1000;
+    const actor = this.#deps.sessions.liveActor(open.sessionId);
+    if (actor?.presence !== 'live') return false;
+    this.#note(`kanban: run ${runId} was decided ${outcome} by the board; cancelling its turn`);
+    void actor.cancel();
+    return true;
+  }
+
+  /** Tell, once, about each task the last pass found nobody to give to
+```, if it has waited long enough (spec §4.2). */
   #noteStranded(): void {
     const cutoff = this.#clock.now() - this.#deps.settings.strandedAfterS * 1000;
     for (const [taskId, reason] of this.#unassignable) {
