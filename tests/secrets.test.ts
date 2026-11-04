@@ -124,3 +124,28 @@ describe('redactValues', () => {
     expect(redactValues(payload)).toBe(payload);
   });
 });
+
+describe('removeSecrets: reference-counted', () => {
+  it('keeps a value masked while another registration holds it, as a configured secret equal to a token', () => {
+    addSecrets(['shared-value-123']);
+    addSecrets(['shared-value-123']);
+    removeSecrets(['shared-value-123']);
+    expect(redactKnownSecrets('k shared-value-123')).toBe(`k ${MASK}`);
+    removeSecrets(['shared-value-123']);
+    expect(redactKnownSecrets('k shared-value-123')).toBe('k shared-value-123');
+  });
+
+  it('counts a stripped form two values share', () => {
+    addSecrets(['sk-ctrl\u0007-abcdef', 'sk-ctrl-abcdef']);
+    removeSecrets(['sk-ctrl\u0007-abcdef']);
+    expect(redactKnownSecrets('k sk-ctrl-abcdef')).toBe(`k ${MASK}`);
+  });
+
+  it('changes nothing when a value that was never added is removed', () => {
+    addSecrets(['sk-test-123456']);
+    removeSecrets(['other-value-123', 'sk-test-123456', 'sk-test-123456']);
+    expect(redactKnownSecrets('k sk-test-123456')).toBe('k sk-test-123456');
+    addSecrets(['sk-test-123456']);
+    expect(redactKnownSecrets('k sk-test-123456')).toBe(`k ${MASK}`);
+  });
+});

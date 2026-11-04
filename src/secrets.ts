@@ -55,12 +55,18 @@ const IDENTIFYING_KEYS: ReadonlySet<string> = new Set([
   'resolvedVia',
 ]);
 
-const secrets = new Set<string>();
+/**
+ * Each known form, and how many registrations hold it. Counted, because one value
+ * can be registered twice -- a worker token equal to a configured secret, or two
+ * values with the same stripped form -- and removing one registration must leave
+ * the value masked while the other holds it.
+ */
+const secrets = new Map<string, number>();
 /** Longest first. Rebuilt on change. */
 let ordered: string[] = [];
 
 function reorder(): void {
-  ordered = [...secrets].sort((a, b) => b.length - a.length);
+  ordered = [...secrets.keys()].sort((a, b) => b.length - a.length);
 }
 
 /**
@@ -82,15 +88,27 @@ function forms(value: string): string[] {
   return out;
 }
 
+/** Register each value: one more registration of each of its forms. */
 export function addSecrets(values: Iterable<string>): void {
-  for (const value of values) for (const form of forms(value)) secrets.add(form);
+  for (const value of values) for (const form of forms(value)) secrets.set(form, (secrets.get(form) ?? 0) + 1);
   reorder();
 }
 
-// The registry is a plain set: plan C must reference-count, or keep configured
-// secrets apart, or removing a worker token equal to a configured secret unmasks it.
+/**
+ * Undo one registration of each value, as a run's token leaves when its run
+ * closes. A form is forgotten only when nothing else holds it, so removing a
+ * token never unmasks a configured secret with the same value. Removing a value
+ * that was never added changes nothing.
+ */
 export function removeSecrets(values: Iterable<string>): void {
-  for (const value of values) for (const form of forms(value)) secrets.delete(form);
+  for (const value of values) {
+    for (const form of forms(value)) {
+      const held = secrets.get(form);
+      if (held === undefined) continue;
+      if (held > 1) secrets.set(form, held - 1);
+      else secrets.delete(form);
+    }
+  }
   reorder();
 }
 
