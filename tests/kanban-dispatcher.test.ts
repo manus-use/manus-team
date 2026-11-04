@@ -85,11 +85,11 @@ describe('Dispatcher: a run is a session', () => {
     const task = h.create({ workspace: 'web', reviewer: 'reviewer' });
     const implementer = h.driver('implementer');
     implementer.providerSessionId = 'prov_impl';
-    implementer.scripts.push((ctl) => {
+    implementer.scripts.push(async (ctl) => {
       const run = h.runOf(implementer);
-      expect(h.service.requestReview(task.taskId, { kind: 'run', runId: run.runId }, { summary: 'please look' }).ok).toBe(
-        true,
-      );
+      expect(
+        (await h.service.requestReview(task.taskId, { kind: 'run', runId: run.runId }, { summary: 'please look' })).ok,
+      ).toBe(true);
       ctl.end('completed');
     });
     const reviewer = h.driver('reviewer');
@@ -151,7 +151,7 @@ describe('Dispatcher: one agent run per workspace', () => {
     let reported = false;
     implementer.scripts.push(async (ctl) => {
       const run = h.runOf(implementer);
-      expect(h.service.complete(parent.taskId, { kind: 'run', runId: run.runId }, { summary: 'done' }).ok).toBe(true);
+      expect((await h.service.complete(parent.taskId, { kind: 'run', runId: run.runId }, { summary: 'done' })).ok).toBe(true);
       reported = true;
       // Still going: summarising, committing, in the same checkout.
       await tidying;
@@ -244,7 +244,7 @@ describe('Dispatcher: kanban.maxRunning', () => {
     });
     let reported = false;
     implementer.scripts.push(async (ctl) => {
-      reportComplete(h, implementer);
+      await reportComplete(h, implementer);
       reported = true;
       await tidying;
       ctl.end('completed');

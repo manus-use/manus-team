@@ -47,8 +47,8 @@ describe('stop nudges', () => {
     const task = h.create({ workspace: 'web' });
     const implementer = h.driver('implementer');
     says(implementer, 'Next I will run the tests.');
-    implementer.scripts.push((ctl) => {
-      reportComplete(h, ctl.env?.['MT_KANBAN_RUN'] ?? '', 'tests pass');
+    implementer.scripts.push(async (ctl) => {
+      await reportComplete(h, ctl.env?.['MT_KANBAN_RUN'] ?? '', 'tests pass');
       ctl.end('completed');
     });
 
@@ -132,8 +132,8 @@ describe('forwarded comments', () => {
       h.service.comment(task.taskId, 'asking the humans', `run:${h.runOf(implementer).runId}`);
     });
     says(implementer, 'Using v2.');
-    implementer.scripts.push((ctl) => {
-      reportComplete(h, ctl.env?.['MT_KANBAN_RUN'] ?? '');
+    implementer.scripts.push(async (ctl) => {
+      await reportComplete(h, ctl.env?.['MT_KANBAN_RUN'] ?? '');
       ctl.end('completed');
     });
 
@@ -156,8 +156,8 @@ describe('forwarded comments', () => {
     const h = harness(2);
     const task = h.create({ workspace: 'web' });
     const implementer = h.driver('implementer');
-    implementer.scripts.push((ctl) => {
-      reportComplete(h, ctl.env?.['MT_KANBAN_RUN'] ?? '');
+    implementer.scripts.push(async (ctl) => {
+      await reportComplete(h, ctl.env?.['MT_KANBAN_RUN'] ?? '');
       h.service.comment(task.taskId, 'nice work', ALICE);
       ctl.end('completed');
     });

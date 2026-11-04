@@ -275,7 +275,7 @@ describe('KanbanService: claims and the runs they open', () => {
 });
 
 describe('KanbanService: the rest of the board', () => {
-  it('runs a task from claim to done, and shows it', () => {
+  it('runs a task from claim to done, and shows it', async () => {
     const s = service();
     const task = ok(s.create(request())).task;
     const run = ok(s.claim(task.taskId)).run;
@@ -287,7 +287,7 @@ describe('KanbanService: the rest of the board', () => {
     ok(s.attachSession(run.runId, 's_run'));
     ok(s.comment(task.taskId, 'remember the empty file', ALICE));
     clock.advance(60_000);
-    ok(s.complete(task.taskId, { kind: 'run', runId: run.runId }, { summary: 'parser written' }));
+    ok(await s.complete(task.taskId, { kind: 'run', runId: run.runId }, { summary: 'parser written' }));
     ok(s.closeRun(run.runId));
     expect(ok(s.show(task.taskId)).view).toMatchObject({
       status: 'done',
@@ -300,19 +300,19 @@ describe('KanbanService: the rest of the board', () => {
     expect(s.show('k_missing')).toEqual({ ok: false, code: 'not_found', message: 'no task k_missing' });
   });
 
-  it('checks a reviewer named in a review report like any assignee', () => {
+  it('checks a reviewer named in a review report like any assignee', async () => {
     const s = service();
     const task = ok(s.create(request())).task;
     const by = { kind: 'run', runId: ok(s.claim(task.taskId)).run.runId } as const;
-    expect(s.requestReview(task.taskId, by, { summary: 'v1', reviewer: 'lark:on_bob' })).toMatchObject({
+    expect(await s.requestReview(task.taskId, by, { summary: 'v1', reviewer: 'lark:on_bob' })).toMatchObject({
       ok: false,
       code: 'person_not_assignable',
     });
-    expect(s.requestReview(task.taskId, by, { summary: 'v1', reviewer: 'ghost' })).toMatchObject({
+    expect(await s.requestReview(task.taskId, by, { summary: 'v1', reviewer: 'ghost' })).toMatchObject({
       ok: false,
       code: 'unknown_role',
     });
-    expect(s.requestReview(task.taskId, by, { summary: 'v1', reviewer: 'reviewer' })).toMatchObject({
+    expect(await s.requestReview(task.taskId, by, { summary: 'v1', reviewer: 'reviewer' })).toMatchObject({
       ok: true,
       task: { phase: 'review', reviewer: { kind: 'role', name: 'reviewer' } },
     });
@@ -379,7 +379,7 @@ describe('KanbanService: the rest of the board', () => {
     expect(s.archive(task.taskId, ALICE)).toMatchObject({ ok: true, task: { phase: 'archived' } });
   });
 
-  it('creates a follow-up for a done task instead of reopening it', () => {
+  it('creates a follow-up for a done task instead of reopening it', async () => {
     const s = service();
     const task = ok(s.create(request())).task;
     expect(s.followUp(task.taskId, request({ title: 'handle CRLF' }))).toEqual({
@@ -387,7 +387,7 @@ describe('KanbanService: the rest of the board', () => {
       code: 'illegal_transition',
       message: `task ${task.taskId} is open; only a done task gets follow-ups`,
     });
-    ok(s.complete(task.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' }));
+    ok(await s.complete(task.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' }));
     const follow = ok(s.followUp(task.taskId, request({ title: 'handle CRLF', body: 'CI log: ...' }))).task;
     expect(ok(s.show(follow.taskId)).view).toMatchObject({
       status: 'ready',
@@ -416,12 +416,12 @@ describe('KanbanService: malformed input', () => {
   /** A value of the wrong type, as an agent's JSON can carry one. */
   const bad = (v: unknown): never => v as never;
 
-  it('refuses every wrong-typed field, at every entry point, as invalid, and writes nothing', () => {
+  it('refuses every wrong-typed field, at every entry point, as invalid, and writes nothing', async () => {
     const s = service();
     const open = ok(s.create(request({ title: 'open', reviewer: 'reviewer' }))).task;
     const by = { kind: 'run', runId: ok(s.claim(open.taskId)).run.runId } as const;
     const done = ok(s.create(request({ title: 'done', assignee: 'docs-writer' }))).task;
-    ok(s.complete(done.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' }));
+    ok(await s.complete(done.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' }));
     const { title: _title, ...untitled } = request();
 
     const cases: Array<[string, () => unknown]> = [
@@ -536,7 +536,7 @@ describe('KanbanService: malformed input', () => {
       const before = counts();
       let r: unknown;
       try {
-        r = call();
+        r = await call();
       } catch (err) {
         r = { threw: (err as Error).message };
       }
@@ -548,10 +548,10 @@ describe('KanbanService: malformed input', () => {
     expect(wrong).toEqual([]);
   });
 
-  it("accepts a person's blank summary: an approval needs no words", () => {
+  it("accepts a person's blank summary: an approval needs no words", async () => {
     const s = service();
     const task = ok(s.create(request())).task;
-    expect(s.complete(task.taskId, { kind: 'person', principal: ALICE }, { summary: '' })).toMatchObject({ ok: true });
+    expect(await s.complete(task.taskId, { kind: 'person', principal: ALICE }, { summary: '' })).toMatchObject({ ok: true });
   });
 });
 
@@ -600,10 +600,10 @@ describe('KanbanService: idempotency keys', () => {
     expect(r.task.taskId).not.toBe(chat.taskId);
   });
 
-  it('namespaces a follow-up from a run the same way', () => {
+  it('namespaces a follow-up from a run the same way', async () => {
     const s = service();
     const done = ok(s.create(request({ title: 'done', assignee: 'docs-writer' }))).task;
-    ok(s.complete(done.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' }));
+    ok(await s.complete(done.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' }));
     const { task, as } = working(s, 'web');
     const first = ok(s.followUp(done.taskId, request({ idempotencyKey: 'more', ...as }))).task;
     expect(first.idempotencyKey).toBe(`run-task:${task.taskId}:more`);
@@ -620,17 +620,17 @@ describe('KanbanService: idempotency keys', () => {
 });
 
 describe('KanbanService: secrets in what a reporter or creator sends', () => {
-  it('refuses a reported commit that is a secret, and stores a commit id', () => {
+  it('refuses a reported commit that is a secret, and stores a commit id', async () => {
     addSecrets(['sk-test-123456']);
     const s = service();
     const task = ok(s.create(request())).task;
     const by = { kind: 'run', runId: ok(s.claim(task.taskId)).run.runId } as const;
-    expect(s.complete(task.taskId, by, { summary: 'done', reportedCommit: 'sk-test-123456' })).toMatchObject({
+    expect(await s.complete(task.taskId, by, { summary: 'done', reportedCommit: 'sk-test-123456' })).toMatchObject({
       ok: false,
       code: 'invalid',
     });
     const sha = '0123456789abcdef0123456789abcdef01234567';
-    expect(ok(s.complete(task.taskId, by, { summary: 'done', reportedCommit: sha })).run?.reportedCommit).toBe(sha);
+    expect(ok(await s.complete(task.taskId, by, { summary: 'done', reportedCommit: sha })).run?.reportedCommit).toBe(sha);
   });
 
   it('refuses an idempotency key that holds a known secret, and writes nothing', () => {
@@ -654,5 +654,19 @@ describe('the board has one writer', () => {
         ),
       );
     expect(importers).toEqual([join('kanban', 'service.ts')]);
+  });
+});
+
+describe('KanbanService: reports are asynchronous', () => {
+  it('answers complete and review with a promise, so their checks never hold up the event loop', async () => {
+    const s = service();
+    const a = ok(s.create(request())).task;
+    const b = ok(s.create(request())).task;
+    const done = s.complete(a.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' });
+    const review = s.requestReview(b.taskId, { kind: 'person', principal: ALICE }, { summary: 'v1', reviewer: 'reviewer' });
+    expect(done).toBeInstanceOf(Promise);
+    expect(review).toBeInstanceOf(Promise);
+    expect(await done).toMatchObject({ ok: true, task: { phase: 'done' } });
+    expect(await review).toMatchObject({ ok: true, task: { phase: 'review' } });
   });
 });

@@ -156,7 +156,7 @@ describe('Dispatcher: the runtime limit (spec §8.5)', () => {
     const held = holds(h.driver('implementer'));
     h.dispatcher.pass();
     await until(() => held.started, 'the run to start');
-    reportComplete(h, h.driver('implementer'));
+    await reportComplete(h, h.driver('implementer'));
 
     h.clock.advance(120 * 1000);
     h.dispatcher.sweep();
@@ -173,11 +173,11 @@ describe('Dispatcher: the runtime limit (spec §8.5)', () => {
 
 describe('Dispatcher: stranded tasks (spec §4.2)', () => {
   /** A task whose parents finished in different workspaces: nobody may guess which to use. */
-  function unclaimable(h: DispatchHarness): string {
+  async function unclaimable(h: DispatchHarness): Promise<string> {
     const web = h.create({ title: 'web half', workspace: 'web' });
     const api = h.create({ title: 'api half', workspace: 'api' });
     for (const parent of [web, api]) {
-      expect(h.service.complete(parent.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' }).ok).toBe(true);
+      expect((await h.service.complete(parent.taskId, { kind: 'person', principal: ALICE }, { summary: 'done' })).ok).toBe(true);
     }
     return h.create({ title: 'join', parents: [web.taskId, api.taskId] }).taskId;
   }
@@ -188,9 +188,9 @@ describe('Dispatcher: stranded tasks (spec §4.2)', () => {
       .map((e) => e.payload);
   }
 
-  it('reports a task nobody can be given once it has waited strandedAfterS, and only once', () => {
+  it('reports a task nobody can be given once it has waited strandedAfterS, and only once', async () => {
     const h = harness();
-    const taskId = unclaimable(h);
+    const taskId = await unclaimable(h);
 
     h.dispatcher.sweep();
     h.clock.advance(30 * MINUTE - 1);

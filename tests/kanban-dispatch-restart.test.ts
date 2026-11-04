@@ -33,7 +33,7 @@ async function before(opts: Parameters<typeof dispatchHarness>[0] = {}, report =
   let running = false;
   implementer.scripts.push(async (ctl: TurnControl) => {
     ctl.emit({ kind: 'tool-call', toolCallId: 'c1', title: 'edit', status: 'completed', raw: {} });
-    if (report) reportComplete(h, implementer);
+    if (report) await reportComplete(h, implementer);
     running = true;
     await new Promise<void>(() => undefined);
   });

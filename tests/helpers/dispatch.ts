@@ -173,19 +173,19 @@ export async function until(done: () => boolean, what = 'the condition'): Promis
  * given by id, or this driver's latest -- which is right only while the driver
  * has one run at a time.
  */
-export function reportComplete(h: DispatchHarness, from: FakeDriver | string, summary = 'done'): void {
+export async function reportComplete(h: DispatchHarness, from: FakeDriver | string, summary = 'done'): Promise<void> {
   const run = typeof from === 'string' ? getRun(h.t.db, from) : h.runOf(from);
   if (run === undefined) throw new Error(`no run ${String(from)}`);
-  const r = h.service.complete(run.taskId, { kind: 'run', runId: run.runId }, { summary });
+  const r = await h.service.complete(run.taskId, { kind: 'run', runId: run.runId }, { summary });
   if (!r.ok) throw new Error(`${r.code}: ${r.message}`);
 }
 
 /** The next turn on this driver reports complete for its own run, then ends. */
 export function completes(h: DispatchHarness, driver: FakeDriver, summary = 'done'): void {
-  driver.scripts.push((ctl) => {
+  driver.scripts.push(async (ctl) => {
     const runId = ctl.env?.['MT_KANBAN_RUN'];
     if (runId === undefined) throw new Error(`a turn on driver ${driver.id} was started with no run`);
-    reportComplete(h, runId, summary);
+    await reportComplete(h, runId, summary);
     ctl.end('completed');
   });
 }
@@ -194,7 +194,7 @@ export function completes(h: DispatchHarness, driver: FakeDriver, summary = 'don
 export interface Held {
   started: boolean;
   /** End the turn: optionally do something first, as the agent, then end with `terminal`. */
-  end(terminal?: TurnTerminal, first?: () => void): void;
+  end(terminal?: TurnTerminal, first?: () => void | Promise<void>): void;
 }
 
 export function holds(driver: FakeDriver): Held {
@@ -202,7 +202,10 @@ export function holds(driver: FakeDriver): Held {
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  let ending: { terminal: TurnTerminal; first: (() => void) | undefined } = { terminal: 'completed', first: undefined };
+  let ending: { terminal: TurnTerminal; first: (() => void | Promise<void>) | undefined } = {
+    terminal: 'completed',
+    first: undefined,
+  };
   const held: Held = {
     started: false,
     end(terminal = 'completed', first) {
@@ -213,7 +216,7 @@ export function holds(driver: FakeDriver): Held {
   driver.scripts.push(async (ctl) => {
     held.started = true;
     await gate;
-    ending.first?.();
+    await ending.first?.();
     ctl.end(ending.terminal);
   });
   return held;

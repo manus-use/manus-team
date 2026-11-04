@@ -39,9 +39,9 @@ describe('a run’s token', () => {
       tokens.push(ctl.env?.['MT_KANBAN_TOKEN'] ?? '');
       ctl.end('completed');
     });
-    implementer.scripts.push((ctl) => {
+    implementer.scripts.push(async (ctl) => {
       tokens.push(ctl.env?.['MT_KANBAN_TOKEN'] ?? '');
-      reportComplete(h, ctl.env?.['MT_KANBAN_RUN'] ?? '');
+      await reportComplete(h, ctl.env?.['MT_KANBAN_RUN'] ?? '');
       ctl.end('completed');
     });
 

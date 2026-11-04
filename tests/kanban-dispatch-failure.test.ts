@@ -124,8 +124,8 @@ describe('Dispatcher: a run that fails is classified (spec §8.1)', () => {
     const h = harness();
     const task = h.create({ workspace: 'web' });
     const implementer = h.driver('implementer');
-    implementer.scripts.push((ctl) => {
-      reportComplete(h, implementer);
+    implementer.scripts.push(async (ctl) => {
+      await reportComplete(h, implementer);
       fails('Error: 429 Too Many Requests', 'ambiguous')(ctl);
     });
 

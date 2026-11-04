@@ -232,17 +232,20 @@ export class WorkerApi {
     };
   }
 
-  /** One request, as the socket parsed it. Never throws. */
-  handle(raw: unknown): WorkerResponse {
+  /**
+   * One request, as the socket parsed it. Never rejects. Asynchronous, since a
+   * report waits for its task's gates (spec §7.7).
+   */
+  async handle(raw: unknown): Promise<WorkerResponse> {
     try {
-      return this.#handle(raw);
+      return await this.#handle(raw);
     } catch {
       // Not quoted: an error here can carry anything, the request included.
       return refused('internal', 'the gateway failed to handle the request; it was not applied unless show says so');
     }
   }
 
-  #handle(raw: unknown): WorkerResponse {
+  async #handle(raw: unknown): Promise<WorkerResponse> {
     if (!isRecord(raw)) return refused('bad_request', 'a request is a JSON object');
     for (const key of Object.keys(raw)) {
       if (!ENVELOPE.includes(key)) return refused('bad_request', `a request has only ${ENVELOPE.join(', ')}`);
@@ -283,12 +286,12 @@ export class WorkerApi {
     if (!isRecord(input)) return refused('invalid', `${command} reads a JSON object on stdin`);
     const bad = badInput(command, input);
     if (bad !== undefined) return bad;
-    const r = this.#act(command, run, input);
+    const r = await this.#act(command, run, input);
     if (r.ok && command !== 'show') this.#changed();
     return r;
   }
 
-  #act(command: WorkerCommand, run: RunRow, input: Record<string, unknown>): WorkerResponse {
+  async #act(command: WorkerCommand, run: RunRow, input: Record<string, unknown>): Promise<WorkerResponse> {
     const by: Reporter = { kind: 'run', runId: run.runId };
     const actor = `run:${run.runId}`;
     const str = (key: string): string | undefined => (typeof input[key] === 'string' ? (input[key] as string) : undefined);
@@ -298,11 +301,11 @@ export class WorkerApi {
       case 'show':
         return this.#show(run);
       case 'complete':
-        return reported(this.#service.complete(run.taskId, by, { summary: str('summary') ?? '', ...metadata }));
+        return reported(await this.#service.complete(run.taskId, by, { summary: str('summary') ?? '', ...metadata }));
       case 'review': {
         const reviewer = str('reviewer');
         return reported(
-          this.#service.requestReview(run.taskId, by, {
+          await this.#service.requestReview(run.taskId, by, {
             summary: str('summary') ?? '',
             ...metadata,
             ...(reviewer === undefined ? {} : { reviewer }),

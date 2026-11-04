@@ -471,19 +471,30 @@ export class KanbanService {
     return board.addComment(this.#db, taskId, by, body, this.#clock.now());
   }
 
-  /** Every path to done (spec §5.1). Gates run here first, from plan C4. */
-  complete(taskId: string, by: Reporter, handoff: board.Handoff): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  /**
+   * Every path to done (spec §5.1). Asynchronous, as a report's checks run
+   * processes -- the task's gates, and reading the reported commit -- and the
+   * gateway must not stop for them: chat runs on the same event loop.
+   */
+  async complete(
+    taskId: string,
+    by: Reporter,
+    handoff: board.Handoff,
+  ): Promise<Result<{ task: TaskRow; run: RunRow | undefined }>> {
     const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
     if (refused !== undefined) return refused;
     return board.complete(this.#db, taskId, by, handoff, this.#clock.now());
   }
 
-  /** A reviewer the report names is checked like any assignee (spec §5.3, §12). */
-  requestReview(
+  /**
+   * A reviewer the report names is checked like any assignee (spec §5.3, §12).
+   * Asynchronous, as complete is: an implementer's review runs the gates too.
+   */
+  async requestReview(
     taskId: string,
     by: Reporter,
     handoff: board.Handoff & { reviewer?: string },
-  ): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  ): Promise<Result<{ task: TaskRow; run: RunRow | undefined }>> {
     const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
     if (refused !== undefined) return refused;
     const { reviewer, ...rest } = handoff;
