@@ -1,5 +1,5 @@
-import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +9,7 @@ import { SessionRegistry } from '../src/core/registry.js';
 import { NamedWorkspaces } from '../src/core/workspace.js';
 import { createCliDriver } from '../src/driver/cli/driver.js';
 import type { Driver } from '../src/driver/types.js';
-import { getTask, runsOf } from '../src/db/kanban-read.js';
+import { eventsOf, getTask, runsOf } from '../src/db/kanban-read.js';
 import { Dispatcher } from '../src/kanban/dispatcher.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { lastTurnOf } from '../src/kanban/session-log.js';
@@ -59,7 +59,8 @@ afterEach(async () => {
   stack = undefined;
 });
 
-async function build(mode: string): Promise<Stack> {
+/** `gated`: the service runs gates and reads commits, for real, and the role's agent has a key a gate can see. */
+async function build(mode: string, opts: { gated?: boolean } = {}): Promise<Stack> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mt-e2e-')));
   const home = join(dir, 'home');
   const workspace = join(dir, 'repo');
@@ -67,8 +68,22 @@ async function build(mode: string): Promise<Stack> {
   mkdirSync(workspace);
   const log = join(dir, 'invocations.log');
   const t = testDb();
-  const roles = new Map([['implementer', role('implementer')]]);
-  const service = new KanbanService({ db: t.db, roles, workspaces: new Set(['default']) });
+  const implementer = role('implementer');
+  const roles = new Map([
+    [
+      'implementer',
+      opts.gated === true ? { ...implementer, agent: { ...implementer.agent, env: { GATE_KEY: 'from-the-role' } } } : implementer,
+    ],
+  ]);
+  const service = new KanbanService({
+    db: t.db,
+    roles,
+    workspaces: new Set(['default']),
+    // A made-up home, so git reads no configuration of the real one.
+    ...(opts.gated === true
+      ? { checks: { workspaceDirs: new Map([['default', workspace]]), env: { PATH: process.env['PATH'], HOME: home } } }
+      : {}),
+  });
   const drivers = new Map<string, Driver>([
     ['implementer', createCliDriver({ command: process.execPath, args: [AGENT], env: { FAKE_CLI_MODE: mode, FAKE_CLI_LOG: log } })],
   ]);
@@ -96,7 +111,7 @@ async function build(mode: string): Promise<Stack> {
   });
   const d = dispatcher;
   const api = new WorkerApi({ db: t.db, service, changed: () => d.pass() });
-  const server = await listenWorker(socket, (request) => api.handle(request));
+  const server = await listenWorker(socket, (request, signal) => api.handle(request, { signal }));
   stack = {
     t,
     service,
@@ -180,6 +195,52 @@ describe('the worker CLI, end to end', () => {
       .map((value) => (Buffer.isBuffer(value) ? value.toString('utf8') : String(value)));
     expect(stored.length).toBeGreaterThan(0);
     for (const value of stored) expect(value).not.toContain(env['MT_KANBAN_TOKEN']);
+  });
+
+  it("an agent's report runs the task's gate in the workspace, and is refused until it passes", async () => {
+    const s = await build('kanban-gated', { gated: true });
+    const env = { PATH: process.env['PATH'], HOME: join(s.dir, 'home'), GIT_CONFIG_NOSYSTEM: '1' };
+    const git = (...args: string[]) =>
+      spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: s.workspace, env, encoding: 'utf8' })
+        .stdout.trim();
+    git('init', '-q');
+    writeFileSync(join(s.workspace, 'README'), 'a repository\n');
+    git('add', 'README');
+    git('commit', '-q', '-m', 'first');
+    const head = git('rev-parse', 'HEAD');
+    const taskId = create(s, 'Make the gate pass');
+    const gate =
+      'test -f gate-ok && echo "key=$GATE_KEY token=${MT_KANBAN_TOKEN:-none} socket=${MT_KANBAN_SOCKET:-none}" && echo "path=$PATH"';
+    expect(s.service.addGate(taskId, { command: gate, timeoutS: 30 }, ALICE).ok).toBe(true);
+
+    s.dispatcher.pass();
+    await s.dispatcher.idle();
+
+    const [run] = runsOf(s.t.db, taskId);
+    expect(getTask(s.t.db, taskId)?.phase).toBe('done');
+    // The commit it reported on, and the file the agent left uncommitted.
+    expect(run).toMatchObject({ outcome: 'completed', summary: 'gate fixed', reportedCommit: head, reportedDirty: true });
+    // What the agent was told, each time.
+    const [first, second] = lastTurnOf(s.t.db, run?.sessionId ?? '')
+      .output.split('\n')
+      .map((line) => JSON.parse(line.slice(line.indexOf(' ') + 1)) as unknown);
+    expect(first).toEqual({
+      ok: false,
+      code: 'gate_failed',
+      message: `gate ${JSON.stringify(gate)} exited 1; the report was not applied: fix it and report again`,
+      gate: { command: gate, exit_code: 1, signal: null, timed_out: false, output: '' },
+    });
+    expect(second).toEqual({ ok: true, task_id: taskId, phase: 'done', outcome: 'completed' });
+    // Each run of the gate recorded; the one that passed had the role's key, and neither the token nor the socket.
+    const ran = eventsOf(s.t.db, taskId).filter((e) => e.kind === 'gates_ran');
+    expect(ran.map((e) => (e.payload as { passed: boolean }).passed)).toEqual([false, true]);
+    const [passed] = (ran[1]?.payload as { results: Array<{ exitCode: number; output: string }> }).results;
+    expect(passed?.exitCode).toBe(0);
+    const [said, path] = (passed?.output ?? '').split('\n');
+    expect(said).toBe('key=from-the-role token=none socket=none');
+    // The gateway's own PATH, never a run's: the mt shim's directory is not on it.
+    expect(path).toBe(`path=${process.env['PATH'] ?? ''}`);
+    expect(path?.split(':')).not.toContain(join(s.dir, 'home', 'bin'));
   });
 
   it('an agent that stops without reporting is nudged in its own session, and then reports', async () => {

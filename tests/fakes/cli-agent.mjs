@@ -24,6 +24,8 @@
  *               run's agent does: `mt` found on PATH, its input on stdin
  *   kanban-late the same, but only once it has been nudged; before that it
  *               narrates its next step and stops without reporting
+ *   kanban-gated report `mt kanban complete`, which the task's gate refuses until a
+ *               file `gate-ok` is in the workspace; then write it and report again
  *
  * Every invocation appends its argv to `FAKE_CLI_LOG` as one JSON line. That file
  * is how a test sees the composed prompt -- which is the whole of this driver's
@@ -182,6 +184,16 @@ switch (MODE) {
 
   case 'kanban': {
     kanbanRun();
+    break;
+  }
+
+  case 'kanban-gated': {
+    const first = mt('complete', { summary: 'first try' });
+    // The agent's cwd is the task's workspace.
+    writeFileSync('gate-ok', '');
+    const second = mt('complete', { summary: 'gate fixed' });
+    delta(`first: ${first.answer}\nsecond: ${second.answer}`);
+    summary('completed', 'reported twice');
     break;
   }
 
