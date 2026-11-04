@@ -6949,12 +6949,23 @@ The review of the finished plan found the following, fixed after Task 14, each t
 
 Counts after the review: `Tests  1144 passed (1144)` unit, `Tests  69 passed (69)` end to end.
 
+The final review found the following Minor items, fixed after those, each behaviour fix test first:
+
+- **A failed gate's command is masked before it is quoted.** The `gate_failed` message quoted the raw command with `JSON.stringify`, and the escaping of a `"` or `\` in a secret stopped the masking of the message from matching it. `#gates` now quotes `redactKnownSecrets(failed.command)` (`tests/kanban-report-checks.test.ts`, a secret holding `"` and `\` registered after its gate was defined: no 8-byte fragment of it, as written or escaped, is in the message).
+- **A crash report leaves no part of a secret.** `inspect` cut a string at 10 000 characters before the masking, and escaped `\` and quotes, so a secret could show in part. `crashReport` (`src/crash.ts`) now masks the error's strings value by value first (`maskDeep`: strings, the own enumerable properties of arrays, plain objects and errors, and an error's `message`, `stack`, `cause` and `errors`, recursively, with a cycle mapped to its copy, a getter that inspect would not call copied as it is, and an error field whose getter throws left out), calls `inspect` with `maxStringLength: Infinity`, masks the text again, and only then cuts it at `CRASH_REPORT_CHARS` (64 Ki characters), through `withholdSecretPrefix`, ending it with ` [cut]`. Other objects, a `Map` or a class's instance, are not copied, so only the second masking and the cut cover them. Tests (`tests/crash.test.ts`): a property and a message of 9 990 bytes followed by a secret; a secret holding `\` and both kinds of quotes in a message, a cause, a property, an `AggregateError`'s errors, an object and a bare string; neither leaves an 8-byte fragment, as written or as `inspect` or JSON escapes it. Also a report past the cap whose cut falls inside an escaped secret, and a cycle, a throwing getter and a throwing `stack`. Spec §10.1 says so.
+- **Documented** (README, spec §7.7): a task has at most 20 gates, and a gate's command at most 4 KiB (`GATE_LIMITS`). The README now says gates run as the role of the task's latest agent run, or the role `default` if no agent has run, as `#gates` does.
+- **The test that kills a gate when the gateway exits waits on what it checks.** The child exits once the gate's pid file is written, polling with a 10 s deadline, instead of after a fixed 500 ms, and the test then polls for `ESRCH` with a 5 s deadline instead of waiting a fixed 200 ms (`tests/kanban-gates.e2e.ts`).
+- **Known follow-up for plan D or later: a person's report beside another task's agent.** A person's run does not hold the workspace, so a person's report, from plan D's chat, can run gates in a workspace while another task's agent run is open in it. Plan D must refuse it, for example with `workspace_busy` (spec §7.7).
+- **Known follow-up for plan D or later: a run decided while its gates run.** A stop, a timeout, a reassignment or an archive that decides the run does not abort its report's gates: they run on, up to 600 s, holding the workspace, and the report is then refused; a claim refused meanwhile waits for the next sweep (spec §7.7).
+
+Counts after the final review: `Tests  1149 passed (1149)` unit, `Tests  69 passed (69)` end to end.
+
 ---
 
 
 ## Done when
 
-- `npm test` gives `Tests  1144 passed (1144)`, after the review follow-ups. `npm run test:e2e` gives `Tests  69 passed (69)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  1149 passed (1149)`, after the review follow-ups and those of the final review. `npm run test:e2e` gives `Tests  69 passed (69)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table, and only `src/kanban/service.ts` imports it (the guard in `tests/kanban-service.test.ts`). `src/kanban/worker.ts` and `src/kanban/gates.ts` write nothing.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - No `spawnSync` or `execSync` in `src/kanban/gates.ts`, `src/kanban/commit.ts` or `src/kanban/service.ts` (`git grep -n "Sync(" -- src/kanban/gates.ts src/kanban/commit.ts src/kanban/service.ts` lists only `readFileSync`, `accessSync` and `statSync`).
