@@ -1,3 +1,4 @@
+import { writeSync } from 'node:fs';
 import { inspect } from 'node:util';
 import { redactKnownSecrets } from './secrets.js';
 
@@ -23,16 +24,48 @@ export function crashReport(what: string, err: unknown): string {
   return `${what}: ${redactKnownSecrets(inspect(err))}\n`;
 }
 
+/**
+ * Writes to stderr synchronously, so the report is out before `exit`: a write to
+ * process.stderr may still be queued, on a pipe, when the process ends. What a
+ * synchronous write cannot take -- a non-blocking pipe that is full -- goes
+ * through process.stderr instead.
+ */
+export function stderrWriter(
+  sync: (fd: number, buf: Buffer) => number = writeSync,
+  fallback: (text: string) => void = (text) => {
+    process.stderr.write(text);
+  },
+): (text: string) => void {
+  return (text) => {
+    const buf = Buffer.from(text, 'utf8');
+    let at = 0;
+    try {
+      while (at < buf.length) at += sync(2, buf.subarray(at));
+    } catch {
+      fallback(buf.subarray(at).toString('utf8'));
+    }
+  };
+}
+
 export function installCrashHandlers(
   source: CrashSource = process,
-  write: (text: string) => void = (text) => process.stderr.write(text),
+  write: (text: string) => void = stderrWriter(),
   exit: (code: number) => void = (code) => process.exit(code),
 ): void {
   const crash = (what: string) => (err: unknown) => {
     try {
-      write(crashReport(what, err));
-    } catch {
-      // Nowhere left to say it; the exit still says something went wrong.
+      let text: string;
+      try {
+        text = crashReport(what, err);
+      } catch {
+        // An error whose inspection throws: say at least what happened.
+        text = `${what}: (the error could not be shown)\n`;
+      }
+      try {
+        write(text);
+      } catch {
+        // Nowhere left to say it; the exit still says something went wrong.
+      }
     } finally {
       exit(1);
     }
