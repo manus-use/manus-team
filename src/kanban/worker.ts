@@ -1,5 +1,6 @@
 import type { Db } from '../db/open.js';
 import { getTask, runByTokenHash, taskView } from '../db/kanban-read.js';
+import { redactKnownSecrets } from '../secrets.js';
 import { briefFor } from './brief.js';
 import type { KanbanService } from './service.js';
 import { hashToken, sameHash, TOKEN_PATTERN } from './token.js';
@@ -75,6 +76,8 @@ export const WORKER_LIMITS = {
   name: 256,
   /** Parents named in one create or block. */
   parents: 50,
+  /** Objects and lists inside one another in metadata, the outermost counted. */
+  metadataDepth: 64,
 } as const;
 
 type Field =
@@ -117,6 +120,27 @@ function bytes(s: string): number {
   return Buffer.byteLength(s, 'utf8');
 }
 
+/**
+ * Agent text a refusal quotes: masked first, then cut, so a known secret that
+ * straddles the cut is masked whole rather than leaving a prefix the socket's
+ * masking would not recognise.
+ */
+function quoted(value: string, max = WORKER_LIMITS.name): string {
+  return redactKnownSecrets(value).slice(0, max);
+}
+
+/** Whether a JSON value nests deeper than `max`, the outermost object or list counted 1. Iterative: the input may nest deep. */
+function deeperThan(value: unknown, max: number): boolean {
+  const stack: Array<[unknown, number]> = [[value, 1]];
+  while (stack.length > 0) {
+    const [v, depth] = stack.pop() as [unknown, number];
+    if (typeof v !== 'object' || v === null) continue;
+    if (depth > max) return true;
+    for (const child of Object.values(v)) stack.push([child, depth + 1]);
+  }
+  return false;
+}
+
 function refused(code: WorkerCode, message: string): WorkerResponse {
   return { ok: false, code, message };
 }
@@ -129,11 +153,12 @@ function isCommand(c: string): c is WorkerCommand {
 function badInput(command: WorkerCommand, input: Record<string, unknown>): WorkerResponse | undefined {
   const schema = SCHEMAS[command];
   for (const key of Object.keys(input)) {
-    if (!(key in schema)) {
+    // Own keys only: `in` would let constructor, toString or __proto__ through.
+    if (!Object.hasOwn(schema, key)) {
       const known = Object.keys(schema);
       return refused(
         'invalid',
-        `${command} takes no field ${JSON.stringify(key).slice(0, WORKER_LIMITS.name)}` +
+        `${command} takes no field ${JSON.stringify(quoted(key))}` +
           (known.length === 0 ? '' : ` (it takes ${known.join(', ')})`),
       );
     }
@@ -152,6 +177,12 @@ function badInput(command: WorkerCommand, input: Record<string, unknown>): Worke
         }
         break;
       case 'json': {
+        // An object, as a report's metadata is shown; and checked for depth before
+        // it is serialized, or a deep one would throw rather than be refused.
+        if (!isRecord(value)) return refused('invalid', `${key} is a JSON object`);
+        if (deeperThan(value, WORKER_LIMITS.metadataDepth)) {
+          return refused('invalid', `${key} nests more than ${WORKER_LIMITS.metadataDepth} deep`);
+        }
         const size = bytes(JSON.stringify(value));
         if (size > WORKER_LIMITS.metadata) {
           return refused('too_large', `${key} is ${size} bytes as JSON; it may be at most ${WORKER_LIMITS.metadata}`);
@@ -170,7 +201,7 @@ function badInput(command: WorkerCommand, input: Record<string, unknown>): Worke
         if (!isRecord(value)) return refused('invalid', `${key} is an object of text fields`);
         for (const [f, v] of Object.entries(value)) {
           if (typeof v === 'string' && bytes(v) > WORKER_LIMITS.contractField) {
-            return refused('too_large', `contract field ${f.slice(0, WORKER_LIMITS.name)} is ${bytes(v)} bytes; at most ${WORKER_LIMITS.contractField}`);
+            return refused('too_large', `contract field ${quoted(f)} is ${bytes(v)} bytes; at most ${WORKER_LIMITS.contractField}`);
           }
         }
         break;
@@ -223,7 +254,7 @@ export class WorkerApi {
     if (!isCommand(command)) {
       return refused(
         'unknown_command',
-        `no command ${JSON.stringify(command).slice(0, WORKER_LIMITS.name)} (one of ${WORKER_COMMANDS.join(', ')})`,
+        `no command ${JSON.stringify(quoted(command))} (one of ${WORKER_COMMANDS.join(', ')})`,
       );
     }
 
@@ -235,6 +266,10 @@ export class WorkerApi {
       return refused('unauthorized', 'no run has this MT_KANBAN_TOKEN');
     }
     if (run.runId !== runId) return refused('unauthorized', 'MT_KANBAN_RUN is not the run this token belongs to');
+    // A person's run reports through chat (plan D); a token on one is not an agent's.
+    if (run.assignee.kind !== 'role') {
+      return refused('unauthorized', `run ${run.runId} is a person’s; it reports through chat, not mt kanban`);
+    }
 
     // The run's scope (spec §7.2): closed, or decided by anyone but itself, and nothing works.
     if (run.endedAt !== null) {

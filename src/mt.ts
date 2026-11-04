@@ -8,4 +8,5 @@ process.exitCode = await runMt(process.argv.slice(2), {
   out: (line) => process.stdout.write(`${line}\n`),
   err: (line) => process.stderr.write(`${line}\n`),
   stdin: (maxBytes) => readAll(process.stdin, maxBytes),
+  stdinIsTTY: process.stdin.isTTY === true,
 });

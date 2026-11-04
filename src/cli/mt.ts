@@ -28,6 +28,8 @@ export interface MtIo {
   git?: Git;
   /** All of stdin, or undefined once it passes `maxBytes`: `mt kanban`'s input. */
   stdin?: (maxBytes: number) => Promise<string | undefined>;
+  /** Stdin is a terminal: `mt kanban` refuses rather than wait on one for input that never comes. */
+  stdinIsTTY?: boolean;
 }
 
 const USAGE = [

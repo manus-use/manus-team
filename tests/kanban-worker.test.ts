@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { claim } from '../src/db/kanban.js';
 import { commentsOf, getRun, getTask, parentsOf } from '../src/db/kanban-read.js';
 import { KanbanService, type CreateRequest } from '../src/kanban/service.js';
 import { hashToken, mintToken } from '../src/kanban/token.js';
@@ -7,7 +8,7 @@ import { WORKER_LIMITS, WorkerApi, type WorkerResponse } from '../src/kanban/wor
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import { ManualClock, testDb, type TestDb } from './helpers/db.js';
 import { DEFAULT_ROLES } from './helpers/dispatch.js';
-import { ALICE, VIA, WORKSPACES } from './helpers/kanban.js';
+import { ALICE, NOW, VIA, WORKSPACES, claimantFor, newTask } from './helpers/kanban.js';
 
 /**
  * The worker API over JSON, against a real board: what `mt kanban` sends,
@@ -81,6 +82,29 @@ describe('worker API: who is asking', () => {
       expect(JSON.stringify(r)).not.toContain(token);
       expect(JSON.stringify(r)).not.toContain(other);
     }
+  });
+
+  it('refuses a person’s run: it reports through chat, not mt kanban', () => {
+    // Under the service, which gives no person work before plan D: as the board would claim one.
+    const task = newTask(b.t.db, { assignee: { kind: 'human', name: 'lark:on_bob' }, workspace: 'web' });
+    const token = mintToken();
+    const claimed = claim(
+      b.t.db,
+      { taskId: task.taskId, claimant: claimantFor(b.t.db, task.taskId), tokenHash: hashToken(token), workspaces: WORKSPACES },
+      NOW,
+    );
+    if (!claimed.ok) throw new Error(claimed.message);
+    const { run } = claimed;
+    const ask = (command: string, input: unknown) => b.api.handle({ run: run.runId, token, command, input });
+    expect(run.assignee.kind).toBe('human');
+    for (const command of ['show', 'complete']) {
+      expect(ask(command, command === 'show' ? {} : { summary: 'x' })).toEqual({
+        ok: false,
+        code: 'unauthorized',
+        message: `run ${run.runId} is a person’s; it reports through chat, not mt kanban`,
+      });
+    }
+    expect(getRun(b.t.db, run.runId)?.outcome).toBeNull();
   });
 
   it('refuses what is not a request, and an unknown command', () => {
@@ -273,6 +297,43 @@ describe('worker API: strict input', () => {
     expect(b.changes).toBe(0);
   });
 
+  it('refuses a key that is only inherited, as constructor, toString and __proto__ are, as unknown', () => {
+    const task = b.create();
+    const { ask } = b.claim(task.taskId);
+    for (const key of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      // Parsed, as the socket parses it: __proto__ is then a key of its own.
+      const input: unknown = JSON.parse(`{"summary": "x", ${JSON.stringify(key)}: "y"}`);
+      expect(ask('complete', input)).toEqual({
+        ok: false,
+        code: 'invalid',
+        message: `complete takes no field ${JSON.stringify(key)} (it takes summary, metadata)`,
+      });
+    }
+    expect(b.changes).toBe(0);
+  });
+
+  it('takes metadata only as a plain object, at most 64 deep', () => {
+    const task = b.create();
+    const { run, ask } = b.claim(task.taskId);
+    // `depth` objects and lists inside one another, the outermost an object.
+    const nested = (depth: number): unknown => {
+      let v: unknown = {};
+      for (let i = 2; i < depth; i += 1) v = i % 2 === 0 ? [v] : { a: v };
+      return { a: v };
+    };
+    for (const metadata of ['just text', ['a', 'list'], 7, true]) {
+      expect(ask('complete', { summary: 'x', metadata })).toEqual({ ok: false, code: 'invalid', message: 'metadata is a JSON object' });
+    }
+    expect(ask('complete', { summary: 'x', metadata: nested(100) })).toEqual({
+      ok: false,
+      code: 'invalid',
+      message: 'metadata nests more than 64 deep',
+    });
+    expect(ask('complete', { summary: 'x', metadata: nested(65) })).toMatchObject({ ok: false, code: 'invalid' });
+    expect(getRun(b.t.db, run.runId)?.outcome).toBeNull();
+    expect(ask('complete', { summary: 'x', metadata: nested(64) })).toMatchObject({ ok: true });
+  });
+
   it('refuses text over its size, and nothing is written', () => {
     const task = b.create();
     const { run, ask } = b.claim(task.taskId);
@@ -296,6 +357,21 @@ describe('worker API: strict input', () => {
 });
 
 describe('worker API: masking', () => {
+  it('masks what a refusal quotes before cutting it, so no part of a secret across the cut is left', () => {
+    const secret = 'Zq9-straddling-secret-77';
+    addSecrets([secret]);
+    const task = b.create();
+    const { run, token, ask } = b.claim(task.taskId);
+    // Each placed so the 256-byte cut falls inside the secret.
+    const answers = [
+      ask('complete', { summary: 'x', [`${'x'.repeat(250)}${secret}`]: 1 }),
+      b.api.handle({ run: run.runId, token, command: `${'x'.repeat(250)}${secret}`, input: {} }),
+      ask('create', { title: 't', body: '', assignee: 'implementer', contract: { [`${'x'.repeat(252)}${secret}`]: 'y'.repeat(WORKER_LIMITS.contractField + 1) } }),
+    ];
+    expect(answers.map((r) => r.ok)).toEqual([false, false, false]);
+    for (const r of answers) expect(JSON.stringify(r)).not.toContain(secret.slice(0, 3));
+  });
+
   it('lands agent text on the board through the service, which masks it on write', () => {
     addSecrets(['sk-live-1234567890']);
     const task = b.create();

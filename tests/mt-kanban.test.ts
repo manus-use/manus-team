@@ -1,4 +1,5 @@
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -62,6 +63,7 @@ async function mt(
   argv: string[],
   stdin: string | (() => never) = '',
   over: Record<string, string | undefined> = {},
+  stdinIsTTY = false,
 ): Promise<{ code: number; out: unknown; err: string }> {
   const out: string[] = [];
   const err: string[] = [];
@@ -69,6 +71,7 @@ async function mt(
     env: { ...env, ...over },
     out: (line) => out.push(line),
     err: (line) => err.push(line),
+    stdinIsTTY,
     stdin: async (max) => {
       const text = typeof stdin === 'function' ? stdin() : stdin;
       return Buffer.byteLength(text) > max ? undefined : text;
@@ -127,6 +130,45 @@ describe('mt kanban', () => {
     const r = await mt(['kanban', 'show'], '', { MT_KANBAN_SOCKET: join(root, 'nowhere.sock') });
     expect(r).toMatchObject({ code: 1, out: { ok: false, code: 'unreachable' } });
     expect(JSON.stringify(r)).not.toContain(env['MT_KANBAN_TOKEN']);
+  });
+
+  it('asks whether the gateway is running when there is no socket, and says to try again only when it refused', async () => {
+    const missing = join(root, 'nowhere.sock');
+    expect((await mt(['kanban', 'show'], '', { MT_KANBAN_SOCKET: missing })).out).toEqual({
+      ok: false,
+      code: 'unreachable',
+      message: `cannot reach the gateway at ${missing}: ENOENT; is the gateway running?`,
+    });
+    // A socket nothing listens on: refused, as a busy gateway's full backlog refuses.
+    const refused = join(root, 'refused.sock');
+    const dead = createServer();
+    await new Promise<void>((resolve) => dead.listen(join(root, 'dead.sock'), resolve));
+    renameSync(join(root, 'dead.sock'), refused);
+    await new Promise<void>((resolve) => dead.close(() => resolve()));
+    expect((await mt(['kanban', 'show'], '', { MT_KANBAN_SOCKET: refused })).out).toEqual({
+      ok: false,
+      code: 'unreachable',
+      message: `cannot reach the gateway at ${refused}: ECONNREFUSED; if it is running, it may be busy: try again`,
+    });
+  });
+
+  it('refuses at once when stdin is a terminal, for every command that reads it; show still works', async () => {
+    const never = (): never => {
+      throw new Error('read a terminal');
+    };
+    for (const command of ['complete', 'review', 'changes', 'block', 'comment', 'create', 'link']) {
+      expect(await mt(['kanban', command], never, {}, true)).toEqual({
+        code: 1,
+        out: {
+          ok: false,
+          code: 'invalid',
+          message: `mt kanban ${command} reads JSON on stdin; stdin is a terminal: redirect a file or pipe it`,
+        },
+        err: '',
+      });
+    }
+    expect(asked).toBe(0);
+    expect((await mt(['kanban', 'show'], never, {}, true)).code).toBe(0);
   });
 
   it('is in the usage', async () => {

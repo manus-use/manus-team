@@ -52,8 +52,14 @@ function ask(socket: string, line: string): Promise<string> {
   });
 }
 
+/** The socket refused, or dropped the connection: what a gateway that is too busy does. */
+const BUSY = ['ECONNREFUSED', 'ECONNRESET', 'EPIPE'];
+
+/** Why the socket could not be asked, and what to do about it. */
 function why(err: unknown): string {
   const code = (err as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT') return 'ENOENT; is the gateway running?';
+  if (code !== undefined && BUSY.includes(code)) return `${code}; if it is running, it may be busy: try again`;
   return code ?? (err instanceof Error ? err.message : String(err));
 }
 
@@ -80,8 +86,17 @@ export async function kanbanCommand(command: string | undefined, rest: readonly 
   }
 
   // show takes nothing, and reads nothing: a terminal on stdin would wait forever.
+  // Every other command reads stdin, so a terminal there is refused at once.
   let input: unknown = {};
   if (command !== 'show') {
+    if (io.stdinIsTTY === true) {
+      say({
+        ok: false,
+        code: 'invalid',
+        message: `mt kanban ${command} reads JSON on stdin; stdin is a terminal: redirect a file or pipe it`,
+      });
+      return 1;
+    }
     const text = await (io.stdin?.(DEFAULT_MAX_REQUEST_BYTES) ?? Promise.resolve(''));
     if (text === undefined) {
       say({ ok: false, code: 'too_large', message: `the input is over ${DEFAULT_MAX_REQUEST_BYTES} bytes` });
@@ -100,7 +115,7 @@ export async function kanbanCommand(command: string | undefined, rest: readonly 
   try {
     line = await ask(socket, `${JSON.stringify({ run, token, command, input })}\n`);
   } catch (err) {
-    say({ ok: false, code: 'unreachable', message: `cannot reach the gateway at ${socket}: ${why(err)}; if it is running, it may be busy: try again` });
+    say({ ok: false, code: 'unreachable', message: `cannot reach the gateway at ${socket}: ${why(err)}` });
     return 1;
   }
   let answer: unknown;
