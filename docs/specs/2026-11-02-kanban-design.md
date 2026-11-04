@@ -1011,12 +1011,14 @@ The task prompt is composed, in this order, of:
      `complete` rather than `review`; if you find follow-up work, create a task for it rather than
      doing it; never put secrets in a summary, metadata or comment; stop once you have reported.
    - *review*: review the implementer's handoff, given in its own section of the context, and the
-     workspace against the task and its contract; do not change the workspace; report `complete` to approve or `changes` with a
+     workspace against the task and its contract — or, when there is no such section, the latest
+     attempts and the workspace; do not change the workspace; report `complete` to approve or `changes` with a
      specific, actionable reason; `block` only for a problem the implementer cannot fix.
 4. **The task** — title, body, contract, the task's gates (§7.7), one line each with its timeout, and
    the result of the last gate run if there is one: who reported, whether it passed, each gate's exit,
    and the end of a failing gate's output, set off as data.
-5. **The worker context:**
+5. **The worker context**, starting with the rework's reason or the handoff under review, where
+   there is one, so the budget's last cut (below) cannot drop it:
    - each parent's latest completion summary and metadata, verbatim — for a reviewed parent, the
      implementer's handoff (§4.4);
    - prior attempts on this task: outcome, summary, error, last output — and for a failed, crashed
@@ -1035,7 +1037,7 @@ Each stored piece is capped — body 12 KiB, a summary 4 KiB, a comment, an erro
 2 KiB, metadata 2 KiB — after it is masked, so a cut never leaves the start of a secret showing. The
 context keeps the latest five attempts and the newest comments that fit, and says what it left out
 ("12 earlier comments omitted; mt kanban show has them"); whatever still runs over is cut at the
-budget with a line saying so. `role.md` is never cut: a role whose `role.md` alone pushes the prompt
+budget with a line saying so, from the end. `role.md` is never cut: a role whose `role.md` alone pushes the prompt
 past the driver's limit gets a turn that fails before the agent starts, with the driver's size
 message as the run's error, and the task gives up after `failure_limit` such runs.
 
@@ -1188,18 +1190,28 @@ fails. Then the transition, which checks everything again in its own transaction
 been decided while the gates ran — a runtime limit, a supersession — and is then refused as any
 decided run's report is.
 
-- **One report at a time.** While a report's gates run, a second report on the task is refused
-  (`report_in_progress`) and the task is not claimed: the same gates would run twice in one checkout,
-  or an agent would start in a checkout being tested.
+- **One report per workspace at a time.** While a report's gates run, a second report on the task,
+  or a report on another task in the same workspace, is refused (`report_in_progress`), and no task
+  whose workspace is, or resolves at its claim to, that workspace is claimed: two reports' gates
+  would run in one checkout, or an agent would start in a checkout being tested.
+- **The gates a report reads are the ones it runs.** A gate removed while a report's gates are
+  running is still run by that report; a gate added meanwhile is not part of it, and runs from the
+  next report on.
 - **A report waits for them.** So a task's gates may take at most 600 s together, and `mt kanban`
   waits 15 minutes for its answer.
 - **The refusal.** `gate_failed` carries the gate's command, its exit code or signal, whether it timed
-  out, and the last 4 KiB of its stdout and stderr together, masked before they are cut (§10.1).
+  out, and the last 4 KiB of its stdout and stderr together, masked before they are cut (§10.1). What
+  is read of a gate's output before masking is its last 64 KiB; when that window is cut, leading text
+  that is the end of a known secret is dropped, and the window starts with `[earlier output cut]`, so
+  a cut through a secret leaves none of it showing.
   `gates_cannot_run` says why gates could not run at all: no workspace, a workspace or role no longer
   configured, its directory gone, or the gateway stopping, which kills them and applies nothing. The
   worker socket tells a report still running its gates when it closes, and sends its answer before
-  the connection goes; the gateway closes the socket before it waits for the dispatcher, whose drain
-  waits for such a report.
+  the connection goes. On shutdown the gateway closes the socket first, once the dispatcher has
+  stopped deciding runs, and only then closes the sessions and waits for the dispatcher: the report
+  is answered while its agent is still there, and no run is decided because of the stop — the next
+  boot ends the runs still open (§8.4). A gate runner that fails unexpectedly fails its gate, recorded
+  with the error masked, and refuses the report as `gate_failed`.
 - **The record.** Each run of a task's gates is one `gates_ran` event, with every gate's result,
   passed or not.
 
@@ -1215,6 +1227,11 @@ token; and a person approving after an implementer's `review` runs them as the i
 secret, and never `MT_KANBAN_TOKEN` or `MT_KANBAN_SOCKET`: a test suite has no business reporting on
 the board.
 
+**Gates are not a containment boundary.** A gate's process group is killed when it times out, is
+stopped or its shell exits, but a process the gate detaches into a session of its own (`setsid`) has
+left the group: it can outlive the timeout and go on changing the checkout. Gates are an operator's
+commands, trusted as such.
+
 **Gates are not isolated from the network**, deliberately. They are commands an operator chose, in the
 same trust position as a cron job, not output from an agent. Denying the network would break ordinary
 gates — installing dependencies, integration tests — and has no portable implementation: macOS offers
@@ -1225,9 +1242,14 @@ Gates are deterministic where a contract is prose: a red test suite is evidence 
 and no reviewer has to notice. Defining a gate requires **operator** tier: a gate is a shell command
 the gateway will execute. An operator defines, lists and removes gates with `mt kanban gate add`,
 `list` and `remove` (§2.6), recorded as `operator:<login>`, and from plan D with `/kanban gate`; both
-call the service's `addGate`, `listGates` and `removeGate`. The worker CLI has no gate command. A gate
+call the service's `addGate`, `listGates` and `removeGate`. The worker CLI has no gate command.
+Wherever a gate's command is shown — `mt kanban gate list`, `mt kanban show`, the task prompt — it is
+masked, since a secret may have become known after the gate was defined; plan D's chat must mask it
+too when it shows one. A gate
 whose command holds a known secret is refused (§10.1) — as written, with control characters stripped,
-or with the shell's quotes and backslashes removed, since the shell runs `sk\$x` as `sk$x`. `mt`
+or with the shell's quotes and backslashes removed, since the shell runs `sk\$x` as `sk$x` — a
+backslash-newline, which the shell removes as a line continuation, is taken out first, and that form
+is checked with its control characters stripped too. `mt`
 checks the secrets its own shell can know: every role's values, and the Lark app secret when
 `LARK_APP_SECRET` is set there.
 
@@ -1244,6 +1266,14 @@ which tells "no commit to review" apart from a report that recorded nothing. The
 asynchronous, take no lock (`git --no-optional-locks status`), run no fsmonitor hook
 (`-c core.fsmonitor=false`), and get only the agent allowlist of the gateway's environment. A
 workspace's clean filters still run, as the gateway's user: no more than its agent could do.
+
+Edge cases, as git reports them:
+
+- a bare repository has no working tree, so `git status` fails and it reads as having uncommitted
+  changes;
+- a workspace directory that is not itself a repository but sits inside one reports the outer
+  repository's `HEAD` and status;
+- the reads' 10 s timeout signals git only, not processes git started, such as a clean filter.
 
 The review card and the reviewer's context show them, and a human reviewer is told what to review:
 

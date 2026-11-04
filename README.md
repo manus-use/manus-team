@@ -280,14 +280,22 @@ at once.
   up to 15 minutes for an answer. A gate whose command holds a known secret is refused: put
   the value in the role's `.env` or `agent.passEnv`, and name it in the command. Defining gates
   is an operator's action: `mt kanban gate add` (the command's words after `--` are joined with
-  spaces; quote it to keep its own quoting), `list` and `remove`, which record you as
+  spaces; quote it to keep its own quoting; words before `--` join it too, so write the whole
+  command after `--`), `list` and `remove`, which record you as
   `operator:<your login>`. They check the secrets this shell knows: every role's values, and
   the Lark app secret if `LARK_APP_SECRET` is set here. They refuse to run in a board run's
   shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set, so an agent does not define gates by
   accident; that is not a security boundary, since an agent runs as your user and could unset
-  them, as it could edit `config.yaml` or a role's files. When an agent reports
+  them, as it could edit `config.yaml` or a role's files. Gate commands are shown masked. One
+  report's gates run in a workspace at a time: another report there is refused until it is
+  answered. A report runs the gates it read when it started: one added or removed meanwhile
+  counts from the next report. Gates are not a containment boundary: a process a gate detaches
+  with `setsid` leaves its process group, can outlive the timeout and can go on changing the
+  checkout. When an agent reports
   `complete` or `review`, the gateway also records its workspace's `HEAD`, and whether the tree
-  had uncommitted changes.
+  had uncommitted changes. A bare repository reads as having uncommitted changes; a workspace
+  that is not itself a repository but sits inside one reports the outer repository's `HEAD`;
+  and the read's timeout signals git only, not what git started.
 
 ### Chat commands
 
