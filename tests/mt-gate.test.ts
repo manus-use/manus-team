@@ -123,6 +123,31 @@ describe('mt kanban gate', () => {
     });
   });
 
+  it('shows a gate command masked when it holds a secret registered after it was defined', async () => {
+    // Defined while nothing was registered: a secret the gateway learned since, from the role's .env.
+    const service = new KanbanService({ db: gateway, roles: new Map(), workspaces: new Set(['default']) });
+    const added = service.addGate(taskId, { command: 'curl -H "k: sk-live-1234567890" https://ci' }, ALICE);
+    if (!added.ok) throw new Error(added.message);
+    const listed = await mt(['list', taskId]);
+    expect(listed.code).toBe(0);
+    expect(listed.out).toContain('curl -H "k: ••••" https://ci');
+    expect(listed.out).not.toContain('sk-live');
+    const removed = await mt(['remove', taskId, String(added.gate.id)]);
+    expect(removed).toMatchObject({ code: 0, out: `removed gate ${added.gate.id}: curl -H "k: ••••" https://ci (up to 300 s) from task ${taskId}` });
+  });
+
+  it('refuses, masked and with exit 1, when the database fails in a way other than being busy', async () => {
+    // A failure whose message holds a secret the shell knows.
+    gateway.exec("CREATE TRIGGER no_gates BEFORE INSERT ON kanban_gates BEGIN SELECT RAISE(ABORT, 'refused for sk-live-1234567890'); END");
+    const r = await mt(['add', taskId, '--', 'npm', 'test']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/^mt: the board's database failed: /);
+    expect(r.err).not.toMatch(/\n\s+at /);
+    expect(r.err).toContain('refused for ••••');
+    expect(r.err).not.toContain('sk-live');
+    expect(gatesOf(gateway, taskId)).toEqual([]);
+  });
+
   it('answers a wrong command line with exit 2', async () => {
     for (const argv of [
       ['add', taskId],

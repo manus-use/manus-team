@@ -442,7 +442,8 @@ export class WorkerApi {
         reported_dirty: a.run.reportedDirty,
         ...(a.toolCalls === undefined ? {} : { tool_calls: a.toolCalls.map((c) => ({ title: c.title, status: c.status })) }),
       })),
-      gates: (brief.gates ?? []).map((g) => ({ gate_id: g.id, command: g.command, timeout_s: g.timeoutS })),
+      // Masked: a gate defined before a secret was known may hold it.
+      gates: (brief.gates ?? []).map((g) => ({ gate_id: g.id, command: redactKnownSecrets(g.command), timeout_s: g.timeoutS })),
       last_gate_run:
         brief.lastGateRun === undefined
           ? null
@@ -453,7 +454,7 @@ export class WorkerApi {
               aborted: brief.lastGateRun.aborted,
               not_run: brief.lastGateRun.notRun,
               results: brief.lastGateRun.results.map((r) => ({
-                command: r.command,
+                command: redactKnownSecrets(r.command),
                 exit_code: r.exitCode,
                 signal: r.signal,
                 timed_out: r.timedOut,

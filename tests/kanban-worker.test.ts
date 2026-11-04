@@ -459,6 +459,16 @@ describe('worker API: show, for gates, review and rework', () => {
     });
   });
 
+  it('masks a gate command holding a secret registered after it was defined', async () => {
+    const task = b.create();
+    expect(b.service.addGate(task.taskId, { command: 'curl -H "k: sk-live-1234567890" https://ci' }, ALICE).ok).toBe(true);
+    addSecrets(['sk-live-1234567890']);
+    const run = b.claim(task.taskId);
+    const shown = await run.ask('show');
+    expect(shown).toMatchObject({ ok: true, gates: [{ command: `curl -H "k: ${MASK}" https://ci` }] });
+    expect(JSON.stringify(shown)).not.toContain('sk-live-1234567890');
+  });
+
   it('shows the commit each attempt reported, and a rework its reason and previous handoff', async () => {
     const task = b.create({ reviewer: 'reviewer' });
     const work = b.claim(task.taskId);

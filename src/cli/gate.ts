@@ -4,7 +4,7 @@ import { loadTeamSettings } from '../config.js';
 import { openDb } from '../db/open.js';
 import { KanbanService } from '../kanban/service.js';
 import type { GateRow } from '../kanban/types.js';
-import { addSecrets } from '../secrets.js';
+import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { loadTeam, teamSecrets } from '../team.js';
 import { refuse, table, type MtIo } from './mt.js';
 
@@ -67,8 +67,19 @@ function openBoard(io: MtIo, what: string): Board | number {
   if (!existsSync(settings.dbPath)) {
     return refuse(io, `there is no board at ${settings.dbPath}: the gateway creates its database when it first starts`);
   }
-  const db = openDb(settings.dbPath);
-  const migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kanban_gates'").get();
+  let db: ReturnType<typeof openDb>;
+  let migrated: unknown;
+  try {
+    db = openDb(settings.dbPath);
+  } catch (err) {
+    return refuse(io, failed(err));
+  }
+  try {
+    migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kanban_gates'").get();
+  } catch (err) {
+    db.close();
+    return refuse(io, failed(err));
+  }
   if (migrated === undefined) {
     db.close();
     return refuse(io, `the database at ${settings.dbPath} has no board yet: start the gateway once, so it is migrated`);
@@ -83,6 +94,12 @@ function busy(err: unknown): boolean {
   return code === 'SQLITE_BUSY' || (err instanceof Error && err.message.startsWith('write contention'));
 }
 
+/** Any other failure, said in a line and masked: a stack would print what the masker never saw. */
+function failed(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return `the board's database failed: ${redactKnownSecrets(message)}`;
+}
+
 function withBoard(io: MtIo, what: string, fn: (b: Board) => number): number {
   const board = openBoard(io, what);
   if (typeof board === 'number') return board;
@@ -90,14 +107,15 @@ function withBoard(io: MtIo, what: string, fn: (b: Board) => number): number {
     return fn(board);
   } catch (err) {
     if (busy(err)) return refuse(io, 'the board is busy: the gateway kept its database locked; try again');
-    throw err;
+    return refuse(io, failed(err));
   } finally {
     board.close();
   }
 }
 
+/** Masked: a gate defined before a secret was known may hold it. */
 function describe(g: GateRow): string {
-  return `gate ${g.id}: ${g.command} (up to ${g.timeoutS} s)`;
+  return `gate ${g.id}: ${redactKnownSecrets(g.command)} (up to ${g.timeoutS} s)`;
 }
 
 /** `mt kanban gate add <task_id> [--timeout <s>] -- <command…>`. */
@@ -119,7 +137,7 @@ export function gateList(taskId: string, io: MtIo): number {
       io.out(`task ${taskId} has no gates`);
       return 0;
     }
-    const rows = r.gates.map((g) => [String(g.id), `${g.timeoutS} s`, g.createdBy, g.command]);
+    const rows = r.gates.map((g) => [String(g.id), `${g.timeoutS} s`, g.createdBy, redactKnownSecrets(g.command)]);
     for (const line of table([['id', 'timeout', 'defined by', 'command'], ...rows])) io.out(line);
     return 0;
   });
