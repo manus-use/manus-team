@@ -1,0 +1,61 @@
+import { EventEmitter } from 'node:events';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { crashReport, installCrashHandlers } from '../src/crash.js';
+import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
+
+/** The crash handlers (spec §10.1), on a stand-in for the process: nothing exits here. */
+
+beforeEach(() => clearSecrets());
+afterEach(() => clearSecrets());
+
+function installed() {
+  const source = new EventEmitter();
+  const written: string[] = [];
+  const exits: number[] = [];
+  installCrashHandlers(source, (text) => written.push(text), (code) => exits.push(code));
+  return { source, written, exits };
+}
+
+describe('crash handlers', () => {
+  it('print an uncaught exception, its stack included, masked, and exit 1', () => {
+    addSecrets(['sk-live-1234567890']);
+    const { source, written, exits } = installed();
+    source.emit('uncaughtException', new Error('request failed with key sk-live-1234567890'));
+    expect(exits).toEqual([1]);
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatch(new RegExp(`^uncaught exception: Error: request failed with key ${MASK}\\n    at `));
+    expect(written[0]).not.toContain('sk-live');
+    expect(written[0]?.endsWith('\n')).toBe(true);
+  });
+
+  it('print an unhandled rejection of anything, masked, and exit 1', () => {
+    addSecrets(['sk-live-1234567890']);
+    const { source, written, exits } = installed();
+    source.emit('unhandledRejection', { status: 401, key: 'sk-live-1234567890' });
+    source.emit('unhandledRejection', 'just sk-live-1234567890');
+    expect(exits).toEqual([1, 1]);
+    expect(written).toEqual([
+      `unhandled rejection: { status: 401, key: '${MASK}' }\n`,
+      `unhandled rejection: 'just ${MASK}'\n`,
+    ]);
+  });
+
+  it('exit even when the report cannot be written', () => {
+    const source = new EventEmitter();
+    const exits: number[] = [];
+    installCrashHandlers(
+      source,
+      () => {
+        throw new Error('stderr is gone');
+      },
+      (code) => exits.push(code),
+    );
+    source.emit('uncaughtException', new Error('boom'));
+    expect(exits).toEqual([1]);
+  });
+
+  it('show an error as Node would, its own fields too', () => {
+    const err = Object.assign(new Error('spawn bytesec ENOENT'), { code: 'ENOENT' });
+    expect(crashReport('uncaught exception', err)).toContain("code: 'ENOENT'");
+  });
+});

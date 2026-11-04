@@ -1,4 +1,5 @@
 import { ConfigError } from './config.js';
+import { installCrashHandlers } from './crash.js';
 import { main } from './index.js';
 import { redactKnownSecrets } from './secrets.js';
 
@@ -16,7 +17,11 @@ import { redactKnownSecrets } from './secrets.js';
  * Both writes are masked, but only for the secrets known by then: main() registers
  * them once loadTeam has returned, so an error from loadConfig or loadTeam itself
  * comes before any is known.
+ *
+ * So is a crash, from the first line: an uncaught exception or an unhandled
+ * rejection is printed through the masker, not by Node, and exits 1.
  */
+installCrashHandlers();
 try {
   await main();
 } catch (err) {
