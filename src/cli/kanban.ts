@@ -20,8 +20,12 @@ import type { MtIo } from './mt.js';
  * Exit codes: 0 done, 1 refused, 2 the command line was wrong.
  */
 
-/** How long to wait for the gateway's answer. A report runs the task's gates from plan C4. */
-const ANSWER_TIMEOUT_MS = 10 * 60_000;
+/**
+ * How long to wait for the gateway's answer. A report runs the task's gates first,
+ * which may take up to 10 minutes together (GATE_LIMITS.totalTimeoutS), and reads
+ * the commit; this leaves room for both.
+ */
+export const ANSWER_TIMEOUT_MS = 15 * 60_000;
 
 const USAGE = `usage: mt kanban <${WORKER_COMMANDS.join('|')}>, with its input as JSON on stdin`;
 

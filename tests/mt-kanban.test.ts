@@ -3,12 +3,13 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { ANSWER_TIMEOUT_MS } from '../src/cli/kanban.js';
 import { runMt } from '../src/cli/mt.js';
 import { getRun } from '../src/db/kanban-read.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { listenWorker, type WorkerServer } from '../src/kanban/socket.js';
 import { hashToken, mintToken } from '../src/kanban/token.js';
-import type { RunRow } from '../src/kanban/types.js';
+import { GATE_LIMITS, type RunRow } from '../src/kanban/types.js';
 import { WorkerApi } from '../src/kanban/worker.js';
 import { clearSecrets } from '../src/secrets.js';
 import { ManualClock, testDb, type TestDb } from './helpers/db.js';
@@ -175,5 +176,11 @@ describe('mt kanban', () => {
     const out: string[] = [];
     await runMt(['help'], { env: {}, out: (l) => out.push(l), err: () => undefined });
     expect(out.join('\n')).toContain('mt kanban <show|complete|review|changes|block|comment|create|link> < input.json');
+  });
+});
+
+describe('mt kanban: waiting for a report', () => {
+  it("waits longer than a task's gates may take together, with a few minutes to spare", () => {
+    expect(ANSWER_TIMEOUT_MS).toBeGreaterThanOrEqual(GATE_LIMITS.totalTimeoutS * 1000 + 5 * 60_000);
   });
 });
