@@ -576,6 +576,24 @@ describe('Router: /kanban', () => {
     expect(lastReply(h)).toBe(`The board could not do that: database\\_locked by ${MASK}`);
     expect(h.notes.some((n) => n.includes('kanban command in'))).toBe(true);
   });
+
+  it('answers a board that throws a long, many-line error in one line, cut, and notes it masked', async () => {
+    addSecrets(['sk-noted-12345678']);
+    const h = harness({
+      kanban: board(async () => {
+        throw new Error(`first line with sk-noted-12345678\n# second line\n${'x'.repeat(2000)}`);
+      }),
+    });
+    await h.router.onMessage(msg({ text: '/kanban list' }));
+    const reply = lastReply(h);
+    expect(reply.split('\n')).toHaveLength(1);
+    expect(reply.startsWith(`The board could not do that: first line with ${MASK} # second line x`)).toBe(true);
+    expect(reply.endsWith('…')).toBe(true);
+    expect(reply.length).toBeLessThan(700);
+    const noted = h.notes.find((n) => n.includes('kanban command in')) ?? '';
+    expect(noted).toContain(MASK);
+    expect(noted).not.toContain('sk-noted');
+  });
 });
 
 describe('Router: prompts', () => {

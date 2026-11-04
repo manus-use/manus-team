@@ -6,6 +6,7 @@ import { bindingsInConversation, resolveBinding } from '../db/bindings.js';
 import type { Channel, SendTarget } from '../channel/types.js';
 import { forDisplay, truncate } from '../channel/escape.js';
 import { redactKnownSecrets } from '../secrets.js';
+import { label } from '../kanban/chat-render.js';
 import type {
   BindingKey,
   InboundAttachment,
@@ -445,8 +446,9 @@ export class Router {
             text = await kanban.run(arg, message, key);
           } catch (err) {
             const detail = err instanceof Error ? err.message : String(err);
-            this.#note(`kanban command in ${message.messageId} failed: ${detail}`);
-            text = `The board could not do that: ${forDisplay(detail)}`;
+            this.#note(`kanban command in ${message.messageId} failed: ${redactKnownSecrets(detail)}`);
+            // One line, masked and cut, as a refusal is: an error can quote anything.
+            text = `The board could not do that: ${label(detail, 600)}`;
           }
         }
         // Each piece was escaped, and masked, as it was put in; the whole reply is

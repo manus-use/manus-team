@@ -1,4 +1,4 @@
-import { forDisplay, forMarkdown, truncate } from '../channel/escape.js';
+import { forDisplay, forMarkdown } from '../channel/escape.js';
 import type { BoardEntry, TaskView } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
@@ -23,15 +23,35 @@ import type { Assignee, GateRow, KanbanEvent, RunRow, TaskRow } from './types.js
 /**
  * Control characters stripped and known secrets masked: the first thing done to
  * any piece, before it is reshaped -- spaces collapsed, trimmed, cut -- since a
- * reshaped secret no longer matches.
+ * reshaped secret no longer matches. Then a CRLF or a lone CR becomes a newline,
+ * which `stripControl` keeps: a body from the worker CLI, a summary, an output or
+ * a comment can hold one, and quoting splits lines on newlines only.
  */
 function masked(text: string): string {
-  return redactKnownSecrets(stripControl(text));
+  return redactKnownSecrets(stripControl(text)).replace(/\r\n?/g, '\n');
+}
+
+const HIGH_SURROGATE = /[\uD800-\uDBFF]$/;
+const LOW_SURROGATE = /^[\uDC00-\uDFFF]/;
+
+/**
+ * The first `max` UTF-16 units at most, with `marker` when anything was cut: cut
+ * on a character boundary, so an emoji at the cut is dropped whole, not halved.
+ */
+function head(text: string, max: number, marker: string): string {
+  if (text.length <= max) return text;
+  const kept = text.slice(0, Math.max(0, max - marker.length));
+  return kept.replace(HIGH_SURROGATE, '') + marker;
+}
+
+/** The last `max` UTF-16 units, cut on a character boundary as `head` is. */
+function end(text: string, max: number): string {
+  return text.slice(-max).replace(LOW_SURROGATE, '');
 }
 
 /** A label: masked, then one line, cut with a one-line marker, and every markdown character escaped. */
 export function label(text: string, max = 200): string {
-  return forDisplay(truncate(masked(text).replace(/\s+/g, ' ').trim(), max, '…'));
+  return forDisplay(head(masked(text).replace(/\s+/g, ' ').trim(), max, '…'));
 }
 
 /**
@@ -49,7 +69,7 @@ function quoted(text: string): string {
 
 /** Free text from its start: masked, then cut to `max` characters, then quoted. */
 function block(text: string, max: number): string {
-  return quoted(truncate(masked(text).trim(), max));
+  return quoted(head(masked(text).trim(), max, '\n… (truncated)'));
 }
 
 /**
@@ -58,7 +78,7 @@ function block(text: string, max: number): string {
  */
 function tail(text: string, max: number): string {
   const whole = masked(text).trim();
-  return quoted(whole.length <= max ? whole : `… (earlier output cut)\n${whole.slice(-max).trimStart()}`);
+  return quoted(whole.length <= max ? whole : `… (earlier output cut)\n${end(whole, max).trimStart()}`);
 }
 
 function who(a: Assignee | null): string {

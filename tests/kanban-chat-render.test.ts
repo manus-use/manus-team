@@ -174,6 +174,30 @@ describe('/kanban show', () => {
     ]);
   });
 
+  it('reads a lone CR in a body as a line break, so every line is quoted and a fence after one is escaped', () => {
+    const k = newTask(h.db, { body: 'intro\r```\r# Heading\r- item' });
+    const view = taskView(h.db, k.taskId);
+    if (view === undefined) throw new Error('no view');
+    const text = renderShow(view, []);
+    expect(text).not.toContain('\r');
+    expect(text.split('\n').slice(2, 6)).toEqual(['> intro', '> \\```', expect.stringMatching(/^> .*Heading$/), expect.stringMatching(/^> .*item$/)]);
+  });
+
+  it('cuts a piece on a character boundary, never leaving half of an emoji', () => {
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    // Each emoji straddles where its piece is cut: a title at 200, a body at 1500, an output's tail at 800.
+    const k = newTask(h.db, { title: `${'a'.repeat(198)}😀 rest`, body: `${'x'.repeat(1485)}😀${' and more'.repeat(10)}` });
+    const run = claimed(h.db, k.taskId);
+    expect(endRun(h.db, run.runId, { outcome: 'failed', lastOutput: `start 😀${'y'.repeat(799)}` }, DEFAULT_LIMITS, NOW).ok).toBe(true);
+    const view = taskView(h.db, k.taskId);
+    if (view === undefined) throw new Error('no view');
+    const text = renderShow(view, []);
+    expect(text).toContain('(truncated)');
+    expect(text).toContain('(earlier output cut)');
+    expect(text).not.toMatch(lone);
+    expect(renderList(boardList(h.db), undefined)).not.toMatch(lone);
+  });
+
   it('masks a secret before it cuts a long piece, so no start of it shows', () => {
     addSecrets(['sk-split-1234567890']);
     const k = newTask(h.db, { body: `${'x'.repeat(1490)}sk-split-1234567890 and more` });

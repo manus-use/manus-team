@@ -143,6 +143,9 @@ export class KanbanChat {
     if (by === undefined) {
       return 'Lark did not say who you are (no union_id came with the message), and the board records who changes it. Ask the operator to check the app can read user ids.';
     }
+    // A change is made, then its reply rendered. Should the render throw after the
+    // change succeeded, the router answers that the board could not do it: the
+    // change stands though the reply says it was not done, and `/kanban show` tells.
     return this.#change(command, by, message, key);
   }
 
@@ -175,7 +178,7 @@ export class KanbanChat {
         const r = service.setWorkspace(command.taskId, command.workspace, by);
         if (!r.ok) return refused(r);
         this.#changed();
-        return `${id(command.taskId)} works in ${forDisplay(command.workspace)}.`;
+        return `${id(command.taskId)} works in ${label(command.workspace)}.`;
       }
       case 'comment': {
         // Only an operator's comment may steer the task's agent; anyone's is shown to people (spec §9.1).
@@ -266,7 +269,7 @@ export class KanbanChat {
         : `role ${forDisplay(task.assignee.name)}`;
     return (
       `Created ${id(task.taskId)} — **${label(task.title)}**, for ${whom}` +
-      `${task.workspace === null ? '' : `, in ${forDisplay(task.workspace)}`}. ` +
+      `${task.workspace === null ? '' : `, in ${label(task.workspace)}`}. ` +
       'This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.'
     );
   }
