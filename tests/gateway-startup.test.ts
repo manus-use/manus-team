@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -145,6 +145,19 @@ describe('the board, at startup', () => {
     expect(waited[0]?.boundMs).toBeGreaterThan(0);
     expect(waited[0]?.boundMs).toBeLessThanOrEqual(10_000);
     expect(gateway.db.open).toBe(false);
+  });
+
+  it('writes the mt a run finds on its PATH only when kanban.enabled is set', async () => {
+    const off = await createGateway(config, team);
+    await off.stop();
+    expect(existsSync(join(config.home, 'bin'))).toBe(false);
+    const on = await createGateway({ ...config, kanban: { ...config.kanban, enabled: true } }, team);
+    try {
+      expect(statSync(join(config.home, 'bin', 'mt')).mode & 0o777).toBe(0o700);
+      expect(readFileSync(join(config.home, 'bin', 'mt'), 'utf8')).toContain(`exec '${process.execPath}'`);
+    } finally {
+      await on.stop();
+    }
   });
 
   it('builds the dispatcher when kanban.enabled is set', async () => {

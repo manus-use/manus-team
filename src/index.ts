@@ -17,7 +17,10 @@ import { systemClock } from './time.js';
 import { addSecrets, redactKnownSecrets } from './secrets.js';
 import { Dispatcher } from './kanban/dispatcher.js';
 import { KanbanService } from './kanban/service.js';
+import { writeMtShim } from './kanban/shim.js';
 import { KanbanSink } from './kanban/sink.js';
+import { claimSocketPath, listenWorker, workerSocketPath, type WorkerServer } from './kanban/socket.js';
+import { WorkerApi } from './kanban/worker.js';
 import type { Channel } from './channel/types.js';
 
 /**
@@ -170,8 +173,9 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     note,
   });
 
-  // Off until the board can be used: nothing can create a task before plan D,
-  // and no agent can report before plan C3 (spec §12).
+  // Off until the board can be used: nothing can create a task before plan D (spec §12).
+  let worker: { api: WorkerApi; socket: string } | undefined;
+  let workerServer: WorkerServer | undefined;
   if (config.kanban.enabled) {
     const { failureLimit, transientLimit, transientCooldownS } = config.kanban;
     const service = new KanbanService({
@@ -180,6 +184,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       workspaces: new Set(team.workspaces.keys()),
       limits: { failureLimit, transientLimit, transientCooldownS },
     });
+    const socket = workerSocketPath(config.home);
     dispatcher = new Dispatcher({
       db,
       service,
@@ -190,7 +195,12 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       note,
       // Outside every workspace: none may contain the home (spec §2.3).
       renderRoot: join(config.home, 'rendered'),
+      // How a run reports (spec §7.2): through the socket, with this build's mt
+      // first on its PATH. Both are in the home too.
+      worker: { socket, mtDir: writeMtShim(config.home), path: process.env['PATH'] },
     });
+    // A worker's create, link or report can make a task claimable.
+    worker = { api: new WorkerApi({ db, service, changed: () => dispatcher?.pass() }), socket };
     note(`kanban: dispatching up to ${config.kanban.maxRunning} agent run(s) at once`);
   }
 
@@ -219,12 +229,22 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     dispatcher,
 
     async start(): Promise<void> {
+      // First, the worker socket's path: a second gateway on this home fails here,
+      // before its reconcile or its boot touches the first one's sessions and runs.
+      if (worker !== undefined) await claimSocketPath(worker.socket);
+
       // Before connecting. Reconciling against a channel that is already delivering
       // means deciding what happened to the last turn while the next one runs.
       const findings = registry.reconcileBoot();
       note(`reconciled ${findings.length} session(s) needing attention`);
       // Then every run the restart killed is closed, before anything can claim (spec §8.4).
       await dispatcher?.boot();
+      // Then the socket, before the first pass can start a run that would report to it.
+      if (worker !== undefined) {
+        const { api, socket } = worker;
+        workerServer = await listenWorker(socket, (request) => api.handle(request), { note });
+        note(`kanban: runs report through ${socket}`);
+      }
 
       await adapter.connect();
       inbound.start();
@@ -289,6 +309,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       if ((await dispatcher?.idle(SHUTDOWN_DRAIN_MS)) === false) {
         note('kanban: stopped with run work still pending; the next boot ends those runs');
       }
+      // No agent is left to report; and none may reach a closed database.
+      await workerServer?.close();
       db.close();
     },
   };
