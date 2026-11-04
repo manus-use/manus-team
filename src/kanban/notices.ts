@@ -29,9 +29,13 @@ import type { KanbanEvent, SubscriptionRow } from './types.js';
  *
  * **A conversation that cannot be reached is let go of.** A send refused as
  * unreachable -- `UNREACHABLE_CODES`: the bot is not in the chat -- or failing
- * `DEAD_AFTER` times in a row at the longest pause, drops the notices it held,
- * says so once, and marks the conversation dead until the gateway restarts: its
- * later events are passed over without a send. A send that fails otherwise holds
+ * `DEAD_AFTER` times in a row at the longest pause, or a conversation on a
+ * channel this gateway has not got, drops the notices it held, says so once, and
+ * marks the conversation dead until the gateway restarts: its later events are
+ * passed over without a send. A subscription whose task is not on the board is
+ * let go of by itself in the same way. A cursor that fails to move after its
+ * batch was sent is said to be so, and that subscription's notices are sent
+ * again after a pause; the others' cursors move. A send that fails otherwise holds
  * the conversation back for a pause that doubles, up to five minutes, while the
  * others go on: a network failure, which the Lark adapter reports as code 0 and
  * not retryable, and a refusal of one bad batch, are not a dead chat. A send that
@@ -105,6 +109,9 @@ function conversationKey(sub: SubscriptionRow): string {
   return [sub.channel, sub.conversationId, sub.threadId].join('\u0000');
 }
 
+/** A subscription's task is not on the board: nothing it follows can be told. */
+class TaskGone extends Error {}
+
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -114,9 +121,11 @@ export class Notifier {
   readonly #clock: Clock;
   readonly #note: (line: string) => void;
   /** Held back after a failure: by conversation key, or by subscription id for one that could not be read. */
-  readonly #backoff = new Map<string, { until: number; waitMs: number; atMax: number }>();
+  readonly #backoff = new Map<string, Backoff>();
   /** Conversations let go of until the gateway restarts. */
   readonly #dead = new Set<string>();
+  /** Subscriptions whose task is not on the board, let go of until the gateway restarts. */
+  readonly #gone = new Set<number>();
   #round: Promise<number> | undefined;
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
@@ -227,12 +236,23 @@ export class Notifier {
   async #deliverTo(c: Conversation, maySend: boolean): Promise<{ notices: number; sent: boolean }> {
     const pending: Pending[] = [];
     for (const sub of c.subs) {
-      if (this.#held(`sub:${sub.id}`)) continue;
+      if (this.#gone.has(sub.id)) {
+        this.#passOver(sub);
+        continue;
+      }
+      const key = `sub:${sub.id}`;
+      if (this.#held(key)) continue;
       try {
         pending.push(this.#read(sub));
+        // A pause for a read that failed is over; one for a cursor that did not move lasts until it moves.
+        if (this.#backoff.get(key)?.advance !== true) this.#backoff.delete(key);
       } catch (err) {
+        if (err instanceof TaskGone) {
+          this.#letGoOfSubscription(sub);
+          continue;
+        }
         // One subscription that cannot be read does not hold up its neighbours.
-        this.#holdBack(`sub:${sub.id}`, `subscription ${sub.id} of task ${sub.taskId}`, message(err));
+        this.#holdBack(key, `subscription ${sub.id} of task ${sub.taskId}`, message(err));
       }
     }
     // A subscription read only its first ROUND_EVENTS: events past the last it read
@@ -245,16 +265,17 @@ export class Notifier {
       .sort((a, b) => a.event.id - b.event.id);
     if (this.#dead.has(c.key)) {
       // Let go of until a restart: passed over, without a send.
-      this.#advanceAll(pending, readTo);
+      this.#advanceAll(pending, readTo, false);
       return { notices: 0, sent: false };
     }
     if (all.length === 0) {
-      this.#advanceAll(pending, readTo);
+      this.#advanceAll(pending, readTo, false);
       return { notices: 0, sent: false };
     }
     const channel = this.#deps.channels.get(c.channel);
     if (channel === undefined) {
-      this.#holdBack(c.key, describe(c), `no channel ${c.channel}`);
+      // Configuration, not a failure that passes: no later round would find the channel either.
+      this.#letGo(c, pending, `no channel ${c.channel}`);
       return { notices: 0, sent: false };
     }
     if (!maySend) return { notices: 0, sent: false };
@@ -285,7 +306,7 @@ export class Notifier {
       return { notices: 0, sent: true };
     }
     this.#backoff.delete(c.key);
-    this.#advanceAll(pending, upTo);
+    this.#advanceAll(pending, upTo, true);
     return { notices: batch.length, sent: true };
   }
 
@@ -313,7 +334,7 @@ export class Notifier {
   /** A subscription's events past its cursor, and the notices among them. */
   #read(sub: SubscriptionRow): Pending {
     const task = getTask(this.#deps.db, sub.taskId);
-    if (task === undefined) throw new Error(`task ${sub.taskId} is not on the board`);
+    if (task === undefined) throw new TaskGone(`task ${sub.taskId} is not on the board`);
     const events = eventsAfter(this.#deps.db, sub.taskId, sub.cursor, ROUND_EVENTS);
     const notices: Pending['notices'] = [];
     for (const event of events) {
@@ -323,13 +344,46 @@ export class Notifier {
     return { sub, events, notices };
   }
 
-  /** Move each subscription's cursor to its last event at or before `upTo`. */
-  #advanceAll(pending: readonly Pending[], upTo: number): void {
+  /**
+   * Move each subscription's cursor to its last event at or before `upTo`. One
+   * that fails to move -- refused, or thrown -- is held back by itself, and the
+   * others still move; after a send (`sent`), it is said that its notices went.
+   */
+  #advanceAll(pending: readonly Pending[], upTo: number, sent: boolean): void {
     for (const p of pending) {
       const last = p.events.filter((e) => e.id <= upTo).at(-1);
       if (last === undefined) continue;
-      const moved = this.#deps.service.advanceSubscription(p.sub.id, last.id);
-      if (!moved.ok) this.#holdBack(`sub:${p.sub.id}`, `subscription ${p.sub.id} of task ${p.sub.taskId}`, moved.message);
+      const key = `sub:${p.sub.id}`;
+      let why: string | undefined;
+      try {
+        const moved = this.#deps.service.advanceSubscription(p.sub.id, last.id);
+        if (!moved.ok) why = moved.message;
+      } catch (err) {
+        why = message(err);
+      }
+      if (why === undefined) this.#backoff.delete(key);
+      else this.#holdBack(key, `subscription ${p.sub.id} of task ${p.sub.taskId}`, why, { sent, advance: true });
+    }
+  }
+
+  /** A subscription whose task is gone: let go of by itself, past what it holds, said once until a restart. */
+  #letGoOfSubscription(sub: SubscriptionRow): void {
+    this.#gone.add(sub.id);
+    this.#backoff.delete(`sub:${sub.id}`);
+    this.#note(
+      `kanban: subscription ${sub.id} follows task ${sub.taskId}, which is not on the board; ` +
+        'passing over its events until the gateway restarts',
+    );
+    this.#passOver(sub);
+  }
+
+  /** A let-go subscription's cursor moved past the events it has, without a word. */
+  #passOver(sub: SubscriptionRow): void {
+    try {
+      const last = eventsAfter(this.#deps.db, sub.taskId, sub.cursor, ROUND_EVENTS).at(-1);
+      if (last !== undefined) this.#deps.service.advanceSubscription(sub.id, last.id);
+    } catch {
+      // Passed over again in the next round.
     }
   }
 
@@ -345,14 +399,19 @@ export class Notifier {
       this.#holdBack(c.key, describe(c), message(err));
       return;
     }
+    this.#letGo(c, pending, message(err));
+  }
+
+  /** A conversation let go of until a restart: its notices dropped, said once, its cursors moved past them. */
+  #letGo(c: Conversation, pending: readonly Pending[], why: string): void {
     this.#dead.add(c.key);
     this.#backoff.delete(c.key);
     const dropped = pending.flatMap((p) => p.notices.map((n) => `${p.sub.taskId}#${n.event.id}`));
     this.#note(
-      `kanban: ${describe(c)} cannot be reached (${message(err)}); dropping ${dropped.length} notice(s) ` +
+      `kanban: ${describe(c)} cannot be reached (${why}); dropping ${dropped.length} notice(s) ` +
         `(${dropped.join(', ')}) and passing over its notices until the gateway restarts`,
     );
-    this.#advanceAll(pending, Number.POSITIVE_INFINITY);
+    this.#advanceAll(pending, Number.POSITIVE_INFINITY, false);
   }
 
   #fail(c: Conversation, err: unknown): void {
@@ -364,12 +423,25 @@ export class Notifier {
     return held !== undefined && this.#clock.now() < held.until;
   }
 
-  /** Hold a conversation or a subscription back for a while, doubling each time, and say so. */
-  #holdBack(key: string, what: string, why: string): void {
+  /**
+   * Hold a conversation or a subscription back for a while, doubling each time,
+   * and say so: that its notices were not sent, or, for a cursor that failed to
+   * move after a send, that they were.
+   */
+  #holdBack(key: string, what: string, why: string, opts: { sent?: boolean; advance?: boolean } = {}): void {
     const { waitMs, atMax } = next(this.#backoff.get(key));
-    this.#backoff.set(key, { until: this.#clock.now() + waitMs, waitMs, atMax });
-    this.#note(`kanban: notices for ${what} were not sent (${why}); trying again in ${Math.round(waitMs / 1000)} s`);
+    this.#backoff.set(key, { until: this.#clock.now() + waitMs, waitMs, atMax, advance: opts.advance === true });
+    const said = opts.sent === true ? 'sent; cursor not moved' : 'were not sent';
+    this.#note(`kanban: notices for ${what} ${said} (${why}); trying again in ${Math.round(waitMs / 1000)} s`);
   }
+}
+
+/** A pause after failures; `advance` when it is for a cursor that did not move. */
+interface Backoff {
+  until: number;
+  waitMs: number;
+  atMax: number;
+  advance: boolean;
 }
 
 /**

@@ -295,10 +295,22 @@ describe('the notifier', () => {
     expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(eventsOf(t.db, a.taskId).at(-1)?.id);
   });
 
-  it('keeps one subscription that cannot be read, or one conversation that throws, from holding up the rest', async () => {
+  it('keeps one subscription whose task is gone, or one conversation that throws, from holding up the rest', async () => {
     const a = create('Draft the notes');
     await done(a, 'merged');
     // A subscription whose task is not on the board, in the same conversation.
+    const goneEvent = (): number => {
+      t.db.pragma('foreign_keys = OFF');
+      const id = Number(
+        t.db
+          .prepare(
+            `INSERT INTO kanban_events (task_id, kind, actor, payload, created_at) VALUES ('k_gone', 'stranded', 'gateway', jsonb('{}'), 0)`,
+          )
+          .run().lastInsertRowid,
+      );
+      t.db.pragma('foreign_keys = ON');
+      return id;
+    };
     t.db.pragma('foreign_keys = OFF');
     t.db
       .prepare(
@@ -306,12 +318,8 @@ describe('the notifier', () => {
          VALUES ('k_gone', 'lark', 'cli_app', 'oc_team', 'omt_topic', 0)`,
       )
       .run();
-    t.db
-      .prepare(
-        `INSERT INTO kanban_events (task_id, kind, actor, payload, created_at) VALUES ('k_gone', 'stranded', 'gateway', jsonb('{}'), 0)`,
-      )
-      .run();
     t.db.pragma('foreign_keys = ON');
+    const first = goneEvent();
     // And a conversation on a channel whose lookup throws.
     const broken = create('On a broken channel', BROKEN);
     await done(broken, 'ok');
@@ -323,11 +331,84 @@ describe('the notifier', () => {
     };
     expect(await notifier({ channels }).deliver()).toBe(1);
     expect(lark.texts.map((m) => m.text.split('\n')[0])).toEqual([`Done — **Draft the notes** \`${a.taskId}\`:`]);
-    expect(notes).toContain(
-      'kanban: notices for subscription 2 of task k_gone were not sent (task k_gone is not on the board); trying again in 2 s',
-    );
+    // The gone task's subscription is let go of by itself, past what it held, said once.
+    const gone = 'kanban: subscription 2 follows task k_gone, which is not on the board; passing over its events until the gateway restarts';
+    expect(notes).toContain(gone);
+    expect(subscriptionsOf(t.db, 'k_gone')[0]?.cursor).toBe(first);
     expect(notes).toContain(
       `kanban: notices for oc_other (task ${broken.taskId}) were not sent (the channel table is broken); trying again in 2 s`,
+    );
+    // Its later events are passed over without another line; its neighbours go on.
+    const later = goneEvent();
+    await done(create('Check the links'), 'checked');
+    clock.advance(NOTICE_POLL_MS * 2);
+    expect(await notifier({ channels }).deliver()).toBeGreaterThanOrEqual(1);
+    expect(subscriptionsOf(t.db, 'k_gone')[0]?.cursor).toBe(later);
+    expect(notes.filter((l) => l === gone)).toHaveLength(2);
+    const n = notifier({ channels });
+    goneEvent();
+    await n.deliver();
+    const last = goneEvent();
+    await n.deliver();
+    expect(subscriptionsOf(t.db, 'k_gone')[0]?.cursor).toBe(last);
+    expect(notes.filter((l) => l === gone)).toHaveLength(3);
+  });
+
+  it('lets go of a conversation on a channel this gateway has not got, past what it held, said once', async () => {
+    const a = create('On a channel not here', BROKEN);
+    await done(a, 'ok');
+    await done(create('Here'), 'ok');
+    const n = notifier();
+    expect(await n.deliver()).toBe(1);
+    expect(lark.texts.map((m) => m.target.chatId)).toEqual(['oc_team']);
+    const line =
+      `kanban: oc_other (task ${a.taskId}) cannot be reached (no channel broken); dropping 1 notice(s) ` +
+      `(${a.taskId}#${eventId(a, 'completed')}) and passing over its notices until the gateway restarts`;
+    expect(notes).toEqual([line]);
+    expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(eventsOf(t.db, a.taskId).at(-1)?.id);
+    // Later notices are passed over, without another line.
+    const b = create('Another not here', BROKEN);
+    await done(b, 'ok');
+    clock.advance(NOTICE_BACKOFF_MAX_MS);
+    expect(await n.deliver()).toBe(0);
+    expect(notes).toEqual([line]);
+    expect(dueSubscriptions(t.db, 'cli_app')).toEqual([]);
+  });
+
+  it('says a batch was sent when a cursor then fails to move, moves the others, and sends that one again later', async () => {
+    const a = create('Draft the notes');
+    const b = create('Check the links');
+    expect(service.block(a.taskId, { kind: 'person', principal: ALICE }, { kind: 'needs_input', reason: 'which wiki?' }).ok).toBe(true);
+    await done(b, 'checked');
+    const advance = service.advanceSubscription.bind(service);
+    let failures = 1;
+    service.advanceSubscription = (id: number, cursor: number) => {
+      if (id === subId(a) && failures > 0) {
+        failures -= 1;
+        throw new Error('disk I/O error');
+      }
+      return advance(id, cursor);
+    };
+    const n = notifier();
+    expect(await n.deliver()).toBe(2);
+    expect(notes).toEqual([
+      `kanban: notices for subscription ${subId(a)} of task ${a.taskId} sent; cursor not moved (disk I/O error); trying again in 2 s`,
+    ]);
+    expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(0);
+    expect(subscriptionsOf(t.db, b.taskId)[0]?.cursor).toBe(eventsOf(t.db, b.taskId).at(-1)?.id);
+    // Held back for its pause, then sent again: at least once.
+    expect(await n.deliver()).toBe(0);
+    clock.advance(2_000);
+    expect(await n.deliver()).toBe(1);
+    expect(lark.texts.at(-1)?.text).toContain(`Blocked (needs\\_input) — **Draft the notes** \`${a.taskId}\`: which wiki?`);
+    expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(eventsOf(t.db, a.taskId).at(-1)?.id);
+    // Its pause starts over after a success: a later failure waits 2 s, not 4.
+    failures = 1;
+    expect(service.unblock(a.taskId, ALICE, 'the team wiki').ok).toBe(true);
+    await done(a, 'merged');
+    expect(await n.deliver()).toBe(1);
+    expect(notes.at(-1)).toBe(
+      `kanban: notices for subscription ${subId(a)} of task ${a.taskId} sent; cursor not moved (disk I/O error); trying again in 2 s`,
     );
   });
 
