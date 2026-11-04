@@ -2,7 +2,7 @@ import type { Channel } from '../../src/channel/types.js';
 import { SessionRegistry } from '../../src/core/registry.js';
 import { NamedWorkspaces } from '../../src/core/workspace.js';
 import { getRun } from '../../src/db/kanban-read.js';
-import { Dispatcher, type DispatcherSettings } from '../../src/kanban/dispatcher.js';
+import { Dispatcher, type DispatcherSettings, type WorkerAccess } from '../../src/kanban/dispatcher.js';
 import { KanbanService, type CreateRequest } from '../../src/kanban/service.js';
 import { KanbanSink } from '../../src/kanban/sink.js';
 import type { RunRow, TaskRow } from '../../src/kanban/types.js';
@@ -74,6 +74,8 @@ export interface HarnessOptions {
   clock?: ManualClock;
   /** Where roles are rendered natively; absent, none is. */
   renderRoot?: string;
+  /** The socket and the mt directory a run is given; absent, neither is. */
+  worker?: WorkerAccess;
 }
 
 export const DEFAULT_ROLES: readonly Role[] = [
@@ -119,6 +121,7 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
     clock,
     note: (line) => notes.push(line),
     ...(opts.renderRoot === undefined ? {} : { renderRoot: opts.renderRoot }),
+    ...(opts.worker === undefined ? {} : { worker: opts.worker }),
   });
   return {
     t,

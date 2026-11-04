@@ -1,3 +1,4 @@
+import { delimiter } from 'node:path';
 import type { SessionRegistry } from '../core/registry.js';
 import { bindingsOnChannel } from '../db/bindings.js';
 import type { Db } from '../db/open.js';
@@ -71,6 +72,20 @@ export interface DispatcherDeps {
    * prompt.
    */
   renderRoot?: string;
+  /**
+   * How a run reaches the worker API (spec §7.2): the socket it is given as
+   * `MT_KANBAN_SOCKET`, and the directory of the `mt` shim, put first on its
+   * PATH ahead of `path`, the PATH it would otherwise get. Absent, a run gets
+   * neither, and its agent cannot report: tests that report through the service.
+   */
+  worker?: WorkerAccess;
+}
+
+export interface WorkerAccess {
+  socket: string;
+  mtDir: string;
+  /** The gateway's own PATH, which an agent is otherwise given; a role's agent.env may replace it. */
+  path: string | undefined;
 }
 
 /** Who a run's session belongs to: the board, not a person in a chat. */
@@ -534,7 +549,7 @@ export class Dispatcher {
     handle.sessionId = sessionId;
     const open: OpenRun = Object.assign(handle, {
       sessionId,
-      env: { ...rendered?.env, MT_KANBAN_RUN: run.runId, MT_KANBAN_TOKEN: token },
+      env: { ...rendered?.env, ...this.#workerEnv(claimed.role), MT_KANBAN_RUN: run.runId, MT_KANBAN_TOKEN: token },
       args: rendered?.args ?? [],
       packageDir: rendered?.dir,
       cancelling: false,
@@ -573,6 +588,21 @@ export class Dispatcher {
       return;
     }
     await this.#turnEnded(sessionId, terminal, thrown);
+  }
+
+  /**
+   * The socket, and a PATH that finds the gateway's `mt` first (spec §7.2): the
+   * shim's directory, then the PATH the agent would have had -- its role's own,
+   * if its agent.env sets one, else the gateway's.
+   */
+  #workerEnv(role: Role | undefined): Record<string, string> {
+    const worker = this.#deps.worker;
+    if (worker === undefined) return {};
+    const rest = role?.agent.env['PATH'] ?? worker.path;
+    return {
+      MT_KANBAN_SOCKET: worker.socket,
+      PATH: rest === undefined || rest === '' ? worker.mtDir : `${worker.mtDir}${delimiter}${rest}`,
+    };
   }
 
   /**

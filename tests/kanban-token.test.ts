@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getRun, runByTokenHash, runsOf } from '../src/db/kanban-read.js';
 import { hashToken, sameHash, TOKEN_PATTERN } from '../src/kanban/token.js';
 import { MASK, clearSecrets, redactKnownSecrets } from '../src/secrets.js';
-import { dispatchHarness, reportComplete, type DispatchHarness } from './helpers/dispatch.js';
+import { completes, dispatchHarness, reportComplete, role, type DispatchHarness } from './helpers/dispatch.js';
 
 const open: DispatchHarness[] = [];
 
@@ -94,5 +94,38 @@ describe('a run’s token', () => {
     expect(sameHash(a, a)).toBe(true);
     expect(sameHash(a, hashToken('b'.repeat(43)))).toBe(false);
     expect(sameHash(a, 'zz')).toBe(false);
+  });
+});
+
+describe('a run’s environment', () => {
+  const worker = { socket: '/home/mt/run/kanban.sock', mtDir: '/home/mt/bin', path: '/usr/bin:/bin' };
+
+  it('has the socket, and the mt directory first on PATH, ahead of the gateway’s', async () => {
+    const h = harness({ worker });
+    const task = h.create({ workspace: 'web' });
+    completes(h, h.driver('implementer'));
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+    const [run] = runsOf(h.t.db, task.taskId);
+    expect(h.driver('implementer').starts[0]?.env).toEqual({
+      MT_KANBAN_RUN: run?.runId,
+      MT_KANBAN_TOKEN: expect.stringMatching(TOKEN_PATTERN),
+      MT_KANBAN_SOCKET: '/home/mt/run/kanban.sock',
+      PATH: '/home/mt/bin:/usr/bin:/bin',
+    });
+  });
+
+  it('keeps a role’s own PATH after the mt directory, and gives only the mt directory when there is none', async () => {
+    const tools = role('implementer');
+    const own = { ...tools, agent: { ...tools.agent, env: { PATH: '/opt/tools/bin' } } };
+    const h = harness({ roles: [own, role('reviewer')], worker: { ...worker, path: undefined } });
+    h.create({ workspace: 'web' });
+    h.create({ workspace: 'api', assignee: 'reviewer' });
+    completes(h, h.driver('implementer'));
+    completes(h, h.driver('reviewer'));
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+    expect(h.driver('implementer').starts[0]?.env?.['PATH']).toBe('/home/mt/bin:/opt/tools/bin');
+    expect(h.driver('reviewer').starts[0]?.env?.['PATH']).toBe('/home/mt/bin');
   });
 });
