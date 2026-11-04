@@ -74,21 +74,44 @@ describe('spawnGate', () => {
   });
 
   it('kills a running gate when the gateway exits', async () => {
+    // The "gateway" exits once the gate has written its pid, or gives up after 10 s.
     const code = [
+      "import { readFileSync } from 'node:fs';",
       `import { spawnGate } from ${JSON.stringify(new URL('../src/kanban/gates.ts', import.meta.url).href)};`,
+      `const pidFile = ${JSON.stringify(join(dir, 'gate.pid'))};`,
       `const opts = { cwd: ${JSON.stringify(dir)}, env: { PATH: '/usr/bin:/bin' }, timeoutMs: 60_000 };`,
-      "void spawnGate('echo $$ > gate.pid; exec sleep 30', opts);",
-      'setTimeout(() => process.exit(1), 500);',
+      "void spawnGate('echo $$ > gate.pid.tmp && mv gate.pid.tmp gate.pid; exec sleep 30', opts);",
+      'const deadline = Date.now() + 10_000;',
+      'setInterval(() => {',
+      "  let written = '';",
+      '  try {',
+      "    written = readFileSync(pidFile, 'utf8');",
+      '  } catch {}',
+      "  if (written.endsWith('\\n')) process.exit(1);",
+      '  if (Date.now() > deadline) process.exit(2);',
+      '}, 20);',
     ].join('\n');
     const loader = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
-    await new Promise<void>((resolve, reject) => {
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
       const child = spawn(process.execPath, ['--import', loader, '--input-type=module', '-e', code], { stdio: 'ignore' });
       child.once('error', reject);
-      child.once('close', () => resolve());
+      child.once('close', (c) => resolve(c));
     });
+    expect(exitCode).toBe(1);
     const pid = Number(readFileSync(join(dir, 'gate.pid'), 'utf8'));
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(() => process.kill(pid, 0)).toThrow(/ESRCH/);
+    expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
+    // The gate's group is killed as the process exits; wait, up to 5 s, for it to be gone.
+    const gone = Date.now() + 5_000;
+    for (;;) {
+      try {
+        process.kill(pid, 0);
+      } catch (err) {
+        expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
+        break;
+      }
+      if (Date.now() > gone) throw new Error(`gate ${pid} is still running`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
   });
 
   it('stops a gate when the gateway stops', async () => {
