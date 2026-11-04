@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import type { Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
-import { gatesOf, getRun, getTask, runsOf, taskView, type TaskView } from '../db/kanban-read.js';
+import { boardList, gatesOf, getRun, getTask, runsOf, taskView, type BoardEntry, type TaskView } from '../db/kanban-read.js';
 import { buildEnv } from '../driver/env.js';
 import { redactKnownSecrets } from '../secrets.js';
 import type { Role } from '../roles.js';
@@ -845,6 +845,22 @@ export class KanbanService {
     if (ids !== undefined) return ids;
     const view = taskView(this.#db, taskId);
     return view === undefined ? board.refuse('not_found', `no task ${taskId}`) : { ok: true, view };
+  }
+
+  /** Every task with its display status (spec §4.1): `/kanban list`. */
+  list(): BoardEntry[] {
+    return boardList(this.#db);
+  }
+
+  /**
+   * A subscription has been told of every event up to `cursor`, or passed over
+   * those that are no notice (spec §9.4). The notifier calls it after each send.
+   */
+  advanceSubscription(subscriptionId: number, cursor: number): Result<{ advanced: boolean }> {
+    if (!Number.isSafeInteger(subscriptionId) || !Number.isSafeInteger(cursor) || cursor < 0) {
+      return board.refuse('invalid', 'a subscription and its cursor are whole numbers');
+    }
+    return board.advanceSubscription(this.#db, subscriptionId, cursor);
   }
 
   /** Who the next claim is for, resolved against the team as it is now. */

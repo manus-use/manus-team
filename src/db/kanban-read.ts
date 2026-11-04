@@ -14,6 +14,7 @@ import type {
   RunKind,
   RunOutcome,
   RunRow,
+  SubscriptionRow,
   TaskRow,
 } from '../kanban/types.js';
 
@@ -309,6 +310,80 @@ export function eventsOf(db: Db, taskId: string): KanbanEvent[] {
     .map(decodeEvent);
 }
 
+/** The task's events after the given id, oldest first, at most `limit`: what a subscription has yet to hear. */
+export function eventsAfter(db: Db, taskId: string, after: number, limit: number): KanbanEvent[] {
+  return db
+    .prepare<[string, number, number], EventRaw>(
+      `SELECT id, task_id, run_id, kind, actor, json(payload) AS payload, created_at
+         FROM kanban_events WHERE task_id = ? AND id > ? ORDER BY id LIMIT ?`,
+    )
+    .all(taskId, after, limit)
+    .map(decodeEvent);
+}
+
+interface SubscriptionRaw {
+  id: number;
+  task_id: string;
+  channel: string;
+  account_id: string;
+  conversation_id: string;
+  thread_id: string;
+  cursor: number;
+  created_at: number;
+}
+
+function decodeSubscription(r: SubscriptionRaw): SubscriptionRow {
+  return {
+    id: r.id,
+    taskId: r.task_id,
+    channel: r.channel,
+    appId: r.account_id,
+    conversationId: r.conversation_id,
+    threadId: r.thread_id,
+    cursor: r.cursor,
+    createdAt: r.created_at,
+  };
+}
+
+const SUBSCRIPTION_COLS = 'id, task_id, channel, account_id, conversation_id, thread_id, cursor, created_at';
+
+/** The chats following a task, in the order they were subscribed (spec §9.4). */
+export function subscriptionsOf(db: Db, taskId: string): SubscriptionRow[] {
+  return db
+    .prepare<[string], SubscriptionRaw>(
+      `SELECT ${SUBSCRIPTION_COLS} FROM kanban_subscriptions WHERE task_id = ? ORDER BY id`,
+    )
+    .all(taskId)
+    .map(decodeSubscription);
+}
+
+/** A subscription with something to deliver, and the id of its oldest event past the cursor. */
+export interface DueSubscription extends SubscriptionRow {
+  oldestPending: number;
+}
+
+/**
+ * This bot's subscriptions with an event past their cursor, in subscription
+ * order: what a round of delivery has to do (spec §9.4). Read from the cursors,
+ * so a round after a restart catches up exactly as a round in normal running
+ * does. Each carries its oldest pending event's id, which the events' `(task_id,
+ * id)` index finds at once, so the notifier can serve the longest-waiting first.
+ */
+export function dueSubscriptions(db: Db, appId: string): DueSubscription[] {
+  return db
+    .prepare<[string], SubscriptionRaw & { oldest_pending: number | null }>(
+      `SELECT * FROM (
+         SELECT ${SUBSCRIPTION_COLS},
+                (SELECT min(e.id) FROM kanban_events e WHERE e.task_id = s.task_id AND e.id > s.cursor) AS oldest_pending
+           FROM kanban_subscriptions s
+          WHERE s.account_id = ?)
+        WHERE oldest_pending IS NOT NULL
+        ORDER BY id`,
+    )
+    .all(appId)
+    .map((r) => ({ ...decodeSubscription(r), oldestPending: r.oldest_pending ?? 0 }));
+}
+
 /** A report's run of the task's gates, as its `gates_ran` event recorded it (spec §7.7). */
 export interface LastGateRun {
   /** The run that reported; null for a person. */
@@ -444,6 +519,32 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
     runs,
     comments: commentsOf(db, taskId),
   };
+}
+
+/** A task on the board, with what a person sees of it (spec §4.1). */
+export interface BoardEntry {
+  task: TaskRow;
+  status: DisplayStatus;
+}
+
+/**
+ * Every task, with its display status, highest priority first, then oldest:
+ * `/kanban list` (spec §9.1). The status is derived here, from the parents and
+ * the runs, as `taskView` derives it.
+ */
+export function boardList(db: Db): BoardEntry[] {
+  return db
+    .prepare<[], TaskRaw>(`SELECT ${TASK_COLS} FROM kanban_tasks ORDER BY priority DESC, created_at, rowid`)
+    .all()
+    .map(decodeTask)
+    .map((task) => ({
+      task,
+      status: displayStatus({
+        phase: task.phase,
+        parentsFinished: parentsOf(db, task.taskId).every((p) => isFinished(p.phase)),
+        undecidedRun: runsOf(db, task.taskId).find((r) => r.outcome === null)?.kind,
+      }),
+    }));
 }
 
 // ---------------------------------------------------------------------------

@@ -38,6 +38,7 @@ import {
   openRunOf,
   parentsOf,
   runsOf,
+  subscriptionsOf,
 } from './kanban-read.js';
 
 /**
@@ -229,6 +230,7 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
     );
     const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
     for (const parent of parents) link.run(parent, taskId, now);
+    subscribe(d, taskId, t.createdVia, createdFromTask, now);
     record(
       d,
       {
@@ -249,6 +251,45 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
       now,
     );
     return { ok: true, task: mustGet(d, taskId), existing: false };
+  });
+}
+
+/**
+ * The chats that follow a new task (spec §9.4, §7.3): the chat it was created
+ * in; or, for a task a run created, every chat following the creating run's
+ * task, so whoever follows that task hears about its follow-ups too. Each cursor
+ * starts at 0: every event of the new task is newer than that.
+ */
+function subscribe(d: Db, taskId: string, via: CreatedVia, createdFromTask: string | null, now: number): void {
+  const insert = d.prepare(
+    `INSERT OR IGNORE INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  if (via.kind === 'chat') {
+    insert.run(taskId, via.channel, via.appId, via.conversationId, via.threadId, now);
+    return;
+  }
+  if (createdFromTask === null) return;
+  for (const s of subscriptionsOf(d, createdFromTask)) {
+    insert.run(taskId, s.channel, s.appId, s.conversationId, s.threadId, now);
+  }
+}
+
+/**
+ * Move a subscription's cursor to an event it has been told of, or passed over as
+ * no notice (spec §9.4). Forward only, so a slower round cannot move it back and
+ * have a notice sent twice. It writes no event: the cursor is the projection's
+ * own, as a binding's `cursor_seq` is, and an event here would itself be a new
+ * event past the cursor.
+ */
+export function advanceSubscription(db: Db, subscriptionId: number, cursor: number): Result<{ advanced: boolean }> {
+  return tx(db, (d) => {
+    const found = d.prepare<[number], { id: number }>('SELECT id FROM kanban_subscriptions WHERE id = ?').get(subscriptionId);
+    if (found === undefined) return refuse('not_found', `no subscription ${subscriptionId}`);
+    const { changes } = d
+      .prepare('UPDATE kanban_subscriptions SET cursor = ? WHERE id = ? AND cursor < ?')
+      .run(cursor, subscriptionId, cursor);
+    return { ok: true, advanced: changes === 1 };
   });
 }
 
@@ -1291,8 +1332,9 @@ export function endRun(
         break;
       }
     }
+    let recurrences: number | null = null;
     if (blockAs !== undefined) {
-      enterBlocked(d, mustGet(d, run.taskId), blockAs.kind, blockAs.reason);
+      recurrences = enterBlocked(d, mustGet(d, run.taskId), blockAs.kind, blockAs.reason);
       next = 'blocked';
     }
     record(
@@ -1302,7 +1344,15 @@ export function endRun(
         runId,
         kind: 'run_ended',
         actor: 'gateway',
-        payload: { outcome: ending.outcome, error: ending.error ?? null, next, blockKind: blockAs?.kind ?? null },
+        payload: {
+          outcome: ending.outcome,
+          error: ending.error ?? null,
+          next,
+          blockKind: blockAs?.kind ?? null,
+          // For the blocked notice (spec §9.4): why, and how often it has recurred, as of now.
+          blockReason: blockAs?.reason ?? null,
+          blockRecurrences: recurrences,
+        },
       },
       now,
     );

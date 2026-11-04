@@ -202,6 +202,22 @@ export interface KanbanEvent {
   createdAt: number;
 }
 
+/**
+ * A chat following a task (spec §9.4): the binding key its notices go to, and
+ * the last `kanban_events` id delivered there, or passed over as no notice.
+ */
+export interface SubscriptionRow {
+  id: number;
+  taskId: string;
+  channel: string;
+  /** The bot's app id: the schema's `account_id`. */
+  appId: string;
+  conversationId: string;
+  threadId: string;
+  cursor: number;
+  createdAt: number;
+}
+
 export type RefusalCode =
   /** No such task or run. */
   | 'not_found'
