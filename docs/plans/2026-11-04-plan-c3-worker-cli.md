@@ -43,7 +43,7 @@
 
 ## Decisions the spec left open
 
-Each is the reading most consistent with the rest of the spec. Decisions marked *confirm* change what an agent or an operator sees, and the user should confirm them before execution; the plan is written with the choice given. Decisions 3, 5, 7, 9, 14 and 16 are now in the spec (§7.2, §7.3, §7.5, §10), amended in the same commit as this plan.
+Each is the reading most consistent with the rest of the spec. Decisions 5, 7 and 23 change what an agent or an operator sees, and the user has confirmed them. Decision 15 is the nudge's wording. Decisions 3, 5, 7, 9, 14 and 16 are now in the spec (§7.2, §7.3, §7.5, §10), amended in the same commit as this plan.
 
 1. **The token is 32 random bytes, base64url: 43 characters** (`TOKEN_PATTERN`), none of which a shell or JSON needs to quote.
    - The dispatcher mints one in `pass()` for a task whose next claim is a role's, and passes its SHA-256 to `service.claim(taskId, { tokenHash })`, as C2 left room for. A person's run gets none: it reports through chat (plan D).
@@ -54,15 +54,15 @@ Each is the reading most consistent with the rest of the spec. Decisions marked 
 3. **The socket is `$MT_HOME/run/kanban.sock`**, `0600`, in a `0700` directory.
    - **Long homes.** A socket path must fit `sun_path`: macOS keeps 104 bytes, the NUL included. Over 103 bytes, the socket goes in `<tmpdir>/mt-<uid>-<first 12 hex of SHA-256(home)>/kanban.sock`: per user, per home, so two gateways never share one. macOS's `TMPDIR` is already per user. If that is too long too, the gateway refuses to start, naming both paths and saying to shorten `MT_HOME` or `TMPDIR`.
    - **The directory** is made `0700` if missing. If it exists it must be a real directory of the gateway's user: a symlink, a file or another user's directory is refused, never followed. Ours but looser than `0700` is tightened.
-   - **A stale socket** is removed: it must be a socket, the gateway user's own, and nothing may answer on it. A file that is not a socket, another user's socket, or one a live gateway still answers on, is refused and left alone.
+   - **A stale socket** is removed: it must be a socket, the gateway user's own, and connecting to it must be refused (`ECONNREFUSED`). Any other failure to connect cannot be told from a live gateway, and is refused as one. A file that is not a socket, another user's socket, or one a live gateway still answers on, is refused and left alone.
    - **The socket itself** is `chmod`-ed to `0600` once bound. Node binds it with the umask's mode; the `0700` directory keeps everyone else out meanwhile.
-   - **When.** `start()` listens after `dispatcher.boot()`, so no request reaches a run that boot is about to end, and before `dispatcher.start()`'s first pass, so no run starts before the socket it reports to exists. `stop()` closes it after the actors are closed and the dispatcher drained, before the database.
+   - **When.** `start()` first claims the path (`claimSocketPath`: the directory, the stale socket, the live-socket check), before `reconcileBoot`, so a second gateway on the same home fails before it quarantines the first one's sessions or ends its runs. It listens after `dispatcher.boot()`, so no request reaches a run that boot is about to end, and before `dispatcher.start()`'s first pass, so no run starts before the socket it reports to exists. `stop()` closes it after the actors are closed and the dispatcher drained, before the database.
 4. **The wire protocol is one request per connection**: one line of JSON, `{"run", "token", "command", "input"}`, then one line of JSON back, and the server closes the connection.
-   - A request is at most 256 KiB, and must arrive within 10 s of connecting. The handler has no time limit: plan C4's gates run inside `complete` and `review`, and the CLI waits up to 10 minutes for an answer.
-   - Up to 64 connections are served at once; more wait in the backlog. Many runs, and several commands of one run, work concurrently.
+   - A request is at most 256 KiB, and must arrive whole within 10 s of connecting: a deadline, not an idle timeout, so a client trickling a byte at a time cannot hold a connection. The handler has no time limit: plan C4's gates run inside `complete` and `review`, and the CLI waits up to 10 minutes for an answer.
+   - Up to 64 connections are served at once; Node accepts and closes any beyond that, which `mt kanban` reports as `unreachable`, saying the gateway may be busy. Many runs, and several commands of one run, work concurrently. Both protocols tell the agent to try once more when it sees `unreachable`.
    - Every answer is masked string by string, keys too, as it is sent, so a live token or a known secret never leaves in a response, whatever the handler put in it.
    - Node cannot read a Unix socket's peer credentials, so the boundary between users is the file modes (spec §7.2), as the spec says.
-5. **The `mt` on a run's PATH is a shim the gateway writes, `$MT_HOME/bin/mt`.** *Confirm.*
+5. **The `mt` on a run's PATH is a shim the gateway writes, `$MT_HOME/bin/mt`.** *Confirmed by the user.*
    - It is two lines of `sh`: `exec '<the gateway's node>' '<this build's mt>' "$@"`. In an install, that is `dist/mt.js`, the file `package.json`'s `bin` names. In a checkout run through tsx (`npm run dev`), it is `node --import <tsx's loader> src/mt.ts`, the loader found from the gateway's own module (`createRequire(import.meta.url).resolve('tsx')`), so it works from any directory. Every word is single-quoted.
    - **Why not an existing directory.** The build directory holds `mt.js`, not an `mt` an agent can run by name, and a checkout has no built `mt` at all. An npm prefix's `bin`, where an install links `mt`, holds every other global command too, and prepending it would change what all of them resolve to.
    - **What it buys.** The directory holds `mt` and nothing else, so prepending it changes one name. The agent always gets the gateway's `mt`, never the tape-drive `mt` (spec §13). The node and the build are pinned to the gateway's, so a run never reports through another version of the CLI.
@@ -71,24 +71,24 @@ Each is the reading most consistent with the rest of the spec. Decisions marked 
 6. **The worker API checks, in this order:** the request's shape (`bad_request`); the command (`unknown_command`); the token, which must match `TOKEN_PATTERN`, find a run by its hash, compare equal in constant time, and belong to the run `MT_KANBAN_RUN` names (`unauthorized`, never echoing the token); the run's scope; the input's fields; then the command.
    - **Scope** (spec §7.2): a closed run, or one the dispatcher or a person decided (an outcome not in `REPORTED_OUTCOMES`), is `run_superseded`, for every command. A run that has reported may still `show`, `comment`, `create` and `link`; a second terminal report is the board's `already_reported`.
    - The constant-time comparison is belt and braces: the lookup is by the hash of a random token, whose timing says nothing an attacker can use.
-7. **A run may link only the tasks its own task created** as the child; the parent may be any task. *Confirm.* Spec §7.2 says the token "cannot move any other task", and a link holds its child back. Decomposition, the reason a worker links, is between tasks it created. A child created elsewhere is refused as `wrong_task`.
+7. **A run may link only the tasks its own task created** as the child; the parent may be any task. *Confirmed by the user.* Spec §7.2 says the token "cannot move any other task", and a link holds its child back. Decomposition, the reason a worker links, is between tasks it created. A child created elsewhere is refused as `wrong_task`.
 8. **A comment may go on any task**, by `task_id`, as spec §7.2 allows ("comment on … tasks"). Its author is `run:<run_id>`, as the board already names a run reporting.
 9. **`create` takes an optional `reviewer`**, as the prompt's protocol already tells the agent (C2's final review); spec §7.3's line gains it. `body` is required, as §7.3 has it, and may be empty. The worker's `idempotency_key` is passed unchanged: the service already stores it as `run-task:<its run's task>:<key>` (C1's review follow-ups), so C3 adds no namespacing.
 10. **Sizes a worker may send**, in UTF-8 bytes, refused as `too_large` (`WORKER_LIMITS`): a title 512, a body 64 KiB, a contract field 8 KiB, a summary 16 KiB, metadata 16 KiB serialized, a reason 8 KiB, a comment 16 KiB, an id, name, kind or key 256, and at most 50 parents. They are above the prompt's caps (spec §7.1), which cut what a later prompt shows, so nothing a worker may store is lost to `mt kanban show`. C1 left these to C3.
 11. **Each command's input is strict**: an object with exactly its fields, each of its type. An unknown field is refused, naming the known ones, rather than ignored: an agent that misspells `summary` should hear so, not have its report land without one. A `null` counts as absent.
 12. **`mt kanban show` prints the run's task and its whole context**, uncut: the run (id, kind, attempt, outcome), the task with its display status, each parent's handoff, every earlier attempt with its tool calls where it ended unreported, the comment thread and the children. It is gathered by C2's `briefFor`, so it is what the prompt was made from, and spelled in snake_case like the input. It never carries the token's hash or the agent's configuration.
-13. **`mt kanban` prints one line of JSON, always**, including for its own refusals: `not_in_a_run` when the three variables are not all set, `invalid` for stdin that is not JSON, `too_large` over 256 KiB, `unreachable` when the socket does not answer, `unknown_command` and `bad_request` for a wrong command line. Exit codes are those of `mt`: 0 done, 1 refused, 2 the command line was wrong. `show` reads no stdin, so it never waits on a terminal. Stdin is never quoted back: it is the agent's text and may hold anything.
+13. **`mt kanban` prints one line of JSON, always**, including for its own refusals: `not_in_a_run` when the three variables are not all set, `invalid` for stdin that is not JSON, `too_large` over 256 KiB, `unreachable` when the socket does not answer ("if it is running, it may be busy: try again"), `unknown_command` and `bad_request` for a wrong command line. Exit codes are those of `mt`: 0 done, 1 refused, 2 the command line was wrong. `show` reads no stdin, so it never waits on a terminal. Stdin is never quoted back: it is the agent's text and may hold anything.
 14. **`kanban.nudge_limit`** is snake_case and file only, like the other `kanban:` keys. Default 2, at most 10, and 0 is allowed: no nudge, a protocol violation at once, as in C2.
-15. **A nudge is another turn in the run's session** (spec §7.5) with its own key, `kanban:<run_id>:<n>`. Its text: *confirm the wording.*
+15. **A nudge is another turn in the run's session** (spec §7.5) with its own key, `kanban:<run_id>:<n>`. Its text:
 
     > You ended your turn without reporting, so your run is not over (reminder 1 of 2).
     >
-    > Report now, through the \`mt kanban\` command, which reads JSON on stdin as # How to work said: \`mt kanban complete < handoff.json\` if the task is done, \`mt kanban review < handoff.json\` to have it reviewed, or \`mt kanban block < block.json\` if you cannot go on.
+    > Report now, through the \`mt kanban\` command, which reads JSON on stdin and answers in JSON: \`mt kanban complete < handoff.json\` if the task is done, or \`mt kanban review < handoff.json\` to have it reviewed, where handoff.json is {"summary": "...", "metadata": {...}}; or \`mt kanban block < block.json\` if you cannot go on, where block.json is {"kind": "...", "reason": "..."}.
     > If you no longer have the task in front of you, \`mt kanban show\` prints it and its context, as JSON.
     >
     > Stop once you have reported.
 
-    The last reminder ends instead with "This is the last reminder: a run that ends its turn again without reporting is a protocol violation, and the task is retried or given up." A review run's lists `complete` to approve, `changes` and `block`.
+    The last reminder ends instead with "This is the last reminder: a run that ends its turn again without reporting is a protocol violation, and the task is retried or given up." A review run's lists `complete` to approve, with `{"summary": "..."}`; `changes`, with `{"reason": "..."}`; and `block`, with `{"kind": "...", "reason": "..."}`. Each nudge carries the input's shape, so an agent whose transcript lost the protocol can still report.
     - **The task is not repeated.** C2 noted that the CLI driver's `#compose` drops the oldest turns, the task prompt first, when the transcript is over its cap. Rather than change the driver, which chat shares, the nudge says how to see the task again: `mt kanban show`. Repeating the task would grow every nudge by up to 48 KiB, and make the overflow it guards against more likely.
 16. **People's comments go in place of the next nudge** (spec §7.5). When a turn completes without a report, any comment newer than the newest the run has been given, by an author not starting `run:`, is forwarded as the next prompt. It does not use up a nudge: a person speaking is not a reminder.
     - The run's prompt counts as given every comment its brief held; each forward moves the mark.
@@ -96,11 +96,11 @@ Each is the reading most consistent with the rest of the spec. Decisions marked 
     - Plan D needs nothing new: `/kanban comment` stores the comment through the service, and the dispatcher picks it up when the turn ends. A comment on a decided run is only stored.
 17. **The "decided meanwhile" check is repeated before every submit** (`#submit`), and the loop stops for a run that is decided, cancelling, released, or whose dispatcher has stopped. `countSubmission` is called only for a prompt actually sent, after the actor is built, where C2 called it before: a run decided while its actor was built now records 0 submissions, not 1.
 18. **A protocol violation's error says how often the run was asked**: "the run ended its turn without reporting, and again after 2 reminders". With no nudges it is C2's text. The last output recorded is the last turn's.
-19. **`dispatcher.cancel(runId)`** cancels the turn of a run the board decided without it: superseded by `assign`, `assignReviewer` or `archive`, or `cancelled` by `stop`. It refuses an undecided run (spec §6.4: the reason is recorded first) and one this process did not start. It marks the run cancelling, so a turn that ignores the cancel is released at the next sweep, as a timed-out one is. Plan D calls it; nothing in C3 supersedes a run.
+19. **`dispatcher.cancel(runId)`** cancels the turn of a run the board decided without it: superseded by `assign`, `assignReviewer` or `archive`, or `cancelled` by `stop`. It refuses an undecided run (spec §6.4: the reason is recorded first) and one this process did not start. It marks the run cancelling, even when no turn is live yet (it then returns false), so a run still starting gets no prompt. A turn that ignores the cancel is released by the first sweep once `sweep_interval_s` has passed since the cancel: the grace a timed-out turn gets between two sweeps. Plan D calls it; nothing in C3 supersedes a run.
 20. **Passes after a worker's change come from the worker API**, through its `changed` hook, which the gateway points at `dispatcher.pass()`. Not a hook on `KanbanService`: the dispatcher itself calls the service (`claim`, `endRun`, `closeRun`) from inside a pass, and a service hook would re-enter it. Every successful command but `show` calls it, since a report frees children in other workspaces, and a create makes a task. A hook that throws does not fail the request.
 21. **`submissions`.** C2 already counts the task prompt (`countSubmission`, its Decision 12). C3 counts each nudge and forwarded comment the same way, so the count is "prompts sent in this run" (spec §3.3).
 22. **Agent text reaches the board only through `KanbanService`**, which masks it on write (spec §10.1 layer 3). The worker API writes nothing, and a test sends a known secret in a comment, a created task's title and body, a summary and metadata, and finds each masked.
-23. **The protocol is not rendered into native packages.** *Confirm.* On a native run `role.md` is the system prompt and the protocol is in the user turn, so a `role.md` that talks the agent out of reporting outranks the precedence line. Rendering the protocol into the agent file would need a package per role and run kind, and tie every package's hash to the gateway's protocol text. The nudges and `protocol_violation` are what catch it, as spec §7.1 says. The operator should watch `protocol_violation` on native roles, and `agent.native: false` restores injection for one.
+23. **The protocol is not rendered into native packages.** *Confirmed by the user.* On a native run `role.md` is the system prompt and the protocol is in the user turn, so a `role.md` that talks the agent out of reporting outranks the precedence line. Rendering the protocol into the agent file would need a package per role and run kind, and tie every package's hash to the gateway's protocol text. The nudges and `protocol_violation` are what catch it, as spec §7.1 says. The operator should watch `protocol_violation` on native roles, and `agent.native: false` restores injection for one.
 24. **No prompt is composed again from the database.** The nudges and forwarded comments are their own text, so nothing reads `run.agentConfig.native` (plan R's note). A nudged native run stays native: the CLI driver gives every turn the session's `args`.
 25. **Rendering stays synchronous** (plan R's note). C3 adds no rendering.
 26. **The dispatch test harness defaults to `nudgeLimit: 0`**, so C2's and R's tests, which count one prompt per run, are unchanged. The nudge tests set it.
@@ -124,6 +124,9 @@ Each is the reading most consistent with the rest of the spec. Decisions marked 
 - A CLI-driver turn whose transcript overflows loses the task prompt; the nudge points at `mt kanban show` instead of repeating it.
 - When the home's path is too long, the socket is under the temporary directory, which a reboot may clear; the gateway recreates it at each start.
 - Forwarded comments are not bounded in number: a person can keep a run's session going by commenting. The runtime limit still applies.
+- A role whose `passEnv` names `PATH` brings the gateway's PATH in through its `agent.env`, but the run's PATH still starts with the shim's directory.
+- A login shell the agent starts may reorder PATH (macOS's `path_helper`), so a system `mt`, such as Linux's `mt-st`, could win there.
+- A workspace can shadow the shim with its own `mt` only through `node_modules/.bin`, when the agent runs it through `npm` or `npx`.
 - A comment that arrives while the run's last nudge is being answered, after which the run still does not report, is not forwarded: the run ends `protocol_violation`, and the next attempt reads it in the thread.
 
 ### What later plans need
@@ -154,7 +157,7 @@ Each is the reading most consistent with the rest of the spec. Decisions marked 
 | `tests/kanban-token.test.ts`, `tests/kanban-worker.test.ts`, `tests/kanban-socket.test.ts`, `tests/mt-kanban.test.ts`, `tests/kanban-shim.test.ts`, `tests/kanban-nudge.test.ts`, `tests/kanban-cancel.test.ts`, `tests/kanban-worker.e2e.ts` (create) | |
 | `tests/secrets.test.ts`, `tests/config.test.ts`, `tests/kanban-dispatch-native.test.ts`, `tests/gateway-startup.test.ts` (modify) | |
 
-Running counts, unit then end to end: Task 1 991 / 51, Task 2 993, Task 3 996, Task 4 1012, Task 5 1021, Task 6 1029, Task 7 1032, Task 8 1034, Task 9 1041, Task 10 1044, Task 11 1045, Task 12 1045 / 53, Task 13 1045 / 53.
+Running counts, unit then end to end: Task 1 991 / 51, Task 2 993, Task 3 996, Task 4 1012, Task 5 1022, Task 6 1030, Task 7 1033, Task 8 1035, Task 9 1042, Task 10 1045, Task 11 1046, Task 12 1046 / 53, Task 13 1046 / 53.
 
 ---
 
@@ -1679,7 +1682,7 @@ git commit -m "Add the worker API: a run token checked by its hash, the run scop
 **Files:**
 - Create: `src/kanban/socket.ts`, `tests/kanban-socket.test.ts`
 
-Decisions 3 and 4. The tests open real sockets in their own process; a stale socket is made by moving a live one away from its server, which then closes without it (Node removes a socket file when its server closes).
+Decisions 3 and 4. `claimSocketPath` takes the path ahead of listening -- the directory made private, a stale socket removed, a live one refused -- and the gateway calls it first thing in `start()` (Task 11). The tests open real sockets in their own process; a stale socket is made by moving a live one away from its server, which then closes without it (Node removes a socket file when its server closes).
 
 - [ ] **Step 5.1: Write the failing tests.**
 
@@ -1703,7 +1706,7 @@ import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { SOCKET_PATH_MAX, listenWorker, workerSocketPath, type WorkerServer } from '../src/kanban/socket.js';
+import { SOCKET_PATH_MAX, claimSocketPath, listenWorker, workerSocketPath, type WorkerServer } from '../src/kanban/socket.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 
 /** The worker socket against real connections, in a fresh directory per test. */
@@ -1800,13 +1803,19 @@ describe('worker socket', () => {
     expect(JSON.parse(cut)).toEqual({ ok: false, code: 'bad_request', message: 'the request ended before its newline' });
   });
 
-  it('drops a connection that sends no request in time', async () => {
-    const server = await listen(sockPath(), () => ({ ok: true }), { requestTimeoutMs: 50 });
+  it('drops a connection that sends no request in time, however slowly it trickles in', async () => {
+    const server = await listen(sockPath(), () => ({ ok: true }), { requestTimeoutMs: 100 });
     const got = await new Promise<string>((resolve) => {
       const socket = createConnection(server.path);
       let text = '';
+      // A byte every 20 ms: never idle for the 100 ms, and never a whole request.
+      const drip = setInterval(() => socket.write('x'), 20);
+      socket.on('error', () => undefined);
       socket.on('data', (d) => (text += String(d)));
-      socket.on('close', () => resolve(text));
+      socket.on('close', () => {
+        clearInterval(drip);
+        resolve(text);
+      });
     });
     expect(got).toBe('');
   });
@@ -1837,6 +1846,9 @@ describe('worker socket: its path', () => {
     expect(JSON.parse(await send(server.path, '{}\n'))).toEqual({ ok: true });
 
     await expect(listenWorker(sockPath(), () => ({}))).rejects.toThrow(`${sockPath()}: another gateway is listening on it`);
+    // Claimed alone, as the gateway does before its boot: refused, and the live socket left alone.
+    await expect(claimSocketPath(sockPath())).rejects.toThrow('another gateway is listening on it');
+    expect(JSON.parse(await send(server.path, '{}\n'))).toEqual({ ok: true });
     await server.close();
 
     writeFileSync(sockPath(), 'not a socket');
@@ -1846,6 +1858,18 @@ describe('worker socket: its path', () => {
     mkdirSync(join(root, 'elsewhere'));
     symlinkSync(join(root, 'elsewhere'), join(root, 'link'));
     await expect(listenWorker(join(root, 'link', 'kanban.sock'), () => ({}))).rejects.toThrow('is not a directory of its own');
+  });
+
+  it('claims a path ahead of listening: a stale socket removed, a fresh directory made private', async () => {
+    mkdirSync(join(root, 'run'), { mode: 0o755 });
+    chmodSync(join(root, 'run'), 0o755);
+    const dead = createServer();
+    await new Promise<void>((resolve) => dead.listen(join(root, 'dead.sock'), resolve));
+    renameSync(join(root, 'dead.sock'), sockPath());
+    await new Promise<void>((resolve) => dead.close(() => resolve()));
+    await claimSocketPath(sockPath());
+    expect(existsSync(sockPath())).toBe(false);
+    expect(statSync(join(root, 'run')).mode & 0o777).toBe(0o700);
   });
 
   it('tightens a directory of its own that others could enter', async () => {
@@ -1973,6 +1997,17 @@ export function privateDir(dir: string): void {
 }
 
 /**
+ * Take the socket's path for this gateway, before it changes anything: the
+ * directory made private, a stale socket removed, and a live one refused. A
+ * second gateway on the same home fails here, before its boot would end the
+ * first gateway's runs. listenWorker does it again, which is then a no-op.
+ */
+export async function claimSocketPath(path: string): Promise<void> {
+  privateDir(dirname(path));
+  await clearStale(path);
+}
+
+/**
  * A socket left by a gateway that died is removed. Anything else at the path is
  * refused: a file that is not a socket, another user's socket, and a socket a
  * live gateway is still listening on.
@@ -1994,9 +2029,10 @@ async function clearStale(path: string): Promise<void> {
       probe.destroy();
       resolve(true);
     });
-    probe.once('error', () => resolve(false));
+    // Only a refusal says nothing listens: any other failure cannot be told from a live gateway.
+    probe.once('error', (err: NodeJS.ErrnoException) => resolve(err.code === 'ECONNREFUSED' ? false : true));
   });
-  if (live) throw new Error(`${path}: another gateway is listening on it`);
+  if (live) throw new Error(`${path}: another gateway is listening on it, or it cannot be told apart from one`);
   unlinkSync(path);
 }
 
@@ -2012,7 +2048,12 @@ function maskAll(value: unknown): unknown {
 
 function answer(socket: Socket, response: unknown): void {
   if (socket.destroyed) return;
-  socket.end(`${JSON.stringify(maskAll(response))}\n`);
+  try {
+    socket.end(`${JSON.stringify(maskAll(response))}\n`);
+  } catch {
+    // An answer that cannot be serialized ends the connection, not the process.
+    socket.destroy();
+  }
 }
 
 /** Listen at `path` and answer each request with what `handle` returns. */
@@ -2024,8 +2065,7 @@ export async function listenWorker(
   const maxBytes = opts.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
   const timeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const note = opts.note ?? (() => undefined);
-  privateDir(dirname(path));
-  await clearStale(path);
+  await claimSocketPath(path);
 
   const sockets = new Set<Socket>();
   // Half-open, so a client that ends its side after the request still gets the answer.
@@ -2034,7 +2074,10 @@ export async function listenWorker(
     socket.once('close', () => sockets.delete(socket));
     // A client that goes away is its own business; an error must not reach the process.
     socket.on('error', () => undefined);
-    socket.setTimeout(timeoutMs, () => socket.destroy());
+    // Within timeoutMs of connecting, however slowly it trickles in: an idle
+    // timeout would let a byte every few seconds hold the connection for ever.
+    const deadline = setTimeout(() => socket.destroy(), timeoutMs);
+    socket.once('close', () => clearTimeout(deadline));
     const chunks: Buffer[] = [];
     let size = 0;
     let read = false;
@@ -2055,7 +2098,7 @@ export async function listenWorker(
       if (nl === -1) return;
       read = true;
       // Read; what is left is the handler's, however long it takes.
-      socket.setTimeout(0);
+      clearTimeout(deadline);
       let request: unknown;
       try {
         request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -2102,13 +2145,13 @@ export async function listenWorker(
 }
 ```
 
-- [ ] **Step 5.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1021 passed (1021)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 5.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1022 passed (1022)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 5.5: Commit.**
 
 ```bash
 git add src/kanban/socket.ts tests/kanban-socket.test.ts
-git commit -m "Serve the worker API on a 0600 socket in a private directory, one JSON line per connection, sizes and timeouts capped"
+git commit -m "Serve the worker API on a 0600 socket in a private directory, one JSON line per connection, with a size cap and a hard request deadline"
 ```
 
 ---
@@ -2374,7 +2417,7 @@ export async function kanbanCommand(command: string | undefined, rest: readonly 
   try {
     line = await ask(socket, `${JSON.stringify({ run, token, command, input })}\n`);
   } catch (err) {
-    say({ ok: false, code: 'unreachable', message: `cannot reach the gateway at ${socket}: ${why(err)}` });
+    say({ ok: false, code: 'unreachable', message: `cannot reach the gateway at ${socket}: ${why(err)}; if it is running, it may be busy: try again` });
     return 1;
   }
   let answer: unknown;
@@ -2384,7 +2427,7 @@ export async function kanbanCommand(command: string | undefined, rest: readonly 
     answer = undefined;
   }
   if (typeof answer !== 'object' || answer === null || typeof (answer as { ok?: unknown }).ok !== 'boolean') {
-    say({ ok: false, code: 'unreachable', message: `the gateway at ${socket} gave no answer` });
+    say({ ok: false, code: 'unreachable', message: `the gateway at ${socket} gave no answer; it may be busy: try again` });
     return 1;
   }
   io.out(JSON.stringify(answer));
@@ -2513,7 +2556,7 @@ with:
 });
 ```
 
-- [ ] **Step 6.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1029 passed (1029)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 6.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1030 passed (1030)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 6.5: Commit.**
 
@@ -2671,7 +2714,7 @@ export function writeMtShim(home: string, command: readonly string[] = mtCommand
 }
 ```
 
-- [ ] **Step 7.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1032 passed (1032)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 7.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1033 passed (1033)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 7.5: Commit.**
 
@@ -2877,7 +2920,7 @@ with:
 ```
 
 
-- [ ] **Step 8.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1034 passed (1034)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 8.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1035 passed (1035)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 8.5: Commit.**
 
@@ -2894,7 +2937,7 @@ git commit -m "Give each run the worker socket, and a PATH with the gateway mt f
 - Create: `tests/kanban-nudge.test.ts`
 - Modify: `src/kanban/prompt.ts`, `src/kanban/dispatcher.ts`, `src/db/kanban.ts`, `tests/helpers/dispatch.ts`
 
-Spec §7.5, in the `terminal === 'completed'` branch C2 left for it (its Decision 6), as a submit loop in `#drive` (Decisions 14 to 18 and 21). `#submit` re-reads the run before every prompt and sends none to a run decided meanwhile. `#followUp` chooses what follows a turn that completed unreported: people's new comments, else a nudge, else nothing, and the run ends `protocol_violation`. The harness defaults to no nudges (Decision 26).
+The protocol also tells the agent to try `mt kanban` once more when it answers `unreachable` (Decision 4). Spec §7.5, in the `terminal === 'completed'` branch C2 left for it (its Decision 6), as a submit loop in `#drive` (Decisions 14 to 18 and 21). `#submit` re-reads the run before every prompt and sends none to a run decided meanwhile. `#followUp` chooses what follows a turn that completed unreported: people's new comments, else a nudge, else nothing, and the run ends `protocol_violation`. The harness defaults to no nudges (Decision 26).
 
 - [ ] **Step 9.1: Write the failing tests.**
 
@@ -3130,6 +3173,34 @@ with:
 
 ```
 
+In `src/kanban/prompt.ts`, replace:
+
+```ts
+Report through the \`mt kanban\` command, which reads JSON on stdin and answers in JSON. Exactly one terminal report ends your run:
+- \`mt kanban complete < handoff.json\`, with {"summary": "...", "metadata": {...}}, when the task is done;
+```
+
+with:
+
+```ts
+Report through the \`mt kanban\` command, which reads JSON on stdin and answers in JSON (if it answers "unreachable", the gateway may be busy: try once more). Exactly one terminal report ends your run:
+- \`mt kanban complete < handoff.json\`, with {"summary": "...", "metadata": {...}}, when the task is done;
+```
+
+In `src/kanban/prompt.ts`, replace:
+
+```ts
+Report through the \`mt kanban\` command, which reads JSON on stdin and answers in JSON. Exactly one terminal report ends your run:
+- \`mt kanban complete < handoff.json\`, with {"summary": "..."}, to approve;
+```
+
+with:
+
+```ts
+Report through the \`mt kanban\` command, which reads JSON on stdin and answers in JSON (if it answers "unreachable", the gateway may be busy: try once more). Exactly one terminal report ends your run:
+- \`mt kanban complete < handoff.json\`, with {"summary": "..."}, to approve;
+```
+
 Add to the end of `src/kanban/prompt.ts`:
 
 ```ts
@@ -3137,8 +3208,8 @@ Add to the end of `src/kanban/prompt.ts`:
 /** The reports that end a run of this kind, as a nudge names them. */
 function reports(kind: RunKind): string {
   return kind === 'work'
-    ? '`mt kanban complete < handoff.json` if the task is done, `mt kanban review < handoff.json` to have it reviewed, or `mt kanban block < block.json` if you cannot go on'
-    : '`mt kanban complete < handoff.json` to approve, `mt kanban changes < reason.json` to ask for changes, or `mt kanban block < block.json` for a problem the implementer cannot fix';
+    ? '`mt kanban complete < handoff.json` if the task is done, or `mt kanban review < handoff.json` to have it reviewed, where handoff.json is {"summary": "...", "metadata": {...}}; or `mt kanban block < block.json` if you cannot go on, where block.json is {"kind": "...", "reason": "..."}'
+    : '`mt kanban complete < handoff.json` to approve, with {"summary": "..."}; `mt kanban changes < reason.json` to ask for changes, with {"reason": "..."}; or `mt kanban block < block.json` for a problem the implementer cannot fix, with {"kind": "...", "reason": "..."}';
 }
 
 const SHOW_AGAIN = 'If you no longer have the task in front of you, `mt kanban show` prints it and its context, as JSON.';
@@ -3152,7 +3223,7 @@ export function composeNudge(kind: RunKind, n: number, limit: number): string {
   return [
     `You ended your turn without reporting, so your run is not over (reminder ${n} of ${limit}).`,
     '',
-    `Report now, through the \`mt kanban\` command, which reads JSON on stdin as # How to work said: ${reports(kind)}.`,
+    `Report now, through the \`mt kanban\` command, which reads JSON on stdin and answers in JSON: ${reports(kind)}.`,
     SHOW_AGAIN,
     '',
     n < limit
@@ -3458,13 +3529,13 @@ with:
 /** A comment, on a task in any phase. The dispatcher forwards a person's to an undecided run (spec §7.5). */
 ```
 
-- [ ] **Step 9.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1041 passed (1041)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 9.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1042 passed (1042)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 9.5: Commit.**
 
 ```bash
 git add src/kanban/prompt.ts src/kanban/dispatcher.ts src/db/kanban.ts tests/helpers/dispatch.ts tests/kanban-nudge.test.ts
-git commit -m "Nudge a run that ends its turn without reporting, and forward a person comment in place of the next nudge"
+git commit -m "Nudge a run that ends its turn without reporting, forward a person comment in place of the next nudge, and tell agents to retry once when the gateway is busy"
 ```
 
 ---
@@ -3544,7 +3615,7 @@ describe('Dispatcher: cancelling a superseded run', () => {
     await h.dispatcher.idle();
   });
 
-  it('releases a superseded run whose turn ignores the cancel at the next sweep', async () => {
+  it('releases a superseded run whose turn ignores the cancel once a sweep interval has passed', async () => {
     const h = harness();
     const task = h.create({ workspace: 'web' });
     const implementer = h.driver('implementer');
@@ -3555,6 +3626,11 @@ describe('Dispatcher: cancelling a superseded run', () => {
     expect(h.service.archive(task.taskId, ALICE).ok).toBe(true);
     expect(h.dispatcher.cancel(run?.runId ?? '')).toBe(true);
 
+    // A sweep straight after the cancel gives the turn its grace.
+    h.dispatcher.sweep();
+    expect(implementer.runtimes[0]?.closes).toBe(0);
+    expect(runsOf(h.t.db, task.taskId)[0]?.endedAt).toBeNull();
+    h.clock.advance(60_000);
     h.dispatcher.sweep();
     await until(() => runsOf(h.t.db, task.taskId)[0]?.endedAt !== null, 'the run to close');
     expect(runsOf(h.t.db, task.taskId)[0]?.outcome).toBe('superseded');
@@ -3587,8 +3663,11 @@ with:
    * The outcome is the board's already, so the turn's end only closes the run.
    * An undecided run is not cancelled here: what ended it must be recorded first
    * (spec §6.4). A turn that ignores the cancel has its session released by the
-   * next sweep, as one past its runtime limit does; a run still starting gets no
-   * prompt, since it is decided. True when a running turn was asked to stop.
+   * first sweep once `sweep_interval_s` has passed since the cancel, the grace a
+   * timed-out turn gets. The run is marked cancelling even when there is no live
+   * turn to stop yet -- false is returned then -- so a run still starting gets no
+   * prompt, and is released the same way if its start never ends. True when a
+   * running turn was asked to stop.
    */
   cancel(runId: string): boolean {
     const open = [...this.#open.values()].find((o) => o.runId === runId);
@@ -3596,6 +3675,7 @@ with:
     const outcome = getRun(this.#deps.db, runId)?.outcome;
     if (outcome === null || outcome === undefined) return false;
     open.cancelling = true;
+    open.releaseAfter = this.#clock.now() + this.#deps.settings.sweepIntervalS * 1000;
     const actor = this.#deps.sessions.liveActor(open.sessionId);
     if (actor?.presence !== 'live') return false;
     this.#note(`kanban: run ${runId} was decided ${outcome} by the board; cancelling its turn`);
@@ -3606,7 +3686,40 @@ with:
   /** Tell, once, about each task the last pass found nobody to give to
 ```
 
-- [ ] **Step 10.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1044 passed (1044)`. Then run `npm run typecheck`. Expected: no output.
+In `src/kanban/dispatcher.ts`, replace:
+
+```ts
+  seenComment: number;
+}
+```
+
+with:
+
+```ts
+  seenComment: number;
+  /**
+   * For a turn `cancel()` asked to stop: not released before this time, a sweep
+   * interval on, the grace a timed-out turn gets between two sweeps.
+   */
+  releaseAfter?: number;
+}
+```
+
+In `src/kanban/dispatcher.ts`, replace:
+
+```ts
+        if (!open.released) {
+          open.released = true;
+```
+
+with:
+
+```ts
+        if (!open.released && (open.releaseAfter === undefined || now >= open.releaseAfter)) {
+          open.released = true;
+```
+
+- [ ] **Step 10.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1045 passed (1045)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 10.5: Commit.**
 
@@ -3622,7 +3735,7 @@ git commit -m "Cancel the turn of a run the board superseded, so it frees its wo
 **Files:**
 - Modify: `src/index.ts`, `tests/gateway-startup.test.ts`
 
-Behind `kanban.enabled`, which stays off, so chat is unchanged. `createGateway` writes the shim and gives the dispatcher the socket's path and the shim's directory; `start()` listens after `boot()` and before the first pass; `stop()` closes the socket before the database (Decision 3). A worker's change calls `dispatcher.pass()` (Decision 20). `start()` connects to Lark, so no unit test calls it: Task 12 builds the same stack by hand.
+Behind `kanban.enabled`, which stays off, so chat is unchanged. `createGateway` writes the shim and gives the dispatcher the socket's path and the shim's directory; `start()` claims the socket's path before anything else, so a second gateway on the same home fails before its reconcile or its boot touches the first one's sessions and runs, and listens after `boot()` and before the first pass; `stop()` closes the socket before the database (Decision 3). A worker's change calls `dispatcher.pass()` (Decision 20). `start()` connects to Lark, so no unit test calls it: Task 12 builds the same stack by hand.
 
 - [ ] **Step 11.1: Write the failing test.**
 
@@ -3682,8 +3795,25 @@ import { Dispatcher } from './kanban/dispatcher.js';
 import { KanbanService } from './kanban/service.js';
 import { writeMtShim } from './kanban/shim.js';
 import { KanbanSink } from './kanban/sink.js';
-import { listenWorker, workerSocketPath, type WorkerServer } from './kanban/socket.js';
+import { claimSocketPath, listenWorker, workerSocketPath, type WorkerServer } from './kanban/socket.js';
 import { WorkerApi } from './kanban/worker.js';
+```
+
+In `src/index.ts`, replace:
+
+```ts
+    async start(): Promise<void> {
+
+```
+
+with:
+
+```ts
+    async start(): Promise<void> {
+      // First, the worker socket's path: a second gateway on this home fails here,
+      // before its reconcile or its boot touches the first one's sessions and runs.
+      if (worker !== undefined) await claimSocketPath(worker.socket);
+
 ```
 
 In `src/index.ts`, replace:
@@ -3794,13 +3924,13 @@ with:
 ```
 
 
-- [ ] **Step 11.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1045 passed (1045)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 11.4: Run the tests.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1046 passed (1046)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 11.5: Commit.**
 
 ```bash
 git add src/index.ts tests/gateway-startup.test.ts
-git commit -m "Behind kanban.enabled, write the mt shim, listen on the worker socket after boot, and close it before the database"
+git commit -m "Behind kanban.enabled, write the mt shim, claim the worker socket first, listen after boot, and close it before the database"
 ```
 
 ---
@@ -3884,6 +4014,8 @@ function mt(command, input) {
   const r = spawnSync('mt', ['kanban', command], {
     input: input === undefined ? '' : JSON.stringify(input),
     encoding: 'utf8',
+    // Never longer than a turn should take: a socket nobody answers fails the turn.
+    timeout: 30_000,
   });
   return { status: r.status, answer: r.stdout.trim(), error: r.error?.message ?? r.stderr.trim() };
 }
@@ -3954,7 +4086,7 @@ import { KanbanService } from '../src/kanban/service.js';
 import { lastTurnOf } from '../src/kanban/session-log.js';
 import { writeMtShim } from '../src/kanban/shim.js';
 import { KanbanSink } from '../src/kanban/sink.js';
-import { listenWorker, type WorkerServer } from '../src/kanban/socket.js';
+import { listenWorker, workerSocketPath, type WorkerServer } from '../src/kanban/socket.js';
 import { WorkerApi } from '../src/kanban/worker.js';
 import { clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
@@ -4023,7 +4155,7 @@ async function build(mode: string): Promise<Stack> {
     appId: 'cli_app',
     maxLive: 4,
   });
-  const socket = join(home, 'run', 'kanban.sock');
+  const socket = workerSocketPath(home);
   dispatcher = new Dispatcher({
     db: t.db,
     service,
@@ -4072,7 +4204,13 @@ function mt(env: Record<string, string>, command: string, input: unknown): Promi
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (d: string) => (out += d));
     child.once('error', reject);
-    child.once('close', (status) => resolve({ status, answer: JSON.parse(out) as unknown }));
+    child.once('close', (status) => {
+      try {
+        resolve({ status, answer: JSON.parse(out) as unknown });
+      } catch (err) {
+        reject(err as Error);
+      }
+    });
     child.stdin.end(JSON.stringify(input));
   });
 }
@@ -4135,7 +4273,7 @@ The fake agent's own `spawnSync` is fine: the agent is a separate process from t
 
 - [ ] **Step 12.2: Run it to verify it passes.** Every piece it uses exists after Task 11, so this test is the integration check rather than a driver of new code. Run `npx vitest run --project e2e tests/kanban-worker.e2e.ts`. Expected: `Tests  2 passed (2)`. To see it fail first, leave the run with no `mt` on its PATH: in the test, change `worker: { socket, mtDir: writeMtShim(home), path: process.env['PATH'] }` to `worker: { socket, mtDir: '/nonexistent', path: process.env['PATH'] }`. Expected: both FAIL: `AssertionError: expected 'blocked' to be 'done'` (the agent finds no `mt`, never reports, and the task gives up) and `AssertionError: expected { runId: 'r_…', …(20) } to match object { outcome: 'completed', …(2) }`. `Tests  2 failed (2)`. Change it back.
 
-- [ ] **Step 12.3: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1045 passed (1045)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  53 passed (53)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 12.3: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1046 passed (1046)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  53 passed (53)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 12.4: Commit.**
 
@@ -4233,7 +4371,7 @@ npm run test:e2e  # spawns hand-written fake agents, one per driver, and one boa
 ```
 
 
-- [ ] **Step 13.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `npm test 2>&1 | tail -4`. Expected: `Tests  1045 passed (1045)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  53 passed (53)`. Then run `npm run typecheck`. Expected: no output.
+- [ ] **Step 13.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `npm test 2>&1 | tail -4`. Expected: `Tests  1046 passed (1046)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  53 passed (53)`. Then run `npm run typecheck`. Expected: no output.
 
 - [ ] **Step 13.3: Commit.**
 
@@ -4246,7 +4384,7 @@ git commit -m "Document mt kanban and the shim, socket and PATH a board run gets
 
 ## Done when
 
-- `npm test` gives `Tests  1045 passed (1045)`. `npm run test:e2e` gives `Tests  53 passed (53)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  1046 passed (1046)`. `npm run test:e2e` gives `Tests  53 passed (53)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table, and only `src/kanban/service.ts` imports it (the guard in `tests/kanban-service.test.ts`). `src/kanban/worker.ts` writes nothing.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - A fake agent process, started by the real dispatcher through the real CLI driver, reports `complete` by running `mt kanban` by name, through the shim, the real socket and the real worker API; and, stopping without a report, is nudged in its own session and then reports (`tests/kanban-worker.e2e.ts`).
