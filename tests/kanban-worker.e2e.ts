@@ -174,8 +174,12 @@ describe('the worker CLI, end to end', () => {
       answer: { ok: false, code: 'run_superseded', message: `run ${run?.runId} is over; its task has moved on without it` },
     });
     expect(runsOf(s.t.db, taskId)[0]?.summary).toBe('did: Write the parser');
-    // Only its hash was stored.
-    expect(JSON.stringify(s.t.db.prepare('SELECT * FROM kanban_runs').all())).not.toContain(env['MT_KANBAN_TOKEN']);
+    // Only its hash was stored: every column read as text, a blob's bytes decoded, so a token in either is found.
+    const stored = (s.t.db.prepare('SELECT * FROM kanban_runs').all() as Array<Record<string, unknown>>)
+      .flatMap((row) => Object.values(row))
+      .map((value) => (Buffer.isBuffer(value) ? value.toString('utf8') : String(value)));
+    expect(stored.length).toBeGreaterThan(0);
+    for (const value of stored) expect(value).not.toContain(env['MT_KANBAN_TOKEN']);
   });
 
   it('an agent that stops without reporting is nudged in its own session, and then reports', async () => {

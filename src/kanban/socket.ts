@@ -159,7 +159,8 @@ function alive(pid: number): boolean {
  * gateway off a home, since a socket probe alone cannot tell a busy gateway,
  * whose full backlog refuses connections, from a dead one. A lock naming another
  * live process is refused; one whose process is gone, or that names none, is
- * stale and taken over; one naming this process is already ours.
+ * stale and taken over; one naming this process is already ours, and only the
+ * holder that created it removes it on release.
  *
  * The lock is in the home even when the socket is under the temporary directory:
  * it has no length limit. It is written whole beside its place and linked in, so
@@ -169,30 +170,33 @@ export function lockGateway(home: string): GatewayLock {
   const dir = join(home, 'run');
   privateDir(dir, 'the gateway lock');
   const path = join(dir, 'gateway.pid');
-  const held: GatewayLock = {
+  // Only the call that created the file removes it: a second holder in this
+  // process, which found the lock naming us already, must not take it from the first.
+  const held = (created: boolean): GatewayLock => ({
     path,
     release() {
+      if (!created) return;
       try {
         if (lockHolder(path) === process.pid) unlinkSync(path);
       } catch {
         // Not ours to remove, or gone already; either way, nothing of ours is left.
       }
     },
-  };
+  });
   // Twice at most: a stale lock removed, then ours linked in. A third means another gateway is starting too.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const staging = join(dir, `.gateway.pid-${randomUUID()}`);
     try {
       writeFileSync(staging, `${process.pid}\n`, { mode: 0o600, flag: 'wx' });
       linkSync(staging, path);
-      return held;
+      return held(true);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     } finally {
       rmSync(staging, { force: true });
     }
     const holder = lockHolder(path);
-    if (holder === process.pid) return held;
+    if (holder === process.pid) return held(false);
     if (holder !== undefined && alive(holder)) {
       throw new Error(`another gateway (pid ${holder}) is running on ${home}: stop it first, or give this one another MT_HOME (${path})`);
     }

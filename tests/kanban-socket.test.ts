@@ -314,6 +314,15 @@ describe('the gateway lock', () => {
     }
   });
 
+  it('leaves the lock to the holder that took it when a second holder in this process releases', () => {
+    const first = lockGateway(root);
+    const second = lockGateway(root);
+    second.release();
+    expect(readFileSync(lockPath(), 'utf8')).toBe(`${process.pid}\n`);
+    first.release();
+    expect(existsSync(lockPath())).toBe(false);
+  });
+
   it('refuses a lock that is not a file of its own, and on release leaves one that is not ours', () => {
     mkdirSync(join(root, 'run'), { mode: 0o700 });
     writeFileSync(join(root, 'elsewhere'), `${deadPid()}\n`);

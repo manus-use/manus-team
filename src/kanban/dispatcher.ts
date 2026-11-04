@@ -120,6 +120,11 @@ interface OpenRun extends RunHandle {
   packageDir: string | undefined;
   /** Its turn has been cancelled for running past its limit: once is enough. */
   cancelling: boolean;
+  /**
+   * The cancel has reached its actor. Not yet when `cancel()` came while the
+   * agent was still starting: the next sweep after it is live sends it.
+   */
+  cancelSent: boolean;
   /** Its session has been released because its turn ignored the cancel. */
   released: boolean;
   /** Its kind: which reports a nudge names. */
@@ -445,6 +450,18 @@ export class Dispatcher {
       const run = getRun(this.#deps.db, open.runId);
       if (run === undefined || run.endedAt !== null) continue;
       if (open.cancelling) {
+        // Cancelled while its agent was still starting: the cancel goes now, and
+        // the turn gets its grace from now.
+        if (!open.cancelSent) {
+          const actor = this.#deps.sessions.liveActor(sessionId);
+          if (actor?.presence === 'live') {
+            open.cancelSent = true;
+            open.releaseAfter = now + this.#deps.settings.sweepIntervalS * 1000;
+            this.#note(`kanban: run ${run.runId} has started; cancelling its turn`);
+            void actor.cancel();
+            continue;
+          }
+        }
         // Cancelled a sweep ago and still open: its agent ignored the cancel, which
         // ACP leaves to the agent. Releasing the session ends the process; the run,
         // decided before the cancel, is closed, and its workspace freed.
@@ -470,6 +487,7 @@ export class Dispatcher {
       const actor = this.#deps.sessions.liveActor(sessionId);
       if (actor?.presence !== 'live') continue;
       open.cancelling = true;
+      open.cancelSent = true;
       this.#note(`kanban: run ${run.runId} passed its runtime limit; cancelling its turn`);
       void actor.cancel();
     }
@@ -487,8 +505,9 @@ export class Dispatcher {
    * first sweep once `sweep_interval_s` has passed since the cancel, the grace a
    * timed-out turn gets. The run is marked cancelling even when there is no live
    * turn to stop yet -- false is returned then -- so a run still starting gets no
-   * prompt, and is released the same way if its start never ends. True when a
-   * running turn was asked to stop.
+   * prompt, and is released the same way if its start never ends; one whose
+   * agent was starting with its prompt is sent the cancel by the first sweep
+   * after it is live. True when a running turn was asked to stop.
    */
   cancel(runId: string): boolean {
     const open = [...this.#open.values()].find((o) => o.runId === runId);
@@ -499,13 +518,13 @@ export class Dispatcher {
     open.releaseAfter = this.#clock.now() + this.#deps.settings.sweepIntervalS * 1000;
     const actor = this.#deps.sessions.liveActor(open.sessionId);
     if (actor?.presence !== 'live') return false;
+    open.cancelSent = true;
     this.#note(`kanban: run ${runId} was decided ${outcome} by the board; cancelling its turn`);
     void actor.cancel();
     return true;
   }
 
-  /** Tell, once, about each task the last pass found nobody to give to
-```, if it has waited long enough (spec §4.2). */
+  /** Tell, once, about each task the last pass found nobody to give to, if it has waited long enough (spec §4.2). */
   #noteStranded(): void {
     const cutoff = this.#clock.now() - this.#deps.settings.strandedAfterS * 1000;
     for (const [taskId, reason] of this.#unassignable) {
@@ -623,6 +642,7 @@ export class Dispatcher {
       args: rendered?.args ?? [],
       packageDir: rendered?.dir,
       cancelling: false,
+      cancelSent: false,
       released: false,
       kind: run.kind,
       nudges: 0,

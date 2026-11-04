@@ -5,13 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigError, loadConfig, type GatewayConfig } from '../src/config.js';
 import { migrate, openDb } from '../src/db/open.js';
 import { createGateway, findingsOn, registerConfiguredSecrets } from '../src/index.js';
+import { LarkAdapter } from '../src/channel/lark/adapter.js';
+import { LarkInbound } from '../src/channel/lark/inbound.js';
 import { loadTeam, type Team } from '../src/team.js';
 import { MASK, clearSecrets, redactKnownSecrets } from '../src/secrets.js';
 
 /**
  * Startup, up to the point where the gateway would connect. `createGateway` opens
  * and migrates the database and registers the workspaces; nothing talks to Lark
- * until `start()`, which these tests never call.
+ * until `start()`, which these tests call only with the channel stubbed, or to see
+ * it refused before it connects.
  */
 let root: string;
 let config: GatewayConfig;
@@ -43,7 +46,10 @@ beforeEach(() => {
   team = loadTeam(config, startupEnv);
 });
 
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+afterEach(() => {
+  vi.restoreAllMocks();
+  rmSync(root, { recursive: true, force: true });
+});
 
 function rows(): Array<{ id: string; root_path: string }> {
   const db = openDb(config.dbPath);
@@ -147,16 +153,40 @@ describe('the board, at startup', () => {
     expect(gateway.db.open).toBe(false);
   });
 
-  it('writes the mt a run finds on its PATH only when kanban.enabled is set', async () => {
+  it('writes the mt a run finds on its PATH at start, once the home is held, and only when kanban.enabled is set', async () => {
+    // The channel stubbed: nothing here talks to Lark.
+    vi.spyOn(LarkAdapter.prototype, 'connect').mockResolvedValue(undefined);
+    vi.spyOn(LarkAdapter.prototype, 'disconnect').mockResolvedValue(undefined);
+    vi.spyOn(LarkInbound.prototype, 'start').mockImplementation(() => undefined);
     const off = await createGateway(config, team);
+    await off.start();
     await off.stop();
     expect(existsSync(join(config.home, 'bin'))).toBe(false);
     const on = await createGateway({ ...config, kanban: { ...config.kanban, enabled: true } }, team);
     try {
+      expect(existsSync(join(config.home, 'bin', 'mt'))).toBe(false);
+      await on.start();
       expect(statSync(join(config.home, 'bin', 'mt')).mode & 0o777).toBe(0o700);
       expect(readFileSync(join(config.home, 'bin', 'mt'), 'utf8')).toContain(`exec '${process.execPath}'`);
     } finally {
       await on.stop();
+    }
+  });
+
+  it("leaves the running gateway's mt alone when another gateway holds the home", async () => {
+    const run = join(config.home, 'run');
+    mkdirSync(run, { mode: 0o700 });
+    // A live process other than this one: the lock is another gateway's.
+    writeFileSync(join(run, 'gateway.pid'), `${process.ppid}\n`, { mode: 0o600 });
+    const bin = join(config.home, 'bin');
+    mkdirSync(bin, { mode: 0o700 });
+    writeFileSync(join(bin, 'mt'), '#!/bin/sh\n# the running gateway\'s\n', { mode: 0o700 });
+    const second = await createGateway({ ...config, kanban: { ...config.kanban, enabled: true } }, team);
+    try {
+      await expect(second.start()).rejects.toThrow(/another gateway \(pid \d+\) is running/);
+      expect(readFileSync(join(bin, 'mt'), 'utf8')).toBe("#!/bin/sh\n# the running gateway's\n");
+    } finally {
+      await second.stop();
     }
   });
 

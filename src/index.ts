@@ -76,7 +76,8 @@ const SHUTDOWN_DRAIN_MS = 5_000;
 export async function createGateway(config: GatewayConfig, team: Team): Promise<Gateway> {
   // Every secret the gateway itself holds, masked wherever text leaves it (spec
   // §10.1). Before anything can print, the notes below included, or store agent
-  // text. Plan C adds and removes worker tokens as runs open and close.
+  // text. The dispatcher adds each run's token when it is claimed and removes it
+  // when the run ends.
   registerConfiguredSecrets(config, team);
 
   const note = (line: string): void => {
@@ -198,7 +199,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       renderRoot: join(config.home, 'rendered'),
       // How a run reports (spec §7.2): through the socket, with this build's mt
       // first on its PATH. Both are in the home too.
-      worker: { socket, mtDir: writeMtShim(config.home), path: process.env['PATH'] },
+      // Written in start(), once the home is held: a refused second gateway must not rewrite the first one's.
+      worker: { socket, mtDir: join(config.home, 'bin'), path: process.env['PATH'] },
     });
     // A worker's create, link or report can make a task claimable.
     worker = { api: new WorkerApi({ db, service, changed: () => dispatcher?.pass() }), socket };
@@ -238,6 +240,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
         lock = lockGateway(config.home);
         try {
           await claimSocketPath(worker.socket);
+          // Only once the home is this gateway's: the mt a run finds on its PATH (spec §7.2).
+          writeMtShim(config.home);
         } catch (err) {
           lock.release();
           throw err;
