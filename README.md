@@ -258,6 +258,11 @@ They only write files and never contact the gateway; changes take effect at the 
   `$MT_HOME/bin/mt`, which runs this build's `mt` with the gateway's node, puts that directory
   first on every run's `PATH`, and listens on `$MT_HOME/run/kanban.sock` (`0600`, in a `0700`
   directory; under the temporary directory when the home's path is too long for a socket).
+  Because `$MT_HOME/bin` comes first on every run's `PATH`, keep nothing else in it: any
+  file there would shadow a command of the same name for every agent. A command other than
+  `show` refuses at once when stdin is a terminal; redirect a file or pipe the JSON in.
+  With `kanban.enabled`, the gateway also holds `$MT_HOME/run/gateway.pid` while it runs, and
+  refuses to start on a home whose lock names another live process.
 
 ### Chat commands
 

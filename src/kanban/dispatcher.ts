@@ -553,11 +553,26 @@ export class Dispatcher {
     const handle: RunHandle = { runId: run.runId, key: runKey(this.#deps.appId, run), closing: undefined };
     try {
       // A person's run is sent a card, from plan D; it holds no session.
-      if (run.assignee.kind === 'role' && token !== undefined) await this.#drive(claimed, handle, token);
+      if (run.assignee.kind === 'role') {
+        if (token !== undefined) {
+          await this.#drive(claimed, handle, token);
+        } else {
+          // The pass mints a token for every role's claim, from the task it read; a
+          // claim that came back a role's without one means the two disagreed.
+          this.#note(
+            `kanban: run ${run.runId} is a role’s but was claimed without a token, so it is not started; the next boot ends it`,
+          );
+        }
+      }
     } finally {
       // The run's one cleanup, once its close -- by whoever asked for it -- is
       // over: everything that must happen exactly once per run goes here. The
       // token leaves the masker last: its run is closed, and its agent gone.
+      //
+      // The one exception is shutdown: a run the stop left open in the database
+      // loses its token here too, while the board still has it open. That is
+      // deliberate: its agent dies with the gateway, so nothing is left to report
+      // with the token, and the next boot ends the run (spec §8.4).
       await handle.closing?.catch(() => undefined);
       if (handle.sessionId !== undefined) this.#open.delete(handle.sessionId);
       if (token !== undefined) removeSecrets([token]);

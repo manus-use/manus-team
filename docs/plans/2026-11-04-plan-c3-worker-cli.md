@@ -133,6 +133,7 @@ Each is the reading most consistent with the rest of the spec. Decisions 5, 7 an
 
 - **C4:** `KanbanService.complete` and `requestReview` are where gates go; the worker API needs no change, and the CLI already waits 10 minutes. Build a gate's environment from `roles`, never from `Dispatcher.envFor`.
 - **D:** `dispatcher.cancel(runId)` after a superseding command; `dispatcher.pass()` after the others; subscriptions copied in `createTask` when `createdVia.kind === 'run'`.
+- **C4, the socket's close.** `close()` drops every connection, including those whose request is still being handled. Once C4 makes `complete` and `review` asynchronous (gates), a command could be applied while its client sees `unreachable`, and the retry the protocol asks for would then get `already_reported`. C4 should drain in-flight requests on close, or make an `already_reported` answer tell the worker that its first report was applied.
 
 ## File structure
 
@@ -4382,9 +4383,35 @@ git commit -m "Document mt kanban and the shim, socket and PATH a board run gets
 
 ---
 
+## Review follow-ups
+
+The review of the finished plan, and that of Tasks 1–3, found the following, fixed after Task 13, each test first. The task steps above show the code as first written; the code and tests in the tree are the corrected ones.
+
+- **A busy gateway's socket is not taken for a stale one.** On macOS a full listen backlog refuses a connection with `ECONNREFUSED`, as a dead socket does, so a second gateway could unlink a live one and go on to `reconcileBoot`. Two fixes:
+  - **The gateway lock.** `lockGateway(home)` (`src/kanban/socket.ts`) writes `$MT_HOME/run/gateway.pid`, `0600` in the private directory, holding the process's pid; it is written whole beside its place and linked in. A lock naming another live process (`process.kill(pid, 0)` succeeds, or fails with `EPERM`) is refused, naming the pid and the home; one whose process is gone, or that names no pid, is stale and taken over; one naming this process is ours already. A symlink, a non-file or another user's file there is refused. `start()` takes it first, before `claimSocketPath` and so before `reconcileBoot`, releasing it if the claim fails; `stop()` releases it last, after the database closes, and only if it still names this process. It is in `$MT_HOME/run` even when the socket is under the temporary directory: the lock has no path-length limit. Like the socket, it is behind `kanban.enabled`.
+  - **The probe is repeated.** A socket that refuses is probed up to 5 times, 100 ms apart, and is stale only if every probe is refused.
+- **An answered connection is closed.** With `allowHalfOpen`, the server's `end` left a connection open for as long as the client kept its side, and 64 such clients locked every run out. `answer()` now ends with `socket.end(line, () => socket.destroy())`, and starts a linger timer of the request timeout, cleared on close, for a client that never reads the answer. The handler itself is still unbounded.
+- **A terminal on stdin is refused at once.** Every `mt kanban` command but `show` reads stdin, and on a terminal waited for ever. `MtIo.stdinIsTTY` (set from `process.stdin.isTTY` in `src/mt.ts`) makes such a command answer `{"ok":false,"code":"invalid","message":"mt kanban <cmd> reads JSON on stdin; stdin is a terminal: redirect a file or pipe it"}`, exit 1.
+- **The worker API's input is checked harder** (`src/kanban/worker.ts`):
+  - an input key must be the schema's own (`Object.hasOwn`), so `constructor`, `toString` and `__proto__` are unknown fields;
+  - `metadata` must be a JSON object, nested at most 64 deep (`WORKER_LIMITS.metadataDepth`), checked iteratively before it is serialized; anything else is `invalid`;
+  - a token on a person's run is `unauthorized`: such a run reports through chat;
+  - what a refusal quotes (an unknown field, an unknown command, a contract field's name) is masked before it is cut, so a known secret across the 256-byte cut leaves no prefix.
+- **`unreachable` says what to do.** "If it is running, it may be busy: try again" only for `ECONNREFUSED`, `ECONNRESET` and `EPIPE`; "is the gateway running?" for `ENOENT`; the code alone otherwise.
+- **`privateDir(dir, purpose)`** names what was to go in a refused directory: the socket, the mt shim or the gateway lock. It now makes the directory exactly `0700`, so a umask that took the owner's bits is undone too.
+- **The shim.** A directory at `$MT_HOME/bin/mt` fails with "…/bin/mt is a directory; remove it"; the staged script is `chmod`-ed `0700` before the rename, so a umask cannot take its execute bit.
+- **The README** says to keep nothing else in `$MT_HOME/bin`, which comes first on every run's PATH, and mentions the terminal refusal and the gateway lock.
+- **The dispatcher.** A role's run claimed without a token, which means the pass and the claim disagreed about the assignee, is noted instead of skipped silently; the next boot ends it. `#run`'s `finally` says why the shutdown path, which removes the token while the run is still open in the database, is a deliberate exception.
+
+Known limitation: two gateways started at the same moment on a home whose last gateway died can both find its stale lock, and the later one's unlink can then remove the earlier one's fresh lock. The window is between reading the stale lock and removing it; a takeover that closes it needs a second lock of its own, and is not done here.
+
+Counts after: `Tests  1061 passed (1061)` unit, `Tests  53 passed (53)` end to end.
+
+---
+
 ## Done when
 
-- `npm test` gives `Tests  1046 passed (1046)`. `npm run test:e2e` gives `Tests  53 passed (53)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  1061 passed (1061)`, after the review follow-ups. `npm run test:e2e` gives `Tests  53 passed (53)`. `npm run typecheck` prints nothing. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table, and only `src/kanban/service.ts` imports it (the guard in `tests/kanban-service.test.ts`). `src/kanban/worker.ts` writes nothing.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - A fake agent process, started by the real dispatcher through the real CLI driver, reports `complete` by running `mt kanban` by name, through the shim, the real socket and the real worker API; and, stopping without a report, is nudged in its own session and then reports (`tests/kanban-worker.e2e.ts`).

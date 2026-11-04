@@ -4,6 +4,7 @@ import { lastSeq, readEvents } from '../src/db/events.js';
 import { getTask, runsOf } from '../src/db/kanban-read.js';
 import { getSession } from '../src/db/sessions.js';
 import { settle } from './helpers/db.js';
+import { ALICE, newTask } from './helpers/kanban.js';
 import { runKey } from '../src/kanban/dispatcher.js';
 import {
   APP,
@@ -367,5 +368,29 @@ describe('Dispatcher: one failure does not stall the board', () => {
       'completed',
       'completed',
     ]);
+  });
+});
+
+describe('Dispatcher: a claim that does not match the pass', () => {
+  it('notes a role’s run claimed without a token, rather than skipping it silently', async () => {
+    const h = harness();
+    // A person's task, as the pass reads it; the role's by the time it is claimed.
+    const task = newTask(h.t.db, { assignee: { kind: 'human', name: 'lark:on_bob' }, workspace: 'web' });
+    const claim = h.service.claim.bind(h.service);
+    h.service.claim = (taskId, opts) => {
+      const moved = h.service.assign(taskId, 'implementer', ALICE);
+      if (!moved.ok) throw new Error(moved.message);
+      return claim(taskId, opts);
+    };
+
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+
+    const [run] = runsOf(h.t.db, task.taskId);
+    expect(run?.assignee).toEqual({ kind: 'role', name: 'implementer' });
+    expect(h.driver('implementer').starts).toHaveLength(0);
+    expect(h.notes).toContain(
+      `kanban: run ${run?.runId} is a role’s but was claimed without a token, so it is not started; the next boot ends it`,
+    );
   });
 });
