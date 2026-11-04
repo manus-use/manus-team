@@ -598,7 +598,7 @@ export class KanbanService {
 
   /**
    * A reviewer the report names is checked like any assignee (spec §5.3, §12).
-   * Asynchronous, as complete is: an implementer's review runs the gates too.
+   * Asynchronous, as complete is: an assignee's review runs the gates too.
    */
   async requestReview(
     taskId: string,
@@ -678,8 +678,9 @@ export class KanbanService {
 
   /**
    * The reported commit (spec §7.8): for an agent's report, its workspace's HEAD
-   * and whether the tree had uncommitted changes. A person's report records
-   * neither: there is no agent state to pin.
+   * and whether the tree had uncommitted changes; neither when the workspace
+   * is not a git repository. A person's report records neither: there is no
+   * agent state to pin.
    */
   async #observe(
     run: RunRow | undefined,
@@ -779,7 +780,7 @@ export class KanbanService {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
     if (!isText(reason) || reason.trim() === '') {
-      return board.refuse('invalid', 'changes need a reason the implementer can act on');
+      return board.refuse('invalid', 'changes need a reason the assignee can act on');
     }
     return board.requestChanges(this.#db, taskId, by, reason, this.#clock.now());
   }

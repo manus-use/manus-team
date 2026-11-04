@@ -8,14 +8,19 @@ import { execFile } from 'node:child_process';
  * observes, not the agent's word: its summary can say what it changed, not
  * reliably which state it left.
  *
- * A workspace that is not a git repository, or where git fails, has no commit,
- * and counts as uncommitted.
+ * A workspace that is not a git repository, or where git is not installed,
+ * records nothing: a task need not be code, and nothing is known of its state.
+ * A repository with no commit yet, or where git fails, has no commit, and
+ * counts as uncommitted.
  */
 
-/** What a report recorded of its workspace: `HEAD`, or null when there is none; and uncommitted changes. */
+/**
+ * What a report recorded of its workspace: `HEAD`, or null when there is none;
+ * and uncommitted changes, or null when the workspace is not a git repository.
+ */
 export interface ReportedState {
   commit: string | null;
-  dirty: boolean;
+  dirty: boolean | null;
 }
 
 export interface GitOptions {
@@ -25,8 +30,14 @@ export interface GitOptions {
   signal?: AbortSignal;
 }
 
-/** Runs one git command: its exit code, null when it did not exit by itself, and its stdout. Never rejects. */
-export type GitExec = (args: readonly string[], opts: GitOptions) => Promise<{ code: number | null; stdout: string }>;
+/**
+ * Runs one git command: its exit code, null when it did not exit by itself, its
+ * stdout, and the error code when it could not start (`ENOENT`: no git). Never rejects.
+ */
+export type GitExec = (
+  args: readonly string[],
+  opts: GitOptions,
+) => Promise<{ code: number | null; stdout: string; error?: string }>;
 
 /** Reads a workspace's state. Never rejects. */
 export type CommitReader = (
@@ -56,17 +67,21 @@ export const execGit: GitExec = (args, opts) =>
       },
       (err, stdout) => {
         const code = err === null ? 0 : typeof err.code === 'number' ? err.code : null;
-        resolve({ code, stdout: typeof stdout === 'string' ? stdout : '' });
+        const out = typeof stdout === 'string' ? stdout : '';
+        resolve(err !== null && typeof err.code === 'string' ? { code, stdout: out, error: err.code } : { code, stdout: out });
       },
     );
   });
 
 /**
- * A reader over `exec`: `git rev-parse` for HEAD, then `git status --porcelain`,
- * which takes no lock (`--no-optional-locks`), so reading never gets in the way
- * of the agent's own git. No HEAD -- not a repository, no commit yet, git
- * missing or failing -- is no commit, and uncommitted. A status that fails
- * counts as uncommitted too: nobody can say the tree is clean.
+ * A reader over `exec`: `git rev-parse --git-dir`, whether the workspace is a
+ * repository at all; `git rev-parse` for HEAD; then `git status --porcelain`.
+ * None takes a lock (`--no-optional-locks`), so reading never gets in the way
+ * of the agent's own git. Not a repository -- `--git-dir` exits non-zero -- or
+ * git missing records nothing. In a repository, no HEAD -- no commit yet, git
+ * failing -- is no commit, and uncommitted; a status that fails, or a
+ * `--git-dir` that times out, counts as uncommitted too: nobody can say the
+ * tree is clean.
  */
 export function commitReader(exec: GitExec = execGit): CommitReader {
   return async (cwd, opts) => {
@@ -77,6 +92,9 @@ export function commitReader(exec: GitExec = execGit): CommitReader {
         timeoutMs: GIT_TIMEOUT_MS,
         ...(opts.signal === undefined ? {} : { signal: opts.signal }),
       });
+    const repo = await git(['--no-optional-locks', 'rev-parse', '--git-dir']);
+    if (repo.error === 'ENOENT' || (repo.code !== null && repo.code !== 0)) return { commit: null, dirty: null };
+    if (repo.code !== 0) return { commit: null, dirty: true };
     const head = await git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
     const commit = head.stdout.trim();
     if (head.code !== 0 || !COMMIT_ID.test(commit)) return { commit: null, dirty: true };

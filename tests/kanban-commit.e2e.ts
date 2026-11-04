@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { commitReader } from '../src/kanban/commit.js';
 
-/** The reported commit against real git (spec §7.8, §11): clean, dirty, and not a repository. */
+/** The reported commit against real git (spec §7.8, §11): clean, dirty, not a repository, and no git. */
 
 let dir: string;
 /** git's environment: a made-up home, so no test reads the real one's configuration. */
@@ -57,7 +57,7 @@ describe('commitReader with git', () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  it('reads a directory that is not a repository, or one with no commit yet, as uncommitted with no commit', async () => {
+  it('records nothing for a directory that is not a repository, and no commit, uncommitted, for one with no commit yet', async () => {
     const plain = join(dir, 'plain');
     mkdirSync(plain);
     const empty = join(dir, 'empty');
@@ -65,7 +65,17 @@ describe('commitReader with git', () => {
     sh(empty, 'init', '-q');
     // Never the repository above the temporary directory, if there is one.
     const outside = { ...env, GIT_CEILING_DIRECTORIES: dir };
-    expect(await commitReader()(plain, { env: outside })).toEqual({ commit: null, dirty: true });
+    expect(await commitReader()(plain, { env: outside })).toEqual({ commit: null, dirty: null });
     expect(await commitReader()(empty, { env: outside })).toEqual({ commit: null, dirty: true });
+  });
+
+  it('records nothing when git is not installed', async () => {
+    const repo = join(dir, 'repo');
+    mkdirSync(repo);
+    sh(repo, 'init', '-q');
+    // A PATH with no git on it.
+    const noGit = join(dir, 'empty-path');
+    mkdirSync(noGit);
+    expect(await commitReader()(repo, { env: { ...env, PATH: noGit } })).toEqual({ commit: null, dirty: null });
   });
 });
