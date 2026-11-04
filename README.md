@@ -275,9 +275,10 @@ at once.
 - A task may have **gates**: shell commands that must exit 0, in the task's workspace, before
   `complete` or `review` is accepted. A failing gate refuses the report with its command, exit
   code and the end of its output, masked, and the agent can fix it and report again. Gates run
-  as the gateway's user with the environment of the role of the task's latest agent run, never
-  with a run's token or socket, for up to 600 s each and 600 s together, so `mt kanban` waits
-  up to 15 minutes for an answer. A gate whose command holds a known secret is refused: put
+  as the gateway's user with the environment of the role of the task's latest agent run, or
+  the role `default` if no agent has run, never with a run's token or socket, for up to 600 s
+  each and 600 s together, so `mt kanban` waits up to 15 minutes for an answer. A task has at
+  most 20 gates, and a gate's command at most 4 KiB. A gate whose command holds a known secret is refused: put
   the value in the role's `.env` or `agent.passEnv`, and name it in the command. Defining gates
   is an operator's action: `mt kanban gate add` (the command's words after `--` are joined with
   spaces; quote it to keep its own quoting; words before `--` join it too, so write the whole

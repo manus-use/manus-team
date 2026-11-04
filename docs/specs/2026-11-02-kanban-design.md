@@ -1199,6 +1199,8 @@ decided run's report is.
   next report on.
 - **A report waits for them.** So a task's gates may take at most 600 s together, and `mt kanban`
   waits 15 minutes for its answer.
+- **Limits.** A task has at most 20 gates, and a gate's command is at most 4 KiB in UTF-8; a gate
+  over either is refused when it is added.
 - **The refusal.** `gate_failed` carries the gate's command, its exit code or signal, whether it timed
   out, and the last 4 KiB of its stdout and stderr together, masked before they are cut (§10.1). What
   is read of a gate's output before masking is its last 64 KiB; when that window is cut, leading text
@@ -1231,6 +1233,17 @@ the board.
 stopped or its shell exits, but a process the gate detaches into a session of its own (`setsid`) has
 left the group: it can outlive the timeout and go on changing the checkout. Gates are an operator's
 commands, trusted as such.
+
+**Known limitations**, for plan D or later:
+
+- **A person's report and another task's agent.** A person's run does not hold the workspace, so a
+  person's report — from plan D's chat — can run gates in a workspace while another task's agent
+  run is open in it, and test a checkout that agent is changing. Plan D must refuse that report,
+  for example with `workspace_busy`.
+- **A run decided while its gates run.** A stop, a timeout, a reassignment or an archive that
+  decides the run does not abort its report's gates: they run on, up to 600 s, holding the
+  workspace, and the report is then refused as any decided run's is. A claim refused meanwhile
+  because the workspace is held waits for the next sweep.
 
 **Gates are not isolated from the network**, deliberately. They are commands an operator chose, in the
 same trust position as a cron job, not output from an agent. Denying the network would break ordinary
