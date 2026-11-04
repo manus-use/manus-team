@@ -154,7 +154,7 @@ ${OTHER_COMMANDS};
 
 Block only on genuine ambiguity, and say why. If one of the task's children below reviews this task, report complete rather than review. If you find follow-up work, create a task for it with \`mt kanban create\` rather than doing it. Never put a secret in a summary, metadata or comment. Stop once you have reported.`;
 
-const REVIEW_PROTOCOL = `You are reviewing one task, below. Review the implementer's handoff, under For your review, and the workspace -- the current directory -- against the task and its contract. Do not change the workspace.
+const REVIEW_PROTOCOL = `You are reviewing one task, below. Review the implementer's handoff, under For your review, and the workspace -- the current directory -- against the task and its contract. If there is no For your review section, review the latest attempts under Context, and the workspace, instead. Do not change the workspace.
 
 Report through the \`mt kanban\` command, which reads JSON on stdin and answers in JSON (if it answers "unreachable", the gateway may be busy: try once more). Exactly one terminal report ends your run:
 - \`mt kanban complete < handoff.json\`, with {"summary": "..."}, to approve;
@@ -423,6 +423,10 @@ function share(lines: readonly string[], reserve: number): number {
  * parents their reserves; the comments next, leaving the parents theirs; and the
  * parents get what is left. So no number of parents, however long their
  * handoffs, can push the attempts, the thread or the children out.
+ *
+ * The handoff under review, or a rework's reason and the handoff it revises,
+ * comes first in the context: what is still over the budget is cut from the end,
+ * so that cut cannot drop it.
  */
 function told(b: RunBrief): string {
   const task = taskSection(b);
@@ -481,7 +485,8 @@ function told(b: RunBrief): string {
     if (omitted > 0) parentBlock.push(...parentsOmitted(omitted));
   }
 
-  const context = [...parentBlock, ...attemptBlock, ...handoff, ...commentBlock, ...children];
+  // The handoff under review, or the rework's reason, first: the last cut below keeps the start.
+  const context = [...handoff, ...parentBlock, ...attemptBlock, ...commentBlock, ...children];
   if (context.length === 0) context.push('', 'Nothing yet: no parents, earlier attempts, comments or children.');
   const text = redactKnownSecrets([...task, ...frame, ...context].join('\n'));
   if (Buffer.byteLength(text, 'utf8') <= CONTEXT_BUDGET_BYTES) return text;

@@ -129,6 +129,11 @@ describe('composePrompt', () => {
     const review = composePrompt(brief({ kind: 'review', task: task({ phase: 'review' }) }));
     expect(review).toContain('mt kanban changes < reason.json');
     expect(review).toContain('Do not change the workspace.');
+    // A review with no handoff to show, as for a task sent to review by a person.
+    expect(review).not.toContain('## For your review');
+    expect(review).toContain(
+      'If there is no For your review section, review the latest attempts under Context, and the workspace, instead.',
+    );
   });
 
   it('names the commands besides the reports, and the kinds of block, in both protocols', () => {
@@ -418,7 +423,7 @@ describe('composePrompt: gates, review and rework', () => {
     expect(stopped).toContain('stopped, as the gateway stopped\n- npm test: was ended by SIGTERM');
   });
 
-  it('gives a review run the handoff it reviews and what to review, after the attempts and before the comments', () => {
+  it('gives a review run the handoff it reviews and what to review, before the attempts and the comments', () => {
     const prompt = composePrompt(
       brief({
         kind: 'review',
@@ -447,8 +452,70 @@ describe('composePrompt: gates, review and rework', () => {
         `State: uncommitted changes on top of ${SHA}`,
       ].join('\n'),
     );
-    expect(at(prompt, '## Attempt 1')).toBeLessThan(at(prompt, '## For your review'));
+    // Before the attempts, so the budget's last cut, which keeps the start, keeps it.
+    expect(at(prompt, '## For your review')).toBeLessThan(at(prompt, '## Attempt 1'));
     expect(at(prompt, '## For your review')).toBeLessThan(at(prompt, '## Comments'));
+  });
+
+  it('keeps the rework reason and the review handoff when the budget cuts the rest, and stays within it', () => {
+    const big = (c: string) => c.repeat(64 * 1024);
+    const handoff = {
+      runId: 'r_2',
+      actor: 'run:r_2',
+      summary: big('s'),
+      metadata: { notes: big('m') },
+      reportedCommit: SHA,
+      reportedDirty: false,
+    };
+    const gates = Array.from({ length: 20 }, (_, i) => gate(i + 1, `npm run check-${i} ${'x'.repeat(4096 - 20)}`));
+    const lastGateRun = {
+      runId: 'r_3',
+      actor: 'run:r_3',
+      for: 'complete' as const,
+      passed: false,
+      aborted: false,
+      notRun: 0,
+      results: gates.map((g, i) => ({
+        gateId: g.id,
+        command: g.command,
+        exitCode: i === 19 ? 1 : 0,
+        signal: null,
+        timedOut: false,
+        durationMs: 1,
+        output: i === 19 ? big('o') : 'ok',
+      })),
+      at: NOW,
+    };
+    const attempts = [1, 2, 3].map((n) => ({
+      run: run({
+        runId: `r_${n}`,
+        attempt: n,
+        summary: big('a'),
+        metadata: { more: big('d') },
+        error: big('e'),
+        lastOutput: big('l'),
+      }),
+      toolCalls:
+        n === 3
+          ? Array.from({ length: 40 }, (_, i) => ({ toolCallId: `t_${i}`, title: `edit ${'f'.repeat(400)}`, status: 'completed' }))
+          : undefined,
+    }));
+    const contract = { outcome: big('c'), verification: big('v'), constraints: big('k'), boundaries: big('b'), stop_when: big('w') };
+    const common = { task: task({ body: big('y'), contract }), gates, lastGateRun, attempts };
+    const within = (prompt: string) =>
+      expect(Buffer.byteLength(prompt.slice(prompt.indexOf('# The task')), 'utf8')).toBeLessThanOrEqual(CONTEXT_BUDGET_BYTES + 1);
+
+    const rework = composePrompt(brief({ ...common, rework: { reason: `Handle an empty file. ${big('r')}`, actor: 'run:r_4', handoff } }));
+    expect(rework).toContain('## Changes requested');
+    expect(rework).toContain('Reason:\n    Handle an empty file.');
+    expect(rework).toContain('The previous handoff, which they reviewed:');
+    expect(rework).toContain('[cut; mt kanban show has all of it]');
+    within(rework);
+
+    const review = composePrompt(brief({ ...common, kind: 'review', task: task({ phase: 'review', body: big('y'), contract }), review: handoff }));
+    expect(review).toContain('## For your review');
+    expect(review).toContain(`State: review commit ${SHA}`);
+    within(review);
   });
 
   it("gives a rework the reviewer's reason and the handoff it revises, each capped", () => {
