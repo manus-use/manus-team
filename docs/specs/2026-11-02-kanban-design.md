@@ -682,7 +682,8 @@ run. Nudges are further turns in the run's session (§7.5); rework is a new run 
 ### 3.4 `kanban_comments`, `kanban_gates`, `kanban_subscriptions`, `kanban_events`
 
 - **`kanban_comments`** — `task_id`, `author`, `body`, `created_at`, and `steers` (migration `004`,
-  default 1): whether the comment may steer an agent (§7.5). The conversation between the agents and
+  default 1): whether the comment may steer an agent (§7.5). Every writer says which: the service's
+  `comment` has no default for it. The conversation between the agents and
   people on a task. A retry reads the whole thread of comments that steer; people see every one.
 - **`kanban_gates`** — `task_id`, `command`, `timeout_s` (default 300, at most 600), `created_by`,
   `created_at`. Shell commands that must exit 0 before the task may complete or go to review (§7.7):
@@ -1598,8 +1599,11 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   succeeded, each subscription's cursor moves to its last event the message covered, notices or
   not; before, none moves. The cursor moves forward only, and moving it writes no event — one would
   itself be a new event past the cursor. A message's uuid is a hash of the sorted set of the
-  `(subscription, event)` pairs it carries. A round runs every 2 s, one at a time, and sends to at
-  most ten conversations, the most behind first; the board is written by chat, the worker socket and
+  `(subscription, event)` pairs it carries. A subscription reads at most 100 events a round; when one
+  has read that many, nothing past its last read event goes in that round's message, so another
+  task's later notice cannot go before an earlier one not yet read. A round runs every 2 s, one at a
+  time, and sends to at most ten conversations, the longest waiting — by its oldest pending event —
+  first; the board is written by chat, the worker socket and
   the dispatcher, and a cheap poll replaces telling the notifier of each.
 - **Across a restart** the cursors are in the database, so the first round after a start — run once
   the channel is connected — catches up on everything the chats missed, by the same code. A batch
@@ -1607,9 +1611,12 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   adapter does not pass a send's uuid to Lark yet (its known gap), so until it does that batch can
   show twice; it is never lost.
 - **A send that fails** moves no cursor, and the conversation is tried again after 2 s, doubling to at
-  most five minutes, while the others go on. **One that cannot succeed is let go of:** a send refused
-  as not retryable — the bot removed from the chat, the chat gone — or the third failure in a row at
-  five minutes drops the notices it held, moving the cursors past them, logs one line naming the
+  most five minutes, while the others go on; a send not answered in 30 s counts as failed. A network
+  failure is such a failure, though the Lark adapter reports it as code 0 and not retryable, and so
+  is a refusal that may be of one bad batch. **One that cannot succeed is let go of:** a send refused
+  as unreachable — Lark's 230002, the bot is not in the chat; the chat-not-found and disbanded codes
+  are not confirmed locally, and such a chat is caught by the next rule — or the third failure in a
+  row at five minutes drops the notices it held, moving the cursors past them, logs one line naming the
   conversation, its tasks and the dropped events, and marks the conversation dead until the gateway
   restarts: its later notices are passed over unsent. A subscription that cannot be read, or a
   conversation that fails otherwise, is held back by itself; the rest of the round goes on.
