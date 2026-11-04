@@ -115,13 +115,14 @@ itself, for instance in a file it reads, is not known to the gateway and is not 
 | `agent.passEnv` | — | Variable **names** forwarded to the agent from the gateway's own environment. A name that is not set is an error, because forwarding nothing surfaces later as the agent failing to authenticate. Leave it empty for a subscription-authenticated agent: its credentials are under `$HOME`, which is forwarded already. |
 | — | `MT_AGENT_ENV_*` | Forwarded with the prefix stripped: `MT_AGENT_ENV_ANTHROPIC_API_KEY` becomes `ANTHROPIC_API_KEY`. Wins over `passEnv`. Opt-in by prefix, because an agent holding the Feishu secret could post as the bot and answer its own approvals. |
 | `maxLiveSessions` | `MT_MAX_LIVE_SESSIONS` | Concurrent agent processes. Default 8. |
-| `kanban.enabled` | — | Run the board's dispatcher. Default **off**: nothing can create a task or report on one yet. The `kanban:` keys are snake_case, as the kanban design spells them; the rest of the file is camelCase. They are set in the file only, and each number has a ceiling (below); a value above it is a startup error. |
+| `kanban.enabled` | — | Run the board: its dispatcher, the worker socket, `/kanban` in chat and its notices. Default **off**, and opt-in: without it chat runs as it always did, and `/kanban` says the board is off. The `kanban:` keys are snake_case, as the kanban design spells them; the rest of the file is camelCase. They are set in the file only, and each number has a ceiling (below); a value above it is a startup error. |
 | `kanban.max_running` | — | Open agent runs at once. Default `maxLiveSessions`, and refused above it: a run is a live session. Set it lower to keep room for chat. At most 256. |
 | `kanban.failure_limit` | — | Counted failures before a task gives up and blocks. Default 2: a first attempt and one retry. At most 100. |
 | `kanban.transient_limit`, `kanban.transient_cooldown_s` | — | A throttled run is retried after a cooldown, 300 s by default, doubling each time up to an hour; after 10 in a row the task blocks. At most 1000 in a row, and a first cooldown of at most 3600 s. |
 | `kanban.default_max_runtime_s` | — | A run's wall-clock limit unless its task sets one. Default 4 hours, at most 7 days. |
 | `kanban.sweep_interval_s`, `kanban.stranded_after_s` | — | How often the dispatcher checks runtimes, cooldowns and stranded tasks (default 60 s), and how long a task nobody can take waits before it is reported stranded (default 30 min). At most 3600 s and 30 days. |
 | `kanban.nudge_limit` | — | Reminders sent into a run whose turn ended without a report, before the run ends as a protocol violation. Default 2; 0 sends none. At most 10. |
+| `kanban.block_recurrence_limit` | — | Blocks of the same kind in a row, unblocked in between, at which a blocked notice stops inviting another unblock and suggests rewriting the task. Default 2, at most 100. |
 | `db`, `downloads` | `MT_DB`, `MT_DOWNLOAD_DIR` | Derived from `MT_HOME` unless set. |
 | — | `MT_HOME` | State directory, and where the config file is looked for. Default `~/.manus-team`. |
 
@@ -318,11 +319,70 @@ at once.
 | `/status` | talk | What this session is doing |
 | `/stop`, `/cancel` | operate | Cancel the current turn |
 | `/help` | talk | List commands |
+| `/kanban <command>` | talk; operate to change the board | The task board, below. Never refused because this chat's session is busy |
 | `/cd <path>` | operate | Declared, and honestly unavailable in this build — every session shares the one configured workspace |
 
 Approvals are answered by clicking a card button, never by typing: the agent's blocked
 `session/request_permission` call *is* the pending request, and a chat verb would be a
 second way to mutate it with no capability the button doesn't already have.
+
+### The board from Lark
+
+With `kanban.enabled`, `/kanban` drives the board from any chat the bot is in. A task is any
+work — research, a document, an operation in Lark, a chore, a change to code — given to a
+role, whose agent runs it in a workspace, which is just a directory.
+
+```
+/kanban new Draft the Q3 summary
+assignee: docs-writer
+workspace: docs
+outcome: a page in the team wiki
+verify: the page links every source
+Use last quarter's page as the model.
+```
+
+The first line is the title. Lines starting `assignee:`, `reviewer:`, `workspace:`, `parent:`
+(one or more task ids; repeat it for more), `outcome:`, `verify:`, `constraints:`,
+`boundaries:` and `stop when:` fill those fields, in any order and in any case; every other
+line is the body. An unknown role or workspace is refused at once, and so is a role whose agent
+is supervised. The dispatcher looks for work as soon as the task is created.
+
+| Command | Tier |
+|---|---|
+| `/kanban new <title>` + lines | operate |
+| `/kanban list [todo\|ready\|running\|review\|reviewing\|blocked\|done\|archived\|all]` | talk; without a status, the tasks someone may still act on |
+| `/kanban show <task>` | talk: the task, its contract, gates, runs, latest output and comments |
+| `/kanban assign <task> <role>` | operate: an undecided run ends `superseded` |
+| `/kanban link <parent> <child>` | operate |
+| `/kanban workspace <task> <name>` | operate: refused once the workspace is fixed |
+| `/kanban comment <task> <text>` | talk: everyone sees it in `/kanban show`; an operator's also reaches the task's agent, when its turn ends or in its next run |
+| `/kanban unblock <task> [comment]` | operate |
+| `/kanban stop <task>` | operate: the run ends `cancelled`, and the task blocks |
+| `/kanban archive <task>` | operate |
+| `/kanban gate add <task> [--timeout <s>] <command>` | operate: the rest of the message is the command, as written |
+| `/kanban gate list <task>` | talk |
+| `/kanban gate remove <task> <gate>` | operate |
+| `/kanban help` | talk |
+
+Whoever acts is recorded as `lark:<union_id>`; a sender whose message carried no union_id can
+read the board but not change it. Everything shown is escaped, so a task's text cannot mention
+anyone, and masked, gate commands included.
+
+**Notices.** The chat, or thread, a task was created in follows it, and the tasks its runs
+create. It hears when a task is done, needs review, blocks (with the kind and the reason),
+is retried after a failure, gives up, or is stranded with nobody able to take it. A run cut
+short by a gateway restart is retried quietly. A task that keeps blocking for the same reason,
+`kanban.block_recurrence_limit` times after an unblock, is flagged for rewriting instead. Each
+chat or thread gets at most one message every couple of seconds, listing what happened in
+order, 20 notices at most. Notices are delivered from a cursor kept in the database, so those
+due while the gateway was down are sent when it is back; a message sent just before a stop
+may be sent twice. A chat the bot can no longer post to — removed from it, or failing for
+several minutes running — is let go of until the next restart: its notices are dropped, and
+the gateway's log says which.
+
+**Not yet:** people as assignees or reviewers. Naming one, with an @-mention, is refused, and
+`/kanban done`, `block`, `review`, `approve` and `changes` say they arrive in a later update
+(plan D2), with cards to a person's direct messages.
 
 ## Repo layout
 
