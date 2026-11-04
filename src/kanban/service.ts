@@ -2,18 +2,21 @@ import { createHash } from 'node:crypto';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import type { Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
-import { getRun, getTask, taskView, type TaskView } from '../db/kanban-read.js';
+import { gatesOf, getRun, getTask, taskView, type TaskView } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import type { Role } from '../roles.js';
+import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
 import {
   BLOCK_KINDS,
   CONTRACT_FIELDS,
+  GATE_LIMITS,
   type AgentSnapshot,
   type Assignee,
   type CommentRow,
   type Contract,
   type CreatedVia,
+  type GateRow,
   type Refusal,
   type Rendering,
   type ReportedBlockKind,
@@ -131,6 +134,17 @@ function isWhole(n: unknown, min: number): boolean {
 /** Throws unless the path is a regular file: a directory where role.md or a SKILL.md was is not one. */
 function regularFile(path: string): void {
   if (!statSync(path).isFile()) throw new Error(`${path} is not a file`);
+}
+
+/**
+ * Whether a gate command holds a known secret (spec §10.1): as written, with its
+ * control characters stripped, as the escapers match it, and with the shell's
+ * quotes and backslashes taken out, so `sk\$x` or `'sk''x'` -- which the shell
+ * runs as the secret -- count as well.
+ */
+function holdsSecret(command: string): boolean {
+  const forms = [command, stripControl(command), command.replace(/['"\\]/g, '')];
+  return forms.some((form) => redactKnownSecrets(form) !== form);
 }
 
 /** A refusal unless every id given is text. */
@@ -387,6 +401,67 @@ export class KanbanService {
       return board.refuse('unknown_workspace', `workspace ${JSON.stringify(workspace)} is not configured`);
     }
     return board.setWorkspace(this.#db, taskId, workspace, by, this.#clock.now());
+  }
+
+  /**
+   * Define a gate on a task (spec §7.7): a shell command that must exit 0 before
+   * the task may complete or go to review. It is an operator action (spec §10):
+   * the caller checks the tier, as it does for the board's other operator
+   * actions. Plan D's chat command calls it; until then only tests do, as
+   * nothing can create a task either.
+   *
+   * The command is stored and run as written, so one that holds a known secret is
+   * refused rather than masked (spec §10.1): a masked command would run broken.
+   * The value belongs in the environment of the role whose agent runs the task,
+   * which is what gates run with, and the command names it.
+   */
+  addGate(taskId: string, gate: { command: string; timeoutS?: number }, by: string): Result<{ gate: GateRow }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!isText(by)) return board.refuse('invalid', 'who defines a gate is text');
+    if (!isRecord(gate) || !isText(gate.command) || gate.command.trim() === '') {
+      return board.refuse('invalid', 'a gate is a command, as text');
+    }
+    const { command } = gate;
+    if (command.includes('\0')) return board.refuse('invalid', 'a gate command cannot hold a NUL');
+    const size = Buffer.byteLength(command, 'utf8');
+    if (size > GATE_LIMITS.commandBytes) {
+      return board.refuse('invalid', `a gate command is ${size} bytes; it may be at most ${GATE_LIMITS.commandBytes}`);
+    }
+    if (holdsSecret(command)) {
+      // Not echoed: the refusal would carry the secret.
+      return board.refuse(
+        'invalid',
+        "the gate's command holds a known secret, and a gate is stored and run as written; " +
+          "pass the value through the agent's environment instead -- the role's .env, or agent.passEnv -- " +
+          'and name it in the command, as $NAME',
+      );
+    }
+    const timeoutS = gate.timeoutS ?? GATE_LIMITS.defaultTimeoutS;
+    if (!Number.isSafeInteger(timeoutS) || timeoutS < 1 || timeoutS > GATE_LIMITS.maxTimeoutS) {
+      return board.refuse('invalid', `a gate's timeout is a whole number of seconds, from 1 to ${GATE_LIMITS.maxTimeoutS}`);
+    }
+    return board.addGate(this.#db, taskId, { command, timeoutS }, by, this.#clock.now());
+  }
+
+  /** The task's gates, in the order they run. */
+  listGates(taskId: string): Result<{ gates: GateRow[] }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (getTask(this.#db, taskId) === undefined) return board.refuse('not_found', `no task ${taskId}`);
+    return { ok: true, gates: gatesOf(this.#db, taskId) };
+  }
+
+  /**
+   * Remove one of a task's gates: an operator action, as defining one is. A report
+   * already running the task's gates runs the ones it read.
+   */
+  removeGate(taskId: string, gateId: number, by: string): Result<{ gate: GateRow }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!isText(by)) return board.refuse('invalid', 'who removes a gate is text');
+    if (!Number.isSafeInteger(gateId) || gateId < 1) return board.refuse('invalid', 'a gate id is a whole number');
+    return board.removeGate(this.#db, taskId, gateId, by, this.#clock.now());
   }
 
   comment(taskId: string, body: string, by: string): Result<{ comment: CommentRow }> {

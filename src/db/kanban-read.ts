@@ -7,6 +7,7 @@ import type {
   CommentRow,
   Contract,
   CreatedVia,
+  GateRow,
   KanbanEvent,
   Phase,
   RetryOnCrash,
@@ -270,6 +271,32 @@ export function commentsOf(db: Db, taskId: string): CommentRow[] {
     )
     .all(taskId)
     .map(decodeComment);
+}
+
+interface GateRaw {
+  id: number;
+  task_id: string;
+  command: string;
+  timeout_s: number;
+  created_by: string;
+  created_at: number;
+}
+
+/** The task's gates, in the order they were defined: the order they run in (spec §7.7). */
+export function gatesOf(db: Db, taskId: string): GateRow[] {
+  return db
+    .prepare<[string], GateRaw>(
+      'SELECT id, task_id, command, timeout_s, created_by, created_at FROM kanban_gates WHERE task_id = ? ORDER BY id',
+    )
+    .all(taskId)
+    .map((r) => ({
+      id: r.id,
+      taskId: r.task_id,
+      command: r.command,
+      timeoutS: r.timeout_s,
+      createdBy: r.created_by,
+      createdAt: r.created_at,
+    }));
 }
 
 export function eventsOf(db: Db, taskId: string): KanbanEvent[] {

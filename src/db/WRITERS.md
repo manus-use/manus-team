@@ -32,7 +32,8 @@ file is for.
 | `kanban_runs` | `db/kanban.ts` | Inserted by a claim. `outcome` is written once, on an undecided run; `ended_at` once, on a decided one (spec §3.3). `agent_config` gains `native` and `packageHash` once, by `recordRendering` (plan R). |
 | `kanban_comments` | `db/kanban.ts` | Rows are added, never updated. |
 | `kanban_events` | `db/kanban.ts` | Append-only, written in the transaction of the change it records. String values in `payload` are masked on write (spec §10.1). |
-| `kanban_gates`, `kanban_subscriptions` | `db/kanban.ts` | No writer until plans C4 (gates) and D (subscriptions); they add their functions to `db/kanban.ts`. |
+| `kanban_gates` | `db/kanban.ts` | Added by `addGate` and deleted by `removeGate`, never updated: the command is stored as written, never masked (spec §10.1). The gateway and the `mt kanban gate` commands both write it, each through `KanbanService`. |
+| `kanban_subscriptions` | `db/kanban.ts` | No writer until plan D, which adds its functions to `db/kanban.ts`. |
 | `schema_version`, `user_version` | `db/open.ts` (`migrate`) | Migration files own the `schema_version` row contents; the runner owns `user_version`. |
 
 ## Rules that hold across all of them

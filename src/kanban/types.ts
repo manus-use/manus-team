@@ -150,6 +150,40 @@ export interface RunRow {
   endedAt: number | null;
 }
 
+/**
+ * A quality gate (spec §7.7): a shell command that must exit 0, in the task's
+ * workspace, before the task may complete or go to review. Defined by an
+ * operator, never by a run; stored as written, never masked, since a masked
+ * command would run broken -- one that holds a known secret is refused instead
+ * (spec §10.1).
+ */
+export interface GateRow {
+  id: number;
+  taskId: string;
+  command: string;
+  timeoutS: number;
+  /** Who defined it (spec §10). */
+  createdBy: string;
+  createdAt: number;
+}
+
+/** What a task's gates may be: each command, timeout, and all of them together. */
+export const GATE_LIMITS = {
+  /** A command's size, in UTF-8 bytes. */
+  commandBytes: 4 * 1024,
+  /** A gate's timeout when none is given, as the schema's default. */
+  defaultTimeoutS: 300,
+  /** The longest one gate may run. */
+  maxTimeoutS: 600,
+  /**
+   * The longest all of a task's gates may run, one after another: a report waits
+   * for them, and `mt kanban` waits 15 minutes for its answer.
+   */
+  totalTimeoutS: 600,
+  /** Gates on one task. */
+  perTask: 20,
+} as const;
+
 export interface CommentRow {
   id: number;
   taskId: string;

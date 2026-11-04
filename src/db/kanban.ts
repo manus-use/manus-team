@@ -3,7 +3,7 @@ import { txImmediate } from './open.js';
 import { newRunId, newTaskId } from '../core/ids.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import { resolveTaskWorkspace } from '../kanban/workspace.js';
-import { ENDED_OUTCOMES, REPORTED_OUTCOMES } from '../kanban/types.js';
+import { ENDED_OUTCOMES, GATE_LIMITS, REPORTED_OUTCOMES } from '../kanban/types.js';
 import type {
   ActivePhase,
   AgentSnapshot,
@@ -13,6 +13,7 @@ import type {
   Contract,
   CreatedVia,
   EndedOutcome,
+  GateRow,
   Phase,
   Refusal,
   RefusalCode,
@@ -30,6 +31,7 @@ import {
   getRun,
   getTask,
   getTaskByKey,
+  gatesOf,
   isFinished,
   openAgentRunIn,
   openRunOf,
@@ -269,6 +271,76 @@ function insertComment(d: Db, taskId: string, author: string, body: string, now:
     .run(taskId, author, masked, now);
   record(d, { taskId, kind: 'commented', actor: author, payload: { body } }, now);
   return { id: Number(lastInsertRowid), taskId, author, body: masked, createdAt: now };
+}
+
+// ---------------------------------------------------------------------------
+// Gates
+// ---------------------------------------------------------------------------
+
+/**
+ * Define a gate on a task (spec §7.7), for an operator: the service has checked
+ * the command. Refused on a task that is done or archived, where nothing will
+ * run it, and past GATE_LIMITS -- the count, and the timeouts together, checked
+ * here, inside the transaction, so two operators adding at once cannot pass them.
+ *
+ * The command is stored as written: never masked, since a masked command would
+ * run broken (spec §10.1). Its event carries it, masked as every payload is,
+ * which changes nothing for a command the service let through.
+ */
+export function addGate(
+  db: Db,
+  taskId: string,
+  gate: { command: string; timeoutS: number },
+  by: string,
+  now: number,
+): Result<{ gate: GateRow }> {
+  return tx(db, (d) => {
+    const task = getTask(d, taskId);
+    if (task === undefined) return refuse('not_found', `no task ${taskId}`);
+    if (task.phase === 'done' || task.phase === 'archived') {
+      return refuse('illegal_transition', `task ${taskId} is ${task.phase}; a gate on it would never run`);
+    }
+    const gates = gatesOf(d, taskId);
+    if (gates.length >= GATE_LIMITS.perTask) {
+      return refuse('invalid', `task ${taskId} has ${gates.length} gates, the most a task may have`);
+    }
+    const total = gates.reduce((sum, g) => sum + g.timeoutS, 0) + gate.timeoutS;
+    if (total > GATE_LIMITS.totalTimeoutS) {
+      return refuse(
+        'invalid',
+        `task ${taskId}'s gates would take up to ${total} s together; at most ${GATE_LIMITS.totalTimeoutS} s, ` +
+          'since a report waits for them',
+      );
+    }
+    const { lastInsertRowid } = d
+      .prepare('INSERT INTO kanban_gates (task_id, command, timeout_s, created_by, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(taskId, gate.command, gate.timeoutS, by, now);
+    const id = Number(lastInsertRowid);
+    record(
+      d,
+      { taskId, kind: 'gate_added', actor: by, payload: { gateId: id, command: gate.command, timeoutS: gate.timeoutS } },
+      now,
+    );
+    return {
+      ok: true,
+      gate: { id, taskId, command: gate.command, timeoutS: gate.timeoutS, createdBy: by, createdAt: now },
+    };
+  });
+}
+
+/**
+ * Remove one of a task's gates, for an operator. The row goes; its `gate_removed`
+ * event keeps what it was and who removed it.
+ */
+export function removeGate(db: Db, taskId: string, gateId: number, by: string, now: number): Result<{ gate: GateRow }> {
+  return tx(db, (d) => {
+    if (getTask(d, taskId) === undefined) return refuse('not_found', `no task ${taskId}`);
+    const gate = gatesOf(d, taskId).find((g) => g.id === gateId);
+    if (gate === undefined) return refuse('not_found', `task ${taskId} has no gate ${gateId}`);
+    d.prepare('DELETE FROM kanban_gates WHERE id = ?').run(gateId);
+    record(d, { taskId, kind: 'gate_removed', actor: by, payload: { gateId, command: gate.command } }, now);
+    return { ok: true, gate };
+  });
 }
 
 // ---------------------------------------------------------------------------
