@@ -140,6 +140,13 @@ Everything is validated at boot; a configuration mistake prints one line and exi
 
 ### Roles and workspaces
 
+The board's tasks can be any work, not only code: research, writing a document, an operation
+in Lark, an ops chore. A role's agent is a coding-agent CLI, used as a general worker with a
+shell and tools. A workspace is a directory, which need not be a git repository. Gates are
+optional checks of any kind: any command that exits 0 when the work is acceptable, for example
+a script that checks a document exists or a link answers. The reported commit is recorded only
+when the workspace is a git repository.
+
 A **role** is who does a kind of work, and how it is run. Each is a directory under
 `$MT_HOME/roles/`:
 
@@ -294,7 +301,10 @@ at once.
   with `setsid` leaves its process group, can outlive the timeout and can go on changing the
   checkout. When an agent reports
   `complete` or `review`, the gateway also records its workspace's `HEAD`, and whether the tree
-  had uncommitted changes. A bare repository reads as having uncommitted changes; a workspace
+  had uncommitted changes, when the workspace is a git repository; for one that is not, or
+  when git is not installed, nothing is recorded, and a reviewer is told no state. A repository
+  with no commit yet reads as uncommitted with no commit, and a bare repository as having
+  uncommitted changes; a workspace
   that is not itself a repository but sits inside one reports the outer repository's `HEAD`;
   and the read's timeout signals git only, not what git started.
 

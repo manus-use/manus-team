@@ -34,6 +34,14 @@ in-process dispatcher; role directories and named workspaces, and the `mt role` 
 commands that create them; the `mt kanban` worker CLI;
 `/kanban` chat commands and cards in Lark.
 
+**Any work, not only code.** A task can be research, writing a document, an operation in Lark, an
+ops chore, or a change to code. A role's agent is a coding-agent CLI, used as a general worker with
+a shell and tools. A workspace is a directory, which need not be a git repository. Gates (§7.7) are
+optional checks of any kind: any command that exits 0 when the work is acceptable, such as a script
+that checks a document exists or a link answers. The reported commit (§7.8) is recorded only when
+the workspace is a git repository. Where this document's examples say "implementer", they mean
+whoever does a task, and review (§5.3) applies to any work.
+
 **Out, each with the seam that keeps it cheap later:**
 
 | Deferred | Seam |
@@ -634,7 +642,7 @@ with a join, not by correlating two files.
 | `token_hash` | SHA-256 of the run's worker token (§7.2); the token itself is never stored |
 | `outcome` | null until decided; §5.2 |
 | `summary`, `metadata` | the handoff, as reported |
-| `reported_commit`, `reported_dirty` | for an agent's `complete` or `review` report: `HEAD`, and whether the tree had uncommitted changes, at the moment of the report (§7.8); outside a git repository, or when git fails, no commit and `reported_dirty` true; both null for a person's report |
+| `reported_commit`, `reported_dirty` | for an agent's `complete` or `review` report: `HEAD`, and whether the tree had uncommitted changes, at the moment of the report (§7.8); in a repository with no commit yet, or when git fails, no commit and `reported_dirty` true; both null for a person's report, and for a workspace that is not a git repository or where git is not installed |
 | `error`, `last_output` | for failures: the classified error, and the tail of the agent's last output |
 | `submissions` | prompts sent in this run: 1 for the task prompt, +1 per nudge or forwarded comment (§7.5) |
 | `started_at`, `ended_at` | `ended_at` is set when the run is **closed** (below) |
@@ -1005,28 +1013,32 @@ The task prompt is composed, in this order, of:
    a role's instructions may shape *how* work is done, not whether it is reported. That precedence is
    an instruction to the model, not something the gateway can enforce; the nudges (§7.5) and the
    `protocol_violation` outcome are what catch a `role.md` that talks an agent out of reporting.
-   - *work*: you have one task; orient by reading the context below; work in the workspace; report
-     through `mt kanban`, and exactly one terminal report — `complete`, `review` or `block` — ends
-     your run; block only on genuine ambiguity, and say why; if a downstream review task exists,
+   - *work*: you have one task; orient by reading the context below; do the work — the current
+     directory is the task's workspace, for any files the work needs; report through `mt kanban`,
+     and exactly one terminal report — `complete`, `review` or `block` — ends your run; when the
+     task is done, the summary says what was done and where its results are, such as files,
+     documents or links; block only on genuine ambiguity, and say why; if a downstream review task exists,
      `complete` rather than `review`; if you find follow-up work, create a task for it rather than
      doing it; never put secrets in a summary, metadata or comment; stop once you have reported.
-   - *review*: review the implementer's handoff, given in its own section of the context, and the
-     workspace against the task and its contract — or, when there is no such section, the latest
-     attempts and the workspace; do not change the workspace; report `complete` to approve or `changes` with a
-     specific, actionable reason; `block` only for a problem the implementer cannot fix.
+   - *review*: review the handoff, given in its own section of the context ("The handoff, from
+     …"), and the work it describes, against the task and its contract; that work is in the
+     workspace (the current directory) and in anything the handoff points to, such as documents,
+     links or messages — or, when there is no such section, review the latest attempts and the
+     workspace; do not change the work under review; report `complete` to approve or `changes` with
+     a specific, actionable reason; `block` only for a problem the assignee cannot fix.
 4. **The task** — title, body, contract, the task's gates (§7.7), one line each with its timeout, and
    the result of the last gate run if there is one: who reported, whether it passed, each gate's exit,
    and the end of a failing gate's output, set off as data.
 5. **The worker context**, starting with the rework's reason or the handoff under review, where
    there is one, so the budget's last cut (below) cannot drop it:
    - each parent's latest completion summary and metadata, verbatim — for a reviewed parent, the
-     implementer's handoff (§4.4);
+     assignee's handoff (§4.4);
    - prior attempts on this task: outcome, summary, error, last output — and for a failed, crashed
      or interrupted attempt, **the tool calls it made**, read from its session's event log (§8.3);
-   - for rework, the reviewer's reason and the implementer's previous handoff, with what its report
+   - for rework, the reviewer's reason and the assignee's previous handoff, with what its report
      recorded of the workspace (§7.8). A work run is a rework while the task's latest review ended in
      `changes` and no review has been asked for since, so a retry of a rework is one too;
-   - for review, the implementer's handoff, and what to review (§7.8);
+   - for review, the assignee's handoff, and what to review (§7.8);
    - the comment thread;
    - the task's children, so the worker can see which review model applies.
 
@@ -1268,15 +1280,17 @@ checks the secrets its own shell can know: every role's values, and the Lark app
 
 ### 7.8 The reported commit
 
-When an **agent** reports `complete` or `review` — an implementer, or a reviewer agent approving with
+When an **agent** reports `complete` or `review` — the assignee, or a reviewer agent approving with
 `complete` — the gateway records, on that run, `HEAD` (`git rev-parse HEAD`) as `reported_commit`
 and whether the working tree had uncommitted changes (`git status --porcelain` non-empty) as
 `reported_dirty`. Both are captured before the gates run and before the transaction that decides
 the run, so they describe the state the report was made in. A person's report records neither: there
-is no agent state to pin. Outside a git repository, with no commit yet, or when git fails, there is
-no commit and the tree counts as uncommitted: `reported_commit` is null and `reported_dirty` true,
-which tells "no commit to review" apart from a report that recorded nothing. The reads are
-asynchronous, take no lock (`git --no-optional-locks status`), run no fsmonitor hook
+is no agent state to pin. A task need not be code, so its workspace need not be a git repository:
+when it is not (`git rev-parse --git-dir` exits non-zero), or git is not installed, nothing is known
+and both stay null, as for a person's report. In a repository with no commit yet, or when git fails
+or times out, there is no commit and the tree counts as uncommitted: `reported_commit` is null and
+`reported_dirty` true, which tells "no commit to review" apart from a report that recorded nothing.
+The reads are asynchronous, take no lock (`git --no-optional-locks`), run no fsmonitor hook
 (`-c core.fsmonitor=false`), and get only the agent allowlist of the gateway's environment. A
 workspace's clean filters still run, as the gateway's user: no more than its agent could do.
 
@@ -1294,7 +1308,9 @@ The review card and the reviewer's context show them, and a human reviewer is to
 - **dirty tree** — "uncommitted changes on top of `abc123`": the commit alone does not contain the
   work, and since a person's review does not hold the workspace (§6.3), those changes may be mixed
   with another agent's later;
-- **not a git repository, or the command failed** — "uncommitted; no commit to review".
+- **no commit yet, or the command failed** — "uncommitted; no commit to review";
+- **not a git repository, or no git** — nothing: the reviewer reviews the handoff and the work it
+  describes, with no state line.
 
 The agent's own summary can say what it changed, but not reliably *which state* it left: it may not
 have committed, or may commit again after reporting. These fields are facts the gateway observes.
@@ -1643,7 +1659,7 @@ board.
 | Restart | `reconcileBoot` then `interrupted`; a decided-but-open run keeps its outcome; kanban findings not posted to Lark; the old session archived |
 | Lark | tiers: a named assignee or reviewer acting with talk tier, a non-reviewer needing operator tier to approve, assigning to a person without talk tier refused; `/kanban review` from a human assignee, refused with gates while the workspace is null; `/kanban stop` on a decided-but-open run; `/kanban assign` mid-run; @-mention vs role assignees; person targets; the one-line group notice for a human task created in a group; card `kind` routing; a click on a superseded run's card refused |
 | Masking | a known value masked through each escaper, in composed worker context and `last_output`, and in stored free text and JSON string values; **a secret split across two message chunks masked on the card**; a secret containing `_` masked before escaping, and one containing `"` masked inside JSON; values under 8 characters and `maskExempt` names left alone; a worker token masked only while its run is open; `turn_submitted` input stored unmasked but shown masked; a gate containing a secret refused; a render withholding a trailing prefix of a secret, mid-stream and on a turn that ended part-way through one; ids inside payloads left unmasked; the registry gaining and losing a worker token with its run |
-| Reported commit | clean tree → commit; dirty tree → commit plus "uncommitted changes"; not a repo → "uncommitted; no commit to review"; recorded for a reviewer agent's `complete`, never for a person's report |
+| Reported commit | clean tree → commit; dirty tree → commit plus "uncommitted changes"; no commit yet → "uncommitted; no commit to review"; not a repo, or no git → nothing recorded, and no state line; recorded for a reviewer agent's `complete`, never for a person's report |
 | Workspaces | a name registered on first sight; a known name repointed to another directory fails startup; no workspace `default` fails startup; a downstream review task inherits its parents' common workspace, a role with its own workspace does not; an unclaimed archived parent ignored; parents in different workspaces make an agent task unresolvable, while a human one is claimed with a null workspace, has gated completion refused, and can then be given one by `/kanban workspace`; a worker-created follow-up uses its creating task's workspace without a link and is claimable at once; an agent claims a workspace while a person's review on another task there is open; a person's run leaves the workspace null and a later agent review claim re-applies the rules |
 | End to end | the fake CLI agent calling `mt kanban complete` through the real socket |
 
