@@ -185,6 +185,35 @@ describe('Dispatcher: native rendering', () => {
     }
   });
 
+  it("starts a rework fresh when how its role was given could not be recorded, rather than resume the claim's unchecked seed", async () => {
+    const h = harness({ roles: [role('implementer'), role('reviewer')] });
+    // A rework's run whose rendering is somehow recorded already: recordRendering refuses it.
+    h.t.db.exec(`CREATE TRIGGER rendered_already AFTER INSERT ON kanban_runs WHEN NEW.seeded_from_run IS NOT NULL
+      BEGIN UPDATE kanban_runs SET agent_config = jsonb_set(agent_config, '$.native', json('false')) WHERE run_id = NEW.run_id; END`);
+    const task = h.create({ workspace: 'web', reviewer: 'reviewer' });
+    const agent = h.driver('implementer');
+    agent.providerSessionId = 'prov_impl';
+    agent.scripts.push(async (ctl) => {
+      const run = h.runOf(agent);
+      expect((await h.service.requestReview(task.taskId, { kind: 'run', runId: run.runId }, { summary: 'v1' })).ok).toBe(true);
+      ctl.end('completed');
+    });
+    h.driver('reviewer').scripts.push((ctl) => {
+      const run = h.runOf(h.driver('reviewer'));
+      expect(h.service.requestChanges(task.taskId, { kind: 'run', runId: run.runId }, 'add a test').ok).toBe(true);
+      ctl.end('completed');
+    });
+    completes(h, agent);
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+
+    const runs = runsOf(h.t.db, task.taskId);
+    expect(runs.map((x) => x.outcome)).toEqual(['review_requested', 'changes_requested', 'completed']);
+    expect(runs[2]?.seededFromRun).toBe(runs[0]?.runId);
+    expect(h.notes).toContain(`kanban: run ${runs[2]?.runId}: recording how its role was given failed: invalid`);
+    expect(agent.starts.map((x) => x.providerSessionId)).toEqual([undefined, undefined]);
+  });
+
   it("copies a role's imported skills into its package, or lists them in the prompt when it is not rendered", async () => {
     // A made-up home's user skill, imported by name, as startup would load it.
     const home = join(base, 'user');

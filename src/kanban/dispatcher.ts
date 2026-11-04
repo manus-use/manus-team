@@ -102,6 +102,7 @@ export function runKey(appId: string, run: { taskId: string; runId: string }): B
 /** A run this process is starting or has started, as its closing sees it. */
 interface RunHandle {
   runId: string;
+  taskId: string;
   key: BindingKey;
   /** Its session, once one was created. */
   sessionId?: string;
@@ -569,7 +570,7 @@ export class Dispatcher {
    */
   async #run(claimed: Claimed, token: string | undefined): Promise<void> {
     const { run } = claimed;
-    const handle: RunHandle = { runId: run.runId, key: runKey(this.#deps.appId, run), closing: undefined };
+    const handle: RunHandle = { runId: run.runId, taskId: run.taskId, key: runKey(this.#deps.appId, run), closing: undefined };
     try {
       // A person's run is sent a card, from plan D; it holds no session.
       if (run.assignee.kind === 'role') {
@@ -607,7 +608,7 @@ export class Dispatcher {
     const rendered = this.#render(claimed);
     // On the run, once decided; it also drops a rework's seed from a work run
     // given its role another way (spec §5.3). A refusal is noted, and the run
-    // goes on with the seed the claim chose.
+    // starts fresh: the claim's seed was never checked against how the role is given.
     const recorded = this.#deps.service.recordRendering(
       run.runId,
       rendered === undefined ? { native: false } : { native: true, packageHash: rendered.hash },
@@ -616,7 +617,7 @@ export class Dispatcher {
     let sessionId: string;
     try {
       if (run.workspace === null) throw new Error(`run ${run.runId} has no workspace`);
-      const seed = this.#seed(recorded.ok ? recorded.run : run);
+      const seed = recorded.ok ? this.#seed(recorded.run) : undefined;
       sessionId = this.#deps.sessions.create(key, KANBAN_OWNER, {
         role: run.assignee.name,
         workspace: run.workspace,
@@ -804,7 +805,7 @@ export class Dispatcher {
     // A turn can end while its report runs the task's gates: its agent's shell
     // gave up on `mt kanban` waiting for them. The report may yet decide the run,
     // and the run holds the workspace the gates run in, so it is waited for.
-    await this.#deps.service.settled(open.key.conversationId);
+    await this.#deps.service.settled(open.taskId);
     // Stopped while it waited: the next boot ends the run.
     if (this.#stopped) return;
     const run = getRun(this.#deps.db, open.runId);
