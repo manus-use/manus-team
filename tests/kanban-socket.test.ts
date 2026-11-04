@@ -8,14 +8,24 @@ import {
   renameSync,
   rmSync,
   statSync,
+  readFileSync,
+  readdirSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { createConnection, createServer } from 'node:net';
+import { createConnection, createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { SOCKET_PATH_MAX, claimSocketPath, listenWorker, workerSocketPath, type WorkerServer } from '../src/kanban/socket.js';
+import {
+  SOCKET_PATH_MAX,
+  claimSocketPath,
+  listenWorker,
+  lockGateway,
+  workerSocketPath,
+  type WorkerServer,
+} from '../src/kanban/socket.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 
 /** The worker socket against real connections, in a fresh directory per test. */
@@ -54,6 +64,26 @@ function send(path: string, text: string): Promise<string> {
 }
 
 const sockPath = () => join(root, 'run', 'kanban.sock');
+
+/** A socket file nothing listens on, as a gateway that died leaves: moved away from its server, which then closes. */
+async function deadSocketAt(path: string): Promise<void> {
+  const dead = createServer();
+  await new Promise<void>((resolve) => dead.listen(join(root, 'dead.sock'), resolve));
+  renameSync(join(root, 'dead.sock'), path);
+  await new Promise<void>((resolve) => dead.close(() => resolve()));
+}
+
+/** A pid no process has: counted down from the largest Linux allows, which no Mac reaches. */
+function deadPid(): number {
+  for (let pid = 4_194_303; pid > 1; pid -= 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+    }
+  }
+  throw new Error('no free pid');
+}
 
 describe('worker socket', () => {
   it('listens on a 0600 socket in a 0700 directory, and removes it on close', async () => {
@@ -129,6 +159,31 @@ describe('worker socket', () => {
     expect(got).toBe('');
   });
 
+  it('closes a connection that keeps its side open and never reads, so others are served', async () => {
+    // One connection at a time: a client left holding one locks every other out.
+    const big = 'y'.repeat(4 * 1024 * 1024);
+    const server = await listen(sockPath(), (req) => ({ ok: true, big: (req as { big?: boolean }).big === true ? big : '' }), {
+      requestTimeoutMs: 100,
+      maxConnections: 1,
+    });
+    // A small answer, which fits the socket's buffer, and one too big to, which only the linger ends.
+    const holders: Socket[] = [];
+    for (const request of ['{}\n', '{"big":true}\n']) {
+      const holder = createConnection(server.path);
+      holders.push(holder);
+      holder.on('error', () => undefined);
+      // Never read, and its write side never ended.
+      holder.pause();
+      holder.write(request);
+      // Well past the 100 ms linger; the holder is still open on its own side.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      // Served only once the server has let the holder go: one connection at a time.
+      expect(JSON.parse(await send(server.path, '{}\n'))).toEqual({ ok: true, big: '' });
+    }
+    for (const holder of holders) holder.destroy();
+    expect(JSON.parse(await send(server.path, '{}\n'))).toEqual({ ok: true, big: '' });
+  });
+
   it('answers internal when the handler throws, without quoting it', async () => {
     const server = await listen(sockPath(), () => {
       throw new Error('secret detail');
@@ -181,6 +236,32 @@ describe('worker socket: its path', () => {
     expect(statSync(join(root, 'run')).mode & 0o777).toBe(0o700);
   });
 
+  it('probes a refused socket again before it calls it stale: a busy gateway may refuse once', async () => {
+    mkdirSync(join(root, 'run'), { mode: 0o700 });
+    await deadSocketAt(sockPath());
+    // Refused at first, as a full backlog refuses; listening again by the next probe.
+    let live: ReturnType<typeof createServer> | undefined;
+    const swap = setTimeout(() => {
+      unlinkSync(sockPath());
+      live = createServer((c) => c.destroy());
+      live.listen(sockPath());
+    }, 100);
+    try {
+      await expect(claimSocketPath(sockPath(), { probes: 3, probeIntervalMs: 300 })).rejects.toThrow('another gateway is listening on it');
+      expect(lstatSync(sockPath()).isSocket()).toBe(true);
+    } finally {
+      clearTimeout(swap);
+      await new Promise<void>((resolve) => (live === undefined ? resolve() : live.close(() => resolve())));
+    }
+
+    // Refused every time: stale, and removed, only after the last probe.
+    await deadSocketAt(sockPath());
+    const started = Date.now();
+    await claimSocketPath(sockPath(), { probes: 3, probeIntervalMs: 100 });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(190);
+    expect(existsSync(sockPath())).toBe(false);
+  });
+
   it('tightens a directory of its own that others could enter', async () => {
     mkdirSync(join(root, 'run'), { mode: 0o755 });
     chmodSync(join(root, 'run'), 0o755);
@@ -199,3 +280,54 @@ describe('worker socket: its path', () => {
     expect(() => workerSocketPath(long, { tmp: `/${'t'.repeat(100)}`, uid: 501 })).toThrow('set MT_HOME, or TMPDIR, to a shorter path');
   });
 });
+
+describe('the gateway lock', () => {
+  const lockPath = () => join(root, 'run', 'gateway.pid');
+
+  it('is $MT_HOME/run/gateway.pid, 0600 in the private directory, holding our pid; removed on release', () => {
+    const lock = lockGateway(root);
+    expect(lock.path).toBe(lockPath());
+    expect(readFileSync(lockPath(), 'utf8')).toBe(`${process.pid}\n`);
+    expect(statSync(lockPath()).mode & 0o777).toBe(0o600);
+    expect(statSync(join(root, 'run')).mode & 0o777).toBe(0o700);
+    // Nothing but the lock is left beside it.
+    expect(readdirSync(join(root, 'run'))).toEqual(['gateway.pid']);
+    lock.release();
+    expect(existsSync(lockPath())).toBe(false);
+  });
+
+  it('refuses a home whose lock names another live process, and leaves the lock alone', () => {
+    mkdirSync(join(root, 'run'), { mode: 0o700 });
+    // Our parent: alive, and not us.
+    writeFileSync(lockPath(), `${process.ppid}\n`);
+    expect(() => lockGateway(root)).toThrow(`another gateway (pid ${process.ppid}) is running on ${root}`);
+    expect(readFileSync(lockPath(), 'utf8')).toBe(`${process.ppid}\n`);
+  });
+
+  it('takes a lock whose process is gone, or that holds no pid, or that is already ours', () => {
+    mkdirSync(join(root, 'run'), { mode: 0o700 });
+    for (const stale of [`${deadPid()}\n`, '', 'not a pid\n', '0\n', '-1\n', `${process.pid}\n`]) {
+      writeFileSync(lockPath(), stale);
+      const lock = lockGateway(root);
+      expect(readFileSync(lockPath(), 'utf8')).toBe(`${process.pid}\n`);
+      lock.release();
+    }
+  });
+
+  it('refuses a lock that is not a file of its own, and on release leaves one that is not ours', () => {
+    mkdirSync(join(root, 'run'), { mode: 0o700 });
+    writeFileSync(join(root, 'elsewhere'), `${deadPid()}\n`);
+    symlinkSync(join(root, 'elsewhere'), lockPath());
+    expect(() => lockGateway(root)).toThrow('is not a file of its own');
+    expect(lstatSync(lockPath()).isSymbolicLink()).toBe(true);
+    unlinkSync(lockPath());
+
+    const lock = lockGateway(root);
+    // Taken over since, by a gateway that judged ours stale: release leaves its lock.
+    unlinkSync(lockPath());
+    writeFileSync(lockPath(), `${process.ppid}\n`);
+    lock.release();
+    expect(readFileSync(lockPath(), 'utf8')).toBe(`${process.ppid}\n`);
+  });
+});
+

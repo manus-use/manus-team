@@ -19,7 +19,7 @@ import { Dispatcher } from './kanban/dispatcher.js';
 import { KanbanService } from './kanban/service.js';
 import { writeMtShim } from './kanban/shim.js';
 import { KanbanSink } from './kanban/sink.js';
-import { claimSocketPath, listenWorker, workerSocketPath, type WorkerServer } from './kanban/socket.js';
+import { claimSocketPath, listenWorker, lockGateway, workerSocketPath, type GatewayLock, type WorkerServer } from './kanban/socket.js';
 import { WorkerApi } from './kanban/worker.js';
 import type { Channel } from './channel/types.js';
 
@@ -176,6 +176,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   // Off until the board can be used: nothing can create a task before plan D (spec §12).
   let worker: { api: WorkerApi; socket: string } | undefined;
   let workerServer: WorkerServer | undefined;
+  let lock: GatewayLock | undefined;
   if (config.kanban.enabled) {
     const { failureLimit, transientLimit, transientCooldownS } = config.kanban;
     const service = new KanbanService({
@@ -229,9 +230,19 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     dispatcher,
 
     async start(): Promise<void> {
-      // First, the worker socket's path: a second gateway on this home fails here,
-      // before its reconcile or its boot touches the first one's sessions and runs.
-      if (worker !== undefined) await claimSocketPath(worker.socket);
+      // First, the home's lock and then the worker socket's path: a second gateway
+      // on this home fails here, before its reconcile or its boot touches the first
+      // one's sessions and runs. The lock decides it: a busy gateway's socket can
+      // refuse a probe as a dead one's does.
+      if (worker !== undefined) {
+        lock = lockGateway(config.home);
+        try {
+          await claimSocketPath(worker.socket);
+        } catch (err) {
+          lock.release();
+          throw err;
+        }
+      }
 
       // Before connecting. Reconciling against a channel that is already delivering
       // means deciding what happened to the last turn while the next one runs.
@@ -312,6 +323,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // No agent is left to report; and none may reach a closed database.
       await workerServer?.close();
       db.close();
+      // Last: until here, this gateway still had the home's sessions and runs.
+      lock?.release();
     },
   };
 }

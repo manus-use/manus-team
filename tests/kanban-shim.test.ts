@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +39,28 @@ describe('the mt shim', () => {
     expect(readFileSync(join(dir, 'mt'), 'utf8')).toContain("'/opt/mt2/dist/mt.js'");
     // Only mt: no staging file is left beside it.
     expect(readdirSync(dir)).toEqual(['mt']);
+  });
+
+  it('stays executable whatever the umask', () => {
+    // One that strips the owner's execute bit from every file created.
+    const was = process.umask(0o177);
+    try {
+      writeMtShim(home, ['/usr/bin/node', '/opt/mt/dist/mt.js']);
+    } finally {
+      process.umask(was);
+    }
+    expect(statSync(join(home, 'bin', 'mt')).mode & 0o777).toBe(0o700);
+  });
+
+  it('says to remove a directory where the shim goes, and names the shim when its directory is refused', () => {
+    mkdirSync(join(home, 'bin', 'mt'), { recursive: true });
+    expect(() => writeMtShim(home, ['/usr/bin/node', '/opt/mt/dist/mt.js'])).toThrow(`${join(home, 'bin', 'mt')} is a directory; remove it`);
+    expect(readdirSync(join(home, 'bin'))).toEqual(['mt']);
+    rmSync(join(home, 'bin'), { recursive: true });
+
+    mkdirSync(join(home, 'elsewhere'));
+    symlinkSync(join(home, 'elsewhere'), join(home, 'bin'));
+    expect(() => writeMtShim(home, ['/usr/bin/node', '/opt/mt/dist/mt.js'])).toThrow('refusing to put the mt shim there');
   });
 
   it('quotes every word, so a path with a space or a quote stays one argument', () => {

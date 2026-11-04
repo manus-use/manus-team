@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -62,11 +62,18 @@ export function shimScript(command: readonly string[]): string {
  */
 export function writeMtShim(home: string, command: readonly string[] = mtCommand()): string {
   const dir = join(home, 'bin');
-  privateDir(dir);
+  privateDir(dir, 'the mt shim');
+  const target = join(dir, 'mt');
+  // Said plainly: a rename onto it would fail with a bare EISDIR.
+  if (lstatSync(target, { throwIfNoEntry: false })?.isDirectory() === true) {
+    throw new Error(`${target} is a directory; remove it`);
+  }
   const staging = join(dir, `.mt-${randomUUID()}`);
   try {
     writeFileSync(staging, shimScript(command), { mode: 0o700, flag: 'wx' });
-    renameSync(staging, join(dir, 'mt'));
+    // The mode a file is created with passes through the umask, which may take the execute bit.
+    chmodSync(staging, 0o700);
+    renameSync(staging, target);
   } catch (err) {
     rmSync(staging, { force: true });
     throw err;
