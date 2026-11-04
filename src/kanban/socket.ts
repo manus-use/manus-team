@@ -31,6 +31,12 @@ import { redactKnownSecrets } from '../secrets.js';
  * closed within that timeout too, read or not; what is answered is masked
  * value by value (spec §10.1), so neither a live token nor a known secret leaves
  * in a response, whatever the handler put in it.
+ *
+ * **Closing drains.** A request being handled when the socket closes -- a report
+ * waiting for its gates -- is told the gateway is stopping, through the signal
+ * its handler was given, and its answer is sent before the connection goes. A
+ * client that saw only a dropped connection would try again, and could be told
+ * `already_reported` about a report it never heard was applied.
  */
 
 /**
@@ -46,19 +52,26 @@ export interface WorkerServerOptions {
   requestTimeoutMs?: number;
   /** Connections served at once; more wait in the kernel's backlog. */
   maxConnections?: number;
+  /** How long closing waits for the requests being handled to be answered. */
+  drainMs?: number;
   /** Metadata only. */
   note?: (line: string) => void;
 }
 
 export interface WorkerServer {
   readonly path: string;
-  /** Stop listening, drop every open connection, and remove the socket. */
+  /**
+   * Stop listening, drop every connection that has not sent a request, tell the
+   * handlers of the rest the gateway is stopping, wait up to `drainMs` for their
+   * answers, then drop whatever is left, and remove the socket.
+   */
   close(): Promise<void>;
 }
 
 export const DEFAULT_MAX_REQUEST_BYTES = 256 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_CONNECTIONS = 64;
+const DEFAULT_DRAIN_MS = 10_000;
 
 function bytes(s: string): number {
   return Buffer.byteLength(s, 'utf8');
@@ -304,22 +317,34 @@ function answer(socket: Socket, response: unknown, lingerMs: number): void {
   socket.once('close', () => clearTimeout(linger));
 }
 
-/** Listen at `path` and answer each request with what `handle` returns. */
+/**
+ * Listen at `path` and answer each request with what `handle` returns. `signal`
+ * is aborted when the socket closes, so a handler still at work can stop and say so.
+ */
 export async function listenWorker(
   path: string,
-  handle: (request: unknown) => unknown,
+  handle: (request: unknown, signal: AbortSignal) => unknown,
   opts: WorkerServerOptions = {},
 ): Promise<WorkerServer> {
   const maxBytes = opts.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
   const timeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const drainMs = opts.drainMs ?? DEFAULT_DRAIN_MS;
   const note = opts.note ?? (() => undefined);
   await claimSocketPath(path);
 
   const sockets = new Set<Socket>();
+  /** Connections whose request is with the handler, or whose answer is going out. */
+  const busy = new Set<Socket>();
+  let drained: (() => void) | undefined;
+  const stopping = new AbortController();
   // Half-open, so a client that ends its side after the request still gets the answer.
   const server = createServer({ allowHalfOpen: true }, (socket) => {
     sockets.add(socket);
-    socket.once('close', () => sockets.delete(socket));
+    socket.once('close', () => {
+      sockets.delete(socket);
+      busy.delete(socket);
+      if (busy.size === 0) drained?.();
+    });
     // A client that goes away is its own business; an error must not reach the process.
     socket.on('error', () => undefined);
     // Within timeoutMs of connecting, however slowly it trickles in: an idle
@@ -346,6 +371,7 @@ export async function listenWorker(
       chunks.push(part);
       if (nl === -1) return;
       read = true;
+      busy.add(socket);
       // Read; what is left is the handler's, however long it takes. Once it has
       // answered, the linger bounds the connection again.
       clearTimeout(deadline);
@@ -357,7 +383,7 @@ export async function listenWorker(
         return;
       }
       Promise.resolve()
-        .then(() => handle(request))
+        .then(() => handle(request, stopping.signal))
         .then(
           (response) => reply(response),
           () => reply({ ok: false, code: 'internal', message: 'the gateway failed to handle the request' }),
@@ -384,11 +410,23 @@ export async function listenWorker(
   return {
     path,
     close() {
-      closing ??= new Promise<void>((resolve) => {
+      closing ??= (async () => {
+        // Node removes the socket file when it stops listening, once every connection has gone.
+        const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+        for (const socket of sockets) if (!busy.has(socket)) socket.destroy();
+        stopping.abort();
+        if (busy.size > 0) {
+          let timer: NodeJS.Timeout | undefined;
+          await Promise.race([
+            new Promise<void>((resolve) => (drained = resolve)),
+            new Promise<void>((resolve) => (timer = setTimeout(resolve, drainMs))),
+          ]);
+          clearTimeout(timer);
+          if (busy.size > 0) note(`kanban: the worker socket closed with ${busy.size} request(s) unanswered`);
+        }
         for (const socket of sockets) socket.destroy();
-        // Node removes the socket file when it stops listening.
-        server.close(() => resolve());
-      });
+        await closed;
+      })();
       return closing;
     },
   };

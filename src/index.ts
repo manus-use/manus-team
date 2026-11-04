@@ -257,7 +257,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // Then the socket, before the first pass can start a run that would report to it.
       if (worker !== undefined) {
         const { api, socket } = worker;
-        workerServer = await listenWorker(socket, (request) => api.handle(request), { note });
+        // A report still running its gates when the gateway stops is told so, and answered.
+        workerServer = await listenWorker(socket, (request, signal) => api.handle(request, { signal }), { note });
         note(`kanban: runs report through ${socket}`);
       }
 
@@ -318,14 +319,15 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // channel -- so this runs after disconnect only because the SDK's send path
       // survives it; a failed final write is logged, not fatal.
       await registry.closeAll();
+      // No agent is left to report. A report still running its gates is stopped
+      // and answered here, before the dispatcher's drain, which waits for it.
+      await workerServer?.close();
       // Then what the dispatcher still has running -- an archive, a close -- so
       // none of it touches the database after it is closed. Bounded: a start that
       // never returns is never drained, and must not hold the shutdown.
       if ((await dispatcher?.idle(SHUTDOWN_DRAIN_MS)) === false) {
         note('kanban: stopped with run work still pending; the next boot ends those runs');
       }
-      // No agent is left to report; and none may reach a closed database.
-      await workerServer?.close();
       db.close();
       // Last: until here, this gateway still had the home's sessions and runs.
       lock?.release();

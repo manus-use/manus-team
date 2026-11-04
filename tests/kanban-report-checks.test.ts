@@ -455,3 +455,20 @@ describe('a gate refusal through the worker API', () => {
     });
   });
 });
+
+describe('a report through the worker API while the gateway stops', () => {
+  it('is told so, and applies nothing', async () => {
+    const api = new WorkerApi({ db: g.t.db, service: g.s });
+    const task = g.create();
+    g.s.addGate(task.taskId, { command: 'npm test' }, ALICE);
+    const token = mintToken();
+    const claimed = g.s.claim(task.taskId, { tokenHash: hashToken(token) });
+    if (!claimed.ok) throw new Error(claimed.message);
+    const stopping = new AbortController();
+    stopping.abort();
+    const request = { run: claimed.run.runId, token, command: 'complete', input: { summary: 'done' } };
+    expect(await api.handle(request, { signal: stopping.signal })).toMatchObject({ ok: false, code: 'gates_cannot_run' });
+    expect(g.ran).toEqual([]);
+    expect(getRun(g.t.db, claimed.run.runId)?.outcome).toBeNull();
+  });
+});

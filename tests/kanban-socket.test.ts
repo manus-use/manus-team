@@ -196,6 +196,53 @@ describe('worker socket', () => {
   });
 });
 
+describe('worker socket: closing', () => {
+  /** A connection that has sent nothing: whether the server has dropped it. */
+  function idle(path: string): Promise<'closed'> {
+    return new Promise((resolve) => {
+      const socket = createConnection(path);
+      socket.on('error', () => undefined);
+      socket.on('close', () => resolve('closed'));
+    });
+  }
+
+  it('answers a request still being handled before it goes: the handler is told the gateway is stopping', async () => {
+    let started: () => void = () => undefined;
+    const handling = new Promise<void>((resolve) => (started = resolve));
+    const server = await listenWorker(sockPath(), async (_req, signal) => {
+      started();
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve()));
+      return { ok: false, code: 'gates_cannot_run', message: 'stopping' };
+    });
+    const reply = send(server.path, '{"command":"complete"}\n');
+    await handling;
+    const waiting = idle(server.path);
+    await server.close();
+    expect(JSON.parse(await reply)).toEqual({ ok: false, code: 'gates_cannot_run', message: 'stopping' });
+    expect(await waiting).toBe('closed');
+    expect(existsSync(server.path)).toBe(false);
+  });
+
+  it('drops a request whose handler does not answer within the drain, and says so', async () => {
+    const notes: string[] = [];
+    let started: () => void = () => undefined;
+    const handling = new Promise<void>((resolve) => (started = resolve));
+    const server = await listenWorker(
+      sockPath(),
+      async () => {
+        started();
+        await new Promise<void>(() => undefined);
+      },
+      { drainMs: 50, note: (line) => notes.push(line) },
+    );
+    const reply = send(server.path, '{}\n');
+    await handling;
+    await server.close();
+    expect(await reply).toBe('');
+    expect(notes).toEqual(['kanban: the worker socket closed with 1 request(s) unanswered']);
+  });
+});
+
 describe('worker socket: its path', () => {
   it('removes a stale socket of its own, and refuses a live one, a file, or a directory that is a symlink', async () => {
     mkdirSync(join(root, 'run'), { mode: 0o700 });
