@@ -1056,7 +1056,9 @@ gateway serving it. It is in the home, which no workspace may be or contain (§2
 written into a workspace.
 
 The token can link only the tasks its run's task created as the child: decomposition is between
-tasks a run created, and a link onto any other task would move it.
+tasks a run created, and a link onto any other task would move it. A link only works on a task that
+has not started yet, and a claimable task created by a run is claimed before `create` answers, so
+follow-ups are sequenced by creating them in order, each naming the earlier ones in `parents`.
 
 **This is cooperative scoping, not confinement.** Every process the agent starts inherits the
 environment, and the token with it. A malicious workload in the workspace could use the token, within
@@ -1082,7 +1084,8 @@ mt kanban link       < link.json    # {parent_id, child_id}
 - **JSON in on stdin, JSON out, always.** A summary is free text; passing it through shell arguments
   invites quoting failures that mangle or reject an agent's report. Every response is
   `{"ok": true, ...}` or `{"ok": false, "code": "...", "message": "..."}`, so the agent can act on an
-  error rather than parse prose.
+  error rather than parse prose. `mt kanban` exits 0 when the command was done, 1 when it was refused,
+  and 2 for a wrong command line.
 - **Why a CLI and not tools in the agent's schema:** the gateway drives vendor agents it cannot add
   tools to. `bytesec run` has no way to receive tools; every coding agent has a shell. The handler
   behind the CLI is one module, and an MCP server for agents that accept one is a second front end to

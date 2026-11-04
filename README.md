@@ -254,7 +254,10 @@ They only write files and never contact the gateway; changes take effect at the 
 - `kanban` is for the agent of a board run, not for a person: it works only with the run's
   `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN` and `MT_KANBAN_SOCKET`, which the gateway gives each run.
   It reads its input as JSON on stdin and prints one line of JSON, `{"ok": true, ...}` or
-  `{"ok": false, "code": "...", "message": "..."}`. With `kanban.enabled`, the gateway writes
+  `{"ok": false, "code": "...", "message": "..."}`. It exits 0 when the command was done, 1 when
+  it was refused, and 2 for a wrong command line. `link` only works on a task that has not
+  started yet, so sequence follow-ups by creating them in order, each naming the earlier ones
+  in `"parents"`. With `kanban.enabled`, the gateway writes
   `$MT_HOME/bin/mt`, which runs this build's `mt` with the gateway's node, puts that directory
   first on every run's `PATH`, and listens on `$MT_HOME/run/kanban.sock` (`0600`, in a `0700`
   directory; under the temporary directory when the home's path is too long for a socket).

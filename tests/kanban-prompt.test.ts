@@ -141,6 +141,8 @@ describe('composePrompt', () => {
     expect(work).toContain('"reviewer": "<role name, or lark:<union_id> for a person>"');
     expect(work).not.toContain('"kind": "role" | "human"');
     expect(work).toContain('`mt kanban link < link.json`, with {"parent_id": "...", "child_id": "..."}');
+    expect(work).toContain('only works on a task that has not started yet');
+    expect(work).toContain('sequence follow-ups by creating them in order, each naming the earlier ones in "parents"');
     expect(work).toContain('`mt kanban comment < comment.json`, with {"body": "..."}');
     expect(work).toContain('`mt kanban show`');
     const review = composePrompt(brief({ kind: 'review', task: task({ phase: 'review' }) }));

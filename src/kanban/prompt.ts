@@ -129,7 +129,7 @@ Report through the \`mt kanban\` command, which reads JSON on stdin and answers 
 
 ${OTHER_COMMANDS};
 - \`mt kanban create < task.json\`, with {"title": "...", "body": "...", "assignee": ${WHO}}, and optionally "reviewer": ${WHO}, "contract", "workspace", "parents" (task ids) and "idempotency_key", creates a task;
-- \`mt kanban link < link.json\`, with {"parent_id": "...", "child_id": "..."}, makes one task wait on another.
+- \`mt kanban link < link.json\`, with {"parent_id": "...", "child_id": "..."}, makes one task wait on another; it only works on a task that has not started yet, so sequence follow-ups by creating them in order, each naming the earlier ones in "parents".
 
 Block only on genuine ambiguity, and say why. If one of the task's children below reviews this task, report complete rather than review. If you find follow-up work, create a task for it with \`mt kanban create\` rather than doing it. Never put a secret in a summary, metadata or comment. Stop once you have reported.`;
 
