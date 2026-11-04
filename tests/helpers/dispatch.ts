@@ -3,7 +3,7 @@ import { SessionRegistry } from '../../src/core/registry.js';
 import { NamedWorkspaces } from '../../src/core/workspace.js';
 import { getRun } from '../../src/db/kanban-read.js';
 import { Dispatcher, type DispatcherSettings, type WorkerAccess } from '../../src/kanban/dispatcher.js';
-import { KanbanService, type CreateRequest } from '../../src/kanban/service.js';
+import { KanbanService, type CreateRequest, type ReportChecks } from '../../src/kanban/service.js';
 import { KanbanSink } from '../../src/kanban/sink.js';
 import type { RunRow, TaskRow } from '../../src/kanban/types.js';
 import type { Role } from '../../src/roles.js';
@@ -76,6 +76,8 @@ export interface HarnessOptions {
   renderRoot?: string;
   /** The socket and the mt directory a run is given; absent, neither is. */
   worker?: WorkerAccess;
+  /** How the service runs gates and reads commits; absent, it does neither. */
+  checks?: ReportChecks;
 }
 
 export const DEFAULT_ROLES: readonly Role[] = [
@@ -90,7 +92,13 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
   const roles = new Map((opts.roles ?? DEFAULT_ROLES).map((r) => [r.name, r]));
   const drivers = new Map([...roles.keys(), 'default'].map((name) => [name, new FakeDriver(name)]));
   const workspaces = new Map(['default', 'web', 'api', 'docs'].map((name) => [name, `/tmp/ws-${name}`]));
-  const service = new KanbanService({ db: t.db, roles, workspaces: new Set(workspaces.keys()), clock });
+  const service = new KanbanService({
+    db: t.db,
+    roles,
+    workspaces: new Set(workspaces.keys()),
+    clock,
+    ...(opts.checks === undefined ? {} : { checks: opts.checks }),
+  });
   const lark = new FakeChannel({ id: 'lark', clock });
   const notes: string[] = [];
   // The registry asks the dispatcher, which is built after it, as in src/index.ts.

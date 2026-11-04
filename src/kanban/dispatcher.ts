@@ -663,6 +663,8 @@ export class Dispatcher {
       // No report, and the turn completed: a person's comment, else a nudge, in
       // the same session, until the run reports or the nudges run out (spec §7.5).
       while (terminal === 'completed') {
+        // A report still running its gates may yet decide the run (spec §7.7).
+        await this.#deps.service.settled(run.taskId);
         const next = this.#followUp(open);
         if (next === undefined) break;
         terminal = await this.#submit(open, actor, next);
@@ -798,6 +800,12 @@ export class Dispatcher {
     // Released because it ignored its cancel: that release ended this turn, the
     // run was decided before it, and the release closes it.
     if (open.released) return;
+    // A turn can end while its report runs the task's gates: its agent's shell
+    // gave up on `mt kanban` waiting for them. The report may yet decide the run,
+    // and the run holds the workspace the gates run in, so it is waited for.
+    await this.#deps.service.settled(open.key.conversationId);
+    // Stopped while it waited: the next boot ends the run.
+    if (this.#stopped) return;
     const run = getRun(this.#deps.db, open.runId);
     if (run !== undefined && run.outcome === null) {
       const turn = lastTurnOf(this.#deps.db, sessionId);
