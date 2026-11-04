@@ -377,7 +377,7 @@ chat or thread gets at most one message every couple of seconds, listing what ha
 order, 20 notices at most. Notices are delivered from a cursor kept in the database, so those
 due while the gateway was down are sent when it is back; a message sent just before a stop
 may be sent twice. A chat the bot can no longer post to — removed from it, or failing for
-several minutes running — is let go of until the next restart: its notices are dropped, and
+about twenty minutes — is let go of until the next restart: its notices are dropped, and
 the gateway's log says which.
 
 **Not yet:** people as assignees or reviewers. Naming one, with an @-mention, is refused, and

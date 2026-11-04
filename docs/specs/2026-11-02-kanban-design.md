@@ -1460,7 +1460,7 @@ getting nowhere, which no liveness check catches.
 | `/kanban done <id> <summary>` · `/kanban block <id> <reason>` | the assignee | report on a human task |
 | `/kanban review <id> <summary> [reviewer]` | the assignee | ask for same-task review of a human task's work (§5.3) |
 | `/kanban stop <id>` | operate | the run ends `cancelled`; the task blocks as `needs_input` |
-| `/kanban gate add <id> [--timeout <s>] <command>` | operate | the rest of the message is the command, as written (§7.7) |
+| `/kanban gate add <id> [--timeout <s>] <command>` | operate | the rest of the message is the command, as written (§7.7); `--timeout=<s>` is read too, and a timeout that cannot be read, or a task id starting `--`, is refused with the usage line rather than taken into the command |
 | `/kanban gate list <id>` | talk | the task's gates, masked |
 | `/kanban gate remove <id> <gate>` | operate | |
 | `/kanban archive <id>` | operate | |
@@ -1486,11 +1486,13 @@ people (§12).
 - **`/kanban new`.** A CRLF or a lone CR in the message counts as a line break. The title is the rest
   of the first line, or the next line when the verb stands alone; a title that is itself a field line
   is refused. A field line is its label at the very start of a line, in any case, then a colon and a
-  value: an indented line, or one that only mentions a label, stays body. The field lines may come
+  value: an indented line, or one that only mentions a label, stays body. A zero-width character
+  (U+200B to U+200D, U+2060, U+FEFF) at the start of the message or of a line, or next to the colon,
+  is passed over, and `stop when:` may have any spaces or tabs between its words. The field lines may come
   in any order, among the body's lines. Each field may be given once, except `parent:`, which takes
   one or more task ids, separated by spaces or commas, and may be repeated. `verify:` fills the
-  contract's `verification`, `stop when:` its `stop_when`. A field with no value, or given twice, is
-  refused. A task with no assignee may be created; it is unassignable until `/kanban assign`.
+  contract's `verification`, `stop when:` its `stop_when`. A field with no value — a `parent:` line
+  of only commas among them — or given twice, is refused. A task with no assignee may be created; it is unassignable until `/kanban assign`.
   The message's id is the task's idempotency key, `lark:<message_id>` (§3.1). A task from chat has
   the worker CLI's limits: a title of at most 512 bytes, a body of at most 64 KiB, each contract
   field at most 8 KiB, checked by the chat command before the service; `KanbanService.create`
@@ -1565,7 +1567,9 @@ first escaped, so the text can neither open nor close a code fence. Links in it 
 escaper neutralizes tags, and a link cannot mention anyone. Each piece is masked before anything else
 is done to it — spaces collapsed into one line, trimmed, cut to its length — and only then escaped,
 so no reshaping can hide a secret from the masker and a cut can neither leave part of a secret
-showing nor split an escape. An agent's output is cut from its start, to show its end. Each whole
+showing nor split an escape. After masking, a CRLF or a lone CR becomes a newline, so quoting sees
+every line. A cut falls on a character boundary: it never leaves half of a surrogate pair. An agent's
+output is cut from its start, to show its end. Each whole
 reply and notice is masked once more before it is sent. The group notice names the assignee in plain text, not as an @-mention: it is a
 notice, and a bot that mentions people whenever work moves trains them to ignore it.
 
@@ -1618,8 +1622,15 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   are not confirmed locally, and such a chat is caught by the next rule — or the third failure in a
   row at five minutes drops the notices it held, moving the cursors past them, logs one line naming the
   conversation, its tasks and the dropped events, and marks the conversation dead until the gateway
-  restarts: its later notices are passed over unsent. A subscription that cannot be read, or a
-  conversation that fails otherwise, is held back by itself; the rest of the round goes on.
+  restarts: its later notices are passed over unsent. A conversation on a channel this gateway has
+  not got is let go of in the same way, at once. A subscription whose task is not on the board is
+  let go of by itself: its cursor moves past its events, one line is logged, and its later events
+  are passed over without another until a restart. A subscription that cannot be read otherwise, or
+  a conversation that fails otherwise, is held back by itself; the rest of the round goes on. When a
+  send succeeded and a cursor then fails to move, the others still move, the log says that
+  subscription's notices were sent and its cursor not moved, and they are sent again after its
+  pause — at least once, as ever. A subscription's pause is cleared once it is read again, or, for
+  one whose cursor did not move, once its cursor moves.
 - **Subscriptions are never deleted**, so a round's scan grows with the tasks ever created; it is one
   indexed query, and a delivered subscription of an archived task has nothing past its cursor.
 
