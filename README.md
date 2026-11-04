@@ -222,7 +222,8 @@ including `MT_AGENT_ENV_*`: any of them still counts as a second definition of t
 
 ### The mt command
 
-`mt` creates and checks roles and workspaces. In a checkout, run it as `npm run -s mt -- …`.
+`mt` creates and checks roles and workspaces, and is how a board run's agent reports. In a
+checkout, run it as `npm run -s mt -- …`.
 
 ```
 mt role create <name> [--clone-from <role>] [--description "..."] [--own-workspace]
@@ -231,11 +232,12 @@ mt role check [<name>]
 mt workspace add <name> <absolute-path>
 mt workspace add <name> --clone <git-url>
 mt workspace list
+mt kanban <show|complete|review|changes|block|comment|create|link> < input.json
 ```
 
-It finds the home, config file and database the way the gateway does (`MT_HOME`, `MT_CONFIG`,
-`MT_DB`), from the shell it runs in, and needs no Lark settings. It only writes files and
-never contacts the gateway; changes take effect at the next start.
+The role and workspace commands find the home, config file and database the way the gateway
+does (`MT_HOME`, `MT_CONFIG`, `MT_DB`), from the shell they run in, and need no Lark settings.
+They only write files and never contact the gateway; changes take effect at the next start.
 
 - `role create` writes `config.yaml` (from the role `default`, or `--clone-from`), a starter
   `role.md`, `skills/`, an empty `0600` `.env` and a `.gitignore`. A `.env` is never copied.
@@ -249,6 +251,13 @@ never contacts the gateway; changes take effect at the next start.
   role's runs are rendered as a native agent package, and why not.
 - `workspace add` edits `workspaces:` in the config file, keeping its comments, and refuses
   anything the next start would refuse. `--clone` clones into `$MT_HOME/workspaces/<name>`.
+- `kanban` is for the agent of a board run, not for a person: it works only with the run's
+  `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN` and `MT_KANBAN_SOCKET`, which the gateway gives each run.
+  It reads its input as JSON on stdin and prints one line of JSON, `{"ok": true, ...}` or
+  `{"ok": false, "code": "...", "message": "..."}`. With `kanban.enabled`, the gateway writes
+  `$MT_HOME/bin/mt`, which runs this build's `mt` with the gateway's node, puts that directory
+  first on every run's `PATH`, and listens on `$MT_HOME/run/kanban.sock` (`0600`, in a `0700`
+  directory; under the temporary directory when the home's path is too long for a socket).
 
 ### Chat commands
 
@@ -287,7 +296,7 @@ docs/testing/           crash matrix for the durability contract
 
 ```bash
 npm test          # unit: in-process, no network, no child processes
-npm run test:e2e  # spawns hand-written fake agents, one per driver
+npm run test:e2e  # spawns hand-written fake agents, one per driver, and one board run end to end
 npm run typecheck
 ```
 
