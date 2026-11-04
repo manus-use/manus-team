@@ -233,11 +233,17 @@ mt workspace add <name> <absolute-path>
 mt workspace add <name> --clone <git-url>
 mt workspace list
 mt kanban <show|complete|review|changes|block|comment|create|link> < input.json
+mt kanban gate add <task_id> [--timeout <s>] -- <command...>
+mt kanban gate list <task_id>
+mt kanban gate remove <task_id> <gate_id>
 ```
 
-The role and workspace commands find the home, config file and database the way the gateway
-does (`MT_HOME`, `MT_CONFIG`, `MT_DB`), from the shell they run in, and need no Lark settings.
-They only write files and never contact the gateway; changes take effect at the next start.
+The role, workspace and gate commands find the home, config file and database the way the
+gateway does (`MT_HOME`, `MT_CONFIG`, `MT_DB`), from the shell they run in, and need no Lark
+settings. The role and workspace commands only write files and never contact the gateway;
+changes take effect at the next start. The gate commands are the one exception: they write the
+board's database, beside a running gateway, through the board's own service, and take effect
+at once.
 
 - `role create` writes `config.yaml` (from the role `default`, or `--clone-from`), a starter
   `role.md`, `skills/`, an empty `0600` `.env` and a `.gitignore`. A `.env` is never copied.
@@ -266,6 +272,22 @@ They only write files and never contact the gateway; changes take effect at the 
   `show` refuses at once when stdin is a terminal; redirect a file or pipe the JSON in.
   With `kanban.enabled`, the gateway also holds `$MT_HOME/run/gateway.pid` while it runs, and
   refuses to start on a home whose lock names another live process.
+- A task may have **gates**: shell commands that must exit 0, in the task's workspace, before
+  `complete` or `review` is accepted. A failing gate refuses the report with its command, exit
+  code and the end of its output, masked, and the agent can fix it and report again. Gates run
+  as the gateway's user with the environment of the role of the task's latest agent run, never
+  with a run's token or socket, for up to 600 s each and 600 s together, so `mt kanban` waits
+  up to 15 minutes for an answer. A gate whose command holds a known secret is refused: put
+  the value in the role's `.env` or `agent.passEnv`, and name it in the command. Defining gates
+  is an operator's action: `mt kanban gate add` (the command's words after `--` are joined with
+  spaces; quote it to keep its own quoting), `list` and `remove`, which record you as
+  `operator:<your login>`. They check the secrets this shell knows: every role's values, and
+  the Lark app secret if `LARK_APP_SECRET` is set here. They refuse to run in a board run's
+  shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set, so an agent does not define gates by
+  accident; that is not a security boundary, since an agent runs as your user and could unset
+  them, as it could edit `config.yaml` or a role's files. When an agent reports
+  `complete` or `review`, the gateway also records its workspace's `HEAD`, and whether the tree
+  had uncommitted changes.
 
 ### Chat commands
 
