@@ -690,7 +690,8 @@ run. Nudges are further turns in the run's session (§7.5); rework is a new run 
   at most 20 on a task, taking at most 600 s together. Stored as written, never masked (§10.1); added
   and removed by an operator, each with an event.
 - **`kanban_subscriptions`** — `task_id`, the channel binding key (channel, app, chat, thread),
-  `cursor` (last `kanban_events.id` delivered). The same cursor discipline as a binding's
+  `cursor` (last `kanban_events.id` delivered), indexed by `account_id` (migration `004`) for the
+  notifier's read of one bot's subscriptions. The same cursor discipline as a binding's
   `cursor_seq`: delivery is a projection over the log, and catch-up after an outage is the same
   code as normal delivery.
 - **`kanban_events`** — append-only: `id` (monotonic), `task_id`, `run_id`, `kind`, `actor`,
@@ -1517,7 +1518,7 @@ people (§12).
   knows.
 - **Until plan D2**, the board gives work only to roles. Naming a person as assignee or reviewer —
   an @-mention, which Lark's text shows as `@Name`, or a `lark:` principal typed out — is refused,
-  saying it arrives in D2, and so is a role whose agent is supervised, whose approvals have nowhere
+  saying it arrives in a later update, and so is a role whose agent is supervised, whose approvals have nowhere
   to go yet. `/kanban done`, `block`, `review`, `approve` and `changes` are answered the same way,
   rather than as unknown commands.
 - **After a change the dispatcher is told:** a pass after `new`, `assign`, `workspace`, `unblock`,
@@ -1615,13 +1616,17 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   adapter does not pass a send's uuid to Lark yet (its known gap), so until it does that batch can
   show twice; it is never lost.
 - **A send that fails** moves no cursor, and the conversation is tried again after 2 s, doubling to at
-  most five minutes, while the others go on; a send not answered in 30 s counts as failed. A network
-  failure is such a failure, though the Lark adapter reports it as code 0 and not retryable, and so
-  is a refusal that may be of one bad batch. **One that cannot succeed is let go of:** a send refused
-  as unreachable — Lark's 230002, the bot is not in the chat; the chat-not-found and disbanded codes
-  are not confirmed locally, and such a chat is caught by the next rule — or the third failure in a
-  row at five minutes drops the notices it held, moving the cursors past them, logs one line naming the
-  conversation, its tasks and the dropped events, and marks the conversation dead until the gateway
+  most five minutes, while the others go on. A refusal that may be of one bad batch is such a
+  failure. So are a network failure, which the Lark adapter reports as code 0 and not retryable, and
+  a send not answered in 30 s, which counts as failed; but they are the gateway's
+  outage, not the chat's: they never count toward letting a chat go, and hold it at the five-minute
+  pause for as long as the outage lasts, so after it the chat catches up from its cursors. **One that
+  cannot succeed is let go of:** a send refused as unreachable — Lark's 230002, the bot is not in the
+  chat; the chat-not-found and disbanded codes are not confirmed locally, and such a chat is caught
+  by the next rule — or the third refusal in a row at five minutes, only a `ChannelError` with a
+  nonzero code counting — the eleventh refused send, after 1,110 s of pauses (2 s doubling to 256 s,
+  then two of five minutes), about 19 minutes — drops the notices it held, moving the cursors past
+  them, logs one line naming the conversation, its tasks and the dropped events, and marks the conversation dead until the gateway
   restarts: its later notices are passed over unsent. A conversation on a channel this gateway has
   not got is let go of in the same way, at once. A subscription whose task is not on the board is
   let go of by itself: its cursor moves past its events, one line is logged, and its later events
@@ -1632,7 +1637,9 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   pause — at least once, as ever. A subscription's pause is cleared once it is read again, or, for
   one whose cursor did not move, once its cursor moves.
 - **Subscriptions are never deleted**, so a round's scan grows with the tasks ever created; it is one
-  indexed query, and a delivered subscription of an archived task has nothing past its cursor.
+  query, which finds this bot's subscriptions through the index on `account_id` (migration `004`)
+  and each one's oldest pending event with a correlated `min(e.id)` through the events' `(task_id,
+  id)` index, and a delivered subscription of an archived task has nothing past its cursor.
 
 ---
 

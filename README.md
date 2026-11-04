@@ -376,9 +376,10 @@ short by a gateway restart is retried quietly. A task that keeps blocking for th
 chat or thread gets at most one message every couple of seconds, listing what happened in
 order, 20 notices at most. Notices are delivered from a cursor kept in the database, so those
 due while the gateway was down are sent when it is back; a message sent just before a stop
-may be sent twice. A chat the bot can no longer post to — removed from it, or failing for
-about twenty minutes — is let go of until the next restart: its notices are dropped, and
-the gateway's log says which.
+may be sent twice. A chat the bot can no longer post to — removed from it, or refused by
+Lark for about 19 minutes — is let go of until the next restart: its notices are dropped, and
+the gateway's log says which. A network outage, or Lark not answering, never lets a chat go:
+its notices wait, and are sent once the gateway reaches Lark again.
 
 **Not yet:** people as assignees or reviewers. Naming one, with an @-mention, is refused, and
 `/kanban done`, `block`, `review`, `approve` and `changes` say they arrive in a later update
