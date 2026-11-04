@@ -352,8 +352,9 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // above, decides no run whose turn ends from here on: the next boot ends
       // them (spec §8.4), so the stop itself never fails a run.
       await workerServer?.close();
-      // A notice being sent finishes while the channel is still connected; bounded, as a send is.
-      if ((await notifier?.idle()) === false) note('kanban: stopped with a notice still being sent; the next boot sends it again');
+      // A notice being sent finishes while the channel is still connected; bounded by the drain, not a
+      // send's 30 s, so a hung send never holds the stop: its batch goes again after the next boot.
+      if ((await notifier?.idle(SHUTDOWN_DRAIN_MS)) === false) note('kanban: stopped with a notice still being sent; the next boot sends it again');
       await adapter.disconnect().catch((err: unknown) => {
         note(`disconnect failed: ${err instanceof Error ? err.message : String(err)}`);
       });

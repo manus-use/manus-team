@@ -136,7 +136,7 @@ describe('the board, at startup', () => {
     }
   });
 
-  it('starts delivering notices once connected, and stops before it disconnects, when kanban.enabled is set', async () => {
+  it('starts delivering notices once connected, and stops before it disconnects, waiting a few seconds at most, when kanban.enabled is set', async () => {
     vi.spyOn(LarkAdapter.prototype, 'connect').mockResolvedValue(undefined);
     const order: string[] = [];
     vi.spyOn(LarkAdapter.prototype, 'disconnect').mockImplementation(async () => {
@@ -149,13 +149,19 @@ describe('the board, at startup', () => {
     vi.spyOn(notifier, 'start').mockImplementation(() => {
       order.push('notices start');
     });
-    vi.spyOn(notifier, 'idle').mockImplementation(async () => {
+    const bounds: Array<number | undefined> = [];
+    vi.spyOn(notifier, 'idle').mockImplementation(async (boundMs) => {
       order.push('notices idle');
+      bounds.push(boundMs);
       return true;
     });
     await gateway.start();
     await gateway.stop();
     expect(order).toEqual(['notices start', 'notices idle', 'disconnect']);
+    // Bounded by the shutdown's drain, not by a send's 30 s: a hung send never holds the stop.
+    expect(bounds).toHaveLength(1);
+    expect(bounds[0]).toBeGreaterThan(0);
+    expect(bounds[0]).toBeLessThanOrEqual(10_000);
   });
 
   it("waits, for a few seconds at most, for the dispatcher's work before it closes the database", async () => {
