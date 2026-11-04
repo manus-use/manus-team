@@ -5,6 +5,7 @@ import { getApproval } from '../db/approvals.js';
 import { bindingsInConversation, resolveBinding } from '../db/bindings.js';
 import type { Channel, SendTarget } from '../channel/types.js';
 import { forDisplay, truncate } from '../channel/escape.js';
+import { redactKnownSecrets } from '../secrets.js';
 import type {
   BindingKey,
   InboundAttachment,
@@ -59,6 +60,14 @@ export interface InboundCardAction {
   value: Record<string, unknown>;
 }
 
+/**
+ * The board's chat commands (spec §9.1): what follows `/kanban`, run for the
+ * message that typed it, answered as the reply to send. Plan D1's `KanbanChat`.
+ */
+export interface KanbanCommands {
+  run(arg: string, message: InboundMessage, key: BindingKey): Promise<string>;
+}
+
 export interface RouterDeps {
   db: Db;
   registry: SessionRegistry;
@@ -66,9 +75,15 @@ export interface RouterDeps {
   channel: Channel;
   channelId: string;
   appId: string;
+  /** The board's commands; absent when `kanban.enabled` is off, and `/kanban` says so. */
+  kanban?: KanbanCommands;
   clock?: Clock;
   note?: (line: string) => void;
 }
+
+/** What `/kanban` says on a gateway whose board is off. */
+export const KANBAN_OFF =
+  'The task board is off on this gateway. An operator turns it on with `kanban.enabled: true` in config.yaml, and a restart.';
 
 /** Reasons we stay silent rather than explain ourselves. See `#shouldExplain`. */
 const SILENT_REASONS: ReadonlySet<RejectReason> = new Set<RejectReason>([
@@ -417,6 +432,26 @@ export class Router {
           'stop',
           'Cancelling. Cancellation is a terminal, not a deletion — the log keeps everything up to here.',
         );
+        return;
+      }
+
+      case 'kanban': {
+        let text: string;
+        const kanban = this.#deps.kanban;
+        if (kanban === undefined) {
+          text = KANBAN_OFF;
+        } else {
+          try {
+            text = await kanban.run(arg, message, key);
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            this.#note(`kanban command in ${message.messageId} failed: ${detail}`);
+            text = `The board could not do that: ${forDisplay(detail)}`;
+          }
+        }
+        // Each piece was escaped, and masked, as it was put in; the whole reply is
+        // masked once more, for what was not: ids, names, the board's own words.
+        await this.#reply(target, message, 'kanban', redactKnownSecrets(text));
         return;
       }
 

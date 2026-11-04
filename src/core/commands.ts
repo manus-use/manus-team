@@ -110,6 +110,21 @@ export const COMMANDS: readonly CommandSpec[] = [
     summary: 'Show what this session is doing.',
   },
   {
+    name: 'kanban',
+    // Talk, because reading the board is; each of its commands that changes the
+    // board checks operator tier itself (spec §9.1).
+    tier: 'talk',
+    needsSession: false,
+    effect: 'immediate',
+    // `/kanban new` takes field lines and a body; `/kanban comment` a paragraph.
+    multiline: true,
+    // Control-plane, like /status: it never touches this chat's session, so a
+    // busy one does not refuse it (spec §9.1).
+    mutating: false,
+    summary: 'The task board: `/kanban help` lists its commands.',
+    usage: '/kanban <command>',
+  },
+  {
     name: 'help',
     tier: 'talk',
     needsSession: false,

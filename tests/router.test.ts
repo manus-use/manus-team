@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ACK_EMOJI, Router } from '../src/core/router.js';
+import { ACK_EMOJI, KANBAN_OFF, Router, type KanbanCommands } from '../src/core/router.js';
 import { CARD_COALESCE_MS } from '../src/channel/card-writer.js';
 import { SessionRegistry } from '../src/core/registry.js';
 import { MAX_MAILBOX_DEPTH, type SessionActor } from '../src/core/session-actor.js';
@@ -10,7 +10,7 @@ import { resolveBinding } from '../src/db/bindings.js';
 import { lastSeq, readEvents } from '../src/db/events.js';
 import { setState } from '../src/db/sessions.js';
 import type { Db } from '../src/db/open.js';
-import type { InboundMessage, PermissionOption, Principal } from '../src/types.js';
+import type { BindingKey, InboundMessage, PermissionOption, Principal } from '../src/types.js';
 import type { Workspace, WorkspaceProvider } from '../src/core/workspace.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import { FakeChannel } from './helpers/channel.js';
@@ -76,7 +76,7 @@ afterEach(() => {
 });
 
 function harness(
-  opts: { auth?: Partial<AuthConfig>; authorizer?: Authorizer } = {},
+  opts: { auth?: Partial<AuthConfig>; authorizer?: Authorizer; kanban?: KanbanCommands } = {},
 ): Harness {
   const t = testDb();
   open.push(t);
@@ -102,6 +102,7 @@ function harness(
     channel,
     channelId: CHANNEL,
     appId: APP,
+    ...(opts.kanban === undefined ? {} : { kanban: opts.kanban }),
     clock,
     note: (line) => notes.push(line),
   });
@@ -510,6 +511,70 @@ describe('Router: commands', () => {
     await h.router.onMessage(msg({ text: '/new' }));
 
     expect(lastReply(h)).toContain('Fresh session');
+  });
+});
+
+describe('Router: /kanban', () => {
+  afterEach(() => clearSecrets());
+
+  /** A board that records what it was asked, and answers with `answer`. */
+  function board(answer: (arg: string) => Promise<string>): KanbanCommands & {
+    calls: Array<{ arg: string; messageId: string; key: BindingKey }>;
+  } {
+    const calls: Array<{ arg: string; messageId: string; key: BindingKey }> = [];
+    return {
+      calls,
+      run: async (arg, message, key) => {
+        calls.push({ arg, messageId: message.messageId, key });
+        return answer(arg);
+      },
+    };
+  }
+
+  it('says the board is off when kanban.enabled is not set, and opens no session', async () => {
+    const h = harness();
+    await h.router.onMessage(msg({ text: '/kanban list' }));
+    expect(lastReply(h)).toBe(KANBAN_OFF);
+    expect(sessionCount(h)).toBe(0);
+  });
+
+  it('hands the board the whole argument, lines kept, with the message and where it was said; the reply masked', async () => {
+    addSecrets(['sk-board-12345678']);
+    const kanban = board(async () => 'Created `k_1`, key sk-board-12345678');
+    const h = harness({ kanban });
+    const message = msg({ text: '/kanban new Draft the notes\nassignee: docs-writer', threadId: 'omt_1' });
+    await h.router.onMessage(message);
+    expect(kanban.calls).toEqual([
+      {
+        arg: 'new Draft the notes\nassignee: docs-writer',
+        messageId: message.messageId,
+        key: { channel: CHANNEL, appId: APP, conversationId: CHAT, threadId: 'omt_1' },
+      },
+    ]);
+    expect(h.channel.texts.at(-1)).toMatchObject({
+      text: `Created \`k_1\`, key ${MASK}`,
+      uuid: replyUuid(APP, message.messageId, 'kanban'),
+    });
+    expect(sessionCount(h)).toBe(0);
+  });
+
+  it('answers while the chat session is busy: it never touches that session', async () => {
+    const h = harness({ kanban: board(async () => 'the board') });
+    await working(h);
+    await h.router.onMessage(msg({ text: '/kanban list' }));
+    expect(lastReply(h)).toBe('the board');
+  });
+
+  it('answers a board that throws with the reason, escaped and masked, and notes it', async () => {
+    addSecrets(['sk-thrown-12345678']);
+    const h = harness({
+      kanban: board(async () => {
+        throw new Error('database_locked by sk-thrown-12345678');
+      }),
+    });
+    await h.router.onMessage(msg({ text: '/kanban list' }));
+    expect(lastReply(h)).toBe(`The board could not do that: database\\_locked by ${MASK}`);
+    expect(h.notes.some((n) => n.includes('kanban command in'))).toBe(true);
   });
 });
 
