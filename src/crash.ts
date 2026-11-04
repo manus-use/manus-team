@@ -1,6 +1,6 @@
 import { writeSync } from 'node:fs';
 import { inspect } from 'node:util';
-import { redactKnownSecrets } from './secrets.js';
+import { redactKnownSecrets, withholdSecretPrefix } from './secrets.js';
 
 /**
  * A crash's last words, masked (spec §10.1). Left to itself, Node prints an
@@ -19,9 +19,71 @@ export interface CrashSource {
   on(event: 'uncaughtException' | 'unhandledRejection', listener: (err: unknown) => void): unknown;
 }
 
-/** The one line a crash prints: what happened, and the error as Node would show it, masked. */
+/** The longest a crash report's error is shown, in characters; the rest is cut. */
+export const CRASH_REPORT_CHARS = 64 * 1024;
+
+/**
+ * The one line a crash prints: what happened, and the error as Node would show it, masked.
+ *
+ * Masking inspect's text alone is not enough. It cuts a long string before the
+ * masker sees it, which can leave a secret's start showing, and it escapes `\`
+ * and quotes, so that a secret holding them no longer matches. So the error's
+ * strings are masked first, value by value (maskDeep), and inspect, shown them
+ * whole, is masked again; the text is cut only after that.
+ */
 export function crashReport(what: string, err: unknown): string {
-  return `${what}: ${redactKnownSecrets(inspect(err))}\n`;
+  const shown = redactKnownSecrets(inspect(maskDeep(err, new WeakMap()), { maxStringLength: Infinity }));
+  const text = shown.length <= CRASH_REPORT_CHARS ? shown : `${withholdSecretPrefix(shown.slice(0, CRASH_REPORT_CHARS))} [cut]`;
+  return `${what}: ${text}\n`;
+}
+
+/** An error's fields that inspect shows though they are not enumerable. */
+const ERROR_FIELDS = ['stack', 'message', 'cause', 'errors'] as const;
+
+/**
+ * A copy of `value` with every string inspect would show masked: strings, and,
+ * in arrays, plain objects and errors, their own enumerable properties, and an
+ * error's message, stack, cause and errors, however deep. A cycle maps to the
+ * copy, so inspect still shows it as one.
+ *
+ * No getter of a property inspect leaves alone is called: it is copied as it is,
+ * and inspect shows `[Getter]`. An error's own field read through a getter that
+ * throws is left out. Any other object -- a Map, a class's instance -- is kept as
+ * it is, and only the masking of inspect's text covers it.
+ */
+function maskDeep(value: unknown, seen: WeakMap<object, unknown>): unknown {
+  if (typeof value === 'string') return redactKnownSecrets(value);
+  if (value === null || typeof value !== 'object') return value;
+  const done = seen.get(value);
+  if (done !== undefined) return done;
+  const isError = value instanceof Error;
+  const proto: unknown = Object.getPrototypeOf(value);
+  let copy: object;
+  if (Array.isArray(value)) copy = new Array<unknown>(value.length);
+  else if (isError) copy = Object.create(proto as object) as object;
+  else if (proto === null || proto === Object.prototype) copy = Object.create(proto as object | null) as object;
+  else return value;
+  seen.set(value, copy);
+  for (const key of Reflect.ownKeys(value)) {
+    const desc = Object.getOwnPropertyDescriptor(value, key);
+    if (desc === undefined || (key === 'length' && Array.isArray(value))) continue;
+    const field = isError && (ERROR_FIELDS as readonly PropertyKey[]).includes(key);
+    if (!desc.enumerable && !field) continue;
+    if ('value' in desc) {
+      Object.defineProperty(copy, key, { ...desc, value: maskDeep(desc.value, seen) });
+    } else if (field) {
+      let read: unknown;
+      try {
+        read = desc.get?.call(value);
+      } catch {
+        continue;
+      }
+      Object.defineProperty(copy, key, { value: maskDeep(read, seen), enumerable: desc.enumerable ?? false, configurable: true, writable: true });
+    } else {
+      Object.defineProperty(copy, key, desc);
+    }
+  }
+  return copy;
 }
 
 /**

@@ -1568,7 +1568,12 @@ changed: removing a token only means later text may show a token that no longer 
 
 **A crash.** An uncaught exception or an unhandled rejection is printed through `redactKnownSecrets`
 too, and the gateway exits 1, the code Node itself would use; Node's own report, which is not masked,
-is never printed.
+is never printed. The error's strings are masked value by value first — its own enumerable fields,
+its message, stack, cause and errors, through arrays and plain objects, however deep — because
+`inspect` escapes `\` and quotes, and a secret holding them would no longer match. `inspect` is then
+shown every string whole and its text masked again; only then is it cut, at 64 Ki characters, with
+any trailing start of a known secret dropped. An object of another kind, a `Map` or a class's
+instance, is covered only by that second masking.
 
 **Streaming.** A card re-renders while an answer streams in, so a secret whose first chunk has
 arrived and whose second has not would briefly show as a prefix. **Every** render therefore drops
