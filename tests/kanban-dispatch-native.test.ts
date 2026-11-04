@@ -153,6 +153,38 @@ describe('Dispatcher: native rendering', () => {
     expect(packages()).toEqual([b.slice(-64)]);
   });
 
+  it("resumes a native rework's conversation only from the package the work ran: an edited role.md starts fresh", async () => {
+    for (const edited of [false, true]) {
+      const r = implementer();
+      const h = harness({ roles: [r, role('reviewer')], renderRoot: root });
+      const task = h.create({ workspace: 'web', reviewer: 'reviewer' });
+      const agent = h.driver('implementer');
+      agent.providerSessionId = 'prov_impl';
+      agent.scripts.push(async (ctl) => {
+        const run = h.runOf(agent);
+        expect((await h.service.requestReview(task.taskId, { kind: 'run', runId: run.runId }, { summary: 'v1' })).ok).toBe(true);
+        ctl.end('completed');
+      });
+      h.driver('reviewer').scripts.push((ctl) => {
+        // Edited while the review runs: the rework's package is a new one.
+        if (edited) writeFileSync(r.roleMdPath ?? '', 'You change code, and you test it.\n');
+        const run = h.runOf(h.driver('reviewer'));
+        expect(h.service.requestChanges(task.taskId, { kind: 'run', runId: run.runId }, 'add a test').ok).toBe(true);
+        ctl.end('completed');
+      });
+      completes(h, agent);
+      h.dispatcher.pass();
+      await h.dispatcher.idle();
+
+      const runs = runsOf(h.t.db, task.taskId);
+      expect(runs.map((x) => x.outcome)).toEqual(['review_requested', 'changes_requested', 'completed']);
+      const [work, , again] = runs;
+      expect(again?.seededFromRun).toBe(edited ? null : work?.runId);
+      expect(agent.starts.map((x) => x.providerSessionId)).toEqual([undefined, edited ? undefined : 'prov_impl']);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("copies a role's imported skills into its package, or lists them in the prompt when it is not rendered", async () => {
     // A made-up home's user skill, imported by name, as startup would load it.
     const home = join(base, 'user');

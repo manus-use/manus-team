@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { closeRun, endRun, DEFAULT_LIMITS } from '../src/db/kanban.js';
+import { attachSession, closeRun, endRun, requestChanges, requestReview, DEFAULT_LIMITS } from '../src/db/kanban.js';
 import { eventsOf, getRun } from '../src/db/kanban-read.js';
+import { createSession } from '../src/db/sessions.js';
 import { KanbanService } from '../src/kanban/service.js';
+import type { Rendering, RunRow } from '../src/kanban/types.js';
 import { addSecrets, clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
-import { AGENT, NOW, WORKSPACES, claimed, newTask } from './helpers/kanban.js';
+import { AGENT, ALICE, NOW, WORKSPACES, claimed, newTask } from './helpers/kanban.js';
 
 /**
  * Whether a run ran natively (plan R) is recorded on the run, in its
@@ -72,5 +74,73 @@ describe('recordRendering', () => {
       message: `run ${person.runId} is a person's: nothing renders for it`,
     });
     expect(service.recordRendering('r_none', { native: false })).toMatchObject({ ok: false, code: 'not_found' });
+  });
+});
+
+describe("recordRendering settles a rework's seed (spec §5.3)", () => {
+  const spaces = [...WORKSPACES];
+  let used = 0;
+
+  /**
+   * A work run given its role one way, reviewed, changes asked; then the rework,
+   * claimed seeded from it. Each in a workspace of its own, as the rework stays open.
+   */
+  function rework(work: Rendering | undefined): { work: RunRow; rework: RunRow } {
+    const task = newTask(h.db, { reviewer: { kind: 'role', name: 'reviewer' }, workspace: spaces[used++ % spaces.length] ?? null });
+    const first = claimed(h.db, task.taskId);
+    createSession(
+      h.db,
+      {
+        id: `s_${first.runId}`,
+        agentId: 'implementer',
+        workspaceId: 'default',
+        ownerPrincipal: ALICE,
+        providerSessionId: 'prov_1',
+      },
+      NOW,
+    );
+    if (attachSession(h.db, first.runId, `s_${first.runId}`, NOW).ok !== true) throw new Error('not attached');
+    if (work !== undefined && !service.recordRendering(first.runId, work).ok) throw new Error('not recorded');
+    requestReview(h.db, task.taskId, { kind: 'run', runId: first.runId }, { summary: 'v1' }, NOW);
+    closeRun(h.db, first.runId, NOW);
+    const review = claimed(h.db, task.taskId);
+    requestChanges(h.db, task.taskId, { kind: 'run', runId: review.runId }, 'add a test', NOW);
+    closeRun(h.db, review.runId, NOW);
+    const again = claimed(h.db, task.taskId);
+    expect(again.seededFromRun).toBe(first.runId);
+    return { work: first, rework: again };
+  }
+
+  const OTHER = 'a'.repeat(64);
+
+  it('keeps the seed when the rework is given its role as the work was: the same package, or both in the prompt', () => {
+    for (const how of [{ native: true, packageHash: HASH }, { native: false }] as const) {
+      const r = rework(how);
+      expect(service.recordRendering(r.rework.runId, how)).toMatchObject({ ok: true, run: { seededFromRun: r.work.runId } });
+      expect(eventsOf(h.db, r.rework.taskId).at(-1)?.payload).toEqual(how);
+    }
+    // A work run from before plan R recorded neither key: it was not native.
+    const old = rework(undefined);
+    expect(service.recordRendering(old.rework.runId, { native: false })).toMatchObject({
+      run: { seededFromRun: old.work.runId },
+    });
+  });
+
+  it('drops the seed when the rework is given its role another way, and says so', () => {
+    const cases: Array<[Rendering | undefined, Rendering]> = [
+      [{ native: true, packageHash: HASH }, { native: true, packageHash: OTHER }],
+      [{ native: true, packageHash: HASH }, { native: false }],
+      [{ native: false }, { native: true, packageHash: HASH }],
+      [undefined, { native: true, packageHash: HASH }],
+    ];
+    for (const [then, now] of cases) {
+      const r = rework(then);
+      expect(service.recordRendering(r.rework.runId, now)).toMatchObject({ ok: true, run: { seededFromRun: null } });
+      expect(getRun(h.db, r.rework.runId)?.seededFromRun).toBeNull();
+      expect(eventsOf(h.db, r.rework.taskId).at(-1)).toMatchObject({
+        kind: 'run_rendered',
+        payload: { ...now, seedDropped: r.work.runId },
+      });
+    }
   });
 });

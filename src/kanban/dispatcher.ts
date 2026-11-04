@@ -605,8 +605,9 @@ export class Dispatcher {
     // Before the session, and synchronously up to the run's entry in #open, so
     // the sweep of another run's render sees this one's package as in use.
     const rendered = this.#render(claimed);
-    // On the run, once decided: C4 and E will seed only from a run with the
-    // same native-ness and package hash. A refusal is noted, and the run goes on.
+    // On the run, once decided; it also drops a rework's seed from a work run
+    // given its role another way (spec §5.3). A refusal is noted, and the run
+    // goes on with the seed the claim chose.
     const recorded = this.#deps.service.recordRendering(
       run.runId,
       rendered === undefined ? { native: false } : { native: true, packageHash: rendered.hash },
@@ -615,7 +616,7 @@ export class Dispatcher {
     let sessionId: string;
     try {
       if (run.workspace === null) throw new Error(`run ${run.runId} has no workspace`);
-      const seed = this.#seed(run);
+      const seed = this.#seed(recorded.ok ? recorded.run : run);
       sessionId = this.#deps.sessions.create(key, KANBAN_OWNER, {
         role: run.assignee.name,
         workspace: run.workspace,

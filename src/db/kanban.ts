@@ -106,6 +106,7 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'reviewerKind',
   'workspace',
   'packageHash',
+  'seedDropped',
 ]);
 
 /** One row of the board's log, masked value by value. */
@@ -525,9 +526,17 @@ const PACKAGE_HASH = /^[0-9a-f]{64}$/;
 /**
  * Record how an agent run's role reached its agent (plan R): as a native
  * package, by its content hash, or in the prompt. It goes into the run's
- * `agent_config`, beside the agent it ran, since it is part of what ran: C4
- * and E will seed only from a run with the same native-ness and package hash.
+ * `agent_config`, beside the agent it ran, since it is part of what ran.
  * Written once, on an open agent run.
+ *
+ * It also settles a rework's seed (spec §5.3). The claim chose it before the
+ * render, from the agent alone; a conversation resumes only under the same
+ * system prompt, so the seed is kept only if the work run it resumes ran the
+ * same way -- natively from the same package, or both in the prompt -- and
+ * dropped otherwise, so that `seeded_from_run` names a run whose provider session
+ * is really resumed. A run from before plan R records neither key, and counts as
+ * not native. The dispatcher creates the session after this, from the run as it
+ * is now.
  */
 export function recordRendering(db: Db, runId: string, rendering: Rendering, now: number): Result<{ run: RunRow }> {
   return tx(db, (d) => {
@@ -541,11 +550,29 @@ export function recordRendering(db: Db, runId: string, rendering: Rendering, now
       return refuse('invalid', 'a native run records its package hash, 64 lower-case hex digits; any other run records none');
     }
     const recorded = rendering.native ? { native: true, packageHash: rendering.packageHash } : { native: false };
-    d.prepare('UPDATE kanban_runs SET agent_config = jsonb(?) WHERE run_id = ?').run(
+    const seed = run.seededFromRun === null ? undefined : getRun(d, run.seededFromRun)?.agentConfig;
+    const sameWay =
+      seed !== undefined &&
+      seed !== null &&
+      (seed.native === true) === rendering.native &&
+      (!rendering.native || seed.packageHash === rendering.packageHash);
+    const dropped = run.seededFromRun !== null && !sameWay ? run.seededFromRun : undefined;
+    d.prepare('UPDATE kanban_runs SET agent_config = jsonb(?), seeded_from_run = ? WHERE run_id = ?').run(
       JSON.stringify({ ...run.agentConfig, ...recorded }),
+      dropped === undefined ? run.seededFromRun : null,
       runId,
     );
-    record(d, { taskId: run.taskId, runId, kind: 'run_rendered', actor: 'gateway', payload: recorded }, now);
+    record(
+      d,
+      {
+        taskId: run.taskId,
+        runId,
+        kind: 'run_rendered',
+        actor: 'gateway',
+        payload: dropped === undefined ? recorded : { ...recorded, seedDropped: dropped },
+      },
+      now,
+    );
     return { ok: true, run: mustGetRun(d, runId) };
   });
 }
