@@ -130,9 +130,32 @@ describe('the board, at startup', () => {
     const gateway = await createGateway(config, team);
     try {
       expect(gateway.dispatcher).toBeUndefined();
+      expect(gateway.notifier).toBeUndefined();
     } finally {
       await gateway.stop();
     }
+  });
+
+  it('starts delivering notices once connected, and stops before it disconnects, when kanban.enabled is set', async () => {
+    vi.spyOn(LarkAdapter.prototype, 'connect').mockResolvedValue(undefined);
+    const order: string[] = [];
+    vi.spyOn(LarkAdapter.prototype, 'disconnect').mockImplementation(async () => {
+      order.push('disconnect');
+    });
+    vi.spyOn(LarkInbound.prototype, 'start').mockImplementation(() => undefined);
+    const gateway = await createGateway({ ...config, kanban: { ...config.kanban, enabled: true } }, team);
+    const notifier = gateway.notifier;
+    if (notifier === undefined) throw new Error('no notifier');
+    vi.spyOn(notifier, 'start').mockImplementation(() => {
+      order.push('notices start');
+    });
+    vi.spyOn(notifier, 'idle').mockImplementation(async () => {
+      order.push('notices idle');
+      return true;
+    });
+    await gateway.start();
+    await gateway.stop();
+    expect(order).toEqual(['notices start', 'notices idle', 'disconnect']);
   });
 
   it("waits, for a few seconds at most, for the dispatcher's work before it closes the database", async () => {

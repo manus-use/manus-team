@@ -15,7 +15,9 @@ import { NamedWorkspaces } from './core/workspace.js';
 import { replyUuid } from './core/ids.js';
 import { systemClock } from './time.js';
 import { addSecrets, redactKnownSecrets } from './secrets.js';
+import { KanbanChat } from './kanban/chat.js';
 import { Dispatcher } from './kanban/dispatcher.js';
+import { Notifier } from './kanban/notices.js';
 import { KanbanService } from './kanban/service.js';
 import { writeMtShim } from './kanban/shim.js';
 import { KanbanSink } from './kanban/sink.js';
@@ -47,6 +49,8 @@ export interface Gateway {
   readonly db: Db;
   /** The board's dispatcher, when `kanban.enabled` is set. */
   readonly dispatcher: Dispatcher | undefined;
+  /** What delivers the board's notices to the chats that follow its tasks, when `kanban.enabled` is set. */
+  readonly notifier: Notifier | undefined;
 }
 
 /**
@@ -174,8 +178,11 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     note,
   });
 
-  // Off until the board can be used: nothing can create a task before plan D (spec §12).
+  // Opt in: off unless kanban.enabled is set (spec §12). Chat runs as it always did
+  // without it, and `/kanban` says the board is off.
   let worker: { api: WorkerApi; socket: string } | undefined;
+  let kanbanChat: KanbanChat | undefined;
+  let notifier: Notifier | undefined;
   let workerServer: WorkerServer | undefined;
   let lock: GatewayLock | undefined;
   if (config.kanban.enabled) {
@@ -207,6 +214,24 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     });
     // A worker's create, link or report can make a task claimable.
     worker = { api: new WorkerApi({ db, service, changed: () => dispatcher?.pass() }), socket };
+    // /kanban in chat (spec §9.1): through the same service, with the router's tiers.
+    kanbanChat = new KanbanChat({
+      service,
+      hasTier: (principal, tier) => authorizer.hasTier(principal, tier),
+      changed: () => dispatcher?.pass(),
+      cancel: (runId) => {
+        dispatcher?.cancel(runId);
+      },
+    });
+    // What the chats following a task hear (spec §9.4), sent through Lark.
+    notifier = new Notifier({
+      db,
+      service,
+      channels: new Map<string, Channel>([[adapter.id, adapter]]),
+      appId: config.lark.appId,
+      blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
+      note,
+    });
     note(`kanban: dispatching up to ${config.kanban.maxRunning} agent run(s) at once`);
   }
 
@@ -217,6 +242,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     channel: adapter,
     channelId: adapter.id,
     appId: config.lark.appId,
+    ...(kanbanChat === undefined ? {} : { kanban: kanbanChat }),
     note,
   });
 
@@ -233,6 +259,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   return {
     db,
     dispatcher,
+    notifier,
 
     async start(): Promise<void> {
       // First, the home's lock and then the worker socket's path: a second gateway
@@ -268,6 +295,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       await adapter.connect();
       inbound.start();
       note(`connected as ${adapter.botOpenId ?? 'unknown bot identity'}`);
+      // Once connected: its first round catches up on what the chats missed while the gateway was down.
+      notifier?.start();
 
       // Only now, because saying it requires a connection. Failing to deliver a
       // finding must not prevent the gateway from starting -- the session is
@@ -313,6 +342,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       if (housekeeping !== undefined) clearInterval(housekeeping);
       // No more claims; the runs still open are ended by the next boot.
       dispatcher?.stop();
+      // No more notices; what was not sent is sent by the next boot, from the cursors.
+      notifier?.stop();
       // Stop taking work before draining it, or the drain never finishes.
       inbound.stop();
       // Then the worker socket: a report still running its gates is stopped and
@@ -321,6 +352,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // above, decides no run whose turn ends from here on: the next boot ends
       // them (spec §8.4), so the stop itself never fails a run.
       await workerServer?.close();
+      // A notice being sent finishes while the channel is still connected; bounded, as a send is.
+      if ((await notifier?.idle()) === false) note('kanban: stopped with a notice still being sent; the next boot sends it again');
       await adapter.disconnect().catch((err: unknown) => {
         note(`disconnect failed: ${err instanceof Error ? err.message : String(err)}`);
       });
