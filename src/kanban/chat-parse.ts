@@ -90,7 +90,17 @@ const FIELDS = {
 } as const;
 type FieldLabel = keyof typeof FIELDS;
 
-const FIELD_LINE = /^(assignee|reviewer|workspace|parent|outcome|verify|constraints|boundaries|stop when)[ \t]*:[ \t]*(.*)$/i;
+/** Zero-width characters, which a paste from a rich editor can put where nobody sees them. */
+const ZW = '\u200B-\u200D\u2060\uFEFF';
+
+/** A field line; a zero-width character next to the colon is passed over, as the line start's is. */
+const FIELD_LINE = new RegExp(
+  `^(assignee|reviewer|workspace|parent|outcome|verify|constraints|boundaries|stop[ \\t]+when)[ \\t${ZW}]*:[ \\t${ZW}]*(.*)$`,
+  'i',
+);
+
+/** Zero-width characters at the start of a line, after any indent. */
+const LEADING_ZW = new RegExp(`^([ \\t]*)[${ZW}]+`, 'gm');
 
 /**
  * A name that is a person, not a role: an @-mention, which Lark's text gives as
@@ -122,7 +132,8 @@ function words(text: string, n: number): string[] | undefined {
  */
 export function parseKanban(arg: string): ParsedKanban {
   // One kind of line break from here on: a pasted CRLF, or a lone CR, is a newline.
-  const [rawVerb, rest] = shift(arg.replace(/\r\n?/g, '\n'));
+  // And no zero-width character at a line's start, where it would hide a verb or a label.
+  const [rawVerb, rest] = shift(arg.replace(/\r\n?/g, '\n').replace(LEADING_ZW, '$1'));
   const verb = rawVerb.toLowerCase();
   switch (verb) {
     case '':
@@ -202,15 +213,19 @@ function parseGate(text: string): ParsedKanban {
   }
   if (sub !== 'add') return usage('gate add');
   const [taskId, after] = shift(rest);
+  // `gate add --timeout 30 x`: the timeout where the task goes is no task id.
+  if (taskId.startsWith('--')) return usage('gate add');
   let command = after;
   let timeoutS: number | undefined;
-  const timed = /^[ \t]*--timeout[ \t]+(\S+)([\s\S]*)$/.exec(command);
+  const timed = /^[ \t]*--timeout(?:=|[ \t]+)(\S+)([\s\S]*)$/.exec(command);
   if (timed !== null) {
     if (!/^[1-9][0-9]*$/.test(timed[1] ?? '')) return usage('gate add');
     timeoutS = Number(timed[1]);
     command = (timed[2] ?? '').replace(/^[ \t]+/, '');
   }
   command = command.trim();
+  // A timeout that could not be read, or a second one, is not the start of a command.
+  if (/^--timeout/i.test(command)) return usage('gate add');
   if (taskId === '' || command === '') return usage('gate add');
   return { ok: true, command: { verb: 'gate add', taskId, command, timeoutS } };
 }
@@ -236,11 +251,13 @@ function parseNew(text: string): ParsedKanban {
       body.push(line);
       continue;
     }
-    const label = (m[1] ?? '').toLowerCase() as FieldLabel;
+    const label = (m[1] ?? '').toLowerCase().replace(/[ \t]+/, ' ') as FieldLabel;
     const value = (m[2] ?? '').trim();
     if (value === '') return { ok: false, usage: `\`${label}:\` needs a value.` };
     if (label === 'parent') {
-      out.parents.push(...value.split(/[\s,]+/).filter((id) => id !== ''));
+      const ids = value.split(/[\s,]+/).filter((id) => id !== '');
+      if (ids.length === 0) return { ok: false, usage: '`parent:` needs a value.' };
+      out.parents.push(...ids);
       continue;
     }
     if (seen.has(label)) return { ok: false, usage: `\`${label}:\` is given twice.` };

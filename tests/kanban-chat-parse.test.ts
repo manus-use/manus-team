@@ -69,6 +69,37 @@ describe('/kanban new', () => {
     });
     expect(parseKanban('new t\nassignee: a\nassignee: b')).toEqual({ ok: false, usage: '`assignee:` is given twice.' });
     expect(parseKanban('new t\nverify:')).toEqual({ ok: false, usage: '`verify:` needs a value.' });
+    expect(parseKanban('new t\nparent: ,,,')).toEqual({ ok: false, usage: '`parent:` needs a value.' });
+  });
+
+  it('reads `stop when:` with any run of spaces or tabs between its words', () => {
+    expect(parseKanban('new t\nstop  when: the build is red\nStop\twhen: twice')).toEqual({
+      ok: false,
+      usage: '`stop when:` is given twice.',
+    });
+    expect(parseKanban('new t\nstop \t when: the build is red')).toMatchObject({
+      ok: true,
+      command: { contract: { stop_when: 'the build is red' }, body: '' },
+    });
+  });
+
+  it('passes over zero-width characters before a verb, before a field label and around its colon', () => {
+    const zw = ['\u200b', '\u200c', '\u200d', '\u2060', '\ufeff'];
+    for (const z of zw) {
+      expect(parseKanban(`${z}new Notes\n${z}assignee${z}: ${z}docs-writer\n${z}workspace: docs\nThe body.`)).toEqual({
+        ok: true,
+        command: {
+          verb: 'new',
+          title: 'Notes',
+          body: 'The body.',
+          assignee: 'docs-writer',
+          workspace: 'docs',
+          parents: [],
+          contract: {},
+        },
+      });
+    }
+    expect(parseKanban('\u200bshow k_1')).toEqual({ ok: true, command: { verb: 'show', taskId: 'k_1' } });
   });
 });
 
@@ -116,6 +147,10 @@ describe('the other /kanban commands', () => {
       ok: true,
       command: { verb: 'gate add', taskId: 'k_1', command: 'curl -fsS https://example.invalid/health', timeoutS: 60 },
     });
+    expect(parseKanban('gate add k_1 --timeout=45 make check')).toEqual({
+      ok: true,
+      command: { verb: 'gate add', taskId: 'k_1', command: 'make check', timeoutS: 45 },
+    });
     expect(parseKanban('gate list k_1')).toEqual({ ok: true, command: { verb: 'gate list', taskId: 'k_1' } });
     expect(parseKanban('gate remove k_1 3')).toEqual({ ok: true, command: { verb: 'gate remove', taskId: 'k_1', gateId: 3 } });
   });
@@ -141,6 +176,15 @@ describe('the other /kanban commands', () => {
       'gate add k_1',
       'gate add k_1 --timeout 0 true',
       'gate add k_1 --timeout x true',
+      'gate add k_1 --timeout',
+      'gate add k_1 --timeout=',
+      'gate add k_1 --timeout= 30 true',
+      'gate add k_1 --timeout=x true',
+      'gate add k_1 --TIMEOUT 30',
+      'gate add k_1 --timeout\n30 true',
+      'gate add k_1 --timeout 30 --timeout 40 true',
+      'gate add --timeout 30 make check',
+      'gate add --timeout=30 make check',
       'gate remove k_1 one',
       'gate remove k_1 0',
     ]) {
