@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eventsOf, gatesOf } from '../src/db/kanban-read.js';
+import { GATE_OUTPUT_BYTES, gateEnv, runGates, type GateExit, type GateRunOptions } from '../src/kanban/gates.js';
 import { KanbanService } from '../src/kanban/service.js';
-import { GATE_LIMITS, type TaskRow } from '../src/kanban/types.js';
-import { addSecrets, clearSecrets } from '../src/secrets.js';
+import { GATE_LIMITS, type GateRow, type TaskRow } from '../src/kanban/types.js';
+import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import { ManualClock, testDb, type TestDb } from './helpers/db.js';
-import { DEFAULT_ROLES } from './helpers/dispatch.js';
+import { DEFAULT_ROLES, role } from './helpers/dispatch.js';
 import { ALICE, VIA, WORKSPACES } from './helpers/kanban.js';
 
 /**
@@ -125,7 +126,9 @@ describe('defining gates', () => {
       ['by a number', () => s.addGate(k.taskId, { command: 'true' }, bad(3))],
       ['task id an object', () => s.addGate(bad({}), { command: 'true' }, ALICE)],
     ];
-    for (const [what, call] of cases) expect([what, call()]).toEqual([what, expect.objectContaining({ ok: false, code: 'invalid' })]);
+    for (const [what, call] of cases) {
+      expect([what, call()]).toEqual([what, expect.objectContaining({ ok: false, code: 'invalid' })]);
+    }
     expect(count()).toBe(0);
   });
 
@@ -158,5 +161,106 @@ describe('defining gates', () => {
       ok: false,
       message: `task ${many.taskId} has 20 gates, the most a task may have`,
     });
+  });
+});
+
+/** Gates as rows, for runGates. */
+function rows(...commands: string[]): GateRow[] {
+  return commands.map((command, i) => ({ id: i + 1, taskId: 'k_1', command, timeoutS: 30 + i, createdBy: ALICE, createdAt: 0 }));
+}
+
+/** A runner that starts nothing: each command's exit, as scripted, and every call it was given. */
+function scripted(exits: Record<string, Partial<GateExit>>) {
+  const calls: Array<{ command: string } & GateRunOptions> = [];
+  const runner = async (command: string, opts: GateRunOptions): Promise<GateExit> => {
+    calls.push({ command, ...opts });
+    return { exitCode: 0, signal: null, timedOut: false, output: '', ...exits[command] };
+  };
+  return { runner, calls };
+}
+
+describe('running gates', () => {
+  it('runs each gate in order, in the workspace, with its timeout, and passes when each exits 0', async () => {
+    const { runner, calls } = scripted({ 'npm test': { output: 'all green' } });
+    const env = { PATH: '/usr/bin', API_KEY: 'k' };
+    const run = await runGates(rows('npm run lint', 'npm test'), { cwd: '/ws/web', env, runner, clock: new ManualClock() });
+    expect(calls.map((c) => [c.command, c.cwd, c.timeoutMs, c.env])).toEqual([
+      ['npm run lint', '/ws/web', 30_000, env],
+      ['npm test', '/ws/web', 31_000, env],
+    ]);
+    expect(run).toEqual({
+      passed: true,
+      aborted: false,
+      notRun: 0,
+      results: [
+        { gateId: 1, command: 'npm run lint', exitCode: 0, signal: null, timedOut: false, durationMs: 0, output: '' },
+        { gateId: 2, command: 'npm test', exitCode: 0, signal: null, timedOut: false, durationMs: 0, output: 'all green' },
+      ],
+    });
+  });
+
+  it('stops at the first gate that exits non-zero or times out, and says how many did not run', async () => {
+    const failing = scripted({ b: { exitCode: 2, output: 'FAIL parser.test.ts' } });
+    const failed = await runGates(rows('a', 'b', 'c', 'd'), { cwd: '/ws', env: {}, runner: failing.runner });
+    expect(failing.calls.map((c) => c.command)).toEqual(['a', 'b']);
+    expect(failed).toMatchObject({
+      passed: false,
+      aborted: false,
+      notRun: 2,
+      results: [{ exitCode: 0 }, { exitCode: 2, output: 'FAIL parser.test.ts' }],
+    });
+
+    const slow = scripted({ a: { exitCode: null, signal: 'SIGTERM', timedOut: true } });
+    expect(await runGates(rows('a', 'b'), { cwd: '/ws', env: {}, runner: slow.runner })).toMatchObject({
+      passed: false,
+      notRun: 1,
+      results: [{ exitCode: null, signal: 'SIGTERM', timedOut: true }],
+    });
+  });
+
+  it('masks what a gate wrote before keeping its end', async () => {
+    addSecrets(['sk-live-1234567890']);
+    const long = `${'x'.repeat(GATE_OUTPUT_BYTES)}\nthe key is sk-live-1234567890`;
+    const { runner } = scripted({ a: { exitCode: 1, output: long } });
+    const [result] = (await runGates(rows('a'), { cwd: '/ws', env: {}, runner })).results;
+    expect(result?.output.endsWith(`the key is ${MASK}`)).toBe(true);
+    expect(result?.output).not.toContain('sk-live');
+    expect(Buffer.byteLength(result?.output ?? '', 'utf8')).toBe(GATE_OUTPUT_BYTES);
+  });
+
+  it('runs nothing more once the gateway is stopping, and says the run was stopped', async () => {
+    const stopping = new AbortController();
+    const { runner, calls } = scripted({});
+    const first = await runGates(rows('a', 'b'), {
+      cwd: '/ws',
+      env: {},
+      runner: async (command, opts) => {
+        stopping.abort();
+        return runner(command, opts);
+      },
+      signal: stopping.signal,
+    });
+    expect(calls.map((c) => [c.command, c.signal?.aborted])).toEqual([['a', true]]);
+    expect(first).toMatchObject({ passed: false, aborted: true, notRun: 1 });
+    expect(await runGates(rows('a'), { cwd: '/ws', env: {}, runner, signal: stopping.signal })).toEqual({
+      passed: false,
+      aborted: true,
+      results: [],
+      notRun: 1,
+    });
+  });
+
+  it("gives a gate its role's environment and the agent allowlist, never the gateway's secrets or a run's", () => {
+    const implementer = role('implementer', {
+      agent: { ...role('implementer').agent, env: { API_KEY: 'sk-role-1', MT_KANBAN_SOCKET: '/somewhere' } },
+    });
+    const parent = {
+      PATH: '/usr/bin',
+      HOME: '/home/mt',
+      LARK_APP_SECRET: 'lark-secret',
+      MT_KANBAN_TOKEN: 'a-token',
+      SOMETHING_ELSE: 'x',
+    };
+    expect(gateEnv(implementer, parent)).toEqual({ PATH: '/usr/bin', HOME: '/home/mt', API_KEY: 'sk-role-1' });
   });
 });

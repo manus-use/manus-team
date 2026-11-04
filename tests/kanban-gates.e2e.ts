@@ -1,0 +1,108 @@
+import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { spawnGate } from '../src/kanban/gates.js';
+
+/**
+ * The real gate runner (spec §7.7): `/bin/sh -c`, in its own process group, in
+ * the workspace, with only the environment it is given. Real processes, so not a
+ * unit test.
+ */
+
+let dir: string;
+const env = { PATH: process.env['PATH'] ?? '/usr/bin:/bin' };
+
+beforeEach(() => {
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'mt-gate-')));
+});
+afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+describe('spawnGate', () => {
+  it('passes a command that exits 0, in the workspace, with the environment given and nothing else', async () => {
+    const r = await spawnGate('pwd; echo "key=$API_KEY token=${MT_KANBAN_TOKEN:-none}"', {
+      cwd: dir,
+      env: { ...env, API_KEY: 'from-the-role' },
+      timeoutMs: 10_000,
+    });
+    expect(r).toEqual({ exitCode: 0, signal: null, timedOut: false, output: `${dir}\nkey=from-the-role token=none\n` });
+  });
+
+  it('fails a command that exits non-zero, with what it wrote to stdout and stderr', async () => {
+    const r = await spawnGate('echo one; echo two >&2; exit 3', { cwd: dir, env, timeoutMs: 10_000 });
+    expect(r).toMatchObject({ exitCode: 3, signal: null, timedOut: false });
+    expect(r.output.split('\n').sort()).toEqual(['', 'one', 'two']);
+  });
+
+  it('kills a gate past its timeout, and what it started, promptly', async () => {
+    const started = Date.now();
+    const r = await spawnGate('echo begun; sleep 30 & sleep 30', { cwd: dir, env, timeoutMs: 300 });
+    expect(r.timedOut).toBe(true);
+    // The shell is killed by the signal, or exits on it once its child is: either way, not 0.
+    expect(r.signal === 'SIGTERM' || r.exitCode === 143).toBe(true);
+    expect(r.output.startsWith('begun\n')).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('does not wait for a background process the gate left holding its output', async () => {
+    const started = Date.now();
+    const r = await spawnGate('sleep 30 & echo done', { cwd: dir, env, timeoutMs: 20_000 });
+    expect(r).toMatchObject({ exitCode: 0, timedOut: false, output: 'done\n' });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("does not wait for a process that left the gate's group holding its output, nor count that against the gate", async () => {
+    const started = Date.now();
+    // A child that makes itself a session of its own, then says so, keeping the gate's output open.
+    const escape = `perl -MPOSIX -e 'POSIX::setsid(); open(my $f, ">", "escaped.pid"); print $f $$; close($f); sleep 30' &`;
+    // The timeout falls in the second the output is let go of: the gate itself ended in time.
+    const r = await spawnGate(`${escape} while [ ! -s escaped.pid ]; do sleep 0.05; done; echo done`, {
+      cwd: dir,
+      env,
+      timeoutMs: 700,
+    });
+    try {
+      expect(r).toMatchObject({ exitCode: 0, timedOut: false, output: 'done\n' });
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      process.kill(Number(readFileSync(join(dir, 'escaped.pid'), 'utf8')), 'SIGKILL');
+    }
+  });
+
+  it('kills a running gate when the gateway exits', async () => {
+    const code = [
+      `import { spawnGate } from ${JSON.stringify(new URL('../src/kanban/gates.ts', import.meta.url).href)};`,
+      `const opts = { cwd: ${JSON.stringify(dir)}, env: { PATH: '/usr/bin:/bin' }, timeoutMs: 60_000 };`,
+      "void spawnGate('echo $$ > gate.pid; exec sleep 30', opts);",
+      'setTimeout(() => process.exit(1), 500);',
+    ].join('\n');
+    const loader = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ['--import', loader, '--input-type=module', '-e', code], { stdio: 'ignore' });
+      child.once('error', reject);
+      child.once('close', () => resolve());
+    });
+    const pid = Number(readFileSync(join(dir, 'gate.pid'), 'utf8'));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(() => process.kill(pid, 0)).toThrow(/ESRCH/);
+  });
+
+  it('stops a gate when the gateway stops', async () => {
+    const stop = new AbortController();
+    setTimeout(() => stop.abort(), 200);
+    const started = Date.now();
+    const r = await spawnGate('sleep 30', { cwd: dir, env, timeoutMs: 20_000, signal: stop.signal });
+    expect(r.timedOut).toBe(false);
+    expect(r.signal === 'SIGTERM' || r.exitCode === 143).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('fails a gate that cannot start, saying why', async () => {
+    const r = await spawnGate('true', { cwd: join(dir, 'missing'), env, timeoutMs: 10_000 });
+    expect(r).toMatchObject({ exitCode: null, timedOut: false });
+    expect(r.output).toMatch(/^the gate could not start: spawn \/bin\/sh ENOENT/);
+  });
+});
