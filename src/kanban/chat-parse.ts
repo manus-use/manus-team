@@ -1,4 +1,6 @@
 import { forDisplay } from '../channel/escape.js';
+import { redactKnownSecrets } from '../secrets.js';
+import { stripControl } from '../text.js';
 import type { DisplayStatus } from './status.js';
 import type { Contract } from './types.js';
 
@@ -110,6 +112,17 @@ export function isPerson(name: string): boolean {
   return name.startsWith('@') || name.toLowerCase().startsWith('lark:');
 }
 
+/**
+ * A word as typed, to echo back: masked, then cut to `max` UTF-16 units with a
+ * marker, on a character boundary, then escaped -- as `label` in
+ * `chat-render.ts` does, which imports this module and so cannot be imported here.
+ */
+function echoed(word: string, max: number): string {
+  const text = redactKnownSecrets(stripControl(word));
+  if (text.length <= max) return forDisplay(text);
+  return forDisplay(`${text.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, '')}…`);
+}
+
 function usage(verb: keyof typeof USAGE): ParsedKanban {
   return { ok: false, usage: `Usage: \`${USAGE[verb]}\`` };
 }
@@ -191,7 +204,7 @@ export function parseKanban(arg: string): ParsedKanban {
     default: {
       const later = LATER_VERBS.find((v) => v === verb);
       if (later !== undefined) return { ok: true, command: { verb: 'later', name: later } };
-      return { ok: false, usage: `Unknown \`/kanban\` command \`${forDisplay(rawVerb)}\`. \`/kanban help\` lists them.` };
+      return { ok: false, usage: `Unknown \`/kanban\` command \`${echoed(rawVerb, 80)}\`. \`/kanban help\` lists them.` };
     }
   }
 }

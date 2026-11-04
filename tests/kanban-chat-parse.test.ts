@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { parseKanban } from '../src/kanban/chat-parse.js';
+import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 
 /** `/kanban` as typed in chat (spec §9.1): what follows the command, parsed. */
+
+afterEach(() => {
+  clearSecrets();
+});
 
 describe('/kanban new', () => {
   it('takes the title from the first line, fields from labelled lines in any order, and the rest as the body', () => {
@@ -193,6 +198,21 @@ describe('the other /kanban commands', () => {
     expect(parseKanban('frob_nicate k_1')).toEqual({
       ok: false,
       usage: 'Unknown `/kanban` command `frob\\_nicate`. `/kanban help` lists them.',
+    });
+  });
+
+  it('echoes an unknown verb masked and cut to 80 characters, on a character boundary', () => {
+    // An emoji straddling the cut is dropped whole.
+    const long = `${'a'.repeat(78)}\u{1F600}${'b'.repeat(200)}`;
+    expect(parseKanban(long)).toEqual({
+      ok: false,
+      usage: `Unknown \`/kanban\` command \`${'a'.repeat(78)}…\`. \`/kanban help\` lists them.`,
+    });
+    // Masked before it is cut, so no start of a secret shows at the cut.
+    addSecrets(['sk-verb-12345678']);
+    expect(parseKanban(`${'c'.repeat(75)}sk-verb-12345678`)).toEqual({
+      ok: false,
+      usage: `Unknown \`/kanban\` command \`${'c'.repeat(75)}${MASK}\`. \`/kanban help\` lists them.`,
     });
   });
 });
