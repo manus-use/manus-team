@@ -760,8 +760,10 @@ export class KanbanService {
     return {
       ok: false,
       code: 'gate_failed',
+      // Masked before it is quoted: quoting escapes a `"` or `\` in a secret, and
+      // the escaped form no longer matches it.
       message:
-        `gate ${JSON.stringify(failed.command)} ${verdict(failed, timeoutS)}; ` +
+        `gate ${JSON.stringify(redactKnownSecrets(failed.command))} ${verdict(failed, timeoutS)}; ` +
         'the report was not applied: fix it and report again',
       gate: {
         command: failed.command,

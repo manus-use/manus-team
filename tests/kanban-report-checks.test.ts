@@ -179,6 +179,27 @@ describe('gates on complete and review', () => {
     expect(eventsOf(g.t.db, task.taskId).filter((e) => e.kind === 'gates_ran')).toHaveLength(2);
   });
 
+  it('masks a secret with a quote in it, registered after its gate was defined, before quoting the gate', async () => {
+    const secret = 'sk-li"ve-12\\34567890';
+    const task = g.create();
+    g.s.addGate(task.taskId, { command: `deploy --key '${secret}'` }, ALICE);
+    addSecrets([secret]);
+    const run = g.claim(task.taskId);
+    g.exits.set(`deploy --key '${secret}'`, { exitCode: 1 });
+    const r = await g.s.complete(task.taskId, as(run), { summary: 'done' });
+    expect(r).toMatchObject({
+      ok: false,
+      code: 'gate_failed',
+      message: `gate ${JSON.stringify(`deploy --key '${MASK}'`)} exited 1; the report was not applied: fix it and report again`,
+    });
+    const message = r.ok ? '' : r.message;
+    for (let i = 0; i + 8 <= secret.length; i += 1) {
+      for (const fragment of [secret.slice(i, i + 8), JSON.stringify(secret).slice(i + 1, i + 9)]) {
+        if (message.includes(fragment)) throw new Error(`a fragment at ${i} shows: ${message}`);
+      }
+    }
+  });
+
   it('says how a gate that timed out or could not start refused the report', async () => {
     const task = g.create();
     g.s.addGate(task.taskId, { command: 'npm test', timeoutS: 120 }, ALICE);
