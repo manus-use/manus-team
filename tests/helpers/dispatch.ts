@@ -117,7 +117,15 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
     sessions: registry,
     roles,
     appId: APP,
-    settings: { maxRunning: 8, defaultMaxRuntimeS: 4 * 3600, strandedAfterS: 1800, sweepIntervalS: 60, ...opts.settings },
+    // No nudges unless a test asks for them: the rest count one prompt per run.
+    settings: {
+      maxRunning: 8,
+      defaultMaxRuntimeS: 4 * 3600,
+      strandedAfterS: 1800,
+      sweepIntervalS: 60,
+      nudgeLimit: 0,
+      ...opts.settings,
+    },
     clock,
     note: (line) => notes.push(line),
     ...(opts.renderRoot === undefined ? {} : { renderRoot: opts.renderRoot }),

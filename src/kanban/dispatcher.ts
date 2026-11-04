@@ -1,8 +1,9 @@
 import { delimiter } from 'node:path';
 import type { SessionRegistry } from '../core/registry.js';
+import type { SessionActor } from '../core/session-actor.js';
 import { bindingsOnChannel } from '../db/bindings.js';
 import type { Db } from '../db/open.js';
-import { claimableTasks, getRun, getTask, openAgentRunCount, openRuns, runBySession } from '../db/kanban-read.js';
+import { claimableTasks, commentsOf, getRun, getTask, openAgentRunCount, openRuns, runBySession } from '../db/kanban-read.js';
 import { getSession } from '../db/sessions.js';
 import { nativeFor, renderNative, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
 import type { Role } from '../roles.js';
@@ -11,12 +12,12 @@ import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, Principal, TurnTerminal } from '../types.js';
 import { briefFor } from './brief.js';
 import { classifyFailure } from './classify.js';
-import { composePrompt } from './prompt.js';
+import { composeForwarded, composeNudge, composePrompt } from './prompt.js';
 import type { Claimed, KanbanService } from './service.js';
 import { hadSideEffects, lastTurnOf, toolCallsOf } from './session-log.js';
 import { KANBAN_CHANNEL } from './sink.js';
 import { hashToken, mintToken } from './token.js';
-import type { RunRow } from './types.js';
+import type { CommentRow, RunKind, RunRow } from './types.js';
 
 /**
  * The dispatcher (spec §6): the one component that turns "a task became ready"
@@ -53,6 +54,8 @@ export interface DispatcherSettings {
   strandedAfterS: number;
   /** How often the sweep runs (spec §6.1). */
   sweepIntervalS: number;
+  /** Reminders a run whose turn ended without a report is sent, before it is a protocol violation (spec §7.5). */
+  nudgeLimit: number;
 }
 
 export interface DispatcherDeps {
@@ -119,6 +122,23 @@ interface OpenRun extends RunHandle {
   cancelling: boolean;
   /** Its session has been released because its turn ignored the cancel. */
   released: boolean;
+  /** Its kind: which reports a nudge names. */
+  kind: RunKind;
+  /** Nudges sent so far (spec §7.5). */
+  nudges: number;
+  /** The newest comment its agent has been given, in its prompt or forwarded: later ones are forwarded. */
+  seenComment: number;
+}
+
+/** The newest comment's id, or 0 for none. */
+function newest(comments: readonly CommentRow[]): number {
+  return comments.reduce((max, c) => Math.max(max, c.id), 0);
+}
+
+/** A protocol violation's error: how many times the run was asked. */
+function unreported(nudges: number): string {
+  const base = 'the run ended its turn without reporting';
+  return nudges === 0 ? base : `${base}, and again after ${nudges} reminder${nudges === 1 ? '' : 's'}`;
 }
 
 function message(err: unknown): string {
@@ -554,29 +574,28 @@ export class Dispatcher {
       packageDir: rendered?.dir,
       cancelling: false,
       released: false,
+      kind: run.kind,
+      nudges: 0,
+      seenComment: 0,
     });
     this.#open.set(sessionId, open);
 
     let terminal: TurnTerminal | 'decided';
     let thrown: string | undefined;
     try {
-      const counted = this.#deps.service.countSubmission(run.runId);
-      if (!counted.ok) throw new Error(counted.message);
-      const prompt = composePrompt(briefFor(this.#deps.db, claimed, { native: rendered !== undefined }));
+      const brief = briefFor(this.#deps.db, claimed, { native: rendered !== undefined });
+      open.seenComment = newest(brief.comments);
+      const prompt = composePrompt(brief);
       const actor = await this.#deps.sessions.actorFor(sessionId, key);
       // Stopped while the actor was built: start no agent the shutdown will not close.
       if (this.#stopped) return;
-      // Decided while the actor was built -- a sweep found it past its limit --
-      // so there is nothing for its agent to do: no prompt is sent.
-      if (getRun(this.#deps.db, run.runId)?.outcome !== null) {
-        terminal = 'decided';
-      } else {
-        // Its own key per prompt (spec §7.5): the actor deduplicates turns on it.
-        terminal = await actor.submit({
-          messageId: `kanban:${run.runId}:${counted.n}`,
-          appId: this.#deps.appId,
-          input: { text: prompt, paths: [] },
-        });
+      terminal = await this.#submit(open, actor, prompt);
+      // No report, and the turn completed: a person's comment, else a nudge, in
+      // the same session, until the run reports or the nudges run out (spec §7.5).
+      while (terminal === 'completed') {
+        const next = this.#followUp(open);
+        if (next === undefined) break;
+        terminal = await this.#submit(open, actor, next);
       }
     } catch (err) {
       terminal = 'failed';
@@ -588,6 +607,51 @@ export class Dispatcher {
       return;
     }
     await this.#turnEnded(sessionId, terminal, thrown);
+  }
+
+  /**
+   * Submit one prompt into the run's session, unless the run was decided
+   * meanwhile -- a sweep found it past its limit, a person stopped it -- when
+   * there is nothing for its agent to do, and none is sent. Each prompt is
+   * counted, and keyed by the count before it (spec §7.5): the actor
+   * deduplicates turns on the key, so each needs its own.
+   */
+  async #submit(open: OpenRun, actor: SessionActor, text: string): Promise<TurnTerminal | 'decided'> {
+    if (getRun(this.#deps.db, open.runId)?.outcome !== null) return 'decided';
+    const counted = this.#deps.service.countSubmission(open.runId);
+    if (!counted.ok) throw new Error(counted.message);
+    return actor.submit({
+      messageId: `kanban:${open.runId}:${counted.n}`,
+      appId: this.#deps.appId,
+      input: { text, paths: [] },
+    });
+  }
+
+  /**
+   * What to send a run whose turn completed without a report (spec §7.5), or
+   * undefined to end it: people's comments since its last prompt, which do not
+   * use up a nudge; else the next nudge, while any are left. Nothing for a run
+   * that is decided -- by its own report, or a sweep -- or released, or once the
+   * dispatcher has stopped. The comments of runs, its own included, are not
+   * forwarded: a person's word is what beats a reminder.
+   */
+  #followUp(open: OpenRun): string | undefined {
+    if (this.#stopped || open.released || open.cancelling) return undefined;
+    const run = getRun(this.#deps.db, open.runId);
+    if (run === undefined || run.outcome !== null) return undefined;
+    const fresh = commentsOf(this.#deps.db, run.taskId).filter(
+      (c) => c.id > open.seenComment && !c.author.startsWith('run:'),
+    );
+    if (fresh.length > 0) {
+      open.seenComment = newest(fresh);
+      this.#note(`kanban: run ${run.runId} ended its turn without reporting; forwarding ${fresh.length} comment(s)`);
+      return composeForwarded(open.kind, fresh);
+    }
+    const limit = this.#deps.settings.nudgeLimit;
+    if (open.nudges >= limit) return undefined;
+    open.nudges += 1;
+    this.#note(`kanban: run ${run.runId} ended its turn without reporting; nudge ${open.nudges} of ${limit}`);
+    return composeNudge(open.kind, open.nudges, limit);
   }
 
   /**
@@ -672,8 +736,8 @@ export class Dispatcher {
       const error = errors.join('\n');
       const ending =
         terminal === 'completed'
-          ? // No report, and the turn completed. Plan C3 nudges first.
-            { outcome: 'protocol_violation' as const, error: 'the run ended its turn without reporting' }
+          ? // No report, and the turn completed, after any nudges (spec §7.5).
+            { outcome: 'protocol_violation' as const, error: unreported(open.nudges) }
           : // Classified only here, for a turn nobody cancelled: a run the
             // dispatcher cancels is decided before it asks (spec §6.4).
             { outcome: classifyFailure(terminal, error), error: error === '' ? `the turn ended ${terminal}` : error };

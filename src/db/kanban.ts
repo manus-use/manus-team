@@ -248,7 +248,7 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
   });
 }
 
-/** A comment, on a task in any phase. Forwarding one to a run is plan C3's. */
+/** A comment, on a task in any phase. The dispatcher forwards a person's to an undecided run (spec §7.5). */
 export function addComment(
   db: Db,
   taskId: string,
