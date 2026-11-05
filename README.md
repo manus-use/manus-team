@@ -357,6 +357,9 @@ With `kanban.enabled`, `/kanban` drives the board from any chat the bot is in. A
 work — research, a document, an operation in Lark, a chore, a change to code — given to a
 role, whose agent runs it in a workspace, which is just a directory, or to a person.
 
+For a walk-through with messages to paste, from one task to chains, fan-out and review, see
+[docs/kanban-guide.md](docs/kanban-guide.md).
+
 ```
 /kanban new Draft the Q3 summary
 assignee: docs-writer
