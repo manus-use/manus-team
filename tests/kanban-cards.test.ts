@@ -161,6 +161,41 @@ describe('CardPoster', () => {
     });
   });
 
+  it('sends no card for a run that ended while the round was under way', async () => {
+    const first = create();
+    claim(first.taskId);
+    const second = create({ title: 'Tidy the docs' });
+    const run = claim(second.taskId);
+    expect(cardsDue(t.db).map((r) => r.taskId)).toEqual([first.taskId, second.taskId]);
+    lark.hold();
+    const round = poster().deliver();
+    await new Promise((resolve) => setImmediate(resolve));
+    // While the first card is being sent, the second's run ends.
+    expect(service.stop(second.taskId, BOB).ok).toBe(true);
+    expect(getRun(t.db, run.runId)?.endedAt).not.toBeNull();
+    lark.release();
+    expect(await round).toBe(1);
+    expect(lark.boardCards.map((c) => c.view.markdown.includes('Tidy the docs'))).toEqual([false]);
+  });
+
+  it('says honestly that nobody is told of a card it cannot send, once its run ended while the round was under way', async () => {
+    const first = create();
+    claim(first.taskId);
+    const second = create({ title: 'Tidy the docs', assignee: BOB });
+    const run = claim(second.taskId);
+    lark.hold();
+    const round = poster({ canTalk: (p) => p !== BOB }).deliver();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(service.stop(second.taskId, ALICE).ok).toBe(true);
+    lark.release();
+    expect(await round).toBe(1);
+    expect(eventsOf(t.db, second.taskId).some((e) => e.kind === 'card_failed')).toBe(false);
+    expect(notes).toContain(
+      `kanban: the card of run ${run.runId} cannot be sent (${BOB} no longer has talk tier on this gateway); ` +
+        'its run is over, or its card was recorded already, so nobody is told',
+    );
+  });
+
   it('sends a card that could not be recorded once, and not again until a restart, saying so once', async () => {
     const task = create();
     const run = claim(task.taskId);

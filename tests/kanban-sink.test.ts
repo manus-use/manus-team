@@ -4,7 +4,7 @@ import { createSession } from '../src/db/sessions.js';
 import { bindSession } from '../src/db/bindings.js';
 import { lastSeq, readEvents } from '../src/db/events.js';
 import { getApproval } from '../src/db/approvals.js';
-import { KANBAN_CHANNEL, KanbanSink } from '../src/kanban/sink.js';
+import { FORWARDED_MAX, KANBAN_CHANNEL, KanbanSink } from '../src/kanban/sink.js';
 import type { BindingKey } from '../src/types.js';
 import { FakeChannel } from './helpers/channel.js';
 import { FakeDriver } from './helpers/driver.js';
@@ -157,6 +157,27 @@ describe('KanbanSink forwarding approvals (spec §7.1)', () => {
     await sink.updateApprovalCard('om_approval_1', { action: 'a', choice: 'b', answeredBy: 'c' });
     expect(lark.approvalUpdates).toHaveLength(1);
     expect(getApproval(h.db, card.spec.approvalId)?.cardMessageId).toBe('om_approval_1');
+  });
+
+  it('remembers at most FORWARDED_MAX forwarded cards for their redraw, forgetting the oldest', async () => {
+    const h = testDb();
+    open.push(h);
+    const clock = new ManualClock(NOW);
+    const task = newTask(h.db, { title: 'Rotate the logs' });
+    const lark = new FakeChannel({ id: 'lark', clock });
+    const sink = new KanbanSink(() => clock.now(), { db: h.db, channels: new Map([['lark', lark]]), appId: 'cli_app' });
+    const sent: string[] = [];
+    for (let i = 0; i <= FORWARDED_MAX; i += 1) {
+      const spec = { approvalId: `a_${i}`, action: 'delete old.log', options: [{ optionId: 'allow', name: 'Allow' }], nonce: 'n' };
+      sent.push((await sink.sendApprovalCard({ chatId: task.taskId, threadId: 'r_1' }, spec, `u_${i}`)).messageId);
+    }
+    const view = { action: 'a', choice: 'b', answeredBy: 'c' };
+    // The first, one past the bound, is forgotten: not this process's to redraw any more.
+    await sink.updateApprovalCard(sent[0]!, view);
+    expect(lark.approvalUpdates).toEqual([]);
+    await sink.updateApprovalCard(sent[1]!, view);
+    await sink.updateApprovalCard(sent[FORWARDED_MAX]!, view);
+    expect(lark.approvalUpdates.map((u) => u.messageId)).toEqual([sent[1], sent[FORWARDED_MAX]]);
   });
 
   it("asks no chat of another bot's, and releases the agent as cancelled", async () => {

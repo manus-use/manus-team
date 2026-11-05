@@ -227,9 +227,13 @@ export class LarkInbound {
         clickUuid(this.#deps.config.appId, evt, action.input),
       );
     } catch (err) {
-      this.#note(
-        `acknowledging click on ${evt.messageId} failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      try {
+        this.#note(
+          `acknowledging click on ${evt.messageId} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      } catch {
+        // Nowhere left to say it; the acknowledgement must not reject, as nobody awaits it.
+      }
     }
   }
 }

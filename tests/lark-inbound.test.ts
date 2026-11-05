@@ -118,6 +118,38 @@ describe('LarkInbound, on a button press', () => {
     expect(i.sent).toEqual(['Sent: Deny.']);
   });
 
+  it("never rejects an approval's acknowledgement, even when its send fails and so does the note of it", async () => {
+    let handlers: { cardAction?: (evt: CardActionEvent) => Promise<void> } = {};
+    const adapter = {
+      raw: { on: (h: typeof handlers) => ((handlers = h), () => undefined) },
+      botOpenId: 'ou_bot',
+      sendText: async () => {
+        throw new Error('network down');
+      },
+    } as unknown as LarkAdapter;
+    const router = { onCardAction: async (_a: InboundCardAction) => 'Sent: Deny.' } as unknown as Router;
+    const i = new LarkInbound({
+      adapter,
+      router,
+      config: { appId: 'cli_app', downloadDir: '/nonexistent' },
+      note: () => {
+        throw new Error('the log is gone');
+      },
+    });
+    i.start();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await handlers.cardAction?.(evt);
+      expect(await i.idle(1_000)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it("sends nothing for a board card's press", async () => {
     const i = inbound(undefined);
     i.release();

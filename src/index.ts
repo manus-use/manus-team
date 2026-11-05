@@ -416,9 +416,16 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
         kanbanChat?.idle(SHUTDOWN_DRAIN_MS),
         inbound.idle(SHUTDOWN_DRAIN_MS),
       ]);
-      if (notices === false) note('kanban: stopped with a notice still being sent; the next boot sends it again');
-      if (sent === false) note('kanban: stopped with a card still being sent; the next boot sends it again');
-      if (pressed === false) note('kanban: stopped with a card press still being worked on; its card may not show the outcome');
+      // Past the bound, the database closes under whatever is still in flight: its write is dropped.
+      if (notices === false) {
+        note('kanban: stopped with a notice still being sent; should it land, its cursor is not moved, and the next boot sends it again');
+      }
+      if (sent === false) {
+        note('kanban: stopped with a card still being sent; should it land, it is not recorded, and the next boot sends it again with the same uuid');
+      }
+      if (pressed === false) {
+        note('kanban: stopped with a card press still being worked on; anything it still writes is dropped, and its card may not show the outcome');
+      }
       await adapter.disconnect().catch((err: unknown) => {
         note(`disconnect failed: ${err instanceof Error ? err.message : String(err)}`);
       });
@@ -430,7 +437,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // none of it touches the database after it is closed. Bounded: a start that
       // never returns is never drained, and must not hold the shutdown.
       if ((await dispatcher?.idle(SHUTDOWN_DRAIN_MS)) === false) {
-        note('kanban: stopped with run work still pending; the next boot ends those runs');
+        note('kanban: stopped with run work still pending; anything it still writes is dropped, and the next boot ends those runs');
       }
       db.close();
       // Last: until here, this gateway still had the home's sessions and runs.

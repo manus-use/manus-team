@@ -206,10 +206,14 @@ export class CardPoster {
     return true;
   }
 
-  /** The run's card, from the board as it is now; undefined when its task is gone. */
+  /**
+   * The run's card, from the board as it is now; undefined when its task is gone,
+   * or its run ended since the round read it: a card for it would be out of date
+   * on arrival.
+   */
   #render(run: RunRow): ReturnType<typeof renderTaskCard> | undefined {
     const reading = this.#deps.service.cardReading(run.runId);
-    if (reading === undefined) return undefined;
+    if (reading === undefined || reading.run.endedAt !== null) return undefined;
     const facts: CardFacts = { ...reading, ...(this.#deps.nameOf === undefined ? {} : { nameOf: this.#deps.nameOf }) };
     return run.kind === 'review' ? renderReviewCard(facts, this.#deps.appId) : renderTaskCard(facts, this.#deps.appId);
   }
@@ -219,9 +223,11 @@ export class CardPoster {
     this.#backoff.delete(run.runId);
     const recorded = this.#deps.service.recordCard(run.runId, { error: why });
     this.#note(
-      recorded.ok
-        ? `kanban: the card of run ${run.runId} cannot be sent (${why}); its subscribers are told`
-        : `kanban: the card of run ${run.runId} cannot be sent (${why}), and that was not recorded (${recorded.code})`,
+      !recorded.ok
+        ? `kanban: the card of run ${run.runId} cannot be sent (${why}), and that was not recorded (${recorded.code})`
+        : recorded.recorded
+          ? `kanban: the card of run ${run.runId} cannot be sent (${why}); its subscribers are told`
+          : `kanban: the card of run ${run.runId} cannot be sent (${why}); its run is over, or its card was recorded already, so nobody is told`,
     );
   }
 

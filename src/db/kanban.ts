@@ -1221,11 +1221,14 @@ export function unblock(
     const task = getTask(d, taskId);
     if (task === undefined) return refuse('not_found', `no task ${taskId}`);
     // An Unblock button is for the block its notice told of (spec §9.2): once that
-    // has been lifted, the task may be blocked again for another reason.
+    // has been lifted, the task may be blocked again for another reason. A run's
+    // end is a block only when the task blocked there, not when it was retried.
     if (opts.blockedAt !== undefined) {
       const blocking = d
         .prepare<[string, number], { id: number }>(
-          "SELECT id FROM kanban_events WHERE task_id = ? AND id = ? AND kind IN ('blocked', 'stopped', 'run_ended')",
+          `SELECT id FROM kanban_events
+            WHERE task_id = ? AND id = ?
+              AND (kind IN ('blocked', 'stopped') OR (kind = 'run_ended' AND json_extract(payload, '$.next') = 'blocked'))`,
         )
         .get(taskId, opts.blockedAt);
       if (blocking === undefined) return refuse('invalid', `event ${opts.blockedAt} is no block of task ${taskId}`);

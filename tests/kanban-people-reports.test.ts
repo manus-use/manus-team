@@ -203,4 +203,25 @@ describe('an Unblock for a block already lifted', () => {
     expect(service.unblock(task.taskId, BOB, undefined, { blockedAt: otherEvent })).toMatchObject({ ok: false, code: 'invalid' });
     expect(service.unblock(task.taskId, BOB, undefined, { blockedAt: second }).ok).toBe(true);
   });
+
+  it("takes a run's end as the block only when the task blocked there", () => {
+    const task = create({ assignee: 'implementer' });
+    const first = claim(task.taskId);
+    // A failure the task is retried after: no block, so no Unblock's pointer.
+    expect(service.endRun(first.runId, { outcome: 'failed', error: 'x', hadSideEffects: false })).toMatchObject({ ok: true, next: 'retry' });
+    expect(service.closeRun(first.runId).ok).toBe(true);
+    const retried = eventsOf(t.db, task.taskId).findLast((e) => e.kind === 'run_ended')?.id ?? 0;
+    claim(task.taskId);
+    expect(service.stop(task.taskId, BOB).ok).toBe(true);
+    expect(service.unblock(task.taskId, BOB, undefined, { blockedAt: retried })).toMatchObject({ ok: false, code: 'invalid' });
+    expect(getTask(t.db, task.taskId)?.phase).toBe('blocked');
+    const stopped = eventsOf(t.db, task.taskId).findLast((e) => e.kind === 'stopped')?.id ?? 0;
+    expect(service.unblock(task.taskId, BOB, undefined, { blockedAt: stopped }).ok).toBe(true);
+    // A run's end that blocked the task is its block.
+    const once = create({ assignee: 'implementer', title: 'Once', failureLimit: 1, workspace: 'web' });
+    const run = claim(once.taskId);
+    expect(service.endRun(run.runId, { outcome: 'failed', error: 'x', hadSideEffects: false })).toMatchObject({ ok: true, next: 'blocked' });
+    const gaveUp = eventsOf(t.db, once.taskId).findLast((e) => e.kind === 'run_ended')?.id ?? 0;
+    expect(service.unblock(once.taskId, BOB, undefined, { blockedAt: gaveUp }).ok).toBe(true);
+  });
 });

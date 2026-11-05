@@ -62,7 +62,11 @@ const TEXT_BUDGET = 12_000;
  * text is split by the SDK, at its own 3,500, without one.
  */
 export const ONE_MESSAGE = 4_000;
-/** Lark's code for a message that was withdrawn: a reply to it goes to its chat instead, as the SDK's own send does. */
+/**
+ * Lark's documented code for a message that was withdrawn: a reply to it goes to
+ * its chat instead. The SDK's own send falls back the same way, keyed on its own
+ * codes (230017, 230020 and HTTP 404); this one is Lark's for a withdrawn message.
+ */
 const WITHDRAWN = 230011;
 /** Lark's code for content it will not take: a post refused so goes as plain text, as the SDK's own send does. */
 const INVALID_CONTENT = 230001;
@@ -178,7 +182,8 @@ export class LarkAdapter implements Channel {
 
   /**
    * One message, sent through the SDK's client with its uuid. A reply whose
-   * message was withdrawn goes to the chat instead, as the SDK's own send does.
+   * message was withdrawn (`WITHDRAWN`, Lark's code for it) goes to the chat
+   * instead: the fallback the SDK's own send makes, on its own codes.
    */
   async #post(target: SendTarget, msgType: 'post' | 'text' | 'interactive', content: object, uuid: string): Promise<SendResult> {
     const im = this.#lark.rawClient.im.v1.message;
@@ -366,8 +371,11 @@ export class LarkAdapter implements Channel {
    * permanent failure burns the per-chat rate limit that the next real message
    * needs, and produces the same error four times instead of once.
    *
-   * See the class note on `uuid`: without it these retries are not deduplicated
-   * platform-side.
+   * A retry of a one-message send -- a text up to `ONE_MESSAGE`, a board or an
+   * approval card -- carries the same uuid, so Lark deduplicates it: one that did
+   * land is still one message. Only a longer text, which the SDK splits and sends
+   * without one, is not deduplicated platform-side (see the class note on `uuid`);
+   * a streamed card is not retried here.
    */
   async #withRetry(attempt: () => Promise<SendResult>): Promise<SendResult> {
     let lastError: unknown;

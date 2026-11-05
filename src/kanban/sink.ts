@@ -40,7 +40,7 @@ export interface ApprovalForwarding {
 /** A task's title on an approval card, as one line, in characters. */
 const TITLE_MAX = 200;
 /** Forwarded cards remembered for their redraw; the oldest are forgotten past this. */
-const FORWARDED_MAX = 1_000;
+export const FORWARDED_MAX = 1_000;
 
 /** A title as one line, cut to `TITLE_MAX` characters on a code point, never half an emoji. */
 function oneLine(title: string): string {
