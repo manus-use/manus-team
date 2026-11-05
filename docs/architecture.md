@@ -238,7 +238,8 @@ not exist yet — until it does, tool output rides inside the update payload.
 two-phase start of §8, and without them a crash between spawn and record is exactly the invisible
 orphan §8.1 describes. `generation_bumped` is the only runtime-lifecycle event that exists. There
 is likewise no `provider.session_observed` — §6.3 still says the provider session id is observed
-continuously, and nothing writes `sessions.provider_session_id`. No `workspace.checkpoint`
+continuously; the actor writes `sessions.provider_session_id` only from what a driver's `start`
+reports, which for the CLI driver is a `cli:` id naming the runtime, not the provider's session. No `workspace.checkpoint`
 (milestone 9), no `file.changed`, no `terminal.output`, no `approval.parked` or
 `approval.auto_resolved` (parking and the policy engine of §10 are schema-only).
 
@@ -738,6 +739,31 @@ observed `provider_session_id`, and pass `--session` on the next turn, keeping t
 the fallback when the id is rejected (`resume: native → replay`). Kanban uses it to make stop nudges
 cheaper and to let review rework continue the implementer's conversation (spec §7.5, §5.3); both
 still work without it.
+
+**Measured again (2026-11-05), on 0.7.4, for plan E** (`docs/plans/2026-11-05-plan-e-native-resume.md`),
+with one small model and trivial prompts, in a scratch directory:
+
+- **`--session-id-file` is written at the process's start**, within a second and before the model
+  answers: the id and a newline, mode `0600`. It is written for a turn that succeeds, one that fails
+  (`finish: "error"`, exit 1) and one killed by `SIGTERM` mid-tool — and, for a run given
+  `--session <id>`, with *that* id even when bytesec then refuses it. So the file alone is not
+  evidence that the session was continued; the driver trusts it only from a run that was not refused.
+- **`--session <id>` continues the conversation**, and the file then holds the same id: the run
+  recalled a word given only to the earlier run. A killed run's session is kept and continues too:
+  it recalled the killed run's prompt. Every typed `--format json` event carries `session_id`; the
+  turn summary does not, and `turn` is 1 on every run, so neither counts turns.
+- **An id the store does not hold** — a made-up one, or one removed with `bytesec session delete` —
+  exits 1 before the turn starts, with nothing on stdout and `turn 1: persistence: session not
+  found` as the last line of stderr. No expiry was observed; a deleted session is the closest
+  measured case.
+- **A session keeps its agent.** A session made as a native agent (`--agent <name>` with
+  `BYTESEC_LOCAL_APM_PATH`, plan R) resumes with the same two and keeps its system prompt; resumed
+  without them it exits 1 with `turn 1: unknown agent: <name>`, and a default-agent session resumed
+  with `--agent` exits 1 with `turn 1: unknown agent: bytesec-agent`. Both print nothing on stdout.
+- **The workspace is not part of a session's identity.** The store is the user's, not the
+  project's: a session resumed with another `--dir` continued the conversation and ran its tools in
+  the new directory. The driver keeps passing a session its own workspace, so this only says that
+  nothing breaks if a workspace's path is the same and its contents moved.
 
 **A misconfiguration can be silent, because the failure text goes to stdout.** A bad argv makes
 the CLI print its usage banner to *stdout* and exit 1, leaving stderr empty. The driver's error
