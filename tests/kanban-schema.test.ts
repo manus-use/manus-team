@@ -64,8 +64,8 @@ function run(
 
 describe('migration 003', () => {
   it('creates every kanban table, all STRICT', () => {
-    // 004 adds a column to kanban_comments and an index; every table is 003's.
-    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(4);
+    // 004 adds a column to kanban_comments and an index, 005 the people table; every kanban table is 003's.
+    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(5);
     const tables = h.db
       .prepare<[], { name: string; strict: number }>(
         "SELECT name, strict FROM pragma_table_list WHERE name LIKE 'kanban_%' ORDER BY name",
