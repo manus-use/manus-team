@@ -38,23 +38,95 @@
  * In the kanban modes it also writes the run's environment to `kanban-env.json`
  * beside the log, token included: a test that later reports as a run whose
  * process has gone needs it, and the token is a test's own.
+ *
+ * With `FAKE_CLI_SESSIONS` set to a directory, it keeps sessions there as
+ * bytesec 0.7.4 keeps them in its local store, as plan E's spike measured:
+ *
+ *   - `--session-id-file <path>` is written at the start, before the turn, with
+ *     the session's id and a newline: on success, failure and cancel alike, and
+ *     with the id asked for even when that id is then refused;
+ *   - without `--session`, a new session is made, as the agent the run names
+ *     (`--agent`, else `bytesec-agent`);
+ *   - `--session <id>` continues that session, whatever `--dir` says; one the
+ *     store does not hold exits 1 with nothing on stdout and
+ *     `turn 1: persistence: session not found` on stderr, and one made as
+ *     another agent exits 1 with `turn 1: unknown agent: <its agent>`;
+ *   - `FAKE_CLI_RESUME=ignore` makes a new session even when `--session` names
+ *     one, as 0.7.2 did, so the id written is not the one asked for;
+ *     `FAKE_CLI_RESUME=echo` does too, but writes the id asked for to the file,
+ *     so only the `session_id` on its events says which session it ran in;
+ *   - `FAKE_CLI_REFUSAL` changes how a refusal looks: `noisy` prints a typed
+ *     event nobody has a projection for before it, `trailing` writes another
+ *     stderr line after it, and `slow` ignores SIGTERM and waits 1.5 s first --
+ *     inside the driver's 2 s grace before SIGKILL -- so a test can stop it and
+ *     still see it exit 1 with the refusal, as a stop that loses the race would.
+ *
+ * Each session's file holds its agent and every prompt it was sent. Without
+ * `FAKE_CLI_SESSIONS` the agent writes no id, as an agent that cannot resume.
+ * The log line carries `--session`'s value as `session` (null when absent).
  */
 
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const MODE = process.env['FAKE_CLI_MODE'] ?? 'basic';
 const LOG = process.env['FAKE_CLI_LOG'];
+const SESSIONS = process.env['FAKE_CLI_SESSIONS'];
 
 const argv = process.argv.slice(2);
 const dashdash = argv.indexOf('--');
 const prompt = dashdash === -1 ? '' : argv.slice(dashdash + 1).join(' ');
+const flags = dashdash === -1 ? argv : argv.slice(0, dashdash);
+
+/** A flag's value, before the `--` that starts the prompt. */
+function flag(name) {
+  const i = flags.indexOf(name);
+  return i === -1 ? undefined : flags[i + 1];
+}
+
+const asked = flag('--session');
 
 if (LOG !== undefined) {
   const apm = process.env['BYTESEC_LOCAL_APM_PATH'] ?? null;
   const run = process.env['MT_KANBAN_RUN'] ?? null;
-  appendFileSync(LOG, `${JSON.stringify({ argv, prompt, apm, run })}\n`);
+  appendFileSync(LOG, `${JSON.stringify({ argv, prompt, apm, run, session: asked ?? null })}\n`);
+}
+
+let SESSION = 'ses_fake_cli';
+
+/** Refuse to continue the session, as bytesec does: before the turn, exit 1. Written synchronously, then gone. */
+function refuse(line) {
+  const how = process.env['FAKE_CLI_REFUSAL'];
+  if (how === 'slow') {
+    // Ignored, so the refusal still arrives after a stop, exit 1 and all.
+    process.on('SIGTERM', () => {});
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+  }
+  if (how === 'noisy') writeSync(1, `${JSON.stringify({ type: 'sentiment_delta', session_id: asked, mood: 'wary' })}\n`);
+  writeSync(2, `${line}\n`);
+  if (how === 'trailing') writeSync(2, 'session store closed\n');
+  process.exit(1);
+}
+
+if (SESSIONS !== undefined) {
+  mkdirSync(SESSIONS, { recursive: true });
+  const agent = flag('--agent') ?? 'bytesec-agent';
+  const resume = process.env['FAKE_CLI_RESUME'];
+  const continuing = asked !== undefined && resume !== 'ignore' && resume !== 'echo';
+  SESSION = continuing ? asked : `ses_fake_${randomBytes(6).toString('hex')}`;
+  const idFile = flag('--session-id-file');
+  if (idFile !== undefined) writeFileSync(idFile, `${asked !== undefined && resume === 'echo' ? asked : SESSION}\n`);
+  const file = join(SESSIONS, `${SESSION}.json`);
+  if (continuing) {
+    if (!existsSync(file)) refuse('turn 1: persistence: session not found');
+    const stored = JSON.parse(readFileSync(file, 'utf8'));
+    if (stored.agent !== agent) refuse(`turn 1: unknown agent: ${stored.agent}`);
+    writeFileSync(file, JSON.stringify({ agent, prompts: [...stored.prompts, prompt] }));
+  } else {
+    writeFileSync(file, JSON.stringify({ agent, prompts: [prompt] }));
+  }
 }
 
 /** `mt kanban <command>`, as an agent's shell runs it: by name, from PATH, JSON on stdin. */
@@ -85,8 +157,6 @@ function kanbanRun() {
   delta(`show: ${shown.status}; complete: ${done.answer}`);
   summary('completed', `reported on ${title}`);
 }
-
-const SESSION = 'ses_fake_cli';
 
 function emit(object) {
   process.stdout.write(`${JSON.stringify(object)}\n`);
