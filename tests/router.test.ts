@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ACK_EMOJI, KANBAN_OFF, Router, type InboundCardAction, type KanbanCommands } from '../src/core/router.js';
+import { ACK_EMOJI, KANBAN_OFF, Router, continuityLine, type InboundCardAction, type KanbanCommands } from '../src/core/router.js';
 import { CARD_COALESCE_MS } from '../src/channel/card-writer.js';
 import { SessionRegistry } from '../src/core/registry.js';
 import { MAX_MAILBOX_DEPTH, type SessionActor } from '../src/core/session-actor.js';
@@ -322,6 +322,35 @@ describe('Router: commands', () => {
     await h.router.onMessage(msg({ text: '/status' }));
     expect(lastReply(h)).toContain('**working**');
     expect(lastReply(h)).toContain('1 open turn(s)');
+  });
+
+  it('says which provider session the last turn ran in, and how it reached it', async () => {
+    const h = harness();
+    h.driver.scripts = [
+      (ctl) => {
+        ctl.emit({ kind: 'session-observed', providerSessionId: 'ses_abc', mode: 'replayed' });
+        ctl.end('completed');
+      },
+      (ctl) => {
+        ctl.emit({ kind: 'session-observed', providerSessionId: 'ses_abc', mode: 'resumed' });
+        ctl.end('completed');
+      },
+    ];
+    await h.router.onMessage(msg({ text: 'remember pickle' }));
+    await flush();
+    await h.router.onMessage(msg({ text: 'what did I say?' }));
+    await flush();
+    await h.router.onMessage(msg({ text: '/status' }));
+    // The latest turn's, not the first's.
+    expect(lastReply(h)).toMatch(/\nprovider session `ses_abc`: the last turn resumed it$/);
+  });
+
+  it('says nothing of a provider session no turn has reported', async () => {
+    const h = harness();
+    await h.router.onMessage(msg({ text: 'hello' }));
+    await flush();
+    await h.router.onMessage(msg({ text: '/status' }));
+    expect(lastReply(h)).not.toContain('provider session');
   });
 
   it('says so when nothing is bound in the chat', async () => {
@@ -1097,3 +1126,18 @@ function click(
     value: { approvalId, optionId, nonce },
   };
 }
+
+describe('continuityLine', () => {
+  it('reads each mode, and drops an id that is not one argv word', () => {
+    expect(continuityLine({ providerSessionId: 'ses_1', mode: 'fresh' })).toBe('\nprovider session `ses_1`: the last turn started it');
+    expect(continuityLine({ providerSessionId: 'ses_1', mode: 'replayed' })).toBe(
+      '\nprovider session `ses_1`: the last turn replayed the conversation into it',
+    );
+    expect(continuityLine({ providerSessionId: 'ses_1', mode: 'later' })).toBe('\nprovider session `ses_1`');
+    expect(continuityLine({ providerSessionId: 'ses_1', mode: 'constructor' })).toBe('\nprovider session `ses_1`');
+    expect(continuityLine({ providerSessionId: 'a`b', mode: 'fresh' })).toBe('');
+    expect(continuityLine({ providerSessionId: '-x', mode: 'fresh' })).toBe('');
+    expect(continuityLine({ providerSessionId: 'cli:1a2b3c4d', mode: 'fresh' })).toBe('');
+    expect(continuityLine(null)).toBe('');
+  });
+});

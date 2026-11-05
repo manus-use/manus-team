@@ -1,6 +1,6 @@
 import type { Db } from './open.js';
 import { txImmediate } from './open.js';
-import type { Event, NewEvent } from '../types.js';
+import type { Event, EventType, NewEvent } from '../types.js';
 import { redactValues } from '../secrets.js';
 
 interface EventRowRaw {
@@ -115,6 +115,20 @@ export function readEvents(
     )
     .all(sessionId, afterSeq, throughSeq);
   return rows.map(decode);
+}
+
+/** A session's latest event of one type, by the index on (session, type, seq). */
+export function lastEventOfType(db: Db, sessionId: string, type: EventType): Event | undefined {
+  const row = db
+    .prepare<[string, string], EventRowRaw>(
+      `SELECT session_id, seq, ts, generation, broker_seq, turn_id, type, actor, json(payload) AS payload
+         FROM events
+        WHERE session_id = ? AND type = ?
+        ORDER BY seq DESC
+        LIMIT 1`,
+    )
+    .get(sessionId, type);
+  return row === undefined ? undefined : decode(row);
 }
 
 export function lastSeq(db: Db, sessionId: string): number {
