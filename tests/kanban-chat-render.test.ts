@@ -318,6 +318,14 @@ describe('notices', () => {
     expect(stopped).toBe(
       `Blocked (needs\\_input) — ${name}: stopped by lark:on\\_alice\n\`/kanban unblock ${k.taskId} [comment]\` once it can go on.`,
     );
+    // A person who stopped it is named as Lark last gave their name, escaped; anyone else by their actor.
+    const nameOf = (p: string) => (p === ALICE ? 'Alice <at id=all></at>' : undefined);
+    expect(renderNotice(event('stopped', { blockRecurrences: 0 }, ALICE), t, { ...LIMIT, nameOf })).toMatch(
+      /: stopped by Alice \\<at id=all\\>\\<\/at\\>\n/,
+    );
+    expect(renderNotice(event('stopped', { blockRecurrences: 0 }, 'lark:on_nobody'), t, { ...LIMIT, nameOf })).toMatch(
+      /: stopped by lark:on\\_nobody\n/,
+    );
     expect(renderNotice(event('review_requested', { summary: 'v1', reviewer: 'reviewer', reviewerKind: 'role' }), t, LIMIT)).toBe(
       `Review requested — ${name}, from role reviewer.`,
     );

@@ -251,6 +251,11 @@ function blockedLine(task: TaskRow, kind: string, reason: string, recurrences: n
 /** Who a principal is, by name, where the gateway knows one: what a notice or a card calls a person. */
 export type NameOf = (principal: string) => string | undefined;
 
+/** Who stopped a task: a person by the name Lark last gave, else as the event recorded them. */
+function stopper(actor: string, nameOf: NameOf | undefined): string {
+  return actor.startsWith('lark:') ? (nameOf?.(actor) ?? actor) : actor;
+}
+
 /** A person, by the name Lark gave, else their principal; a role, as a role. */
 function whom(a: Assignee | null, nameOf: NameOf | undefined): string {
   if (a?.kind !== 'human') return who(a);
@@ -278,9 +283,9 @@ export function blocksTask(event: KanbanEvent): boolean {
  * the event is none: completed, review requested, blocked with its kind and
  * reason, retrying after a failure, gave up, stranded. A dependency block is not
  * one, since nobody needs to act; a throttled run's cooldown is not either, as it
- * clears by itself, and blocks as transient at its limit, which is one. From plan
- * D2: the one line that says who a person's claim gave the task to (spec §9.2),
- * named in plain text, never mentioned, and a card that could not be sent.
+ * clears by itself, and blocks as transient at its limit, which is one. For
+ * people: the one line that says who a person's claim gave the task to (spec
+ * §9.2), named in plain text, never mentioned, and a card that could not be sent.
  */
 export function renderNotice(
   event: KanbanEvent,
@@ -325,7 +330,7 @@ export function renderNotice(
     }
     case 'stopped':
       // A person's stop, not the task blocking again by itself: never the suggestion to rewrite it.
-      return blockedLine(task, 'needs_input', `stopped by ${event.actor}`, 0, Number.POSITIVE_INFINITY);
+      return blockedLine(task, 'needs_input', `stopped by ${stopper(event.actor, opts.nameOf)}`, 0, Number.POSITIVE_INFINITY);
     case 'run_ended': {
       const outcome = text(p, 'outcome');
       const error = text(p, 'error');

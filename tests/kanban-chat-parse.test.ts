@@ -187,6 +187,13 @@ describe('the other /kanban commands', () => {
       ok: true,
       command: { verb: 'review', taskId: 'k_1', summary: 'asked the reviewer' },
     });
+    // Indented, by spaces, tabs or a zero-width character a paste left: still the reviewer line.
+    for (const indent of ['  ', '\t', ' \t ', '\u200b', '\u200b  ', '  \u200b', '\t\u2060 \ufeff']) {
+      expect(parseKanban(`review k_1 drafted the notes\n${indent}reviewer: @Bob Lee`)).toEqual({
+        ok: true,
+        command: { verb: 'review', taskId: 'k_1', summary: 'drafted the notes', reviewer: '@Bob Lee' },
+      });
+    }
     expect(parseKanban('review k_1 x\nreviewer:')).toEqual({ ok: false, usage: '`reviewer:` needs a value.' });
     expect(parseKanban('review k_1 x\nreviewer: a\nreviewer: b')).toEqual({ ok: false, usage: '`reviewer:` is given twice.' });
   });

@@ -125,8 +125,8 @@ const FIELD_LINE = new RegExp(
 /** Zero-width characters at the start of a line, after any indent. */
 const LEADING_ZW = new RegExp(`^([ \\t]*)[${ZW}]+`, 'gm');
 
-/** `/kanban review`'s reviewer line: its label at the start of a line, in any case, as `/kanban new`'s fields are. */
-const REVIEWER_LINE = new RegExp(`^reviewer[ \\t${ZW}]*:[ \\t${ZW}]*(.*)$`, 'i');
+/** `/kanban review`'s reviewer line: its label at the start of a line, in any case, after any spaces, tabs or zero-width characters. */
+const REVIEWER_LINE = new RegExp(`^[ \\t${ZW}]*reviewer[ \\t${ZW}]*:[ \\t${ZW}]*(.*)$`, 'i');
 
 /**
  * A name that is a person, not a role: an @-mention, which Lark's text gives as

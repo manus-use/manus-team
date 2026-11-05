@@ -123,6 +123,12 @@ function refused(r: Refusal): string {
   return `Not done: ${label(r.message, 600)}`;
 }
 
+/** A refusal as a card's note, which heads it "Not done." itself: said once. */
+function cardNote(r: Refusal): string {
+  const why = refused(r).replace(/^Not done: /, '');
+  return why.charAt(0).toUpperCase() + why.slice(1);
+}
+
 /** The board's own ids are code; anything else the sender typed is escaped like any text. */
 function id(taskId: string): string {
   return /^[kr]_[0-9a-z]+$/.test(taskId) ? `\`${taskId}\`` : forDisplay(taskId);
@@ -517,11 +523,16 @@ export class KanbanChat {
     return `${{ done: 'Completing', block: 'Blocking', approve: 'Approving', changes: 'Asking for changes on' }[verb]} ${id(taskId)}: the card shows how it goes.`;
   }
 
-  /** The report a press asked for, in the background: the card redrawn as worked on, then with the outcome. */
+  /**
+   * The report a press asked for, in the background: the card redrawn as worked
+   * on while the report is made -- never holding it back -- then with the outcome,
+   * once the first redraw has settled or been given up on, so the outcome is
+   * always drawn after it.
+   */
   async #press(verb: ReportCommand['verb'], press: Press, by: string, name: string, text: string): Promise<void> {
     const shown = this.#deps.service.show(press.run.taskId);
     const task = shown.ok ? shown.view.task : { taskId: press.run.taskId, title: '' };
-    await this.#redraw(press.messageId, renderCardOutcome(task, 'Working on it…'));
+    const working = this.#redraw(press.messageId, renderCardOutcome(task, 'Working on it…'));
     let r: { ok: true; task: TaskRow } | Refusal;
     try {
       const as = verb === 'done' || verb === 'block' ? 'assignee' : press.run.assignee.name === by ? 'reviewer' : 'operator';
@@ -529,12 +540,14 @@ export class KanbanChat {
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       this.#note(`kanban: a press on card ${press.messageId} failed: ${redactKnownSecrets(detail)}`);
+      await working;
       await this.#redrawLive(press, `The board could not do that: ${label(detail, 600)}`);
       return;
     }
+    await working;
     if (!r.ok) {
       if (r.code === 'run_superseded') await this.#outOfDate(press, task);
-      else await this.#redrawLive(press, refused(r));
+      else await this.#redrawLive(press, cardNote(r));
       return;
     }
     this.#changed();
@@ -608,6 +621,8 @@ export class KanbanChat {
 
   /** Undefined when this person may press this button of this run's card; otherwise why not. */
   #mayPress(verb: ReportCommand['verb'], run: RunRow, by: string, presser: Principal): string | undefined {
+    // Only a person's run is sent a card; an agent's is decided by its agent.
+    if (run.assignee.kind !== 'human') return "That button is not for a person's card.";
     const forWork = verb === 'done' || verb === 'block';
     if (forWork !== (run.kind === 'work')) return 'That button is not for this kind of card.';
     if (run.assignee.name === by) return undefined;
@@ -629,7 +644,8 @@ export class KanbanChat {
     const late = new Promise<'late'>((resolve) => {
       timer = setTimeout(() => resolve('late'), ms);
     });
-    const sent = redraw(messageId, view);
+    // A redraw that throws at once is a failed redraw, not a failed press.
+    const sent = Promise.resolve().then(() => redraw(messageId, view));
     try {
       if ((await Promise.race([sent.then(() => 'drawn' as const), late])) === 'late') {
         this.#note(`kanban: redrawing card ${messageId} took longer than ${ms} ms; going on without it`);

@@ -413,7 +413,9 @@ describe("a person's card", () => {
     await press(run, 'done', ALICE, 'all links answer', { try: '1' });
     await chat.idle(5_000);
     const second = redrawn.at(-1)?.view;
-    expect(second?.markdown).toContain('**Not done.** Not done: the gate test -f links.md exited 1');
+    // Said once: the card's own "Not done." heads the board's refusal.
+    expect(second?.markdown).toContain('**Not done.** The gate test -f links.md exited 1');
+    expect(second?.markdown).not.toContain('Not done:');
     expect(second?.markdown).toContain('> no links.md');
     expect(second?.buttons.map((b) => [b.label, b.value['try']])).toEqual([
       ['Done', '2'],
@@ -466,42 +468,119 @@ describe("a person's card", () => {
     chat.stop();
     expect(await chat.idle(5_000)).toBe(true);
     expect(getRun(t.db, run.runId)?.outcome).toBeNull();
-    expect(redrawn.at(-1)?.view.markdown).toContain('the gateway is stopping');
+    expect(redrawn.at(-1)?.view.markdown).toContain('**Not done.** The gateway is stopping');
     // A typed report's gates too.
     const typed = say(`done ${taskId} again`, ALICE);
     expect(await typed).toContain('the gateway is stopping');
   });
 
-  it('bounds a redraw that never answers: the press ends, the card is not held, and an ended run is still told out of date', async () => {
-    const notes: string[] = [];
-    let first = true;
-    const hung = new KanbanChat({
+  /** A chat whose redraw is `redraw`, waited for `ms`, its notes in `notes`. */
+  function chatWith(redraw: (messageId: string, view: CardView) => Promise<void>, ms: number, notes: string[]): KanbanChat {
+    return new KanbanChat({
       service,
       hasTier: (p, tier) => new Authorizer({ ...defaultAuthConfig(OWNER.openId), allowTalk: [OWNER.openId, ALICE.openId] }).hasTier(p, tier),
       people: new PeopleDirectory({ db: t.db, appId: 'cli_app', canTalk: () => true }),
       appId: 'cli_app',
-      // The first redraw never answers, as an update with no timeout of its own may not.
-      redraw: async (messageId, view) => {
+      redraw,
+      redrawTimeoutMs: ms,
+      note: (line) => notes.push(line),
+    });
+  }
+
+  function doneAction(run: RunRow, input: string): InboundCardAction {
+    const card = renderTaskCard({ task: getTask(t.db, run.taskId)!, run, parents: [] }, 'cli_app');
+    const value = card.buttons.find((b) => b.value['act'] === 'done')?.value ?? {};
+    return { chatId: 'oc_dm', messageId: 'om_card', operator: ALICE, value, input };
+  }
+
+  it('bounds a redraw that never answers: the press ends, the card is not held, and an ended run is still told out of date', async () => {
+    const notes: string[] = [];
+    let first = true;
+    // The first redraw never answers, as an update with no timeout of its own may not.
+    const hung = chatWith(
+      async (messageId, view) => {
         if (first) {
           first = false;
           return new Promise<void>(() => undefined);
         }
         redrawn.push({ messageId, view });
       },
-      redrawTimeoutMs: 50,
-      note: (line) => notes.push(line),
-    });
+      50,
+      notes,
+    );
     const { taskId, run } = await aliceTask();
-    const card = renderTaskCard({ task: getTask(t.db, taskId)!, run, parents: [] }, 'cli_app');
-    const value = card.buttons.find((b) => b.value['act'] === 'done')?.value ?? {};
-    const action: InboundCardAction = { chatId: 'oc_dm', messageId: 'om_card', operator: ALICE, value, input: 'all links answer' };
+    expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
+    let release!: () => void;
+    holds.set('test -f links.md', new Promise<void>((resolve) => (release = resolve)));
+    const action = doneAction(run, 'all links answer');
     await hung.card(action);
-    // While the press waits on the hung redraw, the run ends another way; a press of the card is told it is out of date.
-    expect(await say(`done ${taskId} typed it`, ALICE)).toContain('is complete');
+    await new Promise((resolve) => setImmediate(resolve));
+    // While the press's gates run, the run ends another way; a press of the card is told it is out of date.
+    expect(await say(`stop ${taskId}`)).toContain('Stopped');
     expect(await hung.card(action)).toBe(`That card is out of date: \`${taskId}\` has moved on. \`/kanban show ${taskId}\` says where it is.`);
+    release();
     expect(await hung.idle(5_000)).toBe(true);
     expect(notes).toContain('kanban: redrawing card om_card took longer than 50 ms; going on without it');
     expect(redrawn.at(-1)?.view.markdown).toContain('This card is out of date');
+  });
+
+  it('applies a press at once while its "Working on it" redraw hangs, and redraws the outcome only after it', async () => {
+    const notes: string[] = [];
+    const order: string[] = [];
+    let first = true;
+    const hung = chatWith(
+      async (_messageId, view) => {
+        if (first) {
+          first = false;
+          order.push('working');
+          return new Promise<void>(() => undefined);
+        }
+        order.push(view.markdown);
+      },
+      1_000,
+      notes,
+    );
+    const { run } = await aliceTask();
+    await hung.card(doneAction(run, 'all links answer'));
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+    // Applied long before the hung redraw is given up on.
+    expect(getRun(t.db, run.runId)).toMatchObject({ outcome: 'completed', summary: 'all links answer' });
+    expect(order).toEqual(['working']);
+    expect(await hung.idle(5_000)).toBe(true);
+    expect(order).toHaveLength(2);
+    expect(order[1]).toContain('Done — by Alice Smith.');
+  });
+
+  it('applies a press whose redraw throws at once, and notes the failure', async () => {
+    const notes: string[] = [];
+    const throws = chatWith(
+      (() => {
+        throw new Error('no card update');
+      }) as (messageId: string, view: CardView) => Promise<void>,
+      1_000,
+      notes,
+    );
+    const { run } = await aliceTask();
+    await throws.card(doneAction(run, 'all links answer'));
+    expect(await throws.idle(5_000)).toBe(true);
+    expect(getRun(t.db, run.runId)).toMatchObject({ outcome: 'completed', summary: 'all links answer' });
+    expect(notes).toContain('kanban: redrawing card om_card failed: no card update');
+  });
+
+  it("refuses a press on a card for a run that is not a person's, changing nothing", async () => {
+    const taskId = created(await say('new Fix the footer\nassignee: implementer\nreviewer: reviewer'));
+    const work = service.claim(taskId);
+    if (!work.ok) throw new Error(work.message);
+    expect(await press(work.run, 'done', OWNER, 'x')).toBe("That button is not for a person's card.");
+    expect((await service.requestReview(taskId, { kind: 'run', runId: work.run.runId }, { summary: 'moved it' })).ok).toBe(true);
+    expect(service.closeRun(work.run.runId).ok).toBe(true);
+    const review = service.claim(taskId);
+    if (!review.ok) throw new Error(review.message);
+    // Even an operator, who may answer any review: a role's review run has no card.
+    expect(await press(review.run, 'approve', OWNER, 'fine')).toBe("That button is not for a person's card.");
+    await chat.idle(5_000);
+    expect(redrawn).toEqual([]);
+    expect(getRun(t.db, review.run.runId)?.outcome).toBeNull();
   });
 
   it('refuses a press by someone else, and an altered payload, changing nothing, the card left as it was', async () => {
