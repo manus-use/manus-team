@@ -724,6 +724,7 @@ export class SessionActor {
         action: approval.action,
         choice: optionLabel(approval, res.optionId),
         answeredBy: res.principal.displayName ?? res.principal.openId,
+        ...(res.principal.displayName === null || res.principal.displayName === undefined ? { byOpenId: res.principal.openId } : {}),
       })
       .catch((err: unknown) =>
         this.#note(

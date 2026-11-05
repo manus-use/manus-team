@@ -517,9 +517,10 @@ export class KanbanChat {
       this.#track(this.#redrawLive(press, empty));
       return empty;
     }
-    const name = label(presser.displayName ?? by, 80);
+    // A presser with no name is shown on the card through Lark's person element, by open_id.
+    const name = presser.displayName === null || presser.displayName === undefined ? undefined : label(presser.displayName, 80);
     this.#busy.add(press.messageId);
-    this.#track(this.#press(verb, press, by, name, text).finally(() => this.#busy.delete(press.messageId)));
+    this.#track(this.#press(verb, press, by, name ?? { openId: presser.openId }, text).finally(() => this.#busy.delete(press.messageId)));
     return `${{ done: 'Completing', block: 'Blocking', approve: 'Approving', changes: 'Asking for changes on' }[verb]} ${id(taskId)}: the card shows how it goes.`;
   }
 
@@ -529,7 +530,7 @@ export class KanbanChat {
    * once the first redraw has settled or been given up on, so the outcome is
    * always drawn after it.
    */
-  async #press(verb: ReportCommand['verb'], press: Press, by: string, name: string, text: string): Promise<void> {
+  async #press(verb: ReportCommand['verb'], press: Press, by: string, who: string | { openId: string }, text: string): Promise<void> {
     const shown = this.#deps.service.show(press.run.taskId);
     const task = shown.ok ? shown.view.task : { taskId: press.run.taskId, title: '' };
     const working = this.#redraw(press.messageId, renderCardOutcome(task, 'Working on it…'));
@@ -551,13 +552,14 @@ export class KanbanChat {
       return;
     }
     this.#changed();
+    const byName = typeof who === 'string' ? ` by ${who}` : '';
     const outcome = {
-      done: `Done by ${name}.`,
-      approve: `Approved by ${name}.`,
-      block: `Blocked by ${name}: ${label(text, 300)}`,
-      changes: `Changes requested by ${name}: ${label(text, 300)}`,
+      done: `Done${byName}.`,
+      approve: `Approved${byName}.`,
+      block: `Blocked${byName}: ${label(text, 300)}`,
+      changes: `Changes requested${byName}: ${label(text, 300)}`,
     }[verb];
-    await this.#redraw(press.messageId, renderCardOutcome(task, outcome));
+    await this.#redraw(press.messageId, renderCardOutcome(task, outcome, typeof who === 'string' ? undefined : who.openId));
   }
 
   /** A card for a run that is over: redrawn so, and said so. */

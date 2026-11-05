@@ -61,6 +61,11 @@ export interface CardView {
    * press before it by a channel that drops a press it has seen.
    */
   attempt?: number;
+  /**
+   * Who acted on the card, by open_id, when no name is known for them: shown
+   * under the markdown through Lark's own person element, which draws their name.
+   */
+  byOpenId?: string;
 }
 
 export interface SendResult {
@@ -132,6 +137,11 @@ export interface ApprovalOutcomeView {
   choice: string;
   /** Display name of whoever answered, or their id when no name is known. */
   answeredBy: string;
+  /**
+   * Their open_id, given when no name is known: the card then shows them through
+   * Lark's own person element, which draws their name, rather than the raw id.
+   */
+  byOpenId?: string;
 }
 
 export interface Channel {

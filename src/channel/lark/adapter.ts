@@ -456,21 +456,45 @@ export function approvalCard(spec: ApprovalCardSpec): object {
  * untrusted as the agent's request.
  */
 export function approvalOutcomeCard(view: ApprovalOutcomeView): object {
+  const by = view.byOpenId === undefined ? undefined : byline(view.byOpenId);
+  const answered = by === undefined ? `Answered: ${view.choice}, by ${view.answeredBy}` : `Answered: ${view.choice}`;
   return {
     schema: '2.0',
     config: { update_multi: true },
     body: {
       elements: [
         { tag: 'div', text: { tag: 'plain_text', content: forPlainText(view.action) } },
-        {
-          tag: 'div',
-          text: {
-            tag: 'plain_text',
-            content: forPlainText(`Answered: ${view.choice}, by ${view.answeredBy}`),
-          },
-        },
+        { tag: 'div', text: { tag: 'plain_text', content: forPlainText(answered) } },
+        ...(by === undefined ? [] : [by]),
       ],
     },
+  };
+}
+
+/** An open_id, as Lark gives one; anything else is never put in a person element. */
+const OPEN_ID = /^ou_[0-9A-Za-z]+$/;
+
+/**
+ * "By" and Lark's own person element for `openId`, side by side: Lark draws the
+ * person's name and avatar itself, so a card can name someone the gateway has no
+ * name for, without showing their id and without a mention that notifies them.
+ * Undefined for anything that is not an open_id.
+ */
+function byline(openId: string): object | undefined {
+  if (!OPEN_ID.test(openId)) return undefined;
+  return {
+    tag: 'column_set',
+    flex_mode: 'none',
+    horizontal_spacing: '4px',
+    columns: [
+      { tag: 'column', width: 'auto', vertical_align: 'center', elements: [{ tag: 'div', text: { tag: 'plain_text', content: 'By' } }] },
+      {
+        tag: 'column',
+        width: 'auto',
+        vertical_align: 'center',
+        elements: [{ tag: 'person', user_id: openId, size: 'small', show_avatar: true, show_name: true, style: 'normal' }],
+      },
+    ],
   };
 }
 
@@ -568,6 +592,8 @@ export function boardCard(view: CardView): object {
     ...(view.input === undefined ? {} : { form_action_type: 'submit' }),
   }));
   const elements: object[] = [{ tag: 'markdown', content: view.markdown }];
+  const by = view.byOpenId === undefined ? undefined : byline(view.byOpenId);
+  if (by !== undefined) elements.push(by);
   if (buttons.length > 0 && view.input !== undefined) {
     elements.push({
       tag: 'form',

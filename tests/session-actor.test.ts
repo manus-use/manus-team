@@ -541,7 +541,7 @@ describe('approvals', () => {
     expect(h.channel.approvalUpdates).toEqual([
       {
         messageId: getApproval(h.db.db, approvalId)?.cardMessageId,
-        view: { action: 'rm -rf /', choice: 'Deny', answeredBy: CLICKER.openId },
+        view: { action: 'rm -rf /', choice: 'Deny', answeredBy: CLICKER.openId, byOpenId: CLICKER.openId },
       },
     ]);
   });

@@ -397,6 +397,16 @@ describe("a person's card", () => {
     });
   });
 
+  it("names a presser it has no name for through Lark's person element, not their id", async () => {
+    const { taskId, run } = await aliceTask();
+    await press(run, 'done', { ...ALICE, displayName: null }, 'all links answer');
+    expect(await chat.idle(5_000)).toBe(true);
+    expect(redrawn.at(-1)).toEqual({
+      messageId: 'om_card',
+      view: { markdown: `**Check the links** \`${taskId}\`\nDone.`, buttons: [], byOpenId: 'ou_alice' },
+    });
+  });
+
   it('redraws a card it refused for what a press carried live, saying why, with buttons a new press can be made with', async () => {
     const { taskId, run } = await aliceTask();
     expect(await press(run, 'block', ALICE, '  ')).toBe('Type why it is blocked in the box, then press Block.');

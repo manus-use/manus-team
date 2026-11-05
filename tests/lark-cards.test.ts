@@ -24,6 +24,20 @@ function row(e: Record<string, unknown> | undefined): Array<Record<string, unkno
   return columns.map((c) => c.elements[0] as Record<string, unknown>);
 }
 
+/** The open_ids of every person element on a card, wherever it sits. */
+function persons(card: object): string[] {
+  const out: string[] = [];
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) return v.forEach(walk);
+    if (typeof v !== 'object' || v === null) return;
+    const o = v as Record<string, unknown>;
+    if (o['tag'] === 'person') out.push(String(o['user_id']));
+    Object.values(o).forEach(walk);
+  };
+  walk(card);
+  return out;
+}
+
 function texts(card: object): Array<{ tag: string; content: string }> {
   return elements(card)
     .map((e) => e['text'] as { tag: string; content: string } | undefined)
@@ -51,6 +65,21 @@ describe('approvalOutcomeCard', () => {
       answeredBy: '<at id=all></at>',
     });
     expect(texts(card).every((t) => t.tag === 'plain_text')).toBe(true);
+  });
+
+  it("shows an answerer known only by id as Lark's own person element, never the raw id", () => {
+    const card = approvalOutcomeCard({ ...VIEW, answeredBy: 'ou_owner', byOpenId: 'ou_owner' });
+    const shown = texts(card).map((t) => t.content);
+    expect(shown).toContain('Answered: Deny');
+    expect(shown.join('\n')).not.toContain('ou_owner');
+    expect(JSON.stringify(card)).toContain('"tag":"person"');
+    expect(persons(card)).toEqual(['ou_owner']);
+  });
+
+  it('draws no person element for an id that is not an open_id, and names the answerer in text instead', () => {
+    const card = approvalOutcomeCard({ ...VIEW, answeredBy: 'Alice', byOpenId: '<at id=all></at>' });
+    expect(persons(card)).toEqual([]);
+    expect(texts(card).map((t) => t.content)).toContain('Answered: Deny, by Alice');
   });
 
   it('stays updatable, like the card it replaces', () => {
@@ -157,6 +186,13 @@ describe('boardCard', () => {
       row((elements(boardCard(v))[1] as { elements: Array<Record<string, unknown>> }).elements[1]).map((b) => b['name']);
     expect(names(view)).toEqual(['button_0_0', 'button_1_0']);
     expect(names({ ...view, attempt: 2 })).toEqual(['button_0_2', 'button_1_2']);
+  });
+
+  it("puts a presser known only by id under the markdown as Lark's person element", () => {
+    const card = boardCard({ markdown: '**x** `k_1`\nDone.', buttons: [], byOpenId: 'ou_alice' });
+    expect(elements(card).map((e) => e['tag'])).toEqual(['markdown', 'column_set']);
+    expect(persons(card)).toEqual(['ou_alice']);
+    expect(persons(boardCard({ markdown: 'x', buttons: [], byOpenId: 'on_alice' }))).toEqual([]);
   });
 
   it('has no form without a box, and no buttons once acted on; and stays updatable', () => {

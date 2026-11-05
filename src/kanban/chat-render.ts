@@ -483,8 +483,12 @@ export function renderReviewCard(f: CardFacts, appId: string): CardView {
  * A card once acted on, or found out of date (spec §9.2): its title and what
  * happened, with no buttons left to press.
  */
-export function renderCardOutcome(task: { taskId: string; title: string }, outcome: string): CardView {
-  return { markdown: `**${label(task.title)}** ${id(task.taskId)}\n${outcome}`, buttons: [] };
+export function renderCardOutcome(task: { taskId: string; title: string }, outcome: string, byOpenId?: string): CardView {
+  return {
+    markdown: `**${label(task.title)}** ${id(task.taskId)}\n${outcome}`,
+    buttons: [],
+    ...(byOpenId === undefined ? {} : { byOpenId }),
+  };
 }
 
 /** An Unblock under a notice of a block (spec §9.2), bound to the task and the event that blocked it. */
