@@ -429,7 +429,7 @@ that is over says it is out of date and does nothing. A press is answered at onc
 shows the outcome once the report is made, gates and all; one refused for what it carried — an
 empty box, a failing gate — redraws the card, saying why, ready to be pressed again. `/kanban done`, `block`, `review`,
 `approve` and `changes` do the same from any chat with the bot. A person's task never times out:
-it waits for them, across restarts. The chat the task came from hears one line — "📋 *title* —
+it waits for them, across restarts. The chat the task came from hears one line — "📋 *title*,
 assigned to *name*", the name in plain text, never a mention — and its notices as usual; a
 notice of a block carries an **Unblock** button for an operator. Only a card that cannot reach
 its person — Lark answering that they are outside the app's availability (230013), or the person

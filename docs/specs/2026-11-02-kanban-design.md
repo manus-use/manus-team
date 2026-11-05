@@ -1570,7 +1570,7 @@ people (§12).
   contract, the parents' summaries, and buttons **Done** and **Block**. A button opens Lark's input
   form for the summary or reason; `/kanban done` is the equivalent typed form.
   - **If the task was created in a group**, the group also gets one line at the same moment —
-    "📋 *title* — assigned to *name*" — and nothing else: the card and its buttons go only to the
+    "📋 *title*, assigned to *name*" — and nothing else: the card and its buttons go only to the
     assignee. The team sees who has what without the group filling up with cards meant for one
     person, and the assignee gets a card a busy group cannot bury. Later events on the task reach
     the group through its subscription (§9.4) as usual.
@@ -1647,7 +1647,7 @@ card is redrawn with the outcome once acted on, so its buttons stop working.
   it, outside the nonce; the card says "Not done." once, above why. A press by the wrong person
   changes nothing; a refused report whose run ended meanwhile redraws the card as out of date.
 - **The one line** is the notice of a person's `claimed` event, which records the assignee's kind:
-  "📋 *title* — assigned to *name*", or "review assigned to". It goes to every subscription of the
+  "📋 *title*, assigned to *name*", or "review assigned to". It goes to every subscription of the
   task, as any notice does: a subscription does not record whether its chat is a group.
 - **Unblock** sits under a message of notices, one for each task its notices left blocked, by the
   task's latest block there, at most five. The message is not redrawn when one is pressed, as it
