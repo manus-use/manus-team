@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +22,28 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
+/**
+ * SIGKILL the process whose pid a file holds, if it holds one. Only a positive
+ * integer is a pid here: `Number('')` is 0, and `process.kill(0)` would signal
+ * the test runner's own process group.
+ */
+function killPidIn(file: string): void {
+  let text = '';
+  try {
+    text = readFileSync(file, 'utf8').trim();
+  } catch {
+    return;
+  }
+  if (!/^\d+$/.test(text)) return;
+  const pid = Number(text);
+  if (!Number.isSafeInteger(pid) || pid <= 1) return;
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch {
+    // Gone already.
+  }
+}
+
 describe('spawnGate', () => {
   it('passes a command that exits 0, in the workspace, with the environment given and nothing else', async () => {
     const r = await spawnGate('pwd; echo "key=$API_KEY token=${MT_KANBAN_TOKEN:-none}"', {
@@ -40,11 +62,12 @@ describe('spawnGate', () => {
 
   it('kills a gate past its timeout, and what it started, promptly', async () => {
     const started = Date.now();
+    // Under load the shell may be killed before it prints anything: what a killed gate
+    // wrote is kept is shown by the stop test, which waits for the output first.
     const r = await spawnGate('echo begun; sleep 30 & sleep 30', { cwd: dir, env, timeoutMs: 300 });
     expect(r.timedOut).toBe(true);
     // The shell is killed by the signal, or exits on it once its child is: either way, not 0.
     expect(r.signal === 'SIGTERM' || r.exitCode === 143).toBe(true);
-    expect(r.output.startsWith('begun\n')).toBe(true);
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
@@ -59,17 +82,22 @@ describe('spawnGate', () => {
     const started = Date.now();
     // A child that makes itself a session of its own, then says so, keeping the gate's output open.
     const escape = `perl -MPOSIX -e 'POSIX::setsid(); open(my $f, ">", "escaped.pid"); print $f $$; close($f); sleep 30' &`;
-    // The timeout falls in the second the output is let go of: the gate itself ended in time.
+    // The timeout falls in the 5 s the output is let go of after: the gate itself ended in time.
+    // Both are long enough that a loaded machine still sees the gate end before its timeout.
     const r = await spawnGate(`${escape} while [ ! -s escaped.pid ]; do sleep 0.05; done; echo done`, {
       cwd: dir,
       env,
-      timeoutMs: 700,
+      timeoutMs: 2_500,
+      outputGraceMs: 5_000,
     });
     try {
       expect(r).toMatchObject({ exitCode: 0, timedOut: false, output: 'done\n' });
-      expect(Date.now() - started).toBeLessThan(5_000);
+      // Let go of after the grace given, not held for the escaped process's 30 s.
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeGreaterThanOrEqual(5_000);
+      expect(elapsed).toBeLessThan(20_000);
     } finally {
-      process.kill(Number(readFileSync(join(dir, 'escaped.pid'), 'utf8')), 'SIGKILL');
+      killPidIn(join(dir, 'escaped.pid'));
     }
   });
 
@@ -114,14 +142,24 @@ describe('spawnGate', () => {
     }
   });
 
-  it('stops a gate when the gateway stops', async () => {
+  it('stops a gate when the gateway stops, keeping what it wrote', async () => {
     const stop = new AbortController();
-    setTimeout(() => stop.abort(), 200);
+    // Stopped only once the gate has written its output: `seen` is made after the echo.
+    const seen = join(dir, 'seen');
+    const poll = setInterval(() => {
+      if (existsSync(seen)) stop.abort();
+    }, 20);
     const started = Date.now();
-    const r = await spawnGate('sleep 30', { cwd: dir, env, timeoutMs: 20_000, signal: stop.signal });
-    expect(r.timedOut).toBe(false);
-    expect(r.signal === 'SIGTERM' || r.exitCode === 143).toBe(true);
-    expect(Date.now() - started).toBeLessThan(5_000);
+    try {
+      const r = await spawnGate('echo begun; : > seen; sleep 30', { cwd: dir, env, timeoutMs: 20_000, signal: stop.signal });
+      expect(stop.signal.aborted).toBe(true);
+      expect(r.timedOut).toBe(false);
+      expect(r.signal === 'SIGTERM' || r.exitCode === 143).toBe(true);
+      expect(r.output).toBe('begun\n');
+      expect(Date.now() - started).toBeLessThan(15_000);
+    } finally {
+      clearInterval(poll);
+    }
   });
 
   it('leaves no fragment of a secret its 64 KiB window split', async () => {

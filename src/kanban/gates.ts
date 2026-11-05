@@ -43,6 +43,8 @@ export interface GateRunOptions {
   timeoutMs: number;
   /** Aborted when the gateway stops: the gate is killed, and the report not applied. */
   signal?: AbortSignal;
+  /** How long the output may stay open once the shell has exited; OUTPUT_GRACE_MS when not given. */
+  outputGraceMs?: number;
 }
 
 /** Runs one gate's command. Never rejects: a gate that cannot start is a failed gate. */
@@ -205,7 +207,7 @@ export async function runGates(gates: readonly GateRow[], ctx: GateContext): Pro
  * Once the shell has exited, whatever it left running in its group is killed: a
  * background process holding the gate's output open would otherwise keep the
  * report waiting until the timeout. One that left the group is not waited for:
- * the output is let go of OUTPUT_GRACE_MS after the shell exited.
+ * the output is let go of OUTPUT_GRACE_MS (or `outputGraceMs`) after the shell exited.
  */
 export const spawnGate: GateRunner = (command, opts) =>
   new Promise<GateExit>((resolve) => {
@@ -285,7 +287,7 @@ export const spawnGate: GateRunner = (command, opts) =>
         child.stdout?.destroy();
         child.stderr?.destroy();
         finish();
-      }, OUTPUT_GRACE_MS);
+      }, opts.outputGraceMs ?? OUTPUT_GRACE_MS);
     });
     child.once('close', () => finish());
   });
