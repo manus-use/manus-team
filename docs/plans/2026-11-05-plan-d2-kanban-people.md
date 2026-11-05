@@ -62,7 +62,7 @@ Each is the reading most consistent with the rest of the spec. *The user's decis
 11. **A person's card is delivered from the board.** `CardPoster` reads the open people's runs with no card recorded every 2 s, sends each its card by union_id with one uuid per run, and records `card_sent` with the message. So a card a restart cut off is sent then, one message within Lark's hour, and a recorded one never again. Only Lark refusing because it cannot reach the person — `PERSON_UNREACHABLE_CODES`, which holds 230013, "the bot has no availability to this user" — records `card_failed`, and so does a person who has lost talk tier since being named: the task's subscribers hear it, with the commands the person can type instead, and the card is not tried again. Every other refusal — a scope or a token Lark refuses (its 9999…-codes), a plain 400 — and every failure that never reached Lark are taken for the gateway's problem: tried again after a pause doubling from 2 s to five minutes, with a log line, for as long as it lasts, as D1's notices are. A card sent whose record then fails is not sent again until a restart, said once: resending it every five minutes would outlive the uuid's hour. *Why:* a scope missing is the operator's to fix, and recording it as the person's unreachability would end their card for good; a person outside the app's reach does not come back by itself, and the task can be re-claimed by `/kanban stop` and `unblock` once they do. 230013 is from Lark's documentation of sending a message; nothing in this repository or its SDK confirms it.
 12. **The group's one line is the notice of a person's claim.** A `claimed` event records its assignee's kind now, and a person's is a notice: "📋 **title** `k_…` — assigned to Alice", or "review assigned to", named by the name Lark last gave, else the principal, in plain text, never a mention (spec §9.3). *The user's decision:* it goes to every subscription of the task, as any notice does: a subscription does not record whether its chat is a group, so a task created in a direct message hears the line too. *Why:* it says who has the task wherever the task is followed, and needs no new column.
 13. **A card's nonce is bound to the task and the run, not the boot.** An approval's nonce binds the boot; a person's run parks across restarts (spec §4.2), and its card must still work after one. The nonce is an unkeyed hash of ids anyone who sees the card can read: it catches a pointer mixed or mangled, and is no secret. What protects a press is who made it — the callback's operator, checked against the tiers and the task — and the board's re-check inside its transaction that the card's run is the task's open run (`Reporter.runId`); a card for a run that is over is refused `run_superseded`, said to be out of date, and redrawn so. An Unblock's nonce is bound to the event that blocked the task, which must be a block of that task. *Not done:* an HMAC with a per-gateway secret, which would need a secret kept and shared by every renderer for no change in what a press may do.
-14. **Who may press what, and a refused press.** Done and Block: the run's assignee, at talk tier. Approve and Request changes: the review run's reviewer at talk tier, or an operator. Unblock: an operator. Identity is the callback's operator; the payload is a pointer (spec §9.2, §10). The SDK drops a press it has seen — keyed `card:<message>:<presser>:<tag>|<name>|<option>|<the value's first 128 characters>`, for twelve hours, `form_value` left out (`lib/index.js` of node-sdk 1.73, `cardActionId` and `DEFAULT_DEDUP`) — so a press refused for what it carried — an empty box, a gate, a busy workspace, a report in progress — redraws the card live from the board, saying why under the title, with buttons whose value starts with `try`, the next attempt, outside the nonce. A press by the wrong person, or with a payload that does not match, changes nothing and redraws nothing.
+14. **Who may press what, and a refused press.** Done and Block: the run's assignee, at talk tier. Approve and Request changes: the review run's reviewer at talk tier, or an operator. Unblock: an operator. Identity is the callback's operator; the payload is a pointer (spec §9.2, §10). The SDK drops a press it has seen — keyed `card:<message>:<presser>:<tag>|<name>|<option>|<the value's first 128 characters>`, for twelve hours, `form_value` left out (`lib/index.js` of node-sdk 1.73, `cardActionId` and `DEFAULT_DEDUP`) — so a press refused for what it carried — an empty box, a gate, a busy workspace, a report in progress — redraws the card live from the board, saying why under the title, with buttons named `button_<place>_<attempt>` — whole in the key, whatever order Lark gives the value's keys — and whose value starts with `try`, the attempt, outside the nonce; a `try` that cannot be read starts over at 1. A refused report whose run ended meanwhile redraws the card as out of date instead. A press by the wrong person, or with a payload that does not match, changes nothing and redraws nothing.
 15. **A typed report leaves the card live.** `/kanban done` typed by the assignee decides the run; the card's buttons are left, and a later press is refused as out of date and redraws the card then. *Why:* chat does not need to find the card's message — `card_sent` records it, for a later plan to redraw from — and a stale press does nothing either way.
 16. **Unblock under a notice, not redrawn.** A message whose notices left tasks blocked carries an Unblock for each task's latest block, at most five, in the order told. The message is not redrawn once one is pressed: it carries the round's other notices, which a redraw would lose. A second press finds the block lifted, does nothing, and says so — the re-check spec §9.2 asks for, without the redraw. As the message is not redrawn, the SDK drops the same operator's second press of one Unblock for twelve hours (Decision 14); another operator's, and `/kanban unblock`, still work.
 17. **The people's commands.** `/kanban done <task> [summary]` and `approve <task> [comment]`: the text may be empty. `block <task> <reason>` and `changes <task> <reason>`: a reason is required. *The user's decision:* `review <task> [summary]` names its reviewer on a line `reviewer: <role or @person>`, anywhere in it, as on `/kanban new`, rather than the spec's positional `[reviewer]`: a name at the end of free text could be the summary's last word. Without the line, the task's reviewer is used, and a task with none is refused, saying to add the line.
@@ -76,7 +76,7 @@ Each is the reading most consistent with the rest of the spec. *The user's decis
 25. **What a card shows.** A task card: the title, any changes a reviewer asked for, the body (1,500 characters), the contract, and up to five parents' summaries (600 each). A review card: the handoff (1,500), "To review: review commit `abc…`" only when the report recorded a commit (spec §7.8), the body (1,200) and the contract. Each piece masked, cut and escaped as chat's replies are (spec §9.3), and the whole markdown masked once more before it is sent. Each ends with the typed commands that do the same.
 26. **A person's run parks.** Nothing new is needed: the dispatcher already never times out, nudges or ends a person's run, at a sweep or a restart. A test now shows a person's run claimed beside an agent's in the same workspace, outside `max_running`, and still open past the runtime limit.
 27. **Named by the task as it stands.** Whether a comment steers, and who may report or answer, are read from the task when the command arrives; a card's buttons, from the run the card was sent for.
-28. **A press is answered at once.** Lark waits about three seconds for a callback's answer, and the SDK's websocket client answers only once the handler returns (node-sdk `lib/index.js`, the `ws` message handler awaiting `eventDispatcher.invoke`, which awaits the card handler through the SDK's per-chat queue). So `KanbanChat.card` checks the nonce, the presser and the box, redraws the card as "Working on it…", answers, and makes the report in the background — tracked, waited for by `idle()` at shutdown under the drain's bound, its errors masked and logged — then redraws the card with the outcome. The inbound side sends its acknowledgement without holding the callback either. **[you decide]** Each press is still acknowledged with a short message in the chat ("Completing `k_…`: the card shows how it goes."), as an approval's press is; the card alone could carry it.
+28. **A press is answered at once, and shown only on its card.** Lark waits about three seconds for a callback's answer, and the SDK's websocket client answers only once the handler returns (node-sdk `lib/index.js`, the `ws` message handler awaiting `eventDispatcher.invoke`, which awaits the card handler through the SDK's per-chat queue). So `KanbanChat.card` checks the nonce, the presser and the box, redraws the card as "Working on it…", answers, and makes the report in the background — tracked, waited for by `idle()` at shutdown under the drain's bound, its gates aborted by `stop()` first, so nothing is applied, its errors masked and logged — then redraws the card with the outcome. *The user's decision:* a board card's press posts nothing in the chat; the card alone shows it. The router notes the board's answer, masked, for a press the card cannot show — someone else's, a mangled payload, an Unblock's — and an approval's press is acknowledged in the chat as before. A second press of a card while one is worked on is refused without a redraw, so neither redraws over the other.
 29. **A typed report is made on the run it was checked against.** `/kanban done`, `block`, `review`, `approve` and `changes` pass the task's open run, as read when the report is checked, as `Reporter.runId`, so a reassignment while the report's gates run refuses it inside the transaction (`run_superseded`) rather than let it decide another run, or complete a task now someone else's.
 30. **Every uuid is one message's.** With the uuid reaching Lark, which sends one message per uuid for an hour across receivers, a uuid shared by two messages loses one: a boot finding's message is keyed on the binding and the boot (`findingUuid`), a click's acknowledgement on the callback's token and the box's text, and an approval card on its approval rather than the millisecond. Every other uuid was already one message's: a control reply's is the message and its purpose, a notice batch's its (subscription, event) pairs, a card's its run.
 31. **The approval card in schema 2.0.** Its buttons go in the body with callback behaviors, as a board card's do, instead of a 1.0 `action` container with a `value` on each button. The router reads `action.value` either way, which the SDK takes from the callback, for a card posted before this as for one after.
@@ -90,7 +90,8 @@ Each is the reading most consistent with the rest of the spec. *The user's decis
 - **A notice's Unblock button stays** after it is pressed; a second press says the block was lifted (Decision 16).
 - **A card Lark refuses is not sent again** (Decision 11). The person can type the commands the notice gives; once Lark can reach them, `/kanban stop` and `unblock` give the task a new run, and a new card.
 - **The people table learns only from `/kanban`.** A principal an agent names who has never sent a `/kanban` command, been mentioned in one, or pressed a card is refused (Decision 8).
-- **Texts over 4,000 characters, and streamed answers, still go without the uuid** (Decision 21), and Lark's uuid lasts an hour: a batch sent again after a longer outage can show twice.
+- **Texts over 4,000 characters, and streamed answers, still go without the uuid** (Decision 21), and Lark's uuid lasts an hour: a batch sent again after a longer outage can show twice, and so can a person's card whose send timed out but landed, if it is sent again after the hour.
+- **A press the card cannot show is said nowhere but the log** (Decision 28): someone else's press, a mangled payload, and an Unblock's result. `/kanban show` tells where the task is.
 - **The one line goes to every subscription**, a direct message included (Decision 12).
 - **An approval forwarded to a chat counts toward its run's runtime limit.** A supervised agent waiting on an unanswered approval is cancelled at `max_runtime_s` like any run; after a restart, its card resolves to "no longer bound", as the run's session is archived (spec §8.4).
 - **Texts no longer go through the SDK's markdown tidying** (headings demoted, blank lines compressed): the router's replies and the notices use neither.
@@ -131,7 +132,7 @@ Each is the reading most consistent with the rest of the spec. *The user's decis
 | `tests/helpers/channel.ts`, `tests/helpers/dispatch.ts`, `tests/fakes/cli-agent.mjs` (modify) | board cards in the fake channel; people in the dispatch harness; the agent's `kanban-review` mode |
 | `tests/lark-cards.test.ts`, `tests/kanban-schema.test.ts`, `tests/kanban-sink.test.ts`, `tests/kanban-chat-parse.test.ts`, `tests/kanban-chat-render.test.ts`, `tests/ids.test.ts`, `tests/kanban-chat.test.ts`, `tests/kanban-chat.e2e.ts`, `tests/router.test.ts`, `tests/kanban-notices.test.ts`, `tests/gateway-startup.test.ts`, `tests/kanban-service.test.ts` (modify) | |
 
-Running counts, unit then end to end: Task 1 1233 / 72, Task 2 1236, Task 3 1249, Task 4 1256, Task 5 1259, Task 6 1260, Task 7 1267, Task 8 1283, Task 9 1288, Task 10 1298, Task 11 1300, Task 12 1301, Task 13 1301 / 74, Task 14 1301 / 74.
+Running counts, unit then end to end: Task 1 1233 / 72, Task 2 1236, Task 3 1250, Task 4 1257, Task 5 1260, Task 6 1261, Task 7 1268, Task 8 1287, Task 9 1292, Task 10 1302, Task 11 1304, Task 12 1306, Task 13 1306 / 74, Task 14 1306 / 74.
 
 
 ---
@@ -716,7 +717,7 @@ git commit -m "Note each person Lark identifies, by union_id with the open_id an
 - Create: `tests/lark-adapter.test.ts`
 - Modify: `src/channel/lark/adapter.ts`, `src/channel/types.ts`, `src/core/session-actor.ts`, `src/kanban/sink.ts`, `tests/helpers/channel.ts`, `tests/lark-cards.test.ts`
 
-Three changes to the channel port and the Lark adapter (spec §9.2, §9.4; Decisions 10, 16, 21). A `SendTarget` may name a person by union_id (`receiveIdType`), which Lark takes per message, so a direct message needs no chat opened first. Every message that goes out as one message -- a text of up to 4,000 characters, which every router reply and every batch of notices is, an approval card, a board card -- is sent through the SDK's own client, `im.v1.message.create` or `reply`, with its uuid: Lark sends one message for any number of sends with one uuid within an hour, which closes the gap D1 lived with. And a board card, a `CardView` of markdown, an optional box and buttons, is posted with `sendCard` and redrawn with `updateCard`; a text may carry buttons too, for a notice's Unblock. An approval card's buttons now say `kind: 'approval'`. The request and the card's JSON are pure functions, tested as D1 tested the answered approval card; the fake channel records board cards and their redraws. Three more, as the uuid now reaches Lark and the SDK's own send no longer stands between: a send that never reached Lark -- no response, no code -- is retryable, as the SDK's send retried it; a text whose card of buttons Lark refuses, for a reason that is not the chat's, goes as plain text, so one bad card cannot hold a chat's notices back; and an approval card is built in schema 2.0 as a board card is, its buttons in the body with callback behaviors, and keyed one uuid per approval rather than per millisecond (Decisions 21, 31, 32, 33). The adapter takes the SDK's channel, and how a retry waits, from a test, which `tests/lark-adapter.test.ts` uses to send through a stand-in.
+Three changes to the channel port and the Lark adapter (spec §9.2, §9.4; Decisions 10, 16, 21). A `SendTarget` may name a person by union_id (`receiveIdType`), which Lark takes per message, so a direct message needs no chat opened first. Every message that goes out as one message -- a text of up to 4,000 characters, which every router reply and every batch of notices is, an approval card, a board card -- is sent through the SDK's own client, `im.v1.message.create` or `reply`, with its uuid: Lark sends one message for any number of sends with one uuid within an hour, which closes the gap D1 lived with. And a board card, a `CardView` of markdown, an optional box and buttons, is posted with `sendCard` and redrawn with `updateCard`; a text may carry buttons too, for a notice's Unblock. An approval card's buttons now say `kind: 'approval'`. The request and the card's JSON are pure functions, tested as D1 tested the answered approval card; the fake channel records board cards and their redraws. Three more, as the uuid now reaches Lark and the SDK's own send no longer stands between: a send that never reached Lark -- no response, no code -- is retryable, as the SDK's send retried it; a text whose card of buttons Lark refuses, for a reason that is not the chat's, goes as plain text, so one bad card cannot hold a chat's notices back; and an approval card is built in schema 2.0 as a board card is, its buttons in the body with callback behaviors, and keyed one uuid per approval rather than per millisecond (Decisions 21, 31, 32, 33). A board card's buttons are named by their place and the card's attempt, so a redrawn card's buttons are new ones to the SDK (Decision 14). The adapter takes the SDK's channel, and how a retry waits, from a test, which `tests/lark-adapter.test.ts` uses to send through a stand-in; each of its tests checks the stand-in was taken before anything is sent, so none reaches Lark even before the adapter takes one.
 
 - [ ] **Step 3.1: Write the failing tests.**
 
@@ -932,6 +933,8 @@ function adapter(answers: Array<Error | undefined>): { a: LarkAdapter; calls: Ca
       waits.push(ms);
     },
   });
+  // Before anything is sent: an adapter that built its own SDK channel would reach Lark.
+  if (a.raw !== lark) throw new Error('the adapter did not take the stand-in for the SDK');
   return { a, calls, waits };
 }
 
@@ -1156,6 +1159,13 @@ describe('boardCard', () => {
     expect(form.elements.map((e) => (e['text'] ?? e['placeholder'])?.tag)).toEqual(['plain_text', 'plain_text', 'plain_text']);
   });
 
+  it("names each button by its place and the card's attempt, so a redrawn card's buttons are new ones", () => {
+    const names = (v: CardView) =>
+      (elements(boardCard(v))[1] as { elements: Array<Record<string, unknown>> }).elements.slice(1).map((b) => b['name']);
+    expect(names(view)).toEqual(['button_0_0', 'button_1_0']);
+    expect(names({ ...view, attempt: 2 })).toEqual(['button_0_2', 'button_1_2']);
+  });
+
   it('has no form without a box, and no buttons once acted on; and stays updatable', () => {
     const plain = elements(boardCard({ markdown: view.markdown, buttons: view.buttons }));
     expect(plain.map((e) => e['tag'])).toEqual(['markdown', 'button', 'button']);
@@ -1168,7 +1178,7 @@ describe('boardCard', () => {
 ```
 
 
-- [ ] **Step 3.2: Run them to verify they fail.** Run `export PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH` and then `npx vitest run --project unit tests/lark-cards.test.ts tests/lark-adapter.test.ts`. Expected: thirteen FAIL: `tests/lark-adapter.test.ts` with `TypeError: (0 , sendError) is not a function` and on the adapter taking no stand-in for the SDK, and the cards' tests on the missing `personTarget`, `messageRequest`, `postContent`, `boardCard` and `approvalCard`; the answered approval card's four pass. `Tests  13 failed | 4 passed (17)`.
+- [ ] **Step 3.2: Run them to verify they fail.** Run `export PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH` and then `npx vitest run --project unit tests/lark-cards.test.ts tests/lark-adapter.test.ts`. Expected: fourteen FAIL: each of `tests/lark-adapter.test.ts`'s with `Error: the adapter did not take the stand-in for the SDK`, before anything is sent, so none reaches Lark; and the cards' tests on the missing `personTarget`, `messageRequest`, `postContent`, `boardCard` and `approvalCard`; the answered approval card's four pass. `Tests  14 failed | 4 passed (18)`.
 
 - [ ] **Step 3.3: Implement.**
 
@@ -1612,7 +1622,9 @@ export function postContent(text: string): object {
 export function boardCard(view: CardView): object {
   const buttons = view.buttons.map((b, i) => ({
     tag: 'button',
-    name: `button_${i}`,
+    // The attempt in the name: the SDK keys a press on the button's name, whole,
+    // and on only the start of its value, however Lark orders the value's keys.
+    name: `button_${i}_${view.attempt ?? 0}`,
     text: { tag: 'plain_text', content: forPlainText(b.label) },
     type: b.style,
     behaviors: [{ type: 'callback', value: { ...b.value } }],
@@ -1702,6 +1714,12 @@ export interface CardView {
   markdown: string;
   input?: { placeholder: string };
   buttons: readonly CardButton[];
+  /**
+   * How many times the card has been redrawn live after a press it refused. The
+   * buttons' names carry it, so a press of the redrawn card is not taken for the
+   * press before it by a channel that drops a press it has seen.
+   */
+  attempt?: number;
 }
 ```
 
@@ -1810,9 +1828,9 @@ with:
 ```
 
 
-- [ ] **Step 3.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/lark-cards.test.ts tests/lark-adapter.test.ts`. Expected: `Tests  17 passed (17)`.
+- [ ] **Step 3.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/lark-cards.test.ts tests/lark-adapter.test.ts`. Expected: `Tests  18 passed (18)`.
 
-- [ ] **Step 3.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1249 passed (1249)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 3.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1250 passed (1250)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 3.6: Commit.**
 
@@ -2330,7 +2348,7 @@ export type Reporter = { kind: 'run'; runId: string } | { kind: 'person'; princi
 
 - [ ] **Step 4.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-people-reports.test.ts`. Expected: `Tests  7 passed (7)`.
 
-- [ ] **Step 4.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1256 passed (1256)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 4.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1257 passed (1257)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 4.6: Commit.**
 
@@ -2654,7 +2672,7 @@ export class KanbanSink implements Channel {
 
 - [ ] **Step 5.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-sink.test.ts`. Expected: `Tests  6 passed (6)`.
 
-- [ ] **Step 5.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1259 passed (1259)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 5.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1260 passed (1260)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 5.6: Commit.**
 
@@ -3007,7 +3025,7 @@ with:
 
 - [ ] **Step 6.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-chat-parse.test.ts`. Expected: `Tests  12 passed (12)`.
 
-- [ ] **Step 6.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1260 passed (1260)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 6.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1261 passed (1261)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 6.6: Commit.**
 
@@ -3641,7 +3659,7 @@ export function unblockButton(appId: string, event: KanbanEvent): CardButton {
 
 - [ ] **Step 7.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-chat-render.test.ts tests/ids.test.ts`. Expected: `Tests  39 passed (39)`.
 
-- [ ] **Step 7.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1267 passed (1267)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 7.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1268 passed (1268)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 7.6: Commit.**
 
@@ -3659,7 +3677,7 @@ git commit -m "Render the one line that says who a person's claim gave a task to
 
 `KanbanChat` gives work to people and takes their reports (spec §9.1, §9.2, §4.2, §7.5; Decisions 8, 9, 13, 14, 15, 18, 23, 24, 27). Each sender and each person a command mentions is noted in the people directory first. An @-mention becomes the mentioned person's principal, by the name Lark's text shows; a person without talk tier is refused, by the name typed. A named assignee reports `done`, `block` and `review` on their own task while it is open, a named reviewer answers with `approve` or `changes` while it is in review, with talk tier, and an operator may answer any review. Their comments steer, as an operator's do. A gate's refusal is shown with its output, masked and escaped. A role whose agent is supervised is accepted. And `card()` takes a press of a card's button: the nonce checked, the presser from the callback's operator, the report made on the card's run, and the card redrawn when it was acted on or is out of date. The gateway passes the people directory and the card redraw now; the service gets people in Task 12.
 
-Two things Lark and its SDK force (Decisions 13, 28, 29). Lark waits about three seconds for a callback's answer, and the SDK answers only once the handler returns, so a press is answered at once: the card is redrawn as being worked on, the report made in the background, tracked by `idle()`, and the card redrawn with the outcome. And the SDK drops a press it has seen -- the card, the presser and the button's value -- for twelve hours, whatever the box held, so a press refused for what it carried is redrawn live, saying why, with buttons whose value starts with the next attempt. A typed report is made on the task's open run as it was checked, so a reassignment while its gates run refuses it rather than let it decide someone else's.
+Two things Lark and its SDK force (Decisions 13, 28, 29). Lark waits about three seconds for a callback's answer, and the SDK answers only once the handler returns, so a press is answered at once: the card is redrawn as being worked on, the report made in the background, tracked by `idle()`, and the card redrawn with the outcome. And the SDK drops a press it has seen -- the card, the presser and the button's value -- for twelve hours, whatever the box held, so a press refused for what it carried is redrawn live, saying why, with buttons named for, and valued with, the next attempt. A second press of a card while one is worked on is refused without a redraw, and a refused report whose run ended meanwhile redraws the card as out of date. And `stop()` aborts the gates of every report from chat, a press's or typed, so the gateway's stop kills them and applies nothing, as the worker socket's are. A typed report is made on the task's open run as it was checked, so a reassignment while its gates run refuses it rather than let it decide someone else's.
 
 - [ ] **Step 8.1: Write the failing tests.**
 
@@ -3777,8 +3795,12 @@ beforeEach(() => {
     checks: {
       workspaceDirs: new Map([...WORKSPACES].map((w) => [w, `/ws/${w}`])),
       env: {},
-      runGate: async (command) => {
-        await holds.get(command);
+      runGate: async (command, opts) => {
+        // A held gate ends when the test lets it go, or when the gateway stops, as a killed one does.
+        const stopped = new Promise<'stopped'>((resolve) => opts.signal?.addEventListener('abort', () => resolve('stopped')));
+        if ((await Promise.race([holds.get(command), stopped])) === 'stopped') {
+          return { exitCode: null, signal: 'SIGTERM', timedOut: false, output: '' };
+        }
         return { exitCode: 0, signal: null, timedOut: false, output: '', ...exits.get(command) };
       },
     },
@@ -4076,6 +4098,8 @@ describe("a person's card", () => {
     // The value differs from the button pressed, first: the SDK drops a press it has seen, by the value's start.
     expect(first?.buttons.map((b) => Object.keys(b.value)[0])).toEqual(['try', 'try']);
     expect(first?.buttons.map((b) => b.value['try'])).toEqual(['1', '1']);
+    // And in the buttons' names, which the SDK keys a press on whole: the card carries the attempt.
+    expect(first?.attempt).toBe(1);
     // A gate's refusal, in the background, the same way; the attempt goes on from the button pressed.
     expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
     exits.set('test -f links.md', { exitCode: 1, output: 'no links.md' });
@@ -4088,7 +4112,57 @@ describe("a person's card", () => {
       ['Done', '2'],
       ['Block', '2'],
     ]);
+    expect(second?.attempt).toBe(2);
+    // An attempt that cannot be read starts over.
+    await press(run, 'block', ALICE, '', { try: 'x' });
+    expect(redrawn.at(-1)?.view.attempt).toBe(1);
     expect(getRun(t.db, run.runId)?.outcome).toBeNull();
+  });
+
+  it('takes no second press of a card while one is worked on, so neither redraws over the other', async () => {
+    const { taskId, run } = await aliceTask();
+    expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
+    let release!: () => void;
+    holds.set('test -f links.md', new Promise<void>((resolve) => (release = resolve)));
+    await press(run, 'done', ALICE, 'all links answer');
+    expect(await press(run, 'block', ALICE, '')).toBe('That card is being worked on: it shows the outcome when it is done.');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(redrawn.map((r) => r.view.markdown)).toEqual([`**Check the links** \`${taskId}\`\nWorking on it…`]);
+    release();
+    await chat.idle(5_000);
+    expect(redrawn.at(-1)?.view.markdown).toContain('Done — by Alice Smith.');
+  });
+
+  it('redraws a card as out of date, not live, when its run ended while the refused report ran', async () => {
+    const { taskId, run } = await aliceTask();
+    expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
+    let release!: () => void;
+    holds.set('test -f links.md', new Promise<void>((resolve) => (release = resolve)));
+    exits.set('test -f links.md', { exitCode: 1, output: 'no links.md' });
+    await press(run, 'done', ALICE, 'all links answer');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(await say(`stop ${taskId}`)).toContain('Stopped');
+    release();
+    await chat.idle(5_000);
+    expect(redrawn.at(-1)?.view).toEqual({
+      markdown: `**Check the links** \`${taskId}\`\nThis card is out of date: the task has moved on since it was sent.`,
+      buttons: [],
+    });
+  });
+
+  it("kills a press's gates when the gateway stops, applying nothing, and says so on the card", async () => {
+    const { taskId, run } = await aliceTask();
+    expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
+    holds.set('test -f links.md', new Promise<void>(() => undefined));
+    await press(run, 'done', ALICE, 'all links answer');
+    await new Promise((resolve) => setImmediate(resolve));
+    chat.stop();
+    expect(await chat.idle(5_000)).toBe(true);
+    expect(getRun(t.db, run.runId)?.outcome).toBeNull();
+    expect(redrawn.at(-1)?.view.markdown).toContain('the gateway is stopping');
+    // A typed report's gates too.
+    const typed = say(`done ${taskId} again`, ALICE);
+    expect(await typed).toContain('the gateway is stopping');
   });
 
   it('refuses a press by someone else, and an altered payload, changing nothing, the card left as it was', async () => {
@@ -4255,7 +4329,7 @@ describe('a wrong command line', () => {
 ```
 
 
-- [ ] **Step 8.2: Run them to verify they fail.** Run `export PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH` and then `npx vitest run --project unit tests/kanban-chat.test.ts`. Expected: eighteen FAIL: a person is still refused as arriving in a later update (`Error: not created: Assigning a task to a person, …`), the people's reports are answered the same way, and `chat.card` is not a function. `Tests  18 failed | 7 passed (25)`.
+- [ ] **Step 8.2: Run them to verify they fail.** Run `export PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH` and then `npx vitest run --project unit tests/kanban-chat.test.ts`. Expected: twenty-one FAIL: a person is still refused as arriving in a later update (`Error: not created: Assigning a task to a person, …`), the people's reports are answered the same way, and `chat.card` and `chat.stop` are not functions. `Tests  21 failed | 7 passed (28)`.
 
 - [ ] **Step 8.3: Implement.**
 
@@ -4435,6 +4509,23 @@ with:
 In `src/kanban/chat-render.ts`, replace:
 
 ```ts
+  return { markdown: out.join('\n'), input: { placeholder: 'A summary, or why it is blocked' }, buttons };
+```
+
+with:
+
+```ts
+  return {
+    markdown: out.join('\n'),
+    input: { placeholder: 'A summary, or why it is blocked' },
+    buttons,
+    ...(f.attempt === undefined || f.attempt === 0 ? {} : { attempt: f.attempt }),
+  };
+```
+
+In `src/kanban/chat-render.ts`, replace:
+
+```ts
   const out = [`🔎 **${label(task.title)}** ${id(task.taskId)} — for you to review`];
   const h = f.handoff;
 ```
@@ -4459,6 +4550,23 @@ with:
 ```ts
     { label: 'Approve', style: 'primary', value: act(appId, run, 'approve', f.attempt) },
     { label: 'Request changes', style: 'danger', value: act(appId, run, 'changes', f.attempt) },
+```
+
+In `src/kanban/chat-render.ts`, replace:
+
+```ts
+  return { markdown: out.join('\n'), input: { placeholder: 'What needs changing' }, buttons };
+```
+
+with:
+
+```ts
+  return {
+    markdown: out.join('\n'),
+    input: { placeholder: 'What needs changing' },
+    buttons,
+    ...(f.attempt === undefined || f.attempt === 0 ? {} : { attempt: f.attempt }),
+  };
 ```
 
 Replace the whole of `src/kanban/chat.ts` with:
@@ -4626,6 +4734,10 @@ export class KanbanChat {
   readonly #deps: KanbanChatDeps;
   /** Presses being worked on in the background. */
   readonly #pending = new Set<Promise<void>>();
+  /** The cards a press is being worked on for, by message: a second press waits for the first. */
+  readonly #busy = new Set<string>();
+  /** Aborted when the gateway stops: a report's gates are killed, and nothing is applied (spec §7.7). */
+  readonly #stopping = new AbortController();
 
   constructor(deps: KanbanChatDeps) {
     this.#deps = deps;
@@ -4805,6 +4917,7 @@ export class KanbanChat {
       task.taskId,
       this.#reporter(by, shown.view.runs),
       { summary: command.summary, ...(reviewer === undefined ? {} : { reviewer }) },
+      { signal: this.#stopping.signal },
     );
     if (!r.ok) {
       return r.code === 'no_reviewer'
@@ -4854,7 +4967,7 @@ export class KanbanChat {
     switch (verb) {
       case 'done':
       case 'approve':
-        return service.complete(taskId, by, { summary: text });
+        return service.complete(taskId, by, { summary: text }, { signal: this.#stopping.signal });
       case 'block':
         // A person's block on their own task needs their input (spec §5.4).
         return service.block(taskId, by, { kind: 'needs_input', reason: text });
@@ -4935,7 +5048,10 @@ export class KanbanChat {
     if (run === undefined) return 'That button is not for a run of this task.';
     const allowed = this.#mayPress(verb, run, by, presser);
     if (allowed !== undefined) return allowed;
-    const press: Press = { messageId: action.messageId, run, attempt: Number(field(v, 'try') ?? '0') + 1 };
+    // A press while one is being worked on for this card would redraw over it.
+    if (this.#busy.has(action.messageId)) return 'That card is being worked on: it shows the outcome when it is done.';
+    const tried = Number(field(v, 'try') ?? '0');
+    const press: Press = { messageId: action.messageId, run, attempt: Number.isSafeInteger(tried) && tried >= 0 ? tried + 1 : 1 };
     if (run.endedAt !== null) return this.#outOfDate(press, task);
     const text = (action.input ?? '').trim();
     const empty =
@@ -4949,7 +5065,8 @@ export class KanbanChat {
       return empty;
     }
     const name = label(presser.displayName ?? by, 80);
-    this.#track(this.#press(verb, press, by, name, text));
+    this.#busy.add(press.messageId);
+    this.#track(this.#press(verb, press, by, name, text).finally(() => this.#busy.delete(press.messageId)));
     return `${{ done: 'Completing', block: 'Blocking', approve: 'Approving', changes: 'Asking for changes on' }[verb]} ${id(taskId)}: the card shows how it goes.`;
   }
 
@@ -4992,6 +5109,11 @@ export class KanbanChat {
   async #redrawLive(press: Press, note: string): Promise<void> {
     const reading = this.#deps.service.cardReading(press.run.runId);
     if (reading === undefined) return;
+    // A run that ended meanwhile -- typed, stopped, reassigned -- has no card to press again.
+    if (reading.run.endedAt !== null) {
+      await this.#outOfDate(press, reading.task);
+      return;
+    }
     const facts: CardFacts = {
       ...reading,
       attempt: press.attempt,
@@ -5007,6 +5129,15 @@ export class KanbanChat {
     const tracked = work.catch((err: unknown) => this.#note(`kanban: ${redactKnownSecrets(err instanceof Error ? err.message : String(err))}`));
     this.#pending.add(tracked);
     void tracked.finally(() => this.#pending.delete(tracked));
+  }
+
+  /**
+   * The gateway is stopping: the gates of a report being made -- from a press or
+   * typed -- are killed, and nothing is applied, as the worker socket's are; the
+   * next report after a restart runs them again.
+   */
+  stop(): void {
+    this.#stopping.abort();
   }
 
   /** Once no press is being worked on, or `boundMs` has passed: true once drained. */
@@ -5168,9 +5299,9 @@ export class KanbanChat {
 ```
 
 
-- [ ] **Step 8.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-chat.test.ts`. Expected: `Tests  25 passed (25)`.
+- [ ] **Step 8.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-chat.test.ts`. Expected: `Tests  28 passed (28)`.
 
-- [ ] **Step 8.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1283 passed (1283)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 8.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1287 passed (1287)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 8.6: Commit.**
 
@@ -5186,7 +5317,7 @@ git commit -m "Give tasks to people named by @-mention in /kanban, take a named 
 **Files:**
 - Modify: `src/channel/lark/inbound.ts`, `src/core/router.ts`, `tests/lark-inbound.test.ts`, `tests/router.test.ts`
 
-`Router.onCardAction` treated every press as an approval's, checking operator tier before it read the payload (spec §9.2; Decision 14). It now dispatches on the card's `kind` first: `kanban` goes to the board's `card()`, whose rules decide who may press -- a named assignee at talk tier may press Done -- with the answer masked, as a `/kanban` reply is; `approval`, or no kind, for cards posted before there was one, is an approval as before; any other kind is refused. The inbound side no longer holds Lark's callback while it sends its acknowledgement, and keys that message's uuid on the callback's token and what the box held, so a second press of one button is acknowledged too (Decisions 28, 30).
+`Router.onCardAction` treated every press as an approval's, checking operator tier before it read the payload (spec §9.2; Decision 14). It now dispatches on the card's `kind` first: `kanban` goes to the board's `card()`, whose rules decide who may press -- a named assignee at talk tier may press Done -- its answer noted, masked; `approval`, or no kind, for cards posted before there was one, is an approval as before; any other kind is refused. The inbound side says nothing in the chat for a board card's press, whose card shows what happened (Decision 28): the router notes the board's answer, masked, and returns none. An approval's press is acknowledged as before, that message's uuid keyed on the callback's token and what the box held, so a second press of one button is acknowledged too (Decisions 28, 30).
 
 - [ ] **Step 9.1: Write the failing tests.**
 
@@ -5278,7 +5409,7 @@ with:
 ```ts
   });
 
-  it("hands a board card's button to the board, whatever the presser's tier, and masks its answer", async () => {
+  it("hands a board card's button to the board, whatever the presser's tier, posting nothing and noting its answer masked", async () => {
     addSecrets(['sk-card-12345678']);
     const pressed: InboundCardAction[] = [];
     const h = harness({
@@ -5293,21 +5424,24 @@ with:
     });
     const action = { chatId: CHAT, messageId: 'om_card', operator: GUEST, value: { kind: 'kanban', act: 'done' }, input: 'all fine' };
     // A named assignee at talk tier may press Done: the board's rules, not operator tier, decide (spec §9.2).
-    expect(await h.router.onCardAction(action)).toBe(`Done: \`k_1\` is complete, ${MASK}`);
+    // The card shows the outcome: nothing is said in the chat.
+    expect(await h.router.onCardAction(action)).toBeUndefined();
     expect(pressed).toEqual([action]);
+    expect(h.notes).toContain(`kanban card on om_card: Done: \`k_1\` is complete, ${MASK}`);
     clearSecrets();
   });
 
-  it('says the board is off for a board card when it is, and refuses a kind it does not know', async () => {
+  it('notes a board card pressed with the board off, posting nothing, and refuses a kind it does not know', async () => {
     const h = harness();
     const value = { kind: 'kanban', act: 'done' };
-    expect(await h.router.onCardAction({ chatId: CHAT, messageId: 'om_card', operator: OWNER, value })).toBe(KANBAN_OFF);
+    expect(await h.router.onCardAction({ chatId: CHAT, messageId: 'om_card', operator: OWNER, value })).toBeUndefined();
+    expect(h.notes).toContain('kanban card on om_card pressed with the board off');
     expect(await h.router.onCardAction({ chatId: CHAT, messageId: 'om_card', operator: OWNER, value: { kind: 'poll' } })).toBe(
       'That button is not one this gateway knows.',
     );
   });
 
-  it("answers a board card's button that throws with the reason, on one line, and notes it", async () => {
+  it("notes a board card's button that throws, masked, and posts nothing", async () => {
     const h = harness({
       kanban: {
         run: async () => 'unused',
@@ -5317,7 +5451,7 @@ with:
       },
     });
     const reply = await h.router.onCardAction({ chatId: CHAT, messageId: 'om_card', operator: OWNER, value: { kind: 'kanban' } });
-    expect(reply).toBe('The board could not do that: database\\_locked second line');
+    expect(reply).toBeUndefined();
     expect(h.notes.some((n) => n.includes('kanban card on om_card failed'))).toBe(true);
   });
 
@@ -5348,13 +5482,8 @@ with:
 
 ```ts
     const outcome = await this.#deps.router.onCardAction(action);
-    // Not awaited: the SDK answers Lark's callback only once this handler returns,
-    // and Lark waits about three seconds for it. The acknowledgement is a message
-    // of its own, which need not hold the answer.
-    void this.#acknowledge(evt, action, outcome);
-  }
-
-  async #acknowledge(evt: CardActionEvent, action: InboundCardAction, outcome: string): Promise<void> {
+    // A board card's press is acknowledged by its card, not in the chat (spec §9.2).
+    if (outcome === undefined) return;
     try {
 ```
 
@@ -5440,14 +5569,26 @@ with:
 In `src/core/router.ts`, replace:
 
 ```ts
-  async onCardAction(action: InboundCardAction): Promise<string> {
-    const approvalId = stringField(action.value, 'approvalId');
+   * Handle a button click. Returns the toast text.
 ```
 
 with:
 
 ```ts
+   * Handle a button click. Returns the text to acknowledge it with in the chat,
+   * or undefined for a board card's, whose card shows the outcome itself (spec §9.2).
+```
+
+In `src/core/router.ts`, replace:
+
+```ts
   async onCardAction(action: InboundCardAction): Promise<string> {
+```
+
+with:
+
+```ts
+  async onCardAction(action: InboundCardAction): Promise<string | undefined> {
     // The card's kind first (spec §9.2), then that kind's authorization: the board's
     // rules for a board card, under which a named assignee at talk tier may press
     // Done; operator tier for an approval. A card posted before cards said which
@@ -5456,7 +5597,6 @@ with:
     if (kind === 'kanban') return this.#boardCard(action);
     if (kind !== undefined && kind !== 'approval') return 'That button is not one this gateway knows.';
 
-    const approvalId = stringField(action.value, 'approvalId');
 ```
 
 In `src/core/router.ts`, replace:
@@ -5473,23 +5613,33 @@ with:
   }
 
   /** A board card's button, for the board to authorize and act on; its answer masked, as a `/kanban` reply is. */
-  async #boardCard(action: InboundCardAction): Promise<string> {
+  /**
+   * A board card's button, for the board to authorize and act on. Nothing is
+   * posted in the chat: the card shows what happened -- "Working on it…", then the
+   * outcome, or why the press did nothing -- and the board's answer is noted,
+   * masked, for a press the card cannot show, such as someone else's.
+   */
+  async #boardCard(action: InboundCardAction): Promise<undefined> {
     const kanban = this.#deps.kanban;
-    if (kanban === undefined) return KANBAN_OFF;
+    if (kanban === undefined) {
+      this.#note(`kanban card on ${action.messageId} pressed with the board off`);
+      return undefined;
+    }
     try {
-      return redactKnownSecrets(await kanban.card(action));
+      const answer = Array.from(redactKnownSecrets(await kanban.card(action)).replace(/\s+/g, ' ').trim()).slice(0, 300).join('');
+      this.#note(`kanban card on ${action.messageId}: ${answer}`);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       this.#note(`kanban card on ${action.messageId} failed: ${redactKnownSecrets(detail)}`);
-      return `The board could not do that: ${label(detail, 600)}`;
     }
+    return undefined;
   }
 ```
 
 
 - [ ] **Step 9.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/router.test.ts tests/lark-inbound.test.ts`. Expected: `Tests  77 passed (77)`.
 
-- [ ] **Step 9.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1288 passed (1288)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 9.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1292 passed (1292)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 9.6: Commit.**
 
@@ -6060,7 +6210,7 @@ export class CardPoster {
 
 - [ ] **Step 10.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-cards.test.ts`. Expected: `Tests  10 passed (10)`.
 
-- [ ] **Step 10.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1298 passed (1298)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 10.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1302 passed (1302)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 10.6: Commit.**
 
@@ -6366,7 +6516,7 @@ with:
 
 - [ ] **Step 11.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/kanban-notices.test.ts`. Expected: `Tests  22 passed (22)`.
 
-- [ ] **Step 11.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1300 passed (1300)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 11.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1304 passed (1304)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 11.6: Commit.**
 
@@ -6382,7 +6532,7 @@ git commit -m "Name people in notices by the name Lark gave, and put an Unblock 
 **Files:**
 - Modify: `src/index.ts`, `src/kanban/service.ts`, `tests/gateway-startup.test.ts`, `tests/kanban-service.test.ts`
 
-Behind `kanban.enabled`, as before: the service is given the people directory and accepts supervised roles; the sink forwards approval cards through the Lark adapter; the notifier names people; and `CardPoster` starts once the channel is connected, after the notifier; at shutdown the notices, the cards and the card presses being worked on are waited for together, under one bound, before the channel disconnects. A boot finding's message now has a uuid per binding and per boot, as Lark sends one message per uuid for an hour (Decision 30). The service's refusal of a person it cannot check now says how a person becomes known.
+Behind `kanban.enabled`, as before: the service is given the people directory and accepts supervised roles; the sink forwards approval cards through the Lark adapter; the notifier names people; and `CardPoster` starts once the channel is connected, after the notifier; at shutdown the gates of reports from chat are aborted, then the notices, the cards and the card presses being worked on are waited for together, under one bound, before the channel disconnects. A boot finding's message now has a uuid per binding and per boot, as Lark sends one message per uuid for an hour (Decision 30). The service's refusal of a person it cannot check now says how a person becomes known.
 
 - [ ] **Step 12.1: Write the failing tests.**
 
@@ -6410,6 +6560,7 @@ with:
 ```ts
       expect(gateway.notifier).toBeUndefined();
       expect(gateway.cards).toBeUndefined();
+      expect(gateway.chat).toBeUndefined();
     } finally {
 ```
 
@@ -6505,6 +6656,22 @@ with:
       expect(bound).toBeGreaterThan(0);
       expect(bound).toBeLessThanOrEqual(10_000);
     }
+  });
+
+  it("stops the gates of a report from chat before it waits for the card presses being worked on", async () => {
+    const gateway = await createGateway({ ...config, kanban: { ...config.kanban, enabled: true } }, team);
+    const chat = gateway.chat;
+    if (chat === undefined) throw new Error('no chat');
+    const order: string[] = [];
+    vi.spyOn(chat, 'stop').mockImplementation(() => {
+      order.push('stop');
+    });
+    vi.spyOn(chat, 'idle').mockImplementation(async () => {
+      order.push('idle');
+      return true;
+    });
+    await gateway.stop();
+    expect(order).toEqual(['stop', 'idle']);
 ```
 
 In `tests/gateway-startup.test.ts`, replace:
@@ -6553,7 +6720,7 @@ with:
 ```
 
 
-- [ ] **Step 12.2: Run them to verify they fail.** Run `export PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH` and then `npx vitest run --project unit tests/gateway-startup.test.ts tests/kanban-service.test.ts`. Expected: three FAIL: the start-up test with `Error: no cards`, `findingUuid` not a function, and the service's refusal of a person it cannot check, in its old words. `Tests  3 failed | 40 passed (43)`.
+- [ ] **Step 12.2: Run them to verify they fail.** Run `export PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH` and then `npx vitest run --project unit tests/gateway-startup.test.ts tests/kanban-service.test.ts`. Expected: four FAIL: the start-up tests with `Error: no cards` and `Error: no chat`, `findingUuid` not a function, and the service's refusal of a person it cannot check, in its old words. `Tests  4 failed | 40 passed (44)`.
 
 - [ ] **Step 12.3: Implement.**
 
@@ -6598,6 +6765,8 @@ with:
   readonly notifier: Notifier | undefined;
   /** What sends people their task and review cards, when `kanban.enabled` is set. */
   readonly cards: CardPoster | undefined;
+  /** `/kanban` and the board cards' buttons, when `kanban.enabled` is set. */
+  readonly chat: KanbanChat | undefined;
 }
 ```
 
@@ -6778,6 +6947,9 @@ with:
     dispatcher,
     notifier,
     cards,
+    get chat() {
+      return kanbanChat;
+    },
 
     async start(): Promise<void> {
 ```
@@ -6838,6 +7010,9 @@ with:
 ```ts
       notifier?.stop();
       cards?.stop();
+      // And the gates of a report from chat, a press's or typed: killed, nothing applied,
+      // as the worker socket's are below; the next report after a restart runs them again.
+      kanbanChat?.stop();
       // Stop taking work before draining it, or the drain never finishes.
 ```
 
@@ -6901,9 +7076,9 @@ with:
 ```
 
 
-- [ ] **Step 12.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/gateway-startup.test.ts tests/kanban-service.test.ts`. Expected: `Tests  43 passed (43)`.
+- [ ] **Step 12.4: Run them to verify they pass.** Run `npx vitest run --project unit tests/gateway-startup.test.ts tests/kanban-service.test.ts`. Expected: `Tests  44 passed (44)`.
 
-- [ ] **Step 12.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1301 passed (1301)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 12.5: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1306 passed (1306)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  72 passed (72)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 12.6: Commit.**
 
@@ -7178,7 +7353,8 @@ function createdIn(lark: FakeChannel): string {
 /**
  * Press a card's button as `who`, with what was typed in its box: as Lark's
  * callback gives it, through the router, on the card as it was last drawn. Then
- * wait for the work the press began, and give the answer and the card it left.
+ * wait for the work the press began, and give the card it left, and what was
+ * said in the chat: nothing, as a board card's press is shown on its card.
  */
 async function press(
   s: Stack,
@@ -7186,20 +7362,22 @@ async function press(
   label: string,
   who: Principal,
   input?: string,
-): Promise<{ reply: string; card: string }> {
+): Promise<{ said: number; card: string }> {
   const drawn = s.lark.cardUpdates.filter((u) => u.messageId === card.messageId && u.view.buttons.length > 0).at(-1)?.view ?? card.view;
   const button = drawn.buttons.find((b) => b.label === label);
   if (button === undefined) throw new Error(`no ${label} on the card`);
-  const reply = await s.router.onCardAction({
+  const texts = s.lark.texts.length;
+  const answer = await s.router.onCardAction({
     chatId: `oc_dm_${who.unionId ?? ''}`,
     messageId: card.messageId,
     operator: who,
     value: { ...button.value },
     ...(input === undefined ? {} : { input }),
   });
+  if (answer !== undefined) throw new Error(`a board card's press was answered in the chat: ${answer}`);
   await s.chat.idle(10_000);
   const last = s.lark.cardUpdates.filter((u) => u.messageId === card.messageId).at(-1)?.view.markdown ?? '';
-  return { reply, card: last };
+  return { said: s.lark.texts.length - texts, card: last };
 }
 
 /** The cards sent so far, each with the message it became. */
@@ -7229,9 +7407,10 @@ describe('people on the board, end to end', () => {
     ]);
 
     // Someone else's press does nothing; Alice's, with her summary, completes it.
-    expect((await press(s, card, 'Done', BOB, 'not mine')).reply).toBe('This card is for Alice Smith (lark:on\\_alice).');
+    expect(await press(s, card, 'Done', BOB, 'not mine')).toEqual({ said: 0, card: '' });
+    expect(runsOf(s.t.db, taskId)[0]?.outcome).toBeNull();
     const done = await press(s, card, 'Done', ALICE, 'all links answer');
-    expect(done.reply).toBe(`Completing \`${taskId}\`: the card shows how it goes.`);
+    expect(done.said).toBe(0);
     expect(done.card).toBe(`**Check the links** \`${taskId}\`\nDone — by Alice Smith.`);
     expect(getTask(s.t.db, taskId)?.phase).toBe('done');
     expect(runsOf(s.t.db, taskId)[0]).toMatchObject({ outcome: 'completed', summary: 'all links answer' });
@@ -7240,7 +7419,7 @@ describe('people on the board, end to end', () => {
       [card.messageId, 0],
     ]);
     // Pressed again, the card says it is out of date, and changes nothing.
-    expect((await press(s, card, 'Done', ALICE, 'again')).reply).toMatch(/^That card is out of date/);
+    expect((await press(s, card, 'Done', ALICE, 'again')).card).toMatch(/\nThis card is out of date/);
 
     const before = s.lark.texts.length;
     expect(await s.notifier().deliver()).toBe(1);
@@ -7276,10 +7455,10 @@ describe('people on the board, end to end', () => {
     // Request changes needs a reason; with one, the task goes back to the agent, which revises.
     // An empty box is refused, and the card redrawn live, with buttons a second press can be made with.
     const empty = await press(s, first, 'Request changes', BOB);
-    expect(empty.reply).toBe('Type what needs changing in the box, then press Request changes.');
+    expect(empty.said).toBe(0);
     expect(empty.card).toContain('**Not done.** Type what needs changing');
     const asked = await press(s, first, 'Request changes', BOB, 'cite the sources');
-    expect(asked.reply).toBe(`Asking for changes on \`${taskId}\`: the card shows how it goes.`);
+    expect(asked.said).toBe(0);
     expect(asked.card).toBe(`**Draft the notes** \`${taskId}\`\nChanges requested — by Bob: cite the sources`);
     await s.dispatcher.idle();
     s.dispatcher.pass();
@@ -7297,7 +7476,7 @@ describe('people on the board, end to end', () => {
     if (second === undefined) throw new Error('no second card');
     expect(second.view.markdown).toContain('> revised (cite the sources): Draft the notes');
     expect((await press(s, second, 'Approve', BOB)).card).toBe(`**Draft the notes** \`${taskId}\`\nApproved — by Bob.`);
-    expect((await press(s, first, 'Request changes', BOB, 'again')).reply).toMatch(/^That card is out of date/);
+    expect((await press(s, first, 'Request changes', BOB, 'again')).card).toMatch(/\nThis card is out of date/);
     expect(getTask(s.t.db, taskId)?.phase).toBe('done');
 
     // The thread heard each request for review, who had each review, and the end.
@@ -7321,7 +7500,7 @@ describe('people on the board, end to end', () => {
 
 - [ ] **Step 13.2: Run them to verify they pass.** Every piece they use exists after Task 12, so these tests are the integration check rather than a driver of new code. Run `export PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH` and then `npx vitest run --project e2e tests/kanban-people.e2e.ts`. Expected: `Tests  2 passed (2)`.
 
-- [ ] **Step 13.3: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1301 passed (1301)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  74 passed (74)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 13.3: Run every suite.** Run `npm test 2>&1 | tail -4`. Expected: `Tests  1306 passed (1306)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  74 passed (74)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 13.4: Commit.**
 
@@ -7462,7 +7641,7 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
 ```
 
 
-- [ ] **Step 14.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `git grep -n -i "later update\|plan D2" -- README.md`. Expected: no output. Run `npm test 2>&1 | tail -4`. Expected: `Tests  1301 passed (1301)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  74 passed (74)`. Then run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 14.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `git grep -n -i "later update\|plan D2" -- README.md`. Expected: no output. Run `npm test 2>&1 | tail -4`. Expected: `Tests  1306 passed (1306)`. Run `npm run test:e2e 2>&1 | tail -4`. Expected: `Tests  74 passed (74)`. Then run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 14.3: Commit.**
 
@@ -7475,7 +7654,7 @@ git commit -m "Document people on the board: naming them by @-mention, their car
 
 ## Done when
 
-- `npm test` gives `Tests  1301 passed (1301)`. `npm run test:e2e` gives `Tests  74 passed (74)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  1306 passed (1306)`. `npm run test:e2e` gives `Tests  74 passed (74)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table, and only `src/kanban/service.ts` imports it (the guard in `tests/kanban-service.test.ts`); only `src/db/people.ts` writes `people`. `src/kanban/chat.ts`, `src/kanban/cards.ts`, `src/kanban/sink.ts` and `src/kanban/notices.ts` write nothing themselves.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing, and no reply, notice, card or help text says "D2", "plan" or "a later update".
 - A task given to a person by @-mention reaches them as a card in a direct message, by union_id; their Done, pressed as the callback's operator, completes it, and the thread it came from hears who had it and that it is done (`tests/kanban-people.e2e.ts`).
@@ -7491,14 +7670,18 @@ git commit -m "Document people on the board: naming them by @-mention, their car
 
 Not a task for the implementer: the user runs it, once, against the real Lark tenant, after these tasks are in and before `kanban.enabled: true` goes into the live config. No test reaches Lark (ground rules), so this is where the cards' JSON and the SDK's behaviour are checked. Use a test chat, a test role and two people: the operator, and a second person, B, on `auth.talk`, who has never opened a chat with the bot.
 
-1. **Approval cards.** In a chat with a supervised role (`unsupervised: false`, a driver that asks), send a prompt that makes the agent ask. *Expected:* an approval card with one button per option; pressing one answers it, the card is redrawn "Answered: … — by …", and the agent goes on. Then give the board a task for that role (`/kanban new … assignee: <role>`). *Expected:* its approval card arrives in the chat the task was created in, as "Task `k_…`, *title*, asks: …", and resolves the same way.
+1. **Approval cards.** In a chat with a supervised role (`unsupervised: false`, a driver that asks), send a prompt that makes the agent ask. *Expected:* an approval card with one button per option; pressing one answers it, the card is redrawn "Answered: … — by …", and the agent goes on. Then, in a group, give the board a task for that role (`/kanban new … assignee: <role>`). *Expected:* its approval card arrives in that group, as "Task `k_…`, *title*, asks: …"; pressing an option as the operator releases the agent, and the card in the group is redrawn "Answered: … — by …".
 2. **A direct message by union_id.** `/kanban new Check the links` with `assignee: @B` (type @ and pick B). *Expected:* B, who never opened the bot, gets the task card in a direct message within a few seconds, with the box, Done and Block; the chat gets "📋 **Check the links** `k_…` — assigned to B".
-3. **The box's text.** With the gateway's log at debug, or a temporary note line in `cardInput`, press Done on B's card with "hello" in the box. *Expected:* the callback's `action.form_value` is `{"text": "hello"}`, and the run's summary is "hello" (`/kanban show`).
+3. **The box's text.** Press Done on B's card with "hello" in the box, then run `/kanban show k_…`. *Expected:* the latest run reads `completed — hello`: the text arrived as `form_value.text`. If it reads `completed` with no summary, add `console.error('form_value', JSON.stringify((evt.raw as { action?: { form_value?: unknown } } | undefined)?.action?.form_value));` as the first line of `#onCardAction` in `src/channel/lark/inbound.ts` in a scratch build, press Done on a new card, and report what the gateway's stderr shows; then remove the line.
 4. **A refused press, then the same button again.** On a fresh task card, press Block with the box empty. *Expected:* the card is redrawn with "**Not done.** Type why it is blocked…" and its buttons. Type a reason and press Block again. *Expected:* the second press is not dropped: the task blocks, the card says "Blocked — by B: …".
 5. **A long press.** Give a task for B a gate that takes over 3 s (`/kanban gate add k_… sleep 5`), then press Done. *Expected:* the card shows "Working on it…" at once, Lark shows no error on the press, and about five seconds later the card says "Done — by B.".
-6. **Unblock, and escaping.** Create a task titled `Check <at id=all></at> links` for a role, and have it block (or `/kanban stop` it). *Expected:* the notice in the chat shows the title as text, with `<at id=all></at>` written out and nobody notified, and an "Unblock k_…" button under it; pressing it as the operator unblocks the task and says so.
+6. **Unblock, and escaping.** Create a task titled `Check <at id=all></at> links` for a role, and have it block (or `/kanban stop` it). *Expected:* the notice in the chat shows the title as text, with `<at id=all></at>` written out and nobody notified, and an "Unblock k_…" button under it; pressing it as the operator unblocks the task, which `/kanban show` then shows open, with nothing said in the chat.
 7. **A redraw.** After any press in steps 3 to 6. *Expected:* the card changes in place, in every client the card shows in (desktop and phone), and its old buttons no longer act.
-8. **One message per uuid.** Stop the gateway just after a notice is due and before its cursors move (or send the same text twice from a script through `LarkAdapter.sendText` with one uuid), at chat scope and in a thread. *Expected:* one message each time, not two.
-9. **A reply to a withdrawn message.** In a group, send a message the bot replies to as a quoted reply (a `/kanban list` at chat scope), withdraw the message while the bot is busy (or reply by script to a withdrawn message id). *Expected:* the answer arrives in the chat, unquoted, rather than failing.
+8. **One message per uuid.** With the gateway stopped, run a scratch script with `npx tsx` that builds a `LarkAdapter` from the same `LARK_APP_ID` and `LARK_APP_SECRET`, calls `connect()`, then `sendText` twice with one text and one uuid (any 50 hex characters) to `{ chatId: '<test chat>', threadId: '' }`, and twice with another uuid to `{ chatId: '<test chat>', threadId: '<a thread there>' }`, then `disconnect()`. *Expected:* one message at chat scope and one in the thread, not two of either.
+9. **A review card.** `/kanban new Review the notes` with `assignee: <role>` and `reviewer: @B`, for a role whose agent asks for review. *Expected:* B gets a review card with the handoff, a box, Approve and Request changes. Press Request changes with the box empty. *Expected:* the card is redrawn "**Not done.** Type what needs changing…", with its buttons. Type a reason and press Request changes again. *Expected:* the press is not dropped: the card says "Changes requested — by B: …", and the task goes back to its assignee. When the next review card comes, press Approve. *Expected:* "Approved — by B.", and the task is done.
+10. **A person the app cannot reach.** Give a task (`/kanban new … assignee: @C`) to a person C on `auth.talk` who is outside the app's availability (the app's availability scope, in Lark's developer console). *Expected:* no card reaches C, and the chat hears "Could not send C the card for …: … (code 230013)", with the commands C can type. If the code is another, report it: the gateway then takes it for its own problem, and retries and logs it every five minutes.
+11. **A reply to a withdrawn message.** In a group, send a message the bot replies to as a quoted reply (a `/kanban list` at chat scope), withdraw the message while the bot is busy (or reply by script to a withdrawn message id). *Expected:* the answer arrives in the chat, unquoted, rather than failing.
+
+Afterwards, archive every task the test made: `/kanban list all`, then `/kanban archive k_…` for each.
 
 If any step fails, keep `kanban.enabled` off and report the step and what Lark showed.

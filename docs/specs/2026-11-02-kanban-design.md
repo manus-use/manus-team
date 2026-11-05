@@ -1623,14 +1623,19 @@ card is redrawn with the outcome once acted on, so its buttons stop working.
   says the card is out of date, and redraws it so. A report typed instead leaves the card live, until
   it is next pressed, and is made on the open run as it was checked, so a reassignment while its
   gates run refuses it too.
-- **A press is answered at once.** Lark waits about three seconds for a callback's answer, and the
-  SDK answers only once the handler returns, so the card is redrawn as being worked on, the report
-  is made in the background, and the card is redrawn with the outcome.
+- **A press is answered at once, and shown only on its card.** Lark waits about three seconds for a
+  callback's answer, and the SDK answers only once the handler returns, so the card is redrawn as
+  being worked on, the report is made in the background, and the card is redrawn with the outcome.
+  A board card's press posts nothing in the chat; a press the card cannot show — someone else's, an
+  Unblock's — is only logged. A second press of a card while one is worked on is refused without a
+  redraw. When the gateway stops, the gates of a report from chat, pressed or typed, are killed and
+  nothing is applied, as for the worker socket's.
 - **A refused press leaves a pressable card.** The SDK drops a press it has seen — the card, the
   presser and the button's value — for twelve hours, whatever the box held. So a press refused for
   what it carried — an empty box, a gate, a busy workspace — redraws the card live, saying why, with
-  buttons whose value starts with the next attempt, outside the nonce. A press by the wrong person
-  changes nothing.
+  buttons named for the next attempt, which the SDK's key holds whole, and whose value starts with
+  it, outside the nonce. A press by the wrong person changes nothing; a refused report whose run
+  ended meanwhile redraws the card as out of date.
 - **The one line** is the notice of a person's `claimed` event, which records the assignee's kind:
   "📋 *title* — assigned to *name*", or "review assigned to". It goes to every subscription of the
   task, as any notice does: a subscription does not record whether its chat is a group.
