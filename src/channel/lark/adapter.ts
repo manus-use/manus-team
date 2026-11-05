@@ -413,7 +413,7 @@ export class LarkAdapter implements Channel {
 
 /**
  * An approval card, in Lark's card schema 2.0: the request, then one button per
- * offered option, each directly in the body, its value returned through a
+ * offered option, side by side in one row (`buttonRow`), each value returned through a
  * callback behavior, as a board card's buttons are (`boardCard`).
  *
  * `value` round-trips through the client and Lark does not verify it. It is a
@@ -429,18 +429,20 @@ export function approvalCard(spec: ApprovalCardSpec): object {
     body: {
       elements: [
         { tag: 'div', text: { tag: 'plain_text', content: forPlainText(spec.action) } },
-        ...spec.options.map((option, i) => ({
-          tag: 'button',
-          name: `option_${i}`,
-          text: { tag: 'plain_text', content: forPlainText(option.name) },
-          type: buttonType(option.kind),
-          behaviors: [
-            {
-              type: 'callback',
-              value: { kind: 'approval', approvalId: spec.approvalId, optionId: option.optionId, nonce: spec.nonce },
-            },
-          ],
-        })),
+        buttonRow(
+          spec.options.map((option, i) => ({
+            tag: 'button',
+            name: `option_${i}`,
+            text: { tag: 'plain_text', content: forPlainText(option.name) },
+            type: buttonType(option.kind),
+            behaviors: [
+              {
+                type: 'callback',
+                value: { kind: 'approval', approvalId: spec.approvalId, optionId: option.optionId, nonce: spec.nonce },
+              },
+            ],
+          })),
+        ),
       ],
     },
   };
@@ -532,8 +534,22 @@ export function postContent(text: string): object {
 }
 
 /**
+ * Buttons side by side. Schema 2.0 stacks a body's (or a form's) elements one
+ * above the other, so a row of buttons is a column_set of auto-width columns,
+ * one button each; `flex_mode: 'none'` keeps them on one line, left-aligned.
+ */
+function buttonRow(buttons: object[]): object {
+  return {
+    tag: 'column_set',
+    flex_mode: 'none',
+    horizontal_spacing: '8px',
+    columns: buttons.map((button) => ({ tag: 'column', width: 'auto', elements: [button] })),
+  };
+}
+
+/**
  * A board card (spec §9.2), in Lark's card schema 2.0: its markdown, then its
- * buttons -- in a form with the box, named `text`, when the card has one, so
+ * buttons in one row (`buttonRow`) -- in a form with the box, named `text`, when the card has one, so
  * each button submits what was typed (the inbound side reads it as
  * `form_value.text`). Each button's value goes back through a callback behavior.
  * Button labels and the box's placeholder are `plain_text`, as on an approval
@@ -564,11 +580,11 @@ export function boardCard(view: CardView): object {
           max_length: 1000,
           placeholder: { tag: 'plain_text', content: forPlainText(view.input.placeholder) },
         },
-        ...buttons,
+        buttonRow(buttons),
       ],
     });
-  } else {
-    elements.push(...buttons);
+  } else if (buttons.length > 0) {
+    elements.push(buttonRow(buttons));
   }
   return { schema: '2.0', config: { update_multi: true }, body: { elements } };
 }
