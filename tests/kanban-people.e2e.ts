@@ -260,7 +260,7 @@ describe('people on the board, end to end', () => {
     const replies = s.lark.texts.length;
     expect(await s.notifier().deliver()).toBe(1);
     expect(s.lark.texts.slice(replies).map((m) => [m.target, m.text])).toEqual([
-      [{ chatId: 'oc_team', threadId: 'omt_topic' }, `📋 **Check the links** \`${taskId}\` — assigned to Alice Smith`],
+      [{ chatId: 'oc_team', threadId: 'omt_topic' }, `📋 **Check the links** \`${taskId}\`, assigned to Alice Smith`],
     ]);
 
     // Someone else's press does nothing; Alice's, with her summary, completes it.
@@ -268,7 +268,7 @@ describe('people on the board, end to end', () => {
     expect(runsOf(s.t.db, taskId)[0]?.outcome).toBeNull();
     const done = await press(s, card, 'Done', ALICE, 'all links answer');
     expect(done.said).toBe(0);
-    expect(done.card).toBe(`**Check the links** \`${taskId}\`\nDone — by Alice Smith.`);
+    expect(done.card).toBe(`**Check the links** \`${taskId}\`\nDone by Alice Smith.`);
     expect(getTask(s.t.db, taskId)?.phase).toBe('done');
     expect(runsOf(s.t.db, taskId)[0]).toMatchObject({ outcome: 'completed', summary: 'all links answer' });
     expect(s.lark.cardUpdates.map((u) => [u.messageId, u.view.buttons.length])).toEqual([
@@ -280,7 +280,7 @@ describe('people on the board, end to end', () => {
 
     const before = s.lark.texts.length;
     expect(await s.notifier().deliver()).toBe(1);
-    expect(s.lark.texts.slice(before).map((m) => m.text)).toEqual([`Done — **Check the links** \`${taskId}\`:\n> all links answer`]);
+    expect(s.lark.texts.slice(before).map((m) => m.text)).toEqual([`Done: **Check the links** \`${taskId}\`\n> all links answer`]);
     // A restart sends no card again, and no notice.
     expect(await s.cards().deliver()).toBe(0);
     expect(await s.notifier().deliver()).toBe(0);
@@ -316,7 +316,7 @@ describe('people on the board, end to end', () => {
     expect(empty.card).toContain('**Not done.** Type what needs changing');
     const asked = await press(s, first, 'Request changes', BOB, 'cite the sources');
     expect(asked.said).toBe(0);
-    expect(asked.card).toBe(`**Draft the notes** \`${taskId}\`\nChanges requested — by Bob: cite the sources`);
+    expect(asked.card).toBe(`**Draft the notes** \`${taskId}\`\nChanges requested by Bob: cite the sources`);
     await s.dispatcher.idle();
     s.dispatcher.pass();
     await s.dispatcher.idle();
@@ -332,7 +332,7 @@ describe('people on the board, end to end', () => {
     const second = cardsOf(s.lark)[1];
     if (second === undefined) throw new Error('no second card');
     expect(second.view.markdown).toContain('> revised (cite the sources): Draft the notes');
-    expect((await press(s, second, 'Approve', BOB)).card).toBe(`**Draft the notes** \`${taskId}\`\nApproved — by Bob.`);
+    expect((await press(s, second, 'Approve', BOB)).card).toBe(`**Draft the notes** \`${taskId}\`\nApproved by Bob.`);
     expect((await press(s, first, 'Request changes', BOB, 'again')).card).toMatch(/\nThis card is out of date/);
     expect(getTask(s.t.db, taskId)?.phase).toBe('done');
 
@@ -343,12 +343,12 @@ describe('people on the board, end to end', () => {
       .flatMap((m) => m.text.split('\n\n'));
     const name = `**Draft the notes** \`${taskId}\``;
     expect(told).toEqual([
-      `Review requested — ${name}, from Bob.`,
-      `📋 ${name} — review assigned to Bob`,
-      `Review requested — ${name}, from Bob.`,
-      `📋 ${name} — review assigned to Bob`,
+      `Review requested for ${name}, from Bob.`,
+      `📋 ${name}, review assigned to Bob`,
+      `Review requested for ${name}, from Bob.`,
+      `📋 ${name}, review assigned to Bob`,
       // Approved with nothing more to say.
-      `Done — ${name}.`,
+      `Done: ${name}.`,
     ]);
   });
 

@@ -81,8 +81,8 @@ describe('/kanban list', () => {
     const board = boardList(h.db);
     const open = renderList(board, undefined);
     expect(open.split('\n')).toEqual([
-      `\`${running.taskId}\` **running** — running\\_one · role implementer`,
-      `\`${ready.taskId}\` **ready** — ready hi \\<at id=all\\>\\</at\\> team · role implementer`,
+      `\`${running.taskId}\` **running**: running\\_one · role implementer`,
+      `\`${ready.taskId}\` **ready**: ready hi \\<at id=all\\>\\</at\\> team · role implementer`,
     ]);
     expect(renderList(board, 'done')).toContain(done.taskId);
     expect(renderList(board, 'done')).not.toContain(ready.taskId);
@@ -95,7 +95,7 @@ describe('/kanban list', () => {
     const k = newTask(h.db, { title: `${'word '.repeat(60)}end` });
     const line = renderList(boardList(h.db), undefined);
     expect(line.split('\n')).toHaveLength(1);
-    expect(line).toContain(`\`${k.taskId}\` **ready** — ${'word '.repeat(60).slice(0, 119)}… · role implementer`);
+    expect(line).toContain(`\`${k.taskId}\` **ready**: ${'word '.repeat(60).slice(0, 119)}… · role implementer`);
     expect(line).not.toContain('(truncated)');
   });
 
@@ -132,7 +132,7 @@ describe('/kanban show', () => {
       { id: 1, taskId: k.taskId, command: 'test -f notes.md --key sk-late-12345678', timeoutS: 30, createdBy: ALICE, createdAt: NOW },
     ]);
     expect(text.split('\n')).toEqual([
-      `**Write \\*the\\* notes** \`${k.taskId}\` — ready`,
+      `**Write \\*the\\* notes** \`${k.taskId}\`: ready`,
       'assignee: role implementer · reviewer: nobody · workspace: docs',
       '> Line one hi \\<at id=all\\>\\</at\\> team',
       '> # not a heading',
@@ -142,7 +142,7 @@ describe('/kanban show', () => {
       '**Gates**',
       `1. test -f notes.md --key ${MASK} (30 s)`,
       '**Runs**',
-      '#1 work · role implementer · failed — exit 1',
+      '#1 work · role implementer · failed: exit 1',
       'Latest output:',
       '> wrote \\<b\\>notes\\</b\\>',
       '**Comments** (1 of 1)',
@@ -172,8 +172,8 @@ describe('/kanban show', () => {
     const k = newTask(h.db, { title: 'Rotate sk-multi\nline-123456 today' });
     const view = taskView(h.db, k.taskId);
     if (view === undefined) throw new Error('no view');
-    expect(renderShow(view, []).split('\n')[0]).toBe(`**Rotate ${MASK} today** \`${k.taskId}\` — ready`);
-    expect(renderList(boardList(h.db), undefined)).toContain(`— Rotate ${MASK} today ·`);
+    expect(renderShow(view, []).split('\n')[0]).toBe(`**Rotate ${MASK} today** \`${k.taskId}\`: ready`);
+    expect(renderList(boardList(h.db), undefined)).toContain(`: Rotate ${MASK} today ·`);
   });
 
   it('escapes a line that would open or close a code fence inside a quoted body', () => {
@@ -247,7 +247,7 @@ describe('notices', () => {
     const run = claimed(h.db, k.taskId);
     expect(complete(h.db, k.taskId, { kind: 'run', runId: run.runId }, { summary: `**merged** ${SPOOF}` }, NOW).ok).toBe(true);
     expect(renderNotice(last(k.taskId), task(k.taskId), LIMIT)).toBe(
-      `Done — **Release notes** \`${k.taskId}\`:\n> **merged** hi \\<at id=all\\>\\</at\\> team`,
+      `Done: **Release notes** \`${k.taskId}\`\n> **merged** hi \\<at id=all\\>\\</at\\> team`,
     );
   });
 
@@ -257,7 +257,7 @@ describe('notices', () => {
     const by = { kind: 'run' as const, runId: run.runId };
     expect(block(h.db, k.taskId, by, { kind: 'capability', reason: 'no access to the_drive' }, NOW).ok).toBe(true);
     expect(renderNotice(last(k.taskId), task(k.taskId), LIMIT)).toBe(
-      `Blocked (capability) — **Fetch the report** \`${k.taskId}\`: no access to the\\_drive\n` +
+      `**Fetch the report** \`${k.taskId}\` is blocked (capability): no access to the\\_drive\n` +
         `\`/kanban unblock ${k.taskId} [comment]\` once it can go on.`,
     );
     const again = { ...last(k.taskId), payload: { kind: 'capability', reason: 'still no access', blockRecurrences: 2 } };
@@ -283,7 +283,7 @@ describe('notices', () => {
     const event = (kind: string, payload: unknown, actor = 'gateway'): KanbanEvent => ({ ...last(k.taskId), kind, actor, payload });
     const name = `**Survey** \`${k.taskId}\``;
     expect(renderNotice(event('run_ended', { outcome: 'crashed', error: 'exit_1', next: 'retry' }), t, LIMIT)).toBe(
-      `Retrying — ${name}: the last attempt ended crashed: exit\\_1.`,
+      `Retrying ${name}. The last attempt ended crashed: exit\\_1.`,
     );
     expect(
       renderNotice(
@@ -291,10 +291,10 @@ describe('notices', () => {
         t,
         LIMIT,
       ),
-    ).toBe(`Gave up — ${name}: failed 2 times; last failed\n\`/kanban unblock ${k.taskId} [comment]\` gives it a fresh set of attempts.`);
+    ).toBe(`Gave up on ${name}: failed 2 times; last failed\n\`/kanban unblock ${k.taskId} [comment]\` gives it a fresh set of attempts.`);
     expect(
       renderNotice(event('run_ended', { outcome: 'terminal_provider', next: 'blocked', blockKind: 'capability', blockReason: '401' }), t, LIMIT),
-    ).toMatch(/^Blocked \(capability\) — .*: 401\n`\/kanban unblock/);
+    ).toMatch(/^.* is blocked \(capability\): 401\n`\/kanban unblock/);
     // The recurrences the event recorded, not the task's count now.
     expect(
       renderNotice(
@@ -311,12 +311,12 @@ describe('notices', () => {
       ),
     ).toContain('once it can go on');
     expect(renderNotice(event('stopped', { blockRecurrences: 0 }, ALICE), t, LIMIT)).toMatch(
-      /^Blocked \(needs\\_input\) — .*: stopped by lark:on\\_alice\n/,
+      /^.* is blocked \(needs\\_input\): stopped by lark:on\\_alice\n/,
     );
     // A stop is a person's choice, not the task blocking again for the same reason: no rewrite suggested.
     const stopped = renderNotice(event('stopped', { blockRecurrences: 5 }, ALICE), t, LIMIT);
     expect(stopped).toBe(
-      `Blocked (needs\\_input) — ${name}: stopped by lark:on\\_alice\n\`/kanban unblock ${k.taskId} [comment]\` once it can go on.`,
+      `${name} is blocked (needs\\_input): stopped by lark:on\\_alice\n\`/kanban unblock ${k.taskId} [comment]\` once it can go on.`,
     );
     // A person who stopped it is named as Lark last gave their name, escaped; anyone else by their actor.
     const nameOf = (p: string) => (p === ALICE ? 'Alice <at id=all></at>' : undefined);
@@ -327,10 +327,10 @@ describe('notices', () => {
       /: stopped by lark:on\\_nobody\n/,
     );
     expect(renderNotice(event('review_requested', { summary: 'v1', reviewer: 'reviewer', reviewerKind: 'role' }), t, LIMIT)).toBe(
-      `Review requested — ${name}, from role reviewer.`,
+      `Review requested for ${name}, from role reviewer.`,
     );
     expect(renderNotice(event('stranded', { reason: 'role "gone" is not configured' }), t, LIMIT)).toBe(
-      `Stranded — ${name}: nobody can be given it: role "gone" is not configured`,
+      `Stranded: ${name}. Nobody can be given it: role "gone" is not configured`,
     );
   });
 
@@ -339,12 +339,12 @@ describe('notices', () => {
     claimed(h.db, k.taskId);
     const nameOf = (p: string) => (p === ALICE ? 'Alice <at id=all></at>' : undefined);
     expect(renderNotice(last(k.taskId), task(k.taskId), { ...LIMIT, nameOf })).toBe(
-      `📋 **Check the links hi \\<at id=all\\>\\</at\\> team** \`${k.taskId}\` — assigned to Alice \\<at id=all\\>\\</at\\>`,
+      `📋 **Check the links hi \\<at id=all\\>\\</at\\> team** \`${k.taskId}\`, assigned to Alice \\<at id=all\\>\\</at\\>`,
     );
     // Without a name known, the principal.
-    expect(renderNotice(last(k.taskId), task(k.taskId), LIMIT)).toMatch(/— assigned to lark:on\\_alice$/);
+    expect(renderNotice(last(k.taskId), task(k.taskId), LIMIT)).toMatch(/, assigned to lark:on\\_alice$/);
     const review = { ...last(k.taskId), payload: { kind: 'review', assignee: ALICE, assigneeKind: 'human' } };
-    expect(renderNotice(review, task(k.taskId), { ...LIMIT, nameOf })).toMatch(/— review assigned to Alice /);
+    expect(renderNotice(review, task(k.taskId), { ...LIMIT, nameOf })).toMatch(/, review assigned to Alice /);
     const role = newTask(h.db);
     claimed(h.db, role.taskId);
     expect(renderNotice(last(role.taskId), task(role.taskId), { ...LIMIT, nameOf })).toBeUndefined();
@@ -403,7 +403,7 @@ describe("a person's cards", () => {
     });
     const run = claimed(h.db, k.taskId);
     const view = renderTaskCard({ task: task(k.taskId), run, parents: [{ task: task(parent.taskId), summary: 'in sheet Q3' }] }, 'cli_app');
-    expect(view.markdown).toContain(`📋 **Write them up hi \\<at id=all\\>\\</at\\> team** \`${k.taskId}\` — for you to do`);
+    expect(view.markdown).toContain(`📋 For you to do: **Write them up hi \\<at id=all\\>\\</at\\> team** \`${k.taskId}\``);
     expect(view.markdown).toContain(`> Use the ${MASK} key\n> # not a heading`);
     expect(view.markdown).toContain('outcome: a page');
     expect(view.markdown).toContain(`\`${parent.taskId}\` **Collect the numbers**:\n> in sheet Q3`);
@@ -423,7 +423,7 @@ describe("a person's cards", () => {
     const run = claimed(h.db, k.taskId);
     const handoff = { runId: 'r_work', actor: 'run:r_work', summary: 'moved it', metadata: null, reportedCommit: 'abc1234', reportedDirty: false };
     const view = renderReviewCard({ task: task(k.taskId), run, parents: [], handoff }, 'cli_app');
-    expect(view.markdown).toContain(`🔎 **Fix the footer** \`${k.taskId}\` — for you to review`);
+    expect(view.markdown).toContain(`🔎 For you to review: **Fix the footer** \`${k.taskId}\``);
     expect(view.markdown).toContain('**The handoff**, from its agent:\n> moved it');
     expect(view.markdown).toContain('To review: review commit abc1234.');
     expect(view.buttons.map((b) => [b.label, b.value['act']])).toEqual([
@@ -440,8 +440,8 @@ describe("a person's cards", () => {
   });
 
   it('redraws a card acted on with what happened, and no buttons', () => {
-    expect(renderCardOutcome({ taskId: 'k_1', title: `x ${SPOOF}` }, 'Done — by Alice.')).toEqual({
-      markdown: '**x hi \\<at id=all\\>\\</at\\> team** `k_1`\nDone — by Alice.',
+    expect(renderCardOutcome({ taskId: 'k_1', title: `x ${SPOOF}` }, 'Done by Alice.')).toEqual({
+      markdown: '**x hi \\<at id=all\\>\\</at\\> team** `k_1`\nDone by Alice.',
       buttons: [],
     });
   });

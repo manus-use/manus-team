@@ -81,7 +81,7 @@ describe('CardPoster', () => {
     const card = lark.boardCards[0]!;
     expect(card.target).toEqual({ chatId: 'on_alice', threadId: '', receiveIdType: 'union_id' });
     expect(card.uuid).toBe(boardCardUuid('cli_app', run.runId));
-    expect(card.view.markdown).toContain(`📋 **Check the links** \`${task.taskId}\` — for you to do`);
+    expect(card.view.markdown).toContain(`📋 For you to do: **Check the links** \`${task.taskId}\``);
     expect(card.view.markdown).toContain(`> the key is ${MASK}`);
     expect(card.view.buttons.map((b) => b.label)).toEqual(['Done', 'Block']);
     expect(eventsOf(t.db, task.taskId).at(-1)).toMatchObject({ kind: 'card_sent', runId: run.runId, payload: { messageId: 'om_board_1' } });
@@ -100,7 +100,7 @@ describe('CardPoster', () => {
     await p.deliver();
     const card = lark.boardCards.at(-1)!;
     expect(card.target.chatId).toBe('on_bob');
-    expect(card.view.markdown).toContain('— for you to review');
+    expect(card.view.markdown).toContain('🔎 For you to review: ');
     expect(card.view.markdown).toContain('**The handoff**, from lark:on\\_alice:\n> all answer');
     expect(card.view.buttons.map((b) => b.value['run'])).toEqual([review.runId, review.runId]);
     expect(service.requestChanges(task.taskId, { kind: 'person', principal: BOB, runId: review.runId }, 'cite them').ok).toBe(true);

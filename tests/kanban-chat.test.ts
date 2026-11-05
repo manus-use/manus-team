@@ -142,7 +142,7 @@ describe('/kanban new', () => {
     const reply = await say('new Draft the Q3 summary\nassignee: docs-writer\nworkspace: docs\noutcome: a page in the wiki\nUse last quarter as the model.');
     const taskId = created(reply);
     expect(reply).toBe(
-      `Created \`${taskId}\` — **Draft the Q3 summary**, for role docs-writer, in docs. ` +
+      `Created \`${taskId}\`: **Draft the Q3 summary**, for role docs-writer, in docs. ` +
         'This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.',
     );
     expect(getTask(t.db, taskId)).toMatchObject({
@@ -158,7 +158,7 @@ describe('/kanban new', () => {
     expect(passes).toBe(1);
     // A long title is shown cut to 200 characters, on one line.
     const long = await say(`new ${'x'.repeat(300)}`);
-    expect(long).toContain(` — **${'x'.repeat(199)}…**, for nobody yet`);
+    expect(long).toContain(`: **${'x'.repeat(199)}…**, for nobody yet`);
   });
 
   it('makes one task of one message, however often it arrives', async () => {
@@ -188,7 +188,7 @@ describe('people, named by @-mention', () => {
     const reply = await say('new Check the links\nassignee: @Alice Smith\nreviewer: @Bob', OWNER, [AT_ALICE, AT_BOB]);
     const taskId = created(reply);
     expect(reply).toBe(
-      `Created \`${taskId}\` — **Check the links**, for Alice Smith (lark:on\\_alice). ` +
+      `Created \`${taskId}\`: **Check the links**, for Alice Smith (lark:on\\_alice). ` +
         'They are sent it as a card, in a direct message, once it is ready. ' +
         'This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.',
     );
@@ -393,7 +393,7 @@ describe("a person's card", () => {
     expect(getRun(t.db, run.runId)).toMatchObject({ outcome: 'completed', summary: 'all links answer' });
     expect(redrawn.at(-1)).toEqual({
       messageId: 'om_card',
-      view: { markdown: `**Check the links** \`${taskId}\`\nDone — by Alice Smith.`, buttons: [] },
+      view: { markdown: `**Check the links** \`${taskId}\`\nDone by Alice Smith.`, buttons: [] },
     });
   });
 
@@ -439,7 +439,7 @@ describe("a person's card", () => {
     expect(redrawn.map((r) => r.view.markdown)).toEqual([`**Check the links** \`${taskId}\`\nWorking on it…`]);
     release();
     await chat.idle(5_000);
-    expect(redrawn.at(-1)?.view.markdown).toContain('Done — by Alice Smith.');
+    expect(redrawn.at(-1)?.view.markdown).toContain('Done by Alice Smith.');
   });
 
   it('redraws a card as out of date, not live, when its run ended while the refused report ran', async () => {
@@ -548,7 +548,7 @@ describe("a person's card", () => {
     expect(order).toEqual(['working']);
     expect(await hung.idle(5_000)).toBe(true);
     expect(order).toHaveLength(2);
-    expect(order[1]).toContain('Done — by Alice Smith.');
+    expect(order[1]).toContain('Done by Alice Smith.');
   });
 
   it('applies a press whose redraw throws at once, and notes the failure', async () => {

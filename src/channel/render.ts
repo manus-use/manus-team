@@ -189,7 +189,7 @@ export function renderCard(events: readonly Event[]): RenderedCard {
   // stale "waiting on you" line sends the user hunting for a button that no
   // longer does anything.
   const blocked = !finished && openApprovals.size > 0;
-  if (blocked) parts.push('_Waiting for your approval — see the card below._');
+  if (blocked) parts.push('_Waiting for your approval: see the card below._');
 
   if (finished && terminal !== undefined && terminal !== 'completed') {
     parts.push(`_Turn ${forDisplay(terminal)}._`);

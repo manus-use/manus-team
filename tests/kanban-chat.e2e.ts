@@ -195,7 +195,7 @@ describe('the board from Lark, end to end', () => {
     expect(s.lark.texts.slice(replies)).toEqual([
       {
         target: { chatId: 'oc_team', threadId: 'omt_topic' },
-        text: `Done — **Write the parser** \`${taskId}\`:\n> did: Write the parser`,
+        text: `Done: **Write the parser** \`${taskId}\`\n> did: Write the parser`,
         uuid: expect.any(String) as string,
       },
     ]);
@@ -205,7 +205,7 @@ describe('the board from Lark, end to end', () => {
 
     // And /kanban show tells the same story.
     await s.router.onMessage(said(`/kanban show ${taskId}`));
-    expect(s.lark.texts.at(-1)?.text).toContain('#1 work · role implementer · completed — did: Write the parser');
+    expect(s.lark.texts.at(-1)?.text).toContain('#1 work · role implementer · completed: did: Write the parser');
   });
 
   it("an agent that crashes is retried, then given up on, and the thread hears both", async () => {
@@ -220,7 +220,7 @@ describe('the board from Lark, end to end', () => {
     expect(await s.notifier().deliver()).toBe(2);
     expect(s.lark.texts.slice(replies)).toHaveLength(1);
     const [retry, gaveUp] = (s.lark.texts.at(-1)?.text ?? '').split('\n\n');
-    expect(retry).toMatch(new RegExp(`^Retrying — \\*\\*Flaky job\\*\\* \`${taskId}\`: the last attempt ended crashed`));
-    expect(gaveUp).toMatch(new RegExp(`^Gave up — \\*\\*Flaky job\\*\\* \`${taskId}\`: failed 2 times; last crashed`));
+    expect(retry).toMatch(new RegExp(`^Retrying \\*\\*Flaky job\\*\\* \`${taskId}\`\\. The last attempt ended crashed`));
+    expect(gaveUp).toMatch(new RegExp(`^Gave up on \\*\\*Flaky job\\*\\* \`${taskId}\`: failed 2 times; last crashed`));
   });
 });

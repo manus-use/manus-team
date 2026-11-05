@@ -466,7 +466,7 @@ export function approvalOutcomeCard(view: ApprovalOutcomeView): object {
           tag: 'div',
           text: {
             tag: 'plain_text',
-            content: forPlainText(`Answered: ${view.choice} — by ${view.answeredBy}`),
+            content: forPlainText(`Answered: ${view.choice}, by ${view.answeredBy}`),
           },
         },
       ],

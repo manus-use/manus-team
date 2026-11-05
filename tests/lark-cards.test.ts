@@ -166,7 +166,7 @@ describe('boardCard', () => {
       ['button', undefined],
       ['button', undefined],
     ]);
-    const acted = boardCard({ markdown: 'Done — by Alice', buttons: [] });
+    const acted = boardCard({ markdown: 'Done by Alice', buttons: [] });
     expect(JSON.stringify(acted)).not.toContain('"button"');
     expect((acted as { config?: { update_multi?: boolean } }).config?.update_multi).toBe(true);
   });

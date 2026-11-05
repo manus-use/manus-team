@@ -232,7 +232,7 @@ export class Router {
         target,
         message,
         'queued',
-        `Queued — ${ahead} ahead of this one. It starts when ${ahead === 1 ? 'that finishes' : 'they finish'}; \`/stop\` cancels the running one.`,
+        `Queued: ${ahead} ahead of this one. It starts when ${ahead === 1 ? 'that finishes' : 'they finish'}; \`/stop\` cancels the running one.`,
       );
     }
 
@@ -367,7 +367,7 @@ export class Router {
           target,
           message,
           'status',
-          `**${view.label}** — ${forDisplay(view.detail)}\n` +
+          `**${view.label}**: ${forDisplay(view.detail)}\n` +
             `session \`${binding.sessionId}\` · generation ${view.generation} · ` +
             `${view.openTurns} open turn(s) · ${view.pendingApprovals} pending approval(s)`,
         );
@@ -387,7 +387,7 @@ export class Router {
         }
         const lines = rows.map(
           (b) =>
-            `\`${b.sessionId}\` — ${b.threadId === '' ? 'chat scope' : `thread \`${b.threadId}\``}` +
+            `\`${b.sessionId}\`: ${b.threadId === '' ? 'chat scope' : `thread \`${b.threadId}\``}` +
             `${b.sessionId === binding?.sessionId ? ' (here)' : ''}`,
         );
         await this.#reply(target, message, 'sessions', lines.join('\n'));
@@ -400,7 +400,7 @@ export class Router {
           target,
           message,
           'new',
-          `Fresh session \`${session.id}\`. The previous one is archived, not deleted — ` +
+          `Fresh session \`${session.id}\`. The previous one is archived, not deleted. ` +
             '`/sessions` lists it and `/attach` brings it back.',
         );
         return;
@@ -435,7 +435,7 @@ export class Router {
           target,
           message,
           'stop',
-          'Cancelling. Cancellation is a terminal, not a deletion — the log keeps everything up to here.',
+          'Cancelling. Cancellation is a terminal, not a deletion. The log keeps everything up to here.',
         );
         return;
       }
@@ -687,7 +687,7 @@ function describeSkipped(attachments: readonly InboundAttachment[]): string {
   const lines = attachments.map((a) => {
     const name = forDisplay(a.name ?? a.kind);
     const why = a.skipped === 'too_large' ? 'too large to fetch' : 'could not be downloaded';
-    return `• ${name} — ${why}`;
+    return `• ${name}: ${why}`;
   });
   return `The agent will not see ${attachments.length === 1 ? 'this file' : 'these files'}:\n${lines.join('\n')}`;
 }

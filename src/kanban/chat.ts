@@ -552,10 +552,10 @@ export class KanbanChat {
     }
     this.#changed();
     const outcome = {
-      done: `Done — by ${name}.`,
-      approve: `Approved — by ${name}.`,
-      block: `Blocked — by ${name}: ${label(text, 300)}`,
-      changes: `Changes requested — by ${name}: ${label(text, 300)}`,
+      done: `Done by ${name}.`,
+      approve: `Approved by ${name}.`,
+      block: `Blocked by ${name}: ${label(text, 300)}`,
+      changes: `Changes requested by ${name}: ${label(text, 300)}`,
     }[verb];
     await this.#redraw(press.messageId, renderCardOutcome(task, outcome));
   }
@@ -697,12 +697,12 @@ export class KanbanChat {
     this.#changed();
     const whom =
       task.assignee === null
-        ? 'nobody yet: `/kanban assign ' + task.taskId + ' <role or @person>` gives it to someone'
+        ? 'nobody yet (`/kanban assign ' + task.taskId + ' <role or @person>` gives it to someone)'
         : this.#whom(task.assignee);
     const card =
       task.assignee?.kind === 'human' ? ' They are sent it as a card, in a direct message, once it is ready.' : '';
     return (
-      `Created ${id(task.taskId)} — **${label(task.title)}**, for ${whom}` +
+      `Created ${id(task.taskId)}: **${label(task.title)}**, for ${whom}` +
       `${task.workspace === null ? '' : `, in ${label(task.workspace)}`}.${card} ` +
       'This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.'
     );

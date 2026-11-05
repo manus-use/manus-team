@@ -187,7 +187,7 @@ export function renderHelp(): string {
       c.tier === 'operate' ? 'operator' : 'anyone allowed',
       c.effect === 'next-session' ? 'applies to the next session' : null,
     ].filter((b): b is string => b !== null);
-    return `\`${usage}\` — ${c.summary} (${badges.join(', ')})`;
+    return `\`${usage}\`: ${c.summary} (${badges.join(', ')})`;
   });
   return lines.join('\n');
 }

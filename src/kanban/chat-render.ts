@@ -146,7 +146,7 @@ export function renderList(entries: readonly BoardEntry[], filter: DisplayStatus
     filter === undefined ? ACTIVE.flatMap((status) => shown.filter((e) => e.status === status)) : [...shown];
   const lines = ordered
     .slice(0, LIST_MAX)
-    .map((e) => `${id(e.task.taskId)} **${e.status}** — ${label(e.task.title, 120)} · ${who(e.task.assignee)}`);
+    .map((e) => `${id(e.task.taskId)} **${e.status}**: ${label(e.task.title, 120)} · ${who(e.task.assignee)}`);
   const more = ordered.length - LIST_MAX;
   if (more > 0) lines.push(`… and ${more} more. \`/kanban list <${LIST_FILTERS.join('|')}>\` narrows it.`);
   return lines.join('\n');
@@ -156,14 +156,14 @@ function runLine(run: RunRow): string {
   const outcome = run.outcome === null ? (run.endedAt === null ? 'working' : 'undecided') : run.outcome;
   const head = `#${run.attempt} ${run.kind} · ${who(run.assignee)} · ${forDisplay(outcome)}`;
   const said = run.summary ?? run.error;
-  return said === null || said === '' ? head : `${head} — ${label(said, 300)}`;
+  return said === null || said === '' ? head : `${head}: ${label(said, 300)}`;
 }
 
 /** `/kanban show` (spec §9.1): the task, its contract, gates, runs, latest output and comments. */
 export function renderShow(view: TaskView, gates: readonly GateRow[]): string {
   const { task } = view;
   const out: string[] = [
-    `**${label(task.title)}** ${id(task.taskId)} — ${view.status}`,
+    `**${label(task.title)}** ${id(task.taskId)}: ${view.status}`,
     `assignee: ${who(task.assignee)} · reviewer: ${who(task.reviewer)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}`,
   ];
   if (task.phase === 'blocked' && task.blockKind !== null) {
@@ -238,7 +238,7 @@ function text(payload: Record<string, unknown>, key: string): string {
 }
 
 function blockedLine(task: TaskRow, kind: string, reason: string, recurrences: number, limit: number): string {
-  const head = `Blocked (${forDisplay(kind)}) — **${label(task.title)}** ${id(task.taskId)}: ${label(reason, 800)}`;
+  const head = `**${label(task.title)}** ${id(task.taskId)} is blocked (${forDisplay(kind)}): ${label(reason, 800)}`;
   if (recurrences >= limit) {
     return (
       `${head}\nIt keeps blocking for the same reason (${recurrences} times after an unblock); ` +
@@ -299,18 +299,18 @@ export function renderNotice(
   switch (event.kind) {
     case 'completed': {
       const summary = text(p, 'summary');
-      return summary.trim() === '' ? `Done — ${name}.` : `Done — ${name}:\n${block(summary, 1200)}`;
+      return summary.trim() === '' ? `Done: ${name}.` : `Done: ${name}\n${block(summary, 1200)}`;
     }
     case 'review_requested': {
       const reviewer = text(p, 'reviewer');
       const kind = p['reviewerKind'] === 'human' ? 'human' : 'role';
-      return `Review requested — ${name}, from ${whom(reviewer === '' ? null : { kind, name: reviewer }, opts.nameOf)}.`;
+      return `Review requested for ${name}, from ${whom(reviewer === '' ? null : { kind, name: reviewer }, opts.nameOf)}.`;
     }
     case 'claimed': {
       // A role's claim is no notice: its outcome is. A person's is the group's one line.
       if (p['assigneeKind'] !== 'human') return undefined;
       const person = whom({ kind: 'human', name: text(p, 'assignee') }, opts.nameOf);
-      return `📋 ${name} — ${p['kind'] === 'review' ? 'review ' : ''}assigned to ${person}`;
+      return `📋 ${name}, ${p['kind'] === 'review' ? 'review ' : ''}assigned to ${person}`;
     }
     case 'card_failed': {
       const person = whom({ kind: 'human', name: text(p, 'to') }, opts.nameOf);
@@ -336,18 +336,18 @@ export function renderNotice(
       const error = text(p, 'error');
       if (p['next'] === 'retry' && RETRIED.has(outcome)) {
         const why = error === '' ? '' : `: ${label(error, 500)}`;
-        return `Retrying — ${name}: the last attempt ended ${forDisplay(outcome)}${why}.`;
+        return `Retrying ${name}. The last attempt ended ${forDisplay(outcome)}${why}.`;
       }
       if (p['next'] !== 'blocked') return undefined;
       const kind = text(p, 'blockKind');
       const reason = text(p, 'blockReason');
       if (kind === 'gave_up') {
-        return `Gave up — ${name}: ${label(reason, 800)}\n\`/kanban unblock ${task.taskId} [comment]\` gives it a fresh set of attempts.`;
+        return `Gave up on ${name}: ${label(reason, 800)}\n\`/kanban unblock ${task.taskId} [comment]\` gives it a fresh set of attempts.`;
       }
       return blockedLine(task, kind, reason, recurrences, opts.blockRecurrenceLimit);
     }
     case 'stranded':
-      return `Stranded — ${name}: nobody can be given it: ${label(text(p, 'reason'), 500)}`;
+      return `Stranded: ${name}. Nobody can be given it: ${label(text(p, 'reason'), 500)}`;
     default:
       return undefined;
   }
@@ -415,7 +415,7 @@ function taskText(task: TaskRow, bodyMax: number): string[] {
  */
 export function renderTaskCard(f: CardFacts, appId: string): CardView {
   const { task, run } = f;
-  const out = [`📋 **${label(task.title)}** ${id(task.taskId)} — for you to do`];
+  const out = [`📋 For you to do: **${label(task.title)}** ${id(task.taskId)}`];
   if (f.note !== undefined) out.push(f.note);
   if (f.changes !== undefined) {
     out.push(`**Changes asked** by ${label(f.nameOf?.(f.changes.actor) ?? f.changes.actor, 80)}:`, block(f.changes.reason, 1200));
@@ -452,7 +452,7 @@ export function renderTaskCard(f: CardFacts, appId: string): CardView {
  */
 export function renderReviewCard(f: CardFacts, appId: string): CardView {
   const { task, run } = f;
-  const out = [`🔎 **${label(task.title)}** ${id(task.taskId)} — for you to review`];
+  const out = [`🔎 For you to review: **${label(task.title)}** ${id(task.taskId)}`];
   if (f.note !== undefined) out.push(f.note);
   const h = f.handoff;
   if (h !== undefined) {

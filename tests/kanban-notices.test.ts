@@ -104,8 +104,8 @@ describe('the notifier', () => {
     expect(lark.texts).toHaveLength(1);
     expect(lark.texts[0]?.target).toEqual({ chatId: 'oc_team', threadId: 'omt_topic' });
     expect(lark.texts[0]?.text.split('\n\n')).toEqual([
-      `Blocked (needs\\_input) — **Check the links** \`${b.taskId}\`: which wiki?\n\`/kanban unblock ${b.taskId} [comment]\` once it can go on.`,
-      `Done — **Draft the notes** \`${a.taskId}\`:\n> merged`,
+      `**Check the links** \`${b.taskId}\` is blocked (needs\\_input): which wiki?\n\`/kanban unblock ${b.taskId} [comment]\` once it can go on.`,
+      `Done: **Draft the notes** \`${a.taskId}\`\n> merged`,
     ]);
     expect(lark.texts[0]?.uuid).toBe(
       noticeBatchUuid('cli_app', [
@@ -157,7 +157,7 @@ describe('the notifier', () => {
     if (!r.ok) throw new Error(r.message);
     expect(people.claim(r.task.taskId).ok).toBe(true);
     await notifier({ nameOf: (p) => (p === ALICE ? 'Alice' : undefined) }).deliver();
-    expect(lark.texts.map((m) => m.text)).toEqual([`📋 **Check the links** \`${r.task.taskId}\` — assigned to Alice`]);
+    expect(lark.texts.map((m) => m.text)).toEqual([`📋 **Check the links** \`${r.task.taskId}\`, assigned to Alice`]);
   });
 
   it('sends at most a batch of notices a message, says more follow, and sends them in the next round', async () => {
@@ -201,8 +201,8 @@ describe('the notifier', () => {
     await notifier().deliver();
     expect(lark.texts.map((m) => m.text.split('\n\n').map((n) => n.split('\n')[0]))).toEqual([
       [
-        `Blocked (needs\\_input) — **Plan the launch** \`${parent.taskId}\`: stopped by lark:on\\_alice`,
-        `Done — **Book the room** \`${child.task.taskId}\`:`,
+        `**Plan the launch** \`${parent.taskId}\` is blocked (needs\\_input): stopped by lark:on\\_alice`,
+        `Done: **Book the room** \`${child.task.taskId}\``,
       ],
     ]);
   });
@@ -289,7 +289,7 @@ describe('the notifier', () => {
     // The first round reads only a's first ROUND_EVENTS, none a notice, and so holds b's later one back.
     expect(await n.deliver()).toBe(0);
     expect(await n.deliver()).toBe(2);
-    expect(lark.texts.map((m) => m.text.split('\n\n').map((x) => x.split(' — ')[0]))).toEqual([['Blocked (needs\\_input)', 'Done']]);
+    expect(lark.texts.map((m) => m.text.split('\n\n').map((x) => x.split(':')[0]))).toEqual([[`**Long thread** \`${a.taskId}\` is blocked (needs\\_input)`, 'Done']]);
   });
 
   it('lets go of a conversation a send refuses as unreachable: its notices dropped, said once, the rest passed over until a restart', async () => {
@@ -421,7 +421,7 @@ describe('the notifier', () => {
       return get(id);
     };
     expect(await notifier({ channels }).deliver()).toBe(1);
-    expect(lark.texts.map((m) => m.text.split('\n')[0])).toEqual([`Done — **Draft the notes** \`${a.taskId}\`:`]);
+    expect(lark.texts.map((m) => m.text.split('\n')[0])).toEqual([`Done: **Draft the notes** \`${a.taskId}\``]);
     // The gone task's subscription is let go of by itself, past what it held, said once.
     const gone = 'kanban: subscription 2 follows task k_gone, which is not on the board; passing over its events until the gateway restarts';
     expect(notes).toContain(gone);
@@ -491,7 +491,7 @@ describe('the notifier', () => {
     expect(await n.deliver()).toBe(0);
     clock.advance(2_000);
     expect(await n.deliver()).toBe(1);
-    expect(lark.texts.at(-1)?.text).toContain(`Blocked (needs\\_input) — **Draft the notes** \`${a.taskId}\`: which wiki?`);
+    expect(lark.texts.at(-1)?.text).toContain(`**Draft the notes** \`${a.taskId}\` is blocked (needs\\_input): which wiki?`);
     expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(eventsOf(t.db, a.taskId).at(-1)?.id);
     // Its pause starts over after a success: a later failure waits 2 s, not 4.
     failures = 1;
