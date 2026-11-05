@@ -539,7 +539,8 @@ export function claim(db: Db, input: ClaimInput, now: number): Result<{ run: Run
         runId,
         kind: 'claimed',
         actor: 'gateway',
-        payload: { kind, attempt, assignee: who.name, workspace, seededFromRun },
+        // The kind, so a person's claim can be told as one: the group's one line (spec §9.2).
+        payload: { kind, attempt, assignee: who.name, assigneeKind: who.kind, workspace, seededFromRun },
       },
       now,
     );
@@ -778,6 +779,10 @@ function reportingRun(d: Db, task: TaskRow, by: Reporter): Result<{ run: RunRow 
     return { ok: true, run };
   }
   const open = openRunOf(d, task.taskId);
+  // A card is for one run: pressed once that run is over, it does nothing (spec §9.2).
+  if (by.runId !== undefined && open?.runId !== by.runId) {
+    return refuse('run_superseded', `run ${by.runId} of task ${task.taskId} is over: the task has moved on since this report was made`);
+  }
   if (open === undefined) return { ok: true, run: undefined };
   if (open.assignee.kind === 'role') {
     return refuse(
@@ -894,6 +899,20 @@ export function reportCheck(
   }
   if (kind === 'review' && (reviewer ?? r.task.reviewer) === null) {
     return refuse('no_reviewer', `nobody is named to review task ${taskId}`);
+  }
+  // A person's run holds no workspace (spec §6.3), so another task's agent may be
+  // changing the checkout the gates would test (spec §7.7). Asked here, before the
+  // gates: once they start, no agent is claimed into the workspace until they end.
+  const workspace = r.task.workspace;
+  if (by.kind === 'person' && workspace !== null && gatesOf(db, taskId).length > 0) {
+    const busy = openAgentRunIn(db, workspace);
+    if (busy !== undefined) {
+      return refuse(
+        'workspace_busy',
+        `task ${taskId}'s gates run in workspace ${workspace}, where task ${busy.taskId}'s agent run ${busy.runId} is open; ` +
+          'report again once it has finished',
+      );
+    }
   }
   return r;
 }
@@ -1166,10 +1185,29 @@ export function unblock(
   by: string,
   comment: string | undefined,
   now: number,
+  opts: { blockedAt?: number } = {},
 ): Result<{ task: TaskRow }> {
   return tx(db, (d) => {
     const task = getTask(d, taskId);
     if (task === undefined) return refuse('not_found', `no task ${taskId}`);
+    // An Unblock button is for the block its notice told of (spec §9.2): once that
+    // has been lifted, the task may be blocked again for another reason.
+    if (opts.blockedAt !== undefined) {
+      const blocking = d
+        .prepare<[string, number], { id: number }>(
+          "SELECT id FROM kanban_events WHERE task_id = ? AND id = ? AND kind IN ('blocked', 'stopped', 'run_ended')",
+        )
+        .get(taskId, opts.blockedAt);
+      if (blocking === undefined) return refuse('invalid', `event ${opts.blockedAt} is no block of task ${taskId}`);
+      const since = d
+        .prepare<[string, number], { id: number }>(
+          "SELECT id FROM kanban_events WHERE task_id = ? AND kind = 'unblocked' AND id > ? LIMIT 1",
+        )
+        .get(taskId, opts.blockedAt);
+      if (since !== undefined) {
+        return refuse('stale', `the block of task ${taskId} this button was for has been lifted already`);
+      }
+    }
     if (task.phase !== 'blocked') return refuse('illegal_transition', `task ${taskId} is ${task.phase}, not blocked`);
     d.prepare(
       `UPDATE kanban_tasks
@@ -1557,6 +1595,38 @@ export function noteStranded(
     d.prepare('UPDATE kanban_tasks SET stranded_notified_at = ? WHERE task_id = ?').run(now, taskId);
     record(d, { taskId, kind: 'stranded', actor: 'gateway', payload: { reason } }, now);
     return { ok: true, written: true };
+  });
+}
+
+/** What became of a person's card (spec §9.2): sent, as this message, or refused for good by the channel. */
+export type CardOutcome = { messageId: string } | { error: string };
+
+/**
+ * Record that a person's run was sent its card, or that the channel refused it
+ * (spec §9.2): `card_sent`, or `card_failed`, which its subscribers hear. Once
+ * per run, while it is open: a run that has either is not sent another.
+ */
+export function recordCard(db: Db, runId: string, card: CardOutcome, now: number): Result<{ recorded: boolean }> {
+  return tx(db, (d) => {
+    const run = getRun(d, runId);
+    if (run === undefined) return refuse('not_found', `no run ${runId}`);
+    if (run.agentConfig !== null) return refuse('invalid', `run ${runId} is an agent's, and gets no card`);
+    if (run.endedAt !== null) return { ok: true, recorded: false };
+    const had = d
+      .prepare<[string, string], { id: number }>(
+        "SELECT id FROM kanban_events WHERE task_id = ? AND run_id = ? AND kind IN ('card_sent', 'card_failed') LIMIT 1",
+      )
+      .get(run.taskId, runId);
+    if (had !== undefined) return { ok: true, recorded: false };
+    const base = { kind: run.kind, to: run.assignee.name };
+    record(
+      d,
+      'messageId' in card
+        ? { taskId: run.taskId, runId, kind: 'card_sent', actor: 'gateway', payload: { ...base, messageId: card.messageId } }
+        : { taskId: run.taskId, runId, kind: 'card_failed', actor: 'gateway', payload: { ...base, error: card.error } },
+      now,
+    );
+    return { ok: true, recorded: true };
   });
 }
 

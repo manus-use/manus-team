@@ -566,6 +566,51 @@ export function openRuns(db: Db): RunRow[] {
     .map(decodeRun);
 }
 
+/**
+ * The people's runs whose card is still to be sent (spec §9.2): open, a
+ * person's, with neither a `card_sent` nor a `card_failed` event, oldest first.
+ */
+export function cardsDue(db: Db): RunRow[] {
+  return db
+    .prepare<[], RunRaw>(
+      `SELECT ${RUN_COLS} FROM kanban_runs r
+        WHERE r.ended_at IS NULL AND r.assignee_kind = 'human'
+          AND NOT EXISTS (
+            SELECT 1 FROM kanban_events e
+             WHERE e.task_id = r.task_id AND e.run_id = r.run_id AND e.kind IN ('card_sent', 'card_failed'))
+        ORDER BY r.started_at, r.rowid`,
+    )
+    .all()
+    .map(decodeRun);
+}
+
+/**
+ * What a person's card shows of the board (spec §9.2), read for the run it is
+ * for: the task, its parents' latest completions as its children are given them
+ * (spec §4.4), and for a work run the changes a review asked for, for a review
+ * run the handoff under review. Undefined for a run, or a task, not on the board.
+ */
+export interface CardReading {
+  task: TaskRow;
+  run: RunRow;
+  parents: Array<{ task: TaskRow; summary: string }>;
+  changes?: ChangesAsked;
+  handoff?: ReviewRequest;
+}
+
+export function cardReading(db: Db, runId: string): CardReading | undefined {
+  const run = getRun(db, runId);
+  const task = run === undefined ? undefined : getTask(db, run.taskId);
+  if (run === undefined || task === undefined) return undefined;
+  const parents = parentsOf(db, task.taskId).map((p) => ({ task: p, summary: latestCompletion(db, p.taskId)?.summary ?? '' }));
+  if (run.kind === 'review') {
+    const handoff = latestReviewRequest(db, task.taskId);
+    return handoff === undefined ? { task, run, parents } : { task, run, parents, handoff };
+  }
+  const changes = changesAsked(db, task.taskId);
+  return changes === undefined ? { task, run, parents } : { task, run, parents, changes };
+}
+
 /** The run a gateway session belongs to: at most one, by the unique index on session_id. */
 export function runBySession(db: Db, sessionId: string): RunRow | undefined {
   const row = db.prepare<[string], RunRaw>(`SELECT ${RUN_COLS} FROM kanban_runs WHERE session_id = ?`).get(sessionId);

@@ -68,8 +68,12 @@ export type CreatedVia =
 /**
  * Who is reporting. A run reports through its token (plan C3); a person through
  * chat (plan D). Who may act is checked by the caller; what the rows allow, here.
+ *
+ * A person pressing a card's button reports on the run the card was sent for
+ * (spec §9.2): `runId`, re-checked inside the transaction against the task's
+ * open run, so a card for a run that is over does nothing.
  */
-export type Reporter = { kind: 'run'; runId: string } | { kind: 'person'; principal: string };
+export type Reporter = { kind: 'run'; runId: string } | { kind: 'person'; principal: string; runId?: string };
 
 export interface TaskRow {
   taskId: string;

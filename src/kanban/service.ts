@@ -2,7 +2,18 @@ import { createHash } from 'node:crypto';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import type { Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
-import { boardList, gatesOf, getRun, getTask, runsOf, taskView, type BoardEntry, type TaskView } from '../db/kanban-read.js';
+import {
+  boardList,
+  cardReading,
+  gatesOf,
+  getRun,
+  getTask,
+  runsOf,
+  taskView,
+  type BoardEntry,
+  type CardReading,
+  type TaskView,
+} from '../db/kanban-read.js';
 import { buildEnv } from '../driver/env.js';
 import { redactKnownSecrets } from '../secrets.js';
 import type { Role } from '../roles.js';
@@ -828,11 +839,29 @@ export class KanbanService {
     );
   }
 
-  unblock(taskId: string, by: string, comment?: string): Result<{ task: TaskRow }> {
+  /**
+   * `blockedAt`: an Unblock button's, the event that blocked the task as its
+   * notice told it (spec §9.2); refused once that block has been lifted.
+   */
+  unblock(taskId: string, by: string, comment?: string, opts: { blockedAt?: number } = {}): Result<{ task: TaskRow }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
     if (comment !== undefined && !isText(comment)) return board.refuse('invalid', 'a comment is text');
-    return board.unblock(this.#db, taskId, by, comment, this.#clock.now());
+    if (opts.blockedAt !== undefined && !Number.isSafeInteger(opts.blockedAt)) {
+      return board.refuse('invalid', 'a block is an event id, a whole number');
+    }
+    return board.unblock(this.#db, taskId, by, comment, this.#clock.now(), opts);
+  }
+
+  /** What a person's card for this run shows of the board (spec §9.2); undefined for a run not on it. */
+  cardReading(runId: string): CardReading | undefined {
+    return isText(runId) ? cardReading(this.#db, runId) : undefined;
+  }
+
+  /** A person's run was sent its card, or the channel refused it for good (spec §9.2). */
+  recordCard(runId: string, card: board.CardOutcome): Result<{ recorded: boolean }> {
+    if (!isText(runId)) return board.refuse('invalid', 'a run id is text');
+    return board.recordCard(this.#db, runId, card, this.#clock.now());
   }
 
   stop(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow }> {
