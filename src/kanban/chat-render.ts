@@ -1,10 +1,13 @@
 import { forDisplay, forMarkdown } from '../channel/escape.js';
-import type { BoardEntry, TaskView } from '../db/kanban-read.js';
+import type { CardButton, CardView } from '../channel/types.js';
+import { boardCardNonce } from '../core/ids.js';
+import type { BoardEntry, ReviewRequest, TaskView } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
 import { LIST_FILTERS, USAGE } from './chat-parse.js';
+import { describeReported } from './commit.js';
 import type { DisplayStatus } from './status.js';
-import type { Assignee, GateRow, KanbanEvent, RunRow, TaskRow } from './types.js';
+import type { Assignee, FailedGate, GateRow, KanbanEvent, RunRow, TaskRow } from './types.js';
 
 /**
  * What `/kanban` says in chat (spec §9.3), and the notices a subscription hears
@@ -99,6 +102,8 @@ const ACTIVE: readonly DisplayStatus[] = ['running', 'reviewing', 'review', 'rea
 export function renderHelp(): string {
   const operate = 'operator';
   const talk = 'anyone allowed';
+  const assignee = "the task's assignee";
+  const reviewer = 'its reviewer, or an operator';
   const lines: Array<[string, string]> = [
     [USAGE.new, operate],
     [USAGE.list, talk],
@@ -113,12 +118,17 @@ export function renderHelp(): string {
     [USAGE['gate add'], operate],
     [USAGE['gate list'], talk],
     [USAGE['gate remove'], operate],
+    [USAGE.done, assignee],
+    [USAGE.block, assignee],
+    [USAGE.review, assignee],
+    [USAGE.approve, reviewer],
+    [USAGE.changes, reviewer],
   ];
   return [
-    '**The task board.** A task is any work -- research, a document, an operation in Lark, a chore, a change to code -- given to a role, whose agent runs it in a workspace.',
+    '**The task board.** A task is any work -- research, a document, an operation in Lark, a chore, a change to code -- given to a role, whose agent runs it in a workspace, or to a person.',
     ...lines.map(([usage, tier]) => `\`${usage}\` (${tier})`),
-    'Assignees and reviewers are roles for now: naming a person, with an @-mention, arrives in a later update, with `/kanban done`, `block`, `review`, `approve` and `changes`.',
-    'The chat a task is created in hears when it is done, needs review, blocks, is retried after a failure, gives up, or is stranded.',
+    'Name a person with an @-mention: they are sent the task as a card in a direct message, with Done and Block, or a review with Approve and Request changes. A person named may comment on, and report on, their own task.',
+    'The chat a task is created in hears when it is done, needs review, blocks, is retried after a failure, gives up, or is stranded, and who a person was given it.',
   ].join('\n');
 }
 
@@ -200,6 +210,22 @@ export function renderGates(taskId: string, gates: readonly GateRow[]): string {
 }
 
 /**
+ * A person's report refused by a gate (spec §7.7): the gate, how it ended, and
+ * the end of its output, masked whole before it is cut, as a run's output is.
+ */
+export function renderGateFailure(gate: FailedGate): string {
+  const how = gate.timedOut
+    ? 'ran past its timeout'
+    : gate.exitCode !== null
+      ? `exited ${gate.exitCode}`
+      : gate.signal === null
+        ? 'could not start'
+        : `was ended by ${forDisplay(gate.signal)}`;
+  const head = `Not done: the gate ${label(gate.command, 300)} ${how}, so the report was not applied. Fix it, then report again.`;
+  return gate.output.trim() === '' ? head : `${head}\nIts output:\n${tail(gate.output, 1500)}`;
+}
+
+/**
  * The outcomes a retry follows that are failures to tell a subscriber of (spec
  * §9.4). Not `interrupted`: a run the gateway's restart ended is retried quietly,
  * as the task did nothing wrong.
@@ -222,15 +248,51 @@ function blockedLine(task: TaskRow, kind: string, reason: string, recurrences: n
   return `${head}\n\`/kanban unblock ${task.taskId} [comment]\` once it can go on.`;
 }
 
+/** Who a principal is, by name, where the gateway knows one: what a notice or a card calls a person. */
+export type NameOf = (principal: string) => string | undefined;
+
+/** Who stopped a task: a person by the name Lark last gave, else as the event recorded them. */
+function stopper(actor: string, nameOf: NameOf | undefined): string {
+  return actor.startsWith('lark:') ? (nameOf?.(actor) ?? actor) : actor;
+}
+
+/** A person, by the name Lark gave, else their principal; a role, as a role. */
+function whom(a: Assignee | null, nameOf: NameOf | undefined): string {
+  if (a?.kind !== 'human') return who(a);
+  return label(nameOf?.(a.name) ?? a.name, 80);
+}
+
+function payloadOf(event: KanbanEvent): Record<string, unknown> {
+  return (typeof event.payload === 'object' && event.payload !== null ? event.payload : {}) as Record<string, unknown>;
+}
+
+/**
+ * Whether the event left the task blocked, so that its notice offers Unblock
+ * (spec §9.2): a block of any kind but dependency, a stop, or a run whose end
+ * blocked the task.
+ */
+export function blocksTask(event: KanbanEvent): boolean {
+  const p = payloadOf(event);
+  if (event.kind === 'blocked') return text(p, 'kind') !== '' && text(p, 'kind') !== 'dependency';
+  if (event.kind === 'stopped') return true;
+  return event.kind === 'run_ended' && p['next'] === 'blocked';
+}
+
 /**
  * The notice a subscription hears of one event (spec §9.4), or undefined when
  * the event is none: completed, review requested, blocked with its kind and
  * reason, retrying after a failure, gave up, stranded. A dependency block is not
  * one, since nobody needs to act; a throttled run's cooldown is not either, as it
- * clears by itself, and blocks as transient at its limit, which is one.
+ * clears by itself, and blocks as transient at its limit, which is one. For
+ * people: the one line that says who a person's claim gave the task to (spec
+ * §9.2), named in plain text, never mentioned, and a card that could not be sent.
  */
-export function renderNotice(event: KanbanEvent, task: TaskRow, opts: { blockRecurrenceLimit: number }): string | undefined {
-  const p = (typeof event.payload === 'object' && event.payload !== null ? event.payload : {}) as Record<string, unknown>;
+export function renderNotice(
+  event: KanbanEvent,
+  task: TaskRow,
+  opts: { blockRecurrenceLimit: number; nameOf?: NameOf },
+): string | undefined {
+  const p = payloadOf(event);
   const name = `**${label(task.title)}** ${id(task.taskId)}`;
   // As the event recorded it, not as the task is now: a notice delivered late tells what was true then.
   const recurrences = typeof p['blockRecurrences'] === 'number' ? p['blockRecurrences'] : 0;
@@ -242,7 +304,24 @@ export function renderNotice(event: KanbanEvent, task: TaskRow, opts: { blockRec
     case 'review_requested': {
       const reviewer = text(p, 'reviewer');
       const kind = p['reviewerKind'] === 'human' ? 'human' : 'role';
-      return `Review requested — ${name}, from ${who(reviewer === '' ? null : { kind, name: reviewer })}.`;
+      return `Review requested — ${name}, from ${whom(reviewer === '' ? null : { kind, name: reviewer }, opts.nameOf)}.`;
+    }
+    case 'claimed': {
+      // A role's claim is no notice: its outcome is. A person's is the group's one line.
+      if (p['assigneeKind'] !== 'human') return undefined;
+      const person = whom({ kind: 'human', name: text(p, 'assignee') }, opts.nameOf);
+      return `📋 ${name} — ${p['kind'] === 'review' ? 'review ' : ''}assigned to ${person}`;
+    }
+    case 'card_failed': {
+      const person = whom({ kind: 'human', name: text(p, 'to') }, opts.nameOf);
+      const how =
+        p['kind'] === 'review'
+          ? `\`/kanban approve ${task.taskId}\` or \`/kanban changes ${task.taskId} <reason>\``
+          : `\`/kanban done ${task.taskId} [summary]\` or \`/kanban block ${task.taskId} <reason>\``;
+      return (
+        `Could not send ${person} the card for ${name}: ${label(text(p, 'error'), 300)}\n` +
+        `They can answer from any chat with the bot: ${how}.`
+      );
     }
     case 'blocked': {
       const kind = text(p, 'kind');
@@ -251,7 +330,7 @@ export function renderNotice(event: KanbanEvent, task: TaskRow, opts: { blockRec
     }
     case 'stopped':
       // A person's stop, not the task blocking again by itself: never the suggestion to rewrite it.
-      return blockedLine(task, 'needs_input', `stopped by ${event.actor}`, 0, Number.POSITIVE_INFINITY);
+      return blockedLine(task, 'needs_input', `stopped by ${stopper(event.actor, opts.nameOf)}`, 0, Number.POSITIVE_INFINITY);
     case 'run_ended': {
       const outcome = text(p, 'outcome');
       const error = text(p, 'error');
@@ -272,4 +351,148 @@ export function renderNotice(event: KanbanEvent, task: TaskRow, opts: { blockRec
     default:
       return undefined;
   }
+}
+
+// ---------------------------------------------------------------------------
+// A person's cards (spec §9.2)
+// ---------------------------------------------------------------------------
+
+/** What a person's card shows, as read from the board when it is sent. */
+export interface CardFacts {
+  task: TaskRow;
+  /** The person's run the card is for: its buttons report on it, and on nothing later. */
+  run: RunRow;
+  /** Each parent's latest completion, as its children are given it (spec §4.4). */
+  parents: ReadonlyArray<{ task: TaskRow; summary: string }>;
+  /** For a work run after a review asked for changes: what was asked, and by whom (spec §5.3). */
+  changes?: { reason: string; actor: string };
+  /** For a review run: the handoff under review, with what its report recorded of the workspace (spec §7.8). */
+  handoff?: ReviewRequest;
+  nameOf?: NameOf;
+  /**
+   * How many times the card has been redrawn live after a press it refused --
+   * an empty box, a gate. Its buttons carry it, so a press of the redrawn card is
+   * not the press before it: the SDK drops a press it has seen, by the card, the
+   * presser and the button's value, for twelve hours, whatever the box held.
+   */
+  attempt?: number;
+  /** Why the last press did nothing, shown under the title, already escaped. */
+  note?: string;
+}
+
+/**
+ * The buttons' value: a pointer, with the nonce that binds it to the task and the
+ * run (spec §9.2). The attempt goes first: the SDK keys a press on the value's
+ * first 128 characters. It is not under the nonce, and needs no checking.
+ */
+function act(appId: string, run: RunRow, name: string, attempt: number | undefined): Readonly<Record<string, string>> {
+  return {
+    ...(attempt === undefined || attempt === 0 ? {} : { try: String(attempt) }),
+    kind: 'kanban',
+    act: name,
+    task: run.taskId,
+    run: run.runId,
+    nonce: boardCardNonce(appId, run.taskId, run.runId),
+  };
+}
+
+/** The task's own text, as a card shows it: the body, then the contract. */
+function taskText(task: TaskRow, bodyMax: number): string[] {
+  const out: string[] = [];
+  if (task.body.trim() !== '') out.push(block(task.body, bodyMax));
+  const contract = Object.entries(task.contract).filter(([, v]) => v !== undefined && v.trim() !== '');
+  if (contract.length > 0) {
+    out.push('**Contract**');
+    for (const [field, value] of contract) out.push(`${forDisplay(field)}: ${label(value ?? '', 400)}`);
+  }
+  return out;
+}
+
+/**
+ * A task card, sent to its assignee when it becomes ready (spec §9.2): the title,
+ * the body, the contract, the parents' summaries, and Done and Block, which
+ * submit what was typed in the box -- the summary, or the reason.
+ */
+export function renderTaskCard(f: CardFacts, appId: string): CardView {
+  const { task, run } = f;
+  const out = [`📋 **${label(task.title)}** ${id(task.taskId)} — for you to do`];
+  if (f.note !== undefined) out.push(f.note);
+  if (f.changes !== undefined) {
+    out.push(`**Changes asked** by ${label(f.nameOf?.(f.changes.actor) ?? f.changes.actor, 80)}:`, block(f.changes.reason, 1200));
+  }
+  out.push(...taskText(task, 1500));
+  const parents = f.parents.slice(0, 5);
+  if (parents.length > 0) {
+    out.push('**From its parents**');
+    for (const p of parents) {
+      out.push(`${id(p.task.taskId)} **${label(p.task.title, 120)}**:`, block(p.summary === '' ? '(no summary)' : p.summary, 600));
+    }
+    if (f.parents.length > parents.length) out.push(`… and ${f.parents.length - parents.length} more: \`/kanban show ${task.taskId}\``);
+  }
+  out.push(
+    `Type a summary and press **Done**, or why it is blocked and press **Block**. ` +
+      `In any chat with the bot, \`/kanban done ${task.taskId} [summary]\` and \`/kanban block ${task.taskId} <reason>\` do the same.`,
+  );
+  const buttons: CardButton[] = [
+    { label: 'Done', style: 'primary', value: act(appId, run, 'done', f.attempt) },
+    { label: 'Block', style: 'danger', value: act(appId, run, 'block', f.attempt) },
+  ];
+  return {
+    markdown: out.join('\n'),
+    input: { placeholder: 'A summary, or why it is blocked' },
+    buttons,
+    ...(f.attempt === undefined || f.attempt === 0 ? {} : { attempt: f.attempt }),
+  };
+}
+
+/**
+ * A review card, sent to its reviewer (spec §9.2): the handoff, what to review --
+ * the reported commit, when one was recorded (spec §7.8) -- the task, and Approve
+ * and Request changes, which submits the reason typed in the box.
+ */
+export function renderReviewCard(f: CardFacts, appId: string): CardView {
+  const { task, run } = f;
+  const out = [`🔎 **${label(task.title)}** ${id(task.taskId)} — for you to review`];
+  if (f.note !== undefined) out.push(f.note);
+  const h = f.handoff;
+  if (h !== undefined) {
+    // A run's report is its agent's; a person's, by name.
+    const by = h.actor.startsWith('run:') ? 'its agent' : label(f.nameOf?.(h.actor) ?? h.actor, 80);
+    out.push(`**The handoff**, from ${by}:`, block(h.summary === '' ? '(no summary)' : h.summary, 1500));
+    const state = describeReported(h);
+    if (state !== undefined) out.push(`To review: ${forDisplay(state)}.`);
+  }
+  out.push(...taskText(task, 1200));
+  out.push(
+    `Press **Approve**, or type what needs changing and press **Request changes**. ` +
+      `In any chat with the bot, \`/kanban approve ${task.taskId}\` and \`/kanban changes ${task.taskId} <reason>\` do the same.`,
+  );
+  const buttons: CardButton[] = [
+    { label: 'Approve', style: 'primary', value: act(appId, run, 'approve', f.attempt) },
+    { label: 'Request changes', style: 'danger', value: act(appId, run, 'changes', f.attempt) },
+  ];
+  return {
+    markdown: out.join('\n'),
+    input: { placeholder: 'What needs changing' },
+    buttons,
+    ...(f.attempt === undefined || f.attempt === 0 ? {} : { attempt: f.attempt }),
+  };
+}
+
+/**
+ * A card once acted on, or found out of date (spec §9.2): its title and what
+ * happened, with no buttons left to press.
+ */
+export function renderCardOutcome(task: { taskId: string; title: string }, outcome: string): CardView {
+  return { markdown: `**${label(task.title)}** ${id(task.taskId)}\n${outcome}`, buttons: [] };
+}
+
+/** An Unblock under a notice of a block (spec §9.2), bound to the task and the event that blocked it. */
+export function unblockButton(appId: string, event: KanbanEvent): CardButton {
+  const ref = `event:${event.id}`;
+  return {
+    label: `Unblock ${event.taskId}`,
+    style: 'primary',
+    value: { kind: 'kanban', act: 'unblock', task: event.taskId, event: String(event.id), nonce: boardCardNonce(appId, event.taskId, ref) },
+  };
 }

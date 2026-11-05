@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   BOOT_ID,
   approvalNonce,
+  boardCardNonce,
+  boardCardUuid,
   newApprovalId,
   newRunId,
   newSessionId,
@@ -127,5 +129,16 @@ describe('turnIdempotencyKey', () => {
 
   it('is not the send uuid, so the two cannot be confused at a call site', () => {
     expect(turnIdempotencyKey('cli_a', 'om_1')).not.toBe(replyUuid('cli_a', 'om_1', 'turn'));
+  });
+});
+
+describe("a person's card", () => {
+  it('has one uuid per run, and a nonce bound to the task and the run, not to the boot', () => {
+    expect(boardCardUuid('cli_app', 'r_1')).toBe(boardCardUuid('cli_app', 'r_1'));
+    expect(boardCardUuid('cli_app', 'r_1')).toHaveLength(50);
+    expect(boardCardUuid('cli_app', 'r_2')).not.toBe(boardCardUuid('cli_app', 'r_1'));
+    const n = boardCardNonce('cli_app', 'k_1', 'r_1');
+    expect(n).toHaveLength(32);
+    expect(new Set([n, boardCardNonce('cli_app', 'k_2', 'r_1'), boardCardNonce('cli_app', 'k_1', 'r_2'), boardCardNonce('cli_x', 'k_1', 'r_1')]).size).toBe(4);
   });
 });

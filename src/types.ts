@@ -224,6 +224,20 @@ export interface InboundAttachment {
   skipped?: 'too_large' | 'download_failed';
 }
 
+/**
+ * A person @-mentioned in a message, with the ids Lark gave for them. An
+ * @-mention is how chat names a person (spec §9.1): the ids come from Lark, not
+ * from the text, so there is no name to resolve or confuse.
+ */
+export interface InboundMention {
+  /** The placeholder Lark's raw text has for the mention, such as `@_user_1`. */
+  key: string;
+  /** The name the message's text shows in its place, as `@Name`; null when Lark gave none. */
+  name: string | null;
+  openId: string | null;
+  unionId: string | null;
+}
+
 export interface InboundMessage {
   messageId: string;
   appId: string;
@@ -236,6 +250,8 @@ export interface InboundMessage {
   text: string;
   mentionedBot: boolean;
   mentionAll: boolean;
+  /** The people @-mentioned, the bot and `@all` left out. Absent means none. */
+  mentions?: readonly InboundMention[];
   attachments: InboundAttachment[];
   createTime: number;
 }

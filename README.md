@@ -62,6 +62,31 @@ Create a custom app, then:
    **long connection** — no public URL, no request signing to get wrong.
 3. Add the bot to a chat, or message it directly.
 
+### Sending to Lark
+
+Every message the gateway sends as one message — a reply or a notice of up to 4,000
+characters, an approval card, a board card — goes through the SDK's own client with a uuid, and
+Lark shows one message for any number of sends with the same uuid within an hour. This reaches every chat, with the board
+on or off, and differs from the SDK's own send in three ways everyone sees:
+
+- Replies and notices no longer go through the SDK's markdown tidying (headings demoted, blank
+  lines compressed); they are sent as written.
+- Texts over 4,000 characters, and streamed answers, still go out the SDK's way, without the
+  uuid: a retry of one can still post a second copy.
+- The fallback from a post to plain text is narrower than the SDK's: only a post Lark refuses
+  as invalid content (230001) goes as text. A reply to a message that is gone — Lark's 230011
+  or 230017, or an HTTP 404 — goes to its chat, as the SDK's does; 230020 is retried as the
+  chat's rate limit instead.
+
+**Before deploying this build at all (kanban off).** Run these steps of the smoke test at the
+end of docs/plans/2026-11-05-plan-d2-kanban-people.md against the live tenant first, with
+`kanban.enabled` off, and deploy only once they pass:
+
+- the chat-session half of step 1: an approval card in a chat session, pressed and redrawn;
+- step 8: one message per uuid, at chat scope and in a thread;
+- step 11: a reply to a withdrawn message arrives in its chat;
+- a `/help` reply in a direct message, in a group, and in a thread.
+
 ### Configuration
 
 Settings live in a YAML file; credentials live in the environment. Start from
@@ -115,7 +140,7 @@ itself, for instance in a file it reads, is not known to the gateway and is not 
 | `agent.passEnv` | — | Variable **names** forwarded to the agent from the gateway's own environment. A name that is not set is an error, because forwarding nothing surfaces later as the agent failing to authenticate. Leave it empty for a subscription-authenticated agent: its credentials are under `$HOME`, which is forwarded already. |
 | — | `MT_AGENT_ENV_*` | Forwarded with the prefix stripped: `MT_AGENT_ENV_ANTHROPIC_API_KEY` becomes `ANTHROPIC_API_KEY`. Wins over `passEnv`. Opt-in by prefix, because an agent holding the Feishu secret could post as the bot and answer its own approvals. |
 | `maxLiveSessions` | `MT_MAX_LIVE_SESSIONS` | Concurrent agent processes. Default 8. |
-| `kanban.enabled` | — | Run the board: its dispatcher, the worker socket, `/kanban` in chat and its notices. Default **off**, and opt-in: without it chat runs as it always did, and `/kanban` says the board is off. The `kanban:` keys are snake_case, as the kanban design spells them; the rest of the file is camelCase. They are set in the file only, and each number has a ceiling (below); a value above it is a startup error. |
+| `kanban.enabled` | — | Run the board: its dispatcher, the worker socket, `/kanban` in chat and its notices, people's cards, and forwarding supervised roles' approvals to the chat that follows a task. Default **off**, and opt-in: without it chat runs as it always did, and `/kanban` says the board is off. The `kanban:` keys are snake_case, as the kanban design spells them; the rest of the file is camelCase. They are set in the file only, and each number has a ceiling (below); a value above it is a startup error. |
 | `kanban.max_running` | — | Open agent runs at once. Default `maxLiveSessions`, and refused above it: a run is a live session. Set it lower to keep room for chat. At most 256. |
 | `kanban.failure_limit` | — | Counted failures before a task gives up and blocks. Default 2: a first attempt and one retry. At most 100. |
 | `kanban.transient_limit`, `kanban.transient_cooldown_s` | — | A throttled run is retried after a cooldown, 300 s by default, doubling each time up to an hour; after 10 in a row the task blocks. At most 1000 in a row, and a first cooldown of at most 3600 s. |
@@ -330,7 +355,7 @@ second way to mutate it with no capability the button doesn't already have.
 
 With `kanban.enabled`, `/kanban` drives the board from any chat the bot is in. A task is any
 work — research, a document, an operation in Lark, a chore, a change to code — given to a
-role, whose agent runs it in a workspace, which is just a directory.
+role, whose agent runs it in a workspace, which is just a directory, or to a person.
 
 ```
 /kanban new Draft the Q3 summary
@@ -344,24 +369,29 @@ Use last quarter's page as the model.
 The first line is the title. Lines starting `assignee:`, `reviewer:`, `workspace:`, `parent:`
 (one or more task ids; repeat it for more), `outcome:`, `verify:`, `constraints:`,
 `boundaries:` and `stop when:` fill those fields, in any order and in any case; every other
-line is the body. An unknown role or workspace is refused at once, and so is a role whose agent
-is supervised. The dispatcher looks for work as soon as the task is created.
+line is the body. A bare word names a role, and an @-mention a person. An unknown role or
+workspace is refused at once. The dispatcher looks for work as soon as the task is created.
 
 | Command | Tier |
 |---|---|
 | `/kanban new <title>` + lines | operate |
 | `/kanban list [todo\|ready\|running\|review\|reviewing\|blocked\|done\|archived\|all]` | talk; without a status, the tasks someone may still act on |
 | `/kanban show <task>` | talk: the task, its contract, gates, runs, latest output and comments |
-| `/kanban assign <task> <role>` | operate: an undecided run ends `superseded` |
+| `/kanban assign <task> <role or @person>` | operate: an undecided run ends `superseded` |
 | `/kanban link <parent> <child>` | operate |
 | `/kanban workspace <task> <name>` | operate: refused once the workspace is fixed |
-| `/kanban comment <task> <text>` | talk: everyone sees it in `/kanban show`; an operator's also reaches the task's agent, when its turn ends or in its next run |
+| `/kanban comment <task> <text>` | talk: everyone sees it in `/kanban show`; an operator's, or the task's assignee's or reviewer's, also reaches its agent, when its turn ends or in its next run |
 | `/kanban unblock <task> [comment]` | operate |
 | `/kanban stop <task>` | operate: the run ends `cancelled`, and the task blocks |
 | `/kanban archive <task>` | operate |
 | `/kanban gate add <task> [--timeout <s>] <command>` | operate: the rest of the message is the command, as written |
 | `/kanban gate list <task>` | talk |
 | `/kanban gate remove <task> <gate>` | operate |
+| `/kanban done <task> [summary]` | the task's assignee, a person |
+| `/kanban block <task> <reason>` | the task's assignee: it blocks as needing input |
+| `/kanban review <task> [summary]`, and a line `reviewer: <role or @person>` unless the task names one | the task's assignee |
+| `/kanban approve <task> [comment]` | the task's reviewer, a person, or an operator |
+| `/kanban changes <task> <reason>` | the task's reviewer, a person, or an operator |
 | `/kanban help` | talk |
 
 Whoever acts is recorded as `lark:<union_id>`; a sender whose message carried no union_id can
@@ -376,14 +406,64 @@ short by a gateway restart is retried quietly. A task that keeps blocking for th
 chat or thread gets at most one message every couple of seconds, listing what happened in
 order, 20 notices at most. Notices are delivered from a cursor kept in the database, so those
 due while the gateway was down are sent when it is back; a message sent just before a stop
-may be sent twice. A chat the bot can no longer post to — removed from it, or refused by
+is sent again with the same uuid, which Lark shows once if it comes within the hour. A chat
+the bot can no longer post to — removed from it, or refused by
 Lark for about 19 minutes — is let go of until the next restart: its notices are dropped, and
 the gateway's log says which. A network outage, or Lark not answering, never lets a chat go:
 its notices wait, and are sent once the gateway reaches Lark again.
 
-**Not yet:** people as assignees or reviewers. Naming one, with an @-mention, is refused, and
-`/kanban done`, `block`, `review`, `approve` and `changes` say they arrive in a later update
-(plan D2), with cards to a person's direct messages.
+**People.** Name a person with an @-mention — type @ and pick them, so Lark sends who they
+are — as `assignee:` or `reviewer:`, or in `/kanban assign`. Being named lets a person report on
+the task, so they must have talk tier (`auth.talk`); a person without talk tier is
+refused. The board knows a person as `lark:<union_id>`, which is how `/kanban show` lists them
+and how an agent's `mt kanban create` or `review` names one; the gateway learns each person's
+ids as they use `/kanban`, are mentioned in it, or press a card's button, and refuses a
+principal it has never seen.
+
+When a person's task is ready, they are sent it as a card in a direct message — the title, the
+body, the contract and the parents' summaries — with a box and **Done** and **Block**: type a
+summary, or why it is blocked, and press one. A review for a person comes the same way, with the
+handoff, the commit to review when one was recorded, and **Approve** and **Request changes**.
+Only the person named may press them (an operator may also answer a review); a card for a run
+that is over says it is out of date and does nothing. A press is answered at once, and the card
+shows the outcome once the report is made, gates and all; one refused for what it carried — an
+empty box, a failing gate — redraws the card, saying why, ready to be pressed again. `/kanban done`, `block`, `review`,
+`approve` and `changes` do the same from any chat with the bot. A person's task never times out:
+it waits for them, across restarts. The chat the task came from hears one line — "📋 *title* —
+assigned to *name*", the name in plain text, never a mention — and its notices as usual; a
+notice of a block carries an **Unblock** button for an operator. Only a card that cannot reach
+its person — Lark answering that they are outside the app's availability (230013), or the person
+having lost talk tier — is reported to the chat instead, with the commands to use. Any other
+failure to send a card, a refusal of Lark's included, is taken for the gateway's: the card is
+tried again, after a pause that doubles to five minutes, and the log says why each time. A
+person's report is refused while another task's agent is working in the same workspace, if the
+task has gates to run there.
+
+A role whose agent is supervised may be given tasks too: its approval cards go to the chat that
+follows the task, naming it, and are answered there at operator tier, as in a chat session.
+
+**Known limitations.**
+
+- A typed report (`/kanban done` and the rest) leaves its card's buttons live, until the next
+  press shows the card as out of date.
+- A notice's **Unblock** button stays after it is pressed; a second press does nothing.
+- A card that Lark refuses as unreachable is never sent again; the person can type the
+  commands the chat was given.
+- If a card's "Not done" redraw fails, the card's buttons may stay dead for 12 hours: Lark's
+  SDK drops a second press of the same button for that long. The typed commands
+  (`/kanban done` and the rest) still work.
+- The gateway learns about people only from `/kanban` messages, the people they mention, and
+  the people who press cards; a principal it has never seen is refused.
+- An approval forwarded to a chat counts toward the run's `max_runtime_s`: a supervised agent
+  waiting on one is cancelled at that limit like any run.
+- A person may review their own work: nothing refuses a reviewer who is the assignee.
+- A person's name, in a notice or a card, is the one Lark last gave with their ids, and can be
+  out of date.
+
+Before setting `kanban.enabled: true` on a live tenant, run the rest of the smoke test at the
+end of docs/plans/2026-11-05-plan-d2-kanban-people.md, after the steps that must pass before
+deploying this build at all (see "Sending to Lark" above). It is the section "Before turning
+the board on: a smoke test against Lark".
 
 ## Repo layout
 

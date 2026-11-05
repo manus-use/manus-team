@@ -122,7 +122,7 @@ describe('the other /kanban commands', () => {
       ok: true,
       command: { verb: 'assign', taskId: 'k_1', assignee: 'reviewer' },
     });
-    // A person, whose name may hold a space, is kept whole for the refusal that says it arrives later.
+    // A person, whose name may hold a space, is kept whole, to be found among the message's mentions.
     expect(parseKanban('assign k_1 @Alice Smith')).toEqual({
       ok: true,
       command: { verb: 'assign', taskId: 'k_1', assignee: '@Alice Smith' },
@@ -160,10 +160,42 @@ describe('the other /kanban commands', () => {
     expect(parseKanban('gate remove k_1 3')).toEqual({ ok: true, command: { verb: 'gate remove', taskId: 'k_1', gateId: 3 } });
   });
 
-  it("names the people's commands, which arrive in a later update", () => {
-    for (const name of ['done', 'block', 'review', 'approve', 'changes']) {
-      expect(parseKanban(`${name} k_1 looks good`)).toEqual({ ok: true, command: { verb: 'later', name } });
+  it("reads a person's reports on their own task, the summary or the reason as written", () => {
+    expect(parseKanban('done k_1 the page is up\nlinks checked')).toEqual({
+      ok: true,
+      command: { verb: 'done', taskId: 'k_1', text: 'the page is up\nlinks checked' },
+    });
+    expect(parseKanban('done k_1')).toEqual({ ok: true, command: { verb: 'done', taskId: 'k_1', text: '' } });
+    expect(parseKanban('approve k_1')).toEqual({ ok: true, command: { verb: 'approve', taskId: 'k_1', text: '' } });
+    expect(parseKanban('block k_1 which wiki?')).toEqual({ ok: true, command: { verb: 'block', taskId: 'k_1', text: 'which wiki?' } });
+    expect(parseKanban('changes k_1 cite the sources')).toEqual({
+      ok: true,
+      command: { verb: 'changes', taskId: 'k_1', text: 'cite the sources' },
+    });
+    for (const text of ['done', 'approve', 'block k_1', 'changes k_1  ', 'review']) {
+      expect(parseKanban(text)).toMatchObject({ ok: false, usage: expect.stringMatching(/^Usage: `\/kanban /) });
     }
+  });
+
+  it("reads a review's reviewer from a reviewer: line, anywhere in it, once", () => {
+    expect(parseKanban('review k_1 drafted the notes\nREVIEWER: @Bob Lee\nsee the wiki page')).toEqual({
+      ok: true,
+      command: { verb: 'review', taskId: 'k_1', summary: 'drafted the notes\nsee the wiki page', reviewer: '@Bob Lee' },
+    });
+    // A name at the end of the summary is the summary's.
+    expect(parseKanban('review k_1 asked the reviewer')).toEqual({
+      ok: true,
+      command: { verb: 'review', taskId: 'k_1', summary: 'asked the reviewer' },
+    });
+    // Indented, by spaces, tabs or a zero-width character a paste left: still the reviewer line.
+    for (const indent of ['  ', '\t', ' \t ', '\u200b', '\u200b  ', '  \u200b', '\t\u2060 \ufeff']) {
+      expect(parseKanban(`review k_1 drafted the notes\n${indent}reviewer: @Bob Lee`)).toEqual({
+        ok: true,
+        command: { verb: 'review', taskId: 'k_1', summary: 'drafted the notes', reviewer: '@Bob Lee' },
+      });
+    }
+    expect(parseKanban('review k_1 x\nreviewer:')).toEqual({ ok: false, usage: '`reviewer:` needs a value.' });
+    expect(parseKanban('review k_1 x\nreviewer: a\nreviewer: b')).toEqual({ ok: false, usage: '`reviewer:` is given twice.' });
   });
 
   it('answers a wrong command line with its usage, and an unknown one escaped', () => {

@@ -13,6 +13,7 @@ import type { Driver } from '../src/driver/types.js';
 import { KanbanChat } from '../src/kanban/chat.js';
 import { Dispatcher } from '../src/kanban/dispatcher.js';
 import { Notifier } from '../src/kanban/notices.js';
+import { PeopleDirectory } from '../src/kanban/people.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { writeMtShim } from '../src/kanban/shim.js';
 import { KanbanSink } from '../src/kanban/sink.js';
@@ -124,6 +125,12 @@ async function build(mode: string): Promise<Stack> {
     kanban: new KanbanChat({
       service,
       hasTier: (principal, tier) => authorizer.hasTier(principal, tier),
+      people: new PeopleDirectory({
+        db: t.db,
+        appId: 'cli_app',
+        canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
+      }),
+      appId: 'cli_app',
       changed: () => d.pass(),
       cancel: (runId) => {
         d.cancel(runId);

@@ -119,6 +119,34 @@ export function noticeBatchUuid(appId: string, pairs: ReadonlyArray<readonly [nu
 }
 
 /**
+ * The `uuid` of a person's card for a run (spec §9.2): the same however often it
+ * is sent, so a card sent again after a restart, before it was recorded, is one
+ * message.
+ */
+export function boardCardUuid(appId: string, runId: string): string {
+  const canonical = [appId, 'kanban-card', runId].join(SEP);
+  return createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 50);
+}
+
+/**
+ * The nonce on a board card's buttons (spec §9.2): bound to the task, and to what
+ * the card is for -- a run, or for an Unblock, the event that blocked the task --
+ * so a button whose fields were mixed or mangled is refused before anything is
+ * read.
+ *
+ * It is not a secret, and cannot be: an unkeyed hash of ids anyone who sees the
+ * card can read, which anyone can recompute. What protects a press is who made
+ * it -- the callback's operator, checked against the tiers and the task -- and
+ * the board's re-check of the run, or the block, inside its transaction. Not
+ * bound to the boot, unlike an approval's: a person's run parks across restarts
+ * (spec §4.2), and its card must still work after one.
+ */
+export function boardCardNonce(appId: string, taskId: string, ref: string): string {
+  const canonical = [appId, 'kanban-card', taskId, ref].join(SEP);
+  return createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 32);
+}
+
+/**
  * The opaque value carried in a card button's `action.value`.
  *
  * This round-trips through the client and Lark does **not** verify it, so it is

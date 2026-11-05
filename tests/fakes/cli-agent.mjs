@@ -26,6 +26,8 @@
  *               narrates its next step and stops without reporting
  *   kanban-gated report `mt kanban complete`, which the task's gate refuses until a
  *               file `gate-ok` is in the workspace; then write it and report again
+ *   kanban-review run `mt kanban show`, then ask for review with `mt kanban review`,
+ *               saying, on a rework, the reviewer's reason it revised for
  *
  * Every invocation appends its argv to `FAKE_CLI_LOG` as one JSON line. That file
  * is how a test sees the composed prompt -- which is the whole of this driver's
@@ -194,6 +196,23 @@ switch (MODE) {
     const second = mt('complete', { summary: 'gate fixed' });
     delta(`first: ${first.answer}\nsecond: ${second.answer}`);
     summary('completed', 'reported twice');
+    break;
+  }
+
+  case 'kanban-review': {
+    const shown = mt('show');
+    let title = '?';
+    let reason;
+    try {
+      const brief = JSON.parse(shown.answer);
+      title = brief.task.title;
+      reason = brief.rework?.reason;
+    } catch {
+      process.stderr.write(`mt kanban show failed: ${shown.error} ${shown.answer}\n`);
+    }
+    const asked = mt('review', { summary: reason === undefined ? `drafted: ${title}` : `revised (${reason}): ${title}` });
+    delta(`review: ${asked.answer}`);
+    summary('completed', `asked for review of ${title}`);
     break;
   }
 

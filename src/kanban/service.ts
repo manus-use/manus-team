@@ -2,7 +2,18 @@ import { createHash } from 'node:crypto';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import type { Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
-import { boardList, gatesOf, getRun, getTask, runsOf, taskView, type BoardEntry, type TaskView } from '../db/kanban-read.js';
+import {
+  boardList,
+  cardReading,
+  gatesOf,
+  getRun,
+  getTask,
+  runsOf,
+  taskView,
+  type BoardEntry,
+  type CardReading,
+  type TaskView,
+} from '../db/kanban-read.js';
 import { buildEnv } from '../driver/env.js';
 import { redactKnownSecrets } from '../secrets.js';
 import type { Role } from '../roles.js';
@@ -38,10 +49,11 @@ import {
  * agent's JSON -- has the right shape. db/kanban.ts checks the rest, and is the
  * only writer.
  *
- * Until plan D nothing can deliver a card to a person, so people cannot be
- * assigned or named as reviewers, and a role whose agent is supervised is
- * refused: its approval cards would have nowhere to go (spec §12). Plan D passes
- * `people` and `supervisedRoles` to turn them on. Who may act -- tiers, the
+ * Without `people`, nothing can deliver a card to a person, so people cannot be
+ * assigned or named as reviewers; without `supervisedRoles`, a role whose agent
+ * is supervised is refused, as its approval cards would have nowhere to go (spec
+ * §12). The gateway passes both from plan D2, which sends people their cards and
+ * forwards approvals to the chat following a task. Who may act -- tiers, the
  * named assignee -- is the caller's: the worker CLI's token (plan C3), chat (D).
  */
 
@@ -828,11 +840,29 @@ export class KanbanService {
     );
   }
 
-  unblock(taskId: string, by: string, comment?: string): Result<{ task: TaskRow }> {
+  /**
+   * `blockedAt`: an Unblock button's, the event that blocked the task as its
+   * notice told it (spec §9.2); refused once that block has been lifted.
+   */
+  unblock(taskId: string, by: string, comment?: string, opts: { blockedAt?: number } = {}): Result<{ task: TaskRow }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
     if (comment !== undefined && !isText(comment)) return board.refuse('invalid', 'a comment is text');
-    return board.unblock(this.#db, taskId, by, comment, this.#clock.now());
+    if (opts.blockedAt !== undefined && !Number.isSafeInteger(opts.blockedAt)) {
+      return board.refuse('invalid', 'a block is an event id, a whole number');
+    }
+    return board.unblock(this.#db, taskId, by, comment, this.#clock.now(), opts);
+  }
+
+  /** What a person's card for this run shows of the board (spec §9.2); undefined for a run not on it. */
+  cardReading(runId: string): CardReading | undefined {
+    return isText(runId) ? cardReading(this.#db, runId) : undefined;
+  }
+
+  /** A person's run was sent its card, or the channel refused it for good (spec §9.2). */
+  recordCard(runId: string, card: board.CardOutcome): Result<{ recorded: boolean }> {
+    if (!isText(runId)) return board.refuse('invalid', 'a run id is text');
+    return board.recordCard(this.#db, runId, card, this.#clock.now());
   }
 
   stop(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow }> {
@@ -950,8 +980,13 @@ export class KanbanService {
         );
       }
       if (!this.#people.canTalk(name)) {
-        // Being assigned is permission to report on the task.
-        return board.refuse('person_not_assignable', `${quoted} does not have talk tier, so cannot be given work`);
+        // Being assigned is permission to report on the task (spec §4.2). A person is
+        // known by the open_id Lark last gave with their union_id, from chat.
+        return board.refuse(
+          'person_not_assignable',
+          `${quoted} cannot be given work: being assigned lets a person report on the task, which needs talk tier, ` +
+            'and this gateway does not know them to have it -- a person is known once they have used /kanban, or been @-mentioned in it',
+        );
       }
       return { ok: true, assignee: { kind: 'human', name } };
     }

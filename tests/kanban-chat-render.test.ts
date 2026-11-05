@@ -1,7 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { addComment, addGate, block, complete, createTask, endRun, DEFAULT_LIMITS } from '../src/db/kanban.js';
 import { boardList, eventsOf, getTask, taskView } from '../src/db/kanban-read.js';
-import { renderGates, renderHelp, renderList, renderNotice, renderShow } from '../src/kanban/chat-render.js';
+import { boardCardNonce } from '../src/core/ids.js';
+import {
+  blocksTask,
+  renderCardOutcome,
+  renderGates,
+  renderHelp,
+  renderList,
+  renderNotice,
+  renderReviewCard,
+  renderShow,
+  renderTaskCard,
+  unblockButton,
+} from '../src/kanban/chat-render.js';
 import type { KanbanEvent, TaskRow } from '../src/kanban/types.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
@@ -41,7 +53,7 @@ function task(taskId: string): TaskRow {
 const LIMIT = { blockRecurrenceLimit: 2 };
 
 describe('/kanban help', () => {
-  it('lists every command with the tier it needs, and says people arrive in a later update', () => {
+  it('lists every command with who may run it, people as assignees and reviewers among them', () => {
     const help = renderHelp();
     for (const verb of ['new', 'list', 'show', 'assign', 'link', 'workspace', 'comment', 'unblock', 'stop', 'archive']) {
       expect(help).toContain(`/kanban ${verb}`);
@@ -49,7 +61,10 @@ describe('/kanban help', () => {
     expect(help).toContain('`/kanban gate add <task> [--timeout <seconds>] <command>` (operator)');
     expect(help).toContain('`/kanban list');
     expect(help).toContain('(anyone allowed)');
-    expect(help).toContain('arrives in a later update');
+    expect(help).toContain("`/kanban done <task> [summary]` (the task's assignee)");
+    expect(help).toContain('`/kanban changes <task> <reason>` (its reviewer, or an operator)');
+    expect(help).toContain('Name a person with an @-mention');
+    expect(help).not.toContain('later update');
     expect(help).not.toContain('D2');
   });
 });
@@ -257,7 +272,7 @@ describe('notices', () => {
     expect(renderNotice(event('run_ended', { outcome: 'rate_limited', next: 'cooldown' }), t, LIMIT)).toBeUndefined();
     // A restart's interruption is retried quietly: the task did nothing wrong.
     expect(renderNotice(event('run_ended', { outcome: 'interrupted', next: 'retry' }), t, LIMIT)).toBeUndefined();
-    for (const kind of ['created', 'claimed', 'commented', 'linked', 'gates_ran', 'archived', 'changes_requested']) {
+    for (const kind of ['created', 'claimed', 'commented', 'linked', 'gates_ran', 'archived', 'changes_requested', 'card_sent']) {
       expect(renderNotice(event(kind, {}), t, LIMIT)).toBeUndefined();
     }
   });
@@ -303,6 +318,14 @@ describe('notices', () => {
     expect(stopped).toBe(
       `Blocked (needs\\_input) — ${name}: stopped by lark:on\\_alice\n\`/kanban unblock ${k.taskId} [comment]\` once it can go on.`,
     );
+    // A person who stopped it is named as Lark last gave their name, escaped; anyone else by their actor.
+    const nameOf = (p: string) => (p === ALICE ? 'Alice <at id=all></at>' : undefined);
+    expect(renderNotice(event('stopped', { blockRecurrences: 0 }, ALICE), t, { ...LIMIT, nameOf })).toMatch(
+      /: stopped by Alice \\<at id=all\\>\\<\/at\\>\n/,
+    );
+    expect(renderNotice(event('stopped', { blockRecurrences: 0 }, 'lark:on_nobody'), t, { ...LIMIT, nameOf })).toMatch(
+      /: stopped by lark:on\\_nobody\n/,
+    );
     expect(renderNotice(event('review_requested', { summary: 'v1', reviewer: 'reviewer', reviewerKind: 'role' }), t, LIMIT)).toBe(
       `Review requested — ${name}, from role reviewer.`,
     );
@@ -311,11 +334,115 @@ describe('notices', () => {
     );
   });
 
+  it("tells who a person's claim gave the task to, by name, in plain text, and nothing of a role's", () => {
+    const k = newTask(h.db, { title: `Check the links ${SPOOF}`, assignee: { kind: 'human', name: ALICE } });
+    claimed(h.db, k.taskId);
+    const nameOf = (p: string) => (p === ALICE ? 'Alice <at id=all></at>' : undefined);
+    expect(renderNotice(last(k.taskId), task(k.taskId), { ...LIMIT, nameOf })).toBe(
+      `📋 **Check the links hi \\<at id=all\\>\\</at\\> team** \`${k.taskId}\` — assigned to Alice \\<at id=all\\>\\</at\\>`,
+    );
+    // Without a name known, the principal.
+    expect(renderNotice(last(k.taskId), task(k.taskId), LIMIT)).toMatch(/— assigned to lark:on\\_alice$/);
+    const review = { ...last(k.taskId), payload: { kind: 'review', assignee: ALICE, assigneeKind: 'human' } };
+    expect(renderNotice(review, task(k.taskId), { ...LIMIT, nameOf })).toMatch(/— review assigned to Alice /);
+    const role = newTask(h.db);
+    claimed(h.db, role.taskId);
+    expect(renderNotice(last(role.taskId), task(role.taskId), { ...LIMIT, nameOf })).toBeUndefined();
+    const asked = { ...last(k.taskId), kind: 'review_requested', payload: { summary: 'v1', reviewer: ALICE, reviewerKind: 'human' } };
+    expect(renderNotice(asked, task(k.taskId), { ...LIMIT, nameOf: () => 'Alice' })).toMatch(/, from Alice\.$/);
+  });
+
+  it("tells of a card that could not be sent, and how its person can answer without it", () => {
+    const k = newTask(h.db, { title: 'Survey' });
+    const event = (payload: unknown): KanbanEvent => ({ ...last(k.taskId), kind: 'card_failed', payload });
+    expect(renderNotice(event({ kind: 'work', to: ALICE, error: 'the user is not in the app' }), task(k.taskId), { ...LIMIT, nameOf: () => 'Alice' })).toBe(
+      `Could not send Alice the card for **Survey** \`${k.taskId}\`: the user is not in the app\n` +
+        `They can answer from any chat with the bot: \`/kanban done ${k.taskId} [summary]\` or \`/kanban block ${k.taskId} <reason>\`.`,
+    );
+    expect(renderNotice(event({ kind: 'review', to: ALICE, error: 'x' }), task(k.taskId), LIMIT)).toContain(`\`/kanban approve ${k.taskId}\``);
+  });
+
+  it('knows which events left the task blocked, for the Unblock under their notice', () => {
+    const k = newTask(h.db);
+    const event = (kind: string, payload: unknown): KanbanEvent => ({ ...last(k.taskId), kind, payload });
+    expect(blocksTask(event('blocked', { kind: 'needs_input', reason: 'x' }))).toBe(true);
+    expect(blocksTask(event('blocked', { kind: 'dependency', reason: 'x' }))).toBe(false);
+    expect(blocksTask(event('stopped', {}))).toBe(true);
+    expect(blocksTask(event('run_ended', { next: 'blocked' }))).toBe(true);
+    expect(blocksTask(event('run_ended', { next: 'retry' }))).toBe(false);
+    expect(blocksTask(event('completed', {}))).toBe(false);
+    const b = event('blocked', { kind: 'needs_input', reason: 'x' });
+    expect(unblockButton('cli_app', b)).toEqual({
+      label: `Unblock ${k.taskId}`,
+      style: 'primary',
+      value: { kind: 'kanban', act: 'unblock', task: k.taskId, event: String(b.id), nonce: boardCardNonce('cli_app', k.taskId, `event:${b.id}`) },
+    });
+  });
+
   it('masks a secret in what it tells', () => {
     addSecrets(['sk-said-12345678']);
     const created = createTask(h.db, { title: 'a task', createdBy: ALICE, createdVia: VIA }, NOW);
     if (!created.ok) throw new Error(created.message);
     const event: KanbanEvent = { ...last(created.task.taskId), kind: 'stranded', payload: { reason: 'key sk-said-12345678 refused' } };
     expect(renderNotice(event, created.task, LIMIT)).toContain(`key ${MASK} refused`);
+  });
+});
+
+describe("a person's cards", () => {
+  it('shows a task card its title, body, contract and parents, escaped and masked, with Done and Block for its run', () => {
+    addSecrets(['sk-card-12345678']);
+    const parent = newTask(h.db, { title: 'Collect the numbers' });
+    const prun = claimed(h.db, parent.taskId);
+    expect(complete(h.db, parent.taskId, { kind: 'run', runId: prun.runId }, { summary: 'in sheet Q3' }, NOW).ok).toBe(true);
+    const k = newTask(h.db, {
+      title: `Write them up ${SPOOF}`,
+      body: 'Use the sk-card-12345678 key\n# not a heading',
+      contract: { outcome: 'a page' },
+      assignee: { kind: 'human', name: ALICE },
+      parents: [parent.taskId],
+    });
+    const run = claimed(h.db, k.taskId);
+    const view = renderTaskCard({ task: task(k.taskId), run, parents: [{ task: task(parent.taskId), summary: 'in sheet Q3' }] }, 'cli_app');
+    expect(view.markdown).toContain(`📋 **Write them up hi \\<at id=all\\>\\</at\\> team** \`${k.taskId}\` — for you to do`);
+    expect(view.markdown).toContain(`> Use the ${MASK} key\n> # not a heading`);
+    expect(view.markdown).toContain('outcome: a page');
+    expect(view.markdown).toContain(`\`${parent.taskId}\` **Collect the numbers**:\n> in sheet Q3`);
+    expect(view.markdown).toContain(`\`/kanban done ${k.taskId} [summary]\``);
+    expect(view.input).toEqual({ placeholder: 'A summary, or why it is blocked' });
+    const nonce = boardCardNonce('cli_app', k.taskId, run.runId);
+    expect(view.buttons).toEqual([
+      { label: 'Done', style: 'primary', value: { kind: 'kanban', act: 'done', task: k.taskId, run: run.runId, nonce } },
+      { label: 'Block', style: 'danger', value: { kind: 'kanban', act: 'block', task: k.taskId, run: run.runId, nonce } },
+    ]);
+    const rework = renderTaskCard({ task: task(k.taskId), run, parents: [], changes: { reason: 'cite it', actor: 'lark:on_bob' }, nameOf: () => 'Bob' }, 'cli_app');
+    expect(rework.markdown).toContain('**Changes asked** by Bob:\n> cite it');
+  });
+
+  it('shows a review card the handoff and the commit to review, when one was recorded, with Approve and Request changes', () => {
+    const k = newTask(h.db, { title: 'Fix the footer', reviewer: { kind: 'human', name: ALICE } });
+    const run = claimed(h.db, k.taskId);
+    const handoff = { runId: 'r_work', actor: 'run:r_work', summary: 'moved it', metadata: null, reportedCommit: 'abc1234', reportedDirty: false };
+    const view = renderReviewCard({ task: task(k.taskId), run, parents: [], handoff }, 'cli_app');
+    expect(view.markdown).toContain(`🔎 **Fix the footer** \`${k.taskId}\` — for you to review`);
+    expect(view.markdown).toContain('**The handoff**, from its agent:\n> moved it');
+    expect(view.markdown).toContain('To review: review commit abc1234.');
+    expect(view.buttons.map((b) => [b.label, b.value['act']])).toEqual([
+      ['Approve', 'approve'],
+      ['Request changes', 'changes'],
+    ]);
+    // Any work, not only code: no commit recorded, no line for one.
+    const doc = renderReviewCard(
+      { task: task(k.taskId), run, parents: [], handoff: { ...handoff, runId: null, actor: 'lark:on_bob', reportedCommit: null, reportedDirty: null } },
+      'cli_app',
+    );
+    expect(doc.markdown).not.toContain('To review:');
+    expect(doc.markdown).toContain('from lark:on\\_bob');
+  });
+
+  it('redraws a card acted on with what happened, and no buttons', () => {
+    expect(renderCardOutcome({ taskId: 'k_1', title: `x ${SPOOF}` }, 'Done — by Alice.')).toEqual({
+      markdown: '**x hi \\<at id=all\\>\\</at\\> team** `k_1`\nDone — by Alice.',
+      buttons: [],
+    });
   });
 });

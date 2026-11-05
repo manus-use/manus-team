@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigError, loadConfig, type GatewayConfig } from '../src/config.js';
 import { migrate, openDb } from '../src/db/open.js';
-import { createGateway, findingsOn, registerConfiguredSecrets } from '../src/index.js';
+import { createGateway, findingUuid, findingsOn, registerConfiguredSecrets } from '../src/index.js';
 import { LarkAdapter } from '../src/channel/lark/adapter.js';
 import { LarkInbound } from '../src/channel/lark/inbound.js';
 import { loadTeam, type Team } from '../src/team.js';
@@ -131,12 +131,14 @@ describe('the board, at startup', () => {
     try {
       expect(gateway.dispatcher).toBeUndefined();
       expect(gateway.notifier).toBeUndefined();
+      expect(gateway.cards).toBeUndefined();
+      expect(gateway.chat).toBeUndefined();
     } finally {
       await gateway.stop();
     }
   });
 
-  it('starts delivering notices once connected, and stops before it disconnects, waiting a few seconds at most, when kanban.enabled is set', async () => {
+  it("starts delivering notices and people's cards once connected, and stops before it disconnects, waiting a few seconds at most, when kanban.enabled is set", async () => {
     vi.spyOn(LarkAdapter.prototype, 'connect').mockResolvedValue(undefined);
     const order: string[] = [];
     vi.spyOn(LarkAdapter.prototype, 'disconnect').mockImplementation(async () => {
@@ -146,8 +148,13 @@ describe('the board, at startup', () => {
     const gateway = await createGateway({ ...config, kanban: { ...config.kanban, enabled: true } }, team);
     const notifier = gateway.notifier;
     if (notifier === undefined) throw new Error('no notifier');
+    const cards = gateway.cards;
+    if (cards === undefined) throw new Error('no cards');
     vi.spyOn(notifier, 'start').mockImplementation(() => {
       order.push('notices start');
+    });
+    vi.spyOn(cards, 'start').mockImplementation(() => {
+      order.push('cards start');
     });
     const bounds: Array<number | undefined> = [];
     vi.spyOn(notifier, 'idle').mockImplementation(async (boundMs) => {
@@ -155,13 +162,36 @@ describe('the board, at startup', () => {
       bounds.push(boundMs);
       return true;
     });
+    vi.spyOn(cards, 'idle').mockImplementation(async (boundMs) => {
+      order.push('cards idle');
+      bounds.push(boundMs);
+      return true;
+    });
     await gateway.start();
     await gateway.stop();
-    expect(order).toEqual(['notices start', 'notices idle', 'disconnect']);
+    expect(order).toEqual(['notices start', 'cards start', 'notices idle', 'cards idle', 'disconnect']);
     // Bounded by the shutdown's drain, not by a send's 30 s: a hung send never holds the stop.
-    expect(bounds).toHaveLength(1);
-    expect(bounds[0]).toBeGreaterThan(0);
-    expect(bounds[0]).toBeLessThanOrEqual(10_000);
+    expect(bounds).toHaveLength(2);
+    for (const bound of bounds) {
+      expect(bound).toBeGreaterThan(0);
+      expect(bound).toBeLessThanOrEqual(10_000);
+    }
+  });
+
+  it("stops the gates of a report from chat before it waits for the card presses being worked on", async () => {
+    const gateway = await createGateway({ ...config, kanban: { ...config.kanban, enabled: true } }, team);
+    const chat = gateway.chat;
+    if (chat === undefined) throw new Error('no chat');
+    const order: string[] = [];
+    vi.spyOn(chat, 'stop').mockImplementation(() => {
+      order.push('stop');
+    });
+    vi.spyOn(chat, 'idle').mockImplementation(async () => {
+      order.push('idle');
+      return true;
+    });
+    await gateway.stop();
+    expect(order).toEqual(['stop', 'idle']);
   });
 
   it("waits, for a few seconds at most, for the dispatcher's work before it closes the database", async () => {
@@ -226,6 +256,19 @@ describe('the board, at startup', () => {
     } finally {
       await gateway.stop();
     }
+  });
+
+  it('gives a boot finding a uuid per binding and per boot, as Lark sends one message per uuid for an hour', () => {
+    const a = { channel: 'lark', appId: 'cli_app', conversationId: 'oc_a', threadId: '' };
+    const b = { channel: 'lark', appId: 'cli_app', conversationId: 'oc_b', threadId: '' };
+    const uuids = [
+      findingUuid('cli_app', 's_1', a, 'boot1'),
+      findingUuid('cli_app', 's_1', b, 'boot1'),
+      findingUuid('cli_app', 's_1', { ...a, threadId: 'omt_1' }, 'boot1'),
+      findingUuid('cli_app', 's_1', a, 'boot2'),
+    ];
+    expect(new Set(uuids).size).toBe(4);
+    expect(findingUuid('cli_app', 's_1', a, 'boot1')).toBe(uuids[0]);
   });
 
   it("posts boot findings to the chat channel's bindings only: a kanban binding's conversation is a task", () => {

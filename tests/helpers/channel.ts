@@ -1,7 +1,9 @@
 import type {
   ApprovalCardSpec,
   ApprovalOutcomeView,
+  CardButton,
   CardSession,
+  CardView,
   Channel,
   SendResult,
   SendTarget,
@@ -28,6 +30,8 @@ type Method =
   | 'openCard'
   | 'sendApprovalCard'
   | 'updateApprovalCard'
+  | 'sendCard'
+  | 'updateCard'
   | 'react'
   | 'unreact'
   | 'set'
@@ -53,6 +57,19 @@ export interface TextCall {
   target: SendTarget;
   text: string;
   uuid: string;
+  /** The buttons under it, when it was sent with some. */
+  buttons?: readonly CardButton[];
+}
+
+export interface BoardCardCall {
+  target: SendTarget;
+  view: CardView;
+  uuid: string;
+}
+
+export interface CardUpdateCall {
+  messageId: string;
+  view: CardView;
 }
 
 export interface ApprovalCall {
@@ -125,6 +142,9 @@ export class FakeChannel implements Channel {
   readonly cardOpens: CardOpenCall[] = [];
   readonly reactions: ReactionCall[] = [];
   readonly approvalUpdates: ApprovalUpdateCall[] = [];
+  /** Board cards posted (spec §9.2), and their redraws. */
+  readonly boardCards: BoardCardCall[] = [];
+  readonly cardUpdates: CardUpdateCall[] = [];
 
   readonly #clock: Clock;
   readonly #failures = new Map<Method, unknown[]>();
@@ -176,10 +196,10 @@ export class FakeChannel implements Channel {
 
   // -- Channel ---------------------------------------------------------------
 
-  async sendText(target: SendTarget, text: string, uuid: string): Promise<SendResult> {
+  async sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[]): Promise<SendResult> {
     this.calls.push('sendText');
     await this.gate('sendText');
-    this.texts.push({ target, text, uuid });
+    this.texts.push({ target, text, uuid, ...(buttons === undefined ? {} : { buttons }) });
     return { messageId: `om_text_${++this.#seq}`, deduped: false };
   }
 
@@ -211,6 +231,19 @@ export class FakeChannel implements Channel {
     this.calls.push('updateApprovalCard');
     await this.gate('updateApprovalCard');
     this.approvalUpdates.push({ messageId, view });
+  }
+
+  async sendCard(target: SendTarget, view: CardView, uuid: string): Promise<SendResult> {
+    this.calls.push('sendCard');
+    await this.gate('sendCard');
+    this.boardCards.push({ target, view, uuid });
+    return { messageId: `om_board_${++this.#seq}`, deduped: false };
+  }
+
+  async updateCard(messageId: string, view: CardView): Promise<void> {
+    this.calls.push('updateCard');
+    await this.gate('updateCard');
+    this.cardUpdates.push({ messageId, view });
   }
 
   async react(messageId: string, emoji: string): Promise<void> {

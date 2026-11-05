@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ACK_EMOJI, KANBAN_OFF, Router, type KanbanCommands } from '../src/core/router.js';
+import { ACK_EMOJI, KANBAN_OFF, Router, type InboundCardAction, type KanbanCommands } from '../src/core/router.js';
 import { CARD_COALESCE_MS } from '../src/channel/card-writer.js';
 import { SessionRegistry } from '../src/core/registry.js';
 import { MAX_MAILBOX_DEPTH, type SessionActor } from '../src/core/session-actor.js';
@@ -528,6 +528,7 @@ describe('Router: /kanban', () => {
         calls.push({ arg, messageId: message.messageId, key });
         return answer(arg);
       },
+      card: async () => answer('card'),
     };
   }
 
@@ -918,6 +919,59 @@ describe('Router: card actions', () => {
   it('refuses a button with no payload', async () => {
     const h = harness();
     expect(await h.router.onCardAction(click('', '', ''))).toContain('missing its payload');
+  });
+
+  it("hands a board card's button to the board, whatever the presser's tier, posting nothing and noting its answer masked", async () => {
+    addSecrets(['sk-card-12345678']);
+    const pressed: InboundCardAction[] = [];
+    const h = harness({
+      auth: { allowTalk: [OWNER.openId, GUEST.openId], allowOperate: [OWNER.openId] },
+      kanban: {
+        run: async () => 'unused',
+        card: async (action) => {
+          pressed.push(action);
+          return 'Done: `k_1` is complete, sk-card-12345678';
+        },
+      },
+    });
+    const action = { chatId: CHAT, messageId: 'om_card', operator: GUEST, value: { kind: 'kanban', act: 'done' }, input: 'all fine' };
+    // A named assignee at talk tier may press Done: the board's rules, not operator tier, decide (spec §9.2).
+    // The card shows the outcome: nothing is said in the chat.
+    expect(await h.router.onCardAction(action)).toBeUndefined();
+    expect(pressed).toEqual([action]);
+    expect(h.notes).toContain(`kanban card on om_card: Done: \`k_1\` is complete, ${MASK}`);
+    clearSecrets();
+  });
+
+  it('notes a board card pressed with the board off, posting nothing, and refuses a kind it does not know', async () => {
+    const h = harness();
+    const value = { kind: 'kanban', act: 'done' };
+    expect(await h.router.onCardAction({ chatId: CHAT, messageId: 'om_card', operator: OWNER, value })).toBeUndefined();
+    expect(h.notes).toContain('kanban card on om_card pressed with the board off');
+    expect(await h.router.onCardAction({ chatId: CHAT, messageId: 'om_card', operator: OWNER, value: { kind: 'poll' } })).toBe(
+      'That button is not one this gateway knows.',
+    );
+  });
+
+  it("notes a board card's button that throws, masked, and posts nothing", async () => {
+    const h = harness({
+      kanban: {
+        run: async () => 'unused',
+        card: async () => {
+          throw new Error('database_locked\nsecond line');
+        },
+      },
+    });
+    const reply = await h.router.onCardAction({ chatId: CHAT, messageId: 'om_card', operator: OWNER, value: { kind: 'kanban' } });
+    expect(reply).toBeUndefined();
+    expect(h.notes.some((n) => n.includes('kanban card on om_card failed'))).toBe(true);
+  });
+
+  it("answers an approval's button that says it is one, as one without a kind", async () => {
+    const h = harness();
+    const state = await ask(h);
+    const reply = await h.router.onCardAction({ ...click(state.approvalId, 'deny', state.nonce), value: { kind: 'approval', approvalId: state.approvalId, optionId: 'deny', nonce: state.nonce } });
+    expect(reply).toBe('Sent: Deny.');
   });
 
   it('requires operator tier to answer, the same as the equivalent command', async () => {
