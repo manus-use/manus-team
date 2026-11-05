@@ -99,6 +99,8 @@ describe('Dispatcher: a run is a session', () => {
       ctl.end('completed');
     });
     completes(h, implementer, 'with a test');
+    // The rework's complete goes back to the reviewer, who approves.
+    completes(h, reviewer, 'approved');
 
     h.dispatcher.pass();
     await h.dispatcher.idle();
@@ -107,11 +109,84 @@ describe('Dispatcher: a run is a session', () => {
     expect(runs.map((r) => [r.kind, r.outcome])).toEqual([
       ['work', 'review_requested'],
       ['review', 'changes_requested'],
-      ['work', 'completed'],
+      ['work', 'review_requested'],
+      ['review', 'completed'],
     ]);
+    expect(getTask(h.t.db, task.taskId)?.phase).toBe('done');
     expect(runs[2]?.seededFromRun).toBe(runs[0]?.runId);
     expect(implementer.starts.map((s) => s.providerSessionId)).toEqual([undefined, 'prov_impl']);
     expect(reviewer.starts[0]?.cwd).toBe('/tmp/ws-web');
+  });
+});
+
+describe('Dispatcher: a task that names a reviewer', () => {
+  it("takes an agent's complete as a review request, and claims the reviewer's run", async () => {
+    const h = harness();
+    const task = h.create({ workspace: 'web', reviewer: 'reviewer' });
+    completes(h, h.driver('implementer'), 'parser written');
+    const review = holds(h.driver('reviewer'));
+    h.dispatcher.pass();
+    await until(() => review.started, "the reviewer's run to start");
+    expect(runsOf(h.t.db, task.taskId).map((r) => [r.kind, r.assignee.name, r.outcome])).toEqual([
+      ['work', 'implementer', 'review_requested'],
+      ['review', 'reviewer', null],
+    ]);
+    expect(getTask(h.t.db, task.taskId)?.phase).toBe('review');
+    review.end('completed', () => reportComplete(h, h.driver('reviewer'), 'approved'));
+    await h.dispatcher.idle();
+    expect(getTask(h.t.db, task.taskId)?.phase).toBe('done');
+  });
+
+  it("lets an operator's approval end the reviewer's open run: superseded, the task done, the turn cancelled", async () => {
+    const h = harness();
+    const task = h.create({ workspace: 'web', reviewer: 'reviewer' });
+    completes(h, h.driver('implementer'));
+    const reviewer = h.driver('reviewer');
+    const review = holds(reviewer);
+    h.dispatcher.pass();
+    await until(() => review.started, "the reviewer's run to start");
+    const run = h.runOf(reviewer);
+    const r = await h.service.complete(task.taskId, { kind: 'person', principal: ALICE, runId: run.runId, as: 'operator' }, { summary: 'fine' });
+    expect(r).toMatchObject({ ok: true, task: { phase: 'done' }, run: { runId: run.runId, outcome: 'superseded' } });
+    expect(h.dispatcher.cancel(run.runId)).toBe(true);
+    expect(reviewer.runtimes[0]?.cancels).toBe(1);
+    // The reviewer's late report is refused, and its turn ends.
+    let late: unknown;
+    review.end('cancelled', async () => {
+      late = await h.service.complete(task.taskId, { kind: 'run', runId: run.runId }, { summary: 'approved' });
+    });
+    await h.dispatcher.idle();
+    expect(late).toMatchObject({ ok: false, code: 'run_superseded' });
+    expect(runsOf(h.t.db, task.taskId).map((x) => x.outcome)).toEqual(['review_requested', 'superseded']);
+    expect(getTask(h.t.db, task.taskId)?.phase).toBe('done');
+  });
+
+  it("lets an operator's changes end the reviewer's open run, and claims the rework for the assignee", async () => {
+    const h = harness();
+    const task = h.create({ workspace: 'web', reviewer: 'reviewer' });
+    const implementer = h.driver('implementer');
+    completes(h, implementer, 'v1');
+    const reviewer = h.driver('reviewer');
+    const review = holds(reviewer);
+    h.dispatcher.pass();
+    await until(() => review.started, "the reviewer's run to start");
+    const run = h.runOf(reviewer);
+    const r = h.service.requestChanges(task.taskId, { kind: 'person', principal: ALICE, runId: run.runId, as: 'operator' }, 'add a test');
+    expect(r).toMatchObject({ ok: true, task: { phase: 'open' }, run: { outcome: 'superseded' } });
+    const rework = holds(implementer);
+    expect(h.dispatcher.cancel(run.runId)).toBe(true);
+    review.end('cancelled');
+    await until(() => rework.started, 'the rework to start');
+    const runs = runsOf(h.t.db, task.taskId);
+    expect(runs.map((x) => [x.kind, x.assignee.name, x.outcome])).toEqual([
+      ['work', 'implementer', 'review_requested'],
+      ['review', 'reviewer', 'superseded'],
+      ['work', 'implementer', null],
+    ]);
+    rework.end('completed', () => {
+      h.service.block(task.taskId, { kind: 'run', runId: h.runOf(implementer).runId }, { kind: 'needs_input', reason: 'stop here' });
+    });
+    await h.dispatcher.idle();
   });
 });
 

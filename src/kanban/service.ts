@@ -601,6 +601,10 @@ export class KanbanService {
    * Every path to done (spec §5.1). Asynchronous, as a report's checks run
    * processes -- the task's gates, and reading the reported commit -- and the
    * gateway must not stop for them: chat runs on the same event loop.
+   *
+   * On a task that names a reviewer, a work report's `complete` asks for review
+   * instead, with the same handoff (spec §5.3): the task comes back in `review`,
+   * and its run, if any, `review_requested`. Its gates run once, as for a review.
    */
   async complete(
     taskId: string,
@@ -670,6 +674,8 @@ export class KanbanService {
     }
     const now = board.reportCheck(this.#db, taskId, by, kind, reviewer);
     if (!now.ok) return now;
+    // A complete the board will take as a review request runs the gates as one.
+    const checkedAs = kind === 'complete' && board.completeAsksReview(now.task) ? 'review' : kind;
     // One report's checks in a workspace at a time: two reports' gates in one checkout would trip over each other.
     const other = now.task.workspace === null ? undefined : this.#reportingIn(now.task.workspace);
     if (other !== undefined) {
@@ -681,7 +687,7 @@ export class KanbanService {
     }
     const checked = (async (): Promise<Result<T>> => {
       const seen = await this.#observe(now.run, opts.signal);
-      const gates = await this.#gates(now.task, by, now.run, kind, opts.signal);
+      const gates = await this.#gates(now.task, by, now.run, checkedAs, opts.signal);
       if (!gates.ok) return gates;
       // Stopped while the commit was read, with no gate to notice: what was read may be cut short.
       if (opts.signal?.aborted === true) return board.refuse('gates_cannot_run', STOPPING);

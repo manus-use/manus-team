@@ -151,6 +151,38 @@ describe('composePrompt', () => {
     );
   });
 
+  it("names a work run's reviewer, a role or a person, and tells it to report review, not complete", () => {
+    const byRole = composePrompt(brief({ task: task({ reviewer: { kind: 'role', name: 'reviewer' } }) }));
+    expect(byRole).toContain(
+      'Reviewer: role reviewer. This task is reviewed before it is done: when the work is done, report ' +
+        '`mt kanban review` with your handoff, not `complete`; a complete is sent to the reviewer for review as well.',
+    );
+    expect(at(byRole, 'Reviewer: role reviewer')).toBeGreaterThan(at(byRole, '# The task'));
+    expect(at(byRole, 'Reviewer: role reviewer')).toBeLessThan(at(byRole, '# Context'));
+    const byPerson = composePrompt(brief({ task: task({ reviewer: { kind: 'human', name: 'lark:on_bob' } }) }));
+    expect(byPerson).toContain('Reviewer: lark:on_bob, a person. This task is reviewed before it is done');
+    // The downstream review rule stays, for a task that names no reviewer.
+    for (const prompt of [byRole, byPerson]) {
+      expect(prompt).toContain('If the task names no reviewer and one of the task\'s children below reviews this task, report complete rather than review.');
+    }
+  });
+
+  it('names no reviewer to a task without one, or to the review run itself', () => {
+    const none = composePrompt(
+      brief({ children: [task({ taskId: 'k_review', title: 'Review the parser', assignee: { kind: 'role', name: 'reviewer' } })] }),
+    );
+    expect(none).not.toContain('Reviewer:');
+    expect(none).toContain("one of the task's children below reviews this task, report complete rather than review.");
+    const review = composePrompt(
+      brief({ kind: 'review', task: task({ phase: 'review', reviewer: { kind: 'role', name: 'reviewer' } }) }),
+    );
+    expect(review).not.toContain('Reviewer:');
+  });
+
+  it("says in a work run's nudge that a task with a reviewer is sent to them either way", () => {
+    expect(composeNudge('work', 1, 2)).toContain('a task that names a reviewer is sent to them for review either way');
+  });
+
   it('names the commands besides the reports, and the kinds of block, in both protocols', () => {
     const work = composePrompt(brief());
     expect(work).toContain('`mt kanban create < task.json`');

@@ -227,8 +227,15 @@ describe('people, named by @-mention', () => {
 });
 
 /** A task for Alice, reviewed by Bob, with Alice's run open: what the dispatcher would have claimed. */
-async function aliceTask(title = 'Check the links'): Promise<{ taskId: string; run: RunRow }> {
-  const taskId = created(await say(`new ${title}\nassignee: @Alice Smith\nreviewer: @Bob`, OWNER, [AT_ALICE, AT_BOB]));
+/** Alice's task with no reviewer: her done completes it. */
+function soloTask(): Promise<{ taskId: string; run: RunRow }> {
+  return aliceTask('Check the links', false);
+}
+
+async function aliceTask(title = 'Check the links', reviewer = true): Promise<{ taskId: string; run: RunRow }> {
+  const taskId = created(
+    await say(`new ${title}\nassignee: @Alice Smith${reviewer ? '\nreviewer: @Bob' : ''}`, OWNER, [AT_ALICE, AT_BOB]),
+  );
   const claim = service.claim(taskId);
   if (!claim.ok) throw new Error(claim.message);
   return { taskId, run: claim.run };
@@ -236,7 +243,7 @@ async function aliceTask(title = 'Check the links'): Promise<{ taskId: string; r
 
 describe("a person's own reports", () => {
   it('lets the assignee report done, at talk tier, and nobody else', async () => {
-    const { taskId, run } = await aliceTask();
+    const { taskId, run } = await soloTask();
     expect(await say(`done ${taskId} all links answer`, GUEST)).toBe(
       `\`/kanban done\` is for the person a task is assigned to; \`${taskId}\` is for Alice Smith (lark:on\\_alice).`,
     );
@@ -291,6 +298,63 @@ describe("a person's own reports", () => {
     expect(service.closeRun(work.run.runId).ok).toBe(true);
     expect(await say(`changes ${taskId} keep the old colour`)).toContain('Changes requested on');
     expect(getTask(t.db, taskId)?.phase).toBe('open');
+  });
+
+  it("sends the assignee's done for review when the task names a reviewer, and says so", async () => {
+    const { taskId, run } = await aliceTask();
+    expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
+    expect(await say(`done ${taskId} all links answer`, ALICE)).toBe(
+      `Sent \`${taskId}\` for review to Bob (lark:on\\_bob): the task names a reviewer, so done asks for review.`,
+    );
+    expect(getRun(t.db, run.runId)).toMatchObject({ outcome: 'review_requested', summary: 'all links answer' });
+    expect(getTask(t.db, taskId)?.phase).toBe('review');
+    // The gates ran once, as for a review.
+    expect(eventsOf(t.db, taskId).filter((e) => e.kind === 'gates_ran').map((e) => (e.payload as { for: string }).for)).toEqual(['review']);
+    expect(eventsOf(t.db, taskId).map((e) => e.kind)).toContain('review_requested');
+  });
+
+  it("lets an operator answer a role's review while its run is open, ending that run", async () => {
+    const taskId = created(await say('new Fix the footer\nassignee: implementer\nreviewer: reviewer'));
+    const work = service.claim(taskId);
+    if (!work.ok) throw new Error(work.message);
+    expect((await service.complete(taskId, { kind: 'run', runId: work.run.runId }, { summary: 'moved it' })).ok).toBe(true);
+    expect(service.closeRun(work.run.runId).ok).toBe(true);
+    const review = service.claim(taskId);
+    if (!review.ok) throw new Error(review.message);
+    // Not someone who is neither the reviewer nor an operator.
+    expect(await say(`approve ${taskId}`, GUEST)).toBe(
+      `\`/kanban approve\` answers a review, and is for \`${taskId}\`'s reviewer (role reviewer) or an operator.`,
+    );
+    expect(getRun(t.db, review.run.runId)?.outcome).toBeNull();
+    // Its gates run in the workspace the reviewer's own run holds: that run is not another task's agent.
+    expect(await say(`gate add ${taskId} test -f footer.css`)).toContain('Gate 1 added');
+    expect(await say(`approve ${taskId} fine by me`)).toBe(`Approved: \`${taskId}\` is complete; the review run of role reviewer was ended.`);
+    expect(getTask(t.db, taskId)?.phase).toBe('done');
+    expect(getRun(t.db, review.run.runId)?.outcome).toBe('superseded');
+    expect(cancelled).toEqual([review.run.runId]);
+    expect(eventsOf(t.db, taskId).filter((e) => e.kind === 'gates_ran')).toHaveLength(1);
+    // The reviewer's own report, later, is refused.
+    expect(await service.complete(taskId, { kind: 'run', runId: review.run.runId }, { summary: 'approved' })).toMatchObject({
+      ok: false,
+      code: 'run_superseded',
+    });
+  });
+
+  it("lets an operator ask for changes while a role's review run is open, and the rework goes to the assignee", async () => {
+    const taskId = created(await say('new Fix the footer\nassignee: implementer\nreviewer: reviewer'));
+    const work = service.claim(taskId);
+    if (!work.ok) throw new Error(work.message);
+    expect((await service.requestReview(taskId, { kind: 'run', runId: work.run.runId }, { summary: 'moved it' })).ok).toBe(true);
+    expect(service.closeRun(work.run.runId).ok).toBe(true);
+    const review = service.claim(taskId);
+    if (!review.ok) throw new Error(review.message);
+    expect(await say(`changes ${taskId} keep the old colour`)).toBe(
+      `Changes requested on \`${taskId}\`: it goes back to its assignee, with your reason; the review run of role reviewer was ended.`,
+    );
+    expect(cancelled).toEqual([review.run.runId]);
+    expect(service.closeRun(review.run.runId).ok).toBe(true);
+    const rework = service.claim(taskId);
+    expect(rework).toMatchObject({ ok: true, run: { kind: 'work', assignee: { kind: 'role', name: 'implementer' } } });
   });
 
   it("shows a gate's refusal, its output masked and escaped, and applies nothing", async () => {
@@ -379,7 +443,7 @@ describe("a person's card", () => {
   }
 
   it("answers at once, reports through the card's run in the background, and redraws the card as worked on, then with what happened", async () => {
-    const { taskId, run } = await aliceTask();
+    const { taskId, run } = await soloTask();
     expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
     let release!: () => void;
     holds.set('test -f links.md', new Promise<void>((resolve) => (release = resolve)));
@@ -397,8 +461,19 @@ describe("a person's card", () => {
     });
   });
 
-  it("names a presser it has no name for through Lark's person element, not their id", async () => {
+  it('sends a Done pressed on a task that names a reviewer for review, and the card says so', async () => {
     const { taskId, run } = await aliceTask();
+    expect(await press(run, 'done', ALICE, 'all links answer')).toBe(`Completing \`${taskId}\`: the card shows how it goes.`);
+    expect(await chat.idle(5_000)).toBe(true);
+    expect(getRun(t.db, run.runId)).toMatchObject({ outcome: 'review_requested', summary: 'all links answer' });
+    expect(getTask(t.db, taskId)?.phase).toBe('review');
+    expect(redrawn.at(-1)?.view.markdown).toBe(
+      `**Check the links** \`${taskId}\`\nSent for review to Bob (lark:on\\_bob) by Alice Smith.`,
+    );
+  });
+
+  it("names a presser it has no name for through Lark's person element, not their id", async () => {
+    const { taskId, run } = await soloTask();
     await press(run, 'done', { ...ALICE, displayName: null }, 'all links answer');
     expect(await chat.idle(5_000)).toBe(true);
     expect(redrawn.at(-1)).toEqual({
@@ -439,7 +514,7 @@ describe("a person's card", () => {
   });
 
   it('takes no second press of a card while one is worked on, so neither redraws over the other', async () => {
-    const { taskId, run } = await aliceTask();
+    const { taskId, run } = await soloTask();
     expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
     let release!: () => void;
     holds.set('test -f links.md', new Promise<void>((resolve) => (release = resolve)));
@@ -550,7 +625,7 @@ describe("a person's card", () => {
       1_000,
       notes,
     );
-    const { run } = await aliceTask();
+    const { run } = await soloTask();
     await hung.card(doneAction(run, 'all links answer'));
     // Applied long before the hung redraw is given up on.
     await until(() => getRun(t.db, run.runId)?.outcome === 'completed', 'the press to be applied');
@@ -570,7 +645,7 @@ describe("a person's card", () => {
       1_000,
       notes,
     );
-    const { run } = await aliceTask();
+    const { run } = await soloTask();
     await throws.card(doneAction(run, 'all links answer'));
     expect(await throws.idle(5_000)).toBe(true);
     expect(getRun(t.db, run.runId)).toMatchObject({ outcome: 'completed', summary: 'all links answer' });
@@ -606,7 +681,7 @@ describe("a person's card", () => {
   });
 
   it('does nothing for a card whose run is over, and redraws it as out of date', async () => {
-    const { taskId, run } = await aliceTask();
+    const { taskId, run } = await soloTask();
     expect(await say(`done ${taskId} typed it instead`, ALICE)).toContain('is complete');
     expect(await press(run, 'done', ALICE, 'again')).toBe(
       `That card is out of date: \`${taskId}\` has moved on. \`/kanban show ${taskId}\` says where it is.`,

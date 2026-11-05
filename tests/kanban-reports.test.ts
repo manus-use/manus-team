@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { attachSession, claim, closeRun, complete, link, requestChanges, requestReview } from '../src/db/kanban.js';
+import { attachSession, block, claim, closeRun, complete, link, requestChanges, requestReview } from '../src/db/kanban.js';
 import { eventsOf, getRun, getTask, runsOf, taskView } from '../src/db/kanban-read.js';
 import { createSession } from '../src/db/sessions.js';
 import type { Reporter, RunRow } from '../src/kanban/types.js';
@@ -211,6 +211,135 @@ describe('a review run', () => {
       ok: false,
       code: 'illegal_transition',
       message: `task ${task.taskId} is review; a parent added now could not hold it back`,
+    });
+  });
+});
+
+describe('complete on a task that names a reviewer', () => {
+  it("sends an agent's complete to the role reviewer as a review request, with the same handoff", () => {
+    const task = newTask(h.db, { reviewer: REVIEWER });
+    const work = claimed(h.db, task.taskId);
+    const r = complete(h.db, task.taskId, asRun(work), { summary: 'parser written', metadata: { files: 2 } }, NOW + 1);
+    expect(r).toMatchObject({
+      ok: true,
+      task: { phase: 'review', reviewer: REVIEWER, closedAt: null },
+      run: { runId: work.runId, outcome: 'review_requested', summary: 'parser written', metadata: { files: 2 } },
+    });
+    expect(eventsOf(h.db, task.taskId).at(-1)).toMatchObject({
+      kind: 'review_requested',
+      runId: work.runId,
+      payload: { summary: 'parser written', reviewer: 'reviewer', reviewerKind: 'role' },
+    });
+    expect(eventsOf(h.db, task.taskId).map((e) => e.kind)).not.toContain('completed');
+    ok(closeRun(h.db, work.runId, NOW + 2));
+    expect(claimed(h.db, task.taskId)).toMatchObject({ kind: 'review', assignee: REVIEWER });
+  });
+
+  it("sends a person's done to a person reviewer the same way", () => {
+    const task = newTask(h.db, { assignee: { kind: 'human', name: ALICE }, reviewer: BOB });
+    const run = claimed(h.db, task.taskId);
+    const r = ok(complete(h.db, task.taskId, asPerson(ALICE), { summary: 'booked' }, NOW + 1));
+    expect(r.task).toMatchObject({ phase: 'review', reviewer: BOB });
+    expect(r.run).toMatchObject({ runId: run.runId, outcome: 'review_requested', endedAt: NOW + 1 });
+  });
+
+  it("sends a rework's complete back to review, and completes on the reviewer's approval", () => {
+    const task = newTask(h.db, { reviewer: REVIEWER });
+    const work = claimed(h.db, task.taskId);
+    ok(complete(h.db, task.taskId, asRun(work), { summary: 'v1' }, NOW));
+    ok(closeRun(h.db, work.runId, NOW));
+    const review = claimed(h.db, task.taskId);
+    ok(requestChanges(h.db, task.taskId, asRun(review), 'handle empty input', NOW));
+    ok(closeRun(h.db, review.runId, NOW));
+    const rework = claimed(h.db, task.taskId);
+    expect(ok(complete(h.db, task.taskId, asRun(rework), { summary: 'v2' }, NOW)).task.phase).toBe('review');
+    ok(closeRun(h.db, rework.runId, NOW));
+    const second = claimed(h.db, task.taskId);
+    expect(ok(complete(h.db, task.taskId, asRun(second), { summary: 'approved' }, NOW + 5)).task).toMatchObject({
+      phase: 'done',
+      closedAt: NOW + 5,
+    });
+  });
+
+  it('still completes a task that names no reviewer, whatever its children', () => {
+    const task = newTask(h.db);
+    const review = newTask(h.db, { assignee: REVIEWER, parents: [task.taskId] });
+    const run = claimed(h.db, task.taskId);
+    expect(ok(complete(h.db, task.taskId, asRun(run), { summary: 'done' }, NOW)).task.phase).toBe('done');
+    expect(taskView(h.db, review.taskId)?.status).toBe('ready');
+  });
+});
+
+describe("an operator's answer while a role reviewer's run is open", () => {
+  function reviewing() {
+    const task = newTask(h.db, { reviewer: REVIEWER });
+    const work = claimed(h.db, task.taskId);
+    ok(requestReview(h.db, task.taskId, asRun(work), { summary: 'v1' }, NOW));
+    ok(closeRun(h.db, work.runId, NOW));
+    return { task, work, review: claimed(h.db, task.taskId) };
+  }
+  const operator = (run: RunRow): Reporter => ({ kind: 'person', principal: ALICE, runId: run.runId, as: 'operator' });
+
+  it('supersedes the run and completes the task in one transaction', () => {
+    const { task, review } = reviewing();
+    const r = ok(complete(h.db, task.taskId, operator(review), { summary: 'fine' }, NOW + 1));
+    expect(r.task).toMatchObject({ phase: 'done', closedAt: NOW + 1 });
+    expect(r.run).toMatchObject({ runId: review.runId, outcome: 'superseded', endedAt: null });
+    expect(eventsOf(h.db, task.taskId).at(-1)).toMatchObject({ kind: 'completed', runId: review.runId, actor: ALICE });
+    // The reviewer's own report, later, finds its run over.
+    expect(complete(h.db, task.taskId, asRun(review), { summary: 'approved' }, NOW + 2)).toMatchObject({
+      ok: false,
+      code: 'run_superseded',
+    });
+  });
+
+  it('supersedes the run on changes, and the rework goes to the assignee once it closes', () => {
+    const { task, review } = reviewing();
+    const r = ok(requestChanges(h.db, task.taskId, operator(review), 'keep the old colour', NOW + 1));
+    expect(r.task.phase).toBe('open');
+    expect(r.run).toMatchObject({ runId: review.runId, outcome: 'superseded' });
+    expect(requestChanges(h.db, task.taskId, asRun(review), 'x', NOW + 2)).toMatchObject({ code: 'run_superseded' });
+    ok(closeRun(h.db, review.runId, NOW + 3));
+    expect(claimed(h.db, task.taskId)).toMatchObject({ kind: 'work', assignee: { kind: 'role', name: 'implementer' } });
+  });
+
+  it('is refused to anyone answering as other than an operator, and to an operator on a work run', () => {
+    const { task, review } = reviewing();
+    for (const as of ['reviewer', 'assignee', undefined] as const) {
+      const by: Reporter = { kind: 'person', principal: ALICE, runId: review.runId, ...(as === undefined ? {} : { as }) };
+      expect(complete(h.db, task.taskId, by, { summary: 'fine' }, NOW)).toMatchObject({ ok: false });
+      expect(requestChanges(h.db, task.taskId, by, 'x', NOW)).toMatchObject({ ok: false });
+    }
+    expect(getRun(h.db, review.runId)?.outcome).toBeNull();
+    const other = newTask(h.db, { reviewer: REVIEWER, workspace: 'web' });
+    const work = claimed(h.db, other.taskId);
+    expect(complete(h.db, other.taskId, operator(work), { summary: 'x' }, NOW)).toMatchObject({ ok: false });
+    expect(getRun(h.db, work.runId)?.outcome).toBeNull();
+  });
+
+  it("decides a person reviewer's open run as completed, as before: an operator may answer any review", () => {
+    const task = newTask(h.db, { reviewer: BOB });
+    const work = claimed(h.db, task.taskId);
+    ok(requestReview(h.db, task.taskId, asRun(work), { summary: 'v1' }, NOW));
+    ok(closeRun(h.db, work.runId, NOW));
+    const review = claimed(h.db, task.taskId);
+    const r = ok(complete(h.db, task.taskId, operator(review), { summary: 'fine' }, NOW + 1));
+    expect(r.task.phase).toBe('done');
+    expect(r.run).toMatchObject({ runId: review.runId, outcome: 'completed', endedAt: NOW + 1 });
+  });
+
+  it('is refused while the reviewer has reported and its run is finishing', () => {
+    const task = newTask(h.db, { reviewer: REVIEWER });
+    const work = claimed(h.db, task.taskId);
+    ok(requestReview(h.db, task.taskId, asRun(work), { summary: 'v1' }, NOW));
+    ok(closeRun(h.db, work.runId, NOW));
+    const review = claimed(h.db, task.taskId);
+    // A dependency block keeps the task in review, with the run decided and still open.
+    const parent = newTask(h.db);
+    ok(block(h.db, task.taskId, asRun(review), { kind: 'dependency', reason: 'needs the API', parents: [parent.taskId] }, NOW));
+    expect(complete(h.db, task.taskId, operator(review), { summary: 'fine' }, NOW)).toMatchObject({
+      code: 'agent_run_open',
+      message: `task ${task.taskId}'s agent run ${review.runId} has reported and is finishing; wait for it to finish`,
     });
   });
 });

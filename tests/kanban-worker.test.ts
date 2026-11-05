@@ -165,6 +165,38 @@ describe('worker API: the run’s scope', () => {
     expect(b.changes).toBe(1);
   });
 
+  it("sends complete on a task that names a reviewer for review, and says so", async () => {
+    const task = b.create({ reviewer: 'reviewer' });
+    const { run, ask } = b.claim(task.taskId);
+    expect(await ask('complete', { summary: 'parsed' })).toEqual({
+      ok: true,
+      task_id: task.taskId,
+      phase: 'review',
+      outcome: 'review_requested',
+      message: 'sent for review to role reviewer: the task names a reviewer, so complete asks for review',
+    });
+    expect(getRun(b.t.db, run.runId)).toMatchObject({ outcome: 'review_requested', summary: 'parsed' });
+  });
+
+  it("refuses a role reviewer's report once an operator's answer has superseded its run", async () => {
+    const task = b.create({ reviewer: 'reviewer' });
+    const work = b.claim(task.taskId);
+    expect(await work.ask('review', { summary: 'parsed' })).toMatchObject({ ok: true, phase: 'review' });
+    b.service.closeRun(work.run.runId);
+    const review = b.claim(task.taskId);
+    const answer = await b.service.complete(
+      task.taskId,
+      { kind: 'person', principal: ALICE, runId: review.run.runId, as: 'operator' },
+      { summary: 'fine' },
+    );
+    expect(answer).toMatchObject({ ok: true, task: { phase: 'done' }, run: { outcome: 'superseded' } });
+    expect(await review.ask('complete', { summary: 'approved' })).toEqual({
+      ok: false,
+      code: 'run_superseded',
+      message: `run ${review.run.runId} was ended (superseded); its task has moved on without it`,
+    });
+  });
+
   it('after its own report: show, comment, create and link still work; a second report is already_reported', async () => {
     const task = b.create();
     const { ask } = b.claim(task.taskId);

@@ -339,10 +339,15 @@ export class WorkerApi {
     switch (command) {
       case 'show':
         return this.#show(run);
-      case 'complete':
-        return reported(
-          await this.#service.complete(run.taskId, by, { summary: str('summary') ?? '', ...metadata }, signal),
-        );
+      case 'complete': {
+        const r = await this.#service.complete(run.taskId, by, { summary: str('summary') ?? '', ...metadata }, signal);
+        const out = reported(r);
+        // A task that names a reviewer is sent to them, not done (spec §5.3): the answer says so.
+        const reviewer = r.ok && r.task.phase === 'review' ? r.task.reviewer : null;
+        if (!out.ok || reviewer === null) return out;
+        const whom = reviewer.kind === 'role' ? `role ${reviewer.name}` : reviewer.name;
+        return { ...out, message: `sent for review to ${whom}: the task names a reviewer, so complete asks for review` };
+      }
       case 'review': {
         const reviewer = str('reviewer');
         return reported(
