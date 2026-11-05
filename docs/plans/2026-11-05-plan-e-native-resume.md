@@ -87,7 +87,7 @@ Each has a recommendation and its reason. *The user's decision* marks those the 
 - **Below bytesec 0.7.4 is unmeasured** and may not work: `mt role check` warns, and does not refuse (Decision 13).
 - **A gateway that dies mid-turn leaves its `mt-session-id-…` directory** under the system's temporary directory; it holds only the id.
 - **`seeded_from_run` stays set when the agent refuses a rework's seed** (Decision 10), accepted by the user.
-- **Status texts still say history "is replayed from the log"** for a suspended session (`src/core/status.ts`, and a restart's finding in `src/core/registry.ts`); for a session with a provider id it is resumed instead. The new `/status` line says which.
+- **Status texts said history "is replayed from the log"** for a suspended session (`src/core/status.ts`, and a restart's finding in `src/core/registry.ts`); for a session with a provider id it is resumed instead. Fixed in the review follow-ups: they now say the session resumes where it can, else replays; the `/status` line says which the last turn did.
 - **Provider sessions accumulate in the agent's store**; nothing deletes them, by the user's decision (Decision 8).
 - **One model, one version.** The spike ran once per question against one small model on 0.7.4; the fake agent reproduces what it saw, not bytesec. The smoke test below is the first check against the real agent.
 - **The ACP driver is unchanged**: it reports its id at `start`, and emits no `session-observed`, so `/status` shows no provider line for it.
@@ -110,7 +110,7 @@ Each has a recommendation and its reason. *The user's decision* marks those the 
 | `tests/helpers/mt.ts` (modify) | `agentVersion`, never the real agent |
 | `tests/session-actor.test.ts`, `tests/cli-driver.e2e.ts`, `tests/router.test.ts`, `tests/kanban-reports.test.ts`, `tests/kanban-worker.e2e.ts`, `tests/kanban-people.e2e.ts`, `tests/mt-role.test.ts` (modify) | |
 
-Running counts, unit then end to end: Task 1 1333 / 75, Task 2 1333 / 83, Task 3 1333 / 92, Task 4 1336 / 92, Task 5 1337 / 93, Task 6 1340 / 94, Task 7 1340 / 94.
+Running counts, unit then end to end: Task 1 1333 / 75, Task 2 1333 / 83, Task 3 1333 / 92, Task 4 1336 / 92, Task 5 1337 / 93, Task 6 1340 / 94, Task 7 1340 / 94; after the review follow-ups below, 1342 / 98.
 
 ---
 
@@ -3104,7 +3104,7 @@ git commit -m "Document native resume as built, on bytesec 0.7.4 or later: the C
 
 ## Done when
 
-- `npm test` gives `Tests  1340 passed (1340)`. `npm run test:e2e` gives `Tests  94 passed (94)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  1340 passed (1340)`. `npm run test:e2e` gives `Tests  94 passed (94)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree. After the review follow-ups: `Tests  1342 passed (1342)` and `Tests  98 passed (98)`.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - A CLI turn reports the provider session it ran in — from the id file for a new session, from its events for a resumed one — which the session stores and logs; the next turn passes it back with `--session` and the message alone; a session started with a stored id resumes from its first turn, and a `cli:` id is never passed back, never seeds a rework and never shows in `/status` (`tests/cli-driver.e2e.ts`, `tests/session-actor.test.ts`, `tests/kanban-reports.test.ts`, `tests/router.test.ts`).
 - Only a measured refusal — exit 1, nothing on stdout, the refusal as stderr's last line — runs the same turn again with the transcript, once, reported `replayed` with the reason, and not once the turn is cancelled; a resumed run whose events name another session is replayed from then on; a resumed turn that fails after starting is never run again (`tests/cli-driver.e2e.ts`).
@@ -3123,3 +3123,23 @@ For the user, once the plan is built and deployed; no test runs bytesec. Use a c
 3. `/new`, then send anything, then `/status`: a different provider id, and "the last turn started it".
 4. If convenient, with the board on: a task whose agent stops once without reporting is nudged, and its run's session log has a `provider_session_observed` for the nudge's turn with `"mode": "resumed"` and the first turn's id (`SELECT json(payload) FROM events WHERE session_id = '<the run's session>' AND type = 'provider_session_observed'`); or a rework after Request changes has the work run's id there.
 5. With a workspace that is a real git repository, during a turn: `ls -d "${TMPDIR:-/tmp}"/mt-session-id-*` shows the turn's directory, and `git status` in the workspace shows no new file; after the turn the directory is gone.
+
+## Review follow-ups
+
+Done after review, on top of Task 7 (`53768c9`), test first for each behaviour fix. Counts afterwards: `npm test` gives `Tests  1342 passed (1342)`, `npm run test:e2e` gives `Tests  98 passed (98)`, `npx tsc --noEmit` reports no errors, and the grep for the three letters prints nothing.
+
+| Item | Outcome | Commit |
+|---|---|---|
+| Flaky gate test: "kills a gate past its timeout…" failed under load, `/bin/sh` killed before it printed `begun` | Asserts only `timedOut`, the signal and the elapsed time. The output-kept check moved to the stop test, which now stops the gate only once a file the command writes after its `echo` exists, and expects `begun\n` | `21d2d5f` |
+| Flaky gate test: "does not wait for a process that left the gate's group…" failed under load with ENOENT on `escaped.pid` | `spawnGate` takes `outputGraceMs` (default `OUTPUT_GRACE_MS`); the test gives the gate 2.5 s and its output 5 s, and checks the grace was used (5 s to 20 s elapsed) | `21d2d5f` |
+| `process.kill(Number(''))` is `process.kill(0)`, the runner's own group | The test kills only a positive integer pid read from the file (`killPidIn`). No other test kills a pid read with `Number(...)`; the gateway-exit test already checked its pid was positive | `21d2d5f` |
+| Gate tests under load | `tests/kanban-gates.e2e.ts` run 10 times with 6 busy `yes > /dev/null` loops on a 12-core machine: 10 of 10 passed | |
+| A run stopped for asking permission returned before its session was read | It reports the session as any other turn does: the id file's for a run started without `--session`, the streamed one for a resumed run (three e2e tests) | `9993503` |
+| `streamedId` took the first event's id, resumable or not | Only an id `isResumableProviderId` accepts is taken, so an unusable one does not hide a later one (`FAKE_CLI_FIRST_ID` in the fake; one e2e test) | `9993503` |
+| "plan E" in developer comments | Reworded to "the native-resume spike" or "native resume", in `src/` and the tests | `9993503` |
+| `readAgentVersion` took the first `x.y.z` of stdout | `parseAgentVersion`: the version after the word bytesec, else the first standing on its own, stdout before stderr; `killSignal: 'SIGKILL'`. A pre-release such as `0.7.4-rc1` is kept with its suffix and counts as older than its release, so it is warned of (two unit tests) | `6f6fb48` |
+| Architecture §6.3 known limitations, mirrored in the README | Added: `/attach` during a rework, a reworded refusal ending `ambiguous`, the status texts, leftover `mt-session-id-*` directories, provider sessions accumulating, below 0.7.4 unmeasured | `1f46288` |
+| Status texts saying history "is replayed from the log" | They say the next message resumes the agent's own session where it can, else replays history from the log; their tests assert the text | `1f46288` |
+| Spec §5.3 `seeded_from_run` | Qualified: set when the claim seeds the run, and stays set when the agent refuses the seed | `1f46288` |
+| README `replayed` | Says `fresh` when there was no history to carry | `1f46288` |
+| `continuityLine` doc comment's stray line break | Removed | `9993503` |
