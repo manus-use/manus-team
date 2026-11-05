@@ -1607,24 +1607,41 @@ card is redrawn with the outcome once acted on, so its buttons stop working.
   that do the same.
 - **Delivery, from the board.** Every 2 s the gateway reads the open people's runs with no card
   recorded, sends each its card by `union_id`, with one uuid per run, and records `card_sent` with the
-  message. A card a restart cut off is sent then, and a recorded one never again. A refusal by Lark
-  that retrying cannot change — a nonzero code, not retryable — records `card_failed`, which the
-  task's subscribers hear, with the commands the person can type instead; the card is not tried
-  again, and the run stays open. Anything else is the gateway's outage, tried again after a pause
-  doubling from 2 s to five minutes, for as long as it lasts.
+  message. A card a restart cut off is sent then, and a recorded one never again. Only Lark refusing
+  because it cannot reach the person (230013, "the bot has no availability to this user"), or a
+  person who has lost talk tier since, records `card_failed`, which the task's subscribers hear, with
+  the commands the person can type instead; the card is not tried again, and the run stays open.
+  Every other refusal — a missing scope, a plain 400 — and every failure that never reached Lark is
+  taken for the gateway's, tried again after a pause doubling from 2 s to five minutes, for as long as
+  it lasts. A card sent whose record then fails is not sent again until a restart.
 - **The nonce** is bound to the task and the run — for an Unblock, the event that blocked the task —
   and not to the boot, as a person's run parks across restarts. Who may press: Done and Block, the
   run's assignee at talk tier; Approve and Request changes, the review run's reviewer at talk tier,
-  or an operator; Unblock, an operator. A press for a run that is no longer the task's open one is
-  refused inside the transaction, says the card is out of date, and redraws it so; a press refused
-  for any other reason leaves the card live. A report typed instead leaves the card live too, until
-  it is next pressed.
+  or an operator; Unblock, an operator. The nonce is no secret — an unkeyed hash of ids the card
+  shows — and catches a pointer mixed or mangled; who pressed, and the board's re-check, protect a
+  press. A press for a run that is no longer the task's open one is refused inside the transaction,
+  says the card is out of date, and redraws it so. A report typed instead leaves the card live, until
+  it is next pressed, and is made on the open run as it was checked, so a reassignment while its
+  gates run refuses it too.
+- **A press is answered at once.** Lark waits about three seconds for a callback's answer, and the
+  SDK answers only once the handler returns, so the card is redrawn as being worked on, the report
+  is made in the background, and the card is redrawn with the outcome.
+- **A refused press leaves a pressable card.** The SDK drops a press it has seen — the card, the
+  presser and the button's value — for twelve hours, whatever the box held. So a press refused for
+  what it carried — an empty box, a gate, a busy workspace — redraws the card live, saying why, with
+  buttons whose value starts with the next attempt, outside the nonce. A press by the wrong person
+  changes nothing.
 - **The one line** is the notice of a person's `claimed` event, which records the assignee's kind:
   "📋 *title* — assigned to *name*", or "review assigned to". It goes to every subscription of the
   task, as any notice does: a subscription does not record whether its chat is a group.
 - **Unblock** sits under a message of notices, one for each task its notices left blocked, by the
   task's latest block there, at most five. The message is not redrawn when one is pressed, as it
   carries the round's other notices; a second press finds the block lifted, does nothing, and says so.
+  The same operator's second press of one Unblock is dropped by the SDK, as above; `/kanban unblock`
+  still works. An Unblock's event must be a block of its task.
+- **Approval cards** are built in Lark's card schema 2.0, their buttons in the body with callback
+  behaviors, as a board card's are; the router reads the button's value the same way for a card
+  posted before.
 
 ### 9.3 Rendering
 
@@ -1687,7 +1704,11 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   does, for every message it sends as one — a text of up to 4,000 characters, which a batch always
   is, an approval card, a board card — through the SDK's own client, so a batch sent again within
   Lark's hour shows once; a longer text, which the SDK splits, and a streamed answer still go
-  without it. A batch is never lost.
+  without it. A batch is never lost. Since Lark sends one message per uuid across receivers, every
+  uuid is one message's: a boot finding's is keyed on its binding and the boot, a press's
+  acknowledgement on the press, an approval card on its approval. A send that never reached Lark is
+  retried with its uuid, and a notice whose card of buttons Lark refuses, for a reason not the
+  chat's, goes as plain text.
 - **A send that fails** moves no cursor, and the conversation is tried again after 2 s, doubling to at
   most five minutes, while the others go on. A refusal that may be of one bad batch is such a
   failure. So are a network failure, which the Lark adapter reports as code 0 and not retryable, and
