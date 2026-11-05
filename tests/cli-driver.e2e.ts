@@ -485,6 +485,127 @@ describe('CLI driver: native resume', () => {
   });
 });
 
+describe('CLI driver: when the agent will not resume', () => {
+  it('runs the turn again with the transcript when the agent refuses the session, in the same turn', async () => {
+    const s = await start('basic', { sessions: store(), providerSessionId: 'ses_gone', replay: [said('asked before')] });
+    const events = await collect(s.runtime.prompt(said('asking now')));
+
+    // One turn, completed: the refusal started nothing, so nothing ran twice.
+    expect(kinds(events)).toEqual(['message-chunk', 'message-chunk', 'usage', 'session-observed', 'turn-ended']);
+    expect(events.at(-1)).toEqual({ kind: 'turn-ended', terminal: 'completed' });
+    const [refused, replayed] = s.invocations();
+    expect(s.invocations()).toHaveLength(2);
+    expect(refused?.session).toBe('ses_gone');
+    expect(refused?.prompt).toBe('asking now');
+    expect(replayed?.session).toBeNull();
+    expect(replayed?.prompt).toContain('> asked before');
+    const seen = observed(events);
+    expect(seen?.mode).toBe('replayed');
+    expect(seen?.providerSessionId).not.toBe('ses_gone');
+    expect(seen?.detail).toBe(
+      'provider session ses_gone could not be resumed (persistence: session not found), so the conversation was replayed',
+    );
+
+    // The new session is the one continued from now on.
+    await collect(s.runtime.prompt(said('and now')));
+    expect(s.invocations()[2]?.session).toBe(seen?.providerSessionId);
+    expect(s.invocations()[2]?.prompt).toBe('and now');
+  });
+
+  it('says a refused session with no history to carry started a new conversation', async () => {
+    const s = await start('basic', { sessions: store(), providerSessionId: 'ses_gone' });
+    const seen = observed(await collect(s.runtime.prompt(said('hello'))));
+    expect(seen?.mode).toBe('fresh');
+    expect(seen?.detail).toBe(
+      'provider session ses_gone could not be resumed (persistence: session not found), so this turn started a new conversation',
+    );
+  });
+
+  it('takes a session made as another agent for refused', async () => {
+    // bytesec keeps a session's agent: resumed as another, it exits before the turn.
+    const sessions = store();
+    const writer = await start('basic', { sessions, args: ['--agent', 'writer'] });
+    const id = observed(await collect(writer.runtime.prompt(said('draft it'))))?.providerSessionId;
+
+    const s = await start('basic', { sessions, args: ['--agent', 'editor'], providerSessionId: id });
+    const events = await collect(s.runtime.prompt(said('edit it')));
+    expect(events.at(-1)).toEqual({ kind: 'turn-ended', terminal: 'completed' });
+    expect(s.invocations()).toHaveLength(2);
+    expect(observed(events)?.detail).toContain('(unknown agent: writer)');
+  });
+
+  it('stops resuming an agent that answers --session with another session', async () => {
+    // bytesec 0.7.2 did: the turn ran, but not in the conversation it was asked to continue.
+    const s = await start('basic', { sessions: store(), env: { FAKE_CLI_RESUME: 'ignore' } });
+    const first = observed(await collect(s.runtime.prompt(said('remember pickle'))));
+    const second = observed(await collect(s.runtime.prompt(said('what did I say?'))));
+    expect(s.invocations()[1]?.session).toBe(first?.providerSessionId);
+    expect(second?.mode).toBe('fresh');
+    expect(second?.detail).toBe(
+      `asked to continue provider session ${first?.providerSessionId ?? ''}, the agent ran in ` +
+        `${second?.providerSessionId ?? ''} instead, so later turns carry the conversation as a transcript`,
+    );
+
+    await collect(s.runtime.prompt(said('and now?')));
+    const third = s.invocations()[2];
+    expect(third?.session).toBeNull();
+    expect(third?.prompt).toContain('> remember pickle');
+  });
+
+  it('takes the session a resumed run ran in from its events, not from the id file', async () => {
+    // bytesec writes back the id it was given even when it does not continue it.
+    const s = await start('basic', { sessions: store(), env: { FAKE_CLI_RESUME: 'echo' } });
+    const first = observed(await collect(s.runtime.prompt(said('remember pickle'))));
+    const second = observed(await collect(s.runtime.prompt(said('what did I say?'))));
+    expect(s.invocations()[1]?.session).toBe(first?.providerSessionId);
+    expect(second?.mode).toBe('fresh');
+    expect(second?.providerSessionId).toMatch(/^ses_fake_/);
+    expect(second?.providerSessionId).not.toBe(first?.providerSessionId);
+    expect(s.runtime.providerSessionId).toBe(second?.providerSessionId);
+    await collect(s.runtime.prompt(said('and now?')));
+    expect(s.invocations()[2]?.session).toBeNull();
+  });
+
+  it('does not take a run that printed anything for refused, whatever stderr says', async () => {
+    const s = await start('basic', { sessions: store(), providerSessionId: 'ses_gone', env: { FAKE_CLI_REFUSAL: 'noisy' } });
+    const events = await collect(s.runtime.prompt(said('hello')));
+    expect(s.invocations()).toHaveLength(1);
+    expect(events.at(-1)).toEqual({ kind: 'turn-ended', terminal: 'ambiguous' });
+  });
+
+  it('takes only the last line of stderr for a refusal', async () => {
+    const s = await start('basic', { sessions: store(), providerSessionId: 'ses_gone', env: { FAKE_CLI_REFUSAL: 'trailing' } });
+    const events = await collect(s.runtime.prompt(said('hello')));
+    expect(s.invocations()).toHaveLength(1);
+    expect(events.at(-1)).toEqual({ kind: 'turn-ended', terminal: 'ambiguous' });
+  });
+
+  it('does not run a refused turn again once it is cancelled', async () => {
+    const s = await start('basic', { sessions: store(), providerSessionId: 'ses_gone', env: { FAKE_CLI_REFUSAL: 'slow' } });
+    const turn = collect(s.runtime.prompt(said('hello')));
+    // The fake ignores the stop, and refuses as it would have, exit 1 and all:
+    // only the cancel says not to run the turn again. Until it has started:
+    for (let i = 0; i < 200 && s.invocations().length === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+    await s.runtime.cancel();
+    const events = await turn;
+    expect(events).toEqual([{ kind: 'turn-ended', terminal: 'cancelled' }]);
+    expect(s.invocations()).toHaveLength(1);
+  });
+
+  it('does not run a resumed turn again when it fails after starting', async () => {
+    // Only a refusal before the turn is safe to run again; a crash is the turn's own outcome.
+    const sessions = store();
+    const before = await start('basic', { sessions });
+    const id = observed(await collect(before.runtime.prompt(said('remember pickle'))))?.providerSessionId;
+
+    const s = await start('crash', { sessions, providerSessionId: id });
+    const events = await collect(s.runtime.prompt(said('go')));
+    expect(s.invocations()).toHaveLength(1);
+    expect(events.at(-1)).toEqual({ kind: 'turn-ended', terminal: 'ambiguous' });
+    expect(observed(events)?.mode).toBe('resumed');
+  });
+});
+
 describe('CLI driver: things going wrong', () => {
   it('hands over the reason a turn failed, from stderr', async () => {
     const s = await start('error');
