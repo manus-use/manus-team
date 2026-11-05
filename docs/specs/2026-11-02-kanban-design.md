@@ -741,7 +741,13 @@ session status already follows (`core/status.ts`, channel spec §7), for the sam
 - **Assigning to a person who does not have talk tier is refused** at assignment, not left to fail
   at dispatch: being assigned is permission to report on that task (§9.1), and handing that to
   someone the gateway would otherwise ignore is a policy decision to make explicitly, not by
-  accident.
+  accident. The tiers are decided by `open_id` and the board knows a person by `union_id`, so from
+  plan D2 the gateway keeps a `people` table (migration `005`, written only by `db/people.ts`): the
+  `open_id` and name Lark last gave with each `union_id`, noted for each `/kanban` sender, each
+  person a `/kanban` command mentions, and each person who presses a board card's button. A person
+  named by principal alone — typed out in chat, or in an agent's `mt kanban create` or `review` —
+  is checked through the `open_id` last seen with it; a principal the gateway has never seen cannot
+  be checked, and is refused.
 - **Unassigned, or an assignee that does not resolve** (a role whose directory was removed or is
   now invalid, a role whose files cannot be read, a person the channel cannot reach), **or an agent task whose fixed
   workspace was removed from config**, or whose parents are in different workspaces and none was set
@@ -1001,7 +1007,10 @@ The session uses the **sink channel**: card output is discarded (the session log
 and approval cards, for a supervised agent, are forwarded to the task's first subscription. An
 approval for kanban work is still answered by a person, on the channel where they follow the task;
 the click resolves through the approval's session, which the router already looks up by
-`approvalId`.
+`approvalId`. As plan D2 builds it, the forwarded card names the task ("Task `k_…`, *title*, asks:
+…"), is answered at operator tier as any approval card is, and is redrawn where it went once
+answered. A task nobody follows has nobody to ask: the send fails, and the agent is released as
+cancelled. An unanswered approval counts toward the run's `max_runtime_s` like the rest of its turn.
 
 The task prompt is composed, in this order, of:
 
@@ -1259,9 +1268,13 @@ commands, trusted as such.
 
 - **A person's report and another task's agent.** A person's run does not hold the workspace, so a
   person's report — from plan D2's chat — can run gates in a workspace while another task's agent
-  run is open in it, and test a checkout that agent is changing. Plan D2 must refuse that report,
-  for example with `workspace_busy`. Plan D1 has no person's report: its chat refuses the
-  commands that would make one.
+  run is open in it, and test a checkout that agent is changing. Plan D2 refuses that report with
+  `workspace_busy`: a person's `complete` or `review` on a task with gates and a fixed workspace,
+  while any agent run of another task, decided or not, is open there. It is asked before the gates
+  run, with the report's other checks; once a report's gates start, nothing is claimed into the
+  workspace until they end. A person's report on a task with no gates runs nothing in the checkout,
+  and is not refused. Plan D1 had no person's report: its chat refused the commands that would make
+  one.
 - **A run decided while its gates run.** A stop, a timeout, a reassignment or an archive that
   decides the run does not abort its report's gates: they run on, up to 600 s, holding the
   workspace, and the report is then refused as any decided run's is. A claim refused meanwhile
@@ -1516,15 +1529,39 @@ people (§12).
   operator turns it on, and opens no session. Chat without `/kanban` is unchanged either way.
 - **What arrives later is said as "a later update"**, never by a plan's name, which nobody in chat
   knows.
-- **Until plan D2**, the board gives work only to roles. Naming a person as assignee or reviewer —
-  an @-mention, which Lark's text shows as `@Name`, or a `lark:` principal typed out — is refused,
-  saying it arrives in a later update, and so is a role whose agent is supervised, whose approvals have nowhere
-  to go yet. `/kanban done`, `block`, `review`, `approve` and `changes` are answered the same way,
-  rather than as unknown commands.
+- **Until plan D2**, the board gave work only to roles. Naming a person as assignee or reviewer —
+  an @-mention, which Lark's text shows as `@Name`, or a `lark:` principal typed out — was refused,
+  saying it arrives in a later update, and so was a role whose agent is supervised, whose approvals had nowhere
+  to go yet. `/kanban done`, `block`, `review`, `approve` and `changes` were answered the same way,
+  rather than as unknown commands. Plan D2 lifts all of it, as below.
 - **After a change the dispatcher is told:** a pass after `new`, `assign`, `workspace`, `unblock`,
   `stop` and `archive`; and for `assign`, `stop` and `archive`, the cancel of the agent run's turn
   that the change decided (§5.1), which closes it. A `comment` needs neither: the dispatcher forwards
   it when the run's turn ends (§7.5).
+
+**How plan D2 reads the table.** D2 adds people.
+
+- **Naming a person.** The message carries the mentioned people's ids (`InboundMessage.mentions`,
+  read from Lark's raw event, without `@all` or the bot). A field's `@Name` is matched against the
+  mentions by the name Lark's text shows, or by the mention's key; a name no mention has, one two
+  mentions share, or one whose mention came without a `union_id` is refused. A `lark:<union_id>`
+  typed out is accepted once the gateway has seen that person (§4.2). A person without talk tier is
+  refused by the name typed.
+- **The people's commands.** `/kanban done <id> [summary]` and `/kanban approve <id> [comment]` may
+  say nothing more; `/kanban block <id> <reason>` and `/kanban changes <id> <reason>` need a reason.
+  `/kanban review <id> [summary]` names its reviewer on a line `reviewer: <role or @person>`,
+  anywhere in it, as `/kanban new`'s fields are, rather than as a last word, which could be the
+  summary's; without one the task's reviewer is used, and a task with none is refused.
+- **Who, and when.** `done`, `block` and `review` are the task's assignee's, a person, while the
+  task is `open`; `approve` and `changes` are its reviewer's, a person, or any operator's — for a
+  role's review too — while it is in `review`. The phase is checked because the board's `complete`
+  takes either, and an assignee completing their own task in review would decide the reviewer's
+  run. Who is named is read from the task as it stands when the command arrives.
+- **Steering.** A comment steers when its author is an operator, or the task's assignee or reviewer,
+  a person (§7.5).
+- **A gate's refusal** is shown with the gate, how it ended, and the end of its output, masked and
+  escaped; nothing is applied.
+- **A role whose agent is supervised** is accepted: its approvals go to the chat that follows the task (§7.1).
 
 ### 9.2 Cards
 
@@ -1556,6 +1593,38 @@ card is redrawn with the outcome once acted on, so its buttons stop working.
   the router **dispatches on `kind` first**, then applies that kind's authorization: operator tier
   for an approval, as today; for a kanban card, the rules of §9.1, under which a named assignee with
   talk tier may press Done.
+
+**As plan D2 builds it:**
+
+- **The box.** A Lark card has no form a button opens; a card takes text through a form holding an
+  input, submitted by a button. So a task card has one box, for the summary or the reason, above
+  Done and Block, and a review card one, for what needs changing, above Approve and Request changes.
+  Block and Request changes with an empty box are refused, saying to type a reason. A box holds at
+  most 1,000 characters; the typed commands take more.
+- **What a card shows.** A task card: the title, any changes a reviewer asked for, the body, the
+  contract and up to five parents' summaries. A review card: the handoff, what to review (§7.8) only
+  when the report recorded a commit, the body and the contract. Each ends with the typed commands
+  that do the same.
+- **Delivery, from the board.** Every 2 s the gateway reads the open people's runs with no card
+  recorded, sends each its card by `union_id`, with one uuid per run, and records `card_sent` with the
+  message. A card a restart cut off is sent then, and a recorded one never again. A refusal by Lark
+  that retrying cannot change — a nonzero code, not retryable — records `card_failed`, which the
+  task's subscribers hear, with the commands the person can type instead; the card is not tried
+  again, and the run stays open. Anything else is the gateway's outage, tried again after a pause
+  doubling from 2 s to five minutes, for as long as it lasts.
+- **The nonce** is bound to the task and the run — for an Unblock, the event that blocked the task —
+  and not to the boot, as a person's run parks across restarts. Who may press: Done and Block, the
+  run's assignee at talk tier; Approve and Request changes, the review run's reviewer at talk tier,
+  or an operator; Unblock, an operator. A press for a run that is no longer the task's open one is
+  refused inside the transaction, says the card is out of date, and redraws it so; a press refused
+  for any other reason leaves the card live. A report typed instead leaves the card live too, until
+  it is next pressed.
+- **The one line** is the notice of a person's `claimed` event, which records the assignee's kind:
+  "📋 *title* — assigned to *name*", or "review assigned to". It goes to every subscription of the
+  task, as any notice does: a subscription does not record whether its chat is a group.
+- **Unblock** sits under a message of notices, one for each task its notices left blocked, by the
+  task's latest block there, at most five. The message is not redrawn when one is pressed, as it
+  carries the round's other notices; a second press finds the block lifted, does nothing, and says so.
 
 ### 9.3 Rendering
 
@@ -1597,6 +1666,7 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   archive. A block's notice tells how to unblock, unless the block has recurred
   `kanban.block_recurrence_limit` times (§5.4) — counted as the event recorded it (`blocked`,
   `stopped` and `run_ended` carry `blockRecurrences`), not as the task stands when the notice goes.
+  From plan D2, a person's claim is one too — the one line of §9.2 — and so is a card Lark refused.
 - **Delivery is a projection from the cursors, a batch per conversation.** A round reads every
   subscription of this bot with an event past its cursor, groups them by conversation — a chat, or a
   thread — and sends each conversation at most one message: the round's notices for all its
@@ -1612,9 +1682,12 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   the dispatcher, and a cheap poll replaces telling the notifier of each.
 - **Across a restart** the cursors are in the database, so the first round after a start — run once
   the channel is connected — catches up on everything the chats missed, by the same code. A batch
-  sent just before a stop, whose cursors had not moved, is sent again with the same uuid. The Lark
-  adapter does not pass a send's uuid to Lark yet (its known gap), so until it does that batch can
-  show twice; it is never lost.
+  sent just before a stop, whose cursors had not moved, is sent again with the same uuid. Plan D1's
+  Lark adapter did not pass a send's uuid to Lark, so such a batch could show twice. From plan D2 it
+  does, for every message it sends as one — a text of up to 4,000 characters, which a batch always
+  is, an approval card, a board card — through the SDK's own client, so a batch sent again within
+  Lark's hour shows once; a longer text, which the SDK splits, and a streamed answer still go
+  without it. A batch is never lost.
 - **A send that fails** moves no cursor, and the conversation is tried again after 2 s, doubling to at
   most five minutes, while the others go on. A refusal that may be of one bad batch is such a
   failure. So are a network failure, which the Lark adapter reports as code 0 and not retryable, and
@@ -1673,6 +1746,10 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
 - **No secrets in the handoff.** Summaries, metadata and comments are durable and shown in chat. The
   worker protocol says so, and known secrets are masked (§10.1).
 - **Agent-written task text cannot spoof a mention** (§9.3).
+- **Card buttons are pointers.** A board card's button carries the task, the run and a nonce bound
+  to both; who pressed is the callback's operator, and the board re-checks the run inside its
+  transaction (§9.2). The `people` table holds ids and names Lark gave, never anything a message's
+  text said (§4.2).
 
 ### 10.1 Masking the secrets the gateway knows
 
@@ -1786,6 +1863,7 @@ board.
 | Restart | `reconcileBoot` then `interrupted`; a decided-but-open run keeps its outcome; kanban findings not posted to Lark; the old session archived |
 | Lark | tiers: a named assignee or reviewer acting with talk tier, a non-reviewer needing operator tier to approve, assigning to a person without talk tier refused; `/kanban review` from a human assignee, refused with gates while the workspace is null; `/kanban stop` on a decided-but-open run; `/kanban assign` mid-run; @-mention vs role assignees; person targets; the one-line group notice for a human task created in a group; card `kind` routing; a click on a superseded run's card refused |
 | Chat (D1) | `/kanban new`'s field lines in any order, a field twice or empty refused; each command's usage; operate commands refused at talk tier with nothing written; a sender with no union_id read-only; a person — with spaces in the name too — a supervised role, an unknown role or workspace, an oversized task, or a field line for a title refused at creation; `/kanban done`, `approve` and the rest answered as arriving in a later update; a talk-tier comment stored and given to no agent, an operator's forwarded; an assignment that changes nothing said so; one task per message; the dispatcher told after a change, and the decided run's turn cancelled; `/kanban` answered while the chat's session is busy, and with the board off; gate commands shown masked |
+| People (D2) | a mention's ids read from the raw event; a person without talk tier, one not mentioned, and a principal never seen refused; the named assignee's and reviewer's reports at talk tier, an operator answering any review, their comments steering; a card's run re-checked in the transaction, a stale card redrawn as out of date; card `kind` routing; `workspace_busy` for a person's report with gates beside another task's agent; a card sent once by union_id, again after a restart only if not recorded, with one uuid, and a refused one reported; Unblock under a block's notice, refused once lifted; a supervised agent's approval forwarded to the task's first subscription; the uuid on every one-message send; end to end, a person's task done from its card, and a person's review asking an agent for changes and approving its rework |
 | Notices | each kind of notice, and the events that are none, an interrupted run's retry among them; one message per conversation a round, in event order, at most 20 with how many follow; a follow-up's notices to its creator's chat; a failed send retried after its pause, and sent once; a send refused for good, or failing at the longest pause, dropping its notices with one log line and passing over the conversation until a restart; a subscription that cannot be read, or a conversation that throws, holding up no other; a restart catching up from the cursors with the same batch uuid; only this bot's subscriptions; masked before reshaping, and escaped; an end-to-end `/kanban new` through the router whose completion the thread hears once |
 | Masking | a known value masked through each escaper, in composed worker context and `last_output`, and in stored free text and JSON string values; **a secret split across two message chunks masked on the card**; a secret containing `_` masked before escaping, and one containing `"` masked inside JSON; values under 8 characters and `maskExempt` names left alone; a worker token masked only while its run is open; `turn_submitted` input stored unmasked but shown masked; a gate containing a secret refused; a render withholding a trailing prefix of a secret, mid-stream and on a turn that ended part-way through one; ids inside payloads left unmasked; the registry gaining and losing a worker token with its run |
 | Reported commit | clean tree → commit; dirty tree → commit plus "uncommitted changes"; no commit yet → "uncommitted; no commit to review"; not a repo, or no git → nothing recorded, and no state line; recorded for a reviewer agent's `complete`, never for a person's report |
@@ -1814,7 +1892,7 @@ branch.
 | **C3. The worker CLI** | the run's token, added to F's masker when the run is claimed and removed when it closes, reference-counted so that removing it never unmasks a configured secret with the same value; the `0600` socket; the `mt kanban` commands; stop nudges; reports after the run is closed (§7.2, §7.3, §7.5, §7.6) | C2 |
 | **C4. Review, rework and gates** | same-task review and rework, with the rework's seed settled after the render; quality gates, run asynchronously in every report, and the worker socket draining on close; the reported commit (§5.3, §7.7, §7.8); refusing gates that contain a known secret; the operator's `mt kanban gate` commands; a crash handler whose output is masked | C3 |
 | **D1. The board in chat** | every `/kanban` command a role's task needs (§9.1), through `KanbanService` only, with the tiers of §9.1, never refused for a busy chat session; people still refused, and the person-only commands answered as arriving in a later update; only an operator's chat comment steering an agent (`kanban_comments.steers`, migration `004`, §7.5); rendering escaped and masked, gate commands included (§9.3, §7.7); subscriptions and their notices, batched per conversation, delivered from the cursors and caught up after a restart, a conversation that cannot be reached let go of (§9.4); `kanban.block_recurrence_limit` (§5.4); `/kanban` answering that the board is off when `kanban.enabled` is unset | C4 |
-| **D2. People** | people as assignees and reviewers: direct-message cards with Done, Block, Approve and Request changes; the person send target by union_id; card `kind` routing; the group one-line notice; `/kanban done`, `block` and `review` by a human assignee, `approve` and `changes` by a person reviewer; approval forwarding for supervised roles; an operator's `approve` and `changes` from chat; the named assignee's and reviewer's comments steering; refusing a person's report while another task's agent run is open in the workspace (`workspace_busy`, §7.7); the mentioned users' ids carried on an inbound message | D1 |
+| **D2. People** | people as assignees and reviewers: direct-message cards with Done, Block, Approve and Request changes; the person send target by union_id; card `kind` routing; the group one-line notice; `/kanban done`, `block` and `review` by a human assignee, `approve` and `changes` by a person reviewer; approval forwarding for supervised roles; an operator's `approve` and `changes` from chat; the named assignee's and reviewer's comments steering; refusing a person's report while another task's agent run is open in the workspace (`workspace_busy`, §7.7); the mentioned users' ids carried on an inbound message. As built (`docs/plans/2026-11-05-plan-d2-kanban-people.md`), also: the `people` table (migration `005`) that checks a person named by principal for talk tier (§4.2); cards delivered from the board, `card_sent` and `card_failed` (§9.2); and the uuid passed to Lark for every message sent as one (§9.4) | D1 |
 | **E. Native resume** | the CLI driver captures the provider session id and passes `--session` (architecture §6.3), with transcript replay as the fallback | B; independent of C and D |
 | **R. Native rendering** | the spike, done on bytesec 0.7.4: `BYTESEC_LOCAL_APM_PATH=<one package dir>` with `bytesec run --agent <name>` loads that package's agent, whose body becomes the system prompt, and its skills; a directory of packages fails silently; a package's agent may use only the package's skills. Then (§2.7): the role grammar tightened so a name cannot end in `-`; `agent.native`; `agent.skills`, imported from where bytesec finds a user's skills, since a native agent sees only its package's; `StartOptions.args` and the registry's `argsFor`; a renderer interface with bytesec's renderer; content-addressed, atomic packages under `$MT_HOME/rendered`, swept; the dispatcher rendering just after the claim, recording on the run whether it is native and by which package, and falling back to prompt injection when a render fails; the prompt leaving `role.md` and the skills out of a native run; `mt role check` saying which roles run natively. Claude Code's renderer is later. Prompt injection (§7.1) stays the fallback | B2, C2 |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
@@ -1825,7 +1903,8 @@ whose approval cards would have nowhere to go until D2 forwards them. And **the 
 `kanban.enabled` is set**, off by default. It stays opt-in after D1 and D2 — the user's decision — so
 a gateway that never sets it runs chat exactly as before, and its `/kanban` says the board is off.
 C's kernel implements and tests human runs and approval forwarding through its service API, and D2
-turns them on.
+turns them on: the gateway gives its service `people` and `supervisedRoles`, sends people their
+cards, and forwards a supervised agent's approvals to the chat following its task.
 
 Nor can a person create a task before D1: `/kanban new` arrives there, and every `mt kanban` command
 needs a run's token. C does **not** add a token-less way in. Agents run as the gateway's own user, so
