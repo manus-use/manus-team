@@ -1,6 +1,7 @@
 import type { Db } from './open.js';
 import { txImmediate } from './open.js';
 import { newRunId, newTaskId } from '../core/ids.js';
+import { isResumableProviderId } from '../provider-id.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import type { GateRun } from '../kanban/gates.js';
 import { resolveTaskWorkspace } from '../kanban/workspace.js';
@@ -569,7 +570,8 @@ function reworkSeed(d: Db, runs: readonly RunRow[], agent: AgentSnapshot | null)
   const seen = d
     .prepare<[string], { provider_session_id: string | null }>('SELECT provider_session_id FROM sessions WHERE id = ?')
     .get(work.sessionId);
-  return seen?.provider_session_id ? work.runId : null;
+  // A `cli:` id names a runtime, not a provider session: nothing to resume.
+  return isResumableProviderId(seen?.provider_session_id) ? work.runId : null;
 }
 
 function mustGetRun(d: Db, runId: string): RunRow {
