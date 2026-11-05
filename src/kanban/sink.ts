@@ -2,6 +2,7 @@ import type {
   ApprovalCardSpec,
   ApprovalOutcomeView,
   CardSession,
+  CardView,
   Channel,
   SendResult,
   SendTarget,
@@ -59,6 +60,13 @@ export class KanbanSink implements Channel {
   }
 
   async updateApprovalCard(_messageId: string, _view: ApprovalOutcomeView): Promise<void> {}
+
+  /** A run's session posts no board card; one would be discarded, as its other cards are. */
+  async sendCard(_target: SendTarget, _view: CardView, uuid: string): Promise<SendResult> {
+    return { messageId: `kanban:${uuid}`, deduped: false };
+  }
+
+  async updateCard(_messageId: string, _view: CardView): Promise<void> {}
 
   async react(_messageId: string, _emoji: string): Promise<void> {}
 

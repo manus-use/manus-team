@@ -566,7 +566,9 @@ export class SessionActor {
           options: event.options,
           nonce: approvalNonce(this.sessionId, approvalId, generation),
         },
-        sendUuid(this.#key.appId, this.sessionId, now),
+        // One per approval: keyed on the time, two in one millisecond would share a
+        // uuid, and Lark, which sends one message per uuid, would drop the second.
+        sendUuid(this.#key.appId, approvalId, generation),
       );
       setApprovalCard(this.#db, approvalId, sent.messageId);
     } catch (err) {

@@ -11,6 +11,7 @@ import type { PermissionOption } from '../types.js';
  */
 
 export interface SendTarget {
+  /** The chat; or, when `receiveIdType` is `union_id`, the person. */
   chatId: string;
   /** Feishu thread id, or '' for chat scope. */
   threadId: string;
@@ -22,6 +23,44 @@ export interface SendTarget {
    * already groups the conversation.
    */
   replyTo?: string;
+  /**
+   * How `chatId` names who receives the message: absent, a chat; `union_id`, a
+   * person, sent a direct message (spec §9.2). Lark takes the type per message,
+   * so a person need not have opened a chat with the bot first.
+   */
+  receiveIdType?: 'union_id';
+}
+
+/** A direct message to a person, by union_id (spec §9.2). */
+export function personTarget(unionId: string): SendTarget {
+  return { chatId: unionId, threadId: '', receiveIdType: 'union_id' };
+}
+
+/**
+ * A button on a card. `value` round-trips through the client and Lark does not
+ * verify it: a pointer at most, never a claim about who pressed it.
+ */
+export interface CardButton {
+  label: string;
+  style: 'primary' | 'danger' | 'default';
+  value: Readonly<Record<string, string>>;
+}
+
+/**
+ * A card a person acts on (spec §9.2): markdown, already escaped and masked by
+ * whoever rendered it; a box whose text the buttons submit with them, for a
+ * summary or a reason; and the buttons -- none once it has been acted on.
+ */
+export interface CardView {
+  markdown: string;
+  input?: { placeholder: string };
+  buttons: readonly CardButton[];
+  /**
+   * How many times the card has been redrawn live after a press it refused. The
+   * buttons' names carry it, so a press of the redrawn card is not taken for the
+   * press before it by a channel that drops a press it has seen.
+   */
+  attempt?: number;
 }
 
 export interface SendResult {
@@ -98,8 +137,12 @@ export interface ApprovalOutcomeView {
 export interface Channel {
   readonly id: string;
 
-  /** Plain text message. Used for rejections, errors, and command output. */
-  sendText(target: SendTarget, text: string, uuid: string): Promise<SendResult>;
+  /**
+   * Plain text message. Used for rejections, errors, command output and the
+   * board's notices; with buttons under it, a card (spec §9.2: a blocked task's
+   * Unblock).
+   */
+  sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[]): Promise<SendResult>;
 
   /** Open a streaming card. */
   openCard(target: SendTarget, initialText: string, uuid: string): Promise<CardSession>;
@@ -113,6 +156,12 @@ export interface Channel {
    * produces a chat message explaining that it did nothing.
    */
   updateApprovalCard(messageId: string, view: ApprovalOutcomeView): Promise<void>;
+
+  /** Post a board card: a task for its assignee, a review for its reviewer (spec §9.2). */
+  sendCard(target: SendTarget, view: CardView, uuid: string): Promise<SendResult>;
+
+  /** Redraw a board card once it has been acted on, so its buttons stop working. */
+  updateCard(messageId: string, view: CardView): Promise<void>;
 
   /** Add the bot's reaction to a message. */
   react(messageId: string, emoji: string): Promise<void>;

@@ -1,11 +1,14 @@
 import { createLarkChannel, type LarkChannel, type MarkdownStreamController } from '@larksuiteoapi/node-sdk';
-import type {
-  ApprovalCardSpec,
-  ApprovalOutcomeView,
-  CardSession,
-  Channel,
-  SendResult,
-  SendTarget,
+import {
+  ChannelError,
+  type ApprovalCardSpec,
+  type ApprovalOutcomeView,
+  type CardButton,
+  type CardSession,
+  type CardView,
+  type Channel,
+  type SendResult,
+  type SendTarget,
 } from '../types.js';
 import { forPlainText, truncate } from '../escape.js';
 import { backoffMs, toChannelError } from './errors.js';
@@ -23,14 +26,15 @@ import { PRODUCT_NAME } from '../../identity.js';
  * failure modes are all silent. The cost of the bet is that the card lifecycle is
  * shaped by its producer callback, which is why `CardSession` exists.
  *
- * **Known gap.** The port's `uuid` parameter is accepted and not forwarded: the
- * SDK's high-level `send`/`stream` do not expose Feishu's `uuid` field, so
- * platform-side send dedup is unavailable here. Sends are therefore at-least-once
- * *without* the one-hour dedup window the design assumes, and a retry after an
- * ambiguous failure can post a second copy. The parameter stays in the port
- * rather than being deleted, because deleting it would erase the requirement
- * along with the gap -- and closing it is a one-line change once the SDK exposes
- * the field.
+ * **The uuid.** The SDK's high-level `send`/`stream` do not expose Feishu's
+ * `uuid` field, so every message that goes out as one message -- a text of up to
+ * `ONE_MESSAGE` characters, an approval card, a board card -- is sent through the
+ * SDK's own client instead (`im.v1.message.create` or `reply`), with the uuid:
+ * Feishu then sends one message for any number of sends with the same uuid
+ * within an hour, so a retry, or a notice sent again after a restart, is one
+ * message (spec §9.4). A longer text is split by the SDK into several messages,
+ * and a streamed card is the SDK's to send; neither carries the uuid, so a retry
+ * of those can still post a second copy.
  */
 
 export interface LarkChannelConfig {
@@ -48,18 +52,41 @@ export interface LarkChannelConfig {
 }
 
 const MAX_SEND_ATTEMPTS = 4;
+/** Lark's code for "the bot is not in the chat": a card refused so would be refused as text too. */
+const NOT_IN_CHAT = 230002;
 /** Feishu's text message ceiling, with headroom. */
 const TEXT_BUDGET = 12_000;
+/**
+ * The longest text sent as one message, with its uuid. Every reply the router
+ * sends (cut at 4,000) and every batch of notices (at most 3,800) fits; a longer
+ * text is split by the SDK, at its own 3,500, without one.
+ */
+export const ONE_MESSAGE = 4_000;
+/** Lark's code for a message that was withdrawn: a reply to it goes to its chat instead, as the SDK's own send does. */
+const WITHDRAWN = 230011;
+/** Lark's code for content it will not take: a post refused so goes as plain text, as the SDK's own send does. */
+const INVALID_CONTENT = 230001;
+
+/**
+ * What a test gives the adapter in place of Lark: the SDK's channel, and how a
+ * retry waits. Absent, the real ones.
+ */
+export interface LarkAdapterDeps {
+  lark?: LarkChannel;
+  sleep?: (ms: number) => Promise<void>;
+}
 
 export class LarkAdapter implements Channel {
   readonly id = 'lark';
   readonly #lark: LarkChannel;
   readonly #clock: Clock;
+  readonly #sleep: (ms: number) => Promise<void>;
   #botOpenId: string | undefined;
 
-  constructor(config: LarkChannelConfig, clock: Clock = systemClock) {
+  constructor(config: LarkChannelConfig, clock: Clock = systemClock, deps: LarkAdapterDeps = {}) {
     this.#clock = clock;
-    this.#lark = createLarkChannel({
+    this.#sleep = deps.sleep ?? sleep;
+    this.#lark = deps.lark ?? createLarkChannel({
       appId: config.appId,
       appSecret: config.appSecret,
       transport: 'websocket',
@@ -106,7 +133,27 @@ export class LarkAdapter implements Channel {
     return this.#botOpenId;
   }
 
-  async sendText(target: SendTarget, text: string, _uuid: string): Promise<SendResult> {
+  async sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[]): Promise<SendResult> {
+    if (buttons !== undefined && buttons.length > 0) {
+      try {
+        return await this.sendCard(target, { markdown: text, buttons }, uuid);
+      } catch (err) {
+        // A card Lark will not take, for a reason that is not the chat's, must not
+        // hold back the text it carries: the text goes alone, without its buttons.
+        if (!(err instanceof ChannelError) || err.code === 0 || err.retryable || err.code === NOT_IN_CHAT) throw err;
+        return this.sendText(target, text, uuid);
+      }
+    }
+    if (text.length <= ONE_MESSAGE) {
+      return this.#withRetry(async () => {
+        try {
+          return await this.#post(target, 'post', postContent(text), uuid);
+        } catch (err) {
+          if (!(err instanceof ChannelError) || err.code !== INVALID_CONTENT) throw err;
+          return this.#post(target, 'text', { text }, uuid);
+        }
+      });
+    }
     return this.#withRetry(async () => {
       const result = await this.#lark.send(
         target.chatId,
@@ -115,6 +162,45 @@ export class LarkAdapter implements Channel {
       );
       return { messageId: result.messageId, deduped: false };
     });
+  }
+
+  async sendCard(target: SendTarget, view: CardView, uuid: string): Promise<SendResult> {
+    return this.#withRetry(() => this.#post(target, 'interactive', boardCard(view), uuid));
+  }
+
+  async updateCard(messageId: string, view: CardView): Promise<void> {
+    try {
+      await this.#lark.updateCard(messageId, boardCard(view));
+    } catch (err) {
+      throw toChannelError(err);
+    }
+  }
+
+  /**
+   * One message, sent through the SDK's client with its uuid. A reply whose
+   * message was withdrawn goes to the chat instead, as the SDK's own send does.
+   */
+  async #post(target: SendTarget, msgType: 'post' | 'text' | 'interactive', content: object, uuid: string): Promise<SendResult> {
+    const im = this.#lark.rawClient.im.v1.message;
+    const send = async (req: MessageRequest): Promise<SendResult> => {
+      let r: { code?: number | undefined; msg?: string | undefined; data?: { message_id?: string | undefined } | undefined };
+      try {
+        r = req.kind === 'create' ? await im.create({ params: req.params, data: req.data }) : await im.reply({ path: req.path, data: req.data });
+      } catch (err) {
+        throw sendError(err);
+      }
+      if (typeof r.code === 'number' && r.code !== 0) throw toChannelError(r);
+      const messageId = r.data?.message_id;
+      if (messageId === undefined || messageId === '') throw new ChannelError(0, 'Lark answered the send with no message id', false);
+      return { messageId, deduped: false };
+    };
+    const req = messageRequest(target, msgType, content, uuid);
+    try {
+      return await send(req);
+    } catch (err) {
+      if (req.kind !== 'reply' || !(err instanceof ChannelError) || err.code !== WITHDRAWN) throw err;
+      return send(messageRequest({ chatId: target.chatId, threadId: '' }, msgType, content, uuid));
+    }
   }
 
   /**
@@ -224,38 +310,9 @@ export class LarkAdapter implements Channel {
   async sendApprovalCard(
     target: SendTarget,
     spec: ApprovalCardSpec,
-    _uuid: string,
+    uuid: string,
   ): Promise<SendResult> {
-    const card = {
-      schema: '2.0',
-      config: { update_multi: true },
-      body: {
-        elements: [
-          {
-            tag: 'div',
-            text: { tag: 'plain_text', content: forPlainText(spec.action) },
-          },
-          {
-            tag: 'action',
-            actions: spec.options.map((option) => ({
-              tag: 'button',
-              text: { tag: 'plain_text', content: forPlainText(option.name) },
-              type: buttonType(option.kind),
-              // `action.value` round-trips through the client and Lark does not
-              // verify it. It is a pointer, never a claim: identity comes from
-              // `operator.openId` on the callback, and the nonce is re-checked
-              // against the log by a generation CAS before anything happens.
-              value: { approvalId: spec.approvalId, optionId: option.optionId, nonce: spec.nonce },
-            })),
-          },
-        ],
-      },
-    };
-
-    return this.#withRetry(async () => {
-      const result = await this.#lark.send(target.chatId, { card }, this.#sendOptions(target));
-      return { messageId: result.messageId, deduped: false };
-    });
+    return this.#withRetry(() => this.#post(target, 'interactive', approvalCard(spec), uuid));
   }
 
   async updateApprovalCard(messageId: string, view: ApprovalOutcomeView): Promise<void> {
@@ -324,11 +381,46 @@ export class LarkAdapter implements Channel {
         // The platform's own reset hint beats a guess -- a fixed backoff either
         // gives up too early or waits far longer than the window actually is.
         const wait = err.retryAfterMs ?? backoffMs(i);
-        await sleep(wait);
+        await this.#sleep(wait);
       }
     }
     throw toChannelError(lastError);
   }
+}
+
+/**
+ * An approval card, in Lark's card schema 2.0: the request, then one button per
+ * offered option, each directly in the body, its value returned through a
+ * callback behavior, as a board card's buttons are (`boardCard`).
+ *
+ * `value` round-trips through the client and Lark does not verify it. It is a
+ * pointer, never a claim: identity comes from `operator.openId` on the callback,
+ * and the nonce is re-checked against the log by a generation CAS before
+ * anything happens. `kind` is how the router tells an approval's button from a
+ * board card's (spec §9.2); a card posted before it had one is an approval's.
+ */
+export function approvalCard(spec: ApprovalCardSpec): object {
+  return {
+    schema: '2.0',
+    config: { update_multi: true },
+    body: {
+      elements: [
+        { tag: 'div', text: { tag: 'plain_text', content: forPlainText(spec.action) } },
+        ...spec.options.map((option, i) => ({
+          tag: 'button',
+          name: `option_${i}`,
+          text: { tag: 'plain_text', content: forPlainText(option.name) },
+          type: buttonType(option.kind),
+          behaviors: [
+            {
+              type: 'callback',
+              value: { kind: 'approval', approvalId: spec.approvalId, optionId: option.optionId, nonce: spec.nonce },
+            },
+          ],
+        })),
+      ],
+    },
+  };
 }
 
 /**
@@ -355,6 +447,100 @@ export function approvalOutcomeCard(view: ApprovalOutcomeView): object {
       ],
     },
   };
+}
+
+/**
+ * A send's failure, as the channel reports it. One that never reached Lark -- no
+ * response, so no status and no code: a reset connection, a timeout -- is worth
+ * retrying, as the SDK's own send retried it; the uuid makes a retry of a send
+ * that did land one message.
+ */
+export function sendError(err: unknown): ChannelError {
+  const e = toChannelError(err);
+  const answered = typeof err === 'object' && err !== null && (err as { response?: unknown }).response !== undefined;
+  if (e.code !== 0 || e.retryable || answered) return e;
+  return new ChannelError(0, err instanceof Error && err.message !== '' ? err.message : 'lark request failed', true);
+}
+
+/** One message, as `#post` sends it: a reply where the target threads or quotes, otherwise a new message. */
+export type MessageRequest =
+  | {
+      kind: 'create';
+      params: { receive_id_type: 'chat_id' | 'union_id' };
+      data: { receive_id: string; msg_type: string; content: string; uuid: string };
+    }
+  | {
+      kind: 'reply';
+      path: { message_id: string };
+      data: { msg_type: string; content: string; reply_in_thread?: boolean; uuid: string };
+    };
+
+/**
+ * The request for one message to `target`, as `#sendOptions` places a message:
+ * in its thread, as a quoted reply, or new in the chat -- or, for a person, as a
+ * direct message by union_id. The uuid goes with it either way.
+ */
+export function messageRequest(target: SendTarget, msgType: string, content: object, uuid: string): MessageRequest {
+  const body = { msg_type: msgType, content: JSON.stringify(content), uuid };
+  if (target.receiveIdType !== 'union_id') {
+    if (target.threadId !== '') return { kind: 'reply', path: { message_id: target.threadId }, data: { ...body, reply_in_thread: true } };
+    if (target.replyTo !== undefined) return { kind: 'reply', path: { message_id: target.replyTo }, data: body };
+  }
+  return {
+    kind: 'create',
+    params: { receive_id_type: target.receiveIdType ?? 'chat_id' },
+    data: { receive_id: target.chatId, ...body },
+  };
+}
+
+/**
+ * A text as a post of one markdown element, as the SDK's own markdown send makes
+ * one: Feishu renders the markdown.
+ */
+export function postContent(text: string): object {
+  return { zh_cn: { title: '', content: [[{ tag: 'md', text }]] } };
+}
+
+/**
+ * A board card (spec §9.2), in Lark's card schema 2.0: its markdown, then its
+ * buttons -- in a form with the box, named `text`, when the card has one, so
+ * each button submits what was typed (the inbound side reads it as
+ * `form_value.text`). Each button's value goes back through a callback behavior.
+ * Button labels and the box's placeholder are `plain_text`, as on an approval
+ * card; the markdown was escaped by whoever rendered it. Updatable, so it can be
+ * redrawn once acted on.
+ */
+export function boardCard(view: CardView): object {
+  const buttons = view.buttons.map((b, i) => ({
+    tag: 'button',
+    // The attempt in the name: the SDK keys a press on the button's name, whole,
+    // and on only the start of its value, however Lark orders the value's keys.
+    name: `button_${i}_${view.attempt ?? 0}`,
+    text: { tag: 'plain_text', content: forPlainText(b.label) },
+    type: b.style,
+    behaviors: [{ type: 'callback', value: { ...b.value } }],
+    ...(view.input === undefined ? {} : { form_action_type: 'submit' }),
+  }));
+  const elements: object[] = [{ tag: 'markdown', content: view.markdown }];
+  if (buttons.length > 0 && view.input !== undefined) {
+    elements.push({
+      tag: 'form',
+      name: 'board',
+      elements: [
+        {
+          tag: 'input',
+          name: 'text',
+          width: 'fill',
+          max_length: 1000,
+          placeholder: { tag: 'plain_text', content: forPlainText(view.input.placeholder) },
+        },
+        ...buttons,
+      ],
+    });
+  } else {
+    elements.push(...buttons);
+  }
+  return { schema: '2.0', config: { update_multi: true }, body: { elements } };
 }
 
 function buttonType(kind: string | undefined): string {
