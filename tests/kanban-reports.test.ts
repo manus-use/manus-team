@@ -328,6 +328,16 @@ describe("an operator's answer while a role reviewer's run is open", () => {
     expect(r.run).toMatchObject({ runId: review.runId, outcome: 'completed', endedAt: NOW + 1 });
   });
 
+  it("refuses an operator's block while the reviewer's run is open: only an answer takes the review", () => {
+    const { task, review } = reviewing();
+    expect(block(h.db, task.taskId, operator(review), { kind: 'needs_input', reason: 'hold on' }, NOW)).toMatchObject({
+      ok: false,
+      code: 'agent_run_open',
+    });
+    expect(getRun(h.db, review.runId)?.outcome).toBeNull();
+    expect(getTask(h.db, task.taskId)?.phase).toBe('review');
+  });
+
   it('is refused while the reviewer has reported and its run is finishing', () => {
     const task = newTask(h.db, { reviewer: REVIEWER });
     const work = claimed(h.db, task.taskId);

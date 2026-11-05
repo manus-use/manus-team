@@ -178,6 +178,27 @@ describe('worker API: the run’s scope', () => {
     expect(getRun(b.t.db, run.runId)).toMatchObject({ outcome: 'review_requested', summary: 'parsed' });
   });
 
+  it('names a person reviewer it was sent to by the name the gateway knows, else by id', async () => {
+    const people = { canTalk: () => true };
+    const service = new KanbanService({ db: b.t.db, roles: new Map(DEFAULT_ROLES.map((r) => [r.name, r])), workspaces: WORKSPACES, clock: new ManualClock(), people });
+    const api = new WorkerApi({ db: b.t.db, service, nameOf: (p) => (p === 'lark:on_bob' ? 'Bob Li' : undefined) });
+    for (const [reviewer, whom, workspace] of [
+      ['lark:on_bob', 'Bob Li (lark:on_bob)', 'web'],
+      ['lark:on_carol', 'lark:on_carol', 'api'],
+    ] as const) {
+      const made = service.create({ title: 'a task', assignee: 'implementer', reviewer, workspace, createdBy: ALICE, createdVia: VIA });
+      if (!made.ok) throw new Error(made.message);
+      const token = mintToken();
+      const claimed = service.claim(made.task.taskId, { tokenHash: hashToken(token) });
+      if (!claimed.ok) throw new Error(claimed.message);
+      expect(await api.handle({ run: claimed.run.runId, token, command: 'complete', input: { summary: 'parsed' } })).toMatchObject({
+        ok: true,
+        phase: 'review',
+        message: `sent for review to ${whom}: the task names a reviewer, so complete asks for review`,
+      });
+    }
+  });
+
   it("refuses a role reviewer's report once an operator's answer has superseded its run", async () => {
     const task = b.create({ reviewer: 'reviewer' });
     const work = b.claim(task.taskId);

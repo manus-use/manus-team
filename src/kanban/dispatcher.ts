@@ -82,6 +82,8 @@ export interface DispatcherDeps {
    * neither, and its agent cannot report: tests that report through the service.
    */
   worker?: WorkerAccess;
+  /** A person's name as the gateway last saw it, for the person reviewer a work prompt names; absent, by id. */
+  nameOf?: (principal: string) => string | undefined;
 }
 
 export interface WorkerAccess {
@@ -655,7 +657,10 @@ export class Dispatcher {
     let terminal: TurnTerminal | 'decided';
     let thrown: string | undefined;
     try {
-      const brief = briefFor(this.#deps.db, claimed, { native: rendered !== undefined });
+      const brief = briefFor(this.#deps.db, claimed, {
+        native: rendered !== undefined,
+        ...(this.#deps.nameOf === undefined ? {} : { nameOf: this.#deps.nameOf }),
+      });
       open.seenComment = newest(brief.comments);
       const prompt = composePrompt(brief);
       const actor = await this.#deps.sessions.actorFor(sessionId, key);

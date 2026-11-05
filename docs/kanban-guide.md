@@ -296,8 +296,8 @@ A person presses **Approve**, or types, with an optional comment:
 > Approved: `k_…` is complete.
 
 Approving runs the task's gates first, as any completion does. The chat hears the Done notice
-with the implementer's summary. A task's children (section 5) are given the implementer's
-handoff, not the approval.
+with the approval's comment, if it had one, or just "Done: **title** `k_…`." if it had none. A
+task's children (section 5) are given the implementer's handoff, not the approval.
 
 ### An operator answering a review
 

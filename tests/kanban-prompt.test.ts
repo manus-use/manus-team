@@ -161,6 +161,8 @@ describe('composePrompt', () => {
     expect(at(byRole, 'Reviewer: role reviewer')).toBeLessThan(at(byRole, '# Context'));
     const byPerson = composePrompt(brief({ task: task({ reviewer: { kind: 'human', name: 'lark:on_bob' } }) }));
     expect(byPerson).toContain('Reviewer: lark:on_bob, a person. This task is reviewed before it is done');
+    const named = composePrompt(brief({ task: task({ reviewer: { kind: 'human', name: 'lark:on_bob' } }), reviewerName: 'Bob Li' }));
+    expect(named).toContain('Reviewer: Bob Li (lark:on_bob), a person. This task is reviewed before it is done');
     // The downstream review rule stays, for a task that names no reviewer.
     for (const prompt of [byRole, byPerson]) {
       expect(prompt).toContain('If the task names no reviewer and one of the task\'s children below reviews this task, report complete rather than review.');

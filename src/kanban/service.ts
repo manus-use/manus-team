@@ -807,6 +807,14 @@ export class KanbanService {
     if (!isText(reason) || reason.trim() === '') {
       return board.refuse('invalid', 'changes need a reason the assignee can act on');
     }
+    // Not while a report on the task runs its gates, as for complete: that report,
+    // the reviewer's own approval perhaps, is answered first (spec §5.1).
+    if (this.#reporting.has(taskId)) {
+      return board.refuse(
+        'report_in_progress',
+        `task ${taskId} is being reported on already, and its gates are running; wait for that answer, or see mt kanban show`,
+      );
+    }
     return board.requestChanges(this.#db, taskId, by, reason, this.#clock.now());
   }
 

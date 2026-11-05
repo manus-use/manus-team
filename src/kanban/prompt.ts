@@ -129,6 +129,8 @@ export interface RunBrief {
   review?: ReviewRequest;
   /** For a work run after a reviewer's changes: the rework's reason, and what it revises. */
   rework?: Rework;
+  /** A person reviewer's name, as the gateway last saw it; undefined for a role, or a person not known by name. */
+  reviewerName?: string;
 }
 
 /** An assignee or a reviewer, as KanbanService takes one: a role name, or a person's principal. */
@@ -263,7 +265,12 @@ function taskSection(b: RunBrief): string[] {
 function reviewerLines(b: RunBrief): string[] {
   const r = b.task.reviewer;
   if (b.kind !== 'work' || r === null) return [];
-  const who = r.kind === 'role' ? `role ${flat(r.name)}` : `${flat(r.name)}, a person`;
+  const who =
+    r.kind === 'role'
+      ? `role ${flat(r.name)}`
+      : b.reviewerName === undefined
+        ? `${flat(r.name)}, a person`
+        : `${flat(b.reviewerName)} (${flat(r.name)}), a person`;
   return [
     '',
     `Reviewer: ${who}. This task is reviewed before it is done: when the work is done, report ` +

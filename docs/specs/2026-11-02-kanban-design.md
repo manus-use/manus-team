@@ -609,8 +609,9 @@ with a join, not by correlating two files.
 - **`idempotency_key` is unique** because creation is retried by everything that can create: Lark
   redelivers a message, and an agent re-runs a command whose output it did not see. A repeated
   create with the same key returns the existing task instead of a second card.
-- **`consecutive_failures` and `block_recurrences` reset only on completion**, with one deliberate
-  exception for `gave_up` (§8.2). Resetting `block_recurrences` on unblock is the amnesia that lets
+- **`consecutive_failures` and `block_recurrences` reset only on success**: completion resets both,
+  and work handed to review resets `consecutive_failures`; with one deliberate exception for
+  `gave_up` (§8.2). Resetting `block_recurrences` on unblock is the amnesia that lets
   a task bounce between blocked and unblocked forever, each unblock forgetting the last block.
   Resetting failures on anything but success leaves the breaker unable to trip.
 
@@ -844,7 +845,7 @@ and never an assignee. A run that has already reported is waited for, as above.
 | Outcome | Meaning | Breaker |
 |---|---|---|
 | `completed` | reported `complete` | resets |
-| `review_requested` | reported `review` | — |
+| `review_requested` | reported `review` | resets |
 | `changes_requested` | reviewer reported `changes` | — |
 | `blocked` | reported `block` | — |
 | `failed` | the turn failed for an ordinary reason (§8.1) | counted |
@@ -1409,12 +1410,16 @@ not provider errors.
 - **`failure_limit`** — the task's, else `kanban.failure_limit` (default **2**) — is the number of
   counted failures that blocks the task. With the default, a task gets its first attempt and **one**
   retry. `1` means no retries.
-- `consecutive_failures` increments on every counted outcome, of either run kind. Below the limit,
+- `consecutive_failures` increments on every counted outcome, of either run kind, and resets on
+  success: on completion, and when the work goes to review (a `review`, or a `complete` taken as
+  one, §5.3), so that a failure in one review cycle is not added to the next one's. Going to review
+  resets `consecutive_transient` too, as any outcome but `rate_limited` does, and leaves
+  `block_recurrences` alone, which only completion resets. Below the limit,
   the task stays in its phase with no open run and is claimed again. At the limit, it goes to
   `blocked` with kind `gave_up`, and its subscribers are told what failed, how many times, and the
   last error.
 - **Unblocking a `gave_up` task resets `consecutive_failures`** — the one exception to "only
-  completion resets". Without it, a person who has fixed the cause and unblocks would get exactly one
+  success resets". Without it, a person who has fixed the cause and unblocks would get exactly one
   attempt before the breaker trips again, which is not what unblocking means. `block_recurrences` is
   not reset, so a task given up twice for the same reason still escalates (§5.4). For the same
   reason, **unblocking a `transient` block resets `consecutive_transient`**: otherwise the next

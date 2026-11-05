@@ -177,6 +177,22 @@ describe('latestCompletion', () => {
     });
   });
 
+  it("gives the implementer's handoff, not the operator's comment, for a review an operator approved with no run open", () => {
+    const task = newTask(h.db, { reviewer: REVIEWER });
+    const work = reviewRequested(task.taskId, 'parsed', { pr: 3 });
+    const operator = { kind: 'person', principal: ALICE, runId: null, as: 'operator' } as const;
+    expect(complete(h.db, task.taskId, operator, { summary: 'fine by me' }, NOW).ok).toBe(true);
+    expect(latestCompletion(h.db, task.taskId)).toEqual({ summary: 'parsed', metadata: { pr: 3 }, runId: work });
+  });
+
+  it("gives a person's own review request as the handoff, when nobody's run carried it", () => {
+    const task = newTask(h.db, { assignee: { kind: 'human', name: ALICE }, reviewer: REVIEWER });
+    expect(requestReview(h.db, task.taskId, { kind: 'person', principal: ALICE }, { summary: 'booked it' }, NOW).ok).toBe(true);
+    const operator = { kind: 'person', principal: 'lark:on_owner', runId: null, as: 'operator' } as const;
+    expect(complete(h.db, task.taskId, operator, { summary: 'ok' }, NOW).ok).toBe(true);
+    expect(latestCompletion(h.db, task.taskId)).toEqual({ summary: 'booked it', metadata: null, runId: null });
+  });
+
   it('is undefined for a task never completed', () => {
     expect(latestCompletion(h.db, newTask(h.db).taskId)).toBeUndefined();
   });
