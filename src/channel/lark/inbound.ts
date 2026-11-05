@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { CardActionEvent, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import type { LarkAdapter } from './adapter.js';
-import type { InboundAttachment, InboundMessage, Principal } from '../../types.js';
+import type { InboundAttachment, InboundMention, InboundMessage, Principal } from '../../types.js';
 import type { InboundCardAction, Router } from '../../core/router.js';
 
 /**
@@ -100,6 +100,9 @@ export class LarkInbound {
       text: msg.content,
       mentionedBot: msg.mentionedBot,
       mentionAll: msg.mentionAll,
+      // From the raw event: the normalizer keeps a mention's open_id and drops its
+      // union_id, which is how the board knows a person (spec §9.1).
+      mentions: mentionsOf(msg.raw, botOpenId),
       attachments: await this.#download(msg),
       createTime: msg.createTime,
     };
@@ -179,6 +182,7 @@ export class LarkInbound {
         displayName: evt.operator.name ?? null,
       },
       value: isRecord(evt.action.value) ? evt.action.value : {},
+      ...cardInput(evt.raw),
     };
 
     const outcome = await this.#deps.router.onCardAction(action);
@@ -208,8 +212,56 @@ function asRawMessage(raw: unknown): RawMessageShape | undefined {
   return isRecord(raw) ? (raw as RawMessageShape) : undefined;
 }
 
+/** The ids Lark sends with a message's mentions, in its raw event. */
+interface RawMentionsShape {
+  message?: { mentions?: unknown };
+}
+
+function text(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+/**
+ * The people a message @-mentions, from its raw event: each mention's key, the
+ * name the text shows, and the open_id and union_id Lark gave. `@all` is not a
+ * person, and the bot's own mention is how a group addresses it, so both are
+ * left out. Anything not shaped like a mention is skipped.
+ */
+export function mentionsOf(raw: unknown, botOpenId: string): InboundMention[] {
+  const list = isRecord(raw) ? (raw as RawMentionsShape).message?.mentions : undefined;
+  if (!Array.isArray(list)) return [];
+  const out: InboundMention[] = [];
+  for (const m of list) {
+    if (!isRecord(m)) continue;
+    const key = text(m['key']);
+    if (key === null || key === '@_all') continue;
+    const ids = isRecord(m['id']) ? m['id'] : {};
+    const openId = text(ids['open_id']);
+    if (openId !== null && openId === botOpenId) continue;
+    out.push({ key, name: text(m['name']), openId, unionId: text(ids['union_id']) });
+  }
+  return out;
+}
+
 interface RawCardActionShape {
   operator?: { union_id?: string };
+}
+
+/** What a card's input box held, sent with the button that submitted its form. */
+interface RawFormShape {
+  action?: { form_value?: unknown };
+}
+
+/**
+ * The text typed in a card's box (spec §9.2: Done and Block take a summary or a
+ * reason, Request changes a reason), from the raw callback's `form_value`, where
+ * the box is named `text`. Absent when the button submitted no form.
+ */
+export function cardInput(raw: unknown): { input?: string } {
+  const form = isRecord(raw) ? (raw as RawFormShape).action?.form_value : undefined;
+  if (!isRecord(form)) return {};
+  const value = form['text'];
+  return typeof value === 'string' ? { input: value } : {};
 }
 
 function asRawCardAction(raw: unknown): RawCardActionShape | undefined {

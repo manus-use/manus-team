@@ -59,6 +59,8 @@ export interface InboundCardAction {
    * is untrusted: a pointer at most, never a claim about who clicked.
    */
   value: Record<string, unknown>;
+  /** What was typed in the card's box, when the button submitted it with its form. */
+  input?: string;
 }
 
 /**
