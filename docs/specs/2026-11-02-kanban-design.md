@@ -1627,8 +1627,9 @@ card is redrawn with the outcome once acted on, so its buttons stop working.
   callback's answer, and the SDK answers only once the handler returns, so the card is redrawn as
   being worked on, the report is made in the background, and the card is redrawn with the outcome.
   A board card's press posts nothing in the chat; a press the card cannot show — someone else's, an
-  Unblock's — is only logged. A second press of a card while one is worked on is refused without a
-  redraw. When the gateway stops, the gates of a report from chat, pressed or typed, are killed and
+  Unblock's — is only logged; an approval's press is acknowledged in the chat after the callback is
+  answered. A second press of a card while one is worked on is refused without a redraw. Every
+  redraw is bounded, about 10 s, as the SDK's card update has no timeout of its own. When the gateway stops, the gates of a report from chat, pressed or typed, are killed and
   nothing is applied, as for the worker socket's.
 - **A refused press leaves a pressable card.** The SDK drops a press it has seen — the card, the
   presser and the button's value — for twelve hours, whatever the box held. So a press refused for
@@ -1641,7 +1642,8 @@ card is redrawn with the outcome once acted on, so its buttons stop working.
   task, as any notice does: a subscription does not record whether its chat is a group.
 - **Unblock** sits under a message of notices, one for each task its notices left blocked, by the
   task's latest block there, at most five. The message is not redrawn when one is pressed, as it
-  carries the round's other notices; a second press finds the block lifted, does nothing, and says so.
+  carries the round's other notices; a second press finds the block lifted and does nothing, which
+  is noted in the log.
   The same operator's second press of one Unblock is dropped by the SDK, as above; `/kanban unblock`
   still works. An Unblock's event must be a block of its task.
 - **Approval cards** are built in Lark's card schema 2.0, their buttons in the body with callback
