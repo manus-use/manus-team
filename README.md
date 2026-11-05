@@ -115,7 +115,7 @@ itself, for instance in a file it reads, is not known to the gateway and is not 
 | `agent.passEnv` | — | Variable **names** forwarded to the agent from the gateway's own environment. A name that is not set is an error, because forwarding nothing surfaces later as the agent failing to authenticate. Leave it empty for a subscription-authenticated agent: its credentials are under `$HOME`, which is forwarded already. |
 | — | `MT_AGENT_ENV_*` | Forwarded with the prefix stripped: `MT_AGENT_ENV_ANTHROPIC_API_KEY` becomes `ANTHROPIC_API_KEY`. Wins over `passEnv`. Opt-in by prefix, because an agent holding the Feishu secret could post as the bot and answer its own approvals. |
 | `maxLiveSessions` | `MT_MAX_LIVE_SESSIONS` | Concurrent agent processes. Default 8. |
-| `kanban.enabled` | — | Run the board: its dispatcher, the worker socket, `/kanban` in chat and its notices. Default **off**, and opt-in: without it chat runs as it always did, and `/kanban` says the board is off. The `kanban:` keys are snake_case, as the kanban design spells them; the rest of the file is camelCase. They are set in the file only, and each number has a ceiling (below); a value above it is a startup error. |
+| `kanban.enabled` | — | Run the board: its dispatcher, the worker socket, `/kanban` in chat and its notices, people's cards, and forwarding supervised roles' approvals to the chat that follows a task. Default **off**, and opt-in: without it chat runs as it always did, and `/kanban` says the board is off. The `kanban:` keys are snake_case, as the kanban design spells them; the rest of the file is camelCase. They are set in the file only, and each number has a ceiling (below); a value above it is a startup error. |
 | `kanban.max_running` | — | Open agent runs at once. Default `maxLiveSessions`, and refused above it: a run is a live session. Set it lower to keep room for chat. At most 256. |
 | `kanban.failure_limit` | — | Counted failures before a task gives up and blocks. Default 2: a first attempt and one retry. At most 100. |
 | `kanban.transient_limit`, `kanban.transient_cooldown_s` | — | A throttled run is retried after a cooldown, 300 s by default, doubling each time up to an hour; after 10 in a row the task blocks. At most 1000 in a row, and a first cooldown of at most 3600 s. |
@@ -389,7 +389,7 @@ its notices wait, and are sent once the gateway reaches Lark again.
 
 **People.** Name a person with an @-mention — type @ and pick them, so Lark sends who they
 are — as `assignee:` or `reviewer:`, or in `/kanban assign`. Being named lets a person report on
-the task, so they must have talk tier (`auth.talk`); a person the bot answers nobody for is
+the task, so they must have talk tier (`auth.talk`); a person without talk tier is
 refused. The board knows a person as `lark:<union_id>`, which is how `/kanban show` lists them
 and how an agent's `mt kanban create` or `review` names one; the gateway learns each person's
 ids as they use `/kanban`, are mentioned in it, or press a card's button, and refuses a
@@ -412,6 +412,25 @@ another task's agent is working in the same workspace, if the task has gates to 
 
 A role whose agent is supervised may be given tasks too: its approval cards go to the chat that
 follows the task, naming it, and are answered there at operator tier, as in a chat session.
+
+**Known limitations.**
+
+- A typed report (`/kanban done` and the rest) leaves its card's buttons live, until the next
+  press shows the card as out of date.
+- A notice's **Unblock** button stays after it is pressed; a second press does nothing.
+- A card that Lark refuses as unreachable is never sent again; the person can type the
+  commands the chat was given.
+- The gateway learns about people only from `/kanban` messages, the people they mention, and
+  the people who press cards; a principal it has never seen is refused.
+- An approval forwarded to a chat counts toward the run's `max_runtime_s`: a supervised agent
+  waiting on one is cancelled at that limit like any run.
+- A person may review their own work: nothing refuses a reviewer who is the assignee.
+- A person's name, in a notice or a card, is the one Lark last gave with their ids, and can be
+  out of date.
+
+Before setting `kanban.enabled: true` on a live tenant, run the smoke test at the end of
+docs/plans/2026-11-05-plan-d2-kanban-people.md. It is the section "Before turning the board on:
+a smoke test against Lark".
 
 ## Repo layout
 

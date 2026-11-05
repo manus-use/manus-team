@@ -1550,13 +1550,14 @@ people (§12).
 - **The people's commands.** `/kanban done <id> [summary]` and `/kanban approve <id> [comment]` may
   say nothing more; `/kanban block <id> <reason>` and `/kanban changes <id> <reason>` need a reason.
   `/kanban review <id> [summary]` names its reviewer on a line `reviewer: <role or @person>`,
-  anywhere in it, as `/kanban new`'s fields are, rather than as a last word, which could be the
+  anywhere in it, as `/kanban new`'s fields are, after any spaces, tabs or zero-width characters, rather than as a last word, which could be the
   summary's; without one the task's reviewer is used, and a task with none is refused.
 - **Who, and when.** `done`, `block` and `review` are the task's assignee's, a person, while the
   task is `open`; `approve` and `changes` are its reviewer's, a person, or any operator's — for a
   role's review too — while it is in `review`. The phase is checked because the board's `complete`
   takes either, and an assignee completing their own task in review would decide the reviewer's
-  run. Who is named is read from the task as it stands when the command arrives.
+  run. Who is named is read from the task as it stands when the command arrives, and checked again
+  inside the board's transaction (§9.2), after any gates have run.
 - **Steering.** A comment steers when its author is an operator, or the task's assignee or reviewer,
   a person (§7.5).
 - **A gate's refusal** is shown with the gate, how it ended, and the end of its output, masked and
@@ -1613,7 +1614,8 @@ card is redrawn with the outcome once acted on, so its buttons stop working.
   the commands the person can type instead; the card is not tried again, and the run stays open.
   Every other refusal — a missing scope, a plain 400 — and every failure that never reached Lark is
   taken for the gateway's, tried again after a pause doubling from 2 s to five minutes, for as long as
-  it lasts. A card sent whose record then fails is not sent again until a restart.
+  it lasts. A card sent whose record then fails is not sent again until a restart. A run that ends
+  while a round is under way is sent no card.
 - **The nonce** is bound to the task and the run — for an Unblock, the event that blocked the task —
   and not to the boot, as a person's run parks across restarts. Who may press: Done and Block, the
   run's assignee at talk tier; Approve and Request changes, the review run's reviewer at talk tier,
@@ -1621,11 +1623,18 @@ card is redrawn with the outcome once acted on, so its buttons stop working.
   shows — and catches a pointer mixed or mangled; who pressed, and the board's re-check, protect a
   press. A press for a run that is no longer the task's open one is refused inside the transaction,
   says the card is out of date, and redraws it so. A report typed instead leaves the card live, until
-  it is next pressed, and is made on the open run as it was checked, so a reassignment while its
-  gates run refuses it too.
+  it is next pressed. It is bound to what was checked: the task's open run as it was then, or none,
+  and what the person reports as — the task's assignee, its reviewer, or an operator answering a
+  review. The board checks both again in its transaction, after the gates: a run opened or ended
+  since, a task now someone else's or no longer open, or a review now someone else's or no longer
+  waiting refuses it, `run_superseded`, so a reassignment while its gates run never lets the former
+  assignee or reviewer decide the task. A card's press is bound the same way, to its run. Only a
+  person's run has a card: a press on one for an agent's run is refused.
 - **A press is answered at once, and shown only on its card.** Lark waits about three seconds for a
   callback's answer, and the SDK answers only once the handler returns, so the card is redrawn as
-  being worked on, the report is made in the background, and the card is redrawn with the outcome.
+  being worked on, the report is made in the background, at once, never waiting for that redraw,
+  and the card is redrawn with the outcome once the first redraw has settled or been given up on, so
+  the outcome is always drawn after it. A redraw that fails, even at once, never stops the report.
   A board card's press posts nothing in the chat; a press the card cannot show — someone else's, an
   Unblock's — is only logged; an approval's press is acknowledged in the chat after the callback is
   answered. A second press of a card while one is worked on is refused without a redraw. Every
@@ -1635,8 +1644,8 @@ card is redrawn with the outcome once acted on, so its buttons stop working.
   presser and the button's value — for twelve hours, whatever the box held. So a press refused for
   what it carried — an empty box, a gate, a busy workspace — redraws the card live, saying why, with
   buttons named for the next attempt, which the SDK's key holds whole, and whose value starts with
-  it, outside the nonce. A press by the wrong person changes nothing; a refused report whose run
-  ended meanwhile redraws the card as out of date.
+  it, outside the nonce; the card says "Not done." once, above why. A press by the wrong person
+  changes nothing; a refused report whose run ended meanwhile redraws the card as out of date.
 - **The one line** is the notice of a person's `claimed` event, which records the assignee's kind:
   "📋 *title* — assigned to *name*", or "review assigned to". It goes to every subscription of the
   task, as any notice does: a subscription does not record whether its chat is a group.
@@ -1645,7 +1654,8 @@ card is redrawn with the outcome once acted on, so its buttons stop working.
   carries the round's other notices; a second press finds the block lifted and does nothing, which
   is noted in the log.
   The same operator's second press of one Unblock is dropped by the SDK, as above; `/kanban unblock`
-  still works. An Unblock's event must be a block of its task.
+  still works. An Unblock's event must be a block of its task: a `blocked` or `stopped` event, or a
+  `run_ended` whose task blocked there, not one it was retried after.
 - **Approval cards** are built in Lark's card schema 2.0, their buttons in the body with callback
   behaviors, as a board card's are; the router reads the button's value the same way for a card
   posted before.
@@ -1690,6 +1700,7 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   archive. A block's notice tells how to unblock, unless the block has recurred
   `kanban.block_recurrence_limit` times (§5.4) — counted as the event recorded it (`blocked`,
   `stopped` and `run_ended` carry `blockRecurrences`), not as the task stands when the notice goes.
+  A stop's notice names who stopped it: a person by the name Lark last gave, else as recorded.
   From plan D2, a person's claim is one too — the one line of §9.2 — and so is a card Lark refused.
 - **Delivery is a projection from the cursors, a batch per conversation.** A round reads every
   subscription of this bot with an event past its cursor, groups them by conversation — a chat, or a

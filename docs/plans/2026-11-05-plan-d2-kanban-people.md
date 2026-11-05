@@ -77,7 +77,7 @@ Each is the reading most consistent with the rest of the spec. *The user's decis
 26. **A person's run parks.** Nothing new is needed: the dispatcher already never times out, nudges or ends a person's run, at a sweep or a restart. A test now shows a person's run claimed beside an agent's in the same workspace, outside `max_running`, and still open past the runtime limit.
 27. **Named by the task as it stands.** Whether a comment steers, and who may report or answer, are read from the task when the command arrives; a card's buttons, from the run the card was sent for.
 28. **A press is answered at once, and shown only on its card.** Lark waits about three seconds for a callback's answer, and the SDK's websocket client answers only once the handler returns (node-sdk `lib/index.js`, the `ws` message handler awaiting `eventDispatcher.invoke`, which awaits the card handler through the SDK's per-chat queue). So `KanbanChat.card` checks the nonce, the presser and the box, redraws the card as "Working on it…", answers, and makes the report in the background — tracked, waited for by `idle()` at shutdown under the drain's bound, its gates aborted by `stop()` first, so nothing is applied, its errors masked and logged — then redraws the card with the outcome. Every redraw is bounded by `REDRAW_MS`, 10 s, and logged when it is late, as the SDK's card update has no timeout of its own; the redraws a press makes before its answer — an empty box, an out-of-date card — go in the background too, so none holds Lark's three seconds, and an ended run is told out of date before a press already being worked on is considered. *The user's decision:* a board card's press posts nothing in the chat; the card alone shows it. The router notes the board's answer, masked, for a press the card cannot show — someone else's, a mangled payload, an Unblock's — and an approval's press is acknowledged in the chat as before, its message sent after the handler returns, unawaited, and tracked for the shutdown's drain. A second press of a card while one is worked on is refused without a redraw, so neither redraws over the other.
-29. **A typed report is made on the run it was checked against.** `/kanban done`, `block`, `review`, `approve` and `changes` pass the task's open run, as read when the report is checked, as `Reporter.runId`, so a reassignment while the report's gates run refuses it inside the transaction (`run_superseded`) rather than let it decide another run, or complete a task now someone else's.
+29. **A typed report is bound to what it was checked against.** `/kanban done`, `block`, `review`, `approve` and `changes` pass the task's open run, as read when the report is checked, as `Reporter.runId` — `null` when none was open, meaning "expects none open" — and what the person reports as, `Reporter.as`: `assignee` for `done`, `block` and `review`; `reviewer` for `approve` and `changes` by the task's reviewer, else `operator`. A card's press passes its run and the same `as`. Inside the transaction, after the gates, the board refuses with `run_superseded` a report whose run is no longer the open one (a run opened since a `null` binding among them), an assignee's on a task now someone else's or no longer open, a reviewer's on a review now someone else's, and a reviewer's or operator's on a task no longer in review. So a reassignment while the report's gates run never lets it decide another run, or complete a task now someone else's — with no run claimed too. A person `Reporter` with neither field, as the board's own tests make, is checked as before.
 30. **Every uuid is one message's.** With the uuid reaching Lark, which sends one message per uuid for an hour across receivers, a uuid shared by two messages loses one: a boot finding's message is keyed on the binding and the boot (`findingUuid`), a click's acknowledgement on the callback's token and the box's text, and an approval card on its approval rather than the millisecond. Every other uuid was already one message's: a control reply's is the message and its purpose, a notice batch's its (subscription, event) pairs, a card's its run.
 31. **The approval card in schema 2.0.** Its buttons go in the body with callback behaviors, as a board card's do, instead of a 1.0 `action` container with a `value` on each button. The router reads `action.value` either way, which the SDK takes from the callback, for a card posted before this as for one after.
 32. **A send that never reached Lark is retried.** Through the SDK's client, a network failure is an error with no response; it is made retryable, as the SDK's own send retried it, and the uuid makes a retry that did land one message.
@@ -7739,7 +7739,7 @@ git commit -m "End to end: a person's task reaches them as a card and their Done
 **Files:**
 - Modify: `README.md`
 
-People on the board: naming a person by @-mention and the talk tier it needs, how the gateway learns a person's ids, the cards and their buttons, the typed commands, the one line the group hears, Unblock, a card Lark refuses, the `workspace_busy` refusal, supervised roles, and notices sent again after a stop shown once.
+People on the board: naming a person by @-mention and the talk tier it needs, how the gateway learns a person's ids, the cards and their buttons, the typed commands, the one line the group hears, Unblock, a card Lark refuses, the `workspace_busy` refusal, supervised roles, notices sent again after a stop shown once, the known limitations, and the smoke test to run before turning the board on; and `kanban.enabled`'s row naming people's cards and approval forwarding.
 
 - [ ] **Step 14.1: Edit.**
 
@@ -7838,7 +7838,7 @@ with:
 ```md
 **People.** Name a person with an @-mention — type @ and pick them, so Lark sends who they
 are — as `assignee:` or `reviewer:`, or in `/kanban assign`. Being named lets a person report on
-the task, so they must have talk tier (`auth.talk`); a person the bot answers nobody for is
+the task, so they must have talk tier (`auth.talk`); a person without talk tier is
 refused. The board knows a person as `lark:<union_id>`, which is how `/kanban show` lists them
 and how an agent's `mt kanban create` or `review` names one; the gateway learns each person's
 ids as they use `/kanban`, are mentioned in it, or press a card's button, and refuses a
@@ -7861,6 +7861,37 @@ another task's agent is working in the same workspace, if the task has gates to 
 
 A role whose agent is supervised may be given tasks too: its approval cards go to the chat that
 follows the task, naming it, and are answered there at operator tier, as in a chat session.
+
+**Known limitations.**
+
+- A typed report (`/kanban done` and the rest) leaves its card's buttons live, until the next
+  press shows the card as out of date.
+- A notice's **Unblock** button stays after it is pressed; a second press does nothing.
+- A card that Lark refuses as unreachable is never sent again; the person can type the
+  commands the chat was given.
+- The gateway learns about people only from `/kanban` messages, the people they mention, and
+  the people who press cards; a principal it has never seen is refused.
+- An approval forwarded to a chat counts toward the run's `max_runtime_s`: a supervised agent
+  waiting on one is cancelled at that limit like any run.
+- A person may review their own work: nothing refuses a reviewer who is the assignee.
+- A person's name, in a notice or a card, is the one Lark last gave with their ids, and can be
+  out of date.
+
+Before setting `kanban.enabled: true` on a live tenant, run the smoke test at the end of
+docs/plans/2026-11-05-plan-d2-kanban-people.md. It is the section "Before turning the board on:
+a smoke test against Lark".
+```
+
+In `README.md`, replace:
+
+```md
+| `kanban.enabled` | — | Run the board: its dispatcher, the worker socket, `/kanban` in chat and its notices. Default
+```
+
+with:
+
+```md
+| `kanban.enabled` | — | Run the board: its dispatcher, the worker socket, `/kanban` in chat and its notices, people's cards, and forwarding supervised roles' approvals to the chat that follows a task. Default
 ```
 
 
@@ -7877,7 +7908,7 @@ git commit -m "Document people on the board: naming them by @-mention, their car
 
 ## Done when
 
-- `npm test` gives `Tests  1309 passed (1309)`. `npm run test:e2e` gives `Tests  74 passed (74)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree.
+- `npm test` gives `Tests  1322 passed (1322)`, after the review follow-ups below (1309 at Task 14). `npm run test:e2e` gives `Tests  74 passed (74)`. `npm run typecheck` reports no errors. All of these run under Node 22, in the worktree.
 - Only `src/db/kanban.ts` writes a `kanban_` table, and only `src/kanban/service.ts` imports it (the guard in `tests/kanban-service.test.ts`); only `src/db/people.ts` writes `people`. `src/kanban/chat.ts`, `src/kanban/cards.ts`, `src/kanban/sink.ts` and `src/kanban/notices.ts` write nothing themselves.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing, and no reply, notice, card or help text says "D2", "plan" or "a later update".
 - A task given to a person by @-mention reaches them as a card in a direct message, by union_id; their Done, pressed as the callback's operator, completes it, and the thread it came from hears who had it and that it is done (`tests/kanban-people.e2e.ts`).
@@ -7888,6 +7919,32 @@ git commit -m "Document people on the board: naming them by @-mention, their car
 - A supervised agent's approval card reaches the chat that follows its task, and its answer releases the agent (`tests/kanban-sink.test.ts`).
 - Every message sent as one message carries its uuid to Lark (`tests/lark-cards.test.ts`); a person's card is sent once, again after a restart only if it was not recorded, with the same uuid, and a refused one is reported to the task's subscribers (`tests/kanban-cards.test.ts`).
 - With `kanban.enabled` unset, the gateway builds no service, dispatcher, socket, chat commands, notifier or card poster.
+- A typed report is bound to the run open when it was checked, or to none, and to what the person reports as; a task reassigned, or a review given to someone else, while its gates run is refused `run_superseded`, with no run claimed too (`tests/kanban-chat.test.ts`, `tests/kanban-people-reports.test.ts`).
+- The README's "People" section ends with its known limitations and the smoke test to run before turning the board on.
+
+## Review follow-ups
+
+The review of the finished plan found the following, fixed after Task 14, each behaviour test first. The task steps above show the code as first written; the code and tests in the tree are the corrected ones.
+
+- **An unbound typed report could decide a reassigned task** (I1). With no run open, `#reporter` in `src/kanban/chat.ts` gave no `runId`, and the board accepted the report on no run without checking the assignee again: Alice's `done` on an unclaimed task with gates, the task given to a role while they ran, ended `done`, assigned to the role. `Reporter` now carries `runId: string | null` — `null` meaning "expects none open" — and `as`, `assignee`, `reviewer` or `operator`; `reportingRun` in `src/db/kanban.ts` refuses `run_superseded` when the open run is not the one bound, and `namedRefused` when the task is no longer the assignee's and open, or no longer in review and, for a reviewer, theirs. Typed `done`, `block`, `review`, `approve` and `changes`, and a card's press, all pass both. Tests: a typed `done` with no run claimed, the task reassigned while its gates run; a typed `approve` of a review not yet claimed, its reviewer changed while they run (`tests/kanban-chat.test.ts`); the board's refusals of each binding, an operator answering any review, and a `null` binding with a run open (`tests/kanban-people-reports.test.ts`). Decision 29 says so. A claim cannot happen while a report's gates run (`report_in_progress`), so a run opened under a `null` binding is tested at the board only.
+- **The README's "People" section** (I2) ends with a "Known limitations" list — a typed report leaving its card live, Unblock staying, a card refused as unreachable never resent, how the gateway learns of people, a forwarded approval counting toward `max_runtime_s`, self-review, a name out of date — and says to run the smoke test at the end of this plan before setting `kanban.enabled: true` on a live tenant. Task 14 shows it.
+- **The `kanban.enabled` row** lists people's cards and forwarding supervised roles' approvals. "A person the bot answers nobody for" is now "a person without talk tier".
+- **"Not done" twice.** A refusal redrawn on a card read "**Not done.** Not done: …"; `cardNote` drops the refusal's own prefix and capitalizes what follows. Test: the gate refusal's redraw.
+- **A redraw that throws at once** rejected the press before its report. `#redraw` calls the redraw through `Promise.resolve().then(...)`, so a throw is a failed redraw, noted. Test: a redraw that throws synchronously; the press is applied.
+- **A press on a card for a run that is not a person's** is refused, "That button is not for a person's card.", before anything else is checked: an operator may answer any review, and without it an operator's Approve on a role's review run reached the board. Test: a role's work run, and an operator on a role's review run.
+- **"Working on it…" held the report back** until it was drawn, up to `REDRAW_MS`. The redraw is now started, the report applied at once, and the outcome redrawn once the first redraw has settled or been given up on, so it is always drawn after it. Test: a working redraw that never answers; the report is applied at once, the outcome drawn after it. The hung-redraw test now holds a gate and stops the task meanwhile, since the press no longer waits for the redraw.
+- **An indented `reviewer:` line** is read: spaces, tabs and zero-width characters may come before `reviewer`. Test (`tests/kanban-chat-parse.test.ts`).
+- **The forwarded map's bound** (`FORWARDED_MAX`, now exported): a test sends one past it and finds the oldest forgotten and the rest redrawn (`tests/kanban-sink.test.ts`).
+- **A comment said "From plan D2"** in `renderNotice`; it now says "For people".
+- **A card for a run that ended mid-round.** `CardPoster.#render` returns nothing for a run ended since the round read it, so no card is sent; `#refused` says "its run is over, or its card was recorded already, so nobody is told" when `recordCard` recorded nothing. Tests (`tests/kanban-cards.test.ts`).
+- **The stop notice** names a person who stopped the task by `nameOf`, escaped, else the actor as recorded. Test (`tests/kanban-chat-render.test.ts`).
+- **`#acknowledge`** in `src/channel/lark/inbound.ts` catches a note that throws, so the acknowledgement never rejects unhandled. Test: a send and a note that both throw (`tests/lark-inbound.test.ts`).
+- **The shutdown's messages** say that work still in flight when the drain's bound runs out has its write dropped: a notice's cursor not moved, a card not recorded, a press's and the dispatcher's writes.
+- **`#withRetry`'s doc** says a retry of a one-message send is deduplicated by its uuid, and only a long text is not. **The withdrawn fallback's doc** says the SDK keys its fallback on its own codes (230017, 230020 and HTTP 404), and this code on 230011, Lark's documented code for a withdrawn message. Not done: falling back on HTTP 404 too, which nothing here has seen Lark send for a withdrawn message.
+- **An Unblock's event** may be a `run_ended` only when its `payload.next` was `blocked`, not one the task was retried after. Test: a retried run's end refused `invalid` as a stopped task's Unblock, and a run's end that gave up accepted (`tests/kanban-people-reports.test.ts`).
+- **Docs.** Spec §9.1 (the indented reviewer line, who is named checked again), §9.2 (a typed report's binding, a press on an agent's run, the outcome after "Working on it…", "Not done." once, an Unblock's `run_ended`, a run ended mid-round) and §9.4 (the stop notice's name) say what the code does. This section is placed before the smoke test, which the README sends readers to the end of the plan for.
+
+Counts after the review follow-ups: `Tests  1322 passed (1322)` unit, `Tests  74 passed (74)` end to end.
 
 ## Before turning the board on: a smoke test against Lark
 
