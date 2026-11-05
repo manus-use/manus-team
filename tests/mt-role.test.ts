@@ -14,7 +14,7 @@ import {
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { versionBelow } from '../src/cli/role.js';
+import { parseAgentVersion, versionBelow } from '../src/cli/role.js';
 import { loadTeamSettings } from '../src/config.js';
 import { loadRoleDir } from '../src/roles.js';
 import { loadTeam } from '../src/team.js';
@@ -527,6 +527,28 @@ describe('mt role check', () => {
       false,
       false,
     ]);
+  });
+
+  it("reads bytesec's own version over any other, from stdout and then stderr", () => {
+    expect(parseAgentVersion('bytesec 0.7.4\n', '')).toBe('0.7.4');
+    expect(parseAgentVersion('ByteSec version v0.8.1 (built with go 1.22.3)\n', '')).toBe('0.8.1');
+    // Another version first, such as the runtime's: bytesec's is still the one taken.
+    expect(parseAgentVersion('go1.22.3 runtime 1.22.3\nbytesec 0.7.4\n', '')).toBe('0.7.4');
+    expect(parseAgentVersion('runtime 1.22.3\n', 'bytesec 0.7.4\n')).toBe('0.7.4');
+    // No bytesec named: the first version anywhere, stdout before stderr.
+    expect(parseAgentVersion('0.7.2\n', '0.9.0\n')).toBe('0.7.2');
+    expect(parseAgentVersion('', 'v0.7.3\n')).toBe('0.7.3');
+    expect(parseAgentVersion('v22.15.0\n', '')).toBe('22.15.0');
+    // Not a version: a part of a longer word, or only two parts.
+    expect(parseAgentVersion('build abc1.2.3\n', '')).toBeUndefined();
+    expect(parseAgentVersion('bytesec 0.7\n', '')).toBeUndefined();
+    expect(parseAgentVersion('', '')).toBeUndefined();
+    // A pre-release keeps its suffix, so it is not taken for the release.
+    expect(parseAgentVersion('bytesec 0.7.4-rc1\n', '')).toBe('0.7.4-rc1');
+  });
+
+  it('counts a pre-release as older than its release', () => {
+    expect([versionBelow('0.7.4-rc1', '0.7.4'), versionBelow('0.7.5-rc1', '0.7.4'), versionBelow('0.7.3-rc1', '0.7.4')]).toEqual([true, false, true]);
   });
 
   it('says nothing about rendering when the check fails', async () => {

@@ -461,23 +461,60 @@ function resumeVersions(roles: readonly Role[], io: MtIo): void {
   }
 }
 
-/** The first `x.y.z` that `<command> --version` prints, or undefined when it cannot be run or prints none. */
+/**
+ * The version `<command> --version` prints, or undefined when it cannot be run or
+ * prints none. Killed outright past 10 s: a `--version` that hangs has no state to save.
+ */
 export function readAgentVersion(command: string, env: Env): string | undefined {
-  const r = spawnSync(command, ['--version'], { encoding: 'utf8', env, timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = spawnSync(command, ['--version'], {
+    encoding: 'utf8',
+    env,
+    timeout: 10_000,
+    killSignal: 'SIGKILL',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   if (r.error !== undefined || r.status !== 0) return undefined;
-  return /\d+\.\d+\.\d+/.exec(r.stdout)?.[0];
+  return parseAgentVersion(r.stdout, r.stderr);
 }
 
-/** Whether `x.y.z` is older than `min`, comparing each part as a number. */
+/** `x.y.z`, with a pre-release suffix when it has one: `0.7.4-rc1`. */
+const VERSION = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?`;
+/** The version after the word bytesec, as bytesec prints its own. */
+const BYTESEC_VERSION = new RegExp(String.raw`\bbytesec\b\D*(${VERSION})`, 'i');
+/** Any version standing on its own, `v` before it or not; not the tail of a longer word, such as `go1.22.3`. */
+const ANY_VERSION = new RegExp(String.raw`(?<![\w.])v?(${VERSION})\b`);
+
+/**
+ * The version in what `--version` printed: the one after "bytesec" when it names
+ * itself, else the first standing on its own; stdout read before stderr.
+ */
+export function parseAgentVersion(stdout: string, stderr: string): string | undefined {
+  const text = `${stdout}\n${stderr}`;
+  return BYTESEC_VERSION.exec(text)?.[1] ?? ANY_VERSION.exec(text)?.[1];
+}
+
+/**
+ * Whether `x.y.z` is older than `min`, comparing each part as a number. A
+ * pre-release is older than its release, as semver has it: `0.7.4-rc1` is below
+ * 0.7.4, since the measurements were of 0.7.4 itself.
+ */
 export function versionBelow(version: string, min: string): boolean {
-  const a = version.split('.').map(Number);
-  const b = min.split('.').map(Number);
+  const [core = '', pre] = splitPre(version);
+  const [minCore = '', minPre] = splitPre(min);
+  const a = core.split('.').map(Number);
+  const b = minCore.split('.').map(Number);
   for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
     const x = a[i] ?? 0;
     const y = b[i] ?? 0;
     if (x !== y) return x < y;
   }
-  return false;
+  if (pre === undefined) return false;
+  return minPre === undefined || pre < minPre;
+}
+
+function splitPre(version: string): [string, string | undefined] {
+  const i = version.indexOf('-');
+  return i === -1 ? [version, undefined] : [version.slice(0, i), version.slice(i + 1)];
 }
 
 function report(what: string, problems: readonly string[], io: MtIo): void {
