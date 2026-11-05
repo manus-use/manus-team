@@ -7,6 +7,7 @@ import type { CardView, Channel } from '../src/channel/types.js';
 import { SessionRegistry } from '../src/core/registry.js';
 import { Router } from '../src/core/router.js';
 import { NamedWorkspaces } from '../src/core/workspace.js';
+import { getApproval } from '../src/db/approvals.js';
 import { getTask, runsOf } from '../src/db/kanban-read.js';
 import { createCliDriver } from '../src/driver/cli/driver.js';
 import type { Driver } from '../src/driver/types.js';
@@ -26,7 +27,7 @@ import type { InboundMention, InboundMessage, Principal } from '../src/types.js'
 import { FakeChannel } from './helpers/channel.js';
 import { FakeDriver } from './helpers/driver.js';
 import { testDb, type TestDb } from './helpers/db.js';
-import { role } from './helpers/dispatch.js';
+import { role, until } from './helpers/dispatch.js';
 
 /**
  * People on the board, end to end (spec §9.2, §11): a task given to a person by
@@ -35,7 +36,9 @@ import { role } from './helpers/dispatch.js';
  * the thread hears who had it and that it is done. And a person reviewing an
  * agent's work -- the fake CLI agent, a real process reporting through `mt
  * kanban` and the real socket -- is sent the review card, asks for changes, which
- * the agent's rework run revises, and approves the second review.
+ * the agent's rework run revises, and approves the second review. And an
+ * operator's press on a supervised agent's approval card, forwarded to the
+ * task's thread, goes through the router and answers the agent.
  */
 
 const AGENT = fileURLToPath(new URL('./fakes/cli-agent.mjs', import.meta.url));
@@ -57,6 +60,8 @@ interface Stack {
   server: WorkerServer;
   registry: SessionRegistry;
   dir: string;
+  /** The driver of the `watched` role: a supervised agent, whose approvals are forwarded. */
+  watched: FakeDriver;
 }
 
 let stack: Stack | undefined;
@@ -90,11 +95,17 @@ async function build(mode: string): Promise<Stack> {
     appId: 'cli_app',
     canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
   });
-  const roles = new Map([['implementer', role('implementer')]]);
+  const watchedRole = role('watched');
+  const roles = new Map([
+    ['implementer', role('implementer')],
+    ['watched', { ...watchedRole, agent: { ...watchedRole.agent, unsupervised: false } }],
+  ]);
+  const watched = new FakeDriver();
   const service = new KanbanService({ db: t.db, roles, workspaces: new Set(['default']), people, supervisedRoles: true });
   const lark = new FakeChannel({ id: 'lark' });
   const drivers = new Map<string, Driver>([
     ['default', new FakeDriver()],
+    ['watched', watched],
     [
       'implementer',
       createCliDriver({
@@ -165,6 +176,7 @@ async function build(mode: string): Promise<Stack> {
     server,
     registry,
     dir,
+    watched,
   };
   return stack;
 }
@@ -338,5 +350,45 @@ describe('people on the board, end to end', () => {
       // Approved with nothing more to say.
       `Done — ${name}.`,
     ]);
+  });
+
+  it("an operator's press on a supervised agent's forwarded approval card, through the router, answers the agent", async () => {
+    const s = await build('kanban');
+    let answer: unknown;
+    s.watched.scripts.push(async (ctl) => {
+      answer = await ctl.ask('delete old.log', [
+        { optionId: 'allow', name: 'Allow' },
+        { optionId: 'deny', name: 'Deny' },
+      ]);
+      ctl.end('completed');
+    });
+    await s.router.onMessage(said('/kanban new Rotate the logs\nassignee: watched'));
+    const taskId = createdIn(s.lark);
+    // Not waiting for the dispatcher: the run is waited on until the agent is answered.
+    await until(() => s.lark.approvalCards.length > 0, 'the approval card');
+    const [card] = s.lark.approvalCards;
+    if (card === undefined) throw new Error('no approval card');
+    // Forwarded to the thread the task was made in, naming the task.
+    expect(card.target).toEqual({ chatId: 'oc_team', threadId: 'omt_topic' });
+    expect(card.spec.action).toBe(`Task ${taskId}, Rotate the logs, asks: delete old.log`);
+    const posted = getApproval(s.t.db, card.spec.approvalId)?.cardMessageId ?? '';
+    expect(posted).toMatch(/^om_approval_/);
+    const press = (who: Principal) =>
+      s.router.onCardAction({
+        chatId: 'oc_team',
+        messageId: posted,
+        operator: who,
+        value: { kind: 'approval', approvalId: card.spec.approvalId, optionId: 'allow', nonce: card.spec.nonce },
+      });
+    // Alice may talk to the bot, not answer an approval: nothing is answered.
+    expect(await press(ALICE)).toBe('That command changes session state and needs operator permission.');
+    expect(answer).toBeUndefined();
+    expect(getApproval(s.t.db, card.spec.approvalId)?.state).toBe('pending');
+    expect(await press(OWNER)).toBe('Sent: Allow.');
+    await until(() => answer !== undefined, "the agent's answer");
+    expect(answer).toEqual({ kind: 'selected', optionId: 'allow' });
+    expect(getApproval(s.t.db, card.spec.approvalId)).toMatchObject({ optionId: 'allow', resolvedVia: 'lark' });
+    await until(() => s.lark.approvalUpdates.length > 0, 'the card redrawn');
+    expect(s.lark.approvalUpdates.map((u) => u.messageId)).toEqual([posted]);
   });
 });

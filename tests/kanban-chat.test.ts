@@ -12,7 +12,7 @@ import { Authorizer, defaultAuthConfig } from '../src/policy/auth.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import type { BindingKey, InboundMention, InboundMessage, Principal } from '../src/types.js';
 import { ManualClock, testDb, type TestDb } from './helpers/db.js';
-import { DEFAULT_ROLES, role } from './helpers/dispatch.js';
+import { DEFAULT_ROLES, role, until } from './helpers/dispatch.js';
 import { WORKSPACES } from './helpers/kanban.js';
 
 /**
@@ -542,8 +542,8 @@ describe("a person's card", () => {
     );
     const { run } = await aliceTask();
     await hung.card(doneAction(run, 'all links answer'));
-    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
     // Applied long before the hung redraw is given up on.
+    await until(() => getRun(t.db, run.runId)?.outcome === 'completed', 'the press to be applied');
     expect(getRun(t.db, run.runId)).toMatchObject({ outcome: 'completed', summary: 'all links answer' });
     expect(order).toEqual(['working']);
     expect(await hung.idle(5_000)).toBe(true);
