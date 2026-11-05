@@ -747,7 +747,8 @@ with one small model and trivial prompts, in a scratch directory:
   answers: the id and a newline, mode `0600`. It is written for a turn that succeeds, one that fails
   (`finish: "error"`, exit 1) and one killed by `SIGTERM` mid-tool — and, for a run given
   `--session <id>`, with *that* id even when bytesec then refuses it. So the file alone is not
-  evidence that the session was continued; the driver trusts it only from a run that was not refused.
+  evidence that the session was continued; the driver reads it only from a run not given
+  `--session`, and takes a resumed run's session from its events.
 - **`--session <id>` continues the conversation**, and the file then holds the same id: the run
   recalled a word given only to the earlier run. A killed run's session is kept and continues too:
   it recalled the killed run's prompt. Every typed `--format json` event carries `session_id`; the
