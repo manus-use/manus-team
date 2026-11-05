@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { readAgentVersion } from '../src/cli/role.js';
 import { createCliDriver, resolveExecutable } from '../src/driver/cli/driver.js';
 import type { AgentRuntime, DriverEvent, PromptInput, StartResult } from '../src/driver/types.js';
 
@@ -168,6 +169,12 @@ describe('CLI driver: establishing a session', () => {
     // first prompt looks like the agent breaking, and breaking mid-turn is what
     // quarantines a session.
     await expect(driver.start({ cwd: tmpdir() })).rejects.toThrow(/not an executable file/);
+  });
+
+  it("reads an agent's version from its --version, and nothing from a command that cannot run", () => {
+    // `mt role check` asks bytesec this way (plan E); node answers `v22.…`.
+    expect(readAgentVersion(process.execPath, process.env)).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(readAgentVersion('/nonexistent/agent-binary', process.env)).toBeUndefined();
   });
 
   it('finds a bare command on PATH, and says so when it cannot', () => {

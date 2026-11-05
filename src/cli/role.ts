@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   cpSync,
@@ -21,6 +22,7 @@ import {
   type Env,
 } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
+import { RESUME_MIN_VERSION } from '../driver/cli/driver.js';
 import { isReservedRoleName, nameProblem } from '../names.js';
 import { nativeFor } from '../render/native.js';
 import { discoverRoles, gatewayOwnsVariable, type Role } from '../roles.js';
@@ -428,9 +430,54 @@ export function roleCheck(only: string | undefined, io: MtIo): number {
         : `native: role ${role.name} does not: ${native.reason}`,
     );
   }
+  resumeVersions(real.roles ?? [], io);
   for (const note of real.notes) io.out(`note: ${note}`);
   io.out("note: the environment was checked in this shell; the service's environment may differ");
   return files.length + environment.length === 0 ? 0 : 1;
+}
+
+/**
+ * A line for each bytesec role whose bytesec is older than `RESUME_MIN_VERSION`,
+ * the oldest measured to resume a session (plan E), or whose version cannot be
+ * read. A warning, not a failure: how an older bytesec takes the driver's flags
+ * was never measured, so it may work, or not. Each command is asked once.
+ */
+function resumeVersions(roles: readonly Role[], io: MtIo): void {
+  const ask = io.agentVersion ?? ((command: string) => readAgentVersion(command, io.env));
+  const versions = new Map<string, string | undefined>();
+  for (const role of roles) {
+    const { driver, command } = role.agent;
+    if (driver !== 'structured-cli' || basename(command) !== 'bytesec') continue;
+    if (!versions.has(command)) versions.set(command, ask(command));
+    const version = versions.get(command);
+    if (version === undefined) {
+      io.out(`note: role ${role.name}: ${command} --version gave no version; native resume needs bytesec ${RESUME_MIN_VERSION} or later`);
+    } else if (versionBelow(version, RESUME_MIN_VERSION)) {
+      io.out(
+        `warning: role ${role.name} runs bytesec ${version}, older than ${RESUME_MIN_VERSION}, the oldest ` +
+          'measured to resume a session; with it, native resume is unmeasured and its turns may not work',
+      );
+    }
+  }
+}
+
+/** The first `x.y.z` that `<command> --version` prints, or undefined when it cannot be run or prints none. */
+export function readAgentVersion(command: string, env: Env): string | undefined {
+  const r = spawnSync(command, ['--version'], { encoding: 'utf8', env, timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (r.error !== undefined || r.status !== 0) return undefined;
+  return /\d+\.\d+\.\d+/.exec(r.stdout)?.[0];
+}
+
+/** Whether `x.y.z` is older than `min`, comparing each part as a number. */
+export function versionBelow(version: string, min: string): boolean {
+  const a = version.split('.').map(Number);
+  const b = min.split('.').map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x < y;
+  }
+  return false;
 }
 
 function report(what: string, problems: readonly string[], io: MtIo): void {

@@ -82,6 +82,9 @@ const STDERR_TAIL_BYTES = 8192;
 /** How long a finished turn waits for the tail of stderr. See `drain`. */
 const STDERR_DRAIN_MS = 100;
 
+/** The oldest bytesec whose `--session` continues a conversation (architecture §6.3). */
+export const RESUME_MIN_VERSION = '0.7.4';
+
 /**
  * The last line of stderr when bytesec 0.7.4 will not continue a session: an id
  * its store does not hold, or one made as another agent. Both exit 1 before the

@@ -14,6 +14,7 @@ import {
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
+import { versionBelow } from '../src/cli/role.js';
 import { loadTeamSettings } from '../src/config.js';
 import { loadRoleDir } from '../src/roles.js';
 import { loadTeam } from '../src/team.js';
@@ -489,6 +490,42 @@ describe('mt role check', () => {
     const one = await fx.run(['role', 'check', 'implementer']);
     expect(one.out.split('\n').filter((l) => l.startsWith('native: '))).toEqual([
       'native: role implementer runs as a bytesec agent package',
+    ]);
+  });
+
+  it('warns of a bytesec role whose bytesec cannot resume a session, asking each command once', async () => {
+    fx = mtFixture();
+    roleDir('implementer', 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n');
+    const asked: string[] = [];
+    const r = await fx.run(['role', 'check'], { agentVersion: (command) => (asked.push(command), '0.7.2') });
+    // A warning, not a failure: an older bytesec was never measured, and may work or not.
+    expect(r.code).toBe(0);
+    expect(asked).toEqual(['bytesec']);
+    expect(r.out.split('\n').filter((l) => l.startsWith('warning: '))).toEqual([
+      'warning: role default runs bytesec 0.7.2, older than 0.7.4, the oldest measured to resume a session; with it, native resume is unmeasured and its turns may not work',
+      'warning: role implementer runs bytesec 0.7.2, older than 0.7.4, the oldest measured to resume a session; with it, native resume is unmeasured and its turns may not work',
+    ]);
+  });
+
+  it('notes a bytesec whose version cannot be read, and asks no other agent', async () => {
+    fx = mtFixture();
+    roleDir('reviewer', ACP_AGENT);
+    const asked: string[] = [];
+    const r = await fx.run(['role', 'check'], { agentVersion: (command) => (asked.push(command), undefined) });
+    expect(r.code).toBe(0);
+    expect(asked).toEqual(['bytesec']);
+    expect(r.out).toMatch(/^note: role default: bytesec --version gave no version; native resume needs bytesec 0\.7\.4 or later$/m);
+  });
+
+  it('says nothing of a bytesec that resumes, comparing versions part by part', async () => {
+    fx = mtFixture();
+    const r = await fx.run(['role', 'check'], { agentVersion: () => '0.10.0' });
+    expect(r.out).not.toMatch(/resume/);
+    expect([versionBelow('0.7.2', '0.7.4'), versionBelow('0.7.4', '0.7.4'), versionBelow('0.10.0', '0.7.4'), versionBelow('1.0', '0.7.4')]).toEqual([
+      true,
+      false,
+      false,
+      false,
     ]);
   });
 
