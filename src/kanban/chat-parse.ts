@@ -23,9 +23,24 @@ export const LIST_FILTERS: readonly (DisplayStatus | 'all')[] = [
   'all',
 ];
 
-/** The commands for people's own tasks, which arrive with people in plan D2. */
-export const LATER_VERBS = ['done', 'block', 'review', 'approve', 'changes'] as const;
-export type LaterVerb = (typeof LATER_VERBS)[number];
+/**
+ * A person's report on their own task (spec §9.1): `done` and `block` by its
+ * assignee, `approve` and `changes` by its reviewer or an operator. The text is
+ * the summary, the reason, or an approval's optional comment.
+ */
+export interface ReportCommand {
+  verb: 'done' | 'block' | 'approve' | 'changes';
+  taskId: string;
+  text: string;
+}
+
+/** `/kanban review`: the assignee asks for same-task review (spec §5.3), naming a reviewer on a `reviewer:` line, or not. */
+export interface ReviewCommand {
+  verb: 'review';
+  taskId: string;
+  summary: string;
+  reviewer?: string;
+}
 
 export interface NewTaskCommand {
   verb: 'new';
@@ -53,7 +68,8 @@ export type KanbanCommand =
   | { verb: 'gate add'; taskId: string; command: string; timeoutS: number | undefined }
   | { verb: 'gate list'; taskId: string }
   | { verb: 'gate remove'; taskId: string; gateId: number }
-  | { verb: 'later'; name: LaterVerb };
+  | ReportCommand
+  | ReviewCommand;
 
 export type ParsedKanban = { ok: true; command: KanbanCommand } | { ok: false; usage: string };
 
@@ -62,7 +78,7 @@ export const USAGE = {
   new: '/kanban new <title>, then lines assignee:, reviewer:, workspace:, parent:, outcome:, verify:, constraints:, boundaries:, stop when:, and the body',
   list: `/kanban list [${LIST_FILTERS.join('|')}]`,
   show: '/kanban show <task>',
-  assign: '/kanban assign <task> <role>',
+  assign: '/kanban assign <task> <role or @person>',
   link: '/kanban link <parent> <child>',
   workspace: '/kanban workspace <task> <workspace>',
   comment: '/kanban comment <task> <text>',
@@ -72,6 +88,11 @@ export const USAGE = {
   'gate add': '/kanban gate add <task> [--timeout <seconds>] <command>',
   'gate list': '/kanban gate list <task>',
   'gate remove': '/kanban gate remove <task> <gate>',
+  done: '/kanban done <task> [summary]',
+  block: '/kanban block <task> <reason>',
+  review: '/kanban review <task> [summary], and a line reviewer: <role or @person> unless the task names one',
+  approve: '/kanban approve <task> [comment]',
+  changes: '/kanban changes <task> <reason>',
 } as const;
 
 /**
@@ -103,6 +124,9 @@ const FIELD_LINE = new RegExp(
 
 /** Zero-width characters at the start of a line, after any indent. */
 const LEADING_ZW = new RegExp(`^([ \\t]*)[${ZW}]+`, 'gm');
+
+/** `/kanban review`'s reviewer line: its label at the start of a line, in any case, as `/kanban new`'s fields are. */
+const REVIEWER_LINE = new RegExp(`^reviewer[ \\t${ZW}]*:[ \\t${ZW}]*(.*)$`, 'i');
 
 /**
  * A name that is a person, not a role: an @-mention, which Lark's text gives as
@@ -201,12 +225,50 @@ export function parseKanban(arg: string): ParsedKanban {
     }
     case 'gate':
       return parseGate(rest);
-    default: {
-      const later = LATER_VERBS.find((v) => v === verb);
-      if (later !== undefined) return { ok: true, command: { verb: 'later', name: later } };
-      return { ok: false, usage: `Unknown \`/kanban\` command \`${echoed(rawVerb, 80)}\`. \`/kanban help\` lists them.` };
+    case 'done':
+    case 'approve': {
+      // A person finishing, or approving, may say nothing more.
+      const [taskId, text] = shift(rest);
+      if (taskId === '') return usage(verb);
+      return { ok: true, command: { verb, taskId, text: text.trim() } };
     }
+    case 'block':
+    case 'changes': {
+      // A block, and changes, need a reason someone can act on.
+      const [taskId, text] = shift(rest);
+      if (taskId === '' || text.trim() === '') return usage(verb);
+      return { ok: true, command: { verb, taskId, text: text.trim() } };
+    }
+    case 'review':
+      return parseReview(rest);
+    default:
+      return { ok: false, usage: `Unknown \`/kanban\` command \`${echoed(rawVerb, 80)}\`. \`/kanban help\` lists them.` };
   }
+}
+
+/**
+ * `/kanban review <task>`, then the summary; a `reviewer:` line anywhere in it
+ * names the reviewer, as on `/kanban new`, since a name at the end of free text
+ * could be the summary's last word. Given once, with a value.
+ */
+function parseReview(text: string): ParsedKanban {
+  const [taskId, rest] = shift(text);
+  if (taskId === '') return usage('review');
+  let reviewer: string | undefined;
+  const lines: string[] = [];
+  for (const line of rest.split('\n')) {
+    const m = REVIEWER_LINE.exec(line);
+    if (m === null) {
+      lines.push(line);
+      continue;
+    }
+    const value = (m[1] ?? '').trim();
+    if (value === '') return { ok: false, usage: '`reviewer:` needs a value.' };
+    if (reviewer !== undefined) return { ok: false, usage: '`reviewer:` is given twice.' };
+    reviewer = value;
+  }
+  const summary = lines.join('\n').trim();
+  return { ok: true, command: { verb: 'review', taskId, summary, ...(reviewer === undefined ? {} : { reviewer }) } };
 }
 
 function parseGate(text: string): ParsedKanban {

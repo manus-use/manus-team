@@ -1,6 +1,6 @@
 import { forDisplay } from '../channel/escape.js';
 import type { BindingKey, InboundMessage, Principal, Tier } from '../types.js';
-import { isPerson, parseKanban, type KanbanCommand, type LaterVerb, type NewTaskCommand } from './chat-parse.js';
+import { isPerson, parseKanban, type KanbanCommand, type NewTaskCommand } from './chat-parse.js';
 import { label, renderGates, renderHelp, renderList, renderShow } from './chat-render.js';
 import type { KanbanService } from './service.js';
 import type { Refusal, RunRow } from './types.js';
@@ -48,7 +48,11 @@ const TIERS: Readonly<Record<KanbanCommand['verb'], Tier>> = {
   'gate add': 'operate',
   'gate list': 'talk',
   'gate remove': 'operate',
-  later: 'talk',
+  done: 'talk',
+  block: 'talk',
+  review: 'talk',
+  approve: 'talk',
+  changes: 'talk',
 };
 
 /** The board's principal for a chat sender: `lark:<union_id>`, or undefined when Lark gave none. */
@@ -59,7 +63,7 @@ export function principalOf(sender: Principal): string | undefined {
 const PEOPLE_LATER =
   'Assigning a task to a person, or naming one as its reviewer, arrives in a later update. For now a task is given to a role: name it as a bare word, such as `implementer`.';
 
-function later(name: LaterVerb): string {
+function later(name: 'done' | 'block' | 'review' | 'approve' | 'changes'): string {
   return (
     `\`/kanban ${name}\` is for a person's own task, and arrives in a later update, with people as assignees and reviewers. ` +
     'For now tasks go to roles, whose agents report for themselves.'
@@ -121,8 +125,12 @@ export class KanbanChat {
     switch (command.verb) {
       case 'help':
         return renderHelp();
-      case 'later':
-        return later(command.name);
+      case 'done':
+      case 'block':
+      case 'review':
+      case 'approve':
+      case 'changes':
+        return later(command.verb);
       case 'list':
         return renderList(this.#deps.service.list(), command.filter);
       case 'show': {
