@@ -62,6 +62,31 @@ Create a custom app, then:
    **long connection** — no public URL, no request signing to get wrong.
 3. Add the bot to a chat, or message it directly.
 
+### Sending to Lark
+
+Every message the gateway sends as one message — a reply or a notice of up to 4,000
+characters, an approval card, a board card — goes through the SDK's own client with a uuid, and
+Lark shows one message for any number of sends with the same uuid within an hour. This reaches every chat, with the board
+on or off, and differs from the SDK's own send in three ways everyone sees:
+
+- Replies and notices no longer go through the SDK's markdown tidying (headings demoted, blank
+  lines compressed); they are sent as written.
+- Texts over 4,000 characters, and streamed answers, still go out the SDK's way, without the
+  uuid: a retry of one can still post a second copy.
+- The fallback from a post to plain text is narrower than the SDK's: only a post Lark refuses
+  as invalid content (230001) goes as text. A reply to a message that is gone — Lark's 230011
+  or 230017, or an HTTP 404 — goes to its chat, as the SDK's does; 230020 is retried as the
+  chat's rate limit instead.
+
+**Before deploying this build at all (kanban off).** Run these steps of the smoke test at the
+end of docs/plans/2026-11-05-plan-d2-kanban-people.md against the live tenant first, with
+`kanban.enabled` off, and deploy only once they pass:
+
+- the chat-session half of step 1: an approval card in a chat session, pressed and redrawn;
+- step 8: one message per uuid, at chat scope and in a thread;
+- step 11: a reply to a withdrawn message arrives in its chat;
+- a `/help` reply in a direct message, in a group, and in a thread.
+
 ### Configuration
 
 Settings live in a YAML file; credentials live in the environment. Start from
@@ -406,9 +431,13 @@ empty box, a failing gate — redraws the card, saying why, ready to be pressed 
 `approve` and `changes` do the same from any chat with the bot. A person's task never times out:
 it waits for them, across restarts. The chat the task came from hears one line — "📋 *title* —
 assigned to *name*", the name in plain text, never a mention — and its notices as usual; a
-notice of a block carries an **Unblock** button for an operator. A card Lark refuses to deliver
-is reported to the chat instead, with the commands to use. A person's report is refused while
-another task's agent is working in the same workspace, if the task has gates to run there.
+notice of a block carries an **Unblock** button for an operator. Only a card that cannot reach
+its person — Lark answering that they are outside the app's availability (230013), or the person
+having lost talk tier — is reported to the chat instead, with the commands to use. Any other
+failure to send a card, a refusal of Lark's included, is taken for the gateway's: the card is
+tried again, after a pause that doubles to five minutes, and the log says why each time. A
+person's report is refused while another task's agent is working in the same workspace, if the
+task has gates to run there.
 
 A role whose agent is supervised may be given tasks too: its approval cards go to the chat that
 follows the task, naming it, and are answered there at operator tier, as in a chat session.
@@ -420,6 +449,9 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
 - A notice's **Unblock** button stays after it is pressed; a second press does nothing.
 - A card that Lark refuses as unreachable is never sent again; the person can type the
   commands the chat was given.
+- If a card's "Not done" redraw fails, the card's buttons may stay dead for 12 hours: Lark's
+  SDK drops a second press of the same button for that long. The typed commands
+  (`/kanban done` and the rest) still work.
 - The gateway learns about people only from `/kanban` messages, the people they mention, and
   the people who press cards; a principal it has never seen is refused.
 - An approval forwarded to a chat counts toward the run's `max_runtime_s`: a supervised agent
@@ -428,9 +460,10 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
 - A person's name, in a notice or a card, is the one Lark last gave with their ids, and can be
   out of date.
 
-Before setting `kanban.enabled: true` on a live tenant, run the smoke test at the end of
-docs/plans/2026-11-05-plan-d2-kanban-people.md. It is the section "Before turning the board on:
-a smoke test against Lark".
+Before setting `kanban.enabled: true` on a live tenant, run the rest of the smoke test at the
+end of docs/plans/2026-11-05-plan-d2-kanban-people.md, after the steps that must pass before
+deploying this build at all (see "Sending to Lark" above). It is the section "Before turning
+the board on: a smoke test against Lark".
 
 ## Repo layout
 
