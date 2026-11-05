@@ -20,6 +20,7 @@ import { Dispatcher } from './kanban/dispatcher.js';
 import { Notifier } from './kanban/notices.js';
 import { KanbanService } from './kanban/service.js';
 import { writeMtShim } from './kanban/shim.js';
+import { PeopleDirectory } from './kanban/people.js';
 import { KanbanSink } from './kanban/sink.js';
 import { claimSocketPath, listenWorker, lockGateway, workerSocketPath, type GatewayLock, type WorkerServer } from './kanban/socket.js';
 import { WorkerApi } from './kanban/worker.js';
@@ -214,10 +215,19 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     });
     // A worker's create, link or report can make a task claimable.
     worker = { api: new WorkerApi({ db, service, changed: () => dispatcher?.pass() }), socket };
+    // Who the gateway has seen in Lark: how a person named by principal is checked for talk tier (spec §4.2).
+    const people = new PeopleDirectory({
+      db,
+      appId: config.lark.appId,
+      canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
+    });
     // /kanban in chat (spec §9.1): through the same service, with the router's tiers.
     kanbanChat = new KanbanChat({
       service,
       hasTier: (principal, tier) => authorizer.hasTier(principal, tier),
+      people,
+      appId: config.lark.appId,
+      redraw: (messageId, view) => adapter.updateCard(messageId, view),
       changed: () => dispatcher?.pass(),
       cancel: (runId) => {
         dispatcher?.cancel(runId);

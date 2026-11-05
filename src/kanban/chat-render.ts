@@ -7,7 +7,7 @@ import { stripControl } from '../text.js';
 import { LIST_FILTERS, USAGE } from './chat-parse.js';
 import { describeReported } from './commit.js';
 import type { DisplayStatus } from './status.js';
-import type { Assignee, GateRow, KanbanEvent, RunRow, TaskRow } from './types.js';
+import type { Assignee, FailedGate, GateRow, KanbanEvent, RunRow, TaskRow } from './types.js';
 
 /**
  * What `/kanban` says in chat (spec §9.3), and the notices a subscription hears
@@ -210,6 +210,22 @@ export function renderGates(taskId: string, gates: readonly GateRow[]): string {
 }
 
 /**
+ * A person's report refused by a gate (spec §7.7): the gate, how it ended, and
+ * the end of its output, masked whole before it is cut, as a run's output is.
+ */
+export function renderGateFailure(gate: FailedGate): string {
+  const how = gate.timedOut
+    ? 'ran past its timeout'
+    : gate.exitCode !== null
+      ? `exited ${gate.exitCode}`
+      : gate.signal === null
+        ? 'could not start'
+        : `was ended by ${forDisplay(gate.signal)}`;
+  const head = `Not done: the gate ${label(gate.command, 300)} ${how}, so the report was not applied. Fix it, then report again.`;
+  return gate.output.trim() === '' ? head : `${head}\nIts output:\n${tail(gate.output, 1500)}`;
+}
+
+/**
  * The outcomes a retry follows that are failures to tell a subscriber of (spec
  * §9.4). Not `interrupted`: a run the gateway's restart ended is retried quietly,
  * as the task did nothing wrong.
@@ -348,11 +364,31 @@ export interface CardFacts {
   /** For a review run: the handoff under review, with what its report recorded of the workspace (spec §7.8). */
   handoff?: ReviewRequest;
   nameOf?: NameOf;
+  /**
+   * How many times the card has been redrawn live after a press it refused --
+   * an empty box, a gate. Its buttons carry it, so a press of the redrawn card is
+   * not the press before it: the SDK drops a press it has seen, by the card, the
+   * presser and the button's value, for twelve hours, whatever the box held.
+   */
+  attempt?: number;
+  /** Why the last press did nothing, shown under the title, already escaped. */
+  note?: string;
 }
 
-/** The buttons' value: a pointer, with the nonce that binds it to the task and the run (spec §9.2). */
-function act(appId: string, run: RunRow, name: string): Readonly<Record<string, string>> {
-  return { kind: 'kanban', act: name, task: run.taskId, run: run.runId, nonce: boardCardNonce(appId, run.taskId, run.runId) };
+/**
+ * The buttons' value: a pointer, with the nonce that binds it to the task and the
+ * run (spec §9.2). The attempt goes first: the SDK keys a press on the value's
+ * first 128 characters. It is not under the nonce, and needs no checking.
+ */
+function act(appId: string, run: RunRow, name: string, attempt: number | undefined): Readonly<Record<string, string>> {
+  return {
+    ...(attempt === undefined || attempt === 0 ? {} : { try: String(attempt) }),
+    kind: 'kanban',
+    act: name,
+    task: run.taskId,
+    run: run.runId,
+    nonce: boardCardNonce(appId, run.taskId, run.runId),
+  };
 }
 
 /** The task's own text, as a card shows it: the body, then the contract. */
@@ -375,6 +411,7 @@ function taskText(task: TaskRow, bodyMax: number): string[] {
 export function renderTaskCard(f: CardFacts, appId: string): CardView {
   const { task, run } = f;
   const out = [`📋 **${label(task.title)}** ${id(task.taskId)} — for you to do`];
+  if (f.note !== undefined) out.push(f.note);
   if (f.changes !== undefined) {
     out.push(`**Changes asked** by ${label(f.nameOf?.(f.changes.actor) ?? f.changes.actor, 80)}:`, block(f.changes.reason, 1200));
   }
@@ -392,10 +429,15 @@ export function renderTaskCard(f: CardFacts, appId: string): CardView {
       `In any chat with the bot, \`/kanban done ${task.taskId} [summary]\` and \`/kanban block ${task.taskId} <reason>\` do the same.`,
   );
   const buttons: CardButton[] = [
-    { label: 'Done', style: 'primary', value: act(appId, run, 'done') },
-    { label: 'Block', style: 'danger', value: act(appId, run, 'block') },
+    { label: 'Done', style: 'primary', value: act(appId, run, 'done', f.attempt) },
+    { label: 'Block', style: 'danger', value: act(appId, run, 'block', f.attempt) },
   ];
-  return { markdown: out.join('\n'), input: { placeholder: 'A summary, or why it is blocked' }, buttons };
+  return {
+    markdown: out.join('\n'),
+    input: { placeholder: 'A summary, or why it is blocked' },
+    buttons,
+    ...(f.attempt === undefined || f.attempt === 0 ? {} : { attempt: f.attempt }),
+  };
 }
 
 /**
@@ -406,6 +448,7 @@ export function renderTaskCard(f: CardFacts, appId: string): CardView {
 export function renderReviewCard(f: CardFacts, appId: string): CardView {
   const { task, run } = f;
   const out = [`🔎 **${label(task.title)}** ${id(task.taskId)} — for you to review`];
+  if (f.note !== undefined) out.push(f.note);
   const h = f.handoff;
   if (h !== undefined) {
     // A run's report is its agent's; a person's, by name.
@@ -420,10 +463,15 @@ export function renderReviewCard(f: CardFacts, appId: string): CardView {
       `In any chat with the bot, \`/kanban approve ${task.taskId}\` and \`/kanban changes ${task.taskId} <reason>\` do the same.`,
   );
   const buttons: CardButton[] = [
-    { label: 'Approve', style: 'primary', value: act(appId, run, 'approve') },
-    { label: 'Request changes', style: 'danger', value: act(appId, run, 'changes') },
+    { label: 'Approve', style: 'primary', value: act(appId, run, 'approve', f.attempt) },
+    { label: 'Request changes', style: 'danger', value: act(appId, run, 'changes', f.attempt) },
   ];
-  return { markdown: out.join('\n'), input: { placeholder: 'What needs changing' }, buttons };
+  return {
+    markdown: out.join('\n'),
+    input: { placeholder: 'What needs changing' },
+    buttons,
+    ...(f.attempt === undefined || f.attempt === 0 ? {} : { attempt: f.attempt }),
+  };
 }
 
 /**
