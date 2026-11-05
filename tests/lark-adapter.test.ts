@@ -102,6 +102,33 @@ describe('LarkAdapter.sendText', () => {
     ]);
   });
 
+  it("sends a reply to its chat on the SDK's codes for a gone message too, 230017 and HTTP 404, but retries 230020 as the rate limit it is", async () => {
+    const thread = { chatId: 'oc_team', threadId: 'omt_gone' };
+    const where = (calls: Call[]) => calls.map((c) => [c.kind, c.payload.path?.message_id ?? c.payload.data.receive_id]);
+    for (const err of [refused(230017), refused(230099, 404), Object.assign(new Error('Request failed with status code 404'), { response: { status: 404, data: {}, headers: {} } })]) {
+      const gone = adapter([err]);
+      expect((await gone.a.sendText(thread, 'hi', 'u-9')).messageId).toBe('om_1');
+      expect(where(gone.calls)).toEqual([
+        ['reply', 'omt_gone'],
+        ['create', 'oc_team'],
+      ]);
+      expect(gone.calls.map((c) => c.payload.data.uuid)).toEqual(['u-9', 'u-9']);
+    }
+    const limited = adapter([refused(230020)]);
+    await limited.a.sendText(thread, 'hi', 'u-10');
+    expect(where(limited.calls)).toEqual([
+      ['reply', 'omt_gone'],
+      ['reply', 'omt_gone'],
+    ]);
+    expect(limited.waits).toHaveLength(1);
+    const card = adapter([refused(230017)]);
+    await card.a.sendApprovalCard(thread, { approvalId: 'a_1', action: 'rm x', options: [{ optionId: 'allow', name: 'Allow' }], nonce: 'n' }, 'u-11');
+    expect(where(card.calls)).toEqual([
+      ['reply', 'omt_gone'],
+      ['create', 'oc_team'],
+    ]);
+  });
+
   it('sends a text whose card of buttons Lark refuses without them, unless the bot is not in the chat', async () => {
     const button = { label: 'Unblock k_1', style: 'primary' as const, value: { kind: 'kanban' } };
     const fallback = adapter([refused(200621)]);

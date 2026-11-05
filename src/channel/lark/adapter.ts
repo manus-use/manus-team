@@ -63,11 +63,20 @@ const TEXT_BUDGET = 12_000;
  */
 export const ONE_MESSAGE = 4_000;
 /**
- * Lark's documented code for a message that was withdrawn: a reply to it goes to
- * its chat instead. The SDK's own send falls back the same way, keyed on its own
- * codes (230017, 230020 and HTTP 404); this one is Lark's for a withdrawn message.
+ * The codes on which a reply's message is taken as gone, so the reply goes to
+ * its chat instead: Lark's documented code for a withdrawn message (230011),
+ * and 230017, which the SDK's own send also falls back on, as it does on an
+ * HTTP 404 (see `#post`).
+ *
+ * 230020 is deliberately not here, though the SDK falls back on it too. Lark
+ * documents 230020 as the chat's rate limit, and `RETRYABLE_CODES` retries it
+ * as one. The two readings cannot both win; the retry does, because it is the
+ * safe one: a reply retried with its uuid is at worst late, while one moved to
+ * the chat on a rate limit loses its thread and hits the same limit again.
  */
-const WITHDRAWN = 230011;
+const WITHDRAWN_CODES: ReadonlySet<number> = new Set([230011, 230017]);
+/** The HTTP status on which the SDK's own send takes a reply's message as gone. */
+const NOT_FOUND_STATUS = 404;
 /** Lark's code for content it will not take: a post refused so goes as plain text, as the SDK's own send does. */
 const INVALID_CONTENT = 230001;
 
@@ -182,17 +191,22 @@ export class LarkAdapter implements Channel {
 
   /**
    * One message, sent through the SDK's client with its uuid. A reply whose
-   * message was withdrawn (`WITHDRAWN`, Lark's code for it) goes to the chat
-   * instead: the fallback the SDK's own send makes, on its own codes.
+   * message is gone -- refused with one of `WITHDRAWN_CODES`, or with an HTTP
+   * 404 -- goes to the chat instead, with the same uuid: the fallback the SDK's
+   * own send makes, less 230020, which is retried as a rate limit instead.
    */
   async #post(target: SendTarget, msgType: 'post' | 'text' | 'interactive', content: object, uuid: string): Promise<SendResult> {
     const im = this.#lark.rawClient.im.v1.message;
+    // The errors Lark answered with an HTTP 404, whatever their body's code.
+    const notFound = new WeakSet<ChannelError>();
     const send = async (req: MessageRequest): Promise<SendResult> => {
       let r: { code?: number | undefined; msg?: string | undefined; data?: { message_id?: string | undefined } | undefined };
       try {
         r = req.kind === 'create' ? await im.create({ params: req.params, data: req.data }) : await im.reply({ path: req.path, data: req.data });
       } catch (err) {
-        throw sendError(err);
+        const e = sendError(err);
+        if (httpStatus(err) === NOT_FOUND_STATUS) notFound.add(e);
+        throw e;
       }
       if (typeof r.code === 'number' && r.code !== 0) throw toChannelError(r);
       const messageId = r.data?.message_id;
@@ -203,7 +217,8 @@ export class LarkAdapter implements Channel {
     try {
       return await send(req);
     } catch (err) {
-      if (req.kind !== 'reply' || !(err instanceof ChannelError) || err.code !== WITHDRAWN) throw err;
+      const gone = err instanceof ChannelError && !err.retryable && (WITHDRAWN_CODES.has(err.code) || notFound.has(err));
+      if (req.kind !== 'reply' || !gone) throw err;
       return send(messageRequest({ chatId: target.chatId, threadId: '' }, msgType, content, uuid));
     }
   }
@@ -455,6 +470,13 @@ export function approvalOutcomeCard(view: ApprovalOutcomeView): object {
       ],
     },
   };
+}
+
+/** The HTTP status of an error axios threw, if Lark answered at all. */
+function httpStatus(err: unknown): number | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const status = (err as { response?: { status?: unknown } }).response?.status;
+  return typeof status === 'number' ? status : undefined;
 }
 
 /**

@@ -203,5 +203,9 @@ export const CARD_GONE_CODES: ReadonlySet<number> = new Set([
  * `230049` is the interesting one: it means a send with the same uuid is already
  * in flight. The correct response is to retry with the **same** uuid so the two
  * converge on one message -- minting a fresh uuid would turn one message into two.
+ *
+ * `230020` is the chat's rate limit. The SDK's own send reads it as a gone
+ * message instead and moves a reply to its chat; the Lark adapter does not, and
+ * retries it here (see `WITHDRAWN_CODES` there).
  */
 export const RETRYABLE_CODES: ReadonlySet<number> = new Set([230049, 230020, 99991400]);
