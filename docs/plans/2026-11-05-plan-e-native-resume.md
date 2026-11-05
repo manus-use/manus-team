@@ -86,6 +86,7 @@ Each has a recommendation and its reason. *The user's decision* marks those the 
 - **A context-free turn on an agent that ignores `--session`.** On a 0.7.2-style agent, which answers `--session` with a new session, a new runtime — after a restart or an idle eviction — starts from the stored id and sends its first turn without the transcript, so that one turn is answered with neither the conversation nor a transcript; it is then reported `fresh` with the reason, and the runtime replays from the next turn on (Decision 5).
 - **Below bytesec 0.7.4 is unmeasured** and may not work: `mt role check` warns, and does not refuse (Decision 13).
 - **A gateway that dies mid-turn leaves its `mt-session-id-…` directory** under the system's temporary directory; it holds only the id.
+- **A gateway killed mid-turn can leave the agent's process running.** The session's next turn then resumes the same provider session while that process may still be writing to it; before native resume, the next turn started a new provider session. The orphan most likely ends at its next write to the closed pipe (EPIPE); not measured.
 - **`seeded_from_run` stays set when the agent refuses a rework's seed** (Decision 10), accepted by the user.
 - **Status texts said history "is replayed from the log"** for a suspended session (`src/core/status.ts`, and a restart's finding in `src/core/registry.ts`); for a session with a provider id it is resumed instead. Fixed in the review follow-ups: they now say the session resumes where it can, else replays; the `/status` line says which the last turn did.
 - **Provider sessions accumulate in the agent's store**; nothing deletes them, by the user's decision (Decision 8).
@@ -3118,10 +3119,11 @@ git commit -m "Document native resume as built, on bytesec 0.7.4 or later: the C
 For the user, once the plan is built and deployed; no test runs bytesec. Use a cheap model.
 
 0. `bytesec --version` prints 0.7.4 or later, and `mt role check` prints no `warning:` about resume.
-1. In a chat, send "Remember the word PELICAN. Reply OK.", then `/status`: it ends with `provider session \`ses_…\`: the last turn started it`.
+0b. The upgrade: in a chat that existed before the deploy, send anything, then `/status`: it ends with "the last turn replayed the conversation into it" (its old `cli:` id is never passed back). Send another message, then `/status`: "the last turn resumed it", with the same `ses_…` id.
+1. In a chat, send `/new` first, then "Remember the word PELICAN. Reply OK.", then `/status`: it ends with `provider session \`ses_…\`: the last turn started it`.
 2. Send "What word did I ask you to remember?" It answers PELICAN, and `/status` says the last turn resumed it, with the same id.
 3. `/new`, then send anything, then `/status`: a different provider id, and "the last turn started it".
-4. If convenient, with the board on: a task whose agent stops once without reporting is nudged, and its run's session log has a `provider_session_observed` for the nudge's turn with `"mode": "resumed"` and the first turn's id (`SELECT json(payload) FROM events WHERE session_id = '<the run's session>' AND type = 'provider_session_observed'`); or a rework after Request changes has the work run's id there.
+4. If convenient, with the board on: a task whose agent stops once without reporting is nudged, and its run's session log has a `provider_session_observed` for the nudge's turn with `"mode": "resumed"` and the first turn's id (`sqlite3 ~/.manus-team/gateway.db "SELECT json(payload) FROM events WHERE session_id = '<the run''s session>' AND type = 'provider_session_observed'"`, or `$MT_DB` if set); or a rework after Request changes has the work run's id there.
 5. With a workspace that is a real git repository, during a turn: `ls -d "${TMPDIR:-/tmp}"/mt-session-id-*` shows the turn's directory, and `git status` in the workspace shows no new file; after the turn the directory is gone.
 
 ## Review follow-ups
@@ -3142,4 +3144,8 @@ Done after review, on top of Task 7 (`53768c9`), test first for each behaviour f
 | Status texts saying history "is replayed from the log" | They say the next message resumes the agent's own session where it can, else replays history from the log; their tests assert the text | `1f46288` |
 | Spec §5.3 `seeded_from_run` | Qualified: set when the claim seeds the run, and stays set when the agent refuses the seed | `1f46288` |
 | README `replayed` | Says `fresh` when there was no history to carry | `1f46288` |
-| `continuityLine` doc comment's stray line break | Removed | `9993503` |
+| `continuityLine` doc comment's stray line break | Removed (the first pass missed one; joined after the final review) | final review |
+| Final review: smoke test step 1 on a chat that predates the deploy says "replayed", not "started" | Step 1 starts with `/new`; a new step 0b checks the upgrade (first turn "replayed", next "resumed"); step 4 names the database | final review |
+| Final review: architecture said the driver reports "on every turn", and a refusal only `replayed` | "On every turn that names one"; "`replayed` (or `fresh`, when there was no history to carry)" | final review |
+| Final review: the slow refusal's SIGTERM handler was installed after the invocation line, so an early stop could kill the fake and weaken the cancel test | Installed at the top of the fake, before the invocation is logged; the wait is 1 s, well inside the 2 s grace | final review |
+| Final review: a gateway killed mid-turn can leave the agent running while the next turn resumes its session | Known limitation, here and in architecture §6.3 | final review |

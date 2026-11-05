@@ -239,7 +239,7 @@ not exist yet — until it does, tool output rides inside the update payload.
 two-phase start of §8, and without them a crash between spawn and record is exactly the invisible
 orphan §8.1 describes. `generation_bumped` is the only runtime-lifecycle event that exists.
 `provider_session_observed` is the `provider.session_observed` of §6.3, as plan E built it: the
-CLI driver reports, on every turn, the provider session id the agent wrote and whether the turn
+CLI driver reports, on every turn that names one, the provider session id the agent wrote and whether the turn
 `resumed` it, `replayed` the conversation into it, or started it `fresh`, and the actor stores the
 id in `sessions.provider_session_id` and logs the event. There is no `workspace.checkpoint`
 (milestone 9), no `file.changed`, no `terminal.output`, no `approval.parked` or
@@ -744,7 +744,7 @@ driver stored before it could resume, is never passed back. The id is kept after
 cancelled turn too: the provider's session holds what that turn did. When the agent refuses the id
 before the turn starts — exit 1, no JSON line on stdout, and `turn N: persistence: session not
 found` or `turn N: unknown agent: <name>` as the whole last line of stderr — the same turn is run again without `--session`, with the conversation as a fenced
-transcript, and reported `replayed`, with the reason — `resume: native → replay`, automatically,
+transcript, and reported `replayed` (or `fresh`, when there was no history to carry), with the reason — `resume: native → replay`, automatically,
 and safe because the refused run started nothing. An agent that answers `--session` with another
 session — its events name another — did not continue the conversation, as 0.7.2 did: that turn is
 reported `fresh`, with the reason, and the runtime replays from then on. `/status` shows the provider session the last turn
@@ -796,8 +796,10 @@ texts for a suspended session (`src/core/status.ts`) and for one a restart inter
 (`src/core/registry.ts`) say the next message resumes the agent's own session where it can, else
 replays history from the log: which one happens is known only once the turn runs, and the
 `/status` provider line then says which. A gateway that dies mid-turn leaves its
-`mt-session-id-*` directory under the system's temporary directory; it holds only the id. The
-gateway never deletes a provider session, so they accumulate in bytesec's store. Below 0.7.4 the
+`mt-session-id-*` directory under the system's temporary directory; it holds only the id. It
+can also leave the agent's process running, and the session's next turn then resumes the same
+provider session while that process may still be writing to it; the orphan most likely ends at its
+next write to the closed pipe, but this was not measured. The gateway never deletes a provider session, so they accumulate in bytesec's store. Below 0.7.4 the
 flags every turn passes were never measured: `mt role check` warns, and does not refuse.
 
 **A misconfiguration can be silent, because the failure text goes to stdout.** A bad argv makes

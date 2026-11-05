@@ -57,7 +57,7 @@
  *     so only the `session_id` on its events says which session it ran in;
  *   - `FAKE_CLI_REFUSAL` changes how a refusal looks: `noisy` prints a typed
  *     event nobody has a projection for before it, `trailing` writes another
- *     stderr line after it, and `slow` ignores SIGTERM and waits 1.5 s first --
+ *     stderr line after it, and `slow` ignores SIGTERM and waits 1 s first --
  *     inside the driver's 2 s grace before SIGKILL -- so a test can stop it and
  *     still see it exit 1 with the refusal, as a stop that loses the race would;
  *   - `FAKE_CLI_FIRST_ID` is the `session_id` of its first typed event, in place
@@ -90,6 +90,10 @@ function flag(name) {
 
 const asked = flag('--session');
 
+// Before the invocation is logged, so a stop the moment a test sees the
+// invocation is already ignored, and the refusal still comes, exit 1 and all.
+if (process.env['FAKE_CLI_REFUSAL'] === 'slow') process.on('SIGTERM', () => {});
+
 if (LOG !== undefined) {
   const apm = process.env['BYTESEC_LOCAL_APM_PATH'] ?? null;
   const run = process.env['MT_KANBAN_RUN'] ?? null;
@@ -102,9 +106,9 @@ let SESSION = 'ses_fake_cli';
 function refuse(line) {
   const how = process.env['FAKE_CLI_REFUSAL'];
   if (how === 'slow') {
-    // Ignored, so the refusal still arrives after a stop, exit 1 and all.
-    process.on('SIGTERM', () => {});
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+    // SIGTERM is ignored (see the top), so the refusal still arrives after a stop,
+    // well inside the driver's 2 s grace before SIGKILL.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
   }
   if (how === 'noisy') writeSync(1, `${JSON.stringify({ type: 'sentiment_delta', session_id: asked, mood: 'wary' })}\n`);
   writeSync(2, `${line}\n`);
