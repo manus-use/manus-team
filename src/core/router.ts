@@ -65,10 +65,12 @@ export interface InboundCardAction {
 
 /**
  * The board's chat commands (spec §9.1): what follows `/kanban`, run for the
- * message that typed it, answered as the reply to send. Plan D1's `KanbanChat`.
+ * message that typed it, answered as the reply to send; and a press of a board
+ * card's button (spec §9.2), answered the same way. `KanbanChat`.
  */
 export interface KanbanCommands {
   run(arg: string, message: InboundMessage, key: BindingKey): Promise<string>;
+  card(action: InboundCardAction): Promise<string>;
 }
 
 export interface RouterDeps {
@@ -489,14 +491,23 @@ export class Router {
   // -------------------------------------------------------------------------
 
   /**
-   * Handle a button click. Returns the toast text.
+   * Handle a button click. Returns the text to acknowledge it with in the chat,
+   * or undefined for a board card's, whose card shows the outcome itself (spec §9.2).
    *
    * Not deduplicated by message id, deliberately. `seen_messages` claims a
    * *delivery*; two clicks of the same button are two intents that legitimately
    * repeat. Idempotency comes from `resolveApproval`, which returns `already`
    * instead of overwriting the first answer.
    */
-  async onCardAction(action: InboundCardAction): Promise<string> {
+  async onCardAction(action: InboundCardAction): Promise<string | undefined> {
+    // The card's kind first (spec §9.2), then that kind's authorization: the board's
+    // rules for a board card, under which a named assignee at talk tier may press
+    // Done; operator tier for an approval. A card posted before cards said which
+    // they are is an approval's.
+    const kind = action.value['kind'];
+    if (kind === 'kanban') return this.#boardCard(action);
+    if (kind !== undefined && kind !== 'approval') return 'That button is not one this gateway knows.';
+
     const approvalId = stringField(action.value, 'approvalId');
     const optionId = stringField(action.value, 'optionId');
     const nonce = stringField(action.value, 'nonce');
@@ -526,6 +537,28 @@ export class Router {
       via: this.#deps.channelId,
     });
     return report.message;
+  }
+
+  /**
+   * A board card's button, for the board to authorize and act on. Nothing is
+   * posted in the chat: the card shows what happened -- "Working on it…", then the
+   * outcome, or why the press did nothing -- and the board's answer is noted,
+   * masked, for a press the card cannot show, such as someone else's.
+   */
+  async #boardCard(action: InboundCardAction): Promise<undefined> {
+    const kanban = this.#deps.kanban;
+    if (kanban === undefined) {
+      this.#note(`kanban card on ${action.messageId} pressed with the board off`);
+      return undefined;
+    }
+    try {
+      const answer = Array.from(redactKnownSecrets(await kanban.card(action)).replace(/\s+/g, ' ').trim()).slice(0, 300).join('');
+      this.#note(`kanban card on ${action.messageId}: ${answer}`);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.#note(`kanban card on ${action.messageId} failed: ${redactKnownSecrets(detail)}`);
+    }
+    return undefined;
   }
 
   // -------------------------------------------------------------------------

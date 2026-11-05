@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { cardInput, mentionsOf } from '../src/channel/lark/inbound.js';
+import type { CardActionEvent } from '@larksuiteoapi/node-sdk';
+import type { LarkAdapter } from '../src/channel/lark/adapter.js';
+import { LarkInbound, cardInput, clickUuid, mentionsOf } from '../src/channel/lark/inbound.js';
+import type { InboundCardAction, Router } from '../src/core/router.js';
 
 /**
  * What the Lark side reads from a raw event that the SDK's normalizer drops: the
@@ -49,5 +52,77 @@ describe('cardInput', () => {
     expect(cardInput({ action: { value: {} } })).toEqual({});
     expect(cardInput({ action: { form_value: { other: 'x' } } })).toEqual({});
     expect(cardInput(undefined)).toEqual({});
+  });
+});
+
+describe('clickUuid', () => {
+  const press = (token: string): CardActionEvent => ({
+    messageId: 'om_card',
+    chatId: 'oc_dm',
+    operator: { openId: 'ou_alice' },
+    action: { value: { kind: 'kanban', act: 'block' }, tag: 'button' },
+    raw: { token },
+  });
+
+  it("is the same for a re-delivered press, and differs for another press of the same button, or another box's text", () => {
+    expect(clickUuid('cli_app', press('t1'), 'x')).toBe(clickUuid('cli_app', press('t1'), 'x'));
+    expect(clickUuid('cli_app', press('t1'), 'x')).toHaveLength(50);
+    expect(clickUuid('cli_app', press('t2'), 'x')).not.toBe(clickUuid('cli_app', press('t1'), 'x'));
+    expect(clickUuid('cli_app', press('t1'), 'y')).not.toBe(clickUuid('cli_app', press('t1'), 'x'));
+    expect(clickUuid('cli_app', press('t1'), undefined)).not.toBe(clickUuid('cli_app', press('t1'), 'x'));
+  });
+});
+
+describe('LarkInbound, on a button press', () => {
+  /** An inbound side over stand-ins: the SDK's channel captures its handlers, and nothing reaches Lark. */
+  function inbound(answer: string | undefined): {
+    press: (evt: CardActionEvent) => Promise<void>;
+    sent: string[];
+    release: () => void;
+    inbound: LarkInbound;
+  } {
+    let handlers: { cardAction?: (evt: CardActionEvent) => Promise<void> } = {};
+    const sent: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const adapter = {
+      raw: { on: (h: typeof handlers) => ((handlers = h), () => undefined) },
+      botOpenId: 'ou_bot',
+      sendText: async (_target: unknown, text: string) => {
+        await held;
+        sent.push(text);
+        return { messageId: 'om_ack', deduped: false };
+      },
+    } as unknown as LarkAdapter;
+    const router = { onCardAction: async (_a: InboundCardAction) => answer } as unknown as Router;
+    const i = new LarkInbound({ adapter, router, config: { appId: 'cli_app', downloadDir: '/nonexistent' } });
+    i.start();
+    return { press: (evt) => handlers.cardAction?.(evt) ?? Promise.resolve(), sent, release, inbound: i };
+  }
+
+  const evt: CardActionEvent = {
+    messageId: 'om_card',
+    chatId: 'oc_team',
+    operator: { openId: 'ou_owner' },
+    action: { value: { kind: 'approval' }, tag: 'button' },
+  };
+
+  it("returns before an approval's acknowledgement is sent, and is idle once it is", async () => {
+    const i = inbound('Sent: Deny.');
+    // Returns although the send is held: the SDK answers Lark's callback only once this has.
+    await i.press(evt);
+    expect(i.sent).toEqual([]);
+    expect(await i.inbound.idle(20)).toBe(false);
+    i.release();
+    expect(await i.inbound.idle(1_000)).toBe(true);
+    expect(i.sent).toEqual(['Sent: Deny.']);
+  });
+
+  it("sends nothing for a board card's press", async () => {
+    const i = inbound(undefined);
+    i.release();
+    await i.press(evt);
+    expect(await i.inbound.idle(1_000)).toBe(true);
+    expect(i.sent).toEqual([]);
   });
 });
