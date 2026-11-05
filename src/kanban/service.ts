@@ -49,10 +49,11 @@ import {
  * agent's JSON -- has the right shape. db/kanban.ts checks the rest, and is the
  * only writer.
  *
- * Until plan D nothing can deliver a card to a person, so people cannot be
- * assigned or named as reviewers, and a role whose agent is supervised is
- * refused: its approval cards would have nowhere to go (spec §12). Plan D passes
- * `people` and `supervisedRoles` to turn them on. Who may act -- tiers, the
+ * Without `people`, nothing can deliver a card to a person, so people cannot be
+ * assigned or named as reviewers; without `supervisedRoles`, a role whose agent
+ * is supervised is refused, as its approval cards would have nowhere to go (spec
+ * §12). The gateway passes both from plan D2, which sends people their cards and
+ * forwards approvals to the chat following a task. Who may act -- tiers, the
  * named assignee -- is the caller's: the worker CLI's token (plan C3), chat (D).
  */
 
@@ -979,8 +980,13 @@ export class KanbanService {
         );
       }
       if (!this.#people.canTalk(name)) {
-        // Being assigned is permission to report on the task.
-        return board.refuse('person_not_assignable', `${quoted} does not have talk tier, so cannot be given work`);
+        // Being assigned is permission to report on the task (spec §4.2). A person is
+        // known by the open_id Lark last gave with their union_id, from chat.
+        return board.refuse(
+          'person_not_assignable',
+          `${quoted} cannot be given work: being assigned lets a person report on the task, which needs talk tier, ` +
+            'and this gateway does not know them to have it -- a person is known once they have used /kanban, or been @-mentioned in it',
+        );
       }
       return { ok: true, assignee: { kind: 'human', name } };
     }

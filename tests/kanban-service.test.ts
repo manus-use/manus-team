@@ -133,7 +133,9 @@ describe('KanbanService: who may be given work', () => {
     expect(withPeople.create(request({ assignee: 'lark:on_eve' }))).toEqual({
       ok: false,
       code: 'person_not_assignable',
-      message: '"lark:on_eve" does not have talk tier, so cannot be given work',
+      message:
+        '"lark:on_eve" cannot be given work: being assigned lets a person report on the task, which needs talk tier, ' +
+        'and this gateway does not know them to have it -- a person is known once they have used /kanban, or been @-mentioned in it',
     });
     expect(withPeople.create(request({ assignee: 'slack:U1' }))).toMatchObject({ ok: false, code: 'invalid' });
   });

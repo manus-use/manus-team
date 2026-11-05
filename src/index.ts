@@ -12,7 +12,8 @@ import { Authorizer } from './policy/auth.js';
 import { Router } from './core/router.js';
 import { DEFAULT_ROLE, DEFAULT_WORKSPACE, SessionRegistry, type BootFinding } from './core/registry.js';
 import { NamedWorkspaces } from './core/workspace.js';
-import { replyUuid } from './core/ids.js';
+import { BOOT_ID, replyUuid } from './core/ids.js';
+import type { BindingKey } from './types.js';
 import { systemClock } from './time.js';
 import { addSecrets, redactKnownSecrets } from './secrets.js';
 import { KanbanChat } from './kanban/chat.js';
@@ -20,6 +21,7 @@ import { Dispatcher } from './kanban/dispatcher.js';
 import { Notifier } from './kanban/notices.js';
 import { KanbanService } from './kanban/service.js';
 import { writeMtShim } from './kanban/shim.js';
+import { CardPoster } from './kanban/cards.js';
 import { PeopleDirectory } from './kanban/people.js';
 import { KanbanSink } from './kanban/sink.js';
 import { claimSocketPath, listenWorker, lockGateway, workerSocketPath, type GatewayLock, type WorkerServer } from './kanban/socket.js';
@@ -52,6 +54,10 @@ export interface Gateway {
   readonly dispatcher: Dispatcher | undefined;
   /** What delivers the board's notices to the chats that follow its tasks, when `kanban.enabled` is set. */
   readonly notifier: Notifier | undefined;
+  /** What sends people their task and review cards, when `kanban.enabled` is set. */
+  readonly cards: CardPoster | undefined;
+  /** `/kanban` and the board cards' buttons, when `kanban.enabled` is set. */
+  readonly chat: KanbanChat | undefined;
 }
 
 /**
@@ -64,6 +70,16 @@ export function findingsOn(channelId: string, findings: readonly BootFinding[]):
   return findings
     .map((f) => ({ ...f, bindings: f.bindings.filter((key) => key.channel === channelId) }))
     .filter((f) => f.bindings.length > 0);
+}
+
+/**
+ * The uuid of a boot finding's message to one binding. Lark sends one message
+ * per uuid for an hour, across receivers, so it is keyed on the binding, and on
+ * this boot: two chats bound to one session each hear it, and a second restart
+ * within the hour is said again.
+ */
+export function findingUuid(appId: string, sessionId: string, key: BindingKey, boot: string = BOOT_ID): string {
+  return replyUuid(appId, `boot:${boot}:${sessionId}`, `reconcile:${key.conversationId}:${key.threadId}`);
 }
 
 /**
@@ -165,10 +181,11 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   const registry = new SessionRegistry({
     db,
     drivers,
-    // A chat's session posts to Lark; a kanban run's into the sink (spec §2.4 item 4).
+    // A chat's session posts to Lark; a kanban run's into the sink (spec §2.4 item 4),
+    // which forwards a supervised agent's approval cards to the chat following its task (spec §7.1).
     channels: new Map<string, Channel>([
       [adapter.id, adapter],
-      ['kanban', new KanbanSink()],
+      ['kanban', new KanbanSink(undefined, { db, channels: new Map<string, Channel>([[adapter.id, adapter]]), appId: config.lark.appId })],
     ]),
     envFor: (sessionId) => dispatcher?.envFor(sessionId),
     argsFor: (sessionId) => dispatcher?.argsFor(sessionId),
@@ -184,15 +201,26 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   let worker: { api: WorkerApi; socket: string } | undefined;
   let kanbanChat: KanbanChat | undefined;
   let notifier: Notifier | undefined;
+  let cards: CardPoster | undefined;
   let workerServer: WorkerServer | undefined;
   let lock: GatewayLock | undefined;
   if (config.kanban.enabled) {
     const { failureLimit, transientLimit, transientCooldownS } = config.kanban;
+    // Who the gateway has seen in Lark: how a person named by principal is checked for talk tier (spec §4.2).
+    const people = new PeopleDirectory({
+      db,
+      appId: config.lark.appId,
+      canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
+    });
     const service = new KanbanService({
       db,
       roles: team.roles,
       workspaces: new Set(team.workspaces.keys()),
       limits: { failureLimit, transientLimit, transientCooldownS },
+      // People are given work, and sent cards for it (spec §9.2); a supervised role's
+      // approval cards go to the chat that follows its task (spec §7.1).
+      people,
+      supervisedRoles: true,
       // A report runs its task's gates in the workspace, and reads the commit there
       // (spec §7.7, §7.8). They get only what an agent gets of this environment.
       checks: { workspaceDirs: team.workspaces, env: process.env },
@@ -215,12 +243,6 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     });
     // A worker's create, link or report can make a task claimable.
     worker = { api: new WorkerApi({ db, service, changed: () => dispatcher?.pass() }), socket };
-    // Who the gateway has seen in Lark: how a person named by principal is checked for talk tier (spec §4.2).
-    const people = new PeopleDirectory({
-      db,
-      appId: config.lark.appId,
-      canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
-    });
     // /kanban in chat (spec §9.1): through the same service, with the router's tiers.
     kanbanChat = new KanbanChat({
       service,
@@ -228,6 +250,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       people,
       appId: config.lark.appId,
       redraw: (messageId, view) => adapter.updateCard(messageId, view),
+      note,
       changed: () => dispatcher?.pass(),
       cancel: (runId) => {
         dispatcher?.cancel(runId);
@@ -240,6 +263,17 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       channels: new Map<string, Channel>([[adapter.id, adapter]]),
       appId: config.lark.appId,
       blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
+      nameOf: (principal) => people.nameOf(principal),
+      note,
+    });
+    // A person's run is sent its card, as a direct message (spec §9.2).
+    cards = new CardPoster({
+      db,
+      service,
+      channel: adapter,
+      appId: config.lark.appId,
+      nameOf: (principal) => people.nameOf(principal),
+      canTalk: (principal) => people.canTalk(principal),
       note,
     });
     note(`kanban: dispatching up to ${config.kanban.maxRunning} agent run(s) at once`);
@@ -270,6 +304,10 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     db,
     dispatcher,
     notifier,
+    cards,
+    get chat() {
+      return kanbanChat;
+    },
 
     async start(): Promise<void> {
       // First, the home's lock and then the worker socket's path: a second gateway
@@ -307,6 +345,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       note(`connected as ${adapter.botOpenId ?? 'unknown bot identity'}`);
       // Once connected: its first round catches up on what the chats missed while the gateway was down.
       notifier?.start();
+      // And sends the cards of people's runs that a stop left unsent.
+      cards?.start();
 
       // Only now, because saying it requires a connection. Failing to deliver a
       // finding must not prevent the gateway from starting -- the session is
@@ -317,7 +357,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
             await adapter.sendText(
               { chatId: key.conversationId, threadId: key.threadId },
               finding.message,
-              replyUuid(config.lark.appId, `boot:${finding.sessionId}`, 'reconcile'),
+              findingUuid(config.lark.appId, finding.sessionId, key),
             );
           } catch (err) {
             note(
@@ -352,8 +392,12 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       if (housekeeping !== undefined) clearInterval(housekeeping);
       // No more claims; the runs still open are ended by the next boot.
       dispatcher?.stop();
-      // No more notices; what was not sent is sent by the next boot, from the cursors.
+      // No more notices, nor cards; what was not sent is sent by the next boot, from the board.
       notifier?.stop();
+      cards?.stop();
+      // And the gates of a report from chat, a press's or typed: killed, nothing applied,
+      // as the worker socket's are below; the next report after a restart runs them again.
+      kanbanChat?.stop();
       // Stop taking work before draining it, or the drain never finishes.
       inbound.stop();
       // Then the worker socket: a report still running its gates is stopped and
@@ -364,7 +408,17 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       await workerServer?.close();
       // A notice being sent finishes while the channel is still connected; bounded by the drain, not a
       // send's 30 s, so a hung send never holds the stop: its batch goes again after the next boot.
-      if ((await notifier?.idle(SHUTDOWN_DRAIN_MS)) === false) note('kanban: stopped with a notice still being sent; the next boot sends it again');
+      // Together, under one bound: the notices, the cards, and the card presses being
+      // worked on, whose redraws need the channel.
+      const [notices, sent, pressed] = await Promise.all([
+        notifier?.idle(SHUTDOWN_DRAIN_MS),
+        cards?.idle(SHUTDOWN_DRAIN_MS),
+        kanbanChat?.idle(SHUTDOWN_DRAIN_MS),
+        inbound.idle(SHUTDOWN_DRAIN_MS),
+      ]);
+      if (notices === false) note('kanban: stopped with a notice still being sent; the next boot sends it again');
+      if (sent === false) note('kanban: stopped with a card still being sent; the next boot sends it again');
+      if (pressed === false) note('kanban: stopped with a card press still being worked on; its card may not show the outcome');
       await adapter.disconnect().catch((err: unknown) => {
         note(`disconnect failed: ${err instanceof Error ? err.message : String(err)}`);
       });
