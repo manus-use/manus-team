@@ -609,8 +609,9 @@ with a join, not by correlating two files.
 - **`idempotency_key` is unique** because creation is retried by everything that can create: Lark
   redelivers a message, and an agent re-runs a command whose output it did not see. A repeated
   create with the same key returns the existing task instead of a second card.
-- **`consecutive_failures` and `block_recurrences` reset only on completion**, with one deliberate
-  exception for `gave_up` (§8.2). Resetting `block_recurrences` on unblock is the amnesia that lets
+- **`consecutive_failures` and `block_recurrences` reset only on success**: completion resets both,
+  and work handed to review resets `consecutive_failures`; with one deliberate exception for
+  `gave_up` (§8.2). Resetting `block_recurrences` on unblock is the amnesia that lets
   a task bounce between blocked and unblocked forever, each unblock forgetting the last block.
   Resetting failures on anything but success leaves the breaker unable to trip.
 
@@ -796,10 +797,13 @@ approval.
 | (new) | created | `open` |
 | `open` (ready) | claimed | `open` (running) — a `work` run is opened |
 | `review` (no open run) | claimed by the reviewer | `review` (reviewing) — a `review` run is opened |
-| `open` (running) | `complete` | `done` |
+| `open` (running) | `complete`, the task naming no reviewer | `done` |
+| `open` (running) | `complete`, the task naming a reviewer | `review` — taken as a `review` with the same handoff; the work run ends `review_requested` (§5.3) |
 | `open` (running) | `review` | `review` — the work run ends `review_requested` |
 | `review` (reviewing) | reviewer `complete` | `done` |
 | `review` (reviewing) | reviewer `changes` | `open` (ready) — the next claim is rework (§5.3) |
+| `review` (reviewing), a role's undecided review run | an operator's `/kanban approve` | `done` — the review run ends `superseded` in the same transaction, and its turn is cancelled |
+| `review` (reviewing), a role's undecided review run | an operator's `/kanban changes` | `open` (ready) — the same, and the next claim is rework |
 | `open` (running) | `block`, kind `dependency` | `open` (todo) — the parents it names are linked (§5.4) |
 | `review` (reviewing) | `block`, kind `dependency` | `review` (todo) — the parents it names are linked; the reviewer is claimed again once they are done (§5.4) |
 | `open` (running) / `review` (reviewing) | `block`, any other kind | `blocked`, `blocked_from` = the phase it left |
@@ -820,18 +824,28 @@ added them, which holds the review until they are done; the check is the backsto
 
 **Every path to `done` goes through one `complete` operation**, and it runs the task's gates (§7.7):
 an agent's `mt kanban complete`, a reviewer role's `complete`, a person's `/kanban done` or Done
-button, and `/kanban approve`. A person cannot complete or approve a task **while an agent run is open
+button, and `/kanban approve`. On a task that names a reviewer, the first three, from the work,
+ask for review instead (§5.3). A person cannot complete or approve a task **while an agent run is open
 on it** — because gates would run against a checkout that agent is still changing, and the agent's
 own later report would contradict the person's. If the run is undecided, the refusal says to
 `/kanban stop` it first; if it has already reported and is finishing, the refusal says to wait for it
 to finish.
+
+The one exception is **an operator answering a role's review**: `/kanban approve` or
+`/kanban changes` by an operator, on a task in `review` whose open run is a role reviewer's and
+still undecided, takes the review from it. The answer's transaction ends that run `superseded`,
+and chat then cancels its turn, as `assign` and `stop` do; anything the reviewer reports later is
+refused `run_superseded`. A reviewer does not change the work under review, so its checkout is the
+one the answer's gates test, and the operator's answer is the one recorded. Only an operator may do
+this, only for a role reviewer's run — a person reviewer's run is decided by the answer, as before —
+and never an assignee. A run that has already reported is waited for, as above.
 
 ### 5.2 Run outcomes
 
 | Outcome | Meaning | Breaker |
 |---|---|---|
 | `completed` | reported `complete` | resets |
-| `review_requested` | reported `review` | — |
+| `review_requested` | reported `review` | resets |
 | `changes_requested` | reviewer reported `changes` | — |
 | `blocked` | reported `block` | — |
 | `failed` | the turn failed for an ordinary reason (§8.1) | counted |
@@ -857,10 +871,25 @@ is the task's block kind (§5.4), so both "what happened last" and "why the task
    run in the task's workspace, or a person, sent a card — reports `complete` to approve or
    `changes` with a reason.
 
+**A named reviewer is never skipped.** A task that names a reviewer — on its `reviewer:` line, or
+from an earlier `review` that named one — is reviewed on the task. Its work run's prompt names the
+reviewer and says to report `review` (§7.1). A `complete` from its work — an agent's, or its person
+assignee's `/kanban done` or Done — is taken as a `review` request with the same handoff: the task
+enters `review`, the run ends `review_requested`, the notices say "review requested", and the
+answer says it was sent for review. Its gates run once, as for a review. So a rework's `complete`
+goes back to review too: the reviewer who asked for changes sees them. Only the reviewer's
+approval, or an operator's, completes such a task. A task that names no reviewer completes on
+`complete`, and its implementer may still ask for review, naming a reviewer.
+
 **Never both.** An implementer that requests same-task review when a downstream review task exists
 leaves the downstream task waiting on a parent that is not done, so the review happens twice or not
-at all. The worker protocol (§7.1) says so, and the worker context lists the task's children so the
-worker can see which model applies.
+at all. The worker protocol (§7.1) says so — for a task that names no reviewer, if one of its
+children reviews it, report `complete` — and the worker context lists the task's children so the
+worker can see which model applies. The board cannot tell a child that reviews from any other
+child, so a task that names a reviewer **and** has a downstream review task follows its named
+reviewer: its `complete` goes to that reviewer, and the downstream task is released once they
+approve. The review then happens twice, never not at all; that is the cost of configuring both,
+and the guide says to choose one.
 
 A `review` with no reviewer named anywhere is refused: a task in review with nobody to review it is
 a stranded task with a different label.
@@ -1032,8 +1061,8 @@ The task prompt is composed, in this order, of:
      directory is the task's workspace, for any files the work needs; report through `mt kanban`,
      and exactly one terminal report — `complete`, `review` or `block` — ends your run; when the
      task is done, the summary says what was done and where its results are, such as files,
-     documents or links; block only on genuine ambiguity, and say why; if a downstream review task exists,
-     `complete` rather than `review`; if you find follow-up work, create a task for it rather than
+     documents or links; block only on genuine ambiguity, and say why; if the task names no
+     reviewer and a downstream review task exists, `complete` rather than `review`; if you find follow-up work, create a task for it rather than
      doing it; never put secrets in a summary, metadata or comment; stop once you have reported.
    - *review*: review the handoff, given in its own section of the context ("The handoff, from
      …"), and the work it describes, against the task and its contract; that work is in the
@@ -1041,7 +1070,8 @@ The task prompt is composed, in this order, of:
      links or messages — or, when there is no such section, review the latest attempts and the
      workspace; do not change the work under review; report `complete` to approve or `changes` with
      a specific, actionable reason; `block` only for a problem the assignee cannot fix.
-4. **The task** — title, body, contract, the task's gates (§7.7), one line each with its timeout, and
+4. **The task** — title, body, contract, for a work run on a task that names a reviewer the reviewer
+   and that its work is reported with `review`, not `complete` (§5.3), the task's gates (§7.7), one line each with its timeout, and
    the result of the last gate run if there is one: who reported, whether it passed, each gate's exit,
    and the end of a failing gate's output, set off as data.
 5. **The worker context**, starting with the rework's reason or the handoff under review, where
@@ -1380,12 +1410,16 @@ not provider errors.
 - **`failure_limit`** — the task's, else `kanban.failure_limit` (default **2**) — is the number of
   counted failures that blocks the task. With the default, a task gets its first attempt and **one**
   retry. `1` means no retries.
-- `consecutive_failures` increments on every counted outcome, of either run kind. Below the limit,
+- `consecutive_failures` increments on every counted outcome, of either run kind, and resets on
+  success: on completion, and when the work goes to review (a `review`, or a `complete` taken as
+  one, §5.3), so that a failure in one review cycle is not added to the next one's. Going to review
+  resets `consecutive_transient` too, as any outcome but `rate_limited` does, and leaves
+  `block_recurrences` alone, which only completion resets. Below the limit,
   the task stays in its phase with no open run and is claimed again. At the limit, it goes to
   `blocked` with kind `gave_up`, and its subscribers are told what failed, how many times, and the
   last error.
 - **Unblocking a `gave_up` task resets `consecutive_failures`** — the one exception to "only
-  completion resets". Without it, a person who has fixed the cause and unblocks would get exactly one
+  success resets". Without it, a person who has fixed the cause and unblocks would get exactly one
   attempt before the breaker trips again, which is not what unblocking means. `block_recurrences` is
   not reset, so a task given up twice for the same reason still escalates (§5.4). For the same
   reason, **unblocking a `transient` block resets `consecutive_transient`**: otherwise the next
@@ -1466,15 +1500,15 @@ getting nowhere, which no liveness check catches.
 |---|---|---|
 | `/kanban new <title>` + body lines | operate | creates a task; lines starting `assignee:`, `reviewer:`, `workspace:`, `parent:`, `outcome:`, `verify:`, `constraints:`, `boundaries:`, `stop when:` fill fields; the rest is the body |
 | `/kanban list [status\|all]` | talk | the board, by derived status |
-| `/kanban show <id>` | talk | task, contract, runs, latest output, comments |
+| `/kanban show <id>` | talk | task, contract, gates, runs, latest output, comments |
 | `/kanban assign <id> <assignee>` | operate | an undecided run ends `superseded`; a decided one is closed |
 | `/kanban link <parent> <child>` | operate | |
 | `/kanban workspace <id> <name>` | operate | sets a task's workspace; refused once one is fixed (§2.3) |
-| `/kanban comment <id> <text>` | talk | stored, and shown to people; an operator's also steers: forwarded to an undecided agent run, and read by later runs (§7.5) |
+| `/kanban comment <id> <text>` | talk | stored, and shown to people; an operator's, the named assignee's or the named reviewer's also steers: forwarded to an undecided agent run, and read by later runs (§7.5) |
 | `/kanban unblock <id> [comment]` | operate | |
-| `/kanban approve <id>` · `/kanban changes <id> <reason>` | operate, or the named reviewer | answer a review |
-| `/kanban done <id> <summary>` · `/kanban block <id> <reason>` | the assignee | report on a human task |
-| `/kanban review <id> <summary> [reviewer]` | the assignee | ask for same-task review of a human task's work (§5.3) |
+| `/kanban approve <id> [comment]` · `/kanban changes <id> <reason>` | operate, or the named reviewer | answer a review; an operator's answer while a role reviewer's run is open ends that run `superseded` and cancels its turn (§5.1) |
+| `/kanban done <id> [summary]` · `/kanban block <id> <reason>` | the assignee | report on a human task; on a task that names a reviewer, `done` asks for review (§5.3) |
+| `/kanban review <id> [summary]`, with a line `reviewer: <role or @person>` unless the task names one | the assignee | ask for same-task review of a human task's work (§5.3) |
 | `/kanban stop <id>` | operate | the run ends `cancelled`; the task blocks as `needs_input` |
 | `/kanban gate add <id> [--timeout <s>] <command>` | operate | the rest of the message is the command, as written (§7.7); `--timeout=<s>` is read too, and a timeout that cannot be read, or a task id starting `--`, is refused with the usage line rather than taken into the command |
 | `/kanban gate list <id>` | talk | the task's gates, masked |
@@ -1537,7 +1571,8 @@ people (§12).
   to go yet. `/kanban done`, `block`, `review`, `approve` and `changes` were answered the same way,
   rather than as unknown commands. Plan D2 lifts all of it, as below.
 - **After a change the dispatcher is told:** a pass after `new`, `assign`, `workspace`, `unblock`,
-  `stop` and `archive`; and for `assign`, `stop` and `archive`, the cancel of the agent run's turn
+  `stop` and `archive`; and for `assign`, `stop`, `archive`, and from plan D2 an operator's
+  `approve` or `changes` that ended a role reviewer's run, the cancel of the agent run's turn
   that the change decided (§5.1), which closes it. A `comment` needs neither: the dispatcher forwards
   it when the run's turn ends (§7.5).
 
@@ -1558,7 +1593,7 @@ people (§12).
   task is `open`; `approve` and `changes` are its reviewer's, a person, or any operator's — for a
   role's review too — while it is in `review`. The phase is checked because the board's `complete`
   takes either, and an assignee completing their own task in review would decide the reviewer's
-  run. Who is named is read from the task as it stands when the command arrives, and checked again
+  run. An operator's answer to a role's review while its run is open ends that run (§5.1). Who is named is read from the task as it stands when the command arrives, and checked again
   inside the board's transaction (§9.2), after any gates have run.
 - **Steering.** A comment steers when its author is an operator, or the task's assignee or reviewer,
   a person (§7.5).

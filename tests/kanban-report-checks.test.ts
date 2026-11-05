@@ -403,6 +403,24 @@ describe('a report while its gates run', () => {
     expect(await g.s.complete(same.taskId, person, { summary: 'done' })).toMatchObject({ ok: true, task: { phase: 'done' } });
   });
 
+  it("refuses an operator's approve and changes alike while the reviewer's own report runs its gates", async () => {
+    const task = g.create({ reviewer: 'reviewer' });
+    g.s.addGate(task.taskId, { command: 'npm test' }, ALICE);
+    const work = g.claim(task.taskId);
+    expect(await g.s.complete(task.taskId, as(work), { summary: 'v1' })).toMatchObject({ ok: true, task: { phase: 'review' } });
+    g.s.closeRun(work.runId);
+    const review = g.claim(task.taskId);
+    const held = g.hold('npm test');
+    const approval = g.s.complete(task.taskId, as(review), { summary: 'approved' });
+    await held.started;
+    const operator: Reporter = { kind: 'person', principal: ALICE, runId: review.runId, as: 'operator' };
+    expect(await g.s.complete(task.taskId, operator, { summary: 'fine' })).toMatchObject({ ok: false, code: 'report_in_progress' });
+    expect(g.s.requestChanges(task.taskId, operator, 'redo it')).toMatchObject({ ok: false, code: 'report_in_progress' });
+    expect(getRun(g.t.db, review.runId)?.outcome).toBeNull();
+    held.release();
+    expect(await approval).toMatchObject({ ok: true, task: { phase: 'done' }, run: { outcome: 'completed' } });
+  });
+
   it('settles once the report is answered', async () => {
     const task = g.create();
     g.s.addGate(task.taskId, { command: 'npm test' }, ALICE);

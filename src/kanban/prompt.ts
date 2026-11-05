@@ -129,6 +129,8 @@ export interface RunBrief {
   review?: ReviewRequest;
   /** For a work run after a reviewer's changes: the rework's reason, and what it revises. */
   rework?: Rework;
+  /** A person reviewer's name, as the gateway last saw it; undefined for a role, or a person not known by name. */
+  reviewerName?: string;
 }
 
 /** An assignee or a reviewer, as KanbanService takes one: a role name, or a person's principal. */
@@ -152,7 +154,7 @@ ${OTHER_COMMANDS};
 - \`mt kanban create < task.json\`, with {"title": "...", "body": "...", "assignee": ${WHO}}, and optionally "reviewer": ${WHO}, "contract", "workspace", "parents" (task ids) and "idempotency_key", creates a task;
 - \`mt kanban link < link.json\`, with {"parent_id": "...", "child_id": "..."}, makes one task wait on another; it only works on a task that has not started yet, so sequence follow-ups by creating them in order, each naming the earlier ones in "parents".
 
-When the task is done, the summary says what was done and where its results are, such as files, documents or links. Block only on genuine ambiguity, and say why. If one of the task's children below reviews this task, report complete rather than review. If you find follow-up work, create a task for it with \`mt kanban create\` rather than doing it. Never put a secret in a summary, metadata or comment. Stop once you have reported.`;
+When the task is done, the summary says what was done and where its results are, such as files, documents or links. Block only on genuine ambiguity, and say why. If the task names no reviewer and one of the task's children below reviews this task, report complete rather than review. If you find follow-up work, create a task for it with \`mt kanban create\` rather than doing it. Never put a secret in a summary, metadata or comment. Stop once you have reported.`;
 
 const REVIEW_PROTOCOL = `You are reviewing one task, below. Review the handoff, under For your review, and the work it describes, against the task and its contract. That work is in the workspace -- the current directory -- and in anything the handoff points to, such as documents, links or messages. If there is no For your review section, review the latest attempts under Context, and the workspace, instead. Do not change the work under review.
 
@@ -251,7 +253,29 @@ function taskSection(b: RunBrief): string[] {
       lines.push(...labelled(`- ${CONTRACT_LABELS[field]}`, piece(task.contract[field] ?? '', PIECE_BYTES.contractField)));
     }
   }
-  return [...lines, ...gateLines(b)];
+  return [...lines, ...reviewerLines(b), ...gateLines(b)];
+}
+
+/**
+ * A work run's reviewer (spec §5.3): a task that names one is reviewed on the
+ * task, and the board sends a `complete` from its work to that reviewer as a
+ * review request, so the prompt says so rather than leave it to be found out.
+ * A review run is the reviewer's own, and is not told.
+ */
+function reviewerLines(b: RunBrief): string[] {
+  const r = b.task.reviewer;
+  if (b.kind !== 'work' || r === null) return [];
+  const who =
+    r.kind === 'role'
+      ? `role ${flat(r.name)}`
+      : b.reviewerName === undefined
+        ? `${flat(r.name)}, a person`
+        : `${flat(b.reviewerName)} (${flat(r.name)}), a person`;
+  return [
+    '',
+    `Reviewer: ${who}. This task is reviewed before it is done: when the work is done, report ` +
+      '`mt kanban review` with your handoff, not `complete`; a complete is sent to the reviewer for review as well.',
+  ];
 }
 
 /** How one gate's run ended, in a few words. */
@@ -514,7 +538,7 @@ export function composePrompt(b: RunBrief): string {
 /** The reports that end a run of this kind, as a nudge names them. */
 function reports(kind: RunKind): string {
   return kind === 'work'
-    ? '`mt kanban complete < handoff.json` if the task is done, or `mt kanban review < handoff.json` to have it reviewed, where handoff.json is {"summary": "...", "metadata": {...}}; or `mt kanban block < block.json` if you cannot go on, where block.json is {"kind": "...", "reason": "..."}'
+    ? '`mt kanban complete < handoff.json` if the task is done, or `mt kanban review < handoff.json` to have it reviewed (a task that names a reviewer is sent to them for review either way), where handoff.json is {"summary": "...", "metadata": {...}}; or `mt kanban block < block.json` if you cannot go on, where block.json is {"kind": "...", "reason": "..."}'
     : '`mt kanban complete < handoff.json` to approve, with {"summary": "..."}; `mt kanban changes < reason.json` to ask for changes, with {"reason": "..."}; or `mt kanban block < block.json` for a problem the assignee cannot fix, with {"kind": "...", "reason": "..."}';
 }
 

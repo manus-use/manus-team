@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_LIMITS,
+  block,
   claim,
   closeRun,
   complete,
   endRun,
+  requestChanges,
   requestReview,
   unblock,
   type RunEnding,
@@ -124,6 +126,37 @@ describe('endRun', () => {
       consecutiveFailures: 0,
       blockRecurrences: 0,
     });
+  });
+
+  it('resets the failure count when the work goes to review, so failures across review cycles are not added up', () => {
+    const id = task({ reviewer: { kind: 'role', name: 'reviewer' } });
+    attempt(id, { outcome: 'failed' });
+    // The retry's complete is sent to the reviewer: a run that succeeded, between the failures.
+    const retry = claimed(h.db, id);
+    expect(ok(complete(h.db, id, { kind: 'run', runId: retry.runId }, { summary: 'v1' }, NOW)).task).toMatchObject({
+      phase: 'review',
+      consecutiveFailures: 0,
+    });
+    ok(closeRun(h.db, retry.runId, NOW));
+    const review = claimed(h.db, id);
+    ok(requestChanges(h.db, id, { kind: 'run', runId: review.runId }, 'add a test', NOW));
+    ok(closeRun(h.db, review.runId, NOW));
+    // The rework fails once: one failure, not the second of two.
+    expect(attempt(id, { outcome: 'failed' })).toMatchObject({ next: 'retry', task: { phase: 'open', consecutiveFailures: 1 } });
+  });
+
+  it('keeps the block recurrences when the work goes to review', () => {
+    const id = task({ reviewer: { kind: 'role', name: 'reviewer' } });
+    const first = claimed(h.db, id);
+    ok(block(h.db, id, { kind: 'run', runId: first.runId }, { kind: 'needs_input', reason: 'which file?' }, NOW));
+    ok(closeRun(h.db, first.runId, NOW));
+    ok(unblock(h.db, id, ALICE, undefined, NOW));
+    const second = claimed(h.db, id);
+    ok(block(h.db, id, { kind: 'run', runId: second.runId }, { kind: 'needs_input', reason: 'which file?' }, NOW));
+    ok(closeRun(h.db, second.runId, NOW));
+    ok(unblock(h.db, id, ALICE, undefined, NOW));
+    const third = claimed(h.db, id);
+    expect(ok(requestReview(h.db, id, { kind: 'run', runId: third.runId }, { summary: 'v1' }, NOW)).task.blockRecurrences).toBe(1);
   });
 
   it('does not count throttling, and holds the task in a doubling cooldown', () => {

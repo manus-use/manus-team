@@ -240,9 +240,10 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // first on its PATH. Both are in the home too.
       // Written in start(), once the home is held: a refused second gateway must not rewrite the first one's.
       worker: { socket, mtDir: join(config.home, 'bin'), path: process.env['PATH'] },
+      nameOf: (principal) => people.nameOf(principal),
     });
     // A worker's create, link or report can make a task claimable.
-    worker = { api: new WorkerApi({ db, service, changed: () => dispatcher?.pass() }), socket };
+    worker = { api: new WorkerApi({ db, service, changed: () => dispatcher?.pass(), nameOf: (principal) => people.nameOf(principal) }), socket };
     // /kanban in chat (spec §9.1): through the same service, with the router's tiers.
     kanbanChat = new KanbanChat({
       service,

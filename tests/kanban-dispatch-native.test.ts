@@ -173,11 +173,13 @@ describe('Dispatcher: native rendering', () => {
         ctl.end('completed');
       });
       completes(h, agent);
+      // The rework's complete goes back to the reviewer, who approves.
+      completes(h, h.driver('reviewer'), 'approved');
       h.dispatcher.pass();
       await h.dispatcher.idle();
 
       const runs = runsOf(h.t.db, task.taskId);
-      expect(runs.map((x) => x.outcome)).toEqual(['review_requested', 'changes_requested', 'completed']);
+      expect(runs.map((x) => x.outcome)).toEqual(['review_requested', 'changes_requested', 'review_requested', 'completed']);
       const [work, , again] = runs;
       expect(again?.seededFromRun).toBe(edited ? null : work?.runId);
       expect(agent.starts.map((x) => x.providerSessionId)).toEqual([undefined, edited ? undefined : 'prov_impl']);
@@ -204,11 +206,12 @@ describe('Dispatcher: native rendering', () => {
       ctl.end('completed');
     });
     completes(h, agent);
+    completes(h, h.driver('reviewer'), 'approved');
     h.dispatcher.pass();
     await h.dispatcher.idle();
 
     const runs = runsOf(h.t.db, task.taskId);
-    expect(runs.map((x) => x.outcome)).toEqual(['review_requested', 'changes_requested', 'completed']);
+    expect(runs.map((x) => x.outcome)).toEqual(['review_requested', 'changes_requested', 'review_requested', 'completed']);
     expect(runs[2]?.seededFromRun).toBe(runs[0]?.runId);
     expect(h.notes).toContain(`kanban: run ${runs[2]?.runId}: recording how its role was given failed: invalid`);
     expect(agent.starts.map((x) => x.providerSessionId)).toEqual([undefined, undefined]);

@@ -678,9 +678,10 @@ export interface Completion {
  * metadata when a run completed it. A person's completion has no run, and its
  * summary is the event's. Undefined if the task was never completed.
  *
- * A review run's summary is the reviewer's approval ("LGTM"), not the work: when
- * the completing run is a review, the handoff is the latest work run that asked
- * for review, as the reviewer was given it (spec §4.4).
+ * A review run's summary is the reviewer's approval ("LGTM"), not the work, and
+ * a person's approval is a comment: when the completion is a review run's, or
+ * has no run, and the task was ever sent for review, the handoff is the latest
+ * review request, as the reviewer was given it (spec §4.4).
  */
 export function latestCompletion(db: Db, taskId: string): Completion | undefined {
   const event = db
@@ -690,21 +691,19 @@ export function latestCompletion(db: Db, taskId: string): Completion | undefined
     )
     .get(taskId);
   if (event === undefined) return undefined;
-  let run = event.run_id === null ? undefined : getRun(db, event.run_id);
-  if (run?.kind === 'review') run = latestReviewRequested(db, taskId) ?? run;
+  const run = event.run_id === null ? undefined : getRun(db, event.run_id);
+  // An approval -- a review run's, or a person's with no run of their own -- hands off what was reviewed.
+  if (run === undefined || run.kind === 'review') {
+    const asked = latestOf(db, taskId, ['review_requested']);
+    if (asked !== undefined) return handedOff(db, asked);
+  }
+  return handedOff(db, event);
+}
+
+/** What an event handed off: its run's summary and metadata, or, with no run, the event's summary. */
+function handedOff(db: Db, event: EventRaw): Completion {
+  const run = event.run_id === null ? undefined : getRun(db, event.run_id);
   if (run !== undefined) return { summary: run.summary ?? '', metadata: run.metadata, runId: run.runId };
   const payload = json(event.payload) as { summary?: unknown };
   return { summary: typeof payload.summary === 'string' ? payload.summary : '', metadata: null, runId: null };
-}
-
-/** The task's latest work run that ended asking for review: the handoff a reviewer reviewed. */
-function latestReviewRequested(db: Db, taskId: string): RunRow | undefined {
-  const row = db
-    .prepare<[string], RunRaw>(
-      `SELECT ${RUN_COLS} FROM kanban_runs
-        WHERE task_id = ? AND kind = 'work' AND outcome = 'review_requested'
-        ORDER BY attempt DESC LIMIT 1`,
-    )
-    .get(taskId);
-  return row === undefined ? undefined : decodeRun(row);
 }

@@ -32,8 +32,15 @@ export function endedUnreported(run: RunRow): boolean {
   return run.outcome !== null && (ENDED_OUTCOMES as readonly string[]).includes(run.outcome);
 }
 
-/** `native`: the run's role was rendered as a native agent package, so its prompt leaves role.md and the skills out. */
-export function briefFor(db: Db, c: Claimed, opts: { native?: boolean } = {}): RunBrief {
+/**
+ * `native`: the run's role was rendered as a native agent package, so its prompt leaves role.md and the skills out.
+ * `nameOf`: a person's name as the gateway last saw it, for a person reviewer the prompt names.
+ */
+export function briefFor(
+  db: Db,
+  c: Claimed,
+  opts: { native?: boolean; nameOf?: (principal: string) => string | undefined } = {},
+): RunBrief {
   const taskId = c.task.taskId;
   const parents: ParentHandoff[] = parentsOf(db, taskId).map((task) => {
     const done = latestCompletion(db, task.taskId);
@@ -48,6 +55,8 @@ export function briefFor(db: Db, c: Claimed, opts: { native?: boolean } = {}): R
   const last = lastGateRun(db, taskId);
   const review = c.run.kind === 'review' ? latestReviewRequest(db, taskId) : undefined;
   const changes = c.run.kind === 'work' ? changesAsked(db, taskId) : undefined;
+  const reviewer = c.task.reviewer;
+  const reviewerName = reviewer?.kind === 'human' ? opts.nameOf?.(reviewer.name) : undefined;
   return {
     kind: c.run.kind,
     roleMd: c.roleMd,
@@ -63,5 +72,6 @@ export function briefFor(db: Db, c: Claimed, opts: { native?: boolean } = {}): R
     ...(last === undefined ? {} : { lastGateRun: last }),
     ...(review === undefined ? {} : { review }),
     ...(changes === undefined ? {} : { rework: { ...changes, handoff: latestReviewRequest(db, taskId) } }),
+    ...(reviewerName === undefined ? {} : { reviewerName }),
   };
 }

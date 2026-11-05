@@ -160,6 +160,11 @@ type Named = { ok: true; name: string } | { ok: false; reply: string };
 /** The longest a card's redraw is waited for. */
 export const REDRAW_MS = 10_000;
 
+/** The reviewer a done was sent to instead (spec §5.3): a task that names one is reviewed, not done. */
+function sentForReview(verb: ReportCommand['verb'], task: TaskRow): Assignee | undefined {
+  return verb === 'done' && task.phase === 'review' && task.reviewer !== null ? task.reviewer : undefined;
+}
+
 function outOfDate(taskId: string): string {
   return `That card is out of date: ${id(taskId)} has moved on. \`/kanban show ${taskId}\` says where it is.`;
 }
@@ -338,8 +343,16 @@ export class KanbanChat {
     const as = command.verb === 'done' || command.verb === 'block' ? 'assignee' : this.#answersAs(task, by);
     const r = await this.#apply(command.verb, task.taskId, this.#reporter(by, as, shown.view.runs), command.text);
     if (!r.ok) return refused(r);
+    // An operator's answer in place of a role reviewer's run ended that run: its turn is cancelled.
+    const ended = r.run?.outcome === 'superseded' && r.run.agentConfig !== null ? r.run : undefined;
+    this.#decided(ended);
     this.#changed();
-    return this.#reported(command.verb, task.taskId);
+    const reviewer = sentForReview(command.verb, r.task);
+    if (reviewer !== undefined) {
+      return `Sent ${id(task.taskId)} for review to ${this.#whom(reviewer)}: the task names a reviewer, so done asks for review.`;
+    }
+    const reply = this.#reported(command.verb, task.taskId);
+    return ended === undefined ? reply : `${reply.replace(/\.$/, '')}; the review run of ${this.#whom(ended.assignee)} was ended.`;
   }
 
   /** `/kanban review`: the assignee asks for same-task review (spec §5.3), of a reviewer named here or on the task. */
@@ -410,7 +423,7 @@ export class KanbanChat {
     taskId: string,
     by: Reporter,
     text: string,
-  ): Promise<{ ok: true; task: TaskRow } | Refusal> {
+  ): Promise<{ ok: true; task: TaskRow; run?: RunRow | undefined } | Refusal> {
     const service = this.#deps.service;
     switch (verb) {
       case 'done':
@@ -534,7 +547,7 @@ export class KanbanChat {
     const shown = this.#deps.service.show(press.run.taskId);
     const task = shown.ok ? shown.view.task : { taskId: press.run.taskId, title: '' };
     const working = this.#redraw(press.messageId, renderCardOutcome(task, 'Working on it…'));
-    let r: { ok: true; task: TaskRow } | Refusal;
+    let r: { ok: true; task: TaskRow; run?: RunRow | undefined } | Refusal;
     try {
       const as = verb === 'done' || verb === 'block' ? 'assignee' : press.run.assignee.name === by ? 'reviewer' : 'operator';
       r = await this.#apply(verb, press.run.taskId, { kind: 'person', principal: by, runId: press.run.runId, as }, text);
@@ -553,8 +566,9 @@ export class KanbanChat {
     }
     this.#changed();
     const byName = typeof who === 'string' ? ` by ${who}` : '';
+    const reviewer = sentForReview(verb, r.task);
     const outcome = {
-      done: `Done${byName}.`,
+      done: reviewer === undefined ? `Done${byName}.` : `Sent for review to ${this.#whom(reviewer)}${byName}.`,
       approve: `Approved${byName}.`,
       block: `Blocked${byName}: ${label(text, 300)}`,
       changes: `Changes requested${byName}: ${label(text, 300)}`,

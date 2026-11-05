@@ -126,6 +126,19 @@ describe('briefFor: a native run', () => {
   });
 });
 
+describe("briefFor: a person reviewer's name", () => {
+  it('gives the name the gateway knows for a person reviewer, and none for a role or a stranger', () => {
+    const names = new Map([['lark:on_bob', 'Bob Li']]);
+    const nameOf = (p: string) => names.get(p);
+    const bob = newTask(h.db, { reviewer: { kind: 'human', name: 'lark:on_bob' }, workspace: 'web' });
+    const c = { run: claimed(h.db, bob.taskId), task: bob, roleMd: undefined, role: undefined };
+    expect(briefFor(h.db, c, { nameOf }).reviewerName).toBe('Bob Li');
+    expect(briefFor(h.db, c)).not.toHaveProperty('reviewerName');
+    const carol = newTask(h.db, { reviewer: { kind: 'human', name: 'lark:on_carol' }, workspace: 'api' });
+    expect(briefFor(h.db, { run: claimed(h.db, carol.taskId), task: carol, roleMd: undefined, role: undefined }, { nameOf })).not.toHaveProperty('reviewerName');
+  });
+});
+
 describe('endedUnreported', () => {
   it('is true for the outcomes of a run that ended without a report, and for nothing else', () => {
     const task = newTask(h.db);

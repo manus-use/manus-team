@@ -763,9 +763,18 @@ function actorOf(by: Reporter): string {
  * A person's report decides the open human run, if there is one. While an agent
  * run is open it is refused (spec §5.1): gates would run against a checkout the
  * agent is still changing, and the agent's own later report would contradict
- * the person's.
+ * the person's. One exception (spec §5.1), for `answer` only: an operator's answer to a review
+ * whose open run is a role reviewer's, still undecided, takes the review from
+ * it -- `supersedes` -- and the answer's transaction ends that run `superseded`.
+ * The reviewer does not change the work under review, and its later report is
+ * refused, its run being over.
  */
-function reportingRun(d: Db, task: TaskRow, by: Reporter): Result<{ run: RunRow | undefined }> {
+function reportingRun(
+  d: Db,
+  task: TaskRow,
+  by: Reporter,
+  answer: boolean,
+): Result<{ run: RunRow | undefined; supersedes?: boolean }> {
   if (by.kind === 'run') {
     const run = getRun(d, by.runId);
     if (run === undefined) return refuse('not_found', `no run ${by.runId}`);
@@ -795,6 +804,9 @@ function reportingRun(d: Db, task: TaskRow, by: Reporter): Result<{ run: RunRow 
   if (named !== undefined) return named;
   if (open === undefined) return { ok: true, run: undefined };
   if (open.assignee.kind === 'role') {
+    if (answer && by.as === 'operator' && task.phase === 'review' && open.kind === 'review' && open.outcome === null) {
+      return { ok: true, run: open, supersedes: true };
+    }
     return refuse(
       'agent_run_open',
       open.outcome === null
@@ -884,7 +896,8 @@ function decide(
 /**
  * Report on the task as the run or person given, after the checks every report
  * shares: the reporter may report, the task is in a phase this report applies
- * to, and a run's kind fits that phase.
+ * to, and a run's kind fits that phase. `answer`: an answer to a review, approve
+ * or changes, which alone may take the review from a role reviewer's open run.
  */
 function reporting(
   d: Db,
@@ -892,10 +905,11 @@ function reporting(
   by: Reporter,
   phases: readonly ActivePhase[],
   what: string,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  opts: { answer?: boolean } = {},
+): Result<{ task: TaskRow; run: RunRow | undefined; supersedes: boolean }> {
   const task = getTask(d, taskId);
   if (task === undefined) return refuse('not_found', `no task ${taskId}`);
-  const r = reportingRun(d, task, by);
+  const r = reportingRun(d, task, by, opts.answer === true);
   if (!r.ok) return r;
   if (!(phases as readonly Phase[]).includes(task.phase)) {
     return refuse('illegal_transition', `task ${taskId} is ${task.phase}, so it cannot ${what}`);
@@ -903,7 +917,17 @@ function reporting(
   if (r.run !== undefined && phaseOfKind(r.run.kind) !== task.phase) {
     return refuse('illegal_transition', `a ${r.run.kind} run cannot ${what}`);
   }
-  return { ok: true, task, run: r.run };
+  return { ok: true, task, run: r.run, supersedes: r.supersedes === true };
+}
+
+/**
+ * Whether a `complete` on the task asks for review instead (spec §5.3): a work
+ * report -- an agent's, or its person assignee's -- on a task that names a
+ * reviewer. A named reviewer is never skipped, so the only way such a task is
+ * done is its reviewer's approval, or an operator's.
+ */
+export function completeAsksReview(task: TaskRow): boolean {
+  return task.phase === 'open' && task.reviewer !== null;
 }
 
 /**
@@ -920,10 +944,10 @@ export function reportCheck(
   by: Reporter,
   kind: 'complete' | 'review',
   reviewer?: Assignee,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
+): Result<{ task: TaskRow; run: RunRow | undefined; supersedes: boolean }> {
   const r =
     kind === 'complete'
-      ? reporting(db, taskId, by, ['open', 'review'], 'be completed')
+      ? reporting(db, taskId, by, ['open', 'review'], 'be completed', { answer: true })
       : reporting(db, taskId, by, ['open'], 'ask for review');
   if (!r.ok) return r;
   if (!parentsOf(db, taskId).every((p) => isFinished(p.phase))) {
@@ -938,7 +962,8 @@ export function reportCheck(
   const workspace = r.task.workspace;
   if (by.kind === 'person' && workspace !== null && gatesOf(db, taskId).length > 0) {
     const busy = openAgentRunIn(db, workspace);
-    if (busy !== undefined) {
+    // The reviewer run an operator's answer supersedes is not another agent's.
+    if (busy !== undefined && !(r.supersedes && busy.runId === r.run?.runId)) {
       return refuse(
         'workspace_busy',
         `task ${taskId}'s gates run in workspace ${workspace}, where task ${busy.taskId}'s agent run ${busy.runId} is open; ` +
@@ -981,8 +1006,13 @@ export function recordGates(
  * The one way to `done` (spec §5.1): an agent's or reviewer's `complete`, a
  * person's done or approval. The service runs the task's gates before it.
  *
- * Completion resets the breaker's counters, and is the only report that does
- * (spec §3.1). A task whose parents are not all finished is refused: only a link
+ * On a task that names a reviewer, a work report's `complete` is taken as a
+ * review request with the same handoff (spec §5.3), and the task goes to
+ * `review`, not `done`. An operator answering a review whose role reviewer's
+ * run is still open ends that run `superseded` here, in the same transaction.
+ *
+ * Completion resets the breaker's counters, block recurrences included; work
+ * handed to review resets the failure counts only (spec §3.1, §8.2). A task whose parents are not all finished is refused: only a link
  * added after it started could cause that, which link() prevents; this is the
  * backstop.
  */
@@ -994,12 +1024,17 @@ export function complete(
   now: number,
 ): Result<{ task: TaskRow; run: RunRow | undefined }> {
   return tx(db, (d) => {
-    const r = reporting(d, taskId, by, ['open', 'review'], 'be completed');
+    const r = reporting(d, taskId, by, ['open', 'review'], 'be completed', { answer: true });
     if (!r.ok) return r;
     if (!parentsOf(d, taskId).every((p) => isFinished(p.phase))) {
       return refuse('parents_unfinished', `task ${taskId} has a parent that is not done`);
     }
-    if (r.run !== undefined) decide(d, r.run, 'completed', handoff, now);
+    const reviewer = r.task.reviewer;
+    if (completeAsksReview(r.task) && reviewer !== null) return enterReview(d, r.task, r.run, by, handoff, reviewer, now);
+    if (r.run !== undefined) {
+      if (r.supersedes) decide(d, r.run, 'superseded', {}, now);
+      else decide(d, r.run, 'completed', handoff, now);
+    }
     d.prepare(
       `UPDATE kanban_tasks
           SET phase = 'done', closed_at = ?, consecutive_failures = 0, consecutive_transient = 0,
@@ -1043,25 +1078,49 @@ export function requestReview(
     }
     const reviewer = handoff.reviewer ?? r.task.reviewer;
     if (reviewer === null) return refuse('no_reviewer', `nobody is named to review task ${taskId}`);
-    if (r.run !== undefined) decide(d, r.run, 'review_requested', handoff, now);
-    d.prepare("UPDATE kanban_tasks SET phase = 'review', reviewer_kind = ?, reviewer = ? WHERE task_id = ?").run(
-      reviewer.kind,
-      reviewer.name,
-      taskId,
-    );
-    record(
-      d,
-      {
-        taskId,
-        runId: r.run?.runId ?? null,
-        kind: 'review_requested',
-        actor: actorOf(by),
-        payload: { summary: handoff.summary, reviewer: reviewer.name, reviewerKind: reviewer.kind },
-      },
-      now,
-    );
-    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+    return enterReview(d, r.task, r.run, by, handoff, reviewer, now);
   });
+}
+
+/**
+ * The work run, if any, ends asking for review, and the task waits for its
+ * reviewer (spec §5.3). Work handed to review is work that succeeded, so the
+ * breaker's counters start again (spec §8.2): failures in one review cycle are
+ * not added to the next one's. Block recurrences are kept, as only completion
+ * resets them.
+ */
+function enterReview(
+  d: Db,
+  task: TaskRow,
+  run: RunRow | undefined,
+  by: Reporter,
+  handoff: Handoff,
+  reviewer: Assignee,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  const { taskId } = task;
+  if (run !== undefined) decide(d, run, 'review_requested', handoff, now);
+  d.prepare(
+    `UPDATE kanban_tasks
+        SET phase = 'review', reviewer_kind = ?, reviewer = ?, consecutive_failures = 0, consecutive_transient = 0
+      WHERE task_id = ?`,
+  ).run(
+    reviewer.kind,
+    reviewer.name,
+    taskId,
+  );
+  record(
+    d,
+    {
+      taskId,
+      runId: run?.runId ?? null,
+      kind: 'review_requested',
+      actor: actorOf(by),
+      payload: { summary: handoff.summary, reviewer: reviewer.name, reviewerKind: reviewer.kind },
+    },
+    now,
+  );
+  return { ok: true, task: mustGet(d, taskId), run: run === undefined ? undefined : mustGetRun(d, run.runId) };
 }
 
 /**
@@ -1077,9 +1136,13 @@ export function requestChanges(
   now: number,
 ): Result<{ task: TaskRow; run: RunRow | undefined }> {
   return tx(db, (d) => {
-    const r = reporting(d, taskId, by, ['review'], 'have changes requested');
+    const r = reporting(d, taskId, by, ['review'], 'have changes requested', { answer: true });
     if (!r.ok) return r;
-    if (r.run !== undefined) decide(d, r.run, 'changes_requested', { summary: reason }, now);
+    if (r.run !== undefined) {
+      // An operator's changes in place of a role reviewer's run: the reason is the event's, as a person's is.
+      if (r.supersedes) decide(d, r.run, 'superseded', {}, now);
+      else decide(d, r.run, 'changes_requested', { summary: reason }, now);
+    }
     d.prepare("UPDATE kanban_tasks SET phase = 'open' WHERE task_id = ?").run(taskId);
     record(
       d,

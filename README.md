@@ -294,9 +294,11 @@ at once.
   `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN` and `MT_KANBAN_SOCKET`, which the gateway gives each run.
   It reads its input as JSON on stdin and prints one line of JSON, `{"ok": true, ...}` or
   `{"ok": false, "code": "...", "message": "..."}`. It exits 0 when the command was done, 1 when
-  it was refused, and 2 for a wrong command line. `link` only works on a task that has not
-  started yet, so sequence follow-ups by creating them in order, each naming the earlier ones
-  in `"parents"`. With `kanban.enabled`, the gateway writes
+  it was refused, and 2 for a wrong command line. `link` takes only the tasks the run's own
+  task created, and refuses one that has started, so sequence follow-ups by creating them in
+  order, each naming the earlier ones in `"parents"`. On a task that names a reviewer,
+  `complete` is taken as `review`, with the same handoff, and its answer says
+  `"sent for review to ..."`. With `kanban.enabled`, the gateway writes
   `$MT_HOME/bin/mt`, which runs this build's `mt` with the gateway's node, puts that directory
   first on every run's `PATH`, and listens on `$MT_HOME/run/kanban.sock` (`0600`, in a `0700`
   directory; under the temporary directory when the home's path is too long for a socket).
@@ -357,6 +359,9 @@ With `kanban.enabled`, `/kanban` drives the board from any chat the bot is in. A
 work — research, a document, an operation in Lark, a chore, a change to code — given to a
 role, whose agent runs it in a workspace, which is just a directory, or to a person.
 
+For a walk-through with messages to paste, from one task to chains, fan-out and review, see
+[docs/kanban-guide.md](docs/kanban-guide.md).
+
 ```
 /kanban new Draft the Q3 summary
 assignee: docs-writer
@@ -372,13 +377,24 @@ The first line is the title. Lines starting `assignee:`, `reviewer:`, `workspace
 line is the body. A bare word names a role, and an @-mention a person. An unknown role or
 workspace is refused at once. The dispatcher looks for work as soon as the task is created.
 
+**Review.** A task that names a `reviewer:` is reviewed before it is done. Its agent's prompt
+names the reviewer, and a `complete` from its agent, or a `/kanban done` or **Done** from its
+person assignee, is sent to the reviewer as a review request, with the same summary; its gates
+run once. A rework after changes goes back to the reviewer the same way. Only the reviewer's
+approval, or an operator's, completes it. A task with no reviewer is done when its assignee
+says so, and its agent may still ask for review, naming one. A separate review task, a child of
+the work, is the other way to review: use one or the other, since a task with both is reviewed
+twice. An operator may answer any review; if a reviewer role's agent is working on it, the
+answer ends that run (`superseded`) and stops its turn, and the reviewer's later report is
+refused.
+
 | Command | Tier |
 |---|---|
 | `/kanban new <title>` + lines | operate |
 | `/kanban list [todo\|ready\|running\|review\|reviewing\|blocked\|done\|archived\|all]` | talk; without a status, the tasks someone may still act on |
 | `/kanban show <task>` | talk: the task, its contract, gates, runs, latest output and comments |
 | `/kanban assign <task> <role or @person>` | operate: an undecided run ends `superseded` |
-| `/kanban link <parent> <child>` | operate |
+| `/kanban link <parent> <child>` | operate: refused for a child past `open`, or with a run open |
 | `/kanban workspace <task> <name>` | operate: refused once the workspace is fixed |
 | `/kanban comment <task> <text>` | talk: everyone sees it in `/kanban show`; an operator's, or the task's assignee's or reviewer's, also reaches its agent, when its turn ends or in its next run |
 | `/kanban unblock <task> [comment]` | operate |
@@ -387,11 +403,11 @@ workspace is refused at once. The dispatcher looks for work as soon as the task 
 | `/kanban gate add <task> [--timeout <s>] <command>` | operate: the rest of the message is the command, as written |
 | `/kanban gate list <task>` | talk |
 | `/kanban gate remove <task> <gate>` | operate |
-| `/kanban done <task> [summary]` | the task's assignee, a person |
+| `/kanban done <task> [summary]` | the task's assignee, a person; on a task that names a reviewer, it asks for review instead |
 | `/kanban block <task> <reason>` | the task's assignee: it blocks as needing input |
 | `/kanban review <task> [summary]`, and a line `reviewer: <role or @person>` unless the task names one | the task's assignee |
-| `/kanban approve <task> [comment]` | the task's reviewer, a person, or an operator |
-| `/kanban changes <task> <reason>` | the task's reviewer, a person, or an operator |
+| `/kanban approve <task> [comment]` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
+| `/kanban changes <task> <reason>` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
 | `/kanban help` | talk |
 
 Whoever acts is recorded as `lark:<union_id>`; a sender whose message carried no union_id can
@@ -424,7 +440,8 @@ When a person's task is ready, they are sent it as a card in a direct message �
 body, the contract and the parents' summaries — with a box and **Done** and **Block**: type a
 summary, or why it is blocked, and press one. A review for a person comes the same way, with the
 handoff, the commit to review when one was recorded, and **Approve** and **Request changes**.
-Only the person named may press them (an operator may also answer a review); a card for a run
+Only the person named may press them (an operator may also answer a review, a role's included,
+ending the reviewer agent's run if one is open); a card for a run
 that is over says it is out of date and does nothing. A press is answered at once, and the card
 shows the outcome once the report is made, gates and all; one refused for what it carried — an
 empty box, a failing gate — redraws the card, saying why, ready to be pressed again. `/kanban done`, `block`, `review`,
@@ -457,6 +474,9 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
 - An approval forwarded to a chat counts toward the run's `max_runtime_s`: a supervised agent
   waiting on one is cancelled at that limit like any run.
 - A person may review their own work: nothing refuses a reviewer who is the assignee.
+- An operator's answer to a role's review runs the task's gates before it ends the reviewer
+  agent's run, so they run while that agent is still working; it is told not to change the
+  work under review, but nothing enforces that.
 - A person's name, in a notice or a card, is the one Lark last gave with their ids, and can be
   out of date.
 

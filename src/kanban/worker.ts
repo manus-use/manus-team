@@ -81,6 +81,8 @@ export interface WorkerApiDeps {
    * a new task, a link or a report made claimable. Never throws into a request.
    */
   changed?: () => void;
+  /** A person's name as the gateway last saw it, to name a person reviewer by; absent, people are named by id. */
+  nameOf?: (principal: string) => string | undefined;
 }
 
 /** Sizes, in UTF-8 bytes, of what a worker may send (C1 left them to C3). */
@@ -251,10 +253,12 @@ export class WorkerApi {
   readonly #db: Db;
   readonly #service: KanbanService;
   readonly #changed: () => void;
+  readonly #nameOf: ((principal: string) => string | undefined) | undefined;
 
   constructor(deps: WorkerApiDeps) {
     this.#db = deps.db;
     this.#service = deps.service;
+    this.#nameOf = deps.nameOf;
     const changed = deps.changed ?? (() => undefined);
     this.#changed = () => {
       try {
@@ -339,10 +343,17 @@ export class WorkerApi {
     switch (command) {
       case 'show':
         return this.#show(run);
-      case 'complete':
-        return reported(
-          await this.#service.complete(run.taskId, by, { summary: str('summary') ?? '', ...metadata }, signal),
-        );
+      case 'complete': {
+        const r = await this.#service.complete(run.taskId, by, { summary: str('summary') ?? '', ...metadata }, signal);
+        const out = reported(r);
+        // A task that names a reviewer is sent to them, not done (spec §5.3): the answer says so.
+        const reviewer = r.ok && r.task.phase === 'review' ? r.task.reviewer : null;
+        if (!out.ok || reviewer === null) return out;
+        const name = reviewer.kind === 'human' ? this.#nameOf?.(reviewer.name) : undefined;
+        const whom =
+          reviewer.kind === 'role' ? `role ${reviewer.name}` : name === undefined ? reviewer.name : `${name} (${reviewer.name})`;
+        return { ...out, message: `sent for review to ${whom}: the task names a reviewer, so complete asks for review` };
+      }
       case 'review': {
         const reviewer = str('reviewer');
         return reported(
