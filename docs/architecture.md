@@ -219,6 +219,7 @@ approval_resolved
 session_created
 session_state_changed
 generation_bumped          a new runtime incarnation
+provider_session_observed  { providerSessionId, mode, detail? } -- the provider session a turn ran in
 agent_error
 ```
 
@@ -236,10 +237,11 @@ not exist yet — until it does, tool output rides inside the update payload.
 **Not implemented, and their absence is load-bearing.** There are no `runtime.*` events
 (start_requested, started, attached, detached, exited, lost, start_failed): those are the
 two-phase start of §8, and without them a crash between spawn and record is exactly the invisible
-orphan §8.1 describes. `generation_bumped` is the only runtime-lifecycle event that exists. There
-is likewise no `provider.session_observed` — §6.3 still says the provider session id is observed
-continuously; the actor writes `sessions.provider_session_id` only from what a driver's `start`
-reports, which for the CLI driver is a `cli:` id naming the runtime, not the provider's session. No `workspace.checkpoint`
+orphan §8.1 describes. `generation_bumped` is the only runtime-lifecycle event that exists.
+`provider_session_observed` is the `provider.session_observed` of §6.3, as plan E built it: the
+CLI driver reports, on every turn, the provider session id the agent wrote and whether the turn
+`resumed` it, `replayed` the conversation into it, or started it `fresh`, and the actor stores the
+id in `sessions.provider_session_id` and logs the event. There is no `workspace.checkpoint`
 (milestone 9), no `file.changed`, no `terminal.output`, no `approval.parked` or
 `approval.auto_resolved` (parking and the policy engine of §10 are schema-only).
 
@@ -659,7 +661,10 @@ interface AgentRuntime {
    `loadSession` and `resumeSession?` collapse into one `start` that reports which of the three
    happened. The caller almost never wants to choose — it wants the session usable and wants to
    know what it got, because "resumed" and "replayed" differ in what the agent remembers. The
-   automatic `native → replay` degrade of §6.5 lives inside `start`.
+   automatic `native → replay` degrade of §6.5 lives inside `start` — for the ACP driver. The
+   CLI driver starts no process until a turn, so it learns that an id is refused only then: its
+   degrade lives inside that turn, and every turn reports what it did as a `session-observed`
+   event (§6.3).
 3. **Streaming is per-turn, not a session-wide `events()`.** `prompt` returns an
    `AsyncIterable<DriverEvent>` that ends at `turn-ended` or a terminal `error`. A single global
    stream makes "which turn is this chunk for" a correlation problem; an iterator per turn makes
@@ -725,9 +730,25 @@ because the available agent's ACP build does not stream. The reference case is n
 chunks and 15 tool calls, spanning 107.5 s of the turn. The card writer's ~1/s coalescing is the
 rate limit, not the agent.
 
-**One process per turn, and — as built — no resume.** The driver spawns per turn and re-sends the
-prior conversation as a fenced transcript in the prompt, so the agent recovers what was *said*, not
-the tool state behind it, and after a gateway restart only the prompts are replayed.
+**One process per turn, resumed natively** (plan E, `docs/plans/2026-11-05-plan-e-native-resume.md`),
+on **bytesec 0.7.4 or later**, which `mt role check` warns of for a bytesec role below it. The driver
+spawns per turn with `--session-id-file` in a directory of its own under the system's temporary
+directory — never the workspace — reads the id after the process exits, and reports it as a
+`session-observed` driver event, which the actor stores as `sessions.provider_session_id` and logs
+as `provider_session_observed`. The next turn passes it back as `--session` and sends only the new
+message. For a run given `--session`, the id file is not evidence — it echoes what was sent — so the
+session it ran in is taken from the `session_id` of its first typed event on stdout, and a run that
+printed none reports nothing: "never persist the value you sent" holds. A new runtime — after a restart, an idle eviction, or for a rework seeded from another
+session — starts from the stored id, so `start` reports `resumed` for it; a `cli:` id, which this
+driver stored before it could resume, is never passed back. The id is kept after a failed or
+cancelled turn too: the provider's session holds what that turn did. When the agent refuses the id
+before the turn starts — exit 1, no JSON line on stdout, and `turn N: persistence: session not
+found` or `turn N: unknown agent: <name>` as the whole last line of stderr — the same turn is run again without `--session`, with the conversation as a fenced
+transcript, and reported `replayed`, with the reason — `resume: native → replay`, automatically,
+and safe because the refused run started nothing. An agent that answers `--session` with another
+session — its events name another — did not continue the conversation, as 0.7.2 did: that turn is
+reported `fresh`, with the reason, and the runtime replays from then on. `/status` shows the provider session the last turn
+ran in, and how it reached it.
 
 **Correction (2026-11-02): resume now works.** On bytesec 0.7.2, `--session <id>` was measured and
 did **not** continue a conversation (identical input-token count, `turn: 1` again, a new session id
@@ -780,7 +801,7 @@ sessions.provider_session_id = last observed value.
 Never persist the value you sent.
 ```
 
-Also handle: the interactive resume dialog (`Would you like to resume? 1. Yes / 2. No`) which blocks unattended runs with no error and no exit code — needs a **startup-stall detector**, not just a turn timeout. And project-scoped session lookup means the workspace path is part of session identity: **record it, never relocate it.**
+Also handle: the interactive resume dialog (`Would you like to resume? 1. Yes / 2. No`) which blocks unattended runs with no error and no exit code — needs a **startup-stall detector**, not just a turn timeout. And project-scoped session lookup means the workspace path is part of session identity: **record it, never relocate it.** bytesec's store is not project-scoped (above), but the rule stands: a session is always given its own workspace.
 
 ### 6.4 PTY driver — fallback only, actively being deleted
 
