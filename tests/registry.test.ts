@@ -580,6 +580,10 @@ describe('reconcileBoot', () => {
     const [finding] = h.registry.reconcileBoot();
     expect(finding?.held).toBe(false);
     expect(finding?.message).not.toContain('()');
+    // Not "replayed" outright: a session with a provider session resumes it.
+    expect(finding?.message).toMatch(
+      /Send a message to continue: it resumes the agent's own session where it can, else replays history from the log\.$/,
+    );
   });
 
   it('leaves the sessions belonging to this process alone', () => {

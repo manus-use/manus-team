@@ -875,7 +875,9 @@ attempted when the rework runs the same agent as the work run it resumes — the
 and arguments in the runs' `agent_config`; environment names are not compared, since a changed
 secret does not make a conversation unresumable; a task reassigned to a
 role on another agent gets the full prompt and a fresh conversation, and its `seeded_from_run` is
-null — the column names the run whose provider session was actually resumed, not the one before. A failed or crashed run is the
+null — the column names the run whose provider session the rework's session was seeded with, not the one before. It is set when
+the claim seeds the run, and stays set even when the agent then refuses the seed and the rework replays or starts fresh, which its
+session log says (a known limitation). A failed or crashed run is the
 opposite case, and starts clean (§8.3).
 
 The claim can compare only the agents: how the rework's role reaches its agent (§2.7) is decided by

@@ -531,9 +531,15 @@ talking to it badly. It is a genuinely worse thing, in three specific ways:
   resumes after a restart too, and `/status` shows it and how the last turn reached it.
   When the agent refuses the id, the turn is run again with the conversation composed
   into the prompt as a fenced transcript, so the agent recovers what was *said* but not
-  the tool state behind it, and the session's log says it was `replayed`. The id names
-  a session in the agent's own store on this host; it is not a secret, and the gateway
-  never deletes those sessions.
+  the tool state behind it, and the session's log says it was `replayed`, or `fresh`
+  when there was no history to carry. The id names a session in the agent's own store
+  on this host; it is not a secret, and the gateway never deletes those sessions, so
+  they accumulate in bytesec's store. Known limitations: a refusal is recognised by
+  bytesec's wording, so one it rewords ends the turn `ambiguous`; `/attach` of an
+  archived board run's session while its rework runs would put two processes on one
+  agent session, which was not measured; a gateway that crashes mid-turn can leave an
+  `mt-session-id-*` directory, holding only the id, in the system's temporary
+  directory; and below 0.7.4, resume is unmeasured.
 - **No cooperative cancel.** Cancelling kills the process, so work already done stands.
 
 Everything specific to a protocol stops at its driver. Adding the second one required

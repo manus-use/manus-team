@@ -787,6 +787,19 @@ with one small model and trivial prompts, in a scratch directory:
   the new directory. The driver keeps passing a session its own workspace, so this only says that
   nothing breaks if a workspace's path is the same and its contents moved.
 
+**Known limitations of native resume.** `/attach` of an archived board run's session, by its
+id, while that run's rework runs would put two processes on one provider session; what bytesec
+does then was not measured, and only an operator typing the id can do it. A refusal is recognised
+by its wording alone, so a bytesec that rewords it makes a refused resume end the turn
+`ambiguous`, which quarantines the session, as a run that dies without a summary does. The
+texts for a suspended session (`src/core/status.ts`) and for one a restart interrupted
+(`src/core/registry.ts`) say the next message resumes the agent's own session where it can, else
+replays history from the log: which one happens is known only once the turn runs, and the
+`/status` provider line then says which. A gateway that dies mid-turn leaves its
+`mt-session-id-*` directory under the system's temporary directory; it holds only the id. The
+gateway never deletes a provider session, so they accumulate in bytesec's store. Below 0.7.4 the
+flags every turn passes were never measured: `mt role check` warns, and does not refuse.
+
 **A misconfiguration can be silent, because the failure text goes to stdout.** A bad argv makes
 the CLI print its usage banner to *stdout* and exit 1, leaving stderr empty. The driver's error
 message quotes stderr, so the user sees "agent process exited (code 1) without finishing the turn"

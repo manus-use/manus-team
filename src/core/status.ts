@@ -140,7 +140,7 @@ export function projectSessionStatus(inputs: StatusInputs): StatusView {
     return {
       ...base,
       label: 'suspended',
-      detail: 'Suspended. The next message resumes it; history is replayed from the log.',
+      detail: "Suspended. The next message resumes it, in the agent's own session where it can, else by replaying history from the log.",
       busy: false,
     };
   }
