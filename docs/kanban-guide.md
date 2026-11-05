@@ -201,9 +201,11 @@ Limits and rules:
 A task can be reviewed before it is done. Name the reviewer on a `reviewer:` line: a role by its
 name, or a person by @-mention.
 
-The reviewer is used when the assignee asks for review. The agent decides between reporting done
-and asking for review, and its prompt does not say the task has a reviewer, so ask for review in
-the body.
+A task that names a reviewer is always reviewed before it is done. The agent's prompt names the
+reviewer and tells it to ask for review when the work is done. If it reports done instead, the
+board sends the task for review all the same, with the same summary, and the agent is told
+"sent for review to role reviewer". The same holds for a person's task: their done goes to the
+reviewer. The task's gates run once, as for any review. Nothing needs to be said in the body.
 
 Paste:
 
@@ -213,12 +215,11 @@ assignee: worker
 reviewer: reviewer
 outcome: docs/oncall.md covers paging, escalation and handover
 verify: every escalation contact has a phone number
-When the page is written, ask for review with mt kanban review rather than completing.
 ```
 
 > Created `k_…`: **Write the on-call handbook page**, for role worker. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
 
-When the worker asks for review, the chat hears:
+When the worker's work is done, the chat hears:
 
 > Review requested for **Write the on-call handbook page** `k_…`, from role reviewer.
 
@@ -228,10 +229,28 @@ For a person, name them with an @-mention: type @ and pick them from Lark's list
 /kanban new Write the on-call handbook page
 assignee: worker
 reviewer: @Bob Li
-When the page is written, ask for review with mt kanban review rather than completing.
 ```
 
 > Review requested for **Write the on-call handbook page** `k_…`, from Bob Li.
+
+A task with no `reviewer:` line is done when its assignee says so. Its agent may still ask for
+review, naming a reviewer then, and from then on the task has that reviewer.
+
+### A separate review task
+
+The other way to review is a task of its own, whose parent is the work to review. The work is
+done when its assignee says so, and that releases the review task:
+
+```
+/kanban new Review the on-call handbook page
+parent: k_…
+assignee: reviewer
+Check docs/oncall.md against its parent's outcome, and list anything missing.
+```
+
+Use one way or the other, not both. A task that names a reviewer and also has a review task
+under it is reviewed twice: by its reviewer first, since its done goes to them, and then, once
+they approve, by the review task.
 
 ### What the reviewer gets
 
@@ -262,9 +281,9 @@ what needs changing.
 The task goes back to its assignee as a **rework**. For an agent, the rework is a new run whose
 prompt carries the reviewer's reason and the previous handoff in full. On bytesec, it also
 continues the implementer's own session where it can, so the agent revises what it wrote knowing
-why; where it cannot, the prompt still has everything it needs. When the agent asks for review
-again, the chat hears "Review requested for …" again. A request for changes is not itself a
-notice.
+why; where it cannot, the prompt still has everything it needs. The rework goes back to the
+reviewer when it is done, whether the agent asks for review or reports done, and the chat hears
+"Review requested for …" again. A request for changes is not itself a notice.
 
 ### Approve
 
@@ -283,7 +302,8 @@ handoff, not the approval.
 ### An operator answering a review
 
 An operator may answer any review, a person's or a role's, with the same two commands. This is
-for a reviewer who is away, or a review a role cannot take.
+for a reviewer who is away, a review a role cannot take, or a review an operator wants to settle
+now.
 
 ```
 /kanban approve k_…
@@ -291,9 +311,16 @@ for a reviewer who is away, or a review a role cannot take.
 
 > Approved: `k_…` is complete.
 
-The board refuses while a reviewer agent is working on the task. So for a role's review, an
-operator's answer is for a review no agent has taken, such as one stranded because the reviewer
-role was removed. A person who is neither the reviewer nor an operator is told:
+If a reviewer role's agent is working on the review, the operator's answer takes the review from
+it: its run is ended, and its turn is stopped. The reply says so:
+
+> Approved: `k_…` is complete; the review run of role reviewer was ended.
+
+`/kanban changes` does the same, and the task goes back to its assignee as a rework. Anything the
+reviewer agent reports afterwards is refused, as its run is over. A person reviewer's review needs
+nothing ended: the operator's answer decides it, and the person's card goes out of date.
+
+A person who is neither the reviewer nor an operator is told:
 
 > `/kanban approve` answers a review, and is for `k_…`'s reviewer (Bob Li (lark:on_…)) or an operator.
 
@@ -347,7 +374,13 @@ Each button has a typed form, which works from any chat with the bot, a direct m
 
 > Done: `k_…` is complete.
 
-The summary is optional. A block needs a reason:
+The summary is optional. If the task names a reviewer, done sends it to them instead, and the
+chat says:
+
+> Sent `k_…` for review to Bob Li (lark:on_…): the task names a reviewer, so done asks for review.
+
+Pressing **Done** on the card does the same, and the card says "Sent for review to Bob Li". A
+block needs a reason:
 
 ```
 /kanban block k_… Facilities need a cost centre before they will confirm.
@@ -355,8 +388,8 @@ The summary is optional. A block needs a reason:
 
 > Blocked `k_…` (needs_input). An operator unblocks it with `/kanban unblock k_… [comment]`.
 
-To ask for review of your own task instead of completing it, use `/kanban review`, with a
-summary, and name the reviewer on a `reviewer:` line unless the task already names one:
+To ask for review of your own task, of a reviewer the task does not name, use `/kanban review`,
+with a summary, and name the reviewer on a `reviewer:` line unless the task already names one:
 
 ```
 /kanban review k_… Holding rooms 3A and 3B until Friday.
@@ -790,7 +823,7 @@ the run as timed out.
 - Use a gate for anything checkable. A gate that fails tells the agent exactly what is wrong.
 - Want the agent to see the gates? Create the task without an assignee, add the gates, then
   `/kanban assign` it.
-- Want same-task review? Name a `reviewer:` and ask for review in the body.
+- Want review? Name a `reviewer:` on the task, or make a separate review task under it, not both.
 - Want parallel work? Give each task its own workspace, or they queue.
 - Order follow-ups with `parent:` lines, or `parents` from an agent, when you create them.
 - Steer with a comment; stop only when the agent is going the wrong way.
