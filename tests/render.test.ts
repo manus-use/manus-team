@@ -182,6 +182,37 @@ describe('renderCard', () => {
     expect(lines[0]).toContain('✅');
   });
 
+  it('puts every tool call on one line, a repeated one counted rather than listed again', () => {
+    const view = renderCard([
+      ev('turn_submitted', { text: 'who am I?' }),
+      ...[1, 2, 3, 4].map((n) => ev('tool_call', { toolCallId: `tc_${n}`, title: 'lark-cli', status: 'completed' })),
+      ev('agent_message_chunk', { text: 'You are the bot.' }),
+    ]);
+    expect(view.text.split('\n\n')[0]).toBe('✅ lark-cli ×4');
+  });
+
+  it('keeps calls of different tools, or with a different status, apart on that line, in the order they came', () => {
+    const view = renderCard([
+      ev('tool_call', { toolCallId: 'a', title: 'lark-cli', status: 'completed' }),
+      ev('tool_call', { toolCallId: 'b', title: 'Read', status: 'completed' }),
+      ev('tool_call', { toolCallId: 'c', title: 'lark-cli', status: 'completed' }),
+      ev('tool_call', { toolCallId: 'd', title: 'Bash', status: 'failed' }),
+      ev('tool_call', { toolCallId: 'e', title: 'lark-cli', status: 'in_progress' }),
+    ]);
+    expect(view.text.split('\n\n')[0]).toBe('✅ lark-cli ×2 · ✅ Read · ❌ Bash · ⏳ lark-cli');
+  });
+
+  it('starts what the agent says after a tool call on a new paragraph, instead of running it into what came before', () => {
+    const view = renderCard([
+      ev('agent_message_chunk', { text: "I'll check " }),
+      ev('agent_message_chunk', { text: 'who you are.' }),
+      ev('tool_call', { toolCallId: 'a', title: 'lark-cli', status: 'completed' }),
+      ev('tool_call_update', { toolCallId: 'a', status: 'completed' }),
+      ev('agent_message_chunk', { text: 'You are the bot.' }),
+    ]);
+    expect(view.text).toContain("I'll check who you are.\n\nYou are the bot.");
+  });
+
   it('reports a pending approval instead of claiming progress', () => {
     // A card reading "Working…" while the agent is blocked on a button is how
     // approvals sit unanswered for hours.

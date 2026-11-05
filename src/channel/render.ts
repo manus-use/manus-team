@@ -96,6 +96,9 @@ export function renderCard(events: readonly Event[]): RenderedCard {
   // "Working…" while the agent is blocked on a button is how approvals sit
   // unanswered for hours: the user has no reason to look for one.
   const openApprovals = new Set<string>();
+  // Set by a tool call: what the agent says next is a new step, not more of the
+  // sentence before it, which the chunks would otherwise run straight into.
+  let toolSinceText = false;
 
   for (const event of events) {
     throughSeq = Math.max(throughSeq, event.seq);
@@ -104,10 +107,13 @@ export function renderCard(events: readonly Event[]): RenderedCard {
     switch (event.type) {
       case 'agent_message_chunk': {
         const text = typeof payload?.['text'] === 'string' ? payload['text'] : '';
+        if (toolSinceText && text !== '' && message.trim() !== '' && !/\n\s*$/.test(message)) message += '\n\n';
+        if (text !== '') toolSinceText = false;
         message += text;
         break;
       }
       case 'tool_call': {
+        toolSinceText = true;
         const id = String(payload?.['toolCallId'] ?? '');
         tools.set(id, {
           title: String(payload?.['title'] ?? id),
@@ -116,6 +122,7 @@ export function renderCard(events: readonly Event[]): RenderedCard {
         break;
       }
       case 'tool_call_update': {
+        toolSinceText = true;
         const id = String(payload?.['toolCallId'] ?? '');
         const existing = tools.get(id);
         // An update for a tool call we never saw still gets a line. Dropping it
@@ -133,6 +140,7 @@ export function renderCard(events: readonly Event[]): RenderedCard {
         turnStartSeq = event.seq;
         replyTo = typeof payload?.['replyTo'] === 'string' ? payload['replyTo'] : undefined;
         message = '';
+        toolSinceText = false;
         error = undefined;
         errorRetryable = false;
         tools.clear();
@@ -169,8 +177,8 @@ export function renderCard(events: readonly Event[]): RenderedCard {
 
   const parts: string[] = [];
 
-  const toolLines = [...tools.values()].map((t) => `${statusIcon(t.status)} ${forDisplay(t.title)}`);
-  if (toolLines.length > 0) parts.push(toolLines.join('\n'));
+  const toolLine = toolSummary([...tools.values()]);
+  if (toolLine !== '') parts.push(toolLine);
 
   // Cut, then masked: the joined answer is the only text guaranteed to hold a
   // streamed secret whole. A trailing fragment of one is dropped, because this
@@ -214,6 +222,22 @@ export function renderCard(events: readonly Event[]): RenderedCard {
     turnStartSeq,
     ...(replyTo === undefined ? {} : { replyTo }),
   };
+}
+
+/**
+ * The turn's tool calls on one line: calls of one tool with one status are
+ * counted, not listed again -- "✅ lark-cli ×4" -- and the groups follow the order
+ * they first came in, so a failed or still-running call keeps its own icon.
+ */
+function toolSummary(tools: readonly ToolLine[]): string {
+  const groups = new Map<string, { label: string; count: number }>();
+  for (const t of tools) {
+    const label = `${statusIcon(t.status)} ${forDisplay(t.title)}`;
+    const group = groups.get(label);
+    if (group === undefined) groups.set(label, { label, count: 1 });
+    else group.count += 1;
+  }
+  return [...groups.values()].map((g) => (g.count === 1 ? g.label : `${g.label} ×${g.count}`)).join(' · ');
 }
 
 function statusIcon(status: string): string {
