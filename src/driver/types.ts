@@ -52,6 +52,14 @@ export type DriverEvent =
        */
       resolve: (outcome: PermissionOutcome) => void;
     }
+  /**
+   * The provider's own session id, as the agent reported it for this turn, and
+   * how the turn reached the conversation: continued natively (`resumed`),
+   * carried as a transcript (`replayed`), or neither (`fresh`). Emitted before
+   * `turn-ended`, on every sighting: the core stores the id as observed. `detail`
+   * says why a turn did not continue the conversation it was asked to.
+   */
+  | { kind: 'session-observed'; providerSessionId: string; mode: StartMode; detail?: string }
   | { kind: 'turn-ended'; terminal: TurnTerminal; detail?: string }
   | { kind: 'error'; message: string; retryable: boolean; raw?: unknown };
 
@@ -117,6 +125,10 @@ export interface StartOptions {
 export type StartMode = 'fresh' | 'resumed' | 'replayed';
 
 export interface StartResult {
+  /**
+   * Empty when the agent has reported none yet: a driver that learns its
+   * provider's id only from a turn reports it then, with `session-observed`.
+   */
   providerSessionId: string;
   mode: StartMode;
 }

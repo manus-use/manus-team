@@ -7,7 +7,7 @@ import {
   SessionHeld,
 } from '../src/core/session-actor.js';
 import { approvalNonce } from '../src/core/ids.js';
-import { createSession, getSession, setState } from '../src/db/sessions.js';
+import { createSession, getSession, observeProviderSessionId, setState } from '../src/db/sessions.js';
 import { bindSession, resolveBinding } from '../src/db/bindings.js';
 import { createTurn, openTurns } from '../src/db/turns.js';
 import { createApproval, getApproval } from '../src/db/approvals.js';
@@ -126,6 +126,52 @@ describe('a turn that goes well', () => {
     h.driver.providerSessionId = 'prov_rotated';
     await h.submit();
     expect(getSession(h.db.db, 's_1')?.providerSessionId).toBe('prov_rotated');
+  });
+
+  it('stores the provider session id a turn reports, and logs how the turn reached it', async () => {
+    // The CLI driver learns its provider's id only from a turn (architecture §6.3).
+    const h = harness();
+    h.driver.scripts = [
+      (ctl) => {
+        ctl.emit({ kind: 'session-observed', providerSessionId: 'ses_turn', mode: 'resumed' });
+        ctl.end('completed');
+      },
+    ];
+    await h.submit();
+    expect(getSession(h.db.db, 's_1')?.providerSessionId).toBe('ses_turn');
+    const seen = h.events().find((e) => e.type === 'provider_session_observed');
+    expect(seen).toMatchObject({ actor: 'agent', payload: { providerSessionId: 'ses_turn', mode: 'resumed' } });
+    expect(seen?.turnId).not.toBeNull();
+    expect(h.eventTypes().slice(-2)).toEqual(['provider_session_observed', 'turn_ended']);
+  });
+
+  it('keeps the id a session was seeded with when the start reports none yet', async () => {
+    // A rework's seed (spec §2.4 item 5) must reach the driver's next start, not be
+    // overwritten by a start that has nothing to report.
+    const h = harness();
+    observeProviderSessionId(h.db.db, 's_1', 'ses_seed');
+    h.driver.providerSessionId = '';
+    await h.submit();
+    expect(h.driver.starts[0]?.providerSessionId).toBe('ses_seed');
+    expect(getSession(h.db.db, 's_1')?.providerSessionId).toBe('ses_seed');
+  });
+
+  it('notes why a turn did not continue the conversation it was asked to', async () => {
+    const h = harness();
+    const detail = 'provider session ses_gone could not be resumed (persistence: session not found), so the conversation was replayed';
+    h.driver.scripts = [
+      (ctl) => {
+        ctl.emit({ kind: 'session-observed', providerSessionId: 'ses_new', mode: 'replayed', detail });
+        ctl.end('completed');
+      },
+    ];
+    await h.submit();
+    expect(h.events().find((e) => e.type === 'provider_session_observed')?.payload).toEqual({
+      providerSessionId: 'ses_new',
+      mode: 'replayed',
+      detail,
+    });
+    expect(h.notes).toContain(`provider session: ${detail}`);
   });
 
   it('renders the turn into a card and advances the persisted cursor', async () => {

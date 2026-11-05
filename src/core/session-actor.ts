@@ -504,6 +504,23 @@ export class SessionActor {
         await this.#onPermissionRequest(event, turnId, generation);
         return undefined;
 
+      case 'session-observed':
+        // Observed, never assumed: on every sighting, what the agent reported.
+        observeProviderSessionId(this.#db, this.sessionId, event.providerSessionId);
+        this.#append({
+          type: 'provider_session_observed',
+          actor: 'agent',
+          turnId,
+          generation,
+          payload: {
+            providerSessionId: event.providerSessionId,
+            mode: event.mode,
+            ...(event.detail === undefined ? {} : { detail: event.detail }),
+          },
+        });
+        if (event.detail !== undefined) this.#note(`provider session: ${event.detail}`);
+        return undefined;
+
       case 'turn-ended':
         return event.terminal;
     }
@@ -836,8 +853,12 @@ export class SessionActor {
       this.#runtime = runtime;
 
       // Observed, never assumed. Agents mint their own id and can rotate it, so
-      // what gets stored is what the agent just reported -- not what we sent.
-      observeProviderSessionId(this.#db, this.sessionId, result.providerSessionId);
+      // what gets stored is what the agent just reported -- not what we sent. An
+      // empty one is none yet: the CLI driver learns it from a turn, and storing
+      // '' would lose a seed the session was created with (spec §2.4 item 5).
+      if (result.providerSessionId !== '') {
+        observeProviderSessionId(this.#db, this.sessionId, result.providerSessionId);
+      }
       setExecution(this.#db, this.sessionId, `${BOOT_ID}:${session.generation}`, this.#driver.id);
       setState(this.#db, this.sessionId, 'live', this.#clock.now());
       this.#append({

@@ -33,6 +33,8 @@ export type EventType =
   | 'session_created'
   | 'session_state_changed'
   | 'generation_bumped'
+  /** The provider session id a turn ran in, and how it reached it (architecture §6.3). */
+  | 'provider_session_observed'
   | 'agent_error';
 
 export interface Event {
