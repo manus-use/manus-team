@@ -72,9 +72,9 @@ Each has a recommendation and its reason. *The user's decision* marks those the 
    - Provider sessions are kept: the gateway never runs `bytesec session delete`. *The user's decision.* A rework needs the work run's session after it is archived, and the store is the agent's own.
 9. **The board needs no change to resume.** A nudge (spec §7.5) is a later turn of the run's session, so it resumes and sends only the reminder. A rework's session is created with the work run's observed id as its seed (§2.4 item 5), so its first turn resumes the implementer's conversation, sending the full rework prompt, which still carries the reviewer's reason and the handoff in full (§5.3). What guards a rework when the role's package changes is `recordRendering`'s package-hash check (§5.3, plan R), which drops the seed before the session is made, not the stderr rule: bytesec keeps a session's agent *name*, and a session resumed under a new package of the same name with the same `--agent` was not measured. A retry is a new run in a new session with no seed, so it starts a new provider session (§8.3). Each run is its own gateway session (§7.1). Two runs of one task share a provider session only rework after work, when the work run is closed.
 10. **`seeded_from_run` names the run the rework was started from.** *The user's decision:* accepted as a known limitation. When the agent refuses the seed, the rework's session log says `replayed` or `fresh` with the reason, and the column is left as the claim set it, though spec §5.3 says it "names the run whose provider session was actually resumed". The `cli:` case is fixed: `reworkSeed` (`src/db/kanban.ts`) seeds only from an id `isResumableProviderId` accepts, so a work run whose session holds an old `cli:` id gives the rework no seed and a null `seeded_from_run`; until now every CLI rework recorded one.
-11. **Visibility: `/status` only.** It ends with `provider session \`ses_…\`: the last turn resumed it` — or "replayed the conversation into it", or "started it" — read from the latest `provider_session_observed`, and says nothing when no turn has reported one (the ACP driver, or a session that has not run since this build). The card says nothing: a turn's card is the answer, not its plumbing. A refusal's reason is in the session log and the gateway's notes.
+11. **Visibility: `/status` only.** It ends with `provider session \`ses_…\`: the last turn resumed it` — or "replayed the conversation into it", or "started it" — read from the latest `provider_session_observed`, and says nothing when no turn has reported one (the ACP driver, or a session that has not run since this build). "The last turn" is the last turn that reported one: a turn that reports nothing — a resumed run that printed no typed event — leaves the line as the turn before it left it. The card says nothing: a turn's card is the answer, not its plumbing. A refusal's reason is in the session log and the gateway's notes.
 12. **Masking: the id is not a secret.** It names a session in the agent's own store on the gateway's host, readable only by the user the gateway and its agents run as. It is not added to the masker, is stored as it is in `sessions`, and is shown in `/status`. The event's payload is masked on write like every payload, so an id that happened to equal a configured secret would be masked in the log, and `/status` would show no line.
-13. **No configuration switch, and a version check.** *The user's decision:* there is no `agent.resume` switch; native resume is always attempted on the structured-CLI driver, and Decisions 4 and 5 make a version that stops resuming degrade visibly. Native resume needs bytesec 0.7.4 or later (`RESUME_MIN_VERSION`): the README and architecture §6.3 say so, and `mt role check` asks each bytesec role's command for `--version`, once a command, and warns of one below 0.7.4 — a warning, not a failure, as such a role still works by replaying — or notes one whose version it cannot read. The probe is injectable (`MtIo.agentVersion`), so no test runs bytesec.
+13. **No configuration switch, and a version check.** *The user's decision:* there is no `agent.resume` switch; native resume is always attempted on the structured-CLI driver, and Decisions 4 and 5 make a version that stops resuming degrade visibly. Native resume needs bytesec 0.7.4 or later (`RESUME_MIN_VERSION`): the README and architecture §6.3 say so, and `mt role check` asks each bytesec role's command for `--version`, once a command, and warns of one below 0.7.4 — a warning, not a failure: how an older bytesec takes `--session-id-file` and `--session`, which every turn passes, was never measured, so with it native resume is unmeasured and its turns may not work — or notes one whose version it cannot read. The probe is injectable (`MtIo.agentVersion`), so no test runs bytesec.
 14. **Concurrency.** One actor per session runs one turn at a time through its mailbox; the CLI runtime refuses a second prompt while one is in flight; each turn is one process. So no two processes of one gateway session ever share a provider session. Two gateway sessions hold the same provider id only rework after work (Decision 9), when the work run's session is archived and its binding revoked. The one way two processes could still share one is an operator's `/attach` of the archived work run's session, by id, while its rework runs (Known limitations).
 
 ## Out of scope, and known limitations
@@ -83,6 +83,8 @@ Each has a recommendation and its reason. *The user's decision* marks those the 
 - **The refusal is recognized by its wording** (Decision 4). A bytesec that rewords it makes a refused resume an `ambiguous` turn, which quarantines the session, as a run that dies without a summary does today.
 - **`/attach` from chat to an archived board run's session** is refused by bytesec with `unknown agent: <role>` when that run was native — the chat starts it without the run's `--agent` and package — so the turn replays, and its new provider id overwrites the stored one. A later rework's seed is then lost: it seeds from the chat's new session, or, if refused again, starts fresh.
 - **A role package changed under the same name** is guarded by `recordRendering`'s package-hash check, not by bytesec (Decision 9); resuming under a new package with the same `--agent` name was not measured.
+- **A context-free turn on an agent that ignores `--session`.** On a 0.7.2-style agent, which answers `--session` with a new session, a new runtime — after a restart or an idle eviction — starts from the stored id and sends its first turn without the transcript, so that one turn is answered with neither the conversation nor a transcript; it is then reported `fresh` with the reason, and the runtime replays from the next turn on (Decision 5).
+- **Below bytesec 0.7.4 is unmeasured** and may not work: `mt role check` warns, and does not refuse (Decision 13).
 - **A gateway that dies mid-turn leaves its `mt-session-id-…` directory** under the system's temporary directory; it holds only the id.
 - **`seeded_from_run` stays set when the agent refuses a rework's seed** (Decision 10), accepted by the user.
 - **Status texts still say history "is replayed from the log"** for a suspended session (`src/core/status.ts`, and a restart's finding in `src/core/registry.ts`); for a session with a provider id it is resumed instead. The new `/status` line says which.
@@ -408,7 +410,9 @@ with:
  *     so only the `session_id` on its events says which session it ran in;
  *   - `FAKE_CLI_REFUSAL` changes how a refusal looks: `noisy` prints a typed
  *     event nobody has a projection for before it, `trailing` writes another
- *     stderr line after it, and `slow` waits 1.5 s first, so a test can stop it.
+ *     stderr line after it, and `slow` ignores SIGTERM and waits 1.5 s first --
+ *     inside the driver's 2 s grace before SIGKILL -- so a test can stop it and
+ *     still see it exit 1 with the refusal, as a stop that loses the race would.
  *
  * Each session's file holds its agent and every prompt it was sent. Without
  * `FAKE_CLI_SESSIONS` the agent writes no id, as an agent that cannot resume.
@@ -448,8 +452,11 @@ let SESSION = 'ses_fake_cli';
 /** Refuse to continue the session, as bytesec does: before the turn, exit 1. Written synchronously, then gone. */
 function refuse(line) {
   const how = process.env['FAKE_CLI_REFUSAL'];
-  // Blocks; a SIGTERM still ends the process.
-  if (how === 'slow') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+  if (how === 'slow') {
+    // Ignored, so the refusal still arrives after a stop, exit 1 and all.
+    process.on('SIGTERM', () => {});
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+  }
   if (how === 'noisy') writeSync(1, `${JSON.stringify({ type: 'sentiment_delta', session_id: asked, mood: 'wary' })}\n`);
   writeSync(2, `${line}\n`);
   if (how === 'trailing') writeSync(2, 'session store closed\n');
@@ -1364,7 +1371,7 @@ git commit -m "Have the CLI driver give each turn's process a session id file in
 **Files:**
 - Modify: `src/driver/cli/driver.ts`, `tests/cli-driver.e2e.ts`
 
-A resumed run that the agent refuses before the turn starts — exit 1, no line starting with `{` on stdout, not cancelled, and stderr's last non-empty line exactly `turn N: persistence: session not found` or `turn N: unknown agent: <name>` — is run again in the same turn without `--session`, with the transcript, and reported `replayed` with the reason, or `fresh` when there was nothing to carry (Decision 4). A cancel or close that arrives as the refused run exits ends the turn `cancelled` rather than starting the second process. A resumed run whose events name another session is reported `fresh`, saying so, and the runtime replays from then on (Decision 5). Four of the new tests hold lines the implementation must not cross — a run that printed anything, a refusal that is not stderr's last line, a refusal cancelled while it waits, and a resumed run that fails after starting are never run again — and pass before it as well as after.
+A resumed run that the agent refuses before the turn starts — exit 1, no line starting with `{` on stdout, not cancelled, and stderr's last non-empty line exactly `turn N: persistence: session not found` or `turn N: unknown agent: <name>` — is run again in the same turn without `--session`, with the transcript, and reported `replayed` with the reason, or `fresh` when there was nothing to carry (Decision 4). A stopped turn is never run again: `#attempt` does not take a run that was cancelled or closed for refused, even when it exits 1 with the refusal — which is what the cancel test shows, with a fake that ignores SIGTERM and refuses 1.5 s later, inside the driver's 2 s grace (`KILL_GRACE_MS`). `#runTurn` checks the cancel and the close again before the second process; that recheck is a defence that cannot be reached today, since nothing is awaited between the two checks, not the fix — the test fails only with both removed. A resumed run whose events name another session is reported `fresh`, saying so, and the runtime replays from then on (Decision 5). Four of the new tests hold lines the implementation must not cross — a run that printed anything, a refusal that is not stderr's last line, a refusal cancelled while it waits, and a resumed run that fails after starting are never run again — and pass before it as well as after.
 
 - [ ] **Step 3.1: Write the failing tests.**
 
@@ -1480,7 +1487,8 @@ describe('CLI driver: when the agent will not resume', () => {
   it('does not run a refused turn again once it is cancelled', async () => {
     const s = await start('basic', { sessions: store(), providerSessionId: 'ses_gone', env: { FAKE_CLI_REFUSAL: 'slow' } });
     const turn = collect(s.runtime.prompt(said('hello')));
-    // Until the refusing process has started.
+    // The fake ignores the stop, and refuses as it would have, exit 1 and all:
+    // only the cancel says not to run the turn again. Until it has started:
     for (let i = 0; i < 200 && s.invocations().length === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
     await s.runtime.cancel();
     const events = await turn;
@@ -1773,7 +1781,9 @@ with:
       rmSync(dir, { recursive: true, force: true });
     }
     if (refusal === undefined) return;
-    // Stopped while the refused run was exiting: nothing ran, and nothing will.
+    // A defence, not reachable today: `#attempt` already takes a stopped run's
+    // refusal for the turn's own outcome, and nothing is awaited between its
+    // check and this one. Kept so the second process can never follow a stop.
     if (this.#closed) {
       yield { kind: 'turn-ended', terminal: 'cancelled', detail: 'runtime closed' };
       return;
@@ -2064,6 +2074,7 @@ describe('continuityLine', () => {
       '\nprovider session `ses_1`: the last turn replayed the conversation into it',
     );
     expect(continuityLine({ providerSessionId: 'ses_1', mode: 'later' })).toBe('\nprovider session `ses_1`');
+    expect(continuityLine({ providerSessionId: 'ses_1', mode: 'constructor' })).toBe('\nprovider session `ses_1`');
     expect(continuityLine({ providerSessionId: 'a`b', mode: 'fresh' })).toBe('');
     expect(continuityLine({ providerSessionId: '-x', mode: 'fresh' })).toBe('');
     expect(continuityLine({ providerSessionId: 'cli:1a2b3c4d', mode: 'fresh' })).toBe('');
@@ -2199,15 +2210,18 @@ with:
 }
 
 /** How each way a turn reached its provider session reads in `/status`. */
-const CONTINUITY: Readonly<Record<string, string>> = {
-  resumed: 'the last turn resumed it',
-  replayed: 'the last turn replayed the conversation into it',
-  fresh: 'the last turn started it',
-};
+const CONTINUITY: ReadonlyMap<unknown, string> = new Map([
+  ['resumed', 'the last turn resumed it'],
+  ['replayed', 'the last turn replayed the conversation into it'],
+  ['fresh', 'the last turn started it'],
+]);
 
 /**
  * `/status`'s line for the provider session the last turn ran in, from its
- * `provider_session_observed` event; nothing when no turn has reported one. The
+ * `provider_session_observed` event; nothing when no turn has reported one. "The
+ * last turn" is the last turn that reported one: a turn that reports nothing --
+ * a resumed run that printed no event, or an ACP turn -- leaves the line as the
+ * turn before it left it. The
  * id is no secret (plan E): it names a session in the agent's own store on this
  * host, which only this host's user can read. Shown only when it is an id a
  * driver would pass back (`isResumableProviderId`), so nothing in it can break
@@ -2217,7 +2231,8 @@ export function continuityLine(payload: unknown): string {
   if (typeof payload !== 'object' || payload === null) return '';
   const { providerSessionId: id, mode } = payload as { providerSessionId?: unknown; mode?: unknown };
   if (!isResumableProviderId(id)) return '';
-  const how = typeof mode === 'string' ? CONTINUITY[mode] : undefined;
+  // A Map, so no inherited key (`constructor`, `__proto__`) can read as a mode.
+  const how = CONTINUITY.get(mode);
   return `\nprovider session \`${id}\`${how === undefined ? '' : `: ${how}`}`;
 }
 ```
@@ -2556,7 +2571,7 @@ git commit -m "Seed a rework only from a provider session id an agent could resu
 **Files:**
 - Modify: `src/driver/cli/driver.ts`, `src/cli/mt.ts`, `src/cli/role.ts`, `tests/helpers/mt.ts`, `tests/mt-role.test.ts`, `tests/cli-driver.e2e.ts`
 
-Native resume needs bytesec 0.7.4 (`RESUME_MIN_VERSION`, Decision 13). `mt role check` asks each role whose structured-CLI command is bytesec for `<command> --version`, once a command, and prints a warning for one below 0.7.4, or a note when no version can be read; neither changes its exit code, since such a role still works, by replaying. The probe is `MtIo.agentVersion`, which the test fixture always sets — to `0.7.4` unless a test says otherwise — so no test runs bytesec; the real one, `readAgentVersion`, is tested end to end against `node --version`.
+Native resume needs bytesec 0.7.4 (`RESUME_MIN_VERSION`, Decision 13). `mt role check` asks each role whose structured-CLI command is bytesec for `<command> --version`, once a command, and prints a warning for one below 0.7.4, or a note when no version can be read. Neither changes its exit code: below 0.7.4 is unmeasured — every turn passes `--session-id-file`, which an older bytesec may not take — and may not work, but the check does not know that it fails. The probe is `MtIo.agentVersion`, which the test fixture always sets — to `0.7.4` unless a test says otherwise — so no test runs bytesec; the real one, `readAgentVersion`, is tested end to end against `node --version`.
 
 - [ ] **Step 6.1: Write the failing tests.**
 
@@ -2638,12 +2653,12 @@ with:
     roleDir('implementer', 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n');
     const asked: string[] = [];
     const r = await fx.run(['role', 'check'], { agentVersion: (command) => (asked.push(command), '0.7.2') });
-    // A warning, not a failure: the role still works, replaying its conversation.
+    // A warning, not a failure: an older bytesec was never measured, and may work or not.
     expect(r.code).toBe(0);
     expect(asked).toEqual(['bytesec']);
     expect(r.out.split('\n').filter((l) => l.startsWith('warning: '))).toEqual([
-      'warning: role default runs bytesec 0.7.2, which cannot resume a session, so its sessions replay their conversation instead; native resume needs 0.7.4 or later',
-      'warning: role implementer runs bytesec 0.7.2, which cannot resume a session, so its sessions replay their conversation instead; native resume needs 0.7.4 or later',
+      'warning: role default runs bytesec 0.7.2, older than 0.7.4, the oldest measured to resume a session; with it, native resume is unmeasured and its turns may not work',
+      'warning: role implementer runs bytesec 0.7.2, older than 0.7.4, the oldest measured to resume a session; with it, native resume is unmeasured and its turns may not work',
     ]);
   });
 
@@ -2815,10 +2830,10 @@ with:
 }
 
 /**
- * A line for each bytesec role whose bytesec cannot resume a session, or whose
- * version cannot be read: native resume needs `RESUME_MIN_VERSION` (plan E). A
- * warning, not a failure -- such a role still works, replaying its conversation
- * as a transcript. Each command is asked once.
+ * A line for each bytesec role whose bytesec is older than `RESUME_MIN_VERSION`,
+ * the oldest measured to resume a session (plan E), or whose version cannot be
+ * read. A warning, not a failure: how an older bytesec takes the driver's flags
+ * was never measured, so it may work, or not. Each command is asked once.
  */
 function resumeVersions(roles: readonly Role[], io: MtIo): void {
   const ask = io.agentVersion ?? ((command: string) => readAgentVersion(command, io.env));
@@ -2832,8 +2847,8 @@ function resumeVersions(roles: readonly Role[], io: MtIo): void {
       io.out(`note: role ${role.name}: ${command} --version gave no version; native resume needs bytesec ${RESUME_MIN_VERSION} or later`);
     } else if (versionBelow(version, RESUME_MIN_VERSION)) {
       io.out(
-        `warning: role ${role.name} runs bytesec ${version}, which cannot resume a session, so its sessions ` +
-          `replay their conversation instead; native resume needs ${RESUME_MIN_VERSION} or later`,
+        `warning: role ${role.name} runs bytesec ${version}, older than ${RESUME_MIN_VERSION}, the oldest ` +
+          'measured to resume a session; with it, native resume is unmeasured and its turns may not work',
       );
     }
   }
@@ -2907,7 +2922,7 @@ with:
   use. That is a security posture, not a rough edge, which is why `agent.unsupervised`
   has to be written down before this driver will load.
 - **Resume per process,** on bytesec 0.7.4 or later; `mt role check` warns of a bytesec
-  role below it, whose sessions replay instead. Each turn is a fresh process. The
+  role below it, with which resume is unmeasured and may not work. Each turn is a fresh process. The
   driver reads the agent's own session id from `--session-id-file` and passes it back
   as `--session` on the next turn, which then sends only the new message; the id is stored, so a session
   resumes after a restart too, and `/status` shows it and how the last turn reached it.
