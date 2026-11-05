@@ -10,7 +10,9 @@ import {
   Notifier,
   ROUND_EVENTS,
   ROUND_SENDS,
+  UNBLOCK_BUTTONS,
 } from '../src/kanban/notices.js';
+import { unblockButton } from '../src/kanban/chat-render.js';
 import { KanbanService } from '../src/kanban/service.js';
 import type { CreatedVia, TaskRow } from '../src/kanban/types.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
@@ -54,9 +56,12 @@ afterEach(() => {
   t.close();
 });
 
-function notifier(opts: { appId?: string; channels?: ReadonlyMap<string, Channel>; sendTimeoutMs?: number } = {}): Notifier {
+function notifier(
+  opts: { appId?: string; channels?: ReadonlyMap<string, Channel>; sendTimeoutMs?: number; nameOf?: (p: string) => string | undefined } = {},
+): Notifier {
   return new Notifier({
     ...(opts.sendTimeoutMs === undefined ? {} : { sendTimeoutMs: opts.sendTimeoutMs }),
+    ...(opts.nameOf === undefined ? {} : { nameOf: opts.nameOf }),
     db: t.db,
     service,
     channels: opts.channels ?? new Map([['lark', lark]]),
@@ -113,6 +118,46 @@ describe('the notifier', () => {
     expect(subscriptionsOf(t.db, b.taskId)[0]?.cursor).toBe(eventsOf(t.db, b.taskId).at(-1)?.id);
     expect(await n.deliver()).toBe(0);
     expect(lark.texts).toHaveLength(1);
+  });
+
+  it('puts an Unblock under a message for each task its notices left blocked, the latest block of each, and none under one without', async () => {
+    const a = create('Draft the notes');
+    const b = create('Check the links');
+    const person = { kind: 'person' as const, principal: ALICE };
+    expect(service.block(a.taskId, person, { kind: 'needs_input', reason: 'which wiki?' }).ok).toBe(true);
+    expect(service.unblock(a.taskId, ALICE).ok).toBe(true);
+    expect(service.block(a.taskId, person, { kind: 'needs_input', reason: 'still unsure' }).ok).toBe(true);
+    expect(service.block(b.taskId, person, { kind: 'capability', reason: 'no access' }).ok).toBe(true);
+    const n = notifier();
+    expect(await n.deliver()).toBe(3);
+    const blocks = eventsOf(t.db, a.taskId).filter((e) => e.kind === 'blocked');
+    expect(lark.texts[0]?.buttons).toEqual([
+      unblockButton('cli_app', blocks.at(-1)!),
+      unblockButton('cli_app', eventsOf(t.db, b.taskId).find((e) => e.kind === 'blocked')!),
+    ]);
+    await done(create('Plain'), 'ok');
+    await n.deliver();
+    expect(lark.texts[1]?.buttons).toBeUndefined();
+    // At most a handful, in the order told.
+    const many = Array.from({ length: UNBLOCK_BUTTONS + 2 }, (_, i) => create(`blocked ${i}`));
+    for (const task of many) expect(service.block(task.taskId, person, { kind: 'needs_input', reason: 'x' }).ok).toBe(true);
+    await n.deliver();
+    expect(lark.texts[2]?.buttons?.map((x) => x.value['task'])).toEqual(many.slice(0, UNBLOCK_BUTTONS).map((x) => x.taskId));
+  });
+
+  it("tells who a person's claim gave a task to, by the name Lark gave", async () => {
+    const people = new KanbanService({
+      db: t.db,
+      roles: new Map(DEFAULT_ROLES.map((r) => [r.name, r])),
+      workspaces: WORKSPACES,
+      clock,
+      people: { canTalk: () => true },
+    });
+    const r = people.create({ title: 'Check the links', assignee: ALICE, createdBy: ALICE, createdVia: VIA });
+    if (!r.ok) throw new Error(r.message);
+    expect(people.claim(r.task.taskId).ok).toBe(true);
+    await notifier({ nameOf: (p) => (p === ALICE ? 'Alice' : undefined) }).deliver();
+    expect(lark.texts.map((m) => m.text)).toEqual([`📋 **Check the links** \`${r.task.taskId}\` — assigned to Alice`]);
   });
 
   it('sends at most a batch of notices a message, says more follow, and sends them in the next round', async () => {

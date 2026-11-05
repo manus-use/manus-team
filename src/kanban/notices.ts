@@ -1,10 +1,10 @@
-import { ChannelError, type Channel, type SendTarget } from '../channel/types.js';
+import { ChannelError, type CardButton, type Channel, type SendTarget } from '../channel/types.js';
 import { noticeBatchUuid } from '../core/ids.js';
 import { dueSubscriptions, eventsAfter, getTask, type DueSubscription } from '../db/kanban-read.js';
 import type { Db } from '../db/open.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
-import { renderNotice } from './chat-render.js';
+import { blocksTask, renderNotice, unblockButton, type NameOf } from './chat-render.js';
 import type { KanbanService } from './service.js';
 import type { KanbanEvent, SubscriptionRow } from './types.js';
 
@@ -50,6 +50,12 @@ import type { KanbanEvent, SubscriptionRow } from './types.js';
  * The board's writes come from chat, the worker socket and the dispatcher, so
  * rather than be told of each, the notifier looks every `NOTICE_POLL_MS`: a cheap
  * read when nothing is due.
+ *
+ * **A block's notice offers Unblock** (spec §9.2): a message whose notices left
+ * tasks blocked carries an Unblock button for each, at most `UNBLOCK_BUTTONS`,
+ * bound to the event that blocked it. The message is not redrawn when one is
+ * pressed -- it carries the round's other notices too -- so a second press
+ * finds the block lifted and does nothing, which is noted in the log.
  */
 
 /** How often a round looks for notices to send. */
@@ -73,6 +79,8 @@ export const ROUND_SENDS = 10;
 export const ROUND_EVENTS = 100;
 /** The longest a send is waited for; past it, it counts as failed. */
 export const NOTICE_SEND_MS = 30_000;
+/** Unblock buttons under one message; a block past them is unblocked by `/kanban unblock`, as its notice says. */
+export const UNBLOCK_BUTTONS = 5;
 
 /**
  * Lark's codes that mean this chat cannot be posted to by this bot, whatever is
@@ -92,6 +100,8 @@ export interface NotifierDeps {
   appId: string;
   /** `kanban.block_recurrence_limit` (spec §5.4). */
   blockRecurrenceLimit: number;
+  /** What a notice calls a person, by the name Lark last gave: the people directory's. */
+  nameOf?: NameOf;
   clock?: Clock;
   /** Metadata only: ids and counts, never task text. */
   note?: (line: string) => void;
@@ -297,6 +307,7 @@ export class Notifier {
     }
     const more = all.length - batch.length;
     const text = [...batch.map((n) => n.text), ...(more > 0 ? [`… and ${more} more, in the next message.`] : [])].join('\n\n');
+    const buttons = this.#unblockButtons(batch.map((n) => n.event));
     // The last event the message covers: each cursor moves to it, notices or not.
     const upTo = more > 0 ? (batch.at(-1)?.event.id ?? 0) : readTo;
     try {
@@ -308,6 +319,7 @@ export class Notifier {
             this.#deps.appId,
             batch.map((n) => [n.sub.id, n.event.id]),
           ),
+          ...(buttons.length === 0 ? [] : [buttons]),
         ),
       );
     } catch (err) {
@@ -340,6 +352,20 @@ export class Notifier {
     }
   }
 
+  /**
+   * An Unblock for each task a batch's notices left blocked: the latest such
+   * notice of each, since an earlier one's block was lifted before it, in the
+   * order the batch tells them, at most `UNBLOCK_BUTTONS`.
+   */
+  #unblockButtons(events: readonly KanbanEvent[]): CardButton[] {
+    const latest = new Map<string, KanbanEvent>();
+    for (const e of events) if (blocksTask(e)) latest.set(e.taskId, e);
+    return [...latest.values()]
+      .sort((a, b) => a.id - b.id)
+      .slice(0, UNBLOCK_BUTTONS)
+      .map((e) => unblockButton(this.#deps.appId, e));
+  }
+
   /** A subscription's events past its cursor, and the notices among them. */
   #read(sub: SubscriptionRow): Pending {
     const task = getTask(this.#deps.db, sub.taskId);
@@ -347,7 +373,10 @@ export class Notifier {
     const events = eventsAfter(this.#deps.db, sub.taskId, sub.cursor, ROUND_EVENTS);
     const notices: Pending['notices'] = [];
     for (const event of events) {
-      const text = renderNotice(event, task, { blockRecurrenceLimit: this.#deps.blockRecurrenceLimit });
+      const text = renderNotice(event, task, {
+        blockRecurrenceLimit: this.#deps.blockRecurrenceLimit,
+        ...(this.#deps.nameOf === undefined ? {} : { nameOf: this.#deps.nameOf }),
+      });
       if (text !== undefined) notices.push({ event, text });
     }
     return { sub, events, notices };
