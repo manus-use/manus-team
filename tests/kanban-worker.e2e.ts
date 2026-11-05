@@ -91,7 +91,7 @@ async function build(mode: string, opts: { gated?: boolean } = {}): Promise<Stac
       createCliDriver({
         command: process.execPath,
         args: [AGENT],
-        // The fake keeps its sessions as bytesec does, so a run's turns resume (plan E).
+        // The fake keeps its sessions as bytesec does, so a run's turns resume (native resume).
         env: { FAKE_CLI_MODE: mode, FAKE_CLI_LOG: log, FAKE_CLI_SESSIONS: join(dir, 'sessions') },
       }),
     ],
@@ -265,7 +265,7 @@ describe('the worker CLI, end to end', () => {
     expect(s.invocations()).toHaveLength(2);
     expect(first?.run).toBe(run?.runId);
     expect(second?.run).toBe(run?.runId);
-    // The nudge continues the run's provider session, and is sent alone: no transcript (plan E).
+    // The nudge continues the run's provider session, and is sent alone: no transcript (native resume).
     const provider = getSession(s.t.db, run?.sessionId ?? '')?.providerSessionId;
     expect(provider).toMatch(/^ses_fake_/);
     expect(first?.session).toBeNull();

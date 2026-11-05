@@ -44,7 +44,7 @@ import { isResumableProviderId } from '../../provider-id.js';
  *    already done stands.
  *
  * The wire format below is ByteSec's `run --format json` stream, verified against
- * 0.7.2 rather than inferred, and its sessions against 0.7.4 (plan E's spike).
+ * 0.7.2 rather than inferred, and its sessions against 0.7.4 (the native-resume spike).
  * Everything specific to it -- the flag spellings, the event names, the stderr
  * of a refused session -- stops at this file, in the same way ACP stops at
  * `../acp`.
@@ -88,7 +88,7 @@ export const RESUME_MIN_VERSION = '0.7.4';
 /**
  * The last line of stderr when bytesec 0.7.4 will not continue a session: an id
  * its store does not hold, or one made as another agent. Both exit 1 before the
- * turn starts, with nothing on stdout (plan E's spike). Matched only as the whole
+ * turn starts, with nothing on stdout (the native-resume spike). Matched only as the whole
  * last line, so a turn that merely mentions it is not taken for a refusal.
  */
 const RESUME_REFUSED = /^turn \d+: (persistence: session not found|unknown agent: \S+)$/;
@@ -359,7 +359,7 @@ class CliRuntime implements AgentRuntime {
       '--dir',
       this.#cwd,
       // The provider session to continue, and where the agent says which one it
-      // ran in (plan E). Written at the process's start, even for a turn that
+      // ran in (native resume). Written at the process's start, even for a turn that
       // then fails, and with the id asked for even when that id is refused.
       ...(resume === undefined ? [] : ['--session', resume]),
       '--session-id-file',
@@ -414,15 +414,23 @@ class CliRuntime implements AgentRuntime {
     let said = false;
     /** Any JSON line on stdout, recognized or not: a refused resume prints none. */
     let started = false;
-    /** The session the agent's first typed event says it is in. */
+    /** The session the agent's first typed event naming a resumable id says it is in. */
     let streamedId: string | undefined;
+    // Which session the run was in. Given --session, the agent writes back the
+    // id it was given whether or not it continued that session, so only its own
+    // stream is evidence; without one, the file it wrote is.
+    const ranIn = (): string | undefined => (resume === undefined ? readSessionId(idFile) : streamedId);
 
     const lines = createInterface({ input: child.stdout });
     try {
       for await (const line of lines) {
         if (line.trim().startsWith('{')) {
           started = true;
-          streamedId ??= typedSessionId(line.trim());
+          // The first id it could resume: one it could not does not hide a later one.
+          if (streamedId === undefined) {
+            const id = typedSessionId(line.trim());
+            if (isResumableProviderId(id)) streamedId = id;
+          }
         }
         const parsed = parseLine(line);
         if (parsed === undefined) continue;
@@ -431,6 +439,11 @@ class CliRuntime implements AgentRuntime {
           // future version asks anyway, there is no channel to answer on and the
           // process would wait for an answer that can never arrive. Stopping it is
           // strictly better than a turn that hangs until something else notices.
+          await this.#kill();
+          // Which session it was in, as for any other turn: the provider's session
+          // holds what it did before it asked, which the next turn should continue.
+          const stopped = this.#observe(ranIn(), resume, refused, carried);
+          if (stopped !== undefined) yield stopped;
           yield {
             kind: 'error',
             message:
@@ -439,7 +452,6 @@ class CliRuntime implements AgentRuntime {
               'for work that needs approval.',
             retryable: false,
           };
-          await this.#kill();
           // It had already started acting, and we killed it partway.
           yield { kind: 'turn-ended', terminal: 'ambiguous' };
           return;
@@ -469,11 +481,7 @@ class CliRuntime implements AgentRuntime {
       if (refusal !== null) return `provider session ${resume} could not be resumed (${refusal[1] ?? ''})`;
     }
 
-    // Which session the run was in. Given --session, the agent writes back the
-    // id it was given whether or not it continued that session, so only its own
-    // stream is evidence; without one, the file it wrote is.
-    const ranIn = resume === undefined ? readSessionId(idFile) : streamedId;
-    const seen = this.#observe(ranIn, resume, refused, carried);
+    const seen = this.#observe(ranIn(), resume, refused, carried);
     if (seen !== undefined) yield seen;
 
     // Streamed nothing, but reported an answer. Some builds do not stream at all,

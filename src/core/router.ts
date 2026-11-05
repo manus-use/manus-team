@@ -711,9 +711,9 @@ const CONTINUITY: ReadonlyMap<unknown, string> = new Map([
  * `provider_session_observed` event; nothing when no turn has reported one. "The
  * last turn" is the last turn that reported one: a turn that reports nothing --
  * a resumed run that printed no event, or an ACP turn -- leaves the line as the
- * turn before it left it. The
- * id is no secret (plan E): it names a session in the agent's own store on this
- * host, which only this host's user can read. Shown only when it is an id a
+ * turn before it left it. The id is no secret (native resume): it names a session
+ * in the agent's own store on this host, which only this host's user can read.
+ * Shown only when it is an id a
  * driver would pass back (`isResumableProviderId`), so nothing in it can break
  * the line, and an old `cli:` runtime id is not taken for a provider session.
  */

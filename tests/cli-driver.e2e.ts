@@ -16,7 +16,7 @@ import type { AgentRuntime, DriverEvent, PromptInput, StartResult } from '../src
  * and those two *are* this driver's session handling: the provider's session
  * continued natively, or, from an agent that cannot resume, the conversation as
  * text the driver puts on the command line. With `sessions`, the fake keeps
- * sessions as bytesec 0.7.4 does (plan E's spike).
+ * sessions as bytesec 0.7.4 does (the native-resume spike).
  */
 
 const AGENT = fileURLToPath(new URL('./fakes/cli-agent.mjs', import.meta.url));
@@ -172,7 +172,7 @@ describe('CLI driver: establishing a session', () => {
   });
 
   it("reads an agent's version from its --version, and nothing from a command that cannot run", () => {
-    // `mt role check` asks bytesec this way (plan E); node answers `v22.…`.
+    // `mt role check` asks bytesec this way (native resume); node answers `v22.…`.
     expect(readAgentVersion(process.execPath, process.env)).toMatch(/^\d+\.\d+\.\d+$/);
     expect(readAgentVersion('/nonexistent/agent-binary', process.env)).toBeUndefined();
   });
@@ -573,6 +573,17 @@ describe('CLI driver: when the agent will not resume', () => {
     expect(s.invocations()[2]?.session).toBeNull();
   });
 
+  it('takes the first resumable session a resumed run names, past one it could not resume', async () => {
+    // One event naming an id no driver could hand back does not hide the session the rest name.
+    const s = await start('basic', { sessions: store(), env: { FAKE_CLI_RESUME: 'echo', FAKE_CLI_FIRST_ID: 'cli:abc' } });
+    const first = observed(await collect(s.runtime.prompt(said('remember pickle'))));
+    const second = observed(await collect(s.runtime.prompt(said('what did I say?'))));
+    expect(s.invocations()[1]?.session).toBe(first?.providerSessionId);
+    expect(second?.providerSessionId).toMatch(/^ses_fake_/);
+    expect(second?.providerSessionId).not.toBe(first?.providerSessionId);
+    expect(second?.mode).toBe('fresh');
+  });
+
   it('does not take a run that printed anything for refused, whatever stderr says', async () => {
     const s = await start('basic', { sessions: store(), providerSessionId: 'ses_gone', env: { FAKE_CLI_REFUSAL: 'noisy' } });
     const events = await collect(s.runtime.prompt(said('hello')));
@@ -669,6 +680,40 @@ describe('CLI driver: things going wrong', () => {
     expect(error.retryable).toBe(false);
     // It had started acting, and we killed it partway.
     expect(events.at(-1)).toEqual({ kind: 'turn-ended', terminal: 'ambiguous' });
+  });
+});
+
+describe('CLI driver: the session of a turn stopped for asking permission', () => {
+  it('reports the session a new run wrote, and continues it on the next turn', async () => {
+    const s = await start('permission', { sessions: store() });
+    const events = await collect(s.runtime.prompt(said('delete things')));
+    expect(kinds(events)).toEqual(['message-chunk', 'session-observed', 'error', 'turn-ended']);
+    expect(observed(events)).toMatchObject({ providerSessionId: expect.stringMatching(/^ses_fake_/), mode: 'fresh' });
+    expect(s.runtime.providerSessionId).toBe(observed(events)?.providerSessionId);
+    expect(events.at(-1)).toEqual({ kind: 'turn-ended', terminal: 'ambiguous' });
+
+    await collect(s.runtime.prompt(said('again')));
+    expect(s.invocations()[1]?.session).toBe(observed(events)?.providerSessionId);
+  });
+
+  it('reports the session a resumed run streamed, not the id file', async () => {
+    const sessions = store();
+    const before = await start('basic', { sessions });
+    const id = observed(await collect(before.runtime.prompt(said('remember pickle'))))?.providerSessionId;
+
+    const s = await start('permission', { sessions, providerSessionId: id });
+    const events = await collect(s.runtime.prompt(said('delete things')));
+    expect(observed(events)).toEqual({ kind: 'session-observed', providerSessionId: id, mode: 'resumed' });
+    expect(events.at(-1)).toEqual({ kind: 'turn-ended', terminal: 'ambiguous' });
+  });
+
+  it('reports a resumed run that streamed another session as having left it', async () => {
+    const s = await start('permission', { sessions: store(), env: { FAKE_CLI_RESUME: 'echo' } });
+    const first = observed(await collect(s.runtime.prompt(said('one'))));
+    const second = observed(await collect(s.runtime.prompt(said('two'))));
+    expect(s.invocations()[1]?.session).toBe(first?.providerSessionId);
+    expect(second?.mode).toBe('fresh');
+    expect(second?.providerSessionId).not.toBe(first?.providerSessionId);
   });
 });
 

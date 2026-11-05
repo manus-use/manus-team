@@ -112,7 +112,7 @@ async function build(mode: string): Promise<Stack> {
       createCliDriver({
         command: process.execPath,
         args: [AGENT],
-        // The fake keeps its sessions as bytesec does, so a rework resumes (plan E).
+        // The fake keeps its sessions as bytesec does, so a rework resumes (native resume).
         env: { FAKE_CLI_MODE: mode, FAKE_CLI_LOG: join(dir, 'invocations.log'), FAKE_CLI_SESSIONS: join(dir, 'sessions') },
       }),
     ],

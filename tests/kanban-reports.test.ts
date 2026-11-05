@@ -319,7 +319,7 @@ describe('requestChanges', () => {
   });
 
   it('does not seed a rework from an id the CLI driver stored before it could resume', () => {
-    // A `cli:` id names the work run's runtime, not a provider session (plan E).
+    // A `cli:` id names the work run's runtime, not a provider session (native resume).
     expect(reviewed(AGENT, 'cli:1a2b3c4d').rework.seededFromRun).toBeNull();
   });
 

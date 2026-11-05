@@ -438,7 +438,7 @@ export function roleCheck(only: string | undefined, io: MtIo): number {
 
 /**
  * A line for each bytesec role whose bytesec is older than `RESUME_MIN_VERSION`,
- * the oldest measured to resume a session (plan E), or whose version cannot be
+ * the oldest measured to resume a session (native resume), or whose version cannot be
  * read. A warning, not a failure: how an older bytesec takes the driver's flags
  * was never measured, so it may work, or not. Each command is asked once.
  */

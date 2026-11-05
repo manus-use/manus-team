@@ -40,7 +40,7 @@
  * process has gone needs it, and the token is a test's own.
  *
  * With `FAKE_CLI_SESSIONS` set to a directory, it keeps sessions there as
- * bytesec 0.7.4 keeps them in its local store, as plan E's spike measured:
+ * bytesec 0.7.4 keeps them in its local store, as the native-resume spike measured:
  *
  *   - `--session-id-file <path>` is written at the start, before the turn, with
  *     the session's id and a newline: on success, failure and cancel alike, and
@@ -59,7 +59,9 @@
  *     event nobody has a projection for before it, `trailing` writes another
  *     stderr line after it, and `slow` ignores SIGTERM and waits 1.5 s first --
  *     inside the driver's 2 s grace before SIGKILL -- so a test can stop it and
- *     still see it exit 1 with the refusal, as a stop that loses the race would.
+ *     still see it exit 1 with the refusal, as a stop that loses the race would;
+ *   - `FAKE_CLI_FIRST_ID` is the `session_id` of its first typed event, in place
+ *     of the session's own, so a test can lead with one no driver could resume.
  *
  * Each session's file holds its agent and every prompt it was sent. Without
  * `FAKE_CLI_SESSIONS` the agent writes no id, as an agent that cannot resume.
@@ -162,8 +164,12 @@ function emit(object) {
   process.stdout.write(`${JSON.stringify(object)}\n`);
 }
 
+let firstId = process.env['FAKE_CLI_FIRST_ID'];
+
 function event(type, extra = {}) {
-  emit({ type, session_id: SESSION, message_id: 'msg_1', agent_path: '/root', ...extra });
+  const session_id = firstId ?? SESSION;
+  firstId = undefined;
+  emit({ type, session_id, message_id: 'msg_1', agent_path: '/root', ...extra });
 }
 
 function delta(text) {

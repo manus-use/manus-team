@@ -1,6 +1,6 @@
 /**
  * Whether a stored provider session id is one a driver may hand back to its agent
- * to resume (architecture §6.3, plan E): one argv word, starting with a letter or
+ * to resume (architecture §6.3, native resume): one argv word, starting with a letter or
  * a digit, so it can never be read as a flag, and at most 200 characters.
  *
  * A `cli:<nonce>` id, which the CLI driver stored before it could resume, is not
