@@ -10,6 +10,7 @@ import { NamedWorkspaces } from '../src/core/workspace.js';
 import { createCliDriver } from '../src/driver/cli/driver.js';
 import type { Driver } from '../src/driver/types.js';
 import { eventsOf, getTask, runsOf } from '../src/db/kanban-read.js';
+import { getSession } from '../src/db/sessions.js';
 import { Dispatcher } from '../src/kanban/dispatcher.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { lastTurnOf } from '../src/kanban/session-log.js';
@@ -40,7 +41,7 @@ interface Stack {
   registry: SessionRegistry;
   dir: string;
   workspace: string;
-  invocations(): Array<{ prompt: string; run: string | null }>;
+  invocations(): Array<{ prompt: string; run: string | null; session: string | null }>;
   /** The environment the agent ran with, as it wrote it down. */
   runEnv(): Record<string, string>;
 }
@@ -85,7 +86,15 @@ async function build(mode: string, opts: { gated?: boolean } = {}): Promise<Stac
       : {}),
   });
   const drivers = new Map<string, Driver>([
-    ['implementer', createCliDriver({ command: process.execPath, args: [AGENT], env: { FAKE_CLI_MODE: mode, FAKE_CLI_LOG: log } })],
+    [
+      'implementer',
+      createCliDriver({
+        command: process.execPath,
+        args: [AGENT],
+        // The fake keeps its sessions as bytesec does, so a run's turns resume (native resume).
+        env: { FAKE_CLI_MODE: mode, FAKE_CLI_LOG: log, FAKE_CLI_SESSIONS: join(dir, 'sessions') },
+      }),
+    ],
   ]);
   let dispatcher: Dispatcher | undefined;
   const registry = new SessionRegistry({
@@ -124,7 +133,7 @@ async function build(mode: string, opts: { gated?: boolean } = {}): Promise<Stac
       readFileSync(log, 'utf8')
         .split('\n')
         .filter((l) => l !== '')
-        .map((l) => JSON.parse(l) as { prompt: string; run: string | null }),
+        .map((l) => JSON.parse(l) as { prompt: string; run: string | null; session: string | null }),
     runEnv: () => JSON.parse(readFileSync(join(dir, 'kanban-env.json'), 'utf8')) as Record<string, string>,
   };
   return stack;
@@ -256,8 +265,30 @@ describe('the worker CLI, end to end', () => {
     expect(s.invocations()).toHaveLength(2);
     expect(first?.run).toBe(run?.runId);
     expect(second?.run).toBe(run?.runId);
-    // The CLI driver carries the first turn into the second as a transcript, then the nudge.
-    expect(second?.prompt).toContain('Next I will report.');
-    expect(second?.prompt).toContain('You ended your turn without reporting, so your run is not over (reminder 1 of 2).');
+    // The nudge continues the run's provider session, and is sent alone: no transcript (native resume).
+    const provider = getSession(s.t.db, run?.sessionId ?? '')?.providerSessionId;
+    expect(provider).toMatch(/^ses_fake_/);
+    expect(first?.session).toBeNull();
+    expect(second?.session).toBe(provider);
+    expect(second?.prompt).toMatch(/^You ended your turn without reporting, so your run is not over \(reminder 1 of 2\)\./);
+    expect(second?.prompt).not.toContain('Next I will report.');
+  });
+
+  it('a retry after a crash starts a new provider session, not the crashed one', async () => {
+    const s = await build('crash');
+    const taskId = create(s, 'Flaky job');
+
+    s.dispatcher.pass();
+    await s.dispatcher.idle();
+
+    // Retries start fresh (spec §8.3): a new run, a new session, and nothing resumed.
+    const runs = runsOf(s.t.db, taskId);
+    expect(runs.map((r) => r.outcome)).toEqual(['crashed', 'crashed']);
+    expect(runs.map((r) => r.seededFromRun)).toEqual([null, null]);
+    expect(s.invocations().map((i) => i.session)).toEqual([null, null]);
+    const providers = runs.map((r) => getSession(s.t.db, r.sessionId ?? '')?.providerSessionId);
+    expect(providers[0]).toMatch(/^ses_fake_/);
+    expect(providers[1]).toMatch(/^ses_fake_/);
+    expect(providers[1]).not.toBe(providers[0]);
   });
 });

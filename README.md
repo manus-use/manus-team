@@ -524,16 +524,28 @@ talking to it badly. It is a genuinely worse thing, in three specific ways:
   it just acts. Approval cards stop appearing and the `operate` tier stops gating tool
   use. That is a security posture, not a rough edge, which is why `agent.unsupervised`
   has to be written down before this driver will load.
-- **No resume.** Each turn is a fresh process with a fresh agent session, and the ids
-  it mints cannot be handed back. Continuity is reconstructed by composing the
-  conversation into the prompt as a fenced transcript, so the agent recovers what was
-  *said* but not the tool state behind it — and pays input tokens for it every turn.
-  Sessions started this way report `replayed`, never `resumed`.
+- **Resume per process,** on bytesec 0.7.4 or later; `mt role check` warns of a bytesec
+  role below it, with which resume is unmeasured and may not work. Each turn is a fresh process. The
+  driver reads the agent's own session id from `--session-id-file` and passes it back
+  as `--session` on the next turn, which then sends only the new message; the id is stored, so a session
+  resumes after a restart too, and `/status` shows it and how the last turn reached it.
+  When the agent refuses the id, the turn is run again with the conversation composed
+  into the prompt as a fenced transcript, so the agent recovers what was *said* but not
+  the tool state behind it, and the session's log says it was `replayed`, or `fresh`
+  when there was no history to carry. The id names a session in the agent's own store
+  on this host; it is not a secret, and the gateway never deletes those sessions, so
+  they accumulate in bytesec's store. Known limitations: a refusal is recognised by
+  bytesec's wording, so one it rewords ends the turn `ambiguous`; `/attach` of an
+  archived board run's session while its rework runs would put two processes on one
+  agent session, which was not measured; a gateway that crashes mid-turn can leave an
+  `mt-session-id-*` directory, holding only the id, in the system's temporary
+  directory; and below 0.7.4, resume is unmeasured.
 - **No cooperative cancel.** Cancelling kills the process, so work already done stands.
 
 Everything specific to a protocol stops at its driver. Adding the second one required
 no change to `src/driver/types.ts`, which is the return on declaring that seam while
-there was only one implementation behind it.
+there was only one implementation behind it; resuming it natively added one event,
+`session-observed`, for an id a driver learns only from a turn.
 
 ## References
 

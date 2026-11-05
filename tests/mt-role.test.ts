@@ -14,6 +14,7 @@ import {
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
+import { parseAgentVersion, versionBelow } from '../src/cli/role.js';
 import { loadTeamSettings } from '../src/config.js';
 import { loadRoleDir } from '../src/roles.js';
 import { loadTeam } from '../src/team.js';
@@ -490,6 +491,64 @@ describe('mt role check', () => {
     expect(one.out.split('\n').filter((l) => l.startsWith('native: '))).toEqual([
       'native: role implementer runs as a bytesec agent package',
     ]);
+  });
+
+  it('warns of a bytesec role whose bytesec cannot resume a session, asking each command once', async () => {
+    fx = mtFixture();
+    roleDir('implementer', 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n');
+    const asked: string[] = [];
+    const r = await fx.run(['role', 'check'], { agentVersion: (command) => (asked.push(command), '0.7.2') });
+    // A warning, not a failure: an older bytesec was never measured, and may work or not.
+    expect(r.code).toBe(0);
+    expect(asked).toEqual(['bytesec']);
+    expect(r.out.split('\n').filter((l) => l.startsWith('warning: '))).toEqual([
+      'warning: role default runs bytesec 0.7.2, older than 0.7.4, the oldest measured to resume a session; with it, native resume is unmeasured and its turns may not work',
+      'warning: role implementer runs bytesec 0.7.2, older than 0.7.4, the oldest measured to resume a session; with it, native resume is unmeasured and its turns may not work',
+    ]);
+  });
+
+  it('notes a bytesec whose version cannot be read, and asks no other agent', async () => {
+    fx = mtFixture();
+    roleDir('reviewer', ACP_AGENT);
+    const asked: string[] = [];
+    const r = await fx.run(['role', 'check'], { agentVersion: (command) => (asked.push(command), undefined) });
+    expect(r.code).toBe(0);
+    expect(asked).toEqual(['bytesec']);
+    expect(r.out).toMatch(/^note: role default: bytesec --version gave no version; native resume needs bytesec 0\.7\.4 or later$/m);
+  });
+
+  it('says nothing of a bytesec that resumes, comparing versions part by part', async () => {
+    fx = mtFixture();
+    const r = await fx.run(['role', 'check'], { agentVersion: () => '0.10.0' });
+    expect(r.out).not.toMatch(/resume/);
+    expect([versionBelow('0.7.2', '0.7.4'), versionBelow('0.7.4', '0.7.4'), versionBelow('0.10.0', '0.7.4'), versionBelow('1.0', '0.7.4')]).toEqual([
+      true,
+      false,
+      false,
+      false,
+    ]);
+  });
+
+  it("reads bytesec's own version over any other, from stdout and then stderr", () => {
+    expect(parseAgentVersion('bytesec 0.7.4\n', '')).toBe('0.7.4');
+    expect(parseAgentVersion('ByteSec version v0.8.1 (built with go 1.22.3)\n', '')).toBe('0.8.1');
+    // Another version first, such as the runtime's: bytesec's is still the one taken.
+    expect(parseAgentVersion('go1.22.3 runtime 1.22.3\nbytesec 0.7.4\n', '')).toBe('0.7.4');
+    expect(parseAgentVersion('runtime 1.22.3\n', 'bytesec 0.7.4\n')).toBe('0.7.4');
+    // No bytesec named: the first version anywhere, stdout before stderr.
+    expect(parseAgentVersion('0.7.2\n', '0.9.0\n')).toBe('0.7.2');
+    expect(parseAgentVersion('', 'v0.7.3\n')).toBe('0.7.3');
+    expect(parseAgentVersion('v22.15.0\n', '')).toBe('22.15.0');
+    // Not a version: a part of a longer word, or only two parts.
+    expect(parseAgentVersion('build abc1.2.3\n', '')).toBeUndefined();
+    expect(parseAgentVersion('bytesec 0.7\n', '')).toBeUndefined();
+    expect(parseAgentVersion('', '')).toBeUndefined();
+    // A pre-release keeps its suffix, so it is not taken for the release.
+    expect(parseAgentVersion('bytesec 0.7.4-rc1\n', '')).toBe('0.7.4-rc1');
+  });
+
+  it('counts a pre-release as older than its release', () => {
+    expect([versionBelow('0.7.4-rc1', '0.7.4'), versionBelow('0.7.5-rc1', '0.7.4'), versionBelow('0.7.3-rc1', '0.7.4')]).toEqual([true, false, true]);
   });
 
   it('says nothing about rendering when the check fails', async () => {

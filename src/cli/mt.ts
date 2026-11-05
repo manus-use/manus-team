@@ -34,6 +34,8 @@ export interface MtIo {
   stdin?: (maxBytes: number) => Promise<string | undefined>;
   /** Stdin is a terminal: `mt kanban` refuses rather than wait on one for input that never comes. */
   stdinIsTTY?: boolean;
+  /** An agent command's version, from `<command> --version`; injectable so `mt role check` is tested without one. */
+  agentVersion?: (command: string) => string | undefined;
 }
 
 const USAGE = [

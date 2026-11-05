@@ -607,7 +607,7 @@ export class SessionRegistry {
         held,
         message: held
           ? `Session ${session.id} is held: ${notes.join('; ')}. The log shows what happened up to the restart. Inspect it, then /attach or /new.`
-          : `Session ${session.id} was interrupted by a restart${detail}. Send a message to continue; history is replayed from the log.`,
+          : `Session ${session.id} was interrupted by a restart${detail}. Send a message to continue: it resumes the agent's own session where it can, else replays history from the log.`,
         // Where to say it. A finding nobody is told about is the same as no
         // reconciliation at all: the user sees a session that simply stopped.
         bindings: bindingsForSession(this.#deps.db, session.id).map((b) => ({

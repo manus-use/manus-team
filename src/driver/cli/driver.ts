@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -9,11 +10,13 @@ import type {
   Driver,
   DriverEvent,
   PromptInput,
+  StartMode,
   StartOptions,
   StartResult,
 } from '../types.js';
 import type { TurnTerminal } from '../../types.js';
 import { buildEnv } from '../env.js';
+import { isResumableProviderId } from '../../provider-id.js';
 
 /**
  * The CLI driver: one process per *turn*, driven by argv, read back as NDJSON.
@@ -30,17 +33,21 @@ import { buildEnv } from '../env.js';
  *    cards stop appearing. That is not a limitation to work around -- it is a
  *    security posture, which is why `agent.unsupervised` has to be written down
  *    in the config before this driver will load at all.
- * 2. **No resume.** Each turn is a fresh process with a fresh agent session, and
- *    the session ids it mints cannot be handed back to it. Continuity is therefore
- *    reconstructed: the conversation so far is composed into the prompt as a
- *    transcript. That costs input tokens on every turn, and it means the agent
+ * 2. **Resume per process.** Each turn is a fresh process, which continues the
+ *    provider's own session: the driver reads the id the agent writes to
+ *    `--session-id-file` and passes it back as `--session` on the next turn, which
+ *    then carries only the new message. When the agent refuses the id, the turn is
+ *    run again with the conversation composed into the prompt as a transcript --
+ *    `resume: native -> replay`, the one degrade this layer sanctions -- which
  *    recovers what was *said* but not the tool state behind it.
  * 3. **No cooperative cancel.** Cancelling means killing the process, so work
  *    already done stands.
  *
  * The wire format below is ByteSec's `run --format json` stream, verified against
- * 0.7.2 rather than inferred. Everything specific to it -- the flag spellings, the
- * event names -- stops at this file, in the same way ACP stops at `../acp`.
+ * 0.7.2 rather than inferred, and its sessions against 0.7.4 (the native-resume spike).
+ * Everything specific to it -- the flag spellings, the event names, the stderr
+ * of a refused session -- stops at this file, in the same way ACP stops at
+ * `../acp`.
  */
 
 export interface CliDriverConfig {
@@ -74,6 +81,50 @@ const STDERR_TAIL_BYTES = 8192;
 
 /** How long a finished turn waits for the tail of stderr. See `drain`. */
 const STDERR_DRAIN_MS = 100;
+
+/** The oldest bytesec whose `--session` continues a conversation (architecture §6.3). */
+export const RESUME_MIN_VERSION = '0.7.4';
+
+/**
+ * The last line of stderr when bytesec 0.7.4 will not continue a session: an id
+ * its store does not hold, or one made as another agent. Both exit 1 before the
+ * turn starts, with nothing on stdout (the native-resume spike). Matched only as the whole
+ * last line, so a turn that merely mentions it is not taken for a refusal.
+ */
+const RESUME_REFUSED = /^turn \d+: (persistence: session not found|unknown agent: \S+)$/;
+
+/** The id the agent wrote, or undefined when it wrote none, or nothing usable. */
+function readSessionId(path: string): string | undefined {
+  try {
+    const id = readFileSync(path, 'utf8').trim();
+    return isResumableProviderId(id) ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The `session_id` of a typed event on stdout: which session the agent says it is in. */
+function typedSessionId(line: string): string | undefined {
+  try {
+    const obj = JSON.parse(line) as unknown;
+    if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return undefined;
+    const { type, session_id: id } = obj as Record<string, unknown>;
+    return typeof type === 'string' && typeof id === 'string' ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The last non-empty line of stderr, without colour codes. */
+function lastLine(stderr: string): string {
+  return (
+    stderr
+      .replace(ANSI, '')
+      .split('\n')
+      .map((line) => line.trim())
+      .findLast((line) => line !== '') ?? ''
+  );
+}
 
 /** Resolve once the stream has ended, or once the wait stops being worth it. */
 async function drain(stream: Readable): Promise<void> {
@@ -116,7 +167,6 @@ interface Exchange {
 }
 
 class CliRuntime implements AgentRuntime {
-  readonly providerSessionId: string;
   /** The fence label for the transcript, unguessable so it cannot be forged. */
   readonly #nonce: string;
 
@@ -127,6 +177,12 @@ class CliRuntime implements AgentRuntime {
   #args: readonly string[];
   #history: Exchange[];
   #maxPromptBytes: number;
+  /** The provider session the next turn continues, if there is one. */
+  #resume: string | undefined;
+  /** Cleared once the agent answers `--session` with another session: it does not resume. */
+  #native = true;
+  /** The last id the agent reported, or the one this runtime was started to continue. */
+  #providerSessionId: string;
 
   /** Set synchronously by `prompt`, so a second caller is refused, not queued. */
   #inflight = false;
@@ -143,10 +199,10 @@ class CliRuntime implements AgentRuntime {
     this.#args = opts.args ?? [];
     this.#maxPromptBytes = config.maxPromptBytes ?? MAX_PROMPT_BYTES;
     this.#nonce = randomUUID().slice(0, 8);
-    // The provider mints a session id per process and will not take one back, so
-    // there is nothing durable to observe. This id names *this runtime*, and says
-    // so, rather than recording a provider id that looks resumable and is not.
-    this.providerSessionId = `cli:${this.#nonce}`;
+    // The id the session observed before, or was seeded with (spec §2.4 item 5).
+    // Empty until the first turn reports one otherwise: the agent mints it.
+    this.#resume = isResumableProviderId(opts.providerSessionId) ? opts.providerSessionId : undefined;
+    this.#providerSessionId = this.#resume ?? '';
 
     // Prior prompts come from the event log, which is the system of record. Their
     // answers do not: the log has them, but the driver is not allowed its own idea
@@ -159,18 +215,20 @@ class CliRuntime implements AgentRuntime {
     }));
   }
 
+  get providerSessionId(): string {
+    return this.#providerSessionId;
+  }
+
   /**
-   * `fresh` or `replayed`, never `resumed`.
-   *
-   * The provider cannot resume, so `resume: native -> replay` -- the one degrade
-   * this layer sanctions -- is not a fallback here but the permanent state. When
-   * there is history to carry, that is `replayed`, and the user is entitled to see
-   * it every time rather than have it look like a resumed session.
+   * What the first turn will do: continue a provider session (`resumed`), carry
+   * the history as a transcript (`replayed`), or neither. Nothing is spawned
+   * yet, so `resumed` is an intent; each turn reports what it actually did with
+   * `session-observed`, a refused id included.
    */
   startResult(): StartResult {
     return {
-      providerSessionId: this.providerSessionId,
-      mode: this.#history.length === 0 ? 'fresh' : 'replayed',
+      providerSessionId: this.#providerSessionId,
+      mode: this.#resume !== undefined ? 'resumed' : this.#history.length === 0 ? 'fresh' : 'replayed',
     };
   }
 
@@ -190,7 +248,9 @@ class CliRuntime implements AgentRuntime {
 
   async *#run(input: PromptInput): AsyncGenerator<DriverEvent> {
     try {
-      const composed = this.#compose(input);
+      const resume = this.#native ? this.#resume : undefined;
+      // A resumed turn carries only the new message: the provider has the rest.
+      const composed = resume === undefined ? this.#compose(input) : this.#alone(input);
       if (composed === undefined) {
         const size = Buffer.byteLength(renderInput(input), 'utf8');
         yield {
@@ -213,14 +273,77 @@ class CliRuntime implements AgentRuntime {
         return;
       }
 
-      yield* this.#runTurn(input, composed);
+      yield* this.#runTurn(input, composed, resume, undefined);
     } finally {
       this.#inflight = false;
       this.#child = undefined;
     }
   }
 
-  async *#runTurn(input: PromptInput, composed: string): AsyncGenerator<DriverEvent> {
+  /**
+   * One turn, in one process -- or two, when the agent refuses to continue the
+   * session it was given: then the turn is run again with the transcript, which
+   * is safe because a refused resume starts nothing (`#attempt`).
+   *
+   * The id file lives in a directory of its own under the system's temporary
+   * directory, never the workspace, where it would show in the agent's checkout,
+   * and is removed once read. A gateway that dies mid-turn leaves the directory
+   * behind; it holds only the id, which is no secret.
+   */
+  async *#runTurn(
+    input: PromptInput,
+    composed: string,
+    resume: string | undefined,
+    refused: string | undefined,
+  ): AsyncGenerator<DriverEvent> {
+    let dir: string;
+    try {
+      dir = mkdtempSync(join(tmpdir(), 'mt-session-id-'));
+    } catch (err) {
+      yield {
+        kind: 'error',
+        message: `could not make a directory for the agent's session id: ${err instanceof Error ? err.message : String(err)}`,
+        retryable: true,
+      };
+      // Nothing was started, so nothing is unclear.
+      yield { kind: 'turn-ended', terminal: 'failed' };
+      return;
+    }
+    let refusal: string | undefined;
+    try {
+      refusal = yield* this.#attempt(input, composed, resume, refused, join(dir, 'session-id'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    if (refusal === undefined) return;
+    // A defence, not reachable today: `#attempt` already takes a stopped run's
+    // refusal for the turn's own outcome, and nothing is awaited between its
+    // check and this one. Kept so the second process can never follow a stop.
+    if (this.#closed) {
+      yield { kind: 'turn-ended', terminal: 'cancelled', detail: 'runtime closed' };
+      return;
+    }
+    if (this.#cancelled) {
+      yield { kind: 'turn-ended', terminal: 'cancelled' };
+      return;
+    }
+    this.#resume = undefined;
+    yield* this.#runTurn(input, this.#compose(input) ?? composed, undefined, refusal);
+  }
+
+  /**
+   * Run the agent once. Returns why it refused to continue `resume`, when it did
+   * and yielded nothing; otherwise undefined, having yielded the whole turn.
+   */
+  async *#attempt(
+    input: PromptInput,
+    composed: string,
+    resume: string | undefined,
+    refused: string | undefined,
+    idFile: string,
+  ): AsyncGenerator<DriverEvent, string | undefined> {
+    // Whether this attempt carries a transcript, before it adds its own exchange.
+    const carried = resume === undefined && this.#history.length > 0;
     const args = [
       ...this.#config.args,
       // This session's own, such as the native agent a kanban run is given. After
@@ -235,6 +358,12 @@ class CliRuntime implements AgentRuntime {
       // Per session, so it cannot live in the configured args.
       '--dir',
       this.#cwd,
+      // The provider session to continue, and where the agent says which one it
+      // ran in (native resume). Written at the process's start, even for a turn that
+      // then fails, and with the id asked for even when that id is refused.
+      ...(resume === undefined ? [] : ['--session', resume]),
+      '--session-id-file',
+      idFile,
       // Unsupervised, explicitly. There is no channel on which a permission
       // request could be answered -- stdin is closed -- so an agent that stopped
       // to ask would hang the turn until something killed it. `agent.unsupervised`
@@ -283,10 +412,26 @@ class CliRuntime implements AgentRuntime {
 
     let summary: TurnSummary | undefined;
     let said = false;
+    /** Any JSON line on stdout, recognized or not: a refused resume prints none. */
+    let started = false;
+    /** The session the agent's first typed event naming a resumable id says it is in. */
+    let streamedId: string | undefined;
+    // Which session the run was in. Given --session, the agent writes back the
+    // id it was given whether or not it continued that session, so only its own
+    // stream is evidence; without one, the file it wrote is.
+    const ranIn = (): string | undefined => (resume === undefined ? readSessionId(idFile) : streamedId);
 
     const lines = createInterface({ input: child.stdout });
     try {
       for await (const line of lines) {
+        if (line.trim().startsWith('{')) {
+          started = true;
+          // The first id it could resume: one it could not does not hide a later one.
+          if (streamedId === undefined) {
+            const id = typedSessionId(line.trim());
+            if (isResumableProviderId(id)) streamedId = id;
+          }
+        }
         const parsed = parseLine(line);
         if (parsed === undefined) continue;
         if (parsed === 'permission') {
@@ -294,6 +439,11 @@ class CliRuntime implements AgentRuntime {
           // future version asks anyway, there is no channel to answer on and the
           // process would wait for an answer that can never arrive. Stopping it is
           // strictly better than a turn that hangs until something else notices.
+          await this.#kill();
+          // Which session it was in, as for any other turn: the provider's session
+          // holds what it did before it asked, which the next turn should continue.
+          const stopped = this.#observe(ranIn(), resume, refused, carried);
+          if (stopped !== undefined) yield stopped;
           yield {
             kind: 'error',
             message:
@@ -302,7 +452,6 @@ class CliRuntime implements AgentRuntime {
               'for work that needs approval.',
             retryable: false,
           };
-          await this.#kill();
           // It had already started acting, and we killed it partway.
           yield { kind: 'turn-ended', terminal: 'ambiguous' };
           return;
@@ -321,6 +470,19 @@ class CliRuntime implements AgentRuntime {
     }
 
     const code = await exited;
+
+    // Refused before the turn started: exit 1, no JSON on stdout at all, and one
+    // of the two measured refusals as stderr's last line. Nothing ran, so running
+    // the turn again with the transcript cannot run anything twice. Anything else
+    // -- any JSON line, another exit, other stderr, a cancel -- is the turn's own
+    // outcome, never run again (G6).
+    if (resume !== undefined && !started && code === 1 && !this.#cancelled && !this.#closedDuringTurn) {
+      const refusal = RESUME_REFUSED.exec(lastLine(stderr));
+      if (refusal !== null) return `provider session ${resume} could not be resumed (${refusal[1] ?? ''})`;
+    }
+
+    const seen = this.#observe(ranIn(), resume, refused, carried);
+    if (seen !== undefined) yield seen;
 
     // Streamed nothing, but reported an answer. Some builds do not stream at all,
     // and a card reading "finished with no output" next to a summary that holds
@@ -380,9 +542,55 @@ class CliRuntime implements AgentRuntime {
     };
   }
 
+  /**
+   * The provider session this attempt ran in, as the agent reported it, and how
+   * the turn reached the conversation; the next turn continues it. Undefined when
+   * the agent reported none -- an agent that cannot resume, whose next turn
+   * replays, or a resumed run that printed no typed event, whose next turn
+   * continues the same session.
+   *
+   * Kept after a failed or cancelled turn too: the provider's session holds what
+   * that turn did, which a transcript of what was said does not. An agent that
+   * answers `--session` with another session did not continue the conversation
+   * -- bytesec 0.7.2 did that -- so this runtime stops asking it to.
+   */
+  #observe(
+    observed: string | undefined,
+    resume: string | undefined,
+    refused: string | undefined,
+    carried: boolean,
+  ): DriverEvent | undefined {
+    if (!isResumableProviderId(observed)) return undefined;
+    this.#providerSessionId = observed;
+    let mode: StartMode;
+    let detail: string | undefined;
+    if (resume !== undefined && observed !== resume) {
+      this.#native = false;
+      mode = 'fresh';
+      detail =
+        `asked to continue provider session ${resume}, the agent ran in ${observed} instead, ` +
+        'so later turns carry the conversation as a transcript';
+    } else if (resume !== undefined) {
+      mode = 'resumed';
+    } else {
+      mode = carried ? 'replayed' : 'fresh';
+      if (refused !== undefined) {
+        detail = `${refused}, so ${carried ? 'the conversation was replayed' : 'this turn started a new conversation'}`;
+      }
+    }
+    if (this.#native) this.#resume = observed;
+    return { kind: 'session-observed', providerSessionId: observed, mode, ...(detail === undefined ? {} : { detail }) };
+  }
+
   /** Record the exchange, so the next turn can be told about it. */
   #remember(input: PromptInput, answer: string): void {
     this.#history.push({ prompt: renderInput(input), answer: answer.trim() });
+  }
+
+  /** The message alone, for a resumed turn; undefined when it does not fit. */
+  #alone(input: PromptInput): string | undefined {
+    const message = renderInput(input);
+    return Buffer.byteLength(message, 'utf8') > this.#maxPromptBytes ? undefined : message;
   }
 
   /**

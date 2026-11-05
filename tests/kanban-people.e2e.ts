@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,7 @@ import { Router } from '../src/core/router.js';
 import { NamedWorkspaces } from '../src/core/workspace.js';
 import { getApproval } from '../src/db/approvals.js';
 import { getTask, runsOf } from '../src/db/kanban-read.js';
+import { getSession } from '../src/db/sessions.js';
 import { createCliDriver } from '../src/driver/cli/driver.js';
 import type { Driver } from '../src/driver/types.js';
 import { CardPoster } from '../src/kanban/cards.js';
@@ -111,7 +112,8 @@ async function build(mode: string): Promise<Stack> {
       createCliDriver({
         command: process.execPath,
         args: [AGENT],
-        env: { FAKE_CLI_MODE: mode, FAKE_CLI_LOG: join(dir, 'invocations.log') },
+        // The fake keeps its sessions as bytesec does, so a rework resumes (native resume).
+        env: { FAKE_CLI_MODE: mode, FAKE_CLI_LOG: join(dir, 'invocations.log'), FAKE_CLI_SESSIONS: join(dir, 'sessions') },
       }),
     ],
   ]);
@@ -326,6 +328,25 @@ describe('people on the board, end to end', () => {
       ['work', 'review_requested', 'revised (cite the sources): Draft the notes'],
       ['review', null, null],
     ]);
+
+    // The rework continued the implementer's provider session, under the like-for-like
+    // rule (spec §5.3): same agent, both given their role in the prompt.
+    const [work, , rework] = runsOf(s.t.db, taskId);
+    expect(rework?.seededFromRun).toBe(work?.runId);
+    const provider = getSession(s.t.db, work?.sessionId ?? '')?.providerSessionId;
+    expect(provider).toMatch(/^ses_fake_/);
+    const invocations = readFileSync(join(s.dir, 'invocations.log'), 'utf8')
+      .split('\n')
+      .filter((l) => l !== '')
+      .map((l) => JSON.parse(l) as { run: string | null; session: string | null; prompt: string });
+    expect(invocations.map((i) => [i.run, i.session])).toEqual([
+      [work?.runId, null],
+      [rework?.runId, provider],
+    ]);
+    // Its prompt still carries the reviewer's reason in full, for an agent that cannot resume.
+    expect(invocations[1]?.prompt).toContain('cite the sources');
+    // The provider session the rework ran in is the implementer's own.
+    expect(getSession(s.t.db, rework?.sessionId ?? '')?.providerSessionId).toBe(provider);
 
     // The second review's card; the first one is out of date now.
     expect(await s.cards().deliver()).toBe(1);

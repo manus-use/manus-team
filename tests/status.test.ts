@@ -139,7 +139,9 @@ describe('projectSessionStatus', () => {
   it('distinguishes cold from absent in the detail text', () => {
     // Collapsing the two is how session-exists-but-process-dead falls into the
     // create branch and produces two sessions on one thread.
-    expect(project('cold', { presence: 'cold' }).detail).toContain('resumes it');
+    expect(project('cold', { presence: 'cold' }).detail).toBe(
+      "Suspended. The next message resumes it, in the agent's own session where it can, else by replaying history from the log.",
+    );
     expect(project('idle', { presence: 'absent' }).detail).toContain('No runtime');
   });
 

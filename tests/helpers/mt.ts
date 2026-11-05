@@ -15,7 +15,7 @@ export interface MtFixture {
   env: Record<string, string | undefined>;
   run(
     argv: string[],
-    opts?: { env?: Record<string, string | undefined>; git?: Git },
+    opts?: { env?: Record<string, string | undefined>; git?: Git; agentVersion?: (command: string) => string | undefined },
   ): Promise<{ code: number; out: string; err: string }>;
   cleanup(): void;
 }
@@ -56,6 +56,8 @@ export function mtFixture(config?: (workspace: string) => string): MtFixture {
         out: (line) => out.push(line),
         err: (line) => err.push(line),
         ...(opts.git === undefined ? {} : { git: opts.git }),
+        // Never the real agent: no test runs bytesec.
+        agentVersion: opts.agentVersion ?? (() => '0.7.4'),
       });
       return { code, out: out.join('\n'), err: err.join('\n') };
     },

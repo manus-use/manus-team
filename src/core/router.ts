@@ -1,11 +1,12 @@
 import type { Db } from '../db/open.js';
-import { appendEvent } from '../db/events.js';
+import { appendEvent, lastEventOfType } from '../db/events.js';
 import { claimMessage, recordOutcome } from '../db/dedup.js';
 import { getApproval } from '../db/approvals.js';
 import { bindingsInConversation, resolveBinding } from '../db/bindings.js';
 import type { Channel, SendTarget } from '../channel/types.js';
 import { forDisplay, truncate } from '../channel/escape.js';
 import { redactKnownSecrets } from '../secrets.js';
+import { isResumableProviderId } from '../provider-id.js';
 import { label } from '../kanban/chat-render.js';
 import type {
   BindingKey,
@@ -369,7 +370,8 @@ export class Router {
           'status',
           `**${view.label}**: ${forDisplay(view.detail)}\n` +
             `session \`${binding.sessionId}\` · generation ${view.generation} · ` +
-            `${view.openTurns} open turn(s) · ${view.pendingApprovals} pending approval(s)`,
+            `${view.openTurns} open turn(s) · ${view.pendingApprovals} pending approval(s)` +
+            continuityLine(lastEventOfType(this.#deps.db, binding.sessionId, 'provider_session_observed')?.payload),
         );
         return;
       }
@@ -695,4 +697,30 @@ function describeSkipped(attachments: readonly InboundAttachment[]): string {
 function stringField(value: Record<string, unknown>, field: string): string | undefined {
   const raw = value[field];
   return typeof raw === 'string' && raw !== '' ? raw : undefined;
+}
+
+/** How each way a turn reached its provider session reads in `/status`. */
+const CONTINUITY: ReadonlyMap<unknown, string> = new Map([
+  ['resumed', 'the last turn resumed it'],
+  ['replayed', 'the last turn replayed the conversation into it'],
+  ['fresh', 'the last turn started it'],
+]);
+
+/**
+ * `/status`'s line for the provider session the last turn ran in, from its
+ * `provider_session_observed` event; nothing when no turn has reported one. "The
+ * last turn" is the last turn that reported one: a turn that reports nothing --
+ * a resumed run that printed no event, or an ACP turn -- leaves the line as the
+ * turn before it left it. The id is no secret (native resume): it names a session
+ * in the agent's own store on this host, which only this host's user can read.
+ * Shown only when it is an id a driver would pass back (`isResumableProviderId`), so nothing in it can break
+ * the line, and an old `cli:` runtime id is not taken for a provider session.
+ */
+export function continuityLine(payload: unknown): string {
+  if (typeof payload !== 'object' || payload === null) return '';
+  const { providerSessionId: id, mode } = payload as { providerSessionId?: unknown; mode?: unknown };
+  if (!isResumableProviderId(id)) return '';
+  // A Map, so no inherited key (`constructor`, `__proto__`) can read as a mode.
+  const how = CONTINUITY.get(mode);
+  return `\nprovider session \`${id}\`${how === undefined ? '' : `: ${how}`}`;
 }
