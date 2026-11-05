@@ -20,7 +20,7 @@ import {
 import { redactKnownSecrets } from '../secrets.js';
 import { personPrincipal, type PeopleDirectory } from './people.js';
 import type { KanbanService } from './service.js';
-import type { Assignee, Refusal, Reporter, RunRow, TaskRow } from './types.js';
+import type { Assignee, PersonReportsAs, Refusal, Reporter, RunRow, TaskRow } from './types.js';
 import { WORKER_LIMITS } from './worker.js';
 
 /**
@@ -329,7 +329,8 @@ export class KanbanChat {
     const task = shown.view.task;
     const allowed = this.#mayReport(command.verb, task, by, sender);
     if (allowed !== undefined) return allowed;
-    const r = await this.#apply(command.verb, task.taskId, this.#reporter(by, shown.view.runs), command.text);
+    const as = command.verb === 'done' || command.verb === 'block' ? 'assignee' : this.#answersAs(task, by);
+    const r = await this.#apply(command.verb, task.taskId, this.#reporter(by, as, shown.view.runs), command.text);
     if (!r.ok) return refused(r);
     this.#changed();
     return this.#reported(command.verb, task.taskId);
@@ -350,7 +351,7 @@ export class KanbanChat {
     }
     const r = await this.#deps.service.requestReview(
       task.taskId,
-      this.#reporter(by, shown.view.runs),
+      this.#reporter(by, 'assignee', shown.view.runs),
       { summary: command.summary, ...(reviewer === undefined ? {} : { reviewer }) },
       { signal: this.#stopping.signal },
     );
@@ -364,14 +365,20 @@ export class KanbanChat {
   }
 
   /**
-   * A person reporting as they type it: on the task's open run as it was when the
-   * report was checked, so that should the run change while the report's gates
-   * run -- the task reassigned -- the board refuses the report rather than decide
-   * someone else's run (spec §9.2's re-check, for a typed report too).
+   * A person reporting as they type it, bound to what was checked: the task's open
+   * run as it was then, or none, and what they report as. Should either change
+   * while the report's gates run -- the task reassigned, a run opened, the review
+   * given to someone else -- the board refuses the report rather than decide work
+   * that is no longer theirs (spec §9.2's re-check, for a typed report too).
    */
-  #reporter(by: string, runs: readonly RunRow[]): Reporter {
+  #reporter(by: string, as: PersonReportsAs, runs: readonly RunRow[]): Reporter {
     const open = runs.find((r) => r.endedAt === null);
-    return open === undefined ? { kind: 'person', principal: by } : { kind: 'person', principal: by, runId: open.runId };
+    return { kind: 'person', principal: by, runId: open?.runId ?? null, as };
+  }
+
+  /** Who answers a review: its named reviewer, or else an operator (checked before this). */
+  #answersAs(task: TaskRow, by: string): PersonReportsAs {
+    return isNamed(task.reviewer, by) ? 'reviewer' : 'operator';
   }
 
   /** Undefined when this person may make this report on this task now; otherwise why not. */
@@ -517,7 +524,8 @@ export class KanbanChat {
     await this.#redraw(press.messageId, renderCardOutcome(task, 'Working on it…'));
     let r: { ok: true; task: TaskRow } | Refusal;
     try {
-      r = await this.#apply(verb, press.run.taskId, { kind: 'person', principal: by, runId: press.run.runId }, text);
+      const as = verb === 'done' || verb === 'block' ? 'assignee' : press.run.assignee.name === by ? 'reviewer' : 'operator';
+      r = await this.#apply(verb, press.run.taskId, { kind: 'person', principal: by, runId: press.run.runId, as }, text);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       this.#note(`kanban: a press on card ${press.messageId} failed: ${redactKnownSecrets(detail)}`);

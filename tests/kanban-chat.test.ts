@@ -320,6 +320,34 @@ describe("a person's own reports", () => {
     expect(getTask(t.db, taskId)).toMatchObject({ phase: 'open', assignee: { kind: 'role', name: 'implementer' } });
   });
 
+  it('refuses a typed done made while no run was open, once the task is reassigned while its gates run', async () => {
+    // Not claimed: the person reports with no run open.
+    const taskId = created(await say('new Check the links\nassignee: @Alice Smith\nworkspace: docs', OWNER, [AT_ALICE]));
+    expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
+    let release!: () => void;
+    holds.set('test -f links.md', new Promise<void>((resolve) => (release = resolve)));
+    const reply = say(`done ${taskId} all links answer`, ALICE);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(await say(`assign ${taskId} implementer`)).toContain('is now for role implementer');
+    release();
+    expect(await reply).toMatch(/^Not done: .*the task has moved on since this report was made/);
+    expect(getTask(t.db, taskId)).toMatchObject({ phase: 'open', assignee: { kind: 'role', name: 'implementer' } });
+  });
+
+  it("refuses a typed approve of a review not yet claimed, once its reviewer is changed while the gates run", async () => {
+    const { taskId } = await aliceTask();
+    expect(await say(`review ${taskId} checked them all`, ALICE)).toContain('is waiting for review, by Bob');
+    expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
+    let release!: () => void;
+    holds.set('test -f links.md', new Promise<void>((resolve) => (release = resolve)));
+    const reply = say(`approve ${taskId} fine`, BOB);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(service.assignReviewer(taskId, 'reviewer', 'lark:on_owner').ok).toBe(true);
+    release();
+    expect(await reply).toMatch(/^Not done: .*the task has moved on since this report was made/);
+    expect(getTask(t.db, taskId)).toMatchObject({ phase: 'review', reviewer: { kind: 'role', name: 'reviewer' } });
+  });
+
   it("lets the named assignee's comment steer, as an operator's does", async () => {
     const { taskId } = await aliceTask();
     expect(await say(`comment ${taskId} the wiki moved`, ALICE)).toContain('An agent working on it gets it');

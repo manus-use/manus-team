@@ -69,11 +69,25 @@ export type CreatedVia =
  * Who is reporting. A run reports through its token (plan C3); a person through
  * chat (plan D). Who may act is checked by the caller; what the rows allow, here.
  *
- * A person pressing a card's button reports on the run the card was sent for
- * (spec §9.2): `runId`, re-checked inside the transaction against the task's
- * open run, so a card for a run that is over does nothing.
+ * A person's report from chat is bound to what the caller checked (spec §9.1,
+ * §9.2), and the board checks it again inside its transaction, so nothing that
+ * changed in between -- while the report's gates ran -- lets it decide work that
+ * is no longer the person's:
+ * - `runId`: the run the report is on -- a card's run, or the task's open run
+ *   when a typed report was checked -- or `null` when none was open then, so
+ *   that a run opened since refuses it. Left out, any open person's run is decided.
+ * - `as`: what the person reports as. `assignee`: the task must still be theirs,
+ *   and open. `reviewer`: still in review, and still theirs to review.
+ *   `operator`: still in review, whoever reviews it (an operator may answer any
+ *   review). Left out, nobody named is checked.
+ * Either refusal is `run_superseded`: the task has moved on.
  */
-export type Reporter = { kind: 'run'; runId: string } | { kind: 'person'; principal: string; runId?: string };
+export type Reporter =
+  | { kind: 'run'; runId: string }
+  | { kind: 'person'; principal: string; runId?: string | null; as?: PersonReportsAs };
+
+/** What a person reports as (`Reporter.as`). */
+export type PersonReportsAs = 'assignee' | 'reviewer' | 'operator';
 
 export interface TaskRow {
   taskId: string;

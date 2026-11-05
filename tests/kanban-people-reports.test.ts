@@ -81,6 +81,46 @@ describe("a person's report through a card", () => {
   });
 });
 
+describe("a person's report as typed, bound to what was checked", () => {
+  it('refuses a report made while no run was open, once one is', async () => {
+    const task = create();
+    const run = claim(task.taskId);
+    const none = { kind: 'person', principal: ALICE, runId: null, as: 'assignee' } as const;
+    expect(await service.complete(task.taskId, none, { summary: 'done' })).toMatchObject({ ok: false, code: 'run_superseded' });
+    expect(service.block(task.taskId, none, { kind: 'needs_input', reason: 'which wiki?' })).toMatchObject({ ok: false, code: 'run_superseded' });
+    expect(getRun(t.db, run.runId)?.outcome).toBeNull();
+  });
+
+  it("refuses an assignee's report once the task is someone else's, and a reviewer's once the review is", async () => {
+    const task = create({ reviewer: BOB });
+    const asAlice = { kind: 'person', principal: ALICE, runId: null, as: 'assignee' } as const;
+    expect(service.assign(task.taskId, 'implementer', BOB).ok).toBe(true);
+    expect(await service.complete(task.taskId, asAlice, { summary: 'done' })).toMatchObject({ ok: false, code: 'run_superseded' });
+    expect(await service.requestReview(task.taskId, asAlice, { summary: 'done' })).toMatchObject({ ok: false, code: 'run_superseded' });
+    expect(service.block(task.taskId, asAlice, { kind: 'needs_input', reason: 'x' })).toMatchObject({ ok: false, code: 'run_superseded' });
+    expect(service.assign(task.taskId, ALICE, BOB).ok).toBe(true);
+    expect((await service.requestReview(task.taskId, asAlice, { summary: 'done' })).ok).toBe(true);
+    expect(service.assignReviewer(task.taskId, 'reviewer', BOB).ok).toBe(true);
+    const asBob = { kind: 'person', principal: BOB, runId: null, as: 'reviewer' } as const;
+    expect(await service.complete(task.taskId, asBob, { summary: 'fine' })).toMatchObject({ ok: false, code: 'run_superseded' });
+    expect(service.requestChanges(task.taskId, asBob, 'redo')).toMatchObject({ ok: false, code: 'run_superseded' });
+    // An operator may answer any review.
+    const asOperator = { kind: 'person', principal: BOB, runId: null, as: 'operator' } as const;
+    expect((await service.complete(task.taskId, asOperator, { summary: 'fine' })).ok).toBe(true);
+    expect(getTask(t.db, task.taskId)?.phase).toBe('done');
+  });
+
+  it("refuses an assignee's done once the task is in review, and an answer while it is not", async () => {
+    const task = create({ reviewer: BOB });
+    expect((await service.requestReview(task.taskId, { kind: 'person', principal: ALICE, runId: null, as: 'assignee' }, { summary: 'done' })).ok).toBe(true);
+    expect(await service.complete(task.taskId, { kind: 'person', principal: ALICE, runId: null, as: 'assignee' }, { summary: 'done' }))
+      .toMatchObject({ ok: false, code: 'run_superseded' });
+    const other = create({ title: 'Tidy the docs' });
+    expect(await service.complete(other.taskId, { kind: 'person', principal: BOB, runId: null, as: 'operator' }, { summary: 'done' }))
+      .toMatchObject({ ok: false, code: 'run_superseded' });
+  });
+});
+
 describe("a person's report beside another task's agent", () => {
   it('is refused while that agent run is open in the workspace its gates run in, and runs no gate', async () => {
     const task = create();

@@ -780,9 +780,17 @@ function reportingRun(d: Db, task: TaskRow, by: Reporter): Result<{ run: RunRow 
   }
   const open = openRunOf(d, task.taskId);
   // A card is for one run: pressed once that run is over, it does nothing (spec §9.2).
-  if (by.runId !== undefined && open?.runId !== by.runId) {
-    return refuse('run_superseded', `run ${by.runId} of task ${task.taskId} is over: the task has moved on since this report was made`);
+  // A typed report is for the run open when it was checked, or for none.
+  if (by.runId !== undefined && (open?.runId ?? null) !== by.runId) {
+    return refuse(
+      'run_superseded',
+      by.runId === null
+        ? `task ${task.taskId} has a run open (${open?.runId ?? ''}) that it had not when this report was made: the task has moved on since`
+        : `run ${by.runId} of task ${task.taskId} is over: the task has moved on since this report was made`,
+    );
   }
+  const named = namedRefused(task, by);
+  if (named !== undefined) return named;
   if (open === undefined) return { ok: true, run: undefined };
   if (open.assignee.kind === 'role') {
     return refuse(
@@ -793,6 +801,28 @@ function reportingRun(d: Db, task: TaskRow, by: Reporter): Result<{ run: RunRow 
     );
   }
   return { ok: true, run: open };
+}
+
+/**
+ * Whether the person still reports as what the caller checked them as
+ * (`Reporter.as`): the task's assignee, while it is open; its reviewer, or an
+ * operator, while it is in review. Checked in the transaction, after anything
+ * that ran before it -- the gates -- so a task reassigned meanwhile is refused.
+ */
+function namedRefused(task: TaskRow, by: Extract<Reporter, { kind: 'person' }>): Refusal | undefined {
+  if (by.as === undefined) return undefined;
+  const moved = (now: string) =>
+    refuse('run_superseded', `task ${task.taskId} ${now}: the task has moved on since this report was made`);
+  const whom = (a: Assignee | null) => (a === null ? 'nobody' : a.kind === 'role' ? `role ${a.name}` : a.name);
+  const theirs = (a: Assignee | null) => a?.kind === 'human' && a.name === by.principal;
+  if (by.as === 'assignee') {
+    if (!theirs(task.assignee)) return moved(`is now for ${whom(task.assignee)}`);
+    if (task.phase !== 'open') return moved(`is ${task.phase}`);
+    return undefined;
+  }
+  if (task.phase !== 'review') return moved(`is ${task.phase}, not waiting for review`);
+  if (by.as === 'reviewer' && !theirs(task.reviewer)) return moved(`is now for ${whom(task.reviewer)} to review`);
+  return undefined;
 }
 
 /** The phase a run of this kind works in. */
