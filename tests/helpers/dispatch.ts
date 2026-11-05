@@ -3,7 +3,7 @@ import { SessionRegistry } from '../../src/core/registry.js';
 import { NamedWorkspaces } from '../../src/core/workspace.js';
 import { getRun } from '../../src/db/kanban-read.js';
 import { Dispatcher, type DispatcherSettings, type WorkerAccess } from '../../src/kanban/dispatcher.js';
-import { KanbanService, type CreateRequest, type ReportChecks } from '../../src/kanban/service.js';
+import { KanbanService, type CreateRequest, type People, type ReportChecks } from '../../src/kanban/service.js';
 import { KanbanSink } from '../../src/kanban/sink.js';
 import type { RunRow, TaskRow } from '../../src/kanban/types.js';
 import type { Role } from '../../src/roles.js';
@@ -78,6 +78,8 @@ export interface HarnessOptions {
   worker?: WorkerAccess;
   /** How the service runs gates and reads commits; absent, it does neither. */
   checks?: ReportChecks;
+  /** Who the board may give work to; absent, no person. */
+  people?: People;
 }
 
 export const DEFAULT_ROLES: readonly Role[] = [
@@ -98,6 +100,7 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
     workspaces: new Set(workspaces.keys()),
     clock,
     ...(opts.checks === undefined ? {} : { checks: opts.checks }),
+    ...(opts.people === undefined ? {} : { people: opts.people }),
   });
   const lark = new FakeChannel({ id: 'lark', clock });
   const notes: string[] = [];
