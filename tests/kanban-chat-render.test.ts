@@ -55,21 +55,28 @@ const LIMIT = { blockRecurrenceLimit: 2 };
 describe('/kanban help', () => {
   it('lists every command with who may run it, people as assignees and reviewers among them', () => {
     const help = renderHelp();
-    for (const verb of ['new', 'list', 'show', 'assign', 'link', 'workspace', 'comment', 'unblock', 'stop', 'archive']) {
-      expect(help).toContain(`/kanban ${verb}`);
+    const verbs = ['new', 'list', 'show', 'assign', 'link', 'workspace', 'comment', 'unblock', 'stop', 'archive', 'done', 'block', 'review', 'approve', 'changes'];
+    for (const verb of verbs) {
+      expect(help).toContain(`\`/kanban task ${verb}`);
+      // Never in the old form, without task.
+      expect(help).not.toContain(`/kanban ${verb}`);
     }
+    for (const sub of ['board list', 'board create', 'board use', 'board set', 'board archive', 'gate add', 'gate list', 'gate remove']) {
+      expect(help).toContain(`\`/kanban ${sub}`);
+    }
+    expect(help).toContain('`/kanban help`');
     expect(help).toContain('`/kanban gate add <task> [--timeout <seconds>] <command>` (operator)');
-    expect(help).toContain('`/kanban list');
+    expect(help).toContain('`/kanban task list');
     expect(help).toContain('(anyone allowed)');
-    expect(help).toContain("`/kanban done <task> [summary]` (the task's assignee)");
-    expect(help).toContain('`/kanban changes <task> <reason>` (its reviewer, or an operator)');
+    expect(help).toContain("`/kanban task done <task> [summary]` (the task's assignee)");
+    expect(help).toContain('`/kanban task changes <task> <reason>` (its reviewer, or an operator)');
     expect(help).toContain('Name a person with an @-mention');
     expect(help).not.toContain('later update');
     expect(help).not.toContain('D2');
   });
 });
 
-describe('/kanban list', () => {
+describe('/kanban task list', () => {
   it('shows the open tasks by status, escaped, and a filter or all', () => {
     const ready = newTask(h.db, { title: `ready ${SPOOF}` });
     const running = newTask(h.db, { title: 'running_one' });
@@ -88,7 +95,7 @@ describe('/kanban list', () => {
     expect(renderList(board, 'done')).not.toContain(ready.taskId);
     expect(renderList(board, 'all').split('\n')).toHaveLength(3);
     expect(renderList(board, 'archived')).toBe('No archived tasks.');
-    expect(renderList([], undefined)).toBe('No open tasks. `/kanban list all` shows done and archived ones too.');
+    expect(renderList([], undefined)).toBe('No open tasks. `/kanban task list all` shows done and archived ones too.');
   });
 
   it('keeps a long title to one line, cut with a one-line marker', () => {
@@ -107,7 +114,7 @@ describe('/kanban list', () => {
   });
 });
 
-describe('/kanban show', () => {
+describe('/kanban task show', () => {
   it('shows the task, its contract, gates, runs, latest output and comments, escaped and masked', () => {
     const k = newTask(h.db, {
       title: 'Write *the* notes',
@@ -275,7 +282,7 @@ describe('notices', () => {
     expect(block(h.db, k.taskId, by, { kind: 'capability', reason: 'no access to the_drive' }, NOW).ok).toBe(true);
     expect(renderNotice(last(k.taskId), task(k.taskId), LIMIT)).toBe(
       `**Fetch the report** \`${k.taskId}\` is blocked (capability): no access to the\\_drive\n` +
-        `\`/kanban unblock ${k.taskId} [comment]\` once it can go on.`,
+        `\`/kanban task unblock ${k.taskId} [comment]\` once it can go on.`,
     );
     const again = { ...last(k.taskId), payload: { kind: 'capability', reason: 'still no access', blockRecurrences: 2 } };
     expect(renderNotice(again, task(k.taskId), LIMIT)).toContain('It keeps blocking for the same reason (2 times after an unblock)');
@@ -308,10 +315,10 @@ describe('notices', () => {
         t,
         LIMIT,
       ),
-    ).toBe(`Gave up on ${name}: failed 2 times; last failed\n\`/kanban unblock ${k.taskId} [comment]\` gives it a fresh set of attempts.`);
+    ).toBe(`Gave up on ${name}: failed 2 times; last failed\n\`/kanban task unblock ${k.taskId} [comment]\` gives it a fresh set of attempts.`);
     expect(
       renderNotice(event('run_ended', { outcome: 'terminal_provider', next: 'blocked', blockKind: 'capability', blockReason: '401' }), t, LIMIT),
-    ).toMatch(/^.* is blocked \(capability\): 401\n`\/kanban unblock/);
+    ).toMatch(/^.* is blocked \(capability\): 401\n`\/kanban task unblock/);
     // The recurrences the event recorded, not the task's count now.
     expect(
       renderNotice(
@@ -333,7 +340,7 @@ describe('notices', () => {
     // A stop is a person's choice, not the task blocking again for the same reason: no rewrite suggested.
     const stopped = renderNotice(event('stopped', { blockRecurrences: 5 }, ALICE), t, LIMIT);
     expect(stopped).toBe(
-      `${name} is blocked (needs\\_input): stopped by lark:on\\_alice\n\`/kanban unblock ${k.taskId} [comment]\` once it can go on.`,
+      `${name} is blocked (needs\\_input): stopped by lark:on\\_alice\n\`/kanban task unblock ${k.taskId} [comment]\` once it can go on.`,
     );
     // A person who stopped it is named as Lark last gave their name, escaped; anyone else by their actor.
     const nameOf = (p: string) => (p === ALICE ? 'Alice <at id=all></at>' : undefined);
@@ -374,9 +381,9 @@ describe('notices', () => {
     const event = (payload: unknown): KanbanEvent => ({ ...last(k.taskId), kind: 'card_failed', payload });
     expect(renderNotice(event({ kind: 'work', to: ALICE, error: 'the user is not in the app' }), task(k.taskId), { ...LIMIT, nameOf: () => 'Alice' })).toBe(
       `Could not send Alice the card for **Survey** \`${k.taskId}\`: the user is not in the app\n` +
-        `They can answer from any chat with the bot: \`/kanban done ${k.taskId} [summary]\` or \`/kanban block ${k.taskId} <reason>\`.`,
+        `They can answer from any chat with the bot: \`/kanban task done ${k.taskId} [summary]\` or \`/kanban task block ${k.taskId} <reason>\`.`,
     );
-    expect(renderNotice(event({ kind: 'review', to: ALICE, error: 'x' }), task(k.taskId), LIMIT)).toContain(`\`/kanban approve ${k.taskId}\``);
+    expect(renderNotice(event({ kind: 'review', to: ALICE, error: 'x' }), task(k.taskId), LIMIT)).toContain(`\`/kanban task approve ${k.taskId}\``);
   });
 
   it('knows which events left the task blocked, for the Unblock under their notice', () => {
@@ -424,7 +431,9 @@ describe("a person's cards", () => {
     expect(view.markdown).toContain(`> Use the ${MASK} key\n> # not a heading`);
     expect(view.markdown).toContain('outcome: a page');
     expect(view.markdown).toContain(`\`${parent.taskId}\` **Collect the numbers**:\n> in sheet Q3`);
-    expect(view.markdown).toContain(`\`/kanban done ${k.taskId} [summary]\``);
+    expect(view.markdown).toContain(
+      `In any chat with the bot, \`/kanban task done ${k.taskId} [summary]\` and \`/kanban task block ${k.taskId} <reason>\` do the same.`,
+    );
     expect(view.input).toEqual({ placeholder: 'A summary, or why it is blocked' });
     const nonce = boardCardNonce('cli_app', k.taskId, run.runId);
     expect(view.buttons).toEqual([
@@ -443,6 +452,9 @@ describe("a person's cards", () => {
     expect(view.markdown).toContain(`🔎 For you to review: **Fix the footer** \`${k.taskId}\``);
     expect(view.markdown).toContain('**The handoff**, from its agent:\n> moved it');
     expect(view.markdown).toContain('To review: review commit abc1234.');
+    expect(view.markdown).toContain(
+      `In any chat with the bot, \`/kanban task approve ${k.taskId}\` and \`/kanban task changes ${k.taskId} <reason>\` do the same.`,
+    );
     expect(view.buttons.map((b) => [b.label, b.value['act']])).toEqual([
       ['Approve', 'approve'],
       ['Request changes', 'changes'],

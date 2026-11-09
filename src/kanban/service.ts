@@ -285,6 +285,16 @@ const RUN_KEY = 'run-task:';
 /** Chat's keys: the message that asked, `lark:<message_id>`. */
 const CHAT_KEY = 'lark:';
 
+/**
+ * A report refused while another on the task runs its gates: what to look at
+ * meanwhile, typed as its reporter types it -- in chat for a person, the worker
+ * CLI's own command for a run's agent, as its prompt names it.
+ */
+function inProgress(taskId: string, by: Reporter): string {
+  const see = by.kind === 'person' ? `/kanban task show ${taskId}` : 'mt kanban show';
+  return `task ${taskId} is being reported on already, and its gates are running; wait for that answer, or see ${see}`;
+}
+
 export class KanbanService {
   readonly #db: Db;
   readonly #roles: ReadonlyMap<string, Role>;
@@ -358,7 +368,7 @@ export class KanbanService {
     return board.archiveBoard(this.#db, name, by, this.#clock.now());
   }
 
-  /** Move a chat onto a board: its new tasks go there, and `/kanban list` shows it (spec §16). */
+  /** Move a chat onto a board: its new tasks go there, and `/kanban task list` shows it (spec §16). */
   useBoard(at: ChatAt, name: string, by: string): Result<{ board: BoardRow }> {
     if (!isText(name)) return board.refuse('invalid', 'a board is a name, as text');
     return board.useBoard(this.#db, at, name, by, this.#clock.now());
@@ -751,10 +761,7 @@ export class KanbanService {
     apply: (seen: { reportedCommit?: string | null; reportedDirty?: boolean | null }) => Result<T>,
   ): Promise<Result<T>> {
     if (this.#reporting.has(taskId)) {
-      return board.refuse(
-        'report_in_progress',
-        `task ${taskId} is being reported on already, and its gates are running; wait for that answer, or see mt kanban show`,
-      );
+      return board.refuse('report_in_progress', inProgress(taskId, by));
     }
     const now = board.reportCheck(this.#db, taskId, by, kind, reviewer);
     if (!now.ok) return now;
@@ -894,10 +901,7 @@ export class KanbanService {
     // Not while a report on the task runs its gates, as for complete: that report,
     // the reviewer's own approval perhaps, is answered first (spec §5.1).
     if (this.#reporting.has(taskId)) {
-      return board.refuse(
-        'report_in_progress',
-        `task ${taskId} is being reported on already, and its gates are running; wait for that answer, or see mt kanban show`,
-      );
+      return board.refuse('report_in_progress', inProgress(taskId, by));
     }
     return board.requestChanges(this.#db, taskId, by, reason, this.#clock.now());
   }
@@ -982,7 +986,7 @@ export class KanbanService {
     return view === undefined ? board.refuse('not_found', `no task ${taskId}`) : { ok: true, view };
   }
 
-  /** Every task on a board -- or on every board -- with its display status (spec §4.1): `/kanban list`. */
+  /** Every task on a board -- or on every board -- with its display status (spec §4.1): `/kanban task list`. */
   list(onBoard?: string): BoardEntry[] {
     return boardList(this.#db, onBoard);
   }

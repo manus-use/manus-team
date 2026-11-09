@@ -8,6 +8,7 @@ import {
   isPerson,
   parseKanban,
   tooBig,
+  typed,
   type BoardCommand,
   type KanbanCommand,
   type NewTaskCommand,
@@ -55,7 +56,7 @@ import {
  * person a command mentions, is noted in the people directory, which is how a
  * person named later by principal alone is checked for talk tier (spec §4.2).
  *
- * Anyone at talk tier may comment, and everyone sees comments in `/kanban show`;
+ * Anyone at talk tier may comment, and everyone sees comments in `/kanban task show`;
  * only an operator's, or the task's named assignee's or reviewer's, may steer
  * its agent (spec §9.1, §7.5). A named assignee reports on their own task, and a
  * named reviewer answers its review, with talk tier: being named is the
@@ -184,7 +185,7 @@ function sentForReview(verb: ReportCommand['verb'], task: TaskRow): Assignee | u
 }
 
 function outOfDate(taskId: string): string {
-  return `That card is out of date: ${id(taskId)} has moved on. \`/kanban show ${taskId}\` says where it is.`;
+  return `That card is out of date: ${id(taskId)} has moved on. \`/kanban task show ${taskId}\` says where it is.`;
 }
 
 /** A press being acted on: the card's message, its run, and the attempt its redraw gets. */
@@ -225,7 +226,7 @@ export class KanbanChat {
     for (const m of message.mentions ?? []) this.#deps.people.saw(seen(m));
     const tier = TIERS[command.verb];
     if (tier === 'operate' && !this.#deps.hasTier(message.sender, 'operate')) {
-      return `\`/kanban ${command.verb}\` changes the board, and needs operator permission.`;
+      return `\`${typed(command.verb)}\` changes the board, and needs operator permission.`;
     }
     switch (command.verb) {
       case 'help':
@@ -259,7 +260,7 @@ export class KanbanChat {
     if (by === undefined) return NO_UNION_ID;
     // A change is made, then its reply rendered. Should the render throw after the
     // change succeeded, the router answers that the board could not do it: the
-    // change stands though the reply says it was not done, and `/kanban show` tells.
+    // change stands though the reply says it was not done, and `/kanban task show` tells.
     return this.#change(command, by, message, key);
   }
 
@@ -306,7 +307,7 @@ export class KanbanChat {
         if (!r.ok) return refused(r);
         return steers
           ? `Comment added to ${id(command.taskId)}. An agent working on it gets it when its current turn ends; otherwise the next run reads it.`
-          : `Comment added to ${id(command.taskId)}, for people: \`/kanban show\` shows it. Only an operator's comment, or its assignee's or reviewer's, is given to the task's agent.`;
+          : `Comment added to ${id(command.taskId)}, for people: \`/kanban task show\` shows it. Only an operator's comment, or its assignee's or reviewer's, is given to the task's agent.`;
       }
       case 'unblock': {
         const r = service.unblock(command.taskId, by, command.comment);
@@ -320,7 +321,7 @@ export class KanbanChat {
         this.#decided(r.run);
         this.#changed();
         return r.run.outcome === 'cancelled'
-          ? `Stopped ${id(command.taskId)}: its run was cancelled, and the task is blocked (needs\\_input). \`/kanban unblock ${command.taskId}\` runs it again.`
+          ? `Stopped ${id(command.taskId)}: its run was cancelled, and the task is blocked (needs\\_input). \`/kanban task unblock ${command.taskId}\` runs it again.`
           : `${id(command.taskId)}'s run had already reported (${forDisplay(r.run.outcome ?? 'undecided')}); it is being closed, and the task keeps that outcome.`;
       }
       case 'archive': {
@@ -373,7 +374,7 @@ export class KanbanChat {
       case 'board use': {
         const r = service.useBoard(chatAt(key), command.board, by);
         if (!r.ok) return refused(r);
-        return `This chat is on board ${boardName(r.board)} now: its \`/kanban new\` adds tasks to it, and \`/kanban list\` shows them.`;
+        return `This chat is on board ${boardName(r.board)} now: its \`/kanban task new\` adds tasks to it, and \`/kanban task list\` shows them.`;
       }
       case 'board set': {
         const r = service.setBoard(command.board, command.change, by);
@@ -391,7 +392,7 @@ export class KanbanChat {
       case 'board archive': {
         const r = service.archiveBoard(command.board, by);
         if (!r.ok) return refused(r);
-        return `Archived board ${boardName(r.board)}. Its tasks stay, and \`/kanban show\` still shows them; nothing more is added to it.`;
+        return `Archived board ${boardName(r.board)}. Its tasks stay, and \`/kanban task show\` still shows them; nothing more is added to it.`;
       }
     }
   }
@@ -422,7 +423,7 @@ export class KanbanChat {
     return ended === undefined ? reply : `${reply.replace(/\.$/, '')}; the review run of ${this.#whom(ended.assignee)} was ended.`;
   }
 
-  /** `/kanban review`: the assignee asks for same-task review (spec §5.3), of a reviewer named here or on the task. */
+  /** `/kanban task review`: the assignee asks for same-task review (spec §5.3), of a reviewer named here or on the task. */
   async #review(command: ReviewCommand, by: string, message: InboundMessage): Promise<string> {
     const shown = this.#deps.service.show(command.taskId);
     if (!shown.ok) return refused(shown);
@@ -471,16 +472,16 @@ export class KanbanChat {
   #mayReport(verb: ReportCommand['verb'] | 'review', task: TaskRow, by: string, sender: Principal): string | undefined {
     if (verb === 'approve' || verb === 'changes') {
       if (!isNamed(task.reviewer, by) && !this.#deps.hasTier(sender, 'operate')) {
-        return `\`/kanban ${verb}\` answers a review, and is for ${id(task.taskId)}'s reviewer (${task.reviewer === null ? 'nobody' : this.#whom(task.reviewer)}) or an operator.`;
+        return `\`${typed(verb)}\` answers a review, and is for ${id(task.taskId)}'s reviewer (${task.reviewer === null ? 'nobody' : this.#whom(task.reviewer)}) or an operator.`;
       }
       if (task.phase !== 'review') return `${id(task.taskId)} is not waiting for review: it is ${forDisplay(task.phase)}.`;
       return undefined;
     }
     if (!isNamed(task.assignee, by)) {
-      return `\`/kanban ${verb}\` is for the person a task is assigned to; ${id(task.taskId)} is for ${task.assignee === null ? 'nobody' : this.#whom(task.assignee)}.`;
+      return `\`${typed(verb)}\` is for the person a task is assigned to; ${id(task.taskId)} is for ${task.assignee === null ? 'nobody' : this.#whom(task.assignee)}.`;
     }
     // Its assignee reports on the work; once it is in review, the reviewer answers.
-    if (task.phase !== 'open') return `${id(task.taskId)} is ${forDisplay(task.phase)}: \`/kanban ${verb}\` reports on work being done.`;
+    if (task.phase !== 'open') return `${id(task.taskId)} is ${forDisplay(task.phase)}: \`${typed(verb)}\` reports on work being done.`;
     return undefined;
   }
 
@@ -511,7 +512,7 @@ export class KanbanChat {
       case 'approve':
         return `Approved: ${id(taskId)} is complete.`;
       case 'block':
-        return `Blocked ${id(taskId)} (needs\\_input). An operator unblocks it with \`/kanban unblock ${taskId} [comment]\`.`;
+        return `Blocked ${id(taskId)} (needs\\_input). An operator unblocks it with \`/kanban task unblock ${taskId} [comment]\`.`;
       case 'changes':
         return `Changes requested on ${id(taskId)}: it goes back to its assignee, with your reason.`;
     }
@@ -561,7 +562,7 @@ export class KanbanChat {
       const r = this.#deps.service.unblock(taskId, by, undefined, { blockedAt: Number(event) });
       if (!r.ok) {
         return r.code === 'stale' || r.code === 'illegal_transition'
-          ? `${id(taskId)} is not blocked as that notice said any more: \`/kanban show ${taskId}\` says where it is.`
+          ? `${id(taskId)} is not blocked as that notice said any more: \`/kanban task show ${taskId}\` says where it is.`
           : refused(r);
       }
       this.#changed();
@@ -742,7 +743,7 @@ export class KanbanChat {
   }
 
   /**
-   * `/kanban new` (spec §9.1): created from this chat, which is subscribed to it.
+   * `/kanban task new` (spec §9.1): created from this chat, which is subscribed to it.
    * The message id is the idempotency key, so a redelivery that got past the
    * router's own dedup still makes one task.
    */
@@ -786,7 +787,7 @@ export class KanbanChat {
     this.#changed();
     const whom =
       task.assignee === null
-        ? 'nobody yet (`/kanban assign ' + task.taskId + ' <role or @person>` gives it to someone)'
+        ? 'nobody yet (`/kanban task assign ' + task.taskId + ' <role or @person>` gives it to someone)'
         : this.#whom(task.assignee);
     const card =
       task.assignee?.kind === 'human' ? ' They are sent it as a card, in a direct message, once it is ready.' : '';

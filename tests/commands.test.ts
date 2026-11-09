@@ -71,10 +71,10 @@ describe('the command table', () => {
 
   it('runs /kanban at talk tier, lines kept, without a session and never refused mid-turn', () => {
     // Its commands that change the board check operator tier themselves (spec §9.1).
-    const parsed = parseCommand('/kanban new A task\nassignee: implementer');
+    const parsed = parseCommand('/kanban task new A task\nassignee: implementer');
     if (parsed === undefined || !('spec' in parsed)) throw new Error('/kanban did not parse');
     expect(parsed.spec).toMatchObject({ name: 'kanban', tier: 'talk', needsSession: false, mutating: false, multiline: true });
-    expect(parsed.arg).toBe('new A task\nassignee: implementer');
+    expect(parsed.arg).toBe('task new A task\nassignee: implementer');
   });
 
   it('has no /approve', () => {

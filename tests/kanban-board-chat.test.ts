@@ -12,7 +12,7 @@ import { WORKSPACES } from './helpers/kanban.js';
 
 /**
  * Boards in chat (spec §16): `/kanban board list` and the rest of `/kanban board …`, each chat
- * on its own board, and `/kanban new`, `list` and `show` acting on it.
+ * on its own board, and `/kanban task new`, `list` and `show` acting on it.
  */
 
 const OWNER: Principal = { openId: 'ou_owner', unionId: 'on_owner', displayName: 'Owner' };
@@ -104,7 +104,7 @@ describe('/kanban board use', () => {
   it('moves this chat, all its threads, onto a board, and no other chat', async () => {
     await say('board create web-app');
     expect(await say('board use web-app', TOPIC)).toBe(
-      'This chat is on board **web-app** now: its `/kanban new` adds tasks to it, and `/kanban list` shows them.',
+      'This chat is on board **web-app** now: its `/kanban task new` adds tasks to it, and `/kanban task list` shows them.',
     );
     expect(service.chatBoard({ channel: 'lark', appId: 'cli_app', conversationId: 'oc_team' }).name).toBe('web-app');
     expect(service.chatBoard({ channel: 'lark', appId: 'cli_app', conversationId: 'oc_other' }).name).toBe('default');
@@ -114,34 +114,34 @@ describe('/kanban board use', () => {
 
   it("creates this chat's tasks on its board, and lists that board alone", async () => {
     await say('board create web-app');
-    const plain = created(await say('new On default\nassignee: implementer', OTHER));
+    const plain = created(await say('task new On default\nassignee: implementer', OTHER));
     await say('board use web-app');
-    const reply = await say('new On the web app\nassignee: implementer\nworkspace: web');
+    const reply = await say('task new On the web app\nassignee: implementer\nworkspace: web');
     const taskId = created(reply);
     expect(reply).toContain(', in web, on board **web-app**. This chat hears');
     expect(getTask(t.db, taskId)?.board).toBe('web-app');
     expect(passes).toBe(2);
 
-    expect((await say('list')).split('\n')).toEqual(['Board **web-app**:', `\`${taskId}\` **ready**: On the web app · role implementer`]);
-    expect(await say('list', OTHER)).toBe(`\`${plain}\` **ready**: On default · role implementer`);
-    expect(await say('list done')).toBe('No done tasks on board web-app.');
+    expect((await say('task list')).split('\n')).toEqual(['Board **web-app**:', `\`${taskId}\` **ready**: On the web app · role implementer`]);
+    expect(await say('task list', OTHER)).toBe(`\`${plain}\` **ready**: On default · role implementer`);
+    expect(await say('task list done')).toBe('No done tasks on board web-app.');
   });
 
   it("shows a task on any board by its id, naming its board", async () => {
     await say('board create web-app');
-    const plain = created(await say('new On default\nassignee: implementer'));
-    expect((await say(`show ${plain}`)).split('\n')[1]).toBe('assignee: role implementer · reviewer: nobody · workspace: not yet fixed');
+    const plain = created(await say('task new On default\nassignee: implementer'));
+    expect((await say(`task show ${plain}`)).split('\n')[1]).toBe('assignee: role implementer · reviewer: nobody · workspace: not yet fixed');
     await say('board use web-app');
-    expect((await say(`show ${plain}`)).split('\n')[1]).toBe(
+    expect((await say(`task show ${plain}`)).split('\n')[1]).toBe(
       'assignee: role implementer · reviewer: nobody · workspace: not yet fixed · board: default',
     );
   });
 
   it("refuses a parent on another board", async () => {
     await say('board create web-app');
-    const plain = created(await say('new On default\nassignee: implementer'));
+    const plain = created(await say('task new On default\nassignee: implementer'));
     await say('board use web-app');
-    expect(await say(`new Child\nassignee: implementer\nparent: ${plain}`)).toBe(
+    expect(await say(`task new Child\nassignee: implementer\nparent: ${plain}`)).toBe(
       `Not done: task ${plain.replace('_', '\\_')} is on board default, not web-app: a task and its parents are on one board`,
     );
   });
@@ -173,15 +173,15 @@ describe('/kanban board archive', () => {
   it('archives a board once its tasks are finished, and then adds nothing to it', async () => {
     await say('board create web-app');
     await say('board use web-app');
-    const taskId = created(await say('new Last one\nassignee: implementer'));
+    const taskId = created(await say('task new Last one\nassignee: implementer'));
     expect(await say('board archive web-app')).toBe(
       'Not done: board web-app has 1 task not yet done or archived; finish or archive it first',
     );
-    await say(`archive ${taskId}`);
+    await say(`task archive ${taskId}`);
     expect(await say('board archive web-app')).toBe(
-      'Archived board **web-app**. Its tasks stay, and `/kanban show` still shows them; nothing more is added to it.',
+      'Archived board **web-app**. Its tasks stay, and `/kanban task show` still shows them; nothing more is added to it.',
     );
-    expect(await say('new Another\nassignee: implementer')).toBe(
+    expect(await say('task new Another\nassignee: implementer')).toBe(
       'This chat is on board **web-app**, which is archived: `/kanban board use <board>` moves it to another first.',
     );
     expect(await say('board use web-app', OTHER)).toBe('Not done: board web-app is archived');

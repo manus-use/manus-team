@@ -116,7 +116,7 @@ export const COMMANDS: readonly CommandSpec[] = [
     tier: 'talk',
     needsSession: false,
     effect: 'immediate',
-    // `/kanban new` takes field lines and a body; `/kanban comment` a paragraph.
+    // `/kanban task new` takes field lines and a body; `/kanban task comment` a paragraph.
     multiline: true,
     // Control-plane, like /status: it never touches this chat's session, so a
     // busy one does not refuse it (spec §9.1).

@@ -414,8 +414,12 @@ describe('a report while its gates run', () => {
     const approval = g.s.complete(task.taskId, as(review), { summary: 'approved' });
     await held.started;
     const operator: Reporter = { kind: 'person', principal: ALICE, runId: review.runId, as: 'operator' };
-    expect(await g.s.complete(task.taskId, operator, { summary: 'fine' })).toMatchObject({ ok: false, code: 'report_in_progress' });
-    expect(g.s.requestChanges(task.taskId, operator, 'redo it')).toMatchObject({ ok: false, code: 'report_in_progress' });
+    // A person is told what to type in chat; an agent, its own command.
+    const inChat =
+      `task ${task.taskId} is being reported on already, and its gates are running; ` +
+      `wait for that answer, or see /kanban task show ${task.taskId}`;
+    expect(await g.s.complete(task.taskId, operator, { summary: 'fine' })).toEqual({ ok: false, code: 'report_in_progress', message: inChat });
+    expect(g.s.requestChanges(task.taskId, operator, 'redo it')).toEqual({ ok: false, code: 'report_in_progress', message: inChat });
     expect(getRun(g.t.db, review.runId)?.outcome).toBeNull();
     held.release();
     expect(await approval).toMatchObject({ ok: true, task: { phase: 'done' }, run: { outcome: 'completed' } });

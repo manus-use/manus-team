@@ -1464,7 +1464,7 @@ export function unblock(
 }
 
 /**
- * `/kanban stop` (spec §5.1). An undecided run is cancelled and the task blocks
+ * `/kanban task stop` (spec §5.1). An undecided run is cancelled and the task blocks
  * as `needs_input`, rather than staying ready and being dispatched again at once.
  * A run that has already reported keeps its outcome; nothing is written.
  *
@@ -1700,7 +1700,7 @@ function reassign(
 }
 
 /**
- * `/kanban assign` (spec §5.1): the phase is unchanged, and the next work claim
+ * `/kanban task assign` (spec §5.1): the phase is unchanged, and the next work claim
  * goes to the new assignee. An open work run is superseded.
  */
 export function assign(
@@ -1725,7 +1725,7 @@ export function assignReviewer(
 }
 
 /**
- * `/kanban workspace` (spec §2.3): set a task's workspace while it is null, in any
+ * `/kanban task workspace` (spec §2.3): set a task's workspace while it is null, in any
  * phase. Refused once fixed, not merely once claimed, so a null workspace -- a
  * person's task whose parents disagreed -- can always be set.
  */

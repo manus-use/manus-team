@@ -247,7 +247,7 @@ function cardsOf(lark: FakeChannel): Array<{ view: CardView; to: string; message
 describe('people on the board, end to end', () => {
   it('a task for a person reaches them as a card, their Done completes it, and the thread hears both', async () => {
     const s = await build('kanban');
-    await s.router.onMessage(said('/kanban new Check the links\nassignee: @Alice Smith\nEvery link on the wiki page.', [AT_ALICE]));
+    await s.router.onMessage(said('/kanban task new Check the links\nassignee: @Alice Smith\nEvery link on the wiki page.', [AT_ALICE]));
     const taskId = createdIn(s.lark);
     await s.dispatcher.idle();
     expect(runsOf(s.t.db, taskId)).toMatchObject([{ kind: 'work', assignee: { kind: 'human', name: 'lark:on_alice' }, outcome: null }]);
@@ -291,7 +291,7 @@ describe('people on the board, end to end', () => {
   it("a person reviewing an agent's work asks for changes, the agent revises, and the person approves", async () => {
     const s = await build('kanban-review');
     await s.router.onMessage(
-      said('/kanban new Draft the notes\nassignee: implementer\nreviewer: @Bob\nworkspace: default', [AT_BOB]),
+      said('/kanban task new Draft the notes\nassignee: implementer\nreviewer: @Bob\nworkspace: default', [AT_BOB]),
     );
     const taskId = createdIn(s.lark);
     await s.dispatcher.idle();
@@ -383,7 +383,7 @@ describe('people on the board, end to end', () => {
       ]);
       ctl.end('completed');
     });
-    await s.router.onMessage(said('/kanban new Rotate the logs\nassignee: watched'));
+    await s.router.onMessage(said('/kanban task new Rotate the logs\nassignee: watched'));
     const taskId = createdIn(s.lark);
     // Not waiting for the dispatcher: the run is waited on until the agent is answered.
     await until(() => s.lark.approvalCards.length > 0, 'the approval card');

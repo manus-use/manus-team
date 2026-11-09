@@ -11,7 +11,7 @@ import { WORKER_LIMITS } from './limits.js';
  * carries the usage line to show, already escaped.
  */
 
-/** The display statuses `/kanban list` can filter by, and `all`. */
+/** The display statuses `/kanban task list` can filter by, and `all`. */
 export const LIST_FILTERS: readonly (DisplayStatus | 'all')[] = [
   'todo',
   'ready',
@@ -35,7 +35,7 @@ export interface ReportCommand {
   text: string;
 }
 
-/** `/kanban review`: the assignee asks for same-task review (spec §5.3), naming a reviewer on a `reviewer:` line, or not. */
+/** `/kanban task review`: the assignee asks for same-task review (spec §5.3), naming a reviewer on a `reviewer:` line, or not. */
 export interface ReviewCommand {
   verb: 'review';
   taskId: string;
@@ -87,26 +87,56 @@ export type BoardCommand =
 
 export type ParsedKanban = { ok: true; command: KanbanCommand } | { ok: false; usage: string };
 
+/**
+ * The verbs of `/kanban task …` (spec §9.1), each a command on one task, or the
+ * board's tasks. Every one is typed after `task`: `/kanban new`, without it, is an
+ * unknown command, as any word that is not `help`, `task`, `board` or `gate` is.
+ */
+export const TASK_VERBS = [
+  'new',
+  'list',
+  'show',
+  'assign',
+  'link',
+  'workspace',
+  'comment',
+  'unblock',
+  'stop',
+  'archive',
+  'done',
+  'block',
+  'review',
+  'approve',
+  'changes',
+] as const;
+export type TaskVerb = (typeof TASK_VERBS)[number];
+
+/** A command's name as a person types it: `/kanban task new`, `/kanban board use`, `/kanban gate add`. */
+export function typed(verb: KanbanCommand['verb']): string {
+  return (TASK_VERBS as readonly string[]).includes(verb) ? `/kanban task ${verb}` : `/kanban ${verb}`;
+}
+
 /** Each verb's usage line, as `/kanban help` shows it. */
 export const USAGE = {
-  new: '/kanban new <title>, then lines assignee:, reviewer:, workspace:, parent:, outcome:, verify:, constraints:, boundaries:, stop when:, and the body',
-  list: `/kanban list [${LIST_FILTERS.join('|')}]`,
-  show: '/kanban show <task>',
-  assign: '/kanban assign <task> <role or @person>',
-  link: '/kanban link <parent> <child>',
-  workspace: '/kanban workspace <task> <workspace>',
-  comment: '/kanban comment <task> <text>',
-  unblock: '/kanban unblock <task> [comment]',
-  stop: '/kanban stop <task>',
-  archive: '/kanban archive <task>',
+  help: '/kanban help',
+  new: '/kanban task new <title>, then lines assignee:, reviewer:, workspace:, parent:, outcome:, verify:, constraints:, boundaries:, stop when:, and the body',
+  list: `/kanban task list [${LIST_FILTERS.join('|')}]`,
+  show: '/kanban task show <task>',
+  assign: '/kanban task assign <task> <role or @person>',
+  link: '/kanban task link <parent> <child>',
+  workspace: '/kanban task workspace <task> <workspace>',
+  comment: '/kanban task comment <task> <text>',
+  unblock: '/kanban task unblock <task> [comment]',
+  stop: '/kanban task stop <task>',
+  archive: '/kanban task archive <task>',
   'gate add': '/kanban gate add <task> [--timeout <seconds>] <command>',
   'gate list': '/kanban gate list <task>',
   'gate remove': '/kanban gate remove <task> <gate>',
-  done: '/kanban done <task> [summary]',
-  block: '/kanban block <task> <reason>',
-  review: '/kanban review <task> [summary], and a line reviewer: <role or @person> unless the task names one',
-  approve: '/kanban approve <task> [comment]',
-  changes: '/kanban changes <task> <reason>',
+  done: '/kanban task done <task> [summary]',
+  block: '/kanban task block <task> <reason>',
+  review: '/kanban task review <task> [summary], and a line reviewer: <role or @person> unless the task names one',
+  approve: '/kanban task approve <task> [comment]',
+  changes: '/kanban task changes <task> <reason>',
   'board list': '/kanban board list [all]',
   'board create': '/kanban board create <name>',
   'board use': '/kanban board use <name>',
@@ -115,7 +145,7 @@ export const USAGE = {
 } as const;
 
 /**
- * The lines of `/kanban new` that fill a field (spec §9.1), by their label. A
+ * The lines of `/kanban task new` that fill a field (spec §9.1), by their label. A
  * label is matched at the start of a line, in any case, followed by a colon: a
  * body line that only mentions one, indented or mid-sentence, stays body.
  */
@@ -144,7 +174,10 @@ const FIELD_LINE = new RegExp(
 /** Zero-width characters at the start of a line, after any indent. */
 const LEADING_ZW = new RegExp(`^([ \\t]*)[${ZW}]+`, 'gm');
 
-/** `/kanban review`'s reviewer line: its label at the start of a line, in any case, after any spaces, tabs or zero-width characters. */
+/** Zero-width characters at the start of the text, after any spaces: before `task`'s verb, where they would hide it. */
+const START_ZW = new RegExp(`^([ \\t]*)[${ZW}]+`);
+
+/** `/kanban task review`'s reviewer line: its label at the start of a line, in any case, after any spaces, tabs or zero-width characters. */
 const REVIEWER_LINE = new RegExp(`^[ \\t${ZW}]*reviewer[ \\t${ZW}]*:[ \\t${ZW}]*(.*)$`, 'i');
 
 /**
@@ -225,19 +258,38 @@ function words(text: string, n: number): string[] | undefined {
   return all.length === n ? all : undefined;
 }
 
+/** What `/kanban task` says with no verb, or one it does not take. */
+const TASK_TAKES = `\`/kanban task\` takes ${TASK_VERBS.slice(0, -1).join(', ')} or ${TASK_VERBS.at(-1)}. \`/kanban help\` lists them.`;
+
 /**
- * Parse what follows `/kanban`. The router gives the whole argument, newlines
- * kept: `/kanban new` and `/kanban comment` take several lines.
+ * Parse what follows `/kanban`: `help`, or a group, `task`, `board` or `gate`,
+ * and its verb. The router gives the whole argument, newlines kept: `/kanban
+ * task new` and `/kanban task comment` take several lines.
  */
 export function parseKanban(arg: string): ParsedKanban {
   // One kind of line break from here on: a pasted CRLF, or a lone CR, is a newline.
   // And no zero-width character at a line's start, where it would hide a verb or a label.
-  const [rawVerb, rest] = shift(arg.replace(/\r\n?/g, '\n').replace(LEADING_ZW, '$1'));
-  const verb = rawVerb.toLowerCase();
-  switch (verb) {
+  const [rawGroup, rest] = shift(arg.replace(/\r\n?/g, '\n').replace(LEADING_ZW, '$1'));
+  switch (rawGroup.toLowerCase()) {
     case '':
     case 'help':
       return { ok: true, command: { verb: 'help' } };
+    case 'task':
+      return parseTask(rest);
+    case 'gate':
+      return parseGate(rest);
+    case 'board':
+      return parseBoard(rest);
+    default:
+      return { ok: false, usage: `Unknown \`/kanban\` command \`${echoed(rawGroup, 80)}\`. \`/kanban help\` lists them.` };
+  }
+}
+
+/** `/kanban task <verb> …` (spec §9.1). */
+function parseTask(text: string): ParsedKanban {
+  const [rawVerb, rest] = shift(text.replace(START_ZW, '$1'));
+  const verb = rawVerb.toLowerCase();
+  switch (verb) {
     case 'new':
       return parseNew(rest);
     case 'list': {
@@ -285,8 +337,6 @@ export function parseKanban(arg: string): ParsedKanban {
       const comment = text.trim();
       return { ok: true, command: { verb: 'unblock', taskId, comment: comment === '' ? undefined : comment } };
     }
-    case 'gate':
-      return parseGate(rest);
     case 'done':
     case 'approve': {
       // A person finishing, or approving, may say nothing more.
@@ -303,16 +353,14 @@ export function parseKanban(arg: string): ParsedKanban {
     }
     case 'review':
       return parseReview(rest);
-    case 'board':
-      return parseBoard(rest);
     default:
-      return { ok: false, usage: `Unknown \`/kanban\` command \`${echoed(rawVerb, 80)}\`. \`/kanban help\` lists them.` };
+      return { ok: false, usage: TASK_TAKES };
   }
 }
 
 /**
- * `/kanban review <task>`, then the summary; a `reviewer:` line anywhere in it
- * names the reviewer, as on `/kanban new`, since a name at the end of free text
+ * `/kanban task review <task>`, then the summary; a `reviewer:` line anywhere in it
+ * names the reviewer, as on `/kanban task new`, since a name at the end of free text
  * could be the summary's last word. Given once, with a value.
  */
 function parseReview(text: string): ParsedKanban {
@@ -399,7 +447,7 @@ function parseGate(text: string): ParsedKanban {
 }
 
 /**
- * `/kanban new <title>`, then the field lines and the body, in any order
+ * `/kanban task new <title>`, then the field lines and the body, in any order
  * (spec §9.1). A field may be given once, `parent:` as often as needed, each
  * line one or more task ids.
  */
