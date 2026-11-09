@@ -7,6 +7,7 @@ import type { BindingKey, InboundMention, InboundMessage, Principal, Tier } from
 import {
   isPerson,
   parseKanban,
+  tooBig,
   type BoardCommand,
   type KanbanCommand,
   type NewTaskCommand,
@@ -40,7 +41,6 @@ import {
   type RunRow,
   type TaskRow,
 } from './types.js';
-import { WORKER_LIMITS } from './worker.js';
 
 /**
  * `/kanban` in chat (spec §9.1): a parsed command, checked against the sender's
@@ -134,24 +134,6 @@ export function principalOf(sender: Principal): string | undefined {
 
 const NO_UNION_ID =
   'Lark did not say who you are (no union_id came with the message), and the board records who changes it. Ask the operator to check the app can read user ids.';
-
-/**
- * What `/kanban new` may hold: the limits a worker's `mt kanban create` has
- * (C3's `WORKER_LIMITS`), so a task is the same size whoever made it.
- */
-function oversized(command: NewTaskCommand): string | undefined {
-  const size = (text: string) => Buffer.byteLength(text, 'utf8');
-  if (size(command.title) > WORKER_LIMITS.title) {
-    return `A title is at most ${WORKER_LIMITS.title} bytes; put the rest in the body.`;
-  }
-  if (size(command.body) > WORKER_LIMITS.body) return `A body is at most ${WORKER_LIMITS.body} bytes.`;
-  for (const [field, value] of Object.entries(command.contract)) {
-    if (value !== undefined && size(value) > WORKER_LIMITS.contractField) {
-      return `The contract's ${forDisplay(field)} is at most ${WORKER_LIMITS.contractField} bytes.`;
-    }
-  }
-  return undefined;
-}
 
 /** A refusal, in words for chat: the board's message, on one line, since it can quote what the sender typed. */
 function refused(r: Refusal): string {
@@ -773,8 +755,8 @@ export class KanbanChat {
       if (!n.ok) return n.reply;
       named[role] = n.name;
     }
-    const tooBig = oversized(command);
-    if (tooBig !== undefined) return tooBig;
+    const big = tooBig(command, forDisplay);
+    if (big !== undefined) return big;
     // On the chat's board (spec §16).
     const board = this.#deps.service.chatBoard(chatAt(key));
     if (board.archivedAt !== null) {
