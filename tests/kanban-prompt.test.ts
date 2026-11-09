@@ -35,6 +35,7 @@ function task(extra: Partial<TaskRow> = {}): TaskRow {
     createdAt: NOW,
     closedAt: null,
     createdFromTask: null,
+    board: 'default',
     ...extra,
   };
 }

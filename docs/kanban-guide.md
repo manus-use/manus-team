@@ -34,8 +34,8 @@ needs operator tier, except a person's reports on their own task.
 
 | Who | Commands |
 |---|---|
-| Anyone at talk tier | `/kanban help`, `list`, `show`, `comment`, `gate list` |
-| Operators | `/kanban new`, `assign`, `link`, `workspace`, `unblock`, `stop`, `archive`, `gate add`, `gate remove`, and every talk-tier command |
+| Anyone at talk tier | `/kanban help`, `list`, `show`, `comment`, `gate list`, `boards` |
+| Operators | `/kanban new`, `assign`, `link`, `workspace`, `unblock`, `stop`, `archive`, `gate add`, `gate remove`, `board create`, `board use`, `board set`, `board archive`, and every talk-tier command |
 | The person a task is assigned to | `/kanban done`, `block` and `review` on that task, while it is being worked on |
 | The person named as a task's reviewer, or any operator | `/kanban approve` and `changes` on that task, while it waits for review |
 
@@ -763,7 +763,7 @@ Fix it with `/kanban assign`, or, for parents in different workspaces, set the w
 > `k_…` works in worker.
 
 A task's workspace is fixed at its first start and never changes after; `/kanban workspace` is
-refused once it is fixed. A ready task queued behind another in its workspace is not stranded.
+refused once it is fixed. A ready task queued behind another in its workspace, or waiting for a free slot under the gateway's or its board's `max_running`, is not stranded.
 
 ### Stop, assign and archive
 
@@ -814,7 +814,119 @@ When the agent wants to write a file, the card appears in this chat. Until someo
 agent waits, and the wait counts toward the run's time limit: an approval left overnight can end
 the run as timed out.
 
-## 10. Rules of thumb
+## 10. Boards
+
+Several projects can share one gateway. Give each its own **board**: a queue of tasks of its
+own. A board has its own list in chat, takes its turn with the dispatcher, so that a burst of
+tasks on one board cannot hold up another, and may have its own limit on how many agents it runs
+at once, and its own default workspace. One gateway, with one database, serves every board.
+
+Every gateway has a board called `default`. Every task created before boards existed is on it,
+and every chat starts on it. A gateway that never makes another board works as it always did.
+
+### Making a board, and moving a chat onto it
+
+```
+/kanban board create web-app
+```
+
+> Created board **web-app**. `/kanban board use web-app` puts a chat on it.
+
+A board's name follows the rule for role and workspace names: lowercase letters, digits and
+`-`, starting with a letter, not ending with `-`, at most 40 characters. A name is never renamed
+or reused, an archived board's included. `none` and `all` are not board names: in the board
+commands, `none` means "clear" and `all` means every board.
+
+```
+/kanban board use web-app
+```
+
+> This chat is on board **web-app** now: its `/kanban new` adds tasks to it, and `/kanban list`
+> shows them.
+
+A chat is the whole conversation: a group and every thread in it are on one board, and no other
+chat moves with it. Keep each project's group on its project's board; a direct message with the
+bot can move between boards as you need.
+
+### What a board changes
+
+- `/kanban new` creates the task on this chat's board. The reply names the board, unless it is
+  `default`.
+- `/kanban list` shows this chat's board alone. On a board other than `default`, a line of its
+  own names the board above the tasks; on `default` there is none, as before. `all` still means
+  every status, on this board.
+- `/kanban show k_…` shows a task on any board, by its id, and names its board once any board
+  but `default` is involved.
+- Every other command that names a task (`assign`, `comment`, `approve` and the rest) works on
+  a task on any board, by its id. The commands a notice gives, and its Unblock button, keep
+  working after the chat has moved.
+- A task's follow-ups stay on its board: those its agent creates with `mt kanban create`, and
+  those a done task is given.
+- `parent:` and `/kanban link` cannot cross boards. A follow-up created from chat with `parent:`
+  must be created from a chat on the parent's board; from a chat on another board it is refused:
+
+  > Not done: task k\_… is on board default, not web-app: a task and its parents are on one board
+
+- Notices go where they always did: to the chat a task was created in. A chat that moves to
+  another board still hears about the tasks it created before.
+
+### Listing the boards
+
+```
+/kanban boards
+```
+
+> **default**: 2 open, 14 done
+> **web-app** (this chat): 3 open, 1 in review · max\_running 1 · workspace web
+> `/kanban board use <name>` moves this chat to another board; `/kanban board create <name>` makes one.
+
+`/kanban boards all` lists archived boards too.
+
+### A board's own limit and workspace
+
+```
+/kanban board set web-app max_running 1
+```
+
+> Board **web-app** runs at most 1 agent at once now.
+
+The gateway's own `kanban.max_running` still holds over every board together, so a board's own
+is at most that; `none` clears it. One agent at a time per workspace is still the gateway's rule,
+across boards: two boards' tasks in one workspace take turns.
+
+```
+/kanban board set web-app workspace web
+```
+
+> Board **web-app**'s tasks work in web now, unless their own workspace, their role's or their
+> parents' says otherwise.
+
+A board's workspace is the last resort, in place of `default`, for a task with no `workspace:`
+line, whose role names no workspace, and whose parents have none. It applies to tasks claimed
+from then on; a task already working somewhere stays there. `none` clears it, so a workspace
+called `none` cannot be a board's workspace. If a board's workspace is removed from config, its
+agent tasks that would land there wait as stranded, but a person's task claimed there keeps that
+workspace as its own.
+
+### Archiving a board
+
+```
+/kanban board archive web-app
+```
+
+It is refused while any of the board's tasks is open, in review or blocked: finish or archive
+them first. Once it is archived, nothing more is added to it, and no chat can move onto it; its
+tasks stay, and `/kanban show` still shows them. A chat still on it is told to move before its
+next `/kanban new`, and its `/kanban boards` still lists it, marked archived. `default` is never
+archived.
+
+### Who may do what
+
+Anyone at talk tier may list the boards. Creating, using, setting and archiving a board are
+operator commands: moving a chat onto a board changes where its tasks go, and so which workspace
+an agent may run in.
+
+## 11. Rules of thumb
 
 - Write `outcome:` and `verify:` on every task you care about, and `stop when:` on anything
   risky.
@@ -825,6 +937,8 @@ the run as timed out.
   `/kanban assign` it.
 - Want review? Name a `reviewer:` on the task, or make a separate review task under it, not both.
 - Want parallel work? Give each task its own workspace, or they queue.
+- Several projects? Give each a board, keep its group on it with `/kanban board use`, and give
+  the board the project's workspace.
 - Order follow-ups with `parent:` lines, or `parents` from an agent, when you create them.
 - Steer with a comment; stop only when the agent is going the wrong way.
 - Unblock with a comment that answers the question the block asked.

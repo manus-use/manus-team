@@ -177,6 +177,19 @@ describe('the notifier', () => {
     expect(await n.deliver()).toBe(0);
   });
 
+  it('still tells a chat about a task it created after the chat has moved to another board', async () => {
+    const a = create('Draft the notes');
+    expect(service.createBoard('web-app', ALICE).ok).toBe(true);
+    const at = { channel: 'lark', appId: 'cli_app', conversationId: 'oc_team' };
+    expect(service.useBoard(at, 'web-app', ALICE).ok).toBe(true);
+    await done(a, 'merged');
+
+    expect(await notifier().deliver()).toBe(1);
+    expect(lark.texts.map((m) => [m.target, m.text])).toEqual([
+      [{ chatId: 'oc_team', threadId: 'omt_topic' }, `Done: **Draft the notes** \`${a.taskId}\`\n> merged`],
+    ]);
+  });
+
   it('sends each conversation its own message', async () => {
     await done(create('Here'), 'ok');
     await done(create('There', ELSEWHERE), 'ok');

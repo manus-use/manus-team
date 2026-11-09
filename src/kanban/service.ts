@@ -4,17 +4,22 @@ import type { Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
 import {
   boardList,
+  boardSummaries,
   cardReading,
+  chatBoardOf,
   gatesOf,
+  getBoard,
   getRun,
   getTask,
   runsOf,
   taskView,
   type BoardEntry,
+  type BoardSummary,
   type CardReading,
   type TaskView,
 } from '../db/kanban-read.js';
 import { buildEnv } from '../driver/env.js';
+import { nameProblem, visible } from '../names.js';
 import { redactKnownSecrets } from '../secrets.js';
 import type { Role } from '../roles.js';
 import { stripControl } from '../text.js';
@@ -24,9 +29,12 @@ import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from '
 import {
   BLOCK_KINDS,
   CONTRACT_FIELDS,
+  DEFAULT_BOARD,
   GATE_LIMITS,
   type AgentSnapshot,
   type Assignee,
+  type BoardRow,
+  type ChatAt,
   type CommentRow,
   type Contract,
   type CreatedVia,
@@ -106,6 +114,11 @@ export interface KanbanServiceDeps {
    * alone -- no commit is read, and a task with gates cannot complete.
    */
   checks?: ReportChecks;
+  /**
+   * The gateway's `kanban.max_running`: a board's own may not be above it (spec
+   * §16). Absent -- tests of the board alone -- a board's is not bounded.
+   */
+  maxRunning?: number;
 }
 
 /** A report's options: aborted when the gateway stops, which kills its gates and applies nothing. */
@@ -144,6 +157,8 @@ export interface CreateRequest {
   maxRuntimeS?: number;
   createdBy: string;
   createdVia: CreatedVia;
+  /** The board it goes on (spec §16): chat's is the chat's board. A run's task's follow-ups go on its board, whatever this says. */
+  board?: string;
 }
 
 /** A claim, with what was read for it. */
@@ -277,6 +292,7 @@ export class KanbanService {
   readonly #people: People | undefined;
   readonly #supervisedRoles: boolean;
   readonly #checks: ReportChecks | undefined;
+  readonly #maxRunning: number;
   /**
    * Tasks a report is running its checks for, with the task's workspace and the
    * report's end. One at a time per task: a second report would run the same
@@ -295,6 +311,67 @@ export class KanbanService {
     this.#people = deps.people;
     this.#supervisedRoles = deps.supervisedRoles ?? false;
     this.#checks = deps.checks;
+    this.#maxRunning = deps.maxRunning ?? Number.MAX_SAFE_INTEGER;
+  }
+
+  /**
+   * A new board (spec §16), named in the grammar of roles and workspaces: a name
+   * typed in chat, kept in the database, and never renamed.
+   */
+  createBoard(name: string, by: string): Result<{ board: BoardRow }> {
+    if (!isText(name)) return board.refuse('invalid', 'a board is a name, as text');
+    const problem = nameProblem('board', name);
+    if (problem !== undefined) return board.refuse('invalid', problem);
+    return board.createBoard(this.#db, name, by, this.#clock.now());
+  }
+
+  /**
+   * A board's own max_running, from 1 to the gateway's, or its workspace, a
+   * configured one; null clears either (spec §16).
+   */
+  setBoard(name: string, change: board.BoardChange, by: string): Result<{ board: BoardRow }> {
+    if (!isText(name) || typeof change !== 'object' || change === null) {
+      return board.refuse('invalid', 'a board is a name, and a change an object');
+    }
+    const { maxRunning, workspace } = change;
+    if (maxRunning === undefined && workspace === undefined) {
+      return board.refuse('invalid', "a board's change sets its max_running, its workspace, or both");
+    }
+    const within = (n: number) => Number.isSafeInteger(n) && n >= 1 && n <= this.#maxRunning;
+    if (maxRunning !== undefined && maxRunning !== null && !within(maxRunning)) {
+      return board.refuse(
+        'invalid',
+        `a board's max_running is a whole number from 1 to the gateway's kanban.max_running, ${this.#maxRunning}`,
+      );
+    }
+    if (workspace !== undefined && workspace !== null && (!isText(workspace) || !this.#workspaces.has(workspace))) {
+      return board.refuse('unknown_workspace', `workspace ${visible(JSON.stringify(workspace))} is not configured`);
+    }
+    return board.setBoard(this.#db, name, change, by, this.#clock.now());
+  }
+
+  /** Archive a board whose tasks are all done or archived; never `default` (spec §16). */
+  archiveBoard(name: string, by: string): Result<{ board: BoardRow }> {
+    if (!isText(name)) return board.refuse('invalid', 'a board is a name, as text');
+    return board.archiveBoard(this.#db, name, by, this.#clock.now());
+  }
+
+  /** Move a chat onto a board: its new tasks go there, and `/kanban list` shows it (spec §16). */
+  useBoard(at: ChatAt, name: string, by: string): Result<{ board: BoardRow }> {
+    if (!isText(name)) return board.refuse('invalid', 'a board is a name, as text');
+    return board.useBoard(this.#db, at, name, by, this.#clock.now());
+  }
+
+  /** The board a chat is on: the one it last used, else `default`. */
+  chatBoard(at: ChatAt): BoardRow {
+    const found = getBoard(this.#db, chatBoardOf(this.#db, at) ?? DEFAULT_BOARD);
+    if (found === undefined) throw new Error(`board ${DEFAULT_BOARD} is missing: the database is not migrated`);
+    return found;
+  }
+
+  /** The boards, with their tasks by phase: `/kanban boards`. `including`: a chat's own board, archived or not. */
+  boards(opts: { archived?: boolean; including?: string } = {}): BoardSummary[] {
+    return boardSummaries(this.#db, opts);
   }
 
   /**
@@ -309,13 +386,14 @@ export class KanbanService {
     if (via !== undefined) return via;
     if (req.body !== undefined && !isText(req.body)) return board.refuse('invalid', 'a body is text');
     if (req.workspace !== undefined && !isText(req.workspace)) return board.refuse('invalid', 'a workspace is a name');
+    if (req.board !== undefined && !isText(req.board)) return board.refuse('invalid', 'a board is a name');
     if (req.parents !== undefined && !isTextList(req.parents)) {
       return board.refuse('invalid', 'parents are a list of task ids');
     }
     const contract = this.#contract(req.contract);
     if (!contract.ok) return contract;
     if (req.workspace !== undefined && !this.#workspaces.has(req.workspace)) {
-      return board.refuse('unknown_workspace', `workspace ${JSON.stringify(req.workspace)} is not configured`);
+      return board.refuse('unknown_workspace', `workspace ${visible(JSON.stringify(req.workspace))} is not configured`);
     }
     if (
       !isWhole(req.priority, Number.MIN_SAFE_INTEGER) ||
@@ -350,6 +428,7 @@ export class KanbanService {
         maxRuntimeS: req.maxRuntimeS ?? null,
         createdBy: req.createdBy,
         createdVia: req.createdVia,
+        ...(req.board === undefined ? {} : { board: req.board }),
       },
       this.#clock.now(),
     );
@@ -489,6 +568,7 @@ export class KanbanService {
    * New work on a done task is a new task with it as a parent, never a reopening
    * (spec §4.4): the done task's summary is what its children were given as their
    * handoff, and reopening it would rewrite the input to work that already ran.
+   * It goes on the done task's board, as a parent and its child are on one (spec §16).
    */
   followUp(taskId: string, req: CreateRequest): Result<{ task: TaskRow; existing: boolean }> {
     const ids = idsRefused(taskId);
@@ -502,7 +582,9 @@ export class KanbanService {
     if (done.phase !== 'done') {
       return board.refuse('illegal_transition', `task ${taskId} is ${done.phase}; only a done task gets follow-ups`);
     }
-    return this.create({ ...req, parents: [taskId, ...(req.parents ?? [])] });
+    // The done task's board unless the request names one; one that names another
+    // board is refused `other_board` by the parent check, rather than moved quietly.
+    return this.create({ board: done.board, ...req, parents: [taskId, ...(req.parents ?? [])] });
   }
 
   link(parentId: string, childId: string, by: string): Result<{ added: boolean }> {
@@ -517,7 +599,7 @@ export class KanbanService {
     if (ids !== undefined) return ids;
     if (!isText(workspace)) return board.refuse('invalid', 'a workspace is a name');
     if (!this.#workspaces.has(workspace)) {
-      return board.refuse('unknown_workspace', `workspace ${JSON.stringify(workspace)} is not configured`);
+      return board.refuse('unknown_workspace', `workspace ${visible(JSON.stringify(workspace))} is not configured`);
     }
     return board.setWorkspace(this.#db, taskId, workspace, by, this.#clock.now());
   }
@@ -898,9 +980,9 @@ export class KanbanService {
     return view === undefined ? board.refuse('not_found', `no task ${taskId}`) : { ok: true, view };
   }
 
-  /** Every task with its display status (spec §4.1): `/kanban list`. */
-  list(): BoardEntry[] {
-    return boardList(this.#db);
+  /** Every task on a board -- or on every board -- with its display status (spec §4.1): `/kanban list`. */
+  list(onBoard?: string): BoardEntry[] {
+    return boardList(this.#db, onBoard);
   }
 
   /**

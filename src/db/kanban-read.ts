@@ -4,6 +4,8 @@ import type {
   ActivePhase,
   AgentSnapshot,
   Assignee,
+  BoardRow,
+  ChatAt,
   CommentRow,
   Contract,
   CreatedVia,
@@ -65,6 +67,7 @@ interface TaskRaw {
   created_at: number;
   closed_at: number | null;
   created_from_task: string | null;
+  board: string;
 }
 
 function decodeTask(r: TaskRaw): TaskRow {
@@ -95,6 +98,7 @@ function decodeTask(r: TaskRaw): TaskRow {
     createdAt: r.created_at,
     closedAt: r.closed_at,
     createdFromTask: r.created_from_task,
+    board: r.board,
   };
 }
 
@@ -102,7 +106,7 @@ const TASK_COLS = `task_id, title, body, json(contract) AS contract, assignee_ki
   reviewer_kind, reviewer, workspace, phase, blocked_from, block_kind, block_reason, priority,
   idempotency_key, failure_limit, retry_on_crash, max_runtime_s, consecutive_failures,
   consecutive_transient, cooldown_until, block_recurrences, stranded_notified_at, created_by,
-  json(created_via) AS created_via, created_at, closed_at, created_from_task`;
+  json(created_via) AS created_via, created_at, closed_at, created_from_task, board`;
 
 interface RunRaw {
   run_id: string;
@@ -535,14 +539,16 @@ export interface BoardEntry {
 }
 
 /**
- * Every task, with its display status, highest priority first, then oldest:
- * `/kanban list` (spec §9.1). The status is derived here, from the parents and
- * the runs, as `taskView` derives it.
+ * Every task on a board -- on every board, with none given -- with its display
+ * status, highest priority first, then oldest: `/kanban list` (spec §9.1, §16).
+ * The status is derived here, from the parents and the runs, as `taskView`
+ * derives it.
  */
-export function boardList(db: Db): BoardEntry[] {
+export function boardList(db: Db, board?: string): BoardEntry[] {
+  const where = board === undefined ? '' : 'WHERE board = ?';
   return db
-    .prepare<[], TaskRaw>(`SELECT ${TASK_COLS} FROM kanban_tasks ORDER BY priority DESC, created_at, rowid`)
-    .all()
+    .prepare<string[], TaskRaw>(`SELECT ${TASK_COLS} FROM kanban_tasks ${where} ORDER BY priority DESC, created_at, rowid`)
+    .all(...(board === undefined ? [] : [board]))
     .map(decodeTask)
     .map((task) => ({
       task,
@@ -640,6 +646,17 @@ export function openAgentRunCount(db: Db): number {
   return row?.n ?? 0;
 }
 
+/** Open agent runs on one board's tasks: what a board's own max_running counts (spec §16). */
+export function openAgentRunCountOn(db: Db, board: string): number {
+  const row = db
+    .prepare<[string], { n: number }>(
+      `SELECT count(*) AS n FROM kanban_runs r JOIN kanban_tasks t ON t.task_id = r.task_id
+        WHERE r.ended_at IS NULL AND r.assignee_kind = 'role' AND t.board = ?`,
+    )
+    .get(board);
+  return row?.n ?? 0;
+}
+
 /**
  * Tasks a pass may try to claim (spec §6.2 step 1), highest priority first, then
  * oldest: in open or review, with no open run of any kind, every parent finished,
@@ -706,4 +723,85 @@ function handedOff(db: Db, event: EventRaw): Completion {
   if (run !== undefined) return { summary: run.summary ?? '', metadata: run.metadata, runId: run.runId };
   const payload = json(event.payload) as { summary?: unknown };
   return { summary: typeof payload.summary === 'string' ? payload.summary : '', metadata: null, runId: null };
+}
+
+// ---------------------------------------------------------------------------
+// Boards (spec §16)
+// ---------------------------------------------------------------------------
+
+interface BoardRaw {
+  name: string;
+  max_running: number | null;
+  workspace: string | null;
+  created_by: string;
+  created_at: number;
+  updated_by: string | null;
+  updated_at: number | null;
+  archived_at: number | null;
+}
+
+function decodeBoard(r: BoardRaw): BoardRow {
+  return {
+    name: r.name,
+    maxRunning: r.max_running,
+    workspace: r.workspace,
+    createdBy: r.created_by,
+    createdAt: r.created_at,
+    updatedBy: r.updated_by,
+    updatedAt: r.updated_at,
+    archivedAt: r.archived_at,
+  };
+}
+
+const BOARD_COLS = 'name, max_running, workspace, created_by, created_at, updated_by, updated_at, archived_at';
+
+export function getBoard(db: Db, name: string): BoardRow | undefined {
+  const row = db.prepare<[string], BoardRaw>(`SELECT ${BOARD_COLS} FROM kanban_boards WHERE name = ?`).get(name);
+  return row === undefined ? undefined : decodeBoard(row);
+}
+
+/** Which boards to read: archived ones too, or one board whatever it is, as a chat's own board is. */
+export interface BoardsWanted {
+  archived?: boolean;
+  including?: string;
+}
+
+/** The boards, `default` first, then by name; archived ones only when asked for, or when `including` names one. */
+export function boardsOf(db: Db, opts: BoardsWanted = {}): BoardRow[] {
+  return db
+    .prepare<[string], BoardRaw>(
+      `SELECT ${BOARD_COLS} FROM kanban_boards
+        ${opts.archived === true ? '' : 'WHERE archived_at IS NULL OR name = ?'}
+        ORDER BY name <> 'default', name`,
+    )
+    .all(...((opts.archived === true ? [] : [opts.including ?? '']) as [string]))
+    .map(decodeBoard);
+}
+
+/** A board, and how many of its tasks are in each phase: what `/kanban boards` shows. */
+export interface BoardSummary {
+  board: BoardRow;
+  counts: Record<Phase, number>;
+}
+
+export function boardSummaries(db: Db, opts: BoardsWanted = {}): BoardSummary[] {
+  const counted = db
+    .prepare<[], { board: string; phase: Phase; n: number }>(
+      'SELECT board, phase, count(*) AS n FROM kanban_tasks GROUP BY board, phase',
+    )
+    .all();
+  return boardsOf(db, opts).map((board) => {
+    const counts: Record<Phase, number> = { open: 0, review: 0, blocked: 0, done: 0, archived: 0 };
+    for (const c of counted) if (c.board === board.name) counts[c.phase] = c.n;
+    return { board, counts };
+  });
+}
+
+/** The board a chat was moved onto, if it ever was: a chat with none is on `default` (spec §16). */
+export function chatBoardOf(db: Db, at: ChatAt): string | undefined {
+  return db
+    .prepare<[string, string, string], { board: string }>(
+      'SELECT board FROM kanban_chat_boards WHERE channel = ? AND account_id = ? AND conversation_id = ?',
+    )
+    .get(at.channel, at.appId, at.conversationId)?.board;
 }

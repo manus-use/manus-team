@@ -433,6 +433,8 @@ export class WorkerApi {
         workspace: task.workspace,
         phase: task.phase,
         status: view.status,
+        // Read-only: what a run creates goes on this board, whatever it asks (spec §16).
+        board: task.board,
       },
       parents: brief.parents.map((p) => ({
         task_id: p.task.taskId,

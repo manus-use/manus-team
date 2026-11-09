@@ -224,6 +224,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // A report runs its task's gates in the workspace, and reads the commit there
       // (spec §7.7, §7.8). They get only what an agent gets of this environment.
       checks: { workspaceDirs: team.workspaces, env: process.env },
+      // A board's own max_running is held inside the gateway's (spec §16).
+      maxRunning: config.kanban.maxRunning,
     });
     const socket = workerSocketPath(config.home);
     dispatcher = new Dispatcher({

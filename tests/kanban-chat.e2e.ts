@@ -208,6 +208,23 @@ describe('the board from Lark, end to end', () => {
     expect(s.lark.texts.at(-1)?.text).toContain('#1 work · role implementer · completed: did: Write the parser');
   });
 
+  it("a chat on a board of its own runs its task there, hears of it, and lists that board", async () => {
+    const s = await build('kanban');
+    await s.router.onMessage(said('/kanban board create web-app'));
+    await s.router.onMessage(said('/kanban board use web-app'));
+    expect(s.lark.texts.at(-1)?.text).toContain('This chat is on board **web-app** now');
+    await s.router.onMessage(said('/kanban new Write the parser\nassignee: implementer\nIt reads CSV.'));
+    const taskId = createdIn(s.lark);
+
+    await s.dispatcher.idle();
+    expect(getTask(s.t.db, taskId)).toMatchObject({ board: 'web-app', phase: 'done', workspace: 'default' });
+    expect(await s.notifier().deliver()).toBe(1);
+    expect(s.lark.texts.at(-1)?.text).toBe(`Done: **Write the parser** \`${taskId}\`\n> did: Write the parser`);
+
+    await s.router.onMessage(said('/kanban list all'));
+    expect(s.lark.texts.at(-1)?.text).toBe(`Board **web-app**:\n\`${taskId}\` **done**: Write the parser · role implementer`);
+  });
+
   it("an agent that crashes is retried, then given up on, and the thread hears both", async () => {
     const s = await build('crash');
     await s.router.onMessage(said('/kanban new Flaky job\nassignee: implementer\nworkspace: default'));

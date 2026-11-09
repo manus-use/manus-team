@@ -22,12 +22,33 @@ export function isBytesecSkillName(name: string): boolean {
   return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) && !name.includes('--') && name.length <= 64;
 }
 
-/** Why `name` is not a valid role or workspace name, or undefined if it is. */
-export function nameProblem(kind: 'role' | 'workspace', name: string): string | undefined {
+/**
+ * Board names the board commands read as words of their own: `none` clears a
+ * board's setting, and `all` lists every board (spec §16.3).
+ */
+export const RESERVED_BOARD_NAMES: ReadonlySet<string> = new Set(['none', 'all']);
+
+/** Why `name` is not a valid role, workspace or board name, or undefined if it is. */
+export function nameProblem(kind: 'role' | 'workspace' | 'board', name: string): string | undefined {
+  if (kind === 'board' && RESERVED_BOARD_NAMES.has(name)) {
+    return `board name "${name}" is reserved: none clears a setting, and all lists every board`;
+  }
   if (NAME_PATTERN.test(name)) return undefined;
   return (
-    `${kind} name ${JSON.stringify(name)} must be lowercase letters, digits and '-', ` +
+    `${kind} name ${visible(JSON.stringify(name))} must be lowercase letters, digits and '-', ` +
     "start with a letter, not end with '-', and be at most 40 characters"
+  );
+}
+
+/**
+ * A name as a refusal quotes it, with every character that does not print --
+ * controls, format characters such as a zero-width space, separators other than
+ * a plain space -- written as `\uXXXX`, so a name that cannot be valid does not
+ * look like one that is.
+ */
+export function visible(name: string): string {
+  return name.replace(/[\p{C}\p{Zl}\p{Zp}]|(?! )\p{Zs}/gu, (c) =>
+    Array.from({ length: c.length }, (_, i) => `\\u${c.charCodeAt(i).toString(16).padStart(4, '0')}`).join(''),
   );
 }
 

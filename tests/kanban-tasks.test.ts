@@ -69,6 +69,7 @@ describe('createTask', () => {
           workspace: 'web',
           parents: [],
           createdFromTask: null,
+          board: 'default',
         },
       ],
     ]);

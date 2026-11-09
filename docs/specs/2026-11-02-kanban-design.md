@@ -49,7 +49,7 @@ whoever does a task, and review (§5.3) applies to any work.
 | Templates and workflow definitions | A template is a function that creates tasks and links. Nothing in the kernel knows about templates, so adding them touches no table |
 | Automatic decomposition by an agent | A decomposer is just a task assigned to a role that calls `mt kanban create`. The CLI already allows it |
 | A judge model ("is this really done?") | Completion contracts and gates (§4.3, §7.7) carry the acceptance criteria; a judge would read the same fields |
-| Multiple boards, tenants | One board. A `board` column can be added with a default |
+| Tenants; projects with operators and roles of their own | Boards (§16) are queues, not permissions: each task records its board. Who may act on a board, and which roles it may use, would be checked per board in the service, beside the tiers (§16.9) |
 | A web board | Lark is the v1 interface. The board is a projection over `kanban_events`, so a web view is a second renderer |
 | **Parallel agent runs in one workspace** | One open agent run per workspace (§6.3). Worktrees (architecture milestone 9) give each task its own checkout inside its workspace |
 | Tool restrictions on agents that cannot enforce them | Declared per role, refused at startup until the role's agent can enforce them (§2.2) |
@@ -290,7 +290,7 @@ enforce them.
      Parents with no fixed workspace (an archived parent that was never claimed) are ignored. If the
      parents that count are in different workspaces, the task needs its workspace set (below):
      guessing would review one parent's repository and miss the other's;
-  4. `default` — the implicit workspace of a role that names none, and of a person.
+  4. `default` (or the board's workspace, §16.6): the implicit workspace of a role that names none, and of a person.
 
   A task a worker creates (§7.3) with no `parents` uses the creating run's task in place of parents
   for rule 3 — recorded as `created_from_task` — so a follow-up lands where the work is unless its
@@ -605,6 +605,7 @@ with a join, not by correlating two files.
 | `stranded_notified_at` | §4.2; cleared when the task is next claimed |
 | `created_by`, `created_via`, `created_at`, `closed_at` | `created_via` includes the chat it was created in (§9.2) |
 | `created_from_task` | set when a worker creates the task: the creating run's task, used by §2.3 rule 3 when the task has no parents; not a link |
+| `board` | migration `006`: the board the task is on (§16), `default` for every task before it; set at creation, never changed |
 
 - **`idempotency_key` is unique** because creation is retried by everything that can create: Lark
   redelivers a message, and an agent re-runs a command whose output it did not see. A repeated
@@ -760,7 +761,10 @@ session status already follows (`core/status.ts`, channel spec §7), for the sam
   that make a task ready are on other tasks, or are no event at all, such as a cooldown ending), its
   subscribers are told it is stranded and why, once — `stranded_notified_at` records that the notice
   is due: the `stranded` event written with it is what the subscriptions deliver (§9.4). Only tasks that *cannot* be claimed are stranded; a ready task waiting its turn behind
-  the per-workspace limit (§6.3) is queued, not stranded, and is never reported as such.
+  the per-workspace limit (§6.3), or `kanban.max_running`, or its board's own `max_running` (§16.6),
+  is queued, not stranded, and is never reported as such. The limits are checked before the claim, so
+  an agent task skipped for one is not tried, and its being unassignable is not seen either: a task
+  that cannot be claimed is reported stranded only once a pass has a slot to try it in.
 
 ### 4.3 The completion contract
 
@@ -970,10 +974,10 @@ while the rest of the file is camelCase.
 1. Collect claimable tasks with **no open run of any kind**: **ready** (§4.1) for work, **review**
    for review. A task whose previous run has reported but not yet closed is skipped until it closes;
    claiming it would only fail on the one-open-run index (§3.3). Order by priority, higher first, then
-   age, oldest first.
+   age, oldest first, within each board; across boards, take them in turn (§16.7).
 2. Skip any whose `cooldown_until` is in the future, whose assignee (or reviewer) does not resolve
    (§4.2), or — for an agent run — whose workspace already has an open agent run (§6.3), or when
-   `kanban.max_running` agent runs are open.
+   `kanban.max_running` agent runs are open, or its board's own `max_running` of them (§16.6).
 3. Claim, in one transaction: if the task's workspace is null, resolve it by the rules of §2.3 — which
    may leave it null for a person — then insert the run and write `claimed`. The case where an agent
    task's workspace cannot be resolved is caught by step 2 as unresolvable, before any claim, so an
@@ -1499,7 +1503,7 @@ getting nowhere, which no liveness check catches.
 | Command | Tier | |
 |---|---|---|
 | `/kanban new <title>` + body lines | operate | creates a task; lines starting `assignee:`, `reviewer:`, `workspace:`, `parent:`, `outcome:`, `verify:`, `constraints:`, `boundaries:`, `stop when:` fill fields; the rest is the body |
-| `/kanban list [status\|all]` | talk | the board, by derived status |
+| `/kanban list [status\|all]` | talk | the chat's board (§16.4), by derived status |
 | `/kanban show <id>` | talk | task, contract, gates, runs, latest output, comments |
 | `/kanban assign <id> <assignee>` | operate | an undecided run ends `superseded`; a decided one is closed |
 | `/kanban link <parent> <child>` | operate | |
@@ -1514,6 +1518,7 @@ getting nowhere, which no liveness check catches.
 | `/kanban gate list <id>` | talk | the task's gates, masked |
 | `/kanban gate remove <id> <gate>` | operate | |
 | `/kanban archive <id>` | operate | |
+| `/kanban boards [all]` · `/kanban board create\|use\|set\|archive …` | talk for `boards`, operate for the rest | §16.3 |
 | `/kanban help` | talk | every command, with its tier |
 
 - **Unknown names are refused at creation:** an unknown workspace (§2.3), and an unknown role. A
@@ -1549,7 +1554,7 @@ people (§12).
   itself sets none.
 - **`/kanban list`.** Without a status, the tasks someone may still act on — running, reviewing,
   review, ready, todo and blocked, grouped in that order; with one, only those; `all` lists every
-  task. At most 30 lines, then how many more.
+  task. At most 30 lines, then how many more. From plan G, all of them on the chat's board (§16.4).
 - **`/kanban show`** gives the task, its contract, its gates (masked), its last five runs, the end of
   the latest run's output (its last 800 characters, after a line saying the rest was cut), and its
   last five comments.
@@ -1944,6 +1949,7 @@ board.
 | Masking | a known value masked through each escaper, in composed worker context and `last_output`, and in stored free text and JSON string values; **a secret split across two message chunks masked on the card**; a secret containing `_` masked before escaping, and one containing `"` masked inside JSON; values under 8 characters and `maskExempt` names left alone; a worker token masked only while its run is open; `turn_submitted` input stored unmasked but shown masked; a gate containing a secret refused; a render withholding a trailing prefix of a secret, mid-stream and on a turn that ended part-way through one; ids inside payloads left unmasked; the registry gaining and losing a worker token with its run |
 | Reported commit | clean tree → commit; dirty tree → commit plus "uncommitted changes"; no commit yet → "uncommitted; no commit to review"; not a repo, or no git → nothing recorded, and no state line; recorded for a reviewer agent's `complete`, never for a person's report |
 | Workspaces | a name registered on first sight; a known name repointed to another directory fails startup; no workspace `default` fails startup; a downstream review task inherits its parents' common workspace, a role with its own workspace does not; an unclaimed archived parent ignored; parents in different workspaces make an agent task unresolvable, while a human one is claimed with a null workspace, has gated completion refused, and can then be given one by `/kanban workspace`; a worker-created follow-up uses its creating task's workspace without a link and is claimable at once; an agent claims a workspace while a person's review on another task there is open; a person's run leaves the workspace null and a later agent review claim re-applies the rules |
+| Boards (G) | migration `006` from version 5 with tasks in it, every task on `default`; an idempotency key refused across boards, however its task was created; a chat's own board listed even archived; boards created, set, archived only through the writer, `default` never archived, a board with unfinished tasks not either; a chat's board per conversation; a parent, a link, a dependency block and a worker's follow-up kept on a board; a board's workspace as rule 4; the service's name grammar, with `none` and `all` reserved and a hidden character shown escaped, checked again in the writer, an empty `set` refused, and the `max_running` bound; the boards in turn, a board whose head task waits keeping its turn with its next, and a board's `max_running` inside the gateway's; a task waiting only on a limit never stranded; a chat moved to another board still told of the tasks it created; the board commands at their tiers, and `new`, `list` and `show` on the chat's board; end to end, a chat on a board running its task |
 | End to end | the fake CLI agent calling `mt kanban complete` through the real socket |
 
 ---
@@ -1951,7 +1957,7 @@ board.
 ## 12. Plans
 
 Separate implementation plans. Each ends with everything built so far working and tested. Order: A, A2, B, F, C1,
-C2, R, C3, C4, then D1 and D2; E is independent once B is done. B is delivered as B1 (roles and workspaces in
+C2, R, C3, C4, then D1 and D2, then G; E is independent once B is done. B is delivered as B1 (roles and workspaces in
 configuration), B2 (the session layer) and B3 (the `mt` commands). C is delivered as C1 (the board),
 C2 (agent runs), C3 (the worker CLI) and C4 (review, rework and gates), in that order; R comes
 between C2 and C3, so the runs C3 makes reportable already get their role natively. **Before F**,
@@ -1971,6 +1977,7 @@ branch.
 | **D2. People** | people as assignees and reviewers: direct-message cards with Done, Block, Approve and Request changes; the person send target by union_id; card `kind` routing; the group one-line notice; `/kanban done`, `block` and `review` by a human assignee, `approve` and `changes` by a person reviewer; approval forwarding for supervised roles; an operator's `approve` and `changes` from chat; the named assignee's and reviewer's comments steering; refusing a person's report while another task's agent run is open in the workspace (`workspace_busy`, §7.7); the mentioned users' ids carried on an inbound message. As built (`docs/plans/2026-11-05-plan-d2-kanban-people.md`), also: the `people` table (migration `005`) that checks a person named by principal for talk tier (§4.2); cards delivered from the board, `card_sent` and `card_failed` (§9.2); and the uuid passed to Lark for every message sent as one (§9.4) | D1 |
 | **E. Native resume** | the CLI driver captures the provider session id and passes `--session` (architecture §6.3), with transcript replay as the fallback. As built (`docs/plans/2026-11-05-plan-e-native-resume.md`), on bytesec 0.7.4 or later, which `mt role check` warns of: the id read from `--session-id-file` after each turn — for a resumed run, from its events' `session_id`, since the file echoes the id sent — and reported as a `session-observed` driver event, stored as the observed `provider_session_id` and logged as `provider_session_observed`; a resumed turn sends only the new message; a refused id — exit 1, nothing on stdout, and `persistence: session not found` or `unknown agent:` as stderr's last line — runs the same turn again with the transcript, automatically; a `cli:` id from before never seeds a rework; nudges and a seeded rework resume with no change to the board; `/status` shows the provider session and how the last turn reached it | B; independent of C and D |
 | **R. Native rendering** | the spike, done on bytesec 0.7.4: `BYTESEC_LOCAL_APM_PATH=<one package dir>` with `bytesec run --agent <name>` loads that package's agent, whose body becomes the system prompt, and its skills; a directory of packages fails silently; a package's agent may use only the package's skills. Then (§2.7): the role grammar tightened so a name cannot end in `-`; `agent.native`; `agent.skills`, imported from where bytesec finds a user's skills, since a native agent sees only its package's; `StartOptions.args` and the registry's `argsFor`; a renderer interface with bytesec's renderer; content-addressed, atomic packages under `$MT_HOME/rendered`, swept; the dispatcher rendering just after the claim, recording on the run whether it is native and by which package, and falling back to prompt injection when a render fails; the prompt leaving `role.md` and the skills out of a native run; `mt role check` saying which roles run natively. Claude Code's renderer is later. Prompt injection (§7.1) stays the fallback | B2, C2 |
+| **G. Boards** | isolated task queues on one database (§16): migration `006`, with `kanban_boards`, `default` in it, `kanban_chat_boards` and `kanban_tasks.board`, every existing task on `default`; boards created, set and archived, and each chat moved onto one, from chat (`/kanban boards`, `/kanban board create\|use\|set\|archive`); `/kanban new`, `list` and `show` on the chat's board; follow-ups, parents, links and dependency blocks kept on a board; a board's `max_running`, inside the gateway's, and its workspace as §2.3's rule 4; the dispatcher taking boards in turn; `mt kanban show` giving the board. Plan: `docs/plans/2026-11-09-plan-g-boards.md` | D2 |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D2, nothing can deliver a card to a person, so **plans C and D1 refuse human assignees and
@@ -2045,3 +2052,144 @@ Recorded so the reasons are not lost:
    (§10.1). Pattern-based detection is later.
 
 No questions are open.
+
+---
+
+## 16. Boards
+
+Several projects share one gateway. A **board** is a queue of tasks for one of them: its own list
+in chat, its own turn in each dispatcher pass, and optionally its own `max_running` and default
+workspace. Boards are queues, not permissions: whoever may act on one task may act on any, by the
+tiers of §9.1 and §10, as before. Built by plan G (§12).
+
+### 16.1 One database, one dispatcher
+
+Each task records its board, in a `board` column; there is no database per board. A run is a
+session, and "what did task X's agent do" is a join (§3), whatever the board. One dispatcher (§6.1)
+serves every board, so the one-run-per-workspace limit (§6.3) and `kanban.max_running` hold across
+boards without two dispatchers having to agree: a workspace is a directory, and two boards' agents
+in it would overwrite each other as two tasks' would.
+
+### 16.2 Schema (migration `006_boards.sql`)
+
+| Table, column | Notes |
+|---|---|
+| `kanban_boards` | `name` (the role grammar, §2.1; the key, never renamed), `max_running` (null, or at least 1), `workspace` (a workspace name, or null), `created_by`, `created_at`, `updated_by`, `updated_at`, `archived_at` |
+| `kanban_tasks.board` | the board's name, `NOT NULL DEFAULT 'default'`; set at the insert and never changed |
+| `kanban_chat_boards` | `(channel, account_id, conversation_id)` → `board`, `set_by`, `set_at`; a chat with no row is on `default` |
+
+- **`default` always exists.** The migration inserts it, and every task already on the board is on
+  it: `ALTER TABLE … ADD COLUMN` with a constant default records the default in the schema and
+  rewrites no row, so the migration is as quick on a database holding years of tasks as on an empty
+  one, and it runs in the one transaction `migrate` gives each file, with `user_version`. The live
+  database, at version 5 and holding data, is migrated by the gateway's next start.
+- **No foreign key on `kanban_tasks.board`.** SQLite refuses `REFERENCES` on a column added with a
+  non-null default while foreign keys are on, as the gateway opens its database, and rebuilding
+  `kanban_tasks` would rewrite every row of the live table. `db/kanban.ts` checks the board exists,
+  and is not archived, in the transaction that creates the task. `kanban_chat_boards.board` is a new
+  table's column, and has its foreign key.
+- **No board events.** `kanban_events` rows belong to a task. A board's row says who created it and
+  who last changed it; its history is not kept. A task's `created` event records its board, and is
+  no notice.
+- **One writer.** `db/kanban.ts` writes both tables, as it writes every `kanban_` table.
+
+### 16.3 Commands
+
+| Command | Tier | |
+|---|---|---|
+| `/kanban boards [all]` | talk | each board with its tasks by phase, its own `max_running` and workspace where set, and which one this chat is on, listed even when archived; `all` adds the other archived boards |
+| `/kanban board create <name>` | operate | a new board, with no settings of its own; a name a board has, or had, is refused, and so are `none` and `all` |
+| `/kanban board use <name>` | operate | this chat, all its threads, is on the board from now on |
+| `/kanban board set <name> max_running <number\|none>` · `… workspace <workspace\|none>` | operate | §16.6 |
+| `/kanban board archive <name>` | operate | §16.8 |
+
+**`use` needs operator tier** because it changes where the chat's tasks go, and a board's workspace
+can change where their agents run: a talk-tier person moving an operator's chat would choose the
+directory of the operator's next unsupervised agent. There is no rename: tasks carry the name, and
+renaming would rewrite them; a display name, as Hermes gives its boards, can come later.
+
+**A board's name** is in the grammar of role and workspace names, checked by the service, which says
+why, and again, cheaply, by the writer. **`none` and `all` are reserved**: in `board set`, `none`
+means "clear", so a workspace called `none` cannot be a board's workspace, and `all` lists every
+board. A refusal that quotes a name writes each character that does not print (a control, a
+zero-width or other format character, a separator other than a plain space) as `\uXXXX`, so a name
+that cannot be valid does not look like one that is. A `set` that changes neither setting is refused
+`invalid`, and the board is left unstamped.
+
+### 16.4 A chat's board, and what acts on it
+
+- **A chat is a conversation**, for one bot: a group and every thread in it share one board, so a
+  reply in a thread does not land on `default`. A chat starts on `default`.
+- **`/kanban new`** creates the task on the chat's board, and its reply names the board unless it is
+  `default`. A chat on an archived board is told to move first, and nothing is created.
+- **`/kanban list`** shows the chat's board alone, under a line naming it unless it is `default`.
+  `all` keeps its meaning, every status, on this board; `/kanban boards` is the view across boards.
+- **`/kanban show <id>`**, and every command that names a task, work on any board by the task's id:
+  task ids are unique across boards, and a chat that moved still follows the tasks it created, whose
+  notices give their ids and an Unblock button. `show` names the task's board once any board but
+  `default` is involved, the task's or the chat's.
+- **Notices** are unchanged: a subscription follows the chat a task was created in (§9.4), and the
+  tasks its runs create, so a board's notices go only to the chats that created its tasks. After the
+  migration every existing subscription is a `default` task's in a chat on `default`, as before.
+
+### 16.5 Isolation
+
+- **A task's follow-ups stay on its board.** A task a run creates (§7.3) is on its run's task's
+  board, whatever it asks; `mt kanban create` has no board field, and `mt kanban show` gives the
+  board. A done task's follow-up (§4.4) is on the done task's board.
+- **A parent and its child are on one board.** `parent:` at creation, `/kanban link`, a worker's
+  `link`, and a dependency block's parents (§5.4) are refused `other_board` across boards, in the
+  writer's transaction: a queue whose tasks wait on another queue's is not separate, and its
+  priority, its limit and its archive would all depend on the other.
+- **An idempotency key does not cross boards.** The writer works out the new task's board first, its
+  run's task's for a run and the one asked for otherwise, and refuses `other_board` a key whose
+  existing task is on another board, however that task was created, rather than answering with it:
+  a message redelivered after its chat moved, say. A run's key is namespaced by its task (§3.1), so
+  it does not cross in practice; the check does not depend on that.
+- **A follow-up created from chat with `parent:`** is created on the chat's board, so it must come from
+  a chat on the parent's board; from another it is refused, as any parent across boards is.
+- **`mt kanban gate`** names a task by id, and needs no board.
+
+### 16.6 A board's `max_running` and workspace
+
+- **`max_running`** caps the open agent runs of the board's tasks, counted as §6.3 counts them, decided
+  or not. It is at most the gateway's `kanban.max_running`, which the service refuses above, and
+  which still caps every board together; `none` clears it. Set from chat, as boards are made there:
+  a setting in `config.yaml` would name a board that may not exist yet, and two places would set
+  one thing. Lowering the gateway's limit below a board's makes the gateway's the one that binds.
+- **`workspace`** is §2.3's rule 4 for the board's tasks, in place of `default`: the last resort, after
+  the task's own workspace, its role's explicit one and its parents' common one. It is resolved at a
+  claim, as rule 4 is, so setting it moves no task already claimed. A board's workspace removed from
+  config makes the agent tasks that would land there unresolvable (§4.2), not moved to `default`;
+  a person's claim, which needs no configured workspace (§2.3), fixes the removed one on its task.
+
+### 16.7 The dispatcher takes boards in turn
+
+A pass (§6.2) gives each board a turn in rotation, the boards by name, **starting with the board
+after the one that got the previous agent claim**, wrapping round, and goes round again until every
+board's claimable tasks have been tried. **A board's turn is its first task that can actually be
+claimed:** its tasks are tried in §6.2's order, priority then age, until one agent claim succeeds or
+the board has none left, and only then does the next board get its turn. So a head task that waits
+(on a busy workspace, say) does not cost its board the turn: the next task behind it is offered the
+slot, not left behind every other board's first task. A person's claim holds no slot (§6.3), and
+does not end the board's turn. A board at its own `max_running` (§16.6) skips every agent task it has
+left, and so gives up its turn for the rest of the pass. Without the rotation, a board whose first
+task is always claimable would be offered every free slot first; with it, one board's burst cannot
+starve another, whatever its priorities, which say nothing about another board's. The cursor is in
+memory: a restart starts again from the first board, which costs one turn of fairness. Human runs
+are not limited, and do not move the cursor.
+
+### 16.8 Archiving a board
+
+Refused for `default`, and while any of the board's tasks is `open`, `review` or `blocked`: their
+work would be left on a board nothing may be added to. Once archived, no task is created on it, from chat or
+by a run whose task has just completed there; no chat moves onto it; and `/kanban boards` leaves
+it out unless asked for `all`. Its tasks stay, by id. A chat still on it is
+not moved: putting it back on `default` unasked would send its next task somewhere its operator did
+not choose.
+
+### 16.9 Later
+
+- **Projects:** per-board operators, and a board's list of the roles it may use, checked in the
+  service beside the tiers. The user chose queues without them.
+- A display name, renaming, unarchiving; a board's settings history; naming the board in notices.
