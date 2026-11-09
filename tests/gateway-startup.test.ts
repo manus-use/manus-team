@@ -96,6 +96,20 @@ describe('createGateway', () => {
     }
   });
 
+  it('logs the schema version with the database it is in, so a wrong file shows at once', async () => {
+    const lines: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    const gateway = await createGateway(config, team);
+    try {
+      expect(lines.some((l) => l.endsWith(` schema at version 6 (${config.dbPath})\n`))).toBe(true);
+    } finally {
+      await gateway.stop();
+    }
+  });
+
   it('refuses to start when a workspace name now points at another directory, and changes nothing', async () => {
     const db = openDb(config.dbPath);
     migrate(db, config.schemaDir);

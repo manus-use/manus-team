@@ -3,7 +3,7 @@ import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
 import type { DisplayStatus } from './status.js';
 import type { Contract } from './types.js';
-import { WORKER_LIMITS } from './worker.js';
+import { WORKER_LIMITS } from './limits.js';
 
 /**
  * `/kanban` as typed in chat (spec §9.1), parsed into what to do. Pure: no
