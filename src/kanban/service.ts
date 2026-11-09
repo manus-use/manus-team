@@ -27,6 +27,7 @@ import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
+import { resolveTaskWorkspace } from './workspace.js';
 import {
   BLOCK_KINDS,
   CONTRACT_FIELDS,
@@ -1000,7 +1001,10 @@ export class KanbanService {
    * The role limit a task the dispatcher would otherwise try is waiting on (spec
    * §6.3): ready for work, or in review with nobody reviewing yet, with no open
    * run and no cooldown, and its role at its max_running. Only the role's limit:
-   * a busy workspace, or the gateway's or a board's limit, is not said.
+   * a busy workspace, or the gateway's or a board's limit, is not said. Nor is it
+   * said of a task the claim would refuse whatever the limit: one whose
+   * workspace, fixed or as it would be resolved (spec §2.3), is not configured,
+   * or whose parents are in different workspaces.
    */
   #waitingOnRole(view: TaskView): TaskView['waitingOn'] {
     const { task } = view;
@@ -1012,6 +1016,20 @@ export class KanbanService {
     const role = this.#roles.get(who.name);
     const limit = role === undefined ? undefined : roleLimit(role, this.#maxRunningPerRole);
     if (limit === undefined || openAgentRunCountAs(this.#db, who.name) < limit.limit) return undefined;
+    // The workspace the claim would give it, resolved as the claim resolves it.
+    let workspace = task.workspace;
+    if (workspace === null) {
+      const from = task.createdFromTask === null ? undefined : getTask(this.#db, task.createdFromTask);
+      const resolved = resolveTaskWorkspace({
+        own: null,
+        roleWorkspace: role?.workspace,
+        upstream: view.parents.length > 0 ? view.parents.map((p) => p.workspace) : from === undefined ? [] : [from.workspace],
+        boardWorkspace: getBoard(this.#db, task.board)?.workspace ?? null,
+      });
+      if ('conflict' in resolved) return undefined;
+      workspace = resolved.workspace;
+    }
+    if (!this.#workspaces.has(workspace)) return undefined;
     return { role: who.name, maxRunning: limit.limit };
   }
 

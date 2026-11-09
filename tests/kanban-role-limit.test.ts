@@ -4,6 +4,8 @@ import { completes, dispatchHarness, holds, reportComplete, role, until, type Di
 import { ALICE } from './helpers/kanban.js';
 import { renderShow } from '../src/kanban/chat-render.js';
 import { showText } from '../src/cli/plain.js';
+import { KanbanService } from '../src/kanban/service.js';
+import type { Role } from '../src/roles.js';
 
 /**
  * A role's max_running (spec §6.3): at most that many open agent runs as the
@@ -269,5 +271,74 @@ describe("/kanban task show: a task waiting on its role's limit", () => {
     await h.dispatcher.idle();
     const after = h.service.show(waiting.taskId);
     expect(after.ok && after.view.waitingOn).toBeUndefined();
+  });
+});
+
+describe("the service's show: which tasks are waiting on their role's limit", () => {
+  /** Another service on the harness's board: as the gateway builds it, or as config later says. */
+  function serviceOn(h: DispatchHarness, roles: readonly Role[], extra: { maxRunningPerRole?: number; workspaces?: string[] } = {}) {
+    return new KanbanService({
+      db: h.t.db,
+      roles: new Map(roles.map((r) => [r.name, r])),
+      workspaces: new Set(extra.workspaces ?? ['default', 'web', 'api', 'docs']),
+      clock: h.clock,
+      ...(extra.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: extra.maxRunningPerRole }),
+    });
+  }
+
+  it('takes kanban.max_running_per_role for a role with no limit of its own', async () => {
+    const roles = [role('implementer')];
+    const h = harness({ roles, settings: { maxRunningPerRole: 1 } });
+    const first = h.create({ title: 'first', workspace: 'web' });
+    h.clock.advance(1);
+    const waiting = h.create({ title: 'waiting', workspace: 'api' });
+    const held = holds(h.driver('implementer'));
+    h.dispatcher.pass();
+    await until(() => held.started, 'the first run');
+
+    const withDefault = serviceOn(h, roles, { maxRunningPerRole: 1 }).show(waiting.taskId);
+    expect(withDefault.ok && withDefault.view.waitingOn).toEqual({ role: 'implementer', maxRunning: 1 });
+    // Without the default the role has no limit, so nothing is said.
+    const without = serviceOn(h, roles).show(waiting.taskId);
+    expect(without.ok && without.view.waitingOn).toBeUndefined();
+
+    completes(h, h.driver('implementer'));
+    held.end('completed', () => reportComplete(h, runOf(h, first.taskId)));
+    await h.dispatcher.idle();
+  });
+
+  it('says nothing of a task the claim would refuse anyway: its workspace no longer configured, or its parents in two', async () => {
+    const roles = [role('implementer', { maxRunning: 1 }), role('writer')];
+    const h = harness({ roles });
+    const holder = h.create({ title: 'holder', workspace: 'docs' });
+    const held = holds(h.driver('implementer'));
+    h.dispatcher.pass();
+    await until(() => held.started, "the implementer's run");
+
+    const gone = h.create({ title: 'gone', workspace: 'api' });
+    const p1 = h.create({ title: 'p1', workspace: 'web', assignee: 'writer' });
+    const p2 = h.create({ title: 'p2', workspace: 'api', assignee: 'writer' });
+    const split = h.create({ title: 'split', parents: [p1.taskId, p2.taskId] });
+    const single = h.create({ title: 'single', parents: [p1.taskId] });
+    completes(h, h.driver('writer'));
+    completes(h, h.driver('writer'));
+    h.dispatcher.pass();
+    await until(() => [p1, p2].every((p) => runsOf(h.t.db, p.taskId)[0]?.endedAt != null), "the writer's runs");
+
+    const waiting = (s: KanbanService, taskId: string) => {
+      const r = s.show(taskId);
+      return r.ok ? r.view.waitingOn : 'refused';
+    };
+    const capped = { role: 'implementer', maxRunning: 1 };
+    expect(waiting(h.service, gone.taskId)).toEqual(capped);
+    expect(waiting(serviceOn(h, roles, { workspaces: ['default', 'web', 'docs'] }), gone.taskId)).toBeUndefined();
+    expect(waiting(h.service, single.taskId)).toEqual(capped);
+    expect(waiting(h.service, split.taskId)).toBeUndefined();
+
+    completes(h, h.driver('implementer'));
+    completes(h, h.driver('implementer'));
+    held.end('completed', () => reportComplete(h, runOf(h, holder.taskId)));
+    await h.dispatcher.idle();
+    expect([gone, single, split].map((t) => runsOf(h.t.db, t.taskId).map((r) => r.outcome))).toEqual([['completed'], ['completed'], []]);
   });
 });
