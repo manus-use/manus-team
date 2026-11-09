@@ -408,6 +408,11 @@ refused.
 | `/kanban review <task> [summary]`, and a line `reviewer: <role or @person>` unless the task names one | the task's assignee |
 | `/kanban approve <task> [comment]` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
 | `/kanban changes <task> <reason>` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
+| `/kanban boards [all]` | talk: each board, its tasks, its own limit and workspace, and which one this chat is on |
+| `/kanban board create <name>` | operate: a new board, named as roles and workspaces are |
+| `/kanban board use <name>` | operate: this chat, all its threads, is on that board from now on |
+| `/kanban board set <name> max_running <number\|none>`, or `workspace <workspace\|none>` | operate: the board's own limit, inside `kanban.max_running`, or its tasks' default workspace |
+| `/kanban board archive <name>` | operate: refused while any of its tasks is open, in review or blocked; never `default` |
 | `/kanban help` | talk |
 
 Whoever acts is recorded as `lark:<union_id>`; a sender whose message carried no union_id can
@@ -427,6 +432,16 @@ the bot can no longer post to — removed from it, or refused by
 Lark for about 19 minutes — is let go of until the next restart: its notices are dropped, and
 the gateway's log says which. A network outage, or Lark not answering, never lets a chat go:
 its notices wait, and are sent once the gateway reaches Lark again.
+
+**Boards.** Several projects can share the gateway, each on a board of its own: a queue of
+tasks with its own list, its turn in each dispatcher pass, and optionally its own
+`max_running`, inside the gateway's, and default workspace. One database and one dispatcher
+serve every board. A board called `default` always exists, holds every task from before boards,
+and is where every chat starts; `/kanban board use` moves a chat, and `/kanban new` and
+`/kanban list` act on the chat's board. `/kanban show` and the commands that name a task work
+on any board, by id. A task's follow-ups, its parents and its links stay on its board, and its
+notices go to the chat it was created in, as before. One agent at a time per workspace still
+holds across boards. See section 10 of [docs/kanban-guide.md](docs/kanban-guide.md).
 
 **People.** Name a person with an @-mention — type @ and pick them, so Lark sends who they
 are — as `assignee:` or `reviewer:`, or in `/kanban assign`. Being named lets a person report on
@@ -477,6 +492,8 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
 - An operator's answer to a role's review runs the task's gates before it ends the reviewer
   agent's run, so they run while that agent is still working; it is told not to change the
   work under review, but nothing enforces that.
+- A board's name is never renamed, and an archived board is never brought back: make a new one.
+- A board's own settings keep only who changed them last, and when; there is no history of them.
 - A person's name, in a notice or a card, is the one Lark last gave with their ids, and can be
   out of date.
 
