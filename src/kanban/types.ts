@@ -60,10 +60,15 @@ export interface Assignee {
 export const CONTRACT_FIELDS = ['outcome', 'verification', 'constraints', 'boundaries', 'stop_when'] as const;
 export type Contract = Partial<Record<(typeof CONTRACT_FIELDS)[number], string>>;
 
-/** Where a task came from: the chat it was created in, or the run that created it (spec §3.1). */
+/**
+ * Where a task came from (spec §3.1): the chat it was created in, the run that
+ * created it, or an operator's `mt kanban new` at a terminal, which no chat
+ * follows.
+ */
 export type CreatedVia =
   | { kind: 'chat'; channel: string; appId: string; conversationId: string; threadId: string }
-  | { kind: 'run'; runId: string };
+  | { kind: 'run'; runId: string }
+  | { kind: 'operator' };
 
 /**
  * Who is reporting. A run reports through its token (plan C3); a person through

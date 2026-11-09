@@ -241,18 +241,20 @@ function idsRefused(...ids: unknown[]): Refusal | undefined {
 /** A commit id, abbreviated or whole, SHA-1 or SHA-256. */
 const COMMIT = /^[0-9a-f]{7,64}$/;
 
-/** A refusal unless createdVia is one of the two shapes, with text fields. */
+/** A refusal unless createdVia is one of the three shapes, with text fields. */
 function createdViaRefused(via: unknown): Refusal | undefined {
   const fine =
     isRecord(via) &&
     (via.kind === 'run'
       ? isText(via.runId)
-      : via.kind === 'chat' &&
-        isText(via.channel) &&
-        isText(via.appId) &&
-        isText(via.conversationId) &&
-        isText(via.threadId));
-  return fine ? undefined : board.refuse('invalid', 'created_via is a chat, with text fields, or a run id');
+      : via.kind === 'operator'
+        ? Object.keys(via).length === 1
+        : via.kind === 'chat' &&
+          isText(via.channel) &&
+          isText(via.appId) &&
+          isText(via.conversationId) &&
+          isText(via.threadId));
+  return fine ? undefined : board.refuse('invalid', 'created_via is a chat, with text fields, a run id, or the operator');
 }
 
 /** A refusal unless the handoff has a text summary, and its report fields their types. */
