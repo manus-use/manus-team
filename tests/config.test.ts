@@ -655,7 +655,14 @@ describe('loadTeamSettings', () => {
     };
     const c = loadConfig(env, () => undefined);
     const s = loadTeamSettings(env, () => undefined);
-    expect(s).toEqual({ home: c.home, configPath: c.configPath, dbPath: c.dbPath, workspaces: c.workspaces, agent: c.agent });
+    expect(s).toEqual({
+      home: c.home,
+      configPath: c.configPath,
+      dbPath: c.dbPath,
+      kanbanEnabled: c.kanban.enabled,
+      workspaces: c.workspaces,
+      agent: c.agent,
+    });
   });
 });
 

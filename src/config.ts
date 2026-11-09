@@ -201,6 +201,8 @@ export interface TeamSettings {
   /** The file read, or undefined for an environment-only deployment. */
   configPath: string | undefined;
   dbPath: string;
+  /** `kanban.enabled`: whether the gateway runs the board, so the operator's `mt kanban` can say when it does not. */
+  kanbanEnabled?: boolean;
   /** Workspace name → declared absolute path. Always has `default`. */
   workspaces: Readonly<Record<string, string>>;
   agent: AgentConfig | undefined;
@@ -383,6 +385,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     home,
     configPath: text === undefined ? undefined : path,
     dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'team.db'),
+    kanbanEnabled: file.kanban.enabled ?? KANBAN_DEFAULTS.enabled,
     workspaces,
     agent,
   };

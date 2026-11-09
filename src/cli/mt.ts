@@ -1,7 +1,8 @@
 import { ConfigError, type Env } from '../config.js';
 import { parse, refuse, UsageError } from './args.js';
-import { gateAdd, gateList, gateRemove } from './gate.js';
+import { gateAdd, gateList, gateRemove, inBoardRun } from './gate.js';
 import { kanbanCommand } from './kanban.js';
+import { operatorCommand } from './operator.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
 
@@ -14,11 +15,14 @@ import { workspaceAdd, workspaceList } from './workspace.js';
  * the same user and could edit the same files by hand -- nothing it did not
  * already have. A change takes effect at the gateway's next start.
  *
- * `mt kanban` is the one that talks to the gateway, through its socket, and only
- * with the authority of a run's token, from the run's environment.
+ * In a board run's shell, `mt kanban` is the worker CLI, which talks to the
+ * gateway through its socket, with the authority of the run's token, from the
+ * run's environment (spec §7.3).
  *
- * `mt kanban gate` is the operator's, and the one exception to writing files
- * only: it writes the board's database, through the board's own service (spec §7.7).
+ * Elsewhere it is the operator's (spec §2.6): chat's `/kanban` commands, and `mt
+ * kanban gate`, the exception to writing files only. They write the board's
+ * database, through the board's own service, and after a change ask the gateway
+ * for a dispatcher pass, a request that needs no token and does nothing else.
  */
 
 export type Git = (args: readonly string[]) => Promise<{ code: number; stderr: string }>;
@@ -46,10 +50,16 @@ const USAGE = [
   '  mt workspace add <name> <absolute-path>',
   '  mt workspace add <name> --clone <git-url>',
   '  mt workspace list',
-  '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
+  '  mt kanban board list [all] [--json]',
+  '  mt kanban board create <name> [--json]',
+  '  mt kanban board set <name> max_running <number|none> [--json]',
+  '  mt kanban board set <name> workspace <workspace|none> [--json]',
+  '  mt kanban board archive <name> [--json]',
   '  mt kanban gate add <task_id> [--timeout <s>] -- <command...>',
   '  mt kanban gate list <task_id>',
   '  mt kanban gate remove <task_id> <gate_id>',
+  "in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
+  '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
 ].join('\n');
 
 function expectNothing(positionals: readonly string[], what: string): void {
@@ -82,6 +92,24 @@ function gate(argv: readonly string[], io: MtIo): number {
     return gateRemove(taskId, Number(gateId), io);
   }
   throw new UsageError('kanban gate takes add, list or remove');
+}
+
+/** The worker CLI's commands that no operator's has: the worker's wherever they are typed. */
+const WORKER_ONLY: readonly string[] = ['complete', 'review', 'changes', 'block', 'create'];
+/** The operator's commands that the worker CLI has not got: the operator's wherever they are typed. */
+const OPERATOR_ONLY: readonly string[] = ['gate', 'board'];
+
+/**
+ * Whose `mt kanban <command>` this is: the worker CLI's (spec §7.3) or the
+ * operator's (spec §2.6). In a board run's shell, every name both have, and any
+ * name neither has, is the worker's, so an agent always gets the worker's JSON
+ * answer; the operator's commands refuse to run there. Elsewhere they are the
+ * operator's, and the worker's own names say they work only inside a run.
+ */
+function isWorkers(command: string | undefined, io: MtIo): boolean {
+  if (command !== undefined && WORKER_ONLY.includes(command)) return true;
+  if (command !== undefined && OPERATOR_ONLY.includes(command)) return false;
+  return inBoardRun(io.env);
 }
 
 /** Exit codes: 0 done, 1 refused or a check failed, 2 the command line was wrong. */
@@ -130,8 +158,9 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       // reported as `mt: …` rather than escaping as a stack trace.
       return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, io);
     }
+    if (group === 'kanban' && isWorkers(command, io)) return await kanbanCommand(command, rest, io);
     if (group === 'kanban' && command === 'gate') return gate(rest, io);
-    if (group === 'kanban') return await kanbanCommand(command, rest, io);
+    if (group === 'kanban') return await operatorCommand(command, rest, io);
     if (group === 'workspace' && command === 'list') {
       expectNothing(parse(rest, {}).positionals, 'workspace list');
       return workspaceList(io);
