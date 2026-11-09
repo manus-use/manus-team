@@ -271,22 +271,22 @@ mt kanban board create <name>
 mt kanban board set <name> max_running <number|none>
 mt kanban board set <name> workspace <workspace|none>
 mt kanban board archive <name>
-mt kanban new <title> [--board <name>] [--assignee <role>] [--reviewer <role>] [--workspace <name>]
+mt kanban task new <title> [--board <name>] [--assignee <role>] [--reviewer <role>] [--workspace <name>]
     [--parent <task_id>]... [--outcome "..."] [--verify "..."] [--constraints "..."]
     [--boundaries "..."] [--stop-when "..."] [--body "..." | --body-file <path|->]
-mt kanban list [todo|ready|running|review|reviewing|blocked|done|archived|all] [--board <name>]
-mt kanban show <task_id> [--board <name>]
-mt kanban assign <task_id> <role> [--board <name>]
-mt kanban link <parent_id> <child_id> [--board <name>]
-mt kanban unblock <task_id> [comment...] [--board <name>]
-mt kanban stop <task_id> [--board <name>]
-mt kanban archive <task_id> [--board <name>]
-mt kanban comment <task_id> <text...> [--board <name>]
+mt kanban task list [todo|ready|running|review|reviewing|blocked|done|archived|all] [--board <name>]
+mt kanban task show <task_id> [--board <name>]
+mt kanban task assign <task_id> <role> [--board <name>]
+mt kanban task link <parent_id> <child_id> [--board <name>]
+mt kanban task unblock <task_id> [comment...] [--board <name>]
+mt kanban task stop <task_id> [--board <name>]
+mt kanban task archive <task_id> [--board <name>]
+mt kanban task comment <task_id> <text...> [--board <name>]
 mt kanban gate add <task_id> [--timeout <s>] -- <command...>
 mt kanban gate list <task_id>
 mt kanban gate remove <task_id> <gate_id>
 
-# only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:
+# the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:
 mt kanban <show|complete|review|changes|block|comment|create|link> < input.json
 ```
 
@@ -309,23 +309,26 @@ a running gateway, through the board's own service, and take effect at once.
   role's runs are rendered as a native agent package, and why not.
 - `workspace add` edits `workspaces:` in the config file, keeping its comments, and refuses
   anything the next start would refuse. `--clone` clones into `$MT_HOME/workspaces/<name>`.
-- The operator's `kanban` commands are chat's `/kanban` commands at a terminal, with the same
-  meaning, for whoever runs the gateway: `board list`, `create`, `set` and `archive`, and `new`,
-  `list`, `show`, `assign`, `link`, `unblock`, `stop`, `archive` and `comment`. There is no
-  `board use`, since a terminal is no chat: `new` and `list` take `--board <name>`, `default`
+- The operator's `kanban` commands are chat's `/kanban` commands at a terminal, in the same
+  groups, with the same meaning, for whoever runs the gateway: `board list`, `create`, `set` and
+  `archive`; `task new`, `list`, `show`, `assign`, `link`, `unblock`, `stop`, `archive` and
+  `comment`; and `gate add`, `list` and `remove`. A task command needs `task`: `mt kanban new`,
+  without it, is an unknown command, and `mt kanban show`, `comment` and `link` are always the
+  worker's, which an agent runs in a board run. There is no
+  `board use`, since a terminal is no chat: `task new` and `task list` take `--board <name>`, `default`
   unless given. The commands that name a task work on a task on any board, by id; given
   `--board <name>`, they refuse (`other_board`) a task on another board, and `link` refuses
   unless both tasks are on it. A `--board` naming no board is refused. They record who acted as
   `operator:<login>`, the login of the account the command runs as: run under `sudo -u`, that
-  is the service account, not you. `new` takes `/kanban new`'s lines as flags; its title is the
+  is the service account, not you. `task new` takes `/kanban task new`'s lines as flags; its title is the
   words that are not flags, on one line, with no control character or bidi control, and its
   body `--body`, or `--body-file` with a regular file, or `-` for stdin.
   `assign`, `--assignee` and `--reviewer` take a role: a person is given work from chat, by
   @-mention, where the gateway can check their tier. A task created here is followed by no
-  chat, so nobody is told when it is done or blocks: `mt kanban show` and `list` tell you. Each
+  chat, so nobody is told when it is done or blocks: `mt kanban task show` and `task list` tell you. Each
   prints plain text, or with `--json` one line of JSON, `{"ok": true, ...}` or
   `{"ok": false, "code": "...", "message": "..."}`; each exits 0 when done, 1 when refused, and
-  2 for a wrong command line, said on stderr. After `new`, `assign`, `unblock`, `stop`,
+  2 for a wrong command line, said on stderr. After `task new`, `assign`, `unblock`, `stop`,
   `archive` and `board set`, as after their chat forms, the gateway is asked over its socket to
   look for work at once, which also cancels the turn of an agent run the change ended; if no
   gateway answers, they say why, and that the change stands: the gateway acts on it at its next
@@ -334,11 +337,12 @@ a running gateway, through the board's own service, and take effect at once.
   is off: the change is recorded, and nothing runs it until the board is turned on. They refuse
   to run in a board run's shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set, before
   reading their arguments or stdin.
-- `kanban` in a board run's shell is for the run's agent, not for a person: it works only with
-  the run's `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN` and `MT_KANBAN_SOCKET`, which the gateway gives
-  each run. There, `show`, `comment` and `link` are the agent's, which take no arguments, and
-  the operator's commands are refused; elsewhere, `complete`, `review`, `changes`, `block` and
-  `create` say they work only inside a run.
+- The worker's `kanban` commands, `show`, `complete`, `review`, `changes`, `block`, `comment`,
+  `create` and `link`, with no group, are for the run's agent, not for a person: they work only
+  with the run's `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN` and `MT_KANBAN_SOCKET`, which the gateway
+  gives each run, and take no arguments. They are the worker's in any shell, and elsewhere say
+  they work only inside a run; in a run's shell, the operator's `task`, `board` and `gate`
+  commands are refused.
   It reads its input as JSON on stdin and prints one line of JSON, `{"ok": true, ...}` or
   `{"ok": false, "code": "...", "message": "..."}`. It exits 0 when the command was done, 1 when
   it was refused, and 2 for a wrong command line. `link` takes only the tasks the run's own
@@ -410,7 +414,7 @@ For a walk-through with messages to paste, from one task to chains, fan-out and 
 [docs/kanban-guide.md](docs/kanban-guide.md).
 
 ```
-/kanban new Draft the Q3 summary
+/kanban task new Draft the Q3 summary
 assignee: docs-writer
 workspace: docs
 outcome: a page in the team wiki
@@ -425,7 +429,7 @@ line is the body. A bare word names a role, and an @-mention a person. An unknow
 workspace is refused at once. The dispatcher looks for work as soon as the task is created.
 
 **Review.** A task that names a `reviewer:` is reviewed before it is done. Its agent's prompt
-names the reviewer, and a `complete` from its agent, or a `/kanban done` or **Done** from its
+names the reviewer, and a `complete` from its agent, or a `/kanban task done` or **Done** from its
 person assignee, is sent to the reviewer as a review request, with the same summary; its gates
 run once. A rework after changes goes back to the reviewer the same way. Only the reviewer's
 approval, or an operator's, completes it. A task with no reviewer is done when its assignee
@@ -435,26 +439,30 @@ twice. An operator may answer any review; if a reviewer role's agent is working 
 answer ends that run (`superseded`) and stops its turn, and the reviewer's later report is
 refused.
 
+Every command is in a group, then a verb: a task's under `/kanban task`, a board's under
+`/kanban board`, a gate's under `/kanban gate`, and `/kanban help` on its own. A task command
+typed without `task`, such as `/kanban new`, is an unknown command.
+
 | Command | Tier |
 |---|---|
-| `/kanban new <title>` + lines | operate |
-| `/kanban list [todo\|ready\|running\|review\|reviewing\|blocked\|done\|archived\|all]` | talk; without a status, the tasks someone may still act on |
-| `/kanban show <task>` | talk: the task, its contract, gates, runs, latest output and comments |
-| `/kanban assign <task> <role or @person>` | operate: an undecided run ends `superseded` |
-| `/kanban link <parent> <child>` | operate: refused for a child past `open`, or with a run open |
-| `/kanban workspace <task> <name>` | operate: refused once the workspace is fixed |
-| `/kanban comment <task> <text>` | talk: everyone sees it in `/kanban show`; an operator's, or the task's assignee's or reviewer's, also reaches its agent, when its turn ends or in its next run |
-| `/kanban unblock <task> [comment]` | operate |
-| `/kanban stop <task>` | operate: the run ends `cancelled`, and the task blocks |
-| `/kanban archive <task>` | operate |
+| `/kanban task new <title>` + lines | operate |
+| `/kanban task list [todo\|ready\|running\|review\|reviewing\|blocked\|done\|archived\|all]` | talk; without a status, the tasks someone may still act on |
+| `/kanban task show <task>` | talk: the task, its contract, gates, runs, latest output and comments |
+| `/kanban task assign <task> <role or @person>` | operate: an undecided run ends `superseded` |
+| `/kanban task link <parent> <child>` | operate: refused for a child past `open`, or with a run open |
+| `/kanban task workspace <task> <name>` | operate: refused once the workspace is fixed |
+| `/kanban task comment <task> <text>` | talk: everyone sees it in `/kanban task show`; an operator's, or the task's assignee's or reviewer's, also reaches its agent, when its turn ends or in its next run |
+| `/kanban task unblock <task> [comment]` | operate |
+| `/kanban task stop <task>` | operate: the run ends `cancelled`, and the task blocks |
+| `/kanban task archive <task>` | operate |
 | `/kanban gate add <task> [--timeout <s>] <command>` | operate: the rest of the message is the command, as written |
 | `/kanban gate list <task>` | talk |
 | `/kanban gate remove <task> <gate>` | operate |
-| `/kanban done <task> [summary]` | the task's assignee, a person; on a task that names a reviewer, it asks for review instead |
-| `/kanban block <task> <reason>` | the task's assignee: it blocks as needing input |
-| `/kanban review <task> [summary]`, and a line `reviewer: <role or @person>` unless the task names one | the task's assignee |
-| `/kanban approve <task> [comment]` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
-| `/kanban changes <task> <reason>` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
+| `/kanban task done <task> [summary]` | the task's assignee, a person; on a task that names a reviewer, it asks for review instead |
+| `/kanban task block <task> <reason>` | the task's assignee: it blocks as needing input |
+| `/kanban task review <task> [summary]`, and a line `reviewer: <role or @person>` unless the task names one | the task's assignee |
+| `/kanban task approve <task> [comment]` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
+| `/kanban task changes <task> <reason>` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
 | `/kanban board list [all]` | talk: each board, its tasks, its own limit and workspace, and which one this chat is on |
 | `/kanban board create <name>` | operate: a new board, named as roles and workspaces are, but never `none` or `all` |
 | `/kanban board use <name>` | operate: this chat, all its threads, is on that board from now on |
@@ -484,18 +492,18 @@ its notices wait, and are sent once the gateway reaches Lark again.
 tasks with its own list, its turn in each dispatcher pass, and optionally its own
 `max_running`, inside the gateway's, and default workspace. One database and one dispatcher
 serve every board. A board called `default` always exists, holds every task from before boards,
-and is where every chat starts; `/kanban board use` moves a chat, and `/kanban new` and
-`/kanban list` act on the chat's board. `/kanban show` and the commands that name a task work
+and is where every chat starts; `/kanban board use` moves a chat, and `/kanban task new` and
+`/kanban task list` act on the chat's board. `/kanban task show` and the commands that name a task work
 on any board, by id. A task's follow-ups, its parents and its links stay on its board, and its
 notices go to the chat it was created in, as before. One agent at a time per workspace still
 holds across boards. See section 10 of [docs/kanban-guide.md](docs/kanban-guide.md). From a
-terminal, `mt kanban board …` and `mt kanban new|list --board <name>` do the same (see "The mt
+terminal, `mt kanban board …` and `mt kanban task new|list --board <name>` do the same (see "The mt
 command" above).
 
 **People.** Name a person with an @-mention — type @ and pick them, so Lark sends who they
-are — as `assignee:` or `reviewer:`, or in `/kanban assign`. Being named lets a person report on
+are — as `assignee:` or `reviewer:`, or in `/kanban task assign`. Being named lets a person report on
 the task, so they must have talk tier (`auth.talk`); a person without talk tier is
-refused. The board knows a person as `lark:<union_id>`, which is how `/kanban show` lists them
+refused. The board knows a person as `lark:<union_id>`, which is how `/kanban task show` lists them
 and how an agent's `mt kanban create` or `review` names one; the gateway learns each person's
 ids as they use `/kanban`, are mentioned in it, or press a card's button, and refuses a
 principal it has never seen.
@@ -508,7 +516,7 @@ Only the person named may press them (an operator may also answer a review, a ro
 ending the reviewer agent's run if one is open); a card for a run
 that is over says it is out of date and does nothing. A press is answered at once, and the card
 shows the outcome once the report is made, gates and all; one refused for what it carried — an
-empty box, a failing gate — redraws the card, saying why, ready to be pressed again. `/kanban done`, `block`, `review`,
+empty box, a failing gate — redraws the card, saying why, ready to be pressed again. `/kanban task done`, `block`, `review`,
 `approve` and `changes` do the same from any chat with the bot. A person's task never times out:
 it waits for them, across restarts. The chat the task came from hears one line — "📋 *title*,
 assigned to *name*", the name in plain text, never a mention — and its notices as usual; a
@@ -525,14 +533,14 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
 
 **Known limitations.**
 
-- A typed report (`/kanban done` and the rest) leaves its card's buttons live, until the next
+- A typed report (`/kanban task done` and the rest) leaves its card's buttons live, until the next
   press shows the card as out of date.
 - A notice's **Unblock** button stays after it is pressed; a second press does nothing.
 - A card that Lark refuses as unreachable is never sent again; the person can type the
   commands the chat was given.
 - If a card's "Not done" redraw fails, the card's buttons may stay dead for 12 hours: Lark's
   SDK drops a second press of the same button for that long. The typed commands
-  (`/kanban done` and the rest) still work.
+  (`/kanban task done` and the rest) still work.
 - The gateway learns about people only from `/kanban` messages, the people they mention, and
   the people who press cards; a principal it has never seen is refused.
 - An approval forwarded to a chat counts toward the run's `max_runtime_s`: a supervised agent
@@ -546,7 +554,7 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
 - An agent task nobody can be given is not seen as stranded while `kanban.max_running`, or its
   board's own `max_running`, is reached: the limit is checked first, so it is not tried. It is
   reported once a slot frees and a pass tries it.
-- A task created with `mt kanban new` is followed by no chat: nobody hears its notices, and a
+- A task created with `mt kanban task new` is followed by no chat: nobody hears its notices, and a
   supervised role's approval requests on it reach nobody, as for any task no chat follows.
 - `mt kanban` at a terminal cannot give a person work: assign people from chat.
 - `mt kanban` refuses to run in a board run's shell, but that is not a security boundary: an

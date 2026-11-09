@@ -25,6 +25,11 @@ gateway's next start.
 an @-mention of the bot, or the gateway does not read it. In a direct message with the bot, just
 type the command. The examples below leave the bot's mention out.
 
+**Commands.** Every command is a group, then a verb. A task's commands are under `/kanban task`
+(`/kanban task new`, `/kanban task show k_…`), a board's under `/kanban board`, a gate's under
+`/kanban gate`, and `/kanban help` stands alone. A task command typed without `task`, such as
+`/kanban new`, is an unknown command.
+
 **Ids.** Every task has an id such as `k_…`, which the chat gives you when the task is created.
 Runs have ids such as `r_…`. Wherever an example says `k_…`, use the id the chat gave you.
 
@@ -34,14 +39,14 @@ needs operator tier, except a person's reports on their own task.
 
 | Who | Commands |
 |---|---|
-| Anyone at talk tier | `/kanban help`, `list`, `show`, `comment`, `gate list`, `board list` |
-| Operators | `/kanban new`, `assign`, `link`, `workspace`, `unblock`, `stop`, `archive`, `gate add`, `gate remove`, `board create`, `board use`, `board set`, `board archive`, and every talk-tier command |
-| The person a task is assigned to | `/kanban done`, `block` and `review` on that task, while it is being worked on |
-| The person named as a task's reviewer, or any operator | `/kanban approve` and `changes` on that task, while it waits for review |
+| Anyone at talk tier | `/kanban help`, `task list`, `task show`, `task comment`, `gate list`, `board list` |
+| Operators | `/kanban task new`, `task assign`, `task link`, `task workspace`, `task unblock`, `task stop`, `task archive`, `gate add`, `gate remove`, `board create`, `board use`, `board set`, `board archive`, and every talk-tier command |
+| The person a task is assigned to | `/kanban task done`, `task block` and `task review` on that task, while it is being worked on |
+| The person named as a task's reviewer, or any operator | `/kanban task approve` and `task changes` on that task, while it waits for review |
 
 A talk-tier person who tries an operator command is told so:
 
-> `/kanban new` changes the board, and needs operator permission.
+> `/kanban task new` changes the board, and needs operator permission.
 
 Being named on a task is the permission: a person assigned a task needs only talk tier to report
 on it. An operator cannot report `done` on a task assigned to someone else.
@@ -63,7 +68,7 @@ elsewhere and paste it in.
 Paste:
 
 ```
-/kanban new Summarise the vendor contracts
+/kanban task new Summarise the vendor contracts
 assignee: worker
 Read every PDF in contracts/2026 and write a one-page summary of renewal dates, notice periods and price caps to notes/contracts.md.
 ```
@@ -83,7 +88,7 @@ When the agent reports that it is done, the chat hears, with the agent's summary
 
 How a message is read:
 
-- The title is the rest of the first line, or the next line if `/kanban new` stands alone.
+- The title is the rest of the first line, or the next line if `/kanban task new` stands alone.
 - A field line is its label at the very start of a line, in any case, then a colon:
   `assignee:`, `reviewer:`, `workspace:`, `parent:`, `outcome:`, `verify:`, `constraints:`,
   `boundaries:` and `stop when:`. Field lines may come in any order, among the body's lines.
@@ -99,14 +104,14 @@ Limits: a title is at most 512 bytes, a body at most 64 KiB, and each contract f
 8 KiB. A longer title is refused with "A title is at most 512 bytes; put the rest in the body."
 
 A task may be created with no `assignee:` line. It waits until an operator gives it to someone
-with `/kanban assign` (section 9).
+with `/kanban task assign` (section 9).
 
 ## 2. Saying what done means
 
 ### The contract
 
 Five optional lines tell the agent, and whoever reviews, what done means. They are put in the
-agent's prompt and shown on cards and in `/kanban show`.
+agent's prompt and shown on cards and in `/kanban task show`.
 
 | Line | Means |
 |---|---|
@@ -119,7 +124,7 @@ agent's prompt and shown on cards and in `/kanban show`.
 Paste:
 
 ```
-/kanban new Draft the incident review for the 3 November outage
+/kanban task new Draft the incident review for the 3 November outage
 assignee: worker
 outcome: docs/incidents/2026-11-03.md, with a timeline, the cause and three follow-ups
 verify: every timestamp in the timeline comes from the attached logs
@@ -194,7 +199,7 @@ Limits and rules:
   reporting counts from the next report.
 - The agent's prompt lists the gates the task had when the run started. To be sure the agent
   sees them, create the task with no `assignee:` line, add the gates, then give it to the role
-  with `/kanban assign k_… worker`.
+  with `/kanban task assign k_… worker`.
 
 ## 3. Review
 
@@ -210,7 +215,7 @@ reviewer. The task's gates run once, as for any review. Nothing needs to be said
 Paste:
 
 ```
-/kanban new Write the on-call handbook page
+/kanban task new Write the on-call handbook page
 assignee: worker
 reviewer: reviewer
 outcome: docs/oncall.md covers paging, escalation and handover
@@ -226,7 +231,7 @@ When the worker's work is done, the chat hears:
 For a person, name them with an @-mention: type @ and pick them from Lark's list.
 
 ```
-/kanban new Write the on-call handbook page
+/kanban task new Write the on-call handbook page
 assignee: worker
 reviewer: @Bob Li
 ```
@@ -242,7 +247,7 @@ The other way to review is a task of its own, whose parent is the work to review
 done when its assignee says so, and that releases the review task:
 
 ```
-/kanban new Review the on-call handbook page
+/kanban task new Review the on-call handbook page
 parent: k_…
 assignee: reviewer
 Check docs/oncall.md against its parent's outcome, and list anything missing.
@@ -270,7 +275,7 @@ they approve, by the review task.
 A person types what needs changing in the card's box and presses **Request changes**, or types:
 
 ```
-/kanban changes k_… Add the weekend escalation path, and a phone number for the database on-call.
+/kanban task changes k_… Add the weekend escalation path, and a phone number for the database on-call.
 ```
 
 > Changes requested on `k_…`: it goes back to its assignee, with your reason.
@@ -290,7 +295,7 @@ reviewer when it is done, whether the agent asks for review or reports done, and
 A person presses **Approve**, or types, with an optional comment:
 
 ```
-/kanban approve k_… Looks right. Thanks.
+/kanban task approve k_… Looks right. Thanks.
 ```
 
 > Approved: `k_…` is complete.
@@ -306,7 +311,7 @@ for a reviewer who is away, a review a role cannot take, or a review an operator
 now.
 
 ```
-/kanban approve k_…
+/kanban task approve k_…
 ```
 
 > Approved: `k_…` is complete.
@@ -316,13 +321,13 @@ it: its run is ended, and its turn is stopped. The reply says so:
 
 > Approved: `k_…` is complete; the review run of role reviewer was ended.
 
-`/kanban changes` does the same, and the task goes back to its assignee as a rework. Anything the
+`/kanban task changes` does the same, and the task goes back to its assignee as a rework. Anything the
 reviewer agent reports afterwards is refused, as its run is over. A person reviewer's review needs
 nothing ended: the operator's answer decides it, and the person's card goes out of date.
 
 A person who is neither the reviewer nor an operator is told:
 
-> `/kanban approve` answers a review, and is for `k_…`'s reviewer (Bob Li (lark:on_…)) or an operator.
+> `/kanban task approve` answers a review, and is for `k_…`'s reviewer (Bob Li (lark:on_…)) or an operator.
 
 ## 4. A person's task
 
@@ -334,7 +339,7 @@ sends who they are with the message. Typing the name without picking it does not
 Paste:
 
 ```
-/kanban new Book the venue for the January offsite
+/kanban task new Book the venue for the January offsite
 assignee: @Alice Chen
 outcome: a confirmed booking for 40 people, 14 to 16 January
 Ask facilities for the two rooms on the third floor first.
@@ -369,7 +374,7 @@ A person's task never times out: it waits for them, across gateway restarts.
 Each button has a typed form, which works from any chat with the bot, a direct message included.
 
 ```
-/kanban done k_… Booked rooms 3A and 3B, confirmation in the facilities ticket.
+/kanban task done k_… Booked rooms 3A and 3B, confirmation in the facilities ticket.
 ```
 
 > Done: `k_…` is complete.
@@ -383,16 +388,16 @@ Pressing **Done** on the card does the same, and the card says "Sent for review 
 block needs a reason:
 
 ```
-/kanban block k_… Facilities need a cost centre before they will confirm.
+/kanban task block k_… Facilities need a cost centre before they will confirm.
 ```
 
-> Blocked `k_…` (needs_input). An operator unblocks it with `/kanban unblock k_… [comment]`.
+> Blocked `k_…` (needs_input). An operator unblocks it with `/kanban task unblock k_… [comment]`.
 
-To ask for review of your own task, of a reviewer the task does not name, use `/kanban review`,
+To ask for review of your own task, of a reviewer the task does not name, use `/kanban task review`,
 with a summary, and name the reviewer on a `reviewer:` line unless the task already names one:
 
 ```
-/kanban review k_… Holding rooms 3A and 3B until Friday.
+/kanban task review k_… Holding rooms 3A and 3B until Friday.
 reviewer: @Bob Li
 ```
 
@@ -429,7 +434,7 @@ To run tasks in order, create each one naming the one before it on a `parent:` l
 Create A:
 
 ```
-/kanban new Collect last quarter's support tickets
+/kanban task new Collect last quarter's support tickets
 assignee: worker
 Export every ticket tagged billing from tickets/2026-q3.csv into data/billing-q3.csv.
 ```
@@ -439,7 +444,7 @@ Export every ticket tagged billing from tickets/2026-q3.csv into data/billing-q3
 Create B, with A's id as its parent:
 
 ```
-/kanban new Group the billing tickets by cause
+/kanban task new Group the billing tickets by cause
 parent: k_…
 assignee: worker
 Read data/billing-q3.csv and write the five most common causes, with counts, to notes/billing-causes.md.
@@ -448,7 +453,7 @@ Read data/billing-q3.csv and write the five most common causes, with counts, to 
 Create C, with B's id as its parent:
 
 ```
-/kanban new Write the billing FAQ draft
+/kanban task new Write the billing FAQ draft
 parent: k_…
 assignee: worker
 outcome: docs/faq/billing.md answers each of the top five causes
@@ -467,11 +472,11 @@ How the chain runs:
 - All three run in `worker`, the role's own workspace, so B finds A's files where A left them.
 - An archived parent counts as finished too: archiving A releases B.
 
-A link can be added later with `/kanban link <parent> <child>`, an operator's command, as long as
+A link can be added later with `/kanban task link <parent> <child>`, an operator's command, as long as
 the child has not started:
 
 ```
-/kanban link k_… k_…
+/kanban task link k_… k_…
 ```
 
 > `k_…` now waits for `k_…`.
@@ -519,7 +524,7 @@ workspace and does not count.
 The research task:
 
 ```
-/kanban new Survey the vendors
+/kanban task new Survey the vendors
 assignee: worker
 outcome: notes/vendors.md lists the three vendors we shortlist, with a one-line reason each
 Shortlist three log-storage vendors from vendors/candidates.md.
@@ -529,7 +534,7 @@ Each of the three, with the survey's id as parent and its own workspace (change 
 and C):
 
 ```
-/kanban new Price out vendor A
+/kanban task new Price out vendor A
 parent: k_…
 workspace: vendor-a
 assignee: worker
@@ -540,7 +545,7 @@ Take the first vendor in the parent's summary. Find list prices for 5 TB and 50 
 The write-up, with three `parent:` lines, one per vendor task:
 
 ```
-/kanban new Write the vendor comparison
+/kanban task new Write the vendor comparison
 parent: k_…
 parent: k_…
 parent: k_…
@@ -568,7 +573,7 @@ tells it to create a task for follow-up work it finds, rather than doing it. You
 it in the body:
 
 ```
-/kanban new Plan the runbook rewrite
+/kanban task new Plan the runbook rewrite
 assignee: worker
 outcome: one follow-up task per out-of-date section of runbooks/oncall.md, in reading order
 Read runbooks/oncall.md. For each out-of-date section, create a follow-up task for role worker with mt kanban create, each naming the one before it in "parents", so they run in order. Do not rewrite the sections yourself.
@@ -600,7 +605,7 @@ What to know:
 ### The board
 
 ```
-/kanban list
+/kanban task list
 ```
 
 > `k_…` **running**: Survey the vendors · role worker
@@ -613,12 +618,12 @@ review, ready, todo, then blocked. Name a status to see only those: `todo`, `rea
 `review`, `reviewing`, `blocked`, `done`, `archived`, or `all` for every task.
 
 ```
-/kanban list done
+/kanban task list done
 ```
 
 It shows at most 30 lines, then how many more. With nothing open, it says:
 
-> No open tasks. `/kanban list all` shows done and archived ones too.
+> No open tasks. `/kanban task list all` shows done and archived ones too.
 
 What the statuses mean:
 
@@ -636,7 +641,7 @@ What the statuses mean:
 ### One task
 
 ```
-/kanban show k_…
+/kanban task show k_…
 ```
 
 > **Draft the incident review for the 3 November outage** `k_…`: running
@@ -659,7 +664,7 @@ It shows the task, its parents and children, its contract, gates, its last five 
 
 ### Comments, and who can steer
 
-Anyone at talk tier may comment, and everyone sees comments in `/kanban show`. Only some comments
+Anyone at talk tier may comment, and everyone sees comments in `/kanban task show`. Only some comments
 reach the agent:
 
 - **Steer:** an operator's comment, and the task's named assignee's or reviewer's. The agent gets
@@ -667,7 +672,7 @@ reach the agent:
 - **Stored only:** anyone else's. It is shown to people, never given to an agent.
 
 ```
-/kanban comment k_… Use UTC for every timestamp, and say so under the heading.
+/kanban task comment k_… Use UTC for every timestamp, and say so under the heading.
 ```
 
 From an operator, the chat replies:
@@ -676,7 +681,7 @@ From an operator, the chat replies:
 
 From someone else:
 
-> Comment added to `k_…`, for people: `/kanban show` shows it. Only an operator's comment, or its assignee's or reviewer's, is given to the task's agent.
+> Comment added to `k_…`, for people: `/kanban task show` shows it. Only an operator's comment, or its assignee's or reviewer's, is given to the task's agent.
 
 ### Notices
 
@@ -706,7 +711,7 @@ A task blocks when its agent, or its person, cannot go on, or when the board sto
 gives the kind and the reason, and carries an **Unblock** button for an operator:
 
 > **Draft the incident review for the 3 November outage** `k_…` is blocked (needs_input): The logs disagree about when paging started: 02:14 in pager.log, 02:31 in the incident channel.
-> `/kanban unblock k_… [comment]` once it can go on.
+> `/kanban task unblock k_… [comment]` once it can go on.
 
 The kinds:
 
@@ -720,7 +725,7 @@ The kinds:
 Answer the question in the unblock's comment, which the next run reads:
 
 ```
-/kanban unblock k_… Use pager.log; the channel was opened late.
+/kanban task unblock k_… Use pager.log; the channel was opened late.
 ```
 
 > `k_…` is unblocked, back to open.
@@ -740,7 +745,7 @@ hears:
 By default a task gets its first attempt and one retry. After that, it blocks:
 
 > Gave up on **Summarise the vendor contracts** `k_…`: failed 2 times; last crashed: …
-> `/kanban unblock k_… [comment]` gives it a fresh set of attempts.
+> `/kanban task unblock k_… [comment]` gives it a fresh set of attempts.
 
 Fix the cause first, then unblock; the unblock resets the count. A throttled run (rate limits,
 provider errors) is not counted as a failure: the task cools down, 5 minutes and doubling up to an
@@ -754,15 +759,15 @@ workspaces. After 30 minutes the chat hears, once:
 
 > Stranded: **Write the vendor comparison** `k_…`. Nobody can be given it: task k_… has no assignee
 
-Fix it with `/kanban assign`, or, for parents in different workspaces, set the workspace:
+Fix it with `/kanban task assign`, or, for parents in different workspaces, set the workspace:
 
 ```
-/kanban workspace k_… worker
+/kanban task workspace k_… worker
 ```
 
 > `k_…` works in worker.
 
-A task's workspace is fixed at its first start and never changes after; `/kanban workspace` is
+A task's workspace is fixed at its first start and never changes after; `/kanban task workspace` is
 refused once it is fixed. A ready task queued behind another in its workspace, or waiting for a free slot under the gateway's or its board's `max_running`, is not stranded.
 
 ### Stop, assign and archive
@@ -771,10 +776,10 @@ refused once it is fixed. A ready task queued behind another in its workspace, o
 does not start again until you unblock it:
 
 ```
-/kanban stop k_…
+/kanban task stop k_…
 ```
 
-> Stopped `k_…`: its run was cancelled, and the task is blocked (needs_input). `/kanban unblock k_…` runs it again.
+> Stopped `k_…`: its run was cancelled, and the task is blocked (needs_input). `/kanban task unblock k_…` runs it again.
 
 Comment first with what to do differently, then unblock.
 
@@ -782,7 +787,7 @@ Comment first with what to do differently, then unblock.
 next start goes to the new assignee:
 
 ```
-/kanban assign k_… @Alice Chen
+/kanban task assign k_… @Alice Chen
 ```
 
 > `k_…` is now for Alice Chen (lark:on_…); its run `r_…` was superseded.
@@ -790,7 +795,7 @@ next start goes to the new assignee:
 **Archive** puts a task away for good, ending any run on it. Its children treat it as finished:
 
 ```
-/kanban archive k_…
+/kanban task archive k_…
 ```
 
 > Archived `k_…`.
@@ -805,7 +810,7 @@ to the chat that follows the task, naming it ("Task k_…, Rotate the logs, asks
 answered there by an operator, as in a chat session. For example:
 
 ```
-/kanban new Rotate the logs
+/kanban task new Rotate the logs
 assignee: watched
 Move every log in logs/ older than 30 days into logs/archive/.
 ```
@@ -841,7 +846,7 @@ commands, `none` means "clear" and `all` means every board.
 /kanban board use web-app
 ```
 
-> This chat is on board **web-app** now: its `/kanban new` adds tasks to it, and `/kanban list`
+> This chat is on board **web-app** now: its `/kanban task new` adds tasks to it, and `/kanban task list`
 > shows them.
 
 A chat is the whole conversation: a group and every thread in it are on one board, and no other
@@ -850,19 +855,19 @@ bot can move between boards as you need.
 
 ### What a board changes
 
-- `/kanban new` creates the task on this chat's board. The reply names the board, unless it is
+- `/kanban task new` creates the task on this chat's board. The reply names the board, unless it is
   `default`.
-- `/kanban list` shows this chat's board alone. On a board other than `default`, a line of its
+- `/kanban task list` shows this chat's board alone. On a board other than `default`, a line of its
   own names the board above the tasks; on `default` there is none, as before. `all` still means
   every status, on this board.
-- `/kanban show k_…` shows a task on any board, by its id, and names its board once any board
+- `/kanban task show k_…` shows a task on any board, by its id, and names its board once any board
   but `default` is involved.
 - Every other command that names a task (`assign`, `comment`, `approve` and the rest) works on
   a task on any board, by its id. The commands a notice gives, and its Unblock button, keep
   working after the chat has moved.
 - A task's follow-ups stay on its board: those its agent creates with `mt kanban create`, and
   those a done task is given.
-- `parent:` and `/kanban link` cannot cross boards. A follow-up created from chat with `parent:`
+- `parent:` and `/kanban task link` cannot cross boards. A follow-up created from chat with `parent:`
   must be created from a chat on the parent's board; from a chat on another board it is refused:
 
   > Not done: task k\_… is on board default, not web-app: a task and its parents are on one board
@@ -916,8 +921,8 @@ workspace as its own.
 
 It is refused while any of the board's tasks is open, in review or blocked: finish or archive
 them first. Once it is archived, nothing more is added to it, and no chat can move onto it; its
-tasks stay, and `/kanban show` still shows them. A chat still on it is told to move before its
-next `/kanban new`, and its `/kanban board list` still lists it, marked archived. `default` is never
+tasks stay, and `/kanban task show` still shows them. A chat still on it is told to move before its
+next `/kanban task new`, and its `/kanban board list` still lists it, marked archived. `default` is never
 archived.
 
 ### Who may do what
@@ -929,42 +934,46 @@ an agent may run in.
 ## 11. From a terminal
 
 Whoever runs the gateway can drive the board from a shell on its host, with `mt kanban`: chat's
-commands, with the same meaning, recorded as `operator:<login>`, the login of the account `mt`
+commands, in the same groups (`mt kanban task …`, `mt kanban board …`, `mt kanban gate …`), with
+the same meaning, recorded as `operator:<login>`, the login of the account `mt`
 runs as (under `sudo -u`, the service account). It needs no Lark settings,
 and works beside the running gateway.
 
 ```
 mt kanban board create web-app
-mt kanban new "Draft the Q3 summary" --board web-app --assignee docs-writer --workspace docs \
+mt kanban task new "Draft the Q3 summary" --board web-app --assignee docs-writer --workspace docs \
     --outcome "a page in the team wiki" --verify "the page links every source" \
     --body "Use last quarter's page as the model."
-mt kanban list --board web-app
-mt kanban show k_…
-mt kanban stop k_…
+mt kanban task list --board web-app
+mt kanban task show k_…
+mt kanban task stop k_…
 ```
 
 > created k\_…: Draft the Q3 summary, for role docs-writer, in docs, on board web-app
 
-- There is no `board use`: a terminal is no chat. `new` and `list` take `--board <name>`, and
-  are on `default` without it.
-- The commands that name a task (`show`, `assign`, `link`, `unblock`, `stop`, `archive` and
-  `comment`) work on a task on any board, by id. Give them `--board <name>` to be sure: a task
+- There is no `board use`: a terminal is no chat. `task new` and `task list` take
+  `--board <name>`, and are on `default` without it.
+- The task commands that name a task (`show`, `assign`, `link`, `unblock`, `stop`, `archive`
+  and `comment`) work on a task on any board, by id. Give them `--board <name>` to be sure: a task
   on another board is then refused, and for `link` both tasks must be on it.
 
   > mt: task k\_… is on board default, not web-app
-- `new` takes the lines of `/kanban new` as flags: `--assignee`, `--reviewer`, `--workspace`,
+- `task new` takes the lines of `/kanban task new` as flags: `--assignee`, `--reviewer`, `--workspace`,
   `--parent` (as often as needed), `--outcome`, `--verify`, `--constraints`, `--boundaries` and
   `--stop-when`. The body is `--body "…"`, or `--body-file` with a file, or `-` to read it from
   stdin.
 - Only roles: give a person work from chat, by @-mention.
 - No chat follows a task created here, so nobody is told when it is done or blocks. Look with
-  `mt kanban show`, or create it from chat if a group should hear.
+  `mt kanban task show`, or create it from chat if a group should hear.
 - After a change, the running gateway is told to look for work at once, and to stop the agent
   of a run the change ended. If no gateway answers, `mt` says so, and why; the change stands,
   and the gateway acts on it at its next sweep, or when it next starts. Do not run the command
-  again: a second `new` makes a second task. If the board is off on the gateway
+  again: a second `task new` makes a second task. If the board is off on the gateway
   (`kanban.enabled` unset, or false), `mt` says that instead: nothing runs the change until it
   is turned on.
+- A task command needs `task`: `mt kanban new`, without it, is an unknown command. `mt kanban
+  show`, `comment` and `link` are the commands an agent runs inside a board run, which take JSON
+  on stdin and work only there.
 - Add `--json` for one line of JSON, for scripts. `mt` exits 0 when done, 1 when refused, and
   2 for a wrong command line.
 
@@ -976,7 +985,7 @@ mt kanban stop k_…
   first.
 - Use a gate for anything checkable. A gate that fails tells the agent exactly what is wrong.
 - Want the agent to see the gates? Create the task without an assignee, add the gates, then
-  `/kanban assign` it.
+  `/kanban task assign` it.
 - Want review? Name a `reviewer:` on the task, or make a separate review task under it, not both.
 - Want parallel work? Give each task its own workspace, or they queue.
 - Several projects? Give each a board, keep its group on it with `/kanban board use`, and give
