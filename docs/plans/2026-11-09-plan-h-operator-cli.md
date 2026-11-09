@@ -8,9 +8,9 @@
 - **The database's name** (`src/config.ts`): `$MT_HOME/team.db` unless `MT_DB` or `db:` names one; every test fixture follows.
 - **Chat** (`src/kanban/chat-parse.ts`, `chat.ts`, `chat-render.ts`): the verb `board list` in place of `boards`; and the parts the terminal shares, exported: `boardSetting` (a board's setting as typed), `tooBig` (a new task's limits), `listed` (which tasks a list shows, in what order), `counted` and `runState`.
 - **The board** (`src/kanban/types.ts`, `service.ts`): a task created at a terminal is created via `{ kind: 'operator' }`, which no chat follows. `db/kanban.ts` is unchanged, and stays the board's only writer.
-- **The nudge** (`src/kanban/worker.ts`): `{"nudge": true}`, the one request on the worker socket that needs no token. It asks for a dispatcher pass and does nothing else.
+- **The nudge** (`src/kanban/worker.ts`): `{"nudge": true}`, the one request on the worker socket that needs no token. It asks for a dispatcher pass, one per tick however many arrive, and does nothing else.
 - **The dispatcher** (`src/kanban/dispatcher.ts`): each pass first cancels the turn of every run of its own that a person's action decided (`cancelled`, `superseded`), whoever made the change, so a stop or an assign made at the terminal reaches the running agent as chat's does.
-- **The terminal** (`src/cli/operator.ts`, `plain.ts`, `gate.ts`, `kanban.ts`, `mt.ts`): the operator's commands, their plain-text rendering, the board opening shared with `mt kanban gate`, the nudge client, and the routing that decides, from the shell's environment and the command's name, whether `mt kanban …` is the operator's or the worker's.
+- **The terminal** (`src/cli/operator.ts`, `plain.ts`, `args.ts`, `gate.ts`, `kanban.ts`, `mt.ts`): the operator's commands, their plain-text rendering, the board opening shared with `mt kanban gate`, the nudge client, and the routing that decides, from the shell's environment and the command's name, whether `mt kanban …` is the operator's or the worker's.
 
 **Tech Stack:** TypeScript (Node 22, ESM/NodeNext, strict, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`), vitest, better-sqlite3, `node:util` `parseArgs`.
 
@@ -37,30 +37,33 @@
 
 ## Decisions
 
-Each has a recommendation and its reason. *The user's decision* marks those the user made before this plan was written; **[you decide]** marks one still open, with the recommendation this plan builds.
+Each has its reason. *The user's decision* marks those the user made, before this plan was written or on its first draft; every decision is now settled. The first draft's review findings are listed after the limitations, with what became of each.
 
 1. **`/kanban board list [all]` replaces `/kanban boards [all]`.** *The user's decision.* Same tier (talk), same output, its usage line and help line under `board`. No alias: `/kanban boards` is answered as an unknown command, which points at `/kanban help`. `/kanban list` stays the task list.
 2. **Chat's board commands at the terminal.** *The user's decision.* `mt kanban board list|create|set|archive`, and `mt kanban new|list|show|assign|link|unblock|stop|archive|comment`, with chat's semantics. The tiers are chat's, and whoever has a shell as the gateway's user holds operator tier: they could edit `config.yaml` anyway. Built as `mt kanban gate` is: the same `openBoard`, now shared and exported from `src/cli/gate.ts`, through `KanbanService`, WAL and the writer's busy retries, recorded as `operator:<login>`. Not offered: chat's `workspace`, a person's `done`, `block`, `review`, `approve` and `changes`, and `gate`, which the terminal has had already.
 3. **No `board use`.** *The user's decision.* `mt kanban board use` is a usage error saying why. `new` and `list` take `--board <name>`, `default` unless given.
-4. **`--board` only on `new` and `list`.** **[you decide]** The other commands name a task, by id, which is unique across boards, and work on any board, as chat's do (spec §16.4); a `--board` there could only refuse a task found elsewhere. `list --board` naming no board is refused `unknown_board`, rather than printing an empty list.
+4. **`--board` on every operator command that takes a task.** *The user's decision*, on the first draft, which had it on `new` and `list` only. `show`, `assign`, `link`, `unblock`, `stop`, `archive` and `comment` take `--board <name>` too. With it, the command is refused `other_board` (`task k_… is on board default, not web-app`) unless the task is on that board, and for `link` unless both are; a board that does not exist is refused `unknown_board`, as `list` refuses one; and nothing is changed. Without it, a task on any board, by id, as chat (spec §16.4). `board set` and `board archive` name their board positionally, and are as they were. `--board` is trimmed, and a blank one is a wrong command line, exit 2, on every command.
 5. **`new`'s shape.** *The user's decision*, in outline; the shape is this plan's. `mt kanban new <title words…> [--board] [--assignee] [--reviewer] [--workspace] [--parent …] [--outcome] [--verify] [--constraints] [--boundaries] [--stop-when] [--body "…" | --body-file <path|->] [--json]`. The title is every word that is not a flag, joined with spaces, as `gate add`'s command is. `--parent` may be repeated, and each may hold several ids separated by spaces or commas, as chat's `parent:`. A flag with an empty value is a usage error, as chat's empty field is refused. **The body is never read from stdin unasked:** `--body-file -` reads it, and is refused at once on a terminal, as the worker CLI refuses one; so a script's pipe is never swallowed and a terminal never waits. `--body` and `--body-file` together are a usage error. Chat's limits hold: a title of at most 512 bytes, a body of at most 64 KiB, each contract field at most 8 KiB (`tooBig`, shared with chat), and a comment at most 16 KiB.
-6. **Output.** *The user's decision*: plain text by default, `--json` for scripts; exit 0 done, 1 refused, 2 a wrong command line, as `mt kanban gate`. Plain text is chat's wording without Lark markdown, every piece masked and stripped of control characters, so an escape sequence in a title cannot drive the terminal (`src/cli/plain.ts`). With `--json`, one line, `{"ok": true, …}` or `{"ok": false, "code": …, "message": …}`, every string masked by the socket's own `maskAll`. A wrong command line is said on stderr with the usage, exit 2, with or without `--json`: it is found before the flags are read. `list` prints every task, not chat's first 30.
+6. **Output.** *The user's decision*: plain text by default, `--json` for scripts; exit 0 done, 1 refused, 2 a wrong command line, as `mt kanban gate`. Plain text is chat's wording without Lark markdown, every piece masked and stripped of control characters, so an escape sequence in a title cannot drive the terminal (`src/cli/plain.ts`). With `--json`, one line, `{"ok": true, …}` or `{"ok": false, "code": …, "message": …}`, every string masked by the socket's own `maskAll`, and the characters JSON leaves as they are that a terminal or a reader may act on (C1 controls U+0080 to U+009F, U+2028, U+2029 and the bidi controls) written as `\uXXXX` (`jsonLine`). Plain text drops the bidi controls (U+202A to U+202E, U+2066 to U+2069) as it drops control characters, so an override cannot make a line read as something it is not. A wrong command line is said on stderr with the usage, exit 2, with or without `--json`: it is found before the flags are read. `list` prints every task, not chat's first 30.
 7. **The grammar: whose `mt kanban <command>` it is.** The worker's names are `show|complete|review|changes|block|comment|create|link`; three of them, `show`, `comment` and `link`, are the operator's too. `src/cli/mt.ts` decides:
    - `complete`, `review`, `changes`, `block` and `create` are always the worker's; outside a run they answer `not_in_a_run` in JSON, as today.
    - `gate`, `board`, `new`, `list`, `assign`, `unblock`, `stop` and `archive` are always the operator's.
    - `show`, `comment` and `link`, and any name neither has, are the worker's in a board run's shell (`MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` set, as `mt kanban gate` already reads it), and the operator's elsewhere.
 
    And the shapes never overlap: the worker's commands take no arguments and read JSON on stdin, the operator's `show`, `comment` and `link` always take a task id. So in a run's shell `mt kanban show k_1` is the worker's `bad_request`, exit 2, never the operator's show; and outside one `mt kanban show` is a usage error, never the worker's. An agent always gets the worker's JSON for a name it might mean.
-8. **The operator's commands refuse to run in a board run's shell.** **[you decide]** Recommended, as `mt kanban gate` does today, with the same message, exit 1, before the database is opened. An agent runs as the gateway's user, with a shell, so it can reach these commands; refusing them where the run's variables are set stops an agent acting as the operator by accident, outside its token's scope (spec §7.2). It is not a security boundary, and the plan says so (Known limitations); it is not one for `gate` today either. Allowing them would make every agent an operator for the asking.
-9. **The nudge.** *The user's decision*: a request that only triggers `pass()`, needs no token, and is harmless. It is exactly `{"nudge": true}`, one line on `$MT_HOME/run/kanban.sock` (or the socket's fallback path, computed by the same `workerSocketPath`), answered `{"ok": true}`; any other shape is an ordinary request and refused `bad_request` as today. It is handled in `WorkerApi.handle`, before the token, and calls the API's `changed`, which the gateway already wires to `dispatcher.pass()`. Harmless because it names nothing, carries nothing and changes nothing, and a pass is what the sweep does every `sweep_interval_s` anyway; and only the gateway's user can connect (`0600` in a `0700` directory). The CLI waits up to 2 s for the answer.
-10. **Which changes nudge.** **[you decide]** Those chat follows with the dispatcher's pass: `new`, `assign`, `unblock`, `stop`, `archive` and `board set`. Not `link`, `comment`, `board create` or `board archive`, which make nothing claimable and decide no run. Recommended over nudging after every change, to keep "the same semantics as chat" literal; nudging more would be harmless too. With `--json` the answer carries `"nudged": true|false`.
-11. **When no gateway answers**, the change stands, `mt` exits 0, and says on stderr: `mt: no gateway answered at <socket> (<why>); the change stands: a running gateway acts on it at its next sweep, and a stopped one when it next starts`.
-12. **A pass cancels the turns of runs a person's action decided.** **[you decide]** Chat cancels the turn of an agent run its `assign`, `stop` or `archive` decided by calling `dispatcher.cancel()` in process; a terminal cannot. So each `pass()` first cancels, through the same `cancel()`, every run this process started that is not being cancelled yet and whose outcome is `cancelled` or `superseded` (`SUPERSEDING_OUTCOMES`). The nudge brings that pass at once, and the sweep within `sweep_interval_s` if the nudge was lost. A run that decided itself, by its report, ends its own turn and is left alone. Recommended over a nudge naming the run to cancel, which would be more than "nothing but a pass", and over leaving the agent working until `max_runtime_s`, holding its workspace and its slot.
+8. **The operator's commands refuse to run in a board run's shell.** *The user's decision*, as recommended: as `mt kanban gate` does today, with the same message, exit 1, before the database is opened. An agent runs as the gateway's user, with a shell, so it can reach these commands; refusing them where the run's variables are set stops an agent acting as the operator by accident, outside its token's scope (spec §7.2). It is not a security boundary, and the plan says so (Known limitations); it is not one for `gate` today either. Allowing them would make every agent an operator for the asking.
+9. **The nudge.** *The user's decision*: a request that only triggers `pass()`, needs no token, and is harmless. It is exactly `{"nudge": true}`, one line on `$MT_HOME/run/kanban.sock` (or the socket's fallback path, computed by the same `workerSocketPath`), answered `{"ok": true}`; any other shape is an ordinary request and refused `bad_request` as today. It is handled in `WorkerApi.handle`, before the token, and calls the API's `changed`, which the gateway already wires to `dispatcher.pass()`, on the next tick: a burst of nudges before it runs asks for that one pass, so a loop of them cannot make the gateway run a pass for each. Harmless because it names nothing, carries nothing and changes nothing, and a pass is what the sweep does every `sweep_interval_s` anyway; and only the gateway's user can connect (`0600` in a `0700` directory). The CLI waits up to 2 s for the answer.
+10. **Which changes nudge.** *The user's decision*, as recommended: those chat follows with the dispatcher's pass: `new`, `assign`, `unblock`, `stop`, `archive` and `board set`. Not `link`, `comment`, `board create` or `board archive`, which make nothing claimable and decide no run. So "the same semantics as chat" is literal. With `--json` the answer carries `"nudged": true|false`.
+11. **When no gateway answers**, the change stands, `mt` exits 0, and says on stderr: `mt: no gateway answered at <socket> (<why>); the change stands: a running gateway acts on it at its next sweep, and a stopped one when it next starts`. **When the board is off** (the config does not set `kanban.enabled`, which `loadTeamSettings` now reads as `kanbanEnabled`), no gateway is asked and none would sweep, so `mt` says instead: `mt: the board is off on this gateway (its config does not set kanban.enabled): the change is recorded, and nothing runs it until the board is turned on and the gateway restarted`; `--json` says `"nudged": false`.
+12. **A pass cancels the turns of runs a person's action decided.** *The user's decision*, as recommended. Chat cancels the turn of an agent run its `assign`, `stop` or `archive` decided by calling `dispatcher.cancel()` in process; a terminal cannot. So each `pass()` first cancels, through the same `cancel()`, every run this process started that is not being cancelled yet and whose outcome is `cancelled` or `superseded` (`SUPERSEDING_OUTCOMES`). The nudge brings that pass at once, and the sweep within `sweep_interval_s` if the nudge was lost. A run that decided itself, by its report, ends its own turn and is left alone, and so is one already closing. Each run's cancel is caught and noted, so one failure never ends the pass; a cancel that failed after marking the run is sent by the next sweep, as one made while an agent was still starting is. Chosen over a nudge naming the run to cancel, which would be more than "nothing but a pass", and over leaving the agent working until `max_runtime_s`, holding its workspace and its slot. The review's dry run showed it is needed: without it the end-to-end stop waits on its agent for ever.
 13. **A task created at a terminal** is created via `{ kind: 'operator' }`, a third `CreatedVia` shape the service accepts (with no other field), so the writer subscribes no chat to it. Its creator is `operator:<login>`. A chat's idempotency key (`lark:…`) is refused for it, as for a run.
-14. **No people from the terminal.** **[you decide]** `assign`, `--assignee` and `--reviewer` take a role; a person (`@Name` or `lark:<union_id>`) is refused `person_not_assignable`, saying to use chat. Being assigned needs talk tier (spec §4.2), which is decided by the gateway's Lark allowlist; the terminal, like `mt kanban gate`, reads no Lark settings. Recommended over loading the gateway's whole config, which needs its Lark secret in the shell, and over taking the operator's word for it.
+14. **No people from the terminal.** *The user's decision*, as recommended: `assign`, `--assignee` and `--reviewer` take a role; a person (`@Name` or `lark:<union_id>`) is refused `person_not_assignable`, saying to use chat. Being assigned needs talk tier (spec §4.2), which is decided by the gateway's Lark allowlist; the terminal, like `mt kanban gate`, reads no Lark settings. Chosen over loading the gateway's whole config, which needs its Lark secret in the shell, and over taking the operator's word for it.
 15. **The service the terminal builds** is the gateway's: its roles and workspaces, from the shell's config, and `supervisedRoles: true`, so a supervised role is accepted as chat accepts it. `mt kanban gate`'s service gets the same; it changes nothing for gates.
 16. **Shared, not copied.** The parsing, validation and rendering choices are chat's own functions: `boardSetting`, `tooBig`, `isPerson` and `LIST_FILTERS` from `chat-parse.ts`; `listed`, `counted` and `runState` from `chat-render.ts`. Only the words and the markup differ: chat's are Lark markdown, the terminal's plain text.
 17. **The database is `team.db`.** *The user's decision*, with no transition code. Nothing else keys on the file's name: the gateway's lock is `$MT_HOME/run/gateway.pid` and its socket `$MT_HOME/run/kanban.sock`, both named by the home; the `mt` commands find the database by the gateway's own rule (`MT_DB`, else `db:`, else `$MT_HOME/team.db`, `loadTeamSettings`); `MT_DB` and `db:` name a file and are untouched, so a deployment that sets either keeps its file and must not move it; the backups are named by hand (`gateway-v5.db` from the boards' smoke test, `gateway-pre-rename.db` below); `.gitignore` ignores `*.db`. The plans already written keep `gateway.db`, as history.
+18. **A title is one line.** `mt kanban new` refuses, as a wrong command line, a title holding a line break, U+2028, U+2029 or any other control character, rather than changing it silently: chat's title is a single line by construction, and a script that passes a multi-line title has a bug it should hear about. `tooBig` then checks its size.
+19. **A body file is a regular file.** `--body-file <path>` refuses a directory, a device such as `/dev/null`, and a FIFO, which could block or never end, before reading; its size is checked before it is read. `-` is stdin, read with the 64 KiB cap.
+20. **The command line's parts in one module.** `UsageError`, `parse`, `refuse` and `table` move from `mt.ts` to `src/cli/args.ts`, which imports nothing of `mt`'s at run time, and `gate.ts`, `role.ts`, `workspace.ts`, `plain.ts` and `operator.ts` import them from there; `mt.ts` is imported only for types. So `mt.ts` → `operator.ts` → `plain.ts` → `mt.ts`, and the older `mt.ts` → `gate.ts` → `mt.ts`, are no longer cycles.
 
 ## Known limitations
 
@@ -70,34 +73,56 @@ Each has a recommendation and its reason. *The user's decision* marks those the 
 - **No idempotency key on `mt kanban new`**: a script that retries a `new` whose answer it lost makes a second task.
 - **No `workspace`, and no person's reports, at the terminal** (Decision 2).
 - **A run decided at the terminal while no gateway answers** has its turn cancelled at the gateway's next sweep, within `kanban.sweep_interval_s`.
-- **An archive from the terminal of a task whose run has already reported** leaves that run's turn to end by itself; chat's archive cancels it.
+- **A stop, an assign or an archive from the terminal of a task whose run has already reported** leaves that run's turn to end by itself: the pass cancels only runs a person's action decided (`cancelled`, `superseded`), and such a run keeps its own outcome. Chat's commands cancel it. The run closes when its agent's turn ends, which `stop`'s reply says.
 - **Masking at the terminal** uses the secrets that shell knows: every role's values, and the Lark app secret if `LARK_APP_SECRET` is set there. A `passEnv` name unset in the shell is said to be unmasked.
-- **The nudge runs a pass in the gateway's process**: a same-user process sending nudges in a loop could keep the gateway busy, as that user could stop it anyway.
+- **The nudge runs a pass in the gateway's process**, one per tick however many arrive (Decision 9); a same-user process could still connect in a loop, as it could stop the gateway outright.
+- **A flaky gate test.** `tests/kanban-gates.e2e.ts`, "stops a gate when the gateway stops, keeping what it wrote", failed once under load during the first draft's review. It was not reproduced here (twelve runs of it beside two concurrent unit runs all passed), and the failing assertion was not recorded, so no fix is added: loosening one of its five assertions blind could hide a real fault. If it fails again, note which assertion: its signal check (`SIGTERM`, or exit 143) would fail if the shell were only killed by the `SIGKILL` 2 s later.
+
+## Review of the first draft
+
+An independent dry run of the first draft confirmed every quoted text and every count, and that Task 6 is needed. Its findings, and what became of each:
+
+| Finding | Outcome |
+|---|---|
+| A start before the deploy's `mv` makes an empty `team.db`, whose leftover `-wal` would be replayed into the moved file | The deploy warns, before step 1, not to start the new build or let a service manager restart the old one until step 3 is done; step 3 changes to the home and stops if any `team.db`, `team.db-wal` or `team.db-shm` exists |
+| `#cancelDecided` could throw out of `pass()`, and cancelled runs already closing | Each run's cancel is caught and noted, runs already closing are skipped; a test makes the cancel throw (Task 6) |
+| The limitation on runs that had already reported named archive only; `stop`'s reply said "it is being closed" | The limitation covers stop, assign and archive; the reply says "it closes when its agent's turn ends" (Task 10) |
+| With the board off, the no-answer message promised a sweep that never comes | `kanbanEnabled` is read, and the board's being off is said instead (Decision 11, Task 9) |
+| `--board` was not trimmed everywhere; `board list ALL` was refused | `boardFlag` trims it and refuses a blank one on every command; `all` is read in any case (Tasks 9 and 10) |
+| A title could hold a newline or a control character | Refused as a wrong command line (Decision 18, Task 10) |
+| Bidi controls in plain text; C1 controls, U+2028, U+2029 and bidi controls in JSON | Dropped from plain text; escaped in JSON by `jsonLine`; both tested (Decision 6, Tasks 8 and 9) |
+| The README said `operator:<your login>` | It says the login of the account the command runs as, the service account under `sudo -u` (Task 12) |
+| `--body-file` would read a FIFO or a device | Refused unless a regular file; tested with a directory, `/dev/null` and a FIFO (Decision 19, Task 10) |
+| `mt.ts` → `operator.ts` → `plain.ts` → `mt.ts` was a cycle | `src/cli/args.ts` (Decision 20, Task 7) |
+| A flood of nudges ran a pass each | Coalesced to one per tick (Decision 9, Task 5) |
+| `tests/kanban-gates.e2e.ts` failed once under load | Not reproduced; recorded, not changed (Known limitations) |
 
 ## File map
 
 | File | Responsibility |
 |---|---|
-| `src/config.ts`, `config.example.yaml` (modify) | `$MT_HOME/team.db` |
+| `src/config.ts`, `config.example.yaml` (modify) | `$MT_HOME/team.db`; `TeamSettings.kanbanEnabled` |
 | `src/kanban/chat-parse.ts` (modify) | `board list` in place of `boards`; `BoardSetting`, `boardSetting`, `tooBig` |
 | `src/kanban/chat.ts` (modify) | `board list`'s tier and answer; `tooBig` |
 | `src/kanban/chat-render.ts` (modify) | the help line; `listed`, `counted`, `runState` exported |
 | `src/kanban/service.ts`, `src/db/kanban-read.ts` (modify) | `{ kind: 'operator' }` accepted; comments naming `board list` |
 | `src/kanban/types.ts` (modify) | `CreatedVia`'s operator shape; `SUPERSEDING_OUTCOMES` exported |
-| `src/kanban/worker.ts` (modify) | `NUDGE`, answered before the token |
-| `src/kanban/dispatcher.ts` (modify) | `#cancelDecided` at the start of each pass |
+| `src/kanban/worker.ts` (modify) | `NUDGE`, answered before the token, its passes one per tick |
+| `src/kanban/dispatcher.ts` (modify) | `#cancelDecided` at the start of each pass, which never throws |
 | `src/kanban/socket.ts` (modify) | `maskAll` exported |
-| `src/cli/plain.ts` (create) | the board as plain text: `boardsText`, `listText`, `showText`, `line`, `who` |
-| `src/cli/gate.ts` (modify) | `inBoardRun`, `openBoard`, `withBoard` shared, with the refusal's form and the unset note given |
+| `src/cli/args.ts` (create) | `UsageError`, `parse`, `refuse`, `table`, moved from `mt.ts` |
+| `src/cli/role.ts`, `src/cli/workspace.ts` (modify) | import them from `args.ts` |
+| `src/cli/plain.ts` (create) | the board as plain text: `boardsText`, `listText`, `showText`, `line`, `who`, `BIDI` |
+| `src/cli/gate.ts` (modify) | `inBoardRun`, `openBoard`, `withBoard` shared, with the refusal's form and the unset note given, and `kanbanEnabled` |
 | `src/cli/kanban.ts` (modify) | `ask` with a timeout, and `why`, exported |
-| `src/cli/operator.ts` (create) | the operator's commands, `nudgeGateway` |
-| `src/cli/mt.ts` (modify) | whose command it is; the usage; `parse` and `UsageError` exported |
+| `src/cli/operator.ts` (create) | the operator's commands, `nudgeGateway`, `jsonLine`, `boardFlag` |
+| `src/cli/mt.ts` (modify) | whose command it is; the usage; its helpers from `args.ts` |
 | `README.md`, `docs/kanban-guide.md` (modify) | `board list`, `team.db`, the terminal |
 | `tests/config.test.ts`, `tests/gateway-startup.test.ts`, `tests/helpers/db.ts`, `tests/kanban-boards-schema.test.ts`, `tests/mt-gate.test.ts`, `tests/mt-role.test.ts`, `tests/mt-workspace.test.ts`, `tests/workspace-registry.test.ts`, `tests/workspaces.test.ts` (modify) | `team.db` |
 | `tests/kanban-board-chat-parse.test.ts`, `tests/kanban-board-chat.test.ts` (modify) | `board list` |
 | `tests/kanban-command-parts.test.ts`, `tests/kanban-operator-created.test.ts`, `tests/kanban-worker-nudge.test.ts`, `tests/kanban-cancel-decided.test.ts`, `tests/mt-plain.test.ts`, `tests/mt-kanban-operator.test.ts`, `tests/mt-kanban-operator-tasks.test.ts`, `tests/mt-operator.e2e.ts` (create) | |
 
-Running counts, unit then end to end: Task 1 1433 / 99, Task 2 1434 / 99, Task 3 1438 / 99, Task 4 1440 / 99, Task 5 1443 / 99, Task 6 1445 / 99, Task 7 1448 / 99, Task 8 1457 / 99, Task 9 1467 / 99, Task 10 1467 / 101, Task 11 1467 / 101.
+Running counts, unit then end to end: Task 1 1433 / 99, Task 2 1434 / 99, Task 3 1438 / 99, Task 4 1440 / 99, Task 5 1444 / 99, Task 6 1447 / 99, Task 7 1447 / 99, Task 8 1451 / 99, Task 9 1462 / 99, Task 10 1475 / 99, Task 11 1475 / 101, Task 12 1475 / 101.
 
 ---
 
@@ -1244,7 +1269,7 @@ git commit -m "Let a task be created by the operator, a third origin beside a ch
 - Create: `tests/kanban-worker-nudge.test.ts`
 - Modify: `src/kanban/worker.ts`
 
-`{"nudge": true}`, and only that, asks for a pass, with no run and no token (Decision 9).
+`{"nudge": true}`, and only that, asks for a pass, with no run and no token; a burst of nudges asks for one pass, on the next tick (Decision 9).
 
 - [ ] **Step 5.1: Write the failing tests.**
 
@@ -1286,16 +1311,31 @@ beforeEach(() => {
 
 afterEach(() => t.close());
 
+/** The next tick, when a nudge's pass runs. */
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
 describe('the nudge', () => {
   it('asks for a pass, with no run or token, and answers ok', async () => {
     expect(await api.handle({ ...NUDGE })).toEqual({ ok: true });
+    await tick();
     expect(passes).toBe(1);
+  });
+
+  it('asks for one pass for a burst of nudges, and another for a nudge after it', async () => {
+    for (let i = 0; i < 5; i += 1) expect(await api.handle({ ...NUDGE })).toEqual({ ok: true });
+    expect(passes).toBe(0);
+    await tick();
+    expect(passes).toBe(1);
+    await api.handle({ ...NUDGE });
+    await tick();
+    expect(passes).toBe(2);
   });
 
   it('is exactly {"nudge": true}: anything else is an ordinary request, refused without a pass', async () => {
     for (const raw of [{ nudge: 'yes' }, { nudge: true, run: 'r_1' }, { nudge: 1 }]) {
       expect(await api.handle(raw)).toMatchObject({ ok: false, code: 'bad_request' });
     }
+    await tick();
     expect(passes).toBe(0);
   });
 
@@ -1315,6 +1355,7 @@ describe('the nudge', () => {
         conn.write(`${JSON.stringify(NUDGE)}\n`);
       });
       expect(line).toBe('{"ok":true}\n');
+      await tick();
       expect(passes).toBe(1);
     } finally {
       await server?.close();
@@ -1324,7 +1365,7 @@ describe('the nudge', () => {
 });
 ```
 
-- [ ] **Step 5.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-worker-nudge.test.ts`. Expected: `Tests  2 failed | 1 passed (3)`: there is no `NUDGE`, and the request is refused as one without a run.
+- [ ] **Step 5.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-worker-nudge.test.ts`. Expected: `Tests  3 failed | 1 passed (4)`: there is no `NUDGE`, and the request is refused as one without a run.
 
 - [ ] **Step 5.3: Implement.**
 
@@ -1332,6 +1373,8 @@ In `src/kanban/worker.ts`, replace:
 
 ```ts
 const ENVELOPE = ['run', 'token', 'command', 'input'];
+
+function isRecord(v: unknown): v is Record<string, unknown> {
 ```
 
 with:
@@ -1345,13 +1388,29 @@ const ENVELOPE = ['run', 'token', 'command', 'input'];
  * a change made beside the gateway, so the change is acted on at once rather
  * than at the next sweep. It names nothing and changes nothing, and a pass is
  * what the sweep does every minute anyway, so whoever can reach the socket
- * gains nothing by it.
+ * gains nothing by it. A burst of nudges asks for one pass, on the next tick.
  */
 export const NUDGE = { nudge: true } as const;
 
 function isNudge(raw: Record<string, unknown>): boolean {
   return raw['nudge'] === true && Object.keys(raw).length === 1;
 }
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+```
+
+In `src/kanban/worker.ts`, replace:
+
+```ts
+  readonly #nameOf: ((principal: string) => string | undefined) | undefined;
+```
+
+with:
+
+```ts
+  readonly #nameOf: ((principal: string) => string | undefined) | undefined;
+  /** A nudge's pass is waiting for the next tick: the nudges after it until then ask for nothing more. */
+  #nudged = false;
 ```
 
 In `src/kanban/worker.ts`, replace:
@@ -1365,18 +1424,24 @@ with:
 ```ts
     if (!isRecord(raw)) return refused('bad_request', 'a request is a JSON object');
     if (isNudge(raw)) {
-      this.#changed();
+      if (!this.#nudged) {
+        this.#nudged = true;
+        setImmediate(() => {
+          this.#nudged = false;
+          this.#changed();
+        });
+      }
       return { ok: true };
     }
 ```
 
-- [ ] **Step 5.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1443 passed (1443)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 5.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1444 passed (1444)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 5.5: Commit.**
 
 ```bash
 git add src/kanban/worker.ts tests/kanban-worker-nudge.test.ts
-git commit -m "Answer a nudge on the worker socket: the one request that needs no token, which asks for a dispatcher pass and does nothing else"
+git commit -m "Answer a nudge on the worker socket: the one request that needs no token, which asks for a dispatcher pass on the next tick, one for a burst of them, and does nothing else"
 ```
 
 ---
@@ -1387,7 +1452,7 @@ git commit -m "Answer a nudge on the worker socket: the one request that needs n
 - Create: `tests/kanban-cancel-decided.test.ts`
 - Modify: `src/kanban/types.ts`, `src/kanban/dispatcher.ts`
 
-A stop made beside the gateway decides the run on the board, but nothing tells the dispatcher to cancel the agent's turn. Each pass now looks (Decision 12).
+A stop made beside the gateway decides the run on the board, but nothing tells the dispatcher to cancel the agent's turn. Each pass now looks, skipping runs already closing, and a cancel that fails is noted without ending the pass (Decision 12).
 
 - [ ] **Step 6.1: Write the failing tests.**
 
@@ -1442,6 +1507,31 @@ describe('Dispatcher: a run decided elsewhere', () => {
     expect(getTask(h.t.db, task.taskId)?.phase).toBe('blocked');
   });
 
+  it('goes on with the pass when cancelling a run fails, and notes it', async () => {
+    const h = harness();
+    const stopped = h.create({ workspace: 'web' });
+    const held = holds(h.driver('implementer'));
+    h.dispatcher.pass();
+    await until(() => held.started, 'the run to start');
+    expect(h.service.stop(stopped.taskId, ME).ok).toBe(true);
+    const next = h.create({ workspace: 'api' });
+    const started = holds(h.driver('implementer'));
+    // The registry fails as the cancel asks it for the stopped run's actor.
+    const liveActor = h.registry.liveActor.bind(h.registry);
+    h.registry.liveActor = () => {
+      throw new Error('the registry failed');
+    };
+    expect(() => h.dispatcher.pass()).not.toThrow();
+    h.registry.liveActor = liveActor;
+    const [run] = runsOf(h.t.db, stopped.taskId);
+    expect(h.notes).toContain(`kanban: cancelling run ${run?.runId} failed: the registry failed`);
+    await until(() => started.started, 'the next task to start');
+    expect(runsOf(h.t.db, next.taskId)).toHaveLength(1);
+    held.end('cancelled');
+    started.end('completed');
+    await h.dispatcher.idle();
+  });
+
   it('leaves alone the turn of a run that decided itself, by its report', async () => {
     const h = harness();
     const task = h.create({ workspace: 'web' });
@@ -1460,7 +1550,7 @@ describe('Dispatcher: a run decided elsewhere', () => {
 });
 ```
 
-- [ ] **Step 6.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-cancel-decided.test.ts`. Expected: `Tests  1 failed | 1 passed (2)`: the pass does not cancel the stopped run's turn.
+- [ ] **Step 6.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-cancel-decided.test.ts`. Expected: `Tests  2 failed | 1 passed (3)`: the pass does not cancel the stopped run's turn, nor note a failed cancel.
 
 - [ ] **Step 6.3: Implement.**
 
@@ -1538,50 +1628,200 @@ with:
    * cancelled yet, and that a person's action decided -- `cancelled` by a stop,
    * `superseded` by an assign, an archive or an operator's answer to a review --
    * whoever made the change. A run that decided itself, by its report, ends its
-   * own turn.
+   * own turn, and one already closing needs nothing. One run's failure is noted,
+   * and never ends the pass.
    */
   #cancelDecided(): void {
     for (const open of [...this.#open.values()]) {
-      if (open.cancelling) continue;
-      let outcome: string | null | undefined;
+      if (open.cancelling || open.closing !== undefined) continue;
       try {
-        outcome = getRun(this.#deps.db, open.runId)?.outcome;
+        const outcome = getRun(this.#deps.db, open.runId)?.outcome;
+        if (outcome !== null && outcome !== undefined && (SUPERSEDING_OUTCOMES as readonly string[]).includes(outcome)) {
+          this.cancel(open.runId);
+        }
       } catch (err) {
-        this.#note(`kanban: reading run ${open.runId} failed: ${message(err)}`);
-        continue;
-      }
-      if (outcome !== null && outcome !== undefined && (SUPERSEDING_OUTCOMES as readonly string[]).includes(outcome)) {
-        this.cancel(open.runId);
+        this.#note(`kanban: cancelling run ${open.runId} failed: ${message(err)}`);
       }
     }
   }
 ```
 
-- [ ] **Step 6.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1445 passed (1445)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 6.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1447 passed (1447)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 6.5: Commit.**
 
 ```bash
 git add src/kanban/types.ts src/kanban/dispatcher.ts tests/kanban-cancel-decided.test.ts
-git commit -m "Cancel, at each dispatcher pass, the turn of any run a person's stop, assign or archive decided, whichever process made the change, so a change made beside the gateway reaches the agent"
+git commit -m "Cancel, at each dispatcher pass, the turn of any run a person's stop, assign or archive decided, whichever process made the change, noting rather than throwing a cancel that fails, so a change made beside the gateway reaches the agent"
 ```
 
 ---
 
-### Task 7: The board as plain text
+### Task 7: The command line's parts in one module
+
+**Files:**
+- Create: `src/cli/args.ts`
+- Modify: `src/cli/mt.ts`, `src/cli/gate.ts`, `src/cli/role.ts`, `src/cli/workspace.ts`
+
+`UsageError`, `parse`, `refuse` and `table` move out of `mt.ts`, so the commands import them without importing `mt.ts`, which imports the commands (Decision 20). No behaviour changes, and no test is added: every `mt` test proves it.
+
+- [ ] **Step 7.1: Implement.**
+
+Create `src/cli/args.ts`:
+
+```ts
+import { parseArgs, type ParseArgsConfig } from 'node:util';
+import type { MtIo } from './mt.js';
+
+/**
+ * The parts every `mt` command shares: reading its arguments, refusing, and
+ * printing a table. Their own module, which imports nothing of `mt`'s at run
+ * time, so the commands can use them without importing `mt.ts`, which imports
+ * them.
+ */
+
+/** A wrong command line: said with the usage, exit 2. */
+export class UsageError extends Error {}
+
+/** Strict: an unknown option is a usage error, not something to guess at. */
+export function parse<T extends NonNullable<ParseArgsConfig['options']>>(args: readonly string[], options: T) {
+  try {
+    return parseArgs({ args: [...args], options, allowPositionals: true, strict: true });
+  } catch (err) {
+    throw new UsageError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** Prints a refusal and returns its exit code. */
+export function refuse(io: MtIo, message: string): number {
+  io.err(`mt: ${message}`);
+  return 1;
+}
+
+/** Rows as aligned columns, for the list commands. */
+export function table(rows: readonly (readonly string[])[]): string[] {
+  const widths: number[] = [];
+  for (const row of rows) row.forEach((cell, i) => (widths[i] = Math.max(widths[i] ?? 0, cell.length)));
+  return rows.map((row) => row.map((cell, i) => cell.padEnd(widths[i] ?? 0)).join('  ').trimEnd());
+}
+```
+
+In `src/cli/mt.ts`, replace:
+
+```ts
+import { parseArgs, type ParseArgsConfig } from 'node:util';
+import { ConfigError, type Env } from '../config.js';
+```
+
+with:
+
+```ts
+import { ConfigError, type Env } from '../config.js';
+import { parse, refuse, UsageError } from './args.js';
+```
+
+In `src/cli/mt.ts`, replace:
+
+```ts
+class UsageError extends Error {}
+
+/** Strict: an unknown option is a usage error, not something to guess at. */
+function parse<T extends NonNullable<ParseArgsConfig['options']>>(args: readonly string[], options: T) {
+  try {
+    return parseArgs({ args: [...args], options, allowPositionals: true, strict: true });
+  } catch (err) {
+    throw new UsageError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+function expectNothing(positionals: readonly string[], what: string): void {
+  if (positionals.length > 0) throw new UsageError(`${what} takes no arguments`);
+}
+
+/** Prints a refusal and returns its exit code. */
+export function refuse(io: MtIo, message: string): number {
+  io.err(`mt: ${message}`);
+  return 1;
+}
+
+/** Rows as aligned columns, for the list commands. */
+export function table(rows: readonly (readonly string[])[]): string[] {
+  const widths: number[] = [];
+  for (const row of rows) row.forEach((cell, i) => (widths[i] = Math.max(widths[i] ?? 0, cell.length)));
+  return rows.map((row) => row.map((cell, i) => cell.padEnd(widths[i] ?? 0)).join('  ').trimEnd());
+```
+
+with:
+
+```ts
+function expectNothing(positionals: readonly string[], what: string): void {
+  if (positionals.length > 0) throw new UsageError(`${what} takes no arguments`);
+```
+
+In `src/cli/gate.ts`, replace:
+
+```ts
+import { refuse, table, type MtIo } from './mt.js';
+```
+
+with:
+
+```ts
+import { refuse, table } from './args.js';
+import type { MtIo } from './mt.js';
+```
+
+In `src/cli/role.ts`, replace:
+
+```ts
+import { refuse, table, type MtIo } from './mt.js';
+```
+
+with:
+
+```ts
+import { refuse, table } from './args.js';
+import type { MtIo } from './mt.js';
+```
+
+In `src/cli/workspace.ts`, replace:
+
+```ts
+import { refuse, table, type Git, type MtIo } from './mt.js';
+```
+
+with:
+
+```ts
+import { refuse, table } from './args.js';
+import type { Git, MtIo } from './mt.js';
+```
+
+- [ ] **Step 7.2: Run everything.** Run `grep -n "from './mt.js'" src/cli/*.ts`. Expected: five lines, each an `import type`. Run `npx vitest run --project unit`. Expected: `Tests  1447 passed (1447)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
+
+- [ ] **Step 7.3: Commit.**
+
+```bash
+git add src/cli/args.ts src/cli/mt.ts src/cli/gate.ts src/cli/role.ts src/cli/workspace.ts
+git commit -m "Move the mt commands' shared parts, reading arguments, refusing and printing a table, into a module of their own, so no command imports mt.ts back"
+```
+
+---
+
+### Task 8: The board as plain text
 
 **Files:**
 - Create: `src/cli/plain.ts`, `tests/mt-plain.test.ts`
 
-What the terminal prints: chat's board list, task list and task view, in plain text, masked and stripped of control characters (Decision 6), using chat's `listed`, `counted` and `runState`.
+What the terminal prints: chat's board list, task list and task view, in plain text, masked and stripped of control characters and bidi controls (Decision 6), using chat's `listed`, `counted` and `runState`.
 
-- [ ] **Step 7.1: Write the failing tests.**
+- [ ] **Step 8.1: Write the failing tests.**
 
 Create `tests/mt-plain.test.ts`:
 
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { boardsText, listText, showText } from '../src/cli/plain.js';
+import { boardsText, line, listText, showText } from '../src/cli/plain.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { addSecrets, clearSecrets } from '../src/secrets.js';
 import { ManualClock, testDb, type TestDb } from './helpers/db.js';
@@ -1615,6 +1855,12 @@ function create(title: string, extra: { board?: string; body?: string } = {}): s
   if (!r.ok) throw new Error(r.message);
   return r.task.taskId;
 }
+
+describe('line', () => {
+  it('drops the characters that reorder text, as it drops control characters', () => {
+    expect(line('evil\u202Etxt.exe\u202C and \u2066isolated\u2069\u0007')).toBe('eviltxt.exe and isolated');
+  });
+});
 
 describe('boardsText', () => {
   it('gives each board a line: its tasks by phase, its own settings, and whether it is archived', () => {
@@ -1671,9 +1917,9 @@ describe('showText', () => {
 });
 ```
 
-- [ ] **Step 7.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-plain.test.ts`. Expected: `Test Files  1 failed (1)`, with no test run: there is no `src/cli/plain.ts` to import.
+- [ ] **Step 8.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-plain.test.ts`. Expected: `Test Files  1 failed (1)`, with no test run: there is no `src/cli/plain.ts` to import.
 
-- [ ] **Step 7.3: Implement.**
+- [ ] **Step 8.3: Implement.**
 
 Create `src/cli/plain.ts`:
 
@@ -1684,7 +1930,7 @@ import type { DisplayStatus } from '../kanban/status.js';
 import type { Assignee, GateRow } from '../kanban/types.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
-import { table } from './mt.js';
+import { table } from './args.js';
 
 /**
  * What the operator's `mt kanban` prints (spec §2.6): the board as chat shows it
@@ -1692,16 +1938,21 @@ import { table } from './mt.js';
  * Which tasks a list shows, in what order, and how a board's tasks are counted
  * are chat's own functions, so the two never disagree.
  *
- * Every piece is masked, and stripped of control characters, first: a task's
- * text is untrusted, and an escape sequence in a title would drive the terminal.
+ * Every piece is masked, and stripped of control characters and of the
+ * characters that reorder text (bidi embeddings, overrides and isolates), first:
+ * a task's text is untrusted, an escape sequence in a title would drive the
+ * terminal, and an override would make a line read as something it is not.
  * Nothing is escaped, since a terminal renders no markdown.
  */
 
 const LOW_SURROGATE = /^[\uDC00-\uDFFF]/;
 
+/** The characters that reorder what follows them: U+202A to U+202E, and U+2066 to U+2069. */
+export const BIDI = /[\u202A-\u202E\u2066-\u2069]/g;
+
 /** Masked and stripped, with every line break a newline. */
 function clean(text: string): string {
-  return redactKnownSecrets(stripControl(text)).replace(/\r\n?/g, '\n');
+  return redactKnownSecrets(stripControl(text)).replace(BIDI, '').replace(/\r\n?/g, '\n');
 }
 
 /** The first `max` UTF-16 units at most, with `marker` when anything was cut, on a character boundary. */
@@ -1807,33 +2058,54 @@ export function showText(view: TaskView, gates: readonly GateRow[]): string[] {
 }
 ```
 
-- [ ] **Step 7.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1448 passed (1448)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 8.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1451 passed (1451)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 7.5: Commit.**
+- [ ] **Step 8.5: Commit.**
 
 ```bash
 git add src/cli/plain.ts tests/mt-plain.test.ts
-git commit -m "Render the board as plain text for a terminal: the boards, a board's tasks and one task, as chat shows them, masked and without control characters"
+git commit -m "Render the board as plain text for a terminal: the boards, a board's tasks and one task, as chat shows them, masked and without control or bidi characters"
 ```
 
 ---
 
-### Task 8: The operator's board commands, and whose command it is
+### Task 9: The operator's board commands, and whose command it is
 
 **Files:**
 - Create: `src/cli/operator.ts`, `tests/mt-kanban-operator.test.ts`
-- Modify: `src/cli/gate.ts`, `src/cli/kanban.ts`, `src/cli/mt.ts`, `src/kanban/socket.ts`
+- Modify: `src/config.ts`, `src/cli/gate.ts`, `src/cli/kanban.ts`, `src/cli/mt.ts`, `src/kanban/socket.ts`, `tests/config.test.ts`
 
-The frame every operator command runs in: the board opened as `mt kanban gate` opens it, now shared, a refusal said on stderr or in JSON, the nudge after a change and what is said when no gateway answers (Decisions 9 to 11); and the first commands, `board list|create|set|archive` (Decision 3). `mt.ts` decides whose command a line is (Decisions 7 and 8). The task commands follow in Task 9; until then `mt kanban show` outside a run is a usage error.
+The frame every operator command runs in: the board opened as `mt kanban gate` opens it, now shared, with `kanban.enabled` read from the config; a refusal said on stderr or in JSON (`jsonLine`); the nudge after a change, what is said when no gateway answers, and what is said when the board is off (Decisions 9 to 11); and the first commands, `board list|create|set|archive` (Decision 3). `mt.ts` decides whose command a line is (Decisions 7 and 8). The task commands follow in Task 10; until then `mt kanban show` outside a run is a usage error.
 
-- [ ] **Step 8.1: Write the failing tests.**
+- [ ] **Step 9.1: Write the failing tests.**
+
+In `tests/config.test.ts`, replace:
+
+```ts
+    expect(s).toEqual({ home: c.home, configPath: c.configPath, dbPath: c.dbPath, workspaces: c.workspaces, agent: c.agent });
+```
+
+with:
+
+```ts
+    expect(s).toEqual({
+      home: c.home,
+      configPath: c.configPath,
+      dbPath: c.dbPath,
+      kanbanEnabled: c.kanban.enabled,
+      workspaces: c.workspaces,
+      agent: c.agent,
+    });
+```
 
 Create `tests/mt-kanban-operator.test.ts`:
 
 ```ts
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
+import { writeFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { jsonLine } from '../src/cli/operator.js';
 import { boardsOf, getBoard } from '../src/db/kanban-read.js';
 import { migrate, openDb, type Db } from '../src/db/open.js';
 import { listenWorker, workerSocketPath, type WorkerServer } from '../src/kanban/socket.js';
@@ -1858,7 +2130,16 @@ const ME = `operator:${userInfo().username}`;
 beforeEach(() => {
   clearSecrets();
   f = mtFixture((workspace) =>
-    [`workspace: ${workspace}`, 'agent:', '  driver: structured-cli', '  command: bytesec', '  unsupervised: true', ''].join('\n'),
+    [
+      `workspace: ${workspace}`,
+      'kanban:',
+      '  enabled: true',
+      'agent:',
+      '  driver: structured-cli',
+      '  command: bytesec',
+      '  unsupervised: true',
+      '',
+    ].join('\n'),
   );
   gateway = openDb(join(f.home, 'team.db'));
   migrate(gateway, SCHEMA_DIR);
@@ -1913,6 +2194,7 @@ describe('mt kanban board', () => {
     expect(await mt(['board', 'archive', 'web-app'])).toMatchObject({ code: 0 });
     expect((await mt(['board', 'list'])).out).toBe('default: no tasks');
     expect((await mt(['board', 'list', 'all'])).out).toContain('web-app (archived): no tasks');
+    expect((await mt(['board', 'list', 'ALL'])).out).toContain('web-app (archived): no tasks');
   });
 
   it('prints one line of JSON with --json, a refusal too', async () => {
@@ -1994,6 +2276,31 @@ describe('the nudge after a change', () => {
   });
 });
 
+describe('a gateway whose board is off', () => {
+  it('says the change is recorded and nothing runs it, and asks no gateway', async () => {
+    writeFileSync(f.configPath, `workspace: ${f.workspace}\nagent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n`);
+    await listening();
+    await mt(['board', 'create', 'web-app']);
+    const r = await mt(['board', 'set', 'web-app', 'max_running', '2', '--json']);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ ok: true, nudged: false });
+    expect(r.err).toBe(
+      'mt: the board is off on this gateway (its config does not set kanban.enabled): the change is recorded, ' +
+        'and nothing runs it until the board is turned on and the gateway restarted',
+    );
+    expect(requests).toEqual([]);
+  });
+});
+
+describe('jsonLine', () => {
+  it('escapes what a terminal may act on that JSON leaves alone, and reads back the same', () => {
+    const value = { text: 'a\u0085b\u2028c\u2029d\u202Ee\u2066f\u0007g' };
+    const out = jsonLine(value);
+    expect(out).toBe('{"text":"a\\u0085b\\u2028c\\u2029d\\u202ee\\u2066f\\u0007g"}');
+    expect(JSON.parse(out)).toEqual(value);
+  });
+});
+
 describe('mt kanban: whose command it is', () => {
   it("keeps the worker's own commands the worker's outside a run, which says it needs one", async () => {
     const r = await mt(['complete']);
@@ -2012,9 +2319,38 @@ describe('mt kanban: whose command it is', () => {
 });
 ```
 
-- [ ] **Step 8.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-kanban-operator.test.ts`. Expected: `Tests  8 failed | 1 passed (9)`: `mt kanban board` is the worker's unknown command.
+- [ ] **Step 9.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/config.test.ts tests/mt-kanban-operator.test.ts`. Expected: `Test Files  2 failed (2)` and `Tests  1 failed | 72 passed (73)`: the settings have no `kanbanEnabled`, and `tests/mt-kanban-operator.test.ts` cannot import `src/cli/operator.ts`, so none of its tests runs.
 
-- [ ] **Step 8.3: Implement.**
+- [ ] **Step 9.3: Implement.**
+
+In `src/config.ts`, replace:
+
+```ts
+  dbPath: string;
+  /** Workspace name → declared absolute path. Always has `default`. */
+```
+
+with:
+
+```ts
+  dbPath: string;
+  /** `kanban.enabled`: whether the gateway runs the board, so the operator's `mt kanban` can say when it does not. */
+  kanbanEnabled?: boolean;
+  /** Workspace name → declared absolute path. Always has `default`. */
+```
+
+In `src/config.ts`, replace:
+
+```ts
+    dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'team.db'),
+```
+
+with:
+
+```ts
+    dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'team.db'),
+    kanbanEnabled: file.kanban.enabled ?? KANBAN_DEFAULTS.enabled,
+```
 
 In `src/cli/gate.ts`, replace:
 
@@ -2054,6 +2390,8 @@ export interface BoardAccess {
   service: KanbanService;
   /** The gateway's home, where its socket is (spec §7.2). */
   home: string;
+  /** `kanban.enabled`: whether the gateway runs the board at all. */
+  kanbanEnabled: boolean;
 ```
 
 In `src/cli/gate.ts`, replace:
@@ -2155,7 +2493,7 @@ with:
     workspaces: new Set(team.workspaces.keys()),
     supervisedRoles: true,
   });
-  return { service, home: settings.home, close: () => db.close() };
+  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled === true, close: () => db.close() };
 ```
 
 In `src/cli/gate.ts`, replace:
@@ -2251,10 +2589,11 @@ import type { KanbanService } from '../kanban/service.js';
 import { maskAll, workerSocketPath } from '../kanban/socket.js';
 import type { BoardRow, Refusal } from '../kanban/types.js';
 import { NUDGE } from '../kanban/worker.js';
+import { parse, UsageError } from './args.js';
 import { operatorName, withBoard } from './gate.js';
 import { ask, why } from './kanban.js';
-import { parse, UsageError, type MtIo } from './mt.js';
-import { boardsText, line } from './plain.js';
+import type { MtIo } from './mt.js';
+import { BIDI, boardsText, line } from './plain.js';
 
 /**
  * The operator's `mt kanban` (spec §2.6): chat's `/kanban` commands at a
@@ -2275,8 +2614,10 @@ import { boardsText, line } from './plain.js';
  * **A nudge after a change.** A change that chat follows with a dispatcher pass
  * is followed here by a request for one, over the gateway's socket: the one
  * request that needs no token, and does nothing else (`NUDGE`). A gateway that
- * does not answer -- stopped, or not running the board -- loses nothing: the
- * change stands, and its next sweep, or its next start, acts on it.
+ * does not answer, stopped, loses nothing: the change stands, and its next
+ * sweep, or its next start, acts on it. A gateway whose config does not set
+ * `kanban.enabled` is not asked, and the command says nothing will run the
+ * change until the board is turned on.
  */
 
 /** How long a nudge waits for the gateway's answer: a pass is quick, and the change is made already. */
@@ -2299,6 +2640,26 @@ function refused(r: Refusal | { code: string; message: string }): Outcome {
 
 /** `--json` on every command. */
 const JSON_FLAG = { json: { type: 'boolean' } } as const;
+
+/**
+ * Characters JSON leaves as they are that a terminal or a reader may act on: C1
+ * controls, the line and paragraph separators, and the bidi controls. Escaped
+ * as `\uXXXX`, which every JSON reader reads back as the same string.
+ */
+const UNSAFE_IN_JSON = /[\u0080-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]/g;
+
+/** One line of JSON, masked, with nothing in it a terminal acts on. */
+export function jsonLine(value: unknown): string {
+  return JSON.stringify(maskAll(value)).replace(UNSAFE_IN_JSON, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+/** `--board <name>`, trimmed; a blank one is a wrong command line. */
+export function boardFlag(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const name = value.trim();
+  if (name === '') throw new UsageError('--board needs a board name');
+  return name;
+}
 
 function boardJson(b: BoardRow): Record<string, unknown> {
   return { name: b.name, max_running: b.maxRunning, workspace: b.workspace, archived: b.archivedAt !== null };
@@ -2335,17 +2696,19 @@ async function act(
   fn: (service: KanbanService, by: string) => Outcome,
 ): Promise<number> {
   const no = (code: string, message: string): number => {
-    if (json) io.out(JSON.stringify(maskAll({ ok: false, code, message })));
-    else io.err(`mt: ${message}`);
+    if (json) io.out(jsonLine({ ok: false, code, message }));
+    else io.err(`mt: ${message.replace(BIDI, '')}`);
     return 1;
   };
   let outcome: Outcome | undefined;
   let home = '';
+  let enabled = true;
   const code = withBoard(
     io,
     what,
     (board) => {
       home = board.home;
+      enabled = board.kanbanEnabled;
       outcome = fn(board.service, operatorName(io));
       return 0;
     },
@@ -2355,7 +2718,13 @@ async function act(
   if (!outcome.ok) return no(outcome.code, outcome.message);
   const done: Done = outcome;
   let nudged: boolean | undefined;
-  if (done.nudge === true) {
+  if (done.nudge === true && !enabled) {
+    nudged = false;
+    io.err(
+      "mt: the board is off on this gateway (its config does not set kanban.enabled): the change is recorded, " +
+        'and nothing runs it until the board is turned on and the gateway restarted',
+    );
+  } else if (done.nudge === true) {
     const r = await nudgeGateway(home);
     nudged = r.failed === undefined;
     if (r.failed !== undefined) {
@@ -2365,7 +2734,7 @@ async function act(
       );
     }
   }
-  if (json) io.out(JSON.stringify(maskAll({ ok: true, ...done.json, ...(nudged === undefined ? {} : { nudged }) })));
+  if (json) io.out(jsonLine({ ok: true, ...done.json, ...(nudged === undefined ? {} : { nudged }) }));
   else for (const l of done.lines) io.out(l);
   return 0;
 }
@@ -2377,7 +2746,8 @@ async function board(args: readonly string[], io: MtIo): Promise<number> {
   const json = values.json === true;
   switch (sub) {
     case 'list': {
-      const [all, extra] = positionals;
+      const [word, extra] = positionals;
+      const all = word?.toLowerCase();
       if (extra !== undefined || (all !== undefined && all !== 'all')) throw new UsageError('kanban board list takes at most all');
       return act(io, json, 'mt kanban board list', (service) => {
         const summaries = service.boards({ archived: all === 'all' });
@@ -2497,38 +2867,27 @@ with:
 In `src/cli/mt.ts`, replace:
 
 ```ts
-].join('\n');
-
-class UsageError extends Error {}
-
-/** Strict: an unknown option is a usage error, not something to guess at. */
-function parse<T extends NonNullable<ParseArgsConfig['options']>>(args: readonly string[], options: T) {
+  '  mt kanban gate remove <task_id> <gate_id>',
 ```
 
 with:
 
 ```ts
+  '  mt kanban gate remove <task_id> <gate_id>',
   "in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
   '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
-].join('\n');
-
-export class UsageError extends Error {}
-
-/** Strict: an unknown option is a usage error, not something to guess at. */
-export function parse<T extends NonNullable<ParseArgsConfig['options']>>(args: readonly string[], options: T) {
 ```
 
 In `src/cli/mt.ts`, replace:
 
 ```ts
-}
-
-/** Exit codes: 0 done, 1 refused or a check failed, 2 the command line was wrong. */
+  throw new UsageError('kanban gate takes add, list or remove');
 ```
 
 with:
 
 ```ts
+  throw new UsageError('kanban gate takes add, list or remove');
 }
 
 /** The worker CLI's commands that no operator's has: the worker's wherever they are typed. */
@@ -2547,9 +2906,6 @@ function isWorkers(command: string | undefined, io: MtIo): boolean {
   if (command !== undefined && WORKER_ONLY.includes(command)) return true;
   if (command !== undefined && OPERATOR_ONLY.includes(command)) return false;
   return inBoardRun(io.env);
-}
-
-/** Exit codes: 0 done, 1 refused or a check failed, 2 the command line was wrong. */
 ```
 
 In `src/cli/mt.ts`, replace:
@@ -2567,31 +2923,32 @@ with:
     if (group === 'kanban') return await operatorCommand(command, rest, io);
 ```
 
-- [ ] **Step 8.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1457 passed (1457)`; `tests/mt-gate.test.ts` and `tests/mt-kanban.test.ts` pass unchanged. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1462 passed (1462)`; `tests/mt-gate.test.ts` and `tests/mt-kanban.test.ts` pass unchanged. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 8.5: Commit.**
+- [ ] **Step 9.5: Commit.**
 
 ```bash
-git add src/cli/gate.ts src/cli/kanban.ts src/cli/mt.ts src/cli/operator.ts src/kanban/socket.ts tests/mt-kanban-operator.test.ts
-git commit -m "Add the operator's mt kanban board list, create, set and archive, which write the board beside the gateway as mt kanban gate does, print plain text or JSON, and nudge the gateway after a change; and decide from the shell and the name whether mt kanban is the operator's or a board run's"
+git add src/config.ts src/cli/gate.ts src/cli/kanban.ts src/cli/mt.ts src/cli/operator.ts src/kanban/socket.ts tests/config.test.ts tests/mt-kanban-operator.test.ts
+git commit -m "Add the operator's mt kanban board list, create, set and archive, which write the board beside the gateway as mt kanban gate does, print plain text or JSON, and nudge the gateway after a change, or say its board is off; and decide from the shell and the name whether mt kanban is the operator's or a board run's"
 ```
 
 ---
 
-### Task 9: The operator's task commands
+### Task 10: The operator's task commands
 
 **Files:**
 - Create: `tests/mt-kanban-operator-tasks.test.ts`
 - Modify: `src/cli/operator.ts`, `src/cli/mt.ts`
 
-`new`, `list`, `show`, `assign`, `link`, `unblock`, `stop`, `archive` and `comment`, with chat's semantics and replies (Decisions 2, 4, 5, 13 and 14).
+`new`, `list`, `show`, `assign`, `link`, `unblock`, `stop`, `archive` and `comment`, with chat's semantics and replies (Decisions 2, 4, 5, 13, 14, 18 and 19); every one that names a task takes `--board`, and is refused off it.
 
-- [ ] **Step 9.1: Write the failing tests.**
+- [ ] **Step 10.1: Write the failing tests.**
 
 Create `tests/mt-kanban-operator-tasks.test.ts`:
 
 ```ts
-import { writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -2621,6 +2978,8 @@ beforeEach(async () => {
   f = mtFixture((workspace) =>
     [
       `workspace: ${workspace}`,
+      'kanban:',
+      '  enabled: true',
       'agent:',
       '  driver: structured-cli',
       '  command: bytesec',
@@ -2722,6 +3081,30 @@ describe('mt kanban new', () => {
     });
   });
 
+  it('reads a body only from a regular file: not a directory, a device or a FIFO, which could block', async () => {
+    const dir = join(f.root, 'a-dir');
+    mkdirSync(dir);
+    const fifo = join(f.root, 'a-fifo');
+    execFileSync('mkfifo', [fifo]);
+    for (const path of [dir, '/dev/null', fifo]) {
+      expect(await mt(['new', 'E', '--body-file', path])).toEqual({
+        code: 1,
+        out: '',
+        err: `mt: ${path} is not a regular file: give a file, or - for stdin`,
+      });
+    }
+    expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 0 });
+  });
+
+  it('refuses a title holding a line break or a control character, as a wrong command line', async () => {
+    for (const title of ['two\nlines', 'a\u0007bell', 'a\u2028separator']) {
+      const r = await mt(['new', title]);
+      expect(r.code).toBe(2);
+      expect(r.err.split('\n')[0]).toBe('mt: a title is one line, with no control characters');
+    }
+    expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 0 });
+  });
+
   it("refuses what chat refuses: a person, an unknown role, an archived board, a task over chat's limits", async () => {
     expect(await mt(['new', 'x', '--assignee', 'lark:on_bob'])).toEqual({
       code: 1,
@@ -2745,6 +3128,8 @@ describe('mt kanban new', () => {
       ['new', 'x', '--outcome', ''],
       ['new', 'x', '--parent', ','],
       ['new', 'x', '--priority', '3'],
+      ['new', 'x', '--board', '  '],
+      ['list', '--board', ''],
     ]) {
       expect((await mt(argv)).code).toBe(2);
     }
@@ -2813,8 +3198,38 @@ describe('the task commands', () => {
     ]);
   });
 
+  it('with --board, acts only on a task on that board, both tasks for link, and refuses a board that does not exist', async () => {
+    expect((await mt(['board', 'create', 'web-app'])).code).toBe(0);
+    const here = created((await mt(['new', 'Here', '--board', 'web-app', '--assignee', 'default'])).out);
+    const there = created((await mt(['new', 'There', '--assignee', 'default'])).out);
+    const other = (id: string) => ({ code: 1, out: '', err: `mt: task ${id} is on board default, not web-app` });
+    for (const argv of [
+      ['show', there],
+      ['assign', there, 'default'],
+      ['unblock', there],
+      ['stop', there],
+      ['archive', there],
+      ['comment', there, 'hello'],
+      ['link', here, there],
+    ]) {
+      expect(await mt([...argv, '--board', 'web-app'])).toEqual(other(there));
+    }
+    expect(await mt(['link', there, here, '--board', 'web-app'])).toEqual(other(there));
+    const json = await mt(['stop', there, '--board', 'web-app', '--json']);
+    expect(JSON.parse(json.out)).toEqual({ ok: false, code: 'other_board', message: `task ${there} is on board default, not web-app` });
+    expect(await mt(['show', here, '--board', 'nowhere'])).toEqual({ code: 1, out: '', err: 'mt: there is no board nowhere' });
+    expect(await mt(['show', 'k_missing', '--board', 'web-app'])).toMatchObject({ code: 1, err: 'mt: no task k_missing' });
+    expect(eventsOf(gateway, there).map((e) => e.kind)).toEqual(['created']);
+
+    // On its own board, and without --board on any.
+    expect((await mt(['show', here, '--board', ' web-app '])).out.split('\n')[0]).toBe(`Here (${here}): ready`);
+    expect((await mt(['comment', here, 'hi', '--board', 'web-app'])).code).toBe(0);
+    expect((await mt(['archive', here, '--board', 'web-app'])).out).toBe(`archived ${here}`);
+    expect((await mt(['archive', there])).out).toBe(`archived ${there}`);
+  });
+
   it('answers a wrong command line with exit 2', async () => {
-    for (const argv of [['show'], ['show', 'a', 'b'], ['assign', 'k_1'], ['link', 'k_1'], ['stop', 'k_1', 'now'], ['comment', 'k_1'], ['unblock']]) {
+    for (const argv of [['show', 'k_1', '--board', ''], ['stop', 'k_1', '--board', ' '], ['show'], ['show', 'a', 'b'], ['assign', 'k_1'], ['link', 'k_1'], ['stop', 'k_1', 'now'], ['comment', 'k_1'], ['unblock']]) {
       expect((await mt(argv)).code).toBe(2);
     }
   });
@@ -2842,9 +3257,9 @@ describe("in a board run's shell", () => {
 });
 ```
 
-- [ ] **Step 9.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-kanban-operator-tasks.test.ts`. Expected: `Tests  7 failed | 3 passed (10)`: the task commands are usage errors, or the worker's.
+- [ ] **Step 10.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-kanban-operator-tasks.test.ts`. Expected: `Tests  10 failed | 3 passed (13)`: the task commands are usage errors, or the worker's.
 
-- [ ] **Step 9.3: Implement.**
+- [ ] **Step 10.3: Implement.**
 
 In `src/cli/operator.ts`, replace:
 
@@ -2872,13 +3287,13 @@ import { visible } from '../names.js';
 In `src/cli/operator.ts`, replace:
 
 ```ts
-import { boardsText, line } from './plain.js';
+import { BIDI, boardsText, line } from './plain.js';
 ```
 
 with:
 
 ```ts
-import { boardsText, line, listText, showText, who } from './plain.js';
+import { BIDI, boardsText, line, listText, showText, who } from './plain.js';
 ```
 
 In `src/cli/operator.ts`, replace:
@@ -2896,7 +3311,7 @@ with:
 
 /** A refusal made before the board is opened: a body that cannot be read, or is too big. */
 function early(io: MtIo, json: boolean, code: string, message: string): number {
-  if (json) io.out(JSON.stringify(maskAll({ ok: false, code, message })));
+  if (json) io.out(jsonLine({ ok: false, code, message }));
   else io.err(`mt: ${line(message, 600)}`);
   return 1;
 }
@@ -2920,6 +3335,34 @@ function oneTask(positionals: readonly string[], what: string): string {
   return taskId;
 }
 
+/** `--board` on a command that takes it, with `--json`. */
+const BOARD_FLAGS = { ...JSON_FLAG, board: { type: 'string' } } as const;
+
+/** A refusal unless a board of this name exists, archived or not. */
+function noSuchBoard(service: KanbanService, board: string): Outcome | undefined {
+  if (service.boards({ archived: true }).some((s) => s.board.name === board)) return undefined;
+  return refused({ code: 'unknown_board', message: `there is no board ${visible(board)}` });
+}
+
+/**
+ * With `--board`, a refusal unless the board exists and every task named is on
+ * it (spec §16.4); without, nothing: a task id names its task on any board, as in chat.
+ */
+function offBoard(service: KanbanService, board: string | undefined, ...taskIds: string[]): Outcome | undefined {
+  if (board === undefined) return undefined;
+  const missing = noSuchBoard(service, board);
+  if (missing !== undefined) return missing;
+  for (const taskId of taskIds) {
+    const r = service.show(taskId);
+    if (!r.ok) return refused(r);
+    const task = r.view.task;
+    if (task.board !== board) {
+      return refused({ code: 'other_board', message: `task ${task.taskId} is on board ${visible(task.board)}, not ${visible(board)}` });
+    }
+  }
+  return undefined;
+}
+
 /** The new task's body: `--body`, or `--body-file`, `-` for stdin; or why not, already said. */
 async function bodyOf(values: { body?: string | undefined; 'body-file'?: string | undefined }, io: MtIo, json: boolean): Promise<string | number> {
   const file = values['body-file'];
@@ -2934,7 +3377,10 @@ async function bodyOf(values: { body?: string | undefined; 'body-file'?: string 
     return text ?? early(io, json, 'too_large', `A body is at most ${max} bytes.`);
   }
   try {
-    if (statSync(file).size > max) return early(io, json, 'too_large', `A body is at most ${max} bytes.`);
+    // A regular file only: a FIFO or a device could block, or never end.
+    const st = statSync(file);
+    if (!st.isFile()) return early(io, json, 'invalid', `${file} is not a regular file: give a file, or - for stdin`);
+    if (st.size > max) return early(io, json, 'too_large', `A body is at most ${max} bytes.`);
     return readFileSync(file, 'utf8');
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
@@ -2972,6 +3418,8 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
   const json = values.json === true;
   const title = positionals.join(' ').trim();
   if (title === '') throw new UsageError('kanban new takes a title');
+  // One line, as chat's title is: a line break or a control character is refused, not silently changed.
+  if (/[\p{Cc}\u2028\u2029]/u.test(title)) throw new UsageError('a title is one line, with no control characters');
   for (const flag of ['board', 'assignee', 'reviewer', 'workspace', ...Object.keys(CONTRACT_FLAGS)] as const) {
     const v = values[flag as keyof typeof values];
     if (typeof v === 'string' && v.trim() === '') throw new UsageError(`--${flag} needs a value`);
@@ -2997,7 +3445,7 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
   };
   const big = tooBig(command);
   if (big !== undefined) return early(io, json, 'too_large', big);
-  const board = values.board?.trim() ?? DEFAULT_BOARD;
+  const board = boardFlag(values.board) ?? DEFAULT_BOARD;
   return act(io, json, 'mt kanban new', (service, by) => {
     for (const name of [command.assignee, command.reviewer]) {
       const person = name === undefined ? undefined : personRefused(name);
@@ -3030,17 +3478,16 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
 
 /** `mt kanban list [<status>|all] [--board <name>]` (spec §9.1): one board's tasks, `default`'s unless named. */
 function list(rest: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(rest, { ...JSON_FLAG, board: { type: 'string' } });
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [word, extra] = positionals;
   const filter = word === undefined ? undefined : LIST_FILTERS.find((f) => f === word.toLowerCase());
   if (extra !== undefined || (word !== undefined && filter === undefined)) {
     throw new UsageError(`kanban list takes at most one of ${LIST_FILTERS.join(', ')}`);
   }
-  const board = values.board ?? DEFAULT_BOARD;
+  const board = boardFlag(values.board) ?? DEFAULT_BOARD;
   return act(io, values.json === true, 'mt kanban list', (service) => {
-    if (!service.boards({ archived: true }).some((s) => s.board.name === board)) {
-      return refused({ code: 'unknown_board', message: `there is no board ${visible(board)}` });
-    }
+    const missing = noSuchBoard(service, board);
+    if (missing !== undefined) return missing;
     const entries = service.list(board);
     const tasks = listed(entries, filter).map((e) => ({
       task_id: e.task.taskId,
@@ -3053,11 +3500,14 @@ function list(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** `mt kanban show <task>`: a task on any board, by id (spec §16.4). */
+/** `mt kanban show <task> [--board <name>]`: a task on any board, by id, or on the one named (spec §16.4). */
 function show(rest: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(rest, JSON_FLAG);
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
   const taskId = oneTask(positionals, 'show');
+  const board = boardFlag(values.board);
   return act(io, values.json === true, 'mt kanban show', (service) => {
+    const guard = offBoard(service, board, taskId);
+    if (guard !== undefined) return guard;
     const r = service.show(taskId);
     if (!r.ok) return refused(r);
     const gates = service.listGates(taskId);
@@ -3101,12 +3551,15 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
 
 /** `mt kanban assign <task> <role>`: an undecided run ends `superseded`, and the gateway's pass cancels its turn. */
 function assign(rest: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(rest, JSON_FLAG);
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [taskId, name, extra] = positionals;
   if (taskId === undefined || name === undefined || extra !== undefined) throw new UsageError('kanban assign takes a task id and a role');
+  const board = boardFlag(values.board);
   return act(io, values.json === true, 'mt kanban assign', (service, by) => {
     const person = personRefused(name);
     if (person !== undefined) return person;
+    const guard = offBoard(service, board, taskId);
+    if (guard !== undefined) return guard;
     const now = service.show(taskId);
     const current = now.ok ? now.view.task.assignee : null;
     if (current !== null && current.name === name) {
@@ -3126,12 +3579,15 @@ function assign(rest: readonly string[], io: MtIo): Promise<number> {
 
 /** `mt kanban link <parent> <child>`. */
 function link(rest: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(rest, JSON_FLAG);
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [parentId, childId, extra] = positionals;
   if (parentId === undefined || childId === undefined || extra !== undefined) {
     throw new UsageError('kanban link takes a parent task id and a child task id');
   }
+  const board = boardFlag(values.board);
   return act(io, values.json === true, 'mt kanban link', (service, by) => {
+    const guard = offBoard(service, board, parentId, childId);
+    if (guard !== undefined) return guard;
     const r = service.link(parentId, childId, by);
     if (!r.ok) return refused(r);
     const [p, c] = [line(parentId, 80), line(childId, 80)];
@@ -3141,13 +3597,16 @@ function link(rest: readonly string[], io: MtIo): Promise<number> {
 
 /** `mt kanban unblock <task> [comment]`, `stop <task>` and `archive <task>`: chat's, with the same outcomes. */
 function decide(verb: 'unblock' | 'stop' | 'archive', rest: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(rest, JSON_FLAG);
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [taskId, ...words] = positionals;
   if (taskId === undefined || (verb !== 'unblock' && words.length > 0)) {
     throw new UsageError(`kanban ${verb} takes a task id${verb === 'unblock' ? ', and a comment if you like' : ''}`);
   }
   const comment = words.join(' ').trim();
+  const board = boardFlag(values.board);
   return act(io, values.json === true, `mt kanban ${verb}`, (service, by) => {
+    const guard = offBoard(service, board, taskId);
+    if (guard !== undefined) return guard;
     switch (verb) {
       case 'unblock': {
         const r = service.unblock(taskId, by, comment === '' ? undefined : comment);
@@ -3162,7 +3621,7 @@ function decide(verb: 'unblock' | 'stop' | 'archive', rest: readonly string[], i
         const said =
           r.run.outcome === 'cancelled'
             ? `stopped ${id}: its run was cancelled, and the task is blocked (needs_input); mt kanban unblock ${id} runs it again`
-            : `${id}'s run had already reported (${r.run.outcome ?? 'undecided'}); it is being closed, and the task keeps that outcome`;
+            : `${id}'s run had already reported (${r.run.outcome ?? 'undecided'}); it closes when its agent's turn ends, and the task keeps that outcome`;
         return { ok: true, lines: [said], json: { task_id: id, run_id: r.run.runId, run_outcome: r.run.outcome }, nudge: true };
       }
       case 'archive': {
@@ -3176,14 +3635,17 @@ function decide(verb: 'unblock' | 'stop' | 'archive', rest: readonly string[], i
 
 /** `mt kanban comment <task> <text>`: an operator's comment, which steers the task's agent (spec §7.5). */
 function comment(rest: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(rest, JSON_FLAG);
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [taskId, ...words] = positionals;
   const text = words.join(' ').trim();
   if (taskId === undefined || text === '') throw new UsageError('kanban comment takes a task id and the comment');
+  const board = boardFlag(values.board);
   if (Buffer.byteLength(text, 'utf8') > WORKER_LIMITS.comment) {
     return Promise.resolve(early(io, values.json === true, 'too_large', `A comment is at most ${WORKER_LIMITS.comment} bytes.`));
   }
   return act(io, values.json === true, 'mt kanban comment', (service, by) => {
+    const guard = offBoard(service, board, taskId);
+    if (guard !== undefined) return guard;
     const r = service.comment(taskId, text, by, { steers: true });
     if (!r.ok) return refused(r);
     const id = r.comment.taskId;
@@ -3229,13 +3691,13 @@ with:
 In `src/cli/mt.ts`, replace:
 
 ```ts
-import { ConfigError, type Env } from '../config.js';
+import { parse, refuse, UsageError } from './args.js';
 ```
 
 with:
 
 ```ts
-import { ConfigError, type Env } from '../config.js';
+import { parse, refuse, UsageError } from './args.js';
 import { LIST_FILTERS } from '../kanban/chat-parse.js';
 ```
 
@@ -3253,13 +3715,13 @@ with:
   '      [--parent <task>]... [--outcome "..."] [--verify "..."] [--constraints "..."] [--boundaries "..."]',
   '      [--stop-when "..."] [--body "..." | --body-file <path|->] [--json]',
   `  mt kanban list [${LIST_FILTERS.join('|')}] [--board <name>] [--json]`,
-  '  mt kanban show <task_id> [--json]',
-  '  mt kanban assign <task_id> <role> [--json]',
-  '  mt kanban link <parent_id> <child_id> [--json]',
-  '  mt kanban unblock <task_id> [comment...] [--json]',
-  '  mt kanban stop <task_id> [--json]',
-  '  mt kanban archive <task_id> [--json]',
-  '  mt kanban comment <task_id> <text...> [--json]',
+  '  mt kanban show <task_id> [--board <name>] [--json]',
+  '  mt kanban assign <task_id> <role> [--board <name>] [--json]',
+  '  mt kanban link <parent_id> <child_id> [--board <name>] [--json]',
+  '  mt kanban unblock <task_id> [comment...] [--board <name>] [--json]',
+  '  mt kanban stop <task_id> [--board <name>] [--json]',
+  '  mt kanban archive <task_id> [--board <name>] [--json]',
+  '  mt kanban comment <task_id> <text...> [--board <name>] [--json]',
 ```
 
 In `src/cli/mt.ts`, replace:
@@ -3274,25 +3736,25 @@ with:
 const OPERATOR_ONLY: readonly string[] = ['gate', 'board', 'new', 'list', 'assign', 'unblock', 'stop', 'archive'];
 ```
 
-- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1467 passed (1467)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 10.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1475 passed (1475)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 9.5: Commit.**
+- [ ] **Step 10.5: Commit.**
 
 ```bash
 git add src/cli/operator.ts src/cli/mt.ts tests/mt-kanban-operator-tasks.test.ts
-git commit -m "Add the operator's mt kanban new, list, show, assign, link, unblock, stop, archive and comment, with chat's meaning and answers: new takes chat's lines as flags and its body from a flag, a file or stdin, and a person is given work only from chat"
+git commit -m "Add the operator's mt kanban new, list, show, assign, link, unblock, stop, archive and comment, with chat's meaning and answers: new takes chat's lines as flags, a one-line title, and its body from a flag, a regular file or stdin; a person is given work only from chat; and --board keeps a command to the tasks on that board"
 ```
 
 ---
 
-### Task 10: The operator at a terminal, end to end
+### Task 11: The operator at a terminal, end to end
 
 **Files:**
 - Create: `tests/mt-operator.e2e.ts`
 
 The real `mt`, as its own process through the shim the gateway writes, beside a real dispatcher, socket and fake CLI agent. The test never asks the dispatcher for a pass: the nudge starts a task created at the terminal, and cancels the turn of a run stopped there. Without Task 6 the second test's `idle()` would wait on the hanging agent for ever.
 
-- [ ] **Step 10.1: Write the test.**
+- [ ] **Step 11.1: Write the test.**
 
 Create `tests/mt-operator.e2e.ts`:
 
@@ -3363,7 +3825,16 @@ async function gateway(mode: string): Promise<Gateway> {
   // What the operator's mt reads: the gateway's config, whose agent block is the role default.
   writeFileSync(
     join(home, 'config.yaml'),
-    [`workspace: ${workspace}`, 'agent:', '  driver: structured-cli', '  command: bytesec', '  unsupervised: true', ''].join('\n'),
+    [
+      `workspace: ${workspace}`,
+      'kanban:',
+      '  enabled: true',
+      'agent:',
+      '  driver: structured-cli',
+      '  command: bytesec',
+      '  unsupervised: true',
+      '',
+    ].join('\n'),
   );
   const log = join(dir, 'invocations.log');
   const t = testDb();
@@ -3464,11 +3935,11 @@ describe('the operator at a terminal, end to end', () => {
 });
 ```
 
-- [ ] **Step 10.2: Run it.** Run `npx vitest run --project e2e tests/mt-operator.e2e.ts`. Expected: `Tests  2 passed (2)`: what it proves was built in Tasks 5, 6, 8 and 9.
+- [ ] **Step 11.2: Run it.** Run `npx vitest run --project e2e tests/mt-operator.e2e.ts`. Expected: `Tests  2 passed (2)`: what it proves was built in Tasks 5, 6, 9 and 10.
 
-- [ ] **Step 10.3: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1467 passed (1467)`. Run `npx vitest run --project e2e`. Expected: `Tests  101 passed (101)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 11.3: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1475 passed (1475)`. Run `npx vitest run --project e2e`. Expected: `Tests  101 passed (101)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 10.4: Commit.**
+- [ ] **Step 11.4: Commit.**
 
 ```bash
 git add tests/mt-operator.e2e.ts
@@ -3477,14 +3948,14 @@ git commit -m "Test the operator's mt kanban end to end: a task created at a ter
 
 ---
 
-### Task 11: The README and the guide
+### Task 12: The README and the guide
 
 **Files:**
 - Modify: `README.md`, `docs/kanban-guide.md`
 
-`board list` where `boards` was, `team.db` where the database is named, the operator's commands in the README's `mt` section with their limitations, and a section of the guide on the terminal. The spec and `docs/architecture.md` are already updated, by this plan's own commit.
+`board list` where `boards` was, `team.db` where the database is named, the operator's commands in the README's `mt` section with `--board`, who they record and their limitations, and a section of the guide on the terminal. The spec and `docs/architecture.md` are already updated, by this plan's own commit.
 
-- [ ] **Step 11.1: Write.**
+- [ ] **Step 12.1: Write.**
 
 In `README.md`, replace:
 
@@ -3530,13 +4001,13 @@ mt kanban new <title> [--board <name>] [--assignee <role>] [--reviewer <role>] [
     [--parent <task_id>]... [--outcome "..."] [--verify "..."] [--constraints "..."]
     [--boundaries "..."] [--stop-when "..."] [--body "..." | --body-file <path|->]
 mt kanban list [todo|ready|running|review|reviewing|blocked|done|archived|all] [--board <name>]
-mt kanban show <task_id>
-mt kanban assign <task_id> <role>
-mt kanban link <parent_id> <child_id>
-mt kanban unblock <task_id> [comment...]
-mt kanban stop <task_id>
-mt kanban archive <task_id>
-mt kanban comment <task_id> <text...>
+mt kanban show <task_id> [--board <name>]
+mt kanban assign <task_id> <role> [--board <name>]
+mt kanban link <parent_id> <child_id> [--board <name>]
+mt kanban unblock <task_id> [comment...] [--board <name>]
+mt kanban stop <task_id> [--board <name>]
+mt kanban archive <task_id> [--board <name>]
+mt kanban comment <task_id> <text...> [--board <name>]
 ```
 
 In `README.md`, replace:
@@ -3588,9 +4059,13 @@ with:
   meaning, for whoever runs the gateway: `board list`, `create`, `set` and `archive`, and `new`,
   `list`, `show`, `assign`, `link`, `unblock`, `stop`, `archive` and `comment`. There is no
   `board use`, since a terminal is no chat: `new` and `list` take `--board <name>`, `default`
-  unless given, and the commands that name a task work on any board, by id. They record you as
-  `operator:<your login>`. `new` takes `/kanban new`'s lines as flags; its title is the words
-  that are not flags, its body `--body`, or `--body-file` with a path, or `-` for stdin.
+  unless given. The commands that name a task work on a task on any board, by id; given
+  `--board <name>`, they refuse (`other_board`) a task on another board, and `link` refuses
+  unless both tasks are on it. A `--board` naming no board is refused. They record who acted as
+  `operator:<login>`, the login of the account the command runs as: run under `sudo -u`, that
+  is the service account, not you. `new` takes `/kanban new`'s lines as flags; its title is the
+  words that are not flags, on one line, and its body `--body`, or `--body-file` with a regular
+  file, or `-` for stdin.
   `assign`, `--assignee` and `--reviewer` take a role: a person is given work from chat, by
   @-mention, where the gateway can check their tier. A task created here is followed by no
   chat, so nobody is told when it is done or blocks: `mt kanban show` and `list` tell you. Each
@@ -3600,8 +4075,9 @@ with:
   `archive` and `board set`, as after their chat forms, the gateway is asked over its socket to
   look for work at once, which also cancels the turn of an agent run the change ended; if no
   gateway answers, the change stands, and the gateway acts on it at its next sweep, or when it
-  next starts. They refuse to run in a board run's shell, where `MT_KANBAN_RUN` or
-  `MT_KANBAN_TOKEN` is set.
+  next starts. If the config does not set `kanban.enabled`, they say the board is off: the
+  change is recorded, and nothing runs it until the board is turned on. They refuse to run in a
+  board run's shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set.
 - `kanban` in a board run's shell is for the run's agent, not for a person: it works only with
   the run's `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN` and `MT_KANBAN_SOCKET`, which the gateway gives
   each run. There, `show`, `comment` and `link` are the agent's, which take no arguments, and
@@ -3715,7 +4191,8 @@ with:
 ## 11. From a terminal
 
 Whoever runs the gateway can drive the board from a shell on its host, with `mt kanban`: chat's
-commands, with the same meaning, recorded as `operator:<your login>`. It needs no Lark settings,
+commands, with the same meaning, recorded as `operator:<login>`, the login of the account `mt`
+runs as (under `sudo -u`, the service account). It needs no Lark settings,
 and works beside the running gateway.
 
 ```
@@ -3731,7 +4208,12 @@ mt kanban stop k_…
 > created k\_…: Draft the Q3 summary, for role docs-writer, in docs, on board web-app
 
 - There is no `board use`: a terminal is no chat. `new` and `list` take `--board <name>`, and
-  are on `default` without it; the commands that name a task work on any board, by id.
+  are on `default` without it.
+- The commands that name a task (`show`, `assign`, `link`, `unblock`, `stop`, `archive` and
+  `comment`) work on a task on any board, by id. Give them `--board <name>` to be sure: a task
+  on another board is then refused, and for `link` both tasks must be on it.
+
+  > mt: task k\_… is on board default, not web-app
 - `new` takes the lines of `/kanban new` as flags: `--assignee`, `--reviewer`, `--workspace`,
   `--parent` (as often as needed), `--outcome`, `--verify`, `--constraints`, `--boundaries` and
   `--stop-when`. The body is `--body "…"`, or `--body-file` with a file, or `-` to read it from
@@ -3741,16 +4223,18 @@ mt kanban stop k_…
   `mt kanban show`, or create it from chat if a group should hear.
 - After a change, the running gateway is told to look for work at once, and to stop the agent
   of a run the change ended. If no gateway answers, `mt` says so; the change stands, and the
-  gateway acts on it at its next sweep, or when it next starts.
+  gateway acts on it at its next sweep, or when it next starts. If the board is off on the
+  gateway (`kanban.enabled` unset), `mt` says that instead: nothing runs the change until it
+  is turned on.
 - Add `--json` for one line of JSON, for scripts. `mt` exits 0 when done, 1 when refused, and
   2 for a wrong command line.
 
 ## 12. Rules of thumb
 ````
 
-- [ ] **Step 11.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `git diff -U0 docs/kanban-guide.md README.md | grep '^+' | grep -c "$(printf '\342\200\224')"`, which counts the long dashes added. Expected: `0`. Run `git grep -n "kanban boards" -- README.md docs/kanban-guide.md src`. Expected: no output. Run `npx vitest run --project unit`. Expected: `Tests  1467 passed (1467)`. Run `npx vitest run --project e2e`. Expected: `Tests  101 passed (101)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 12.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `git diff -U0 docs/kanban-guide.md README.md | grep '^+' | grep -c "$(printf '\342\200\224')"`, which counts the long dashes added. Expected: `0`. Run `git grep -n "kanban boards" -- README.md docs/kanban-guide.md src`. Expected: no output. Run `npx vitest run --project unit`. Expected: `Tests  1475 passed (1475)`. Run `npx vitest run --project e2e`. Expected: `Tests  101 passed (101)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 11.3: Commit.**
+- [ ] **Step 12.3: Commit.**
 
 ```bash
 git add README.md docs/kanban-guide.md
@@ -3761,36 +4245,40 @@ git commit -m "Describe the operator's mt kanban commands in the README and the 
 
 ## Done when
 
-- `npx vitest run --project unit` gives `Tests  1467 passed (1467)`. `npx vitest run --project e2e` gives `Tests  101 passed (101)`. `npm run typecheck` reports no errors. All under Node 22, in the worktree.
+- `npx vitest run --project unit` gives `Tests  1475 passed (1475)`. `npx vitest run --project e2e` gives `Tests  101 passed (101)`. `npm run typecheck` reports no errors. All under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - The default database is `$MT_HOME/team.db`, and `mt` finds it there (`tests/config.test.ts`, `tests/mt-gate.test.ts`).
 - `/kanban board list [all]` answers as `/kanban boards` did, and `/kanban boards` is unknown (`tests/kanban-board-chat-parse.test.ts`, `tests/kanban-board-chat.test.ts`).
-- The operator's `mt kanban board …` and task commands work beside the gateway's open database, as `operator:<login>`, in plain text and JSON, with exits 0, 1 and 2 (`tests/mt-kanban-operator.test.ts`, `tests/mt-kanban-operator-tasks.test.ts`).
+- The operator's `mt kanban board …` and task commands work beside the gateway's open database, as `operator:<login>`, in plain text and JSON, with exits 0, 1 and 2, and each command that names a task keeps to the board `--board` names (`tests/mt-kanban-operator.test.ts`, `tests/mt-kanban-operator-tasks.test.ts`).
 - In a board run's shell the operator's commands are refused and `show`, `comment` and `link` are the worker's; outside one the worker's own names say they need a run (the same files, and `tests/mt-kanban.test.ts` unchanged).
-- A change from the terminal nudges a running gateway, whose pass starts new work and cancels the turn of a run the change decided; with no gateway, the change stands and `mt` says so (`tests/kanban-worker-nudge.test.ts`, `tests/kanban-cancel-decided.test.ts`, `tests/mt-operator.e2e.ts`).
+- A change from the terminal nudges a running gateway, whose pass starts new work and cancels the turn of a run the change decided; with no gateway, the change stands and `mt` says so; with the board off, `mt` says that (`tests/kanban-worker-nudge.test.ts`, `tests/kanban-cancel-decided.test.ts`, `tests/mt-kanban-operator.test.ts`, `tests/mt-operator.e2e.ts`).
+- `grep -n "from './mt.js'" src/cli/*.ts` shows only `import type` lines.
 
 ## Before using it: the deploy, and a smoke test against the live gateway
 
 For the user, once the plan is built. The database is moved by hand, since the build has no transition code (Decision 17). If the service sets `MT_DB`, or `config.yaml` sets `db:`, the file is named there and keeps its name: skip step 3. Run the `sqlite3` and `mv` lines as the gateway's own user.
 
+**Do not start the new build, and make sure no service manager (launchd, systemd, a supervisor) restarts the old one, until step 3 is done.** A start before the move, of either build and whether or not `kanban.enabled` is set, creates and migrates an empty `team.db`; the move would then put `gateway.db` beside that empty database's leftover `team.db-wal`, which SQLite would replay into the moved file. Step 3 stops if it finds any of them.
+
 1. Stop the gateway.
 2. Back up with `sqlite3 ~/.manus-team/gateway.db ".backup $HOME/.manus-team/gateway-pre-rename.db"`. (`$HOME`, not `~`, inside the quotes: neither the shell nor sqlite3 expands a quoted `~`. A copy made with `cp` could miss what is still in the `-wal` file.)
-3. `mv` gateway.db, gateway.db-wal and gateway.db-shm (if they exist) to team.db, team.db-wal and team.db-shm:
+3. `mv` gateway.db, gateway.db-wal and gateway.db-shm (if they exist) to team.db, team.db-wal and team.db-shm, after checking that none of the new names exists:
    ```bash
-   cd ~/.manus-team
+   cd "${MT_HOME:-$HOME/.manus-team}" || exit 1
+   for f in team.db team.db-wal team.db-shm; do [ -e "$f" ] && { echo "$f exists: stop"; exit 1; }; done
    mv gateway.db team.db
    [ -e gateway.db-wal ] && mv gateway.db-wal team.db-wal
    [ -e gateway.db-shm ] && mv gateway.db-shm team.db-shm
    ```
-   All three move together: SQLite finds a database's WAL by its name, and a `-wal` left behind would lose what is in it.
+   Run it in a subshell (`( … )`) or a script, so its `exit` does not close your terminal. All three move together: SQLite finds a database's WAL by its name, and a `-wal` left behind would lose what is in it. If the check stops it, a build has started since step 1: stop it, look at the `team.db` it made (it holds no tasks), and remove its three files before running step 3 again.
 4. Merge `operator-cli` into `main`, and update the checkout the gateway runs from.
 5. Start the gateway, and check that `PRAGMA user_version` is 6 and the task count is unchanged: `sqlite3 ~/.manus-team/team.db "PRAGMA user_version; SELECT count(*) FROM kanban_tasks"` prints `6` and the same number as `sqlite3 ~/.manus-team/gateway-pre-rename.db "SELECT count(*) FROM kanban_tasks"`. No `gateway.db` has been created beside it.
 
-Then, with `kanban.enabled: true`, on a role on a cheap model; `<role>` below is its name. In a checkout, `mt` is `npm run -s mt -- …`, run from a shell as the gateway's user.
+Then, with `kanban.enabled: true`, on a role on a cheap model; `<role>` below is its name. In a checkout, `mt` is `npm run -s mt -- …`, run from a shell as the gateway's user, which is the login the board records.
 
 6. In a chat with the bot: `/kanban board list` answers as `/kanban boards` used to; `/kanban boards` says it is an unknown command.
 7. `mt kanban board list` prints `default: …` with its counts, as chat does.
 8. `mt kanban new "Smoke: reply with the word hello" --assignee <role>` prints `created k_…: …, on board default`, and nothing on stderr: the gateway answered the nudge. The task starts at once, with no sweep to wait for; `mt kanban show k_…` reaches `done`.
-9. `mt kanban new "Smoke: count slowly to 600, one number a second" --assignee <role>`, and once `mt kanban show` says `running`, `mt kanban stop k_…`: it prints `stopped k_…: its run was cancelled, …`, the agent's process ends within seconds, and `show` says `blocked`, with the run `cancelled`.
+9. `mt kanban new "Smoke: count slowly to 600, one number a second" --assignee <role>`, and once `mt kanban show` says `running`, `mt kanban stop k_… --board default`: it prints `stopped k_…: its run was cancelled, …`, the agent's process ends within seconds, and `show` says `blocked`, with the run `cancelled`. `mt kanban show k_… --board smoke` is refused: there is no board smoke.
 10. `mt kanban list all --json` prints one line of JSON with both tasks. `MT_KANBAN_RUN=x mt kanban list` is refused as an operator's command; `mt kanban complete` answers `not_in_a_run`.
 11. Clean up: `mt kanban archive k_…` for each, which prints `archived k_…`.

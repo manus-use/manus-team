@@ -506,20 +506,25 @@ fresh install) has no registrations. A deployment with no config file (environme
   mt kanban new <title…> [--board] [--assignee] [--reviewer] [--workspace] [--parent …] [--outcome] [--verify]
                          [--constraints] [--boundaries] [--stop-when] [--body "…" | --body-file <path|->]
   mt kanban list [<status>|all] [--board <name>]
-  mt kanban show|stop|archive <task> · assign <task> <role> · link <parent> <child>
-  mt kanban unblock <task> [comment…] · comment <task> <text…>
+  mt kanban show|stop|archive <task> · assign <task> <role> · link <parent> <child>   [--board <name>]
+  mt kanban unblock <task> [comment…] · comment <task> <text…>                       [--board <name>]
   ```
 
   Every one takes `--json`: plain text by default, masked and stripped of control characters, or one
   line of JSON shaped as the worker's; exit 0 done, 1 refused, 2 a wrong command line. There is no
-  `board use`, as a terminal is no chat: `new` and `list` take `--board`, `default` unless given, and
-  the commands that name a task work on any board by id (§16.4). `new`'s body is read from stdin only
-  for `--body-file -`. Only roles are given work here: a person needs talk tier, which the Lark
+  `board use`, as a terminal is no chat: `new` and `list` take `--board`, `default` unless given; the
+  commands that name a task work on any board by id (§16.4), and with `--board` refuse `other_board`
+  a task on another board (§16.5). `new`'s title is one line, with no control character, and its body
+  is read from stdin only for `--body-file -`, otherwise from a regular file. They record the login
+  of the account they run as, the service account under `sudo -u`. Plain output drops control and
+  bidi characters; `--json` writes C1 controls, U+2028, U+2029 and bidi controls as `\uXXXX`. Only roles are given work here: a person needs talk tier, which the Lark
   allowlist decides, and these read no Lark settings. A task created here is created via
   `{kind: operator}`, which no chat follows. After `new`, `assign`, `unblock`, `stop`, `archive` and
   `board set`, the changes chat follows with a pass (§9.1), the command sends the gateway's socket
   the nudge (§7.3), and the pass cancels the turn of a run the change decided (§6.2); a gateway that
-  does not answer loses nothing, as its next sweep or start acts on the change. They refuse a board
+  does not answer loses nothing, as its next sweep or start acts on the change. When the config does
+  not set `kanban.enabled`, no gateway is asked, and the command says the board is off and nothing
+  runs the change until it is turned on. They refuse a board
   run's shell, as the gate commands do, and that is not a security boundary either.
 - Not taken from comparable tools, deliberately: a role is not its own command (roles are run by the
   board, not by hand); a role has no memory of its own (each vendor agent keeps its own); a role has
@@ -998,7 +1003,8 @@ while the rest of the file is camelCase.
 0. First, cancel the turn of every agent run this dispatcher started that a person's action decided
    (`cancelled`, `superseded`) and that is not already being cancelled, as `cancel()` does when chat
    asks (§5.1). A change made by another process, the operator's `mt kanban` (§2.6), cannot ask, and
-   its nudge (§7.3), or the next sweep, brings this pass. A run that decided itself ends its own turn.
+   its nudge (§7.3), or the next sweep, brings this pass. A run that decided itself ends its own turn,
+   and one already closing is skipped. A cancel that fails is noted, and never ends the pass.
 1. Collect claimable tasks with **no open run of any kind**: **ready** (§4.1) for work, **review**
    for review. A task whose previous run has reported but not yet closed is skipped until it closes;
    claiming it would only fail on the one-open-run index (§3.3). Order by priority, higher first, then
@@ -1203,8 +1209,8 @@ mt kanban link       < link.json    # {parent_id, child_id}
   (`MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` set) and the operator's elsewhere. The shapes never overlap
   either: the worker's take no arguments, the operator's `show`, `comment` and `link` always a task id.
 - **The nudge** is the one request on the socket that needs no token: exactly `{"nudge": true}`,
-  answered `{"ok": true}`. It triggers a dispatcher pass and nothing else, and is what the operator's
-  commands send after a change.
+  answered `{"ok": true}`. It triggers a dispatcher pass, on the next tick, one for a burst of
+  nudges, and nothing else, and is what the operator's commands send after a change.
 - **Why a CLI and not tools in the agent's schema:** the gateway drives vendor agents it cannot add
   tools to. `bytesec run` has no way to receive tools; every coding agent has a shell. The handler
   behind the CLI is one module, and an MCP server for agents that accept one is a second front end to
@@ -2156,7 +2162,8 @@ directory of the operator's next unsupervised agent. There is no rename: tasks c
 renaming would rewrite them; a display name, as Hermes gives its boards, can come later.
 
 **At a terminal** (§2.6), `mt kanban board list|create|set|archive` are the same commands, at operator
-tier; there is no `board use`, since a terminal is no chat. `/kanban board list` was `/kanban boards`
+tier; there is no `board use`, since a terminal is no chat, and `--board <name>` names the board
+instead (§16.5). `/kanban board list` was `/kanban boards`
 until plan H, which kept no alias.
 
 **A board's name** is in the grammar of role and workspace names, checked by the service, which says
@@ -2199,8 +2206,12 @@ that cannot be valid does not look like one that is. A `set` that changes neithe
   it does not cross in practice; the check does not depend on that.
 - **A follow-up created from chat with `parent:`** is created on the chat's board, so it must come from
   a chat on the parent's board; from another it is refused, as any parent across boards is.
-- **`mt kanban gate`** names a task by id, and needs no board. Of the operator's other commands
-  (§2.6), only `new` and `list` take `--board`, `default` unless given; the rest name a task by id.
+- **`mt kanban gate`** names a task by id, and needs no board. The operator's other commands (§2.6)
+  take `--board <name>`: `new` and `list` act on that board, `default` unless given. The commands
+  that name a task (`show`, `assign`, `link`, `unblock`, `stop`, `archive`, `comment`) work on a
+  task on any board without it, as chat's do; with it, they refuse `other_board` unless the task is
+  on that board, and for `link` unless both are, and a board that does not exist `unknown_board`,
+  changing nothing. `board set` and `board archive` name their board positionally.
 
 ### 16.6 A board's `max_running` and workspace
 
