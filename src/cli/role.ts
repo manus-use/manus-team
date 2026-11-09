@@ -25,7 +25,7 @@ import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { RESUME_MIN_VERSION } from '../driver/cli/driver.js';
 import { isReservedRoleName, nameProblem } from '../names.js';
 import { nativeFor } from '../render/native.js';
-import { discoverRoles, gatewayOwnsVariable, type Role } from '../roles.js';
+import { discoverRoles, gatewayOwnsVariable, roleLimit, type Role } from '../roles.js';
 import { loadTeam } from '../team.js';
 import { refuse, table } from './args.js';
 import type { MtIo } from './mt.js';
@@ -40,20 +40,21 @@ import {
   type NewWorkspace,
 } from './workspace.js';
 
-/** `mt role list`: every role, its driver, where it comes from, and its description. */
+/** `mt role list`: every role, its driver, where it comes from, its max_running, and its description. */
 export function roleList(io: MtIo): number {
   // Names only, so an unset agent.passEnv name is no reason to fail (see
   // LoadOptions.unsetPassEnv).
   const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
   const rolesDir = join(settings.home, 'roles');
   const found = discoverRoles(rolesDir);
+  const perRole = settings.kanban?.maxRunningPerRole;
   const rows: string[][] = [];
   if (settings.agent !== undefined && !found.names.includes('default')) {
-    rows.push(['default', settings.agent.driver, 'agent: block', '']);
+    rows.push(['default', settings.agent.driver, 'agent: block', limitCell(undefined, perRole), '']);
   }
   for (const name of found.names) {
     const summary = summarize(join(rolesDir, name, 'config.yaml'));
-    rows.push([name, summary.driver, `roles/${name}`, summary.description]);
+    rows.push([name, summary.driver, `roles/${name}`, limitCell(summary.maxRunning, perRole), summary.description]);
   }
   if (rows.length === 0) io.out('no roles: create one with mt role create <name>');
   for (const line of table(rows)) io.out(line);
@@ -61,19 +62,33 @@ export function roleList(io: MtIo): number {
   return 0;
 }
 
+/**
+ * A role's max_running in `mt role list` (spec §6.3): its own, marked `(role)`;
+ * else `kanban.max_running_per_role`, marked `(default)`; else none. `?` for one
+ * its config.yaml sets to something that is not a limit.
+ */
+function limitCell(own: number | 'invalid' | undefined, perRole: number | undefined): string {
+  if (own === 'invalid') return 'max_running ?';
+  const limit = roleLimit(own === undefined ? {} : { maxRunning: own }, perRole);
+  return limit === undefined ? 'max_running none' : `max_running ${limit.limit} (${limit.from})`;
+}
+
 /** Read loosely, so a broken role still gets a line; `mt role check` says what is wrong with it. */
-function summarize(path: string): { driver: string; description: string } {
+function summarize(path: string): { driver: string; description: string; maxRunning: number | 'invalid' | undefined } {
   try {
     const raw = parseYaml(readFileSync(path, 'utf8')) as Record<string, unknown> | null;
     const agent = raw?.['agent'] as Record<string, unknown> | undefined;
     const driver = agent?.['driver'];
     const description = raw?.['description'];
+    const max = raw?.['max_running'];
     return {
       driver: typeof driver === 'string' ? driver : '?',
       description: typeof description === 'string' ? description : '',
+      maxRunning:
+        max === undefined || max === null ? undefined : Number.isSafeInteger(max) && (max as number) > 0 ? (max as number) : 'invalid',
     };
   } catch {
-    return { driver: '?', description: '(unreadable config.yaml)' };
+    return { driver: '?', description: '(unreadable config.yaml)', maxRunning: undefined };
   }
 }
 
@@ -150,15 +165,18 @@ export function roleCreate(name: string, opts: CreateOptions, io: MtIo): number 
     }
     if (opts.description !== undefined) doc.set('description', opts.description);
     else if (opts.cloneFrom === undefined && !legacy) doc.delete('description');
+    if (opts.cloneFrom === undefined && !legacy) doc.delete('max_running');
     if (opts.ownWorkspace === true) doc.set('workspace', name);
     configText = String(doc);
   } else if (opts.cloneFrom === undefined && !legacy) {
-    // A description says what one role is for, so a role made from default does
-    // not take default's; --clone-from keeps the source's. A config that is not a
-    // map is copied as it is, as before, for mt role check to report.
+    // A description says what one role is for, and a max_running how many of it
+    // may run (spec §6.3), so a role made from default takes neither of
+    // default's; --clone-from keeps the source's. A config that is not a map is
+    // copied as it is, as before, for mt role check to report.
     const doc = parseDocument(configText);
-    if (doc.errors.length === 0 && isMap(doc.contents) && doc.has('description')) {
+    if (doc.errors.length === 0 && isMap(doc.contents) && (doc.has('description') || doc.has('max_running'))) {
       doc.delete('description');
+      doc.delete('max_running');
       configText = String(doc);
     }
   }
@@ -352,6 +370,8 @@ function reportCutover(dir: string, configPath: string | undefined, io: MtIo): v
 
 interface Attempt {
   error?: string;
+  /** kanban.max_running_per_role, when the check got as far as reading it. */
+  perRole?: number;
   /** `role: NAME` for each passEnv name not set in the environment checked. */
   unset: string[];
   /** What startup would log: entries under roles/ that were ignored, and why. */
@@ -384,7 +404,13 @@ function attemptAll(env: Env, only: string | undefined): Attempt {
       if (was !== undefined && was !== path) return { error: movedMessage(name, was, path), unset, notes };
     }
     const roles = [...team.roles.values()].filter((r) => only === undefined || r.name === only);
-    return { unset, notes, roles: roles.sort((a, b) => a.name.localeCompare(b.name)) };
+    const perRole = settings.kanban?.maxRunningPerRole;
+    return {
+      unset,
+      notes,
+      roles: roles.sort((a, b) => a.name.localeCompare(b.name)),
+      ...(perRole === undefined ? {} : { perRole }),
+    };
   } catch (err) {
     if (err instanceof ConfigError) return { error: err.message, unset, notes };
     throw err;
@@ -431,10 +457,22 @@ export function roleCheck(only: string | undefined, io: MtIo): number {
         : `native: role ${role.name} does not: ${native.reason}`,
     );
   }
+  // One line a role: how many of its runs may be open at once, and why (spec §6.3).
+  for (const role of real.roles ?? []) io.out(limitLine(role, real.perRole));
   resumeVersions(real.roles ?? [], io);
   for (const note of real.notes) io.out(`note: ${note}`);
   io.out("note: the environment was checked in this shell; the service's environment may differ");
   return files.length + environment.length === 0 ? 0 : 1;
+}
+
+/** `mt role check`'s line for a role's max_running, and where it comes from. */
+function limitLine(role: Role, perRole: number | undefined): string {
+  const limit = roleLimit(role, perRole);
+  if (limit === undefined) {
+    return `max_running: role ${role.name} has no limit of its own: kanban.max_running and the boards' limits hold`;
+  }
+  const at = `${limit.limit} agent${limit.limit === 1 ? '' : 's'} at once`;
+  return `max_running: role ${role.name} runs at most ${at}, from ${limit.from === 'role' ? 'its config.yaml' : 'kanban.max_running_per_role'}`;
 }
 
 /**
