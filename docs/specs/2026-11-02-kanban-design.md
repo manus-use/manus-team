@@ -510,22 +510,27 @@ fresh install) has no registrations. A deployment with no config file (environme
   mt kanban unblock <task> [comment…] · comment <task> <text…>                       [--board <name>]
   ```
 
-  Every one takes `--json`: plain text by default, masked and stripped of control characters, or one
+  Every one takes `--json`: plain text by default, stripped of control characters and masked, or one
   line of JSON shaped as the worker's; exit 0 done, 1 refused, 2 a wrong command line. There is no
   `board use`, as a terminal is no chat: `new` and `list` take `--board`, `default` unless given; the
   commands that name a task work on any board by id (§16.4), and with `--board` refuse `other_board`
-  a task on another board (§16.5). `new`'s title is one line, with no control character, and its body
+  a task on another board (§16.5). `new`'s title is one line, with no control character and no bidi
+  control, checked before it is trimmed, so a trailing newline or a leading tab is refused; its body
   is read from stdin only for `--body-file -`, otherwise from a regular file. They record the login
-  of the account they run as, the service account under `sudo -u`. Plain output drops control and
-  bidi characters; `--json` writes C1 controls, U+2028, U+2029 and bidi controls as `\uXXXX`. Only roles are given work here: a person needs talk tier, which the Lark
+  of the account they run as, the service account under `sudo -u`. Plain output drops control
+  characters and the characters that show nothing (bidi controls, zero-width characters, direction
+  marks) before it masks, so a secret split by one is masked, and makes U+2028 and U+2029 line
+  breaks; `--json` writes DEL, C1 controls, U+2028, U+2029 and bidi controls as `\uXXXX`. Only roles are given work here: a person needs talk tier, which the Lark
   allowlist decides, and these read no Lark settings. A task created here is created via
   `{kind: operator}`, which no chat follows. After `new`, `assign`, `unblock`, `stop`, `archive` and
   `board set`, the changes chat follows with a pass (§9.1), the command sends the gateway's socket
   the nudge (§7.3), and the pass cancels the turn of a run the change decided (§6.2); a gateway that
-  does not answer loses nothing, as its next sweep or start acts on the change. When the config does
-  not set `kanban.enabled`, no gateway is asked, and the command says the board is off and nothing
-  runs the change until it is turned on. They refuse a board
-  run's shell, as the gate commands do, and that is not a security boundary either.
+  does not answer loses nothing, as its next sweep or start acts on the change, and the command says
+  why it did not answer and that the change stands, never to try again: a second `new` would make a
+  second task. When the config does not set `kanban.enabled`, or sets it to false, no gateway is
+  asked, and the command says which, that the board is off, and that nothing runs the change until it
+  is turned on. They refuse a board run's shell, as the gate commands do, before their command line
+  is parsed or stdin read, and that is not a security boundary either.
 - Not taken from comparable tools, deliberately: a role is not its own command (roles are run by the
   board, not by hand); a role has no memory of its own (each vendor agent keeps its own); a role has
   no bot token or gateway of its own (there is one gateway).
@@ -1209,8 +1214,10 @@ mt kanban link       < link.json    # {parent_id, child_id}
   (`MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` set) and the operator's elsewhere. The shapes never overlap
   either: the worker's take no arguments, the operator's `show`, `comment` and `link` always a task id.
 - **The nudge** is the one request on the socket that needs no token: exactly `{"nudge": true}`,
-  answered `{"ok": true}`. It triggers a dispatcher pass, on the next tick, one for a burst of
-  nudges, and nothing else, and is what the operator's commands send after a change.
+  answered `{"ok": true}`. It triggers a dispatcher pass and nothing else, and is what the operator's
+  commands send after a change. Throttled: a nudge's pass runs on the next tick, and at most one in
+  each 100 ms; a nudge inside that window brings one more pass at its end, shared by every later
+  nudge in it, so the last is never lost.
 - **Why a CLI and not tools in the agent's schema:** the gateway drives vendor agents it cannot add
   tools to. `bytesec run` has no way to receive tools; every coding agent has a shell. The handler
   behind the CLI is one module, and an MCP server for agents that accept one is a second front end to
@@ -1872,8 +1879,9 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   shell so an agent does not act as an operator by accident; an agent runs as the same user and could
   unset the run's variables, or open the database itself, so it is not a boundary.
 - **The nudge** (§7.3) needs no token because it names nothing and changes nothing: a pass is what
-  the sweep runs anyway. Only the gateway's user can reach the socket. A flood of nudges could keep
-  the gateway busy, as that user could stop it outright.
+  the sweep runs anyway. Only the gateway's user can reach the socket. A flood of nudges runs ten
+  passes a second at most (§7.3), and could keep the gateway that busy, as that user could stop it
+  outright.
 - **No secrets in the handoff.** Summaries, metadata and comments are durable and shown in chat. The
   worker protocol says so, and known secrets are masked (§10.1).
 - **Agent-written task text cannot spoof a mention** (§9.3).
@@ -1886,7 +1894,11 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
 
 Anything an agent writes — a summary, a comment, its output — is shown in chat and, on the board,
 passed to other agents. So the gateway masks **every secret value it holds itself**, replacing each
-exact occurrence with `••••`:
+exact occurrence with `••••`. The characters that show nothing (bidi controls U+202A to U+202E and
+U+2066 to U+2069, zero-width characters U+200B to U+200D and U+FEFF, direction marks U+200E,
+U+200F and U+061C) are skipped as it matches, and masked with the secret, since a secret split by
+one reads whole on screen; they are not stripped elsewhere, as a joined emoji and right-to-left text
+need them:
 
 - the Lark app secret;
 - every environment value the gateway passes to an agent: every value in every role's `.env`

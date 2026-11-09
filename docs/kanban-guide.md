@@ -960,9 +960,10 @@ mt kanban stop k_…
 - No chat follows a task created here, so nobody is told when it is done or blocks. Look with
   `mt kanban show`, or create it from chat if a group should hear.
 - After a change, the running gateway is told to look for work at once, and to stop the agent
-  of a run the change ended. If no gateway answers, `mt` says so; the change stands, and the
-  gateway acts on it at its next sweep, or when it next starts. If the board is off on the
-  gateway (`kanban.enabled` unset), `mt` says that instead: nothing runs the change until it
+  of a run the change ended. If no gateway answers, `mt` says so, and why; the change stands,
+  and the gateway acts on it at its next sweep, or when it next starts. Do not run the command
+  again: a second `new` makes a second task. If the board is off on the gateway
+  (`kanban.enabled` unset, or false), `mt` says that instead: nothing runs the change until it
   is turned on.
 - Add `--json` for one line of JSON, for scripts. `mt` exits 0 when done, 1 when refused, and
   2 for a wrong command line.

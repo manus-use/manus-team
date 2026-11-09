@@ -115,7 +115,8 @@ by its owner (for example `0600` or `0400`). It may not set `MT_*`, `LARK_*` or 
 The gateway masks every secret it holds itself — the Lark app secret, and every value it gives
 an agent from a role's `.env`, `passEnv` or `MT_AGENT_ENV_*`, except names the role lists in
 `agent.maskExempt` — as `••••` in everything it shows in chat, and in what it stores in its event
-log and approvals. Values shorter than 8 characters are not masked. A secret the agent finds by
+log and approvals. A secret split by a character that shows nothing (a zero-width or bidi
+character, a direction mark) is masked too. Values shorter than 8 characters are not masked. A secret the agent finds by
 itself, for instance in a file it reads, is not known to the gateway and is not masked.
 
 | File setting | Env override | Meaning |
@@ -317,8 +318,8 @@ a running gateway, through the board's own service, and take effect at once.
   unless both tasks are on it. A `--board` naming no board is refused. They record who acted as
   `operator:<login>`, the login of the account the command runs as: run under `sudo -u`, that
   is the service account, not you. `new` takes `/kanban new`'s lines as flags; its title is the
-  words that are not flags, on one line, and its body `--body`, or `--body-file` with a regular
-  file, or `-` for stdin.
+  words that are not flags, on one line, with no control character or bidi control, and its
+  body `--body`, or `--body-file` with a regular file, or `-` for stdin.
   `assign`, `--assignee` and `--reviewer` take a role: a person is given work from chat, by
   @-mention, where the gateway can check their tier. A task created here is followed by no
   chat, so nobody is told when it is done or blocks: `mt kanban show` and `list` tell you. Each
@@ -327,10 +328,12 @@ a running gateway, through the board's own service, and take effect at once.
   2 for a wrong command line, said on stderr. After `new`, `assign`, `unblock`, `stop`,
   `archive` and `board set`, as after their chat forms, the gateway is asked over its socket to
   look for work at once, which also cancels the turn of an agent run the change ended; if no
-  gateway answers, the change stands, and the gateway acts on it at its next sweep, or when it
-  next starts. If the config does not set `kanban.enabled`, they say the board is off: the
-  change is recorded, and nothing runs it until the board is turned on. They refuse to run in a
-  board run's shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set.
+  gateway answers, they say why, and that the change stands: the gateway acts on it at its next
+  sweep, or when it next starts, and running the command again would make it twice. If the
+  config does not set `kanban.enabled`, or sets it to false, they say which, and that the board
+  is off: the change is recorded, and nothing runs it until the board is turned on. They refuse
+  to run in a board run's shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set, before
+  reading their arguments or stdin.
 - `kanban` in a board run's shell is for the run's agent, not for a person: it works only with
   the run's `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN` and `MT_KANBAN_SOCKET`, which the gateway gives
   each run. There, `show`, `comment` and `link` are the agent's, which take no arguments, and
