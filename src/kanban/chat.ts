@@ -89,6 +89,13 @@ const TIERS: Readonly<Record<KanbanCommand['verb'], Tier>> = {
   review: 'talk',
   approve: 'talk',
   changes: 'talk',
+  boards: 'talk',
+  // Moving a chat onto a board changes where its tasks go, and so which workspace
+  // an agent may run in: an operator's, as creating a task is (spec §16).
+  'board create': 'operate',
+  'board use': 'operate',
+  'board set': 'operate',
+  'board archive': 'operate',
 };
 
 /** The board's principal for a chat sender: `lark:<union_id>`, or undefined when Lark gave none. */

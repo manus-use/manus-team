@@ -69,7 +69,14 @@ export type KanbanCommand =
   | { verb: 'gate list'; taskId: string }
   | { verb: 'gate remove'; taskId: string; gateId: number }
   | ReportCommand
-  | ReviewCommand;
+  | ReviewCommand
+  | { verb: 'boards'; archived: boolean }
+  | BoardCommand;
+
+/** `/kanban board …` (spec §16): a board's name as typed, which the service checks. */
+export type BoardCommand =
+  | { verb: 'board create' | 'board use' | 'board archive'; board: string }
+  | { verb: 'board set'; board: string; change: { maxRunning?: number | null; workspace?: string | null } };
 
 export type ParsedKanban = { ok: true; command: KanbanCommand } | { ok: false; usage: string };
 
@@ -93,6 +100,11 @@ export const USAGE = {
   review: '/kanban review <task> [summary], and a line reviewer: <role or @person> unless the task names one',
   approve: '/kanban approve <task> [comment]',
   changes: '/kanban changes <task> <reason>',
+  boards: '/kanban boards [all]',
+  'board create': '/kanban board create <name>',
+  'board use': '/kanban board use <name>',
+  'board set': '/kanban board set <name> max_running <number|none>, or workspace <workspace|none>',
+  'board archive': '/kanban board archive <name>',
 } as const;
 
 /**
@@ -241,6 +253,14 @@ export function parseKanban(arg: string): ParsedKanban {
     }
     case 'review':
       return parseReview(rest);
+    case 'boards': {
+      const w = words(rest, 0) ?? words(rest, 1);
+      const all = w?.[0]?.toLowerCase();
+      if (w === undefined || (all !== undefined && all !== 'all')) return usage('boards');
+      return { ok: true, command: { verb: 'boards', archived: all === 'all' } };
+    }
+    case 'board':
+      return parseBoard(rest);
     default:
       return { ok: false, usage: `Unknown \`/kanban\` command \`${echoed(rawVerb, 80)}\`. \`/kanban help\` lists them.` };
   }
@@ -269,6 +289,38 @@ function parseReview(text: string): ParsedKanban {
   }
   const summary = lines.join('\n').trim();
   return { ok: true, command: { verb: 'review', taskId, summary, ...(reviewer === undefined ? {} : { reviewer }) } };
+}
+
+/**
+ * `/kanban board create|use|archive <name>`, and `/kanban board set <name>` with
+ * `max_running <number|none>` or `workspace <workspace|none>` (spec §16).
+ */
+function parseBoard(text: string): ParsedKanban {
+  const [rawSub, rest] = shift(text);
+  const sub = rawSub.toLowerCase();
+  if (sub === 'create' || sub === 'use' || sub === 'archive') {
+    const verb = `board ${sub}` as const;
+    const w = words(rest, 1);
+    return w?.[0] === undefined ? usage(verb) : { ok: true, command: { verb, board: w[0] } };
+  }
+  if (sub === 'set') {
+    const [board, setting, value] = words(rest, 3) ?? [];
+    if (board === undefined || setting === undefined || value === undefined) return usage('board set');
+    const none = value.toLowerCase() === 'none';
+    switch (setting.toLowerCase()) {
+      case 'max_running': {
+        const n = Number(value);
+        if (!none && !(/^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(n))) return usage('board set');
+        return { ok: true, command: { verb: 'board set', board, change: { maxRunning: none ? null : n } } };
+      }
+      case 'workspace':
+        return { ok: true, command: { verb: 'board set', board, change: { workspace: none ? null : value } } };
+      default:
+        return usage('board set');
+    }
+  }
+  const verbs = (['board create', 'board use', 'board set', 'board archive'] as const).map((v) => `\`${USAGE[v]}\``);
+  return { ok: false, usage: `Usage: ${verbs.join(', ')}` };
 }
 
 function parseGate(text: string): ParsedKanban {
