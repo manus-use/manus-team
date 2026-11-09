@@ -104,7 +104,7 @@ describe('the notifier', () => {
     expect(lark.texts).toHaveLength(1);
     expect(lark.texts[0]?.target).toEqual({ chatId: 'oc_team', threadId: 'omt_topic' });
     expect(lark.texts[0]?.text.split('\n\n')).toEqual([
-      `**Check the links** \`${b.taskId}\` is blocked (needs\\_input): which wiki?\n\`/kanban unblock ${b.taskId} [comment]\` once it can go on.`,
+      `**Check the links** \`${b.taskId}\` is blocked (needs\\_input): which wiki?\n\`/kanban task unblock ${b.taskId} [comment]\` once it can go on.`,
       `Done: **Draft the notes** \`${a.taskId}\`\n> merged`,
     ]);
     expect(lark.texts[0]?.uuid).toBe(

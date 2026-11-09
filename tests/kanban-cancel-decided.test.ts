@@ -4,7 +4,7 @@ import { dispatchHarness, holds, reportComplete, until, type DispatchHarness } f
 
 /**
  * A run decided by a change the dispatcher was not told of (spec §2.6): an
- * operator's `mt kanban stop`, assign or archive, made beside the gateway. Its
+ * operator's `mt kanban task stop`, assign or archive, made beside the gateway. Its
  * next pass, which the change's nudge asks for, cancels the turn.
  */
 

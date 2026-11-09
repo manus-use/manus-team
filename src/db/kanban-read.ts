@@ -273,7 +273,7 @@ export function openAgentRunIn(db: Db, workspace: string): RunRow | undefined {
  * The task's comments, oldest first. `steering`: only those that may steer an
  * agent -- a run's, or an operator's -- which are what a run's prompt and a
  * forwarded comment carry (spec §7.5, §9.1). Without it, every comment, as
- * `/kanban show` gives them to people.
+ * `/kanban task show` gives them to people.
  */
 export function commentsOf(db: Db, taskId: string, opts: { steering?: boolean } = {}): CommentRow[] {
   return db
@@ -502,7 +502,7 @@ function latestOf(db: Db, taskId: string, kinds: readonly string[]): EventRaw | 
     .get(taskId, ...kinds);
 }
 
-/** The task as `/kanban show` and `mt kanban show` present it. */
+/** The task as `/kanban task show` and `mt kanban task show` present it. */
 export interface TaskView {
   task: TaskRow;
   status: DisplayStatus;
@@ -540,7 +540,7 @@ export interface BoardEntry {
 
 /**
  * Every task on a board -- on every board, with none given -- with its display
- * status, highest priority first, then oldest: `/kanban list` (spec §9.1, §16).
+ * status, highest priority first, then oldest: `/kanban task list` (spec §9.1, §16).
  * The status is derived here, from the parents and the runs, as `taskView`
  * derives it.
  */

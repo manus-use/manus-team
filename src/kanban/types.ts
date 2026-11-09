@@ -41,7 +41,7 @@ export const ENDED_OUTCOMES = [
   'terminal_provider',
   'interrupted',
 ] as const;
-/** Recorded by a person's action, not by the run: `/kanban stop`, assign, archive. */
+/** Recorded by a person's action, not by the run: `/kanban task stop`, assign, archive. */
 export const SUPERSEDING_OUTCOMES = ['cancelled', 'superseded'] as const;
 
 export type ReportedOutcome = (typeof REPORTED_OUTCOMES)[number];
@@ -62,7 +62,7 @@ export type Contract = Partial<Record<(typeof CONTRACT_FIELDS)[number], string>>
 
 /**
  * Where a task came from (spec §3.1): the chat it was created in, the run that
- * created it, or an operator's `mt kanban new` at a terminal, which no chat
+ * created it, or an operator's `mt kanban task new` at a terminal, which no chat
  * follows.
  */
 export type CreatedVia =

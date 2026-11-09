@@ -137,9 +137,9 @@ function taskCount(): number {
   return t.db.prepare<[], { n: number }>('SELECT count(*) AS n FROM kanban_tasks').get()?.n ?? 0;
 }
 
-describe('/kanban new', () => {
+describe('/kanban task new', () => {
   it("creates a task from its field lines, as the sender, from this chat, which follows it; and looks for work", async () => {
-    const reply = await say('new Draft the Q3 summary\nassignee: docs-writer\nworkspace: docs\noutcome: a page in the wiki\nUse last quarter as the model.');
+    const reply = await say('task new Draft the Q3 summary\nassignee: docs-writer\nworkspace: docs\noutcome: a page in the wiki\nUse last quarter as the model.');
     const taskId = created(reply);
     expect(reply).toBe(
       `Created \`${taskId}\`: **Draft the Q3 summary**, for role docs-writer, in docs. ` +
@@ -157,35 +157,37 @@ describe('/kanban new', () => {
     expect(subscriptionsOf(t.db, taskId).map((s) => [s.conversationId, s.threadId])).toEqual([['oc_team', 'omt_topic']]);
     expect(passes).toBe(1);
     // A long title is shown cut to 200 characters, on one line.
-    const long = await say(`new ${'x'.repeat(300)}`);
+    const long = await say(`task new ${'x'.repeat(300)}`);
     expect(long).toContain(`: **${'x'.repeat(199)}…**, for nobody yet`);
+    const nobody = created(long);
+    expect(long).toContain(`(\`/kanban task assign ${nobody} <role or @person>\` gives it to someone)`);
   });
 
   it('makes one task of one message, however often it arrives', async () => {
-    const first = created(await chat.run('new Once', message(OWNER, 'om_same'), KEY));
-    expect(await chat.run('new Once', message(OWNER, 'om_same'), KEY)).toBe(`Already created, as \`${first}\`.`);
+    const first = created(await chat.run('task new Once', message(OWNER, 'om_same'), KEY));
+    expect(await chat.run('task new Once', message(OWNER, 'om_same'), KEY)).toBe(`Already created, as \`${first}\`.`);
     expect(taskCount()).toBe(1);
   });
 
   it('refuses an unknown role or workspace, and an oversized task, creating nothing', async () => {
-    expect(await say('new t\nassignee: nobody-here')).toBe('Not done: role "nobody-here" is not configured');
-    expect(await say('new t\nassignee: implementer\nworkspace: nowhere')).toBe(
+    expect(await say('task new t\nassignee: nobody-here')).toBe('Not done: role "nobody-here" is not configured');
+    expect(await say('task new t\nassignee: implementer\nworkspace: nowhere')).toBe(
       'Not done: workspace "nowhere" is not configured',
     );
-    expect(await say(`new ${'t'.repeat(513)}`)).toBe('A title is at most 512 bytes; put the rest in the body.');
-    expect(await say('new t\noutcome: ' + 'x'.repeat(8193))).toBe("The contract's outcome is at most 8192 bytes.");
+    expect(await say(`task new ${'t'.repeat(513)}`)).toBe('A title is at most 512 bytes; put the rest in the body.');
+    expect(await say('task new t\noutcome: ' + 'x'.repeat(8193))).toBe("The contract's outcome is at most 8192 bytes.");
     expect(taskCount()).toBe(0);
   });
 
   it("gives a task to a role whose agent is supervised: its approvals go to the chat that follows it", async () => {
-    const taskId = created(await say('new Rotate the logs\nassignee: watched'));
+    const taskId = created(await say('task new Rotate the logs\nassignee: watched'));
     expect(getTask(t.db, taskId)?.assignee).toEqual({ kind: 'role', name: 'watched' });
   });
 });
 
 describe('people, named by @-mention', () => {
   it('gives a task to the person a mention names, by their union_id, and says they get a card', async () => {
-    const reply = await say('new Check the links\nassignee: @Alice Smith\nreviewer: @Bob', OWNER, [AT_ALICE, AT_BOB]);
+    const reply = await say('task new Check the links\nassignee: @Alice Smith\nreviewer: @Bob', OWNER, [AT_ALICE, AT_BOB]);
     const taskId = created(reply);
     expect(reply).toBe(
       `Created \`${taskId}\`: **Check the links**, for Alice Smith (lark:on\\_alice). ` +
@@ -197,30 +199,30 @@ describe('people, named by @-mention', () => {
       reviewer: { kind: 'human', name: 'lark:on_bob' },
     });
     // Once seen, a person may be named by principal too.
-    expect(created(await say('new Again\nassignee: lark:on_alice'))).toMatch(/^k_/);
+    expect(created(await say('task new Again\nassignee: lark:on_alice'))).toMatch(/^k_/);
   });
 
   it('refuses a person without talk tier, one the message does not mention, and one never seen, creating nothing', async () => {
-    expect(await say('new t\nassignee: @Carol', OWNER, [AT_CAROL])).toBe(
+    expect(await say('task new t\nassignee: @Carol', OWNER, [AT_CAROL])).toBe(
       '@Carol cannot be given work: being assigned lets a person report on the task, which needs talk tier, ' +
         'and the gateway does not know them to have it.',
     );
-    expect(await say('new t\nreviewer: @Dan Lee', OWNER, [AT_ALICE])).toBe(
+    expect(await say('task new t\nreviewer: @Dan Lee', OWNER, [AT_ALICE])).toBe(
       '@Dan Lee is not someone this message mentions: type @ and pick them, so Lark says who they are.',
     );
-    expect(await say('new t\nassignee: lark:on_stranger')).toMatch(/^lark:on\\_stranger cannot be given work/);
-    expect(await say('new t\nassignee: @Alice Smith', OWNER, [{ ...AT_ALICE, unionId: null }])).toMatch(
+    expect(await say('task new t\nassignee: lark:on_stranger')).toMatch(/^lark:on\\_stranger cannot be given work/);
+    expect(await say('task new t\nassignee: @Alice Smith', OWNER, [{ ...AT_ALICE, unionId: null }])).toMatch(
       /^Lark did not say who @Alice Smith is/,
     );
     expect(taskCount()).toBe(0);
   });
 
   it('assigns a task to a person, and says when they have it already', async () => {
-    const taskId = created(await say('new Survey the vendors\nassignee: implementer'));
-    expect(await say(`assign ${taskId} @Alice Smith`, OWNER, [AT_ALICE])).toBe(
+    const taskId = created(await say('task new Survey the vendors\nassignee: implementer'));
+    expect(await say(`task assign ${taskId} @Alice Smith`, OWNER, [AT_ALICE])).toBe(
       `\`${taskId}\` is now for Alice Smith (lark:on\\_alice).`,
     );
-    expect(await say(`assign ${taskId} @Alice Smith`, OWNER, [AT_ALICE])).toBe(
+    expect(await say(`task assign ${taskId} @Alice Smith`, OWNER, [AT_ALICE])).toBe(
       `\`${taskId}\` is already assigned to Alice Smith (lark:on\\_alice).`,
     );
   });
@@ -234,7 +236,7 @@ function soloTask(): Promise<{ taskId: string; run: RunRow }> {
 
 async function aliceTask(title = 'Check the links', reviewer = true): Promise<{ taskId: string; run: RunRow }> {
   const taskId = created(
-    await say(`new ${title}\nassignee: @Alice Smith${reviewer ? '\nreviewer: @Bob' : ''}`, OWNER, [AT_ALICE, AT_BOB]),
+    await say(`task new ${title}\nassignee: @Alice Smith${reviewer ? '\nreviewer: @Bob' : ''}`, OWNER, [AT_ALICE, AT_BOB]),
   );
   const claim = service.claim(taskId);
   if (!claim.ok) throw new Error(claim.message);
@@ -244,13 +246,13 @@ async function aliceTask(title = 'Check the links', reviewer = true): Promise<{ 
 describe("a person's own reports", () => {
   it('lets the assignee report done, at talk tier, and nobody else', async () => {
     const { taskId, run } = await soloTask();
-    expect(await say(`done ${taskId} all links answer`, GUEST)).toBe(
-      `\`/kanban done\` is for the person a task is assigned to; \`${taskId}\` is for Alice Smith (lark:on\\_alice).`,
+    expect(await say(`task done ${taskId} all links answer`, GUEST)).toBe(
+      `\`/kanban task done\` is for the person a task is assigned to; \`${taskId}\` is for Alice Smith (lark:on\\_alice).`,
     );
     // Not even an operator: done is the assignee's report.
-    expect(await say(`done ${taskId} all links answer`)).toMatch(/^`\/kanban done` is for the person a task is assigned to/);
+    expect(await say(`task done ${taskId} all links answer`)).toMatch(/^`\/kanban task done` is for the person a task is assigned to/);
     const before = passes;
-    expect(await say(`done ${taskId} all links answer`, ALICE)).toBe(`Done: \`${taskId}\` is complete.`);
+    expect(await say(`task done ${taskId} all links answer`, ALICE)).toBe(`Done: \`${taskId}\` is complete.`);
     expect(getRun(t.db, run.runId)).toMatchObject({ outcome: 'completed', summary: 'all links answer' });
     expect(getTask(t.db, taskId)?.phase).toBe('done');
     expect(passes).toBe(before + 1);
@@ -258,52 +260,52 @@ describe("a person's own reports", () => {
 
   it("lets the assignee block their task as needing input, and ask for review of a reviewer they mention", async () => {
     const { taskId } = await aliceTask();
-    expect(await say(`block ${taskId} which wiki?`, ALICE)).toBe(
-      `Blocked \`${taskId}\` (needs\\_input). An operator unblocks it with \`/kanban unblock ${taskId} [comment]\`.`,
+    expect(await say(`task block ${taskId} which wiki?`, ALICE)).toBe(
+      `Blocked \`${taskId}\` (needs\\_input). An operator unblocks it with \`/kanban task unblock ${taskId} [comment]\`.`,
     );
     expect(getTask(t.db, taskId)).toMatchObject({ phase: 'blocked', blockKind: 'needs_input', blockReason: 'which wiki?' });
-    expect(await say(`unblock ${taskId}`)).toContain('is unblocked');
+    expect(await say(`task unblock ${taskId}`)).toContain('is unblocked');
     expect(service.claim(taskId).ok).toBe(true);
-    expect(await say(`review ${taskId} checked them all\nreviewer: @Bob`, ALICE, [AT_BOB])).toBe(
+    expect(await say(`task review ${taskId} checked them all\nreviewer: @Bob`, ALICE, [AT_BOB])).toBe(
       `\`${taskId}\` is waiting for review, by Bob (lark:on\\_bob).`,
     );
     expect(getTask(t.db, taskId)).toMatchObject({ phase: 'review', reviewer: { kind: 'human', name: 'lark:on_bob' } });
     // Once in review, the assignee's own reports are not the answer.
-    expect(await say(`done ${taskId} x`, ALICE)).toBe(`\`${taskId}\` is review: \`/kanban done\` reports on work being done.`);
+    expect(await say(`task done ${taskId} x`, ALICE)).toBe(`\`${taskId}\` is review: \`/kanban task done\` reports on work being done.`);
   });
 
   it('lets the named reviewer answer at talk tier, and an operator answer any review', async () => {
     const { taskId } = await aliceTask();
-    expect(await say(`approve ${taskId}`, BOB)).toBe(`\`${taskId}\` is not waiting for review: it is open.`);
-    expect(await say(`review ${taskId} checked them all`, ALICE)).toContain('is waiting for review, by Bob');
-    expect(await say(`approve ${taskId}`, GUEST)).toBe(
-      `\`/kanban approve\` answers a review, and is for \`${taskId}\`'s reviewer (Bob (lark:on\\_bob)) or an operator.`,
+    expect(await say(`task approve ${taskId}`, BOB)).toBe(`\`${taskId}\` is not waiting for review: it is open.`);
+    expect(await say(`task review ${taskId} checked them all`, ALICE)).toContain('is waiting for review, by Bob');
+    expect(await say(`task approve ${taskId}`, GUEST)).toBe(
+      `\`/kanban task approve\` answers a review, and is for \`${taskId}\`'s reviewer (Bob (lark:on\\_bob)) or an operator.`,
     );
-    expect(await say(`changes ${taskId} cite the source of each link`, BOB)).toBe(
+    expect(await say(`task changes ${taskId} cite the source of each link`, BOB)).toBe(
       `Changes requested on \`${taskId}\`: it goes back to its assignee, with your reason.`,
     );
     expect(getTask(t.db, taskId)?.phase).toBe('open');
     expect(service.claim(taskId).ok).toBe(true);
-    expect(await say(`review ${taskId} sources added`, ALICE)).toContain('is waiting for review');
+    expect(await say(`task review ${taskId} sources added`, ALICE)).toContain('is waiting for review');
     // An operator answers a review that is not theirs.
-    expect(await say(`approve ${taskId} fine by me`)).toBe(`Approved: \`${taskId}\` is complete.`);
+    expect(await say(`task approve ${taskId} fine by me`)).toBe(`Approved: \`${taskId}\` is complete.`);
     expect(getTask(t.db, taskId)?.phase).toBe('done');
   });
 
   it("lets an operator answer a role's review", async () => {
-    const taskId = created(await say('new Fix the footer\nassignee: implementer\nreviewer: reviewer'));
+    const taskId = created(await say('task new Fix the footer\nassignee: implementer\nreviewer: reviewer'));
     const work = service.claim(taskId);
     if (!work.ok) throw new Error(work.message);
     expect((await service.requestReview(taskId, { kind: 'run', runId: work.run.runId }, { summary: 'moved it' })).ok).toBe(true);
     expect(service.closeRun(work.run.runId).ok).toBe(true);
-    expect(await say(`changes ${taskId} keep the old colour`)).toContain('Changes requested on');
+    expect(await say(`task changes ${taskId} keep the old colour`)).toContain('Changes requested on');
     expect(getTask(t.db, taskId)?.phase).toBe('open');
   });
 
   it("sends the assignee's done for review when the task names a reviewer, and says so", async () => {
     const { taskId, run } = await aliceTask();
     expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
-    expect(await say(`done ${taskId} all links answer`, ALICE)).toBe(
+    expect(await say(`task done ${taskId} all links answer`, ALICE)).toBe(
       `Sent \`${taskId}\` for review to Bob (lark:on\\_bob): the task names a reviewer, so done asks for review.`,
     );
     expect(getRun(t.db, run.runId)).toMatchObject({ outcome: 'review_requested', summary: 'all links answer' });
@@ -314,7 +316,7 @@ describe("a person's own reports", () => {
   });
 
   it("lets an operator answer a role's review while its run is open, ending that run", async () => {
-    const taskId = created(await say('new Fix the footer\nassignee: implementer\nreviewer: reviewer'));
+    const taskId = created(await say('task new Fix the footer\nassignee: implementer\nreviewer: reviewer'));
     const work = service.claim(taskId);
     if (!work.ok) throw new Error(work.message);
     expect((await service.complete(taskId, { kind: 'run', runId: work.run.runId }, { summary: 'moved it' })).ok).toBe(true);
@@ -322,13 +324,13 @@ describe("a person's own reports", () => {
     const review = service.claim(taskId);
     if (!review.ok) throw new Error(review.message);
     // Not someone who is neither the reviewer nor an operator.
-    expect(await say(`approve ${taskId}`, GUEST)).toBe(
-      `\`/kanban approve\` answers a review, and is for \`${taskId}\`'s reviewer (role reviewer) or an operator.`,
+    expect(await say(`task approve ${taskId}`, GUEST)).toBe(
+      `\`/kanban task approve\` answers a review, and is for \`${taskId}\`'s reviewer (role reviewer) or an operator.`,
     );
     expect(getRun(t.db, review.run.runId)?.outcome).toBeNull();
     // Its gates run in the workspace the reviewer's own run holds: that run is not another task's agent.
     expect(await say(`gate add ${taskId} test -f footer.css`)).toContain('Gate 1 added');
-    expect(await say(`approve ${taskId} fine by me`)).toBe(`Approved: \`${taskId}\` is complete; the review run of role reviewer was ended.`);
+    expect(await say(`task approve ${taskId} fine by me`)).toBe(`Approved: \`${taskId}\` is complete; the review run of role reviewer was ended.`);
     expect(getTask(t.db, taskId)?.phase).toBe('done');
     expect(getRun(t.db, review.run.runId)?.outcome).toBe('superseded');
     expect(cancelled).toEqual([review.run.runId]);
@@ -341,14 +343,14 @@ describe("a person's own reports", () => {
   });
 
   it("lets an operator ask for changes while a role's review run is open, and the rework goes to the assignee", async () => {
-    const taskId = created(await say('new Fix the footer\nassignee: implementer\nreviewer: reviewer'));
+    const taskId = created(await say('task new Fix the footer\nassignee: implementer\nreviewer: reviewer'));
     const work = service.claim(taskId);
     if (!work.ok) throw new Error(work.message);
     expect((await service.requestReview(taskId, { kind: 'run', runId: work.run.runId }, { summary: 'moved it' })).ok).toBe(true);
     expect(service.closeRun(work.run.runId).ok).toBe(true);
     const review = service.claim(taskId);
     if (!review.ok) throw new Error(review.message);
-    expect(await say(`changes ${taskId} keep the old colour`)).toBe(
+    expect(await say(`task changes ${taskId} keep the old colour`)).toBe(
       `Changes requested on \`${taskId}\`: it goes back to its assignee, with your reason; the review run of role reviewer was ended.`,
     );
     expect(cancelled).toEqual([review.run.runId]);
@@ -362,7 +364,7 @@ describe("a person's own reports", () => {
     expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
     addSecrets(['sk-gate-12345678']);
     exits.set('test -f links.md', { exitCode: 1, output: 'no links.md <at id=all></at> sk-gate-12345678' });
-    const reply = await say(`done ${taskId} all links answer`, ALICE);
+    const reply = await say(`task done ${taskId} all links answer`, ALICE);
     expect(reply).toBe(
       'Not done: the gate test -f links.md exited 1, so the report was not applied. Fix it, then report again.\n' +
         `Its output:\n> no links.md \\<at id=all\\>\\</at\\> ${MASK}`,
@@ -375,10 +377,10 @@ describe("a person's own reports", () => {
     expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
     let release!: () => void;
     holds.set('test -f links.md', new Promise<void>((resolve) => (release = resolve)));
-    const reply = say(`done ${taskId} all links answer`, ALICE);
+    const reply = say(`task done ${taskId} all links answer`, ALICE);
     await new Promise((resolve) => setImmediate(resolve));
     // While the gates run, the task is given to someone else.
-    expect(await say(`assign ${taskId} implementer`)).toContain('is now for role implementer');
+    expect(await say(`task assign ${taskId} implementer`)).toContain('is now for role implementer');
     release();
     expect(await reply).toBe(`Not done: run ${run.runId.replace(/_/g, '\\_')} of task ${taskId.replace(/_/g, '\\_')} is over: the task has moved on since this report was made`);
     expect(getTask(t.db, taskId)).toMatchObject({ phase: 'open', assignee: { kind: 'role', name: 'implementer' } });
@@ -386,13 +388,13 @@ describe("a person's own reports", () => {
 
   it('refuses a typed done made while no run was open, once the task is reassigned while its gates run', async () => {
     // Not claimed: the person reports with no run open.
-    const taskId = created(await say('new Check the links\nassignee: @Alice Smith\nworkspace: docs', OWNER, [AT_ALICE]));
+    const taskId = created(await say('task new Check the links\nassignee: @Alice Smith\nworkspace: docs', OWNER, [AT_ALICE]));
     expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
     let release!: () => void;
     holds.set('test -f links.md', new Promise<void>((resolve) => (release = resolve)));
-    const reply = say(`done ${taskId} all links answer`, ALICE);
+    const reply = say(`task done ${taskId} all links answer`, ALICE);
     await new Promise((resolve) => setImmediate(resolve));
-    expect(await say(`assign ${taskId} implementer`)).toContain('is now for role implementer');
+    expect(await say(`task assign ${taskId} implementer`)).toContain('is now for role implementer');
     release();
     expect(await reply).toMatch(/^Not done: .*the task has moved on since this report was made/);
     expect(getTask(t.db, taskId)).toMatchObject({ phase: 'open', assignee: { kind: 'role', name: 'implementer' } });
@@ -400,11 +402,11 @@ describe("a person's own reports", () => {
 
   it("refuses a typed approve of a review not yet claimed, once its reviewer is changed while the gates run", async () => {
     const { taskId } = await aliceTask();
-    expect(await say(`review ${taskId} checked them all`, ALICE)).toContain('is waiting for review, by Bob');
+    expect(await say(`task review ${taskId} checked them all`, ALICE)).toContain('is waiting for review, by Bob');
     expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
     let release!: () => void;
     holds.set('test -f links.md', new Promise<void>((resolve) => (release = resolve)));
-    const reply = say(`approve ${taskId} fine`, BOB);
+    const reply = say(`task approve ${taskId} fine`, BOB);
     await new Promise((resolve) => setImmediate(resolve));
     expect(service.assignReviewer(taskId, 'reviewer', 'lark:on_owner').ok).toBe(true);
     release();
@@ -414,9 +416,9 @@ describe("a person's own reports", () => {
 
   it("lets the named assignee's comment steer, as an operator's does", async () => {
     const { taskId } = await aliceTask();
-    expect(await say(`comment ${taskId} the wiki moved`, ALICE)).toContain('An agent working on it gets it');
-    expect(await say(`comment ${taskId} the reviewer agrees`, BOB)).toContain('An agent working on it gets it');
-    expect(await say(`comment ${taskId} me too`, GUEST)).toContain('for people');
+    expect(await say(`task comment ${taskId} the wiki moved`, ALICE)).toContain('An agent working on it gets it');
+    expect(await say(`task comment ${taskId} the reviewer agrees`, BOB)).toContain('An agent working on it gets it');
+    expect(await say(`task comment ${taskId} me too`, GUEST)).toContain('for people');
     expect(commentsOf(t.db, taskId, { steering: true }).map((c) => c.author)).toEqual(['lark:on_alice', 'lark:on_bob']);
   });
 });
@@ -535,7 +537,7 @@ describe("a person's card", () => {
     exits.set('test -f links.md', { exitCode: 1, output: 'no links.md' });
     await press(run, 'done', ALICE, 'all links answer');
     await new Promise((resolve) => setImmediate(resolve));
-    expect(await say(`stop ${taskId}`)).toContain('Stopped');
+    expect(await say(`task stop ${taskId}`)).toContain('Stopped');
     release();
     await chat.idle(5_000);
     expect(redrawn.at(-1)?.view).toEqual({
@@ -555,7 +557,7 @@ describe("a person's card", () => {
     expect(getRun(t.db, run.runId)?.outcome).toBeNull();
     expect(redrawn.at(-1)?.view.markdown).toContain('**Not done.** The gateway is stopping');
     // A typed report's gates too.
-    const typed = say(`done ${taskId} again`, ALICE);
+    const typed = say(`task done ${taskId} again`, ALICE);
     expect(await typed).toContain('the gateway is stopping');
   });
 
@@ -601,8 +603,8 @@ describe("a person's card", () => {
     await hung.card(action);
     await new Promise((resolve) => setImmediate(resolve));
     // While the press's gates run, the run ends another way; a press of the card is told it is out of date.
-    expect(await say(`stop ${taskId}`)).toContain('Stopped');
-    expect(await hung.card(action)).toBe(`That card is out of date: \`${taskId}\` has moved on. \`/kanban show ${taskId}\` says where it is.`);
+    expect(await say(`task stop ${taskId}`)).toContain('Stopped');
+    expect(await hung.card(action)).toBe(`That card is out of date: \`${taskId}\` has moved on. \`/kanban task show ${taskId}\` says where it is.`);
     release();
     expect(await hung.idle(5_000)).toBe(true);
     expect(notes).toContain('kanban: redrawing card om_card took longer than 50 ms; going on without it');
@@ -653,7 +655,7 @@ describe("a person's card", () => {
   });
 
   it("refuses a press on a card for a run that is not a person's, changing nothing", async () => {
-    const taskId = created(await say('new Fix the footer\nassignee: implementer\nreviewer: reviewer'));
+    const taskId = created(await say('task new Fix the footer\nassignee: implementer\nreviewer: reviewer'));
     const work = service.claim(taskId);
     if (!work.ok) throw new Error(work.message);
     expect(await press(work.run, 'done', OWNER, 'x')).toBe("That button is not for a person's card.");
@@ -682,9 +684,9 @@ describe("a person's card", () => {
 
   it('does nothing for a card whose run is over, and redraws it as out of date', async () => {
     const { taskId, run } = await soloTask();
-    expect(await say(`done ${taskId} typed it instead`, ALICE)).toContain('is complete');
+    expect(await say(`task done ${taskId} typed it instead`, ALICE)).toContain('is complete');
     expect(await press(run, 'done', ALICE, 'again')).toBe(
-      `That card is out of date: \`${taskId}\` has moved on. \`/kanban show ${taskId}\` says where it is.`,
+      `That card is out of date: \`${taskId}\` has moved on. \`/kanban task show ${taskId}\` says where it is.`,
     );
     expect(redrawn.map((r) => r.view.markdown)).toEqual([
       `**Check the links** \`${taskId}\`\nThis card is out of date: the task has moved on since it was sent.`,
@@ -694,7 +696,7 @@ describe("a person's card", () => {
 
   it("unblocks from a notice's button at operator tier, once", async () => {
     const { taskId } = await aliceTask();
-    expect(await say(`block ${taskId} which wiki?`, ALICE)).toContain('Blocked');
+    expect(await say(`task block ${taskId} which wiki?`, ALICE)).toContain('Blocked');
     const blocked = eventsOf(t.db, taskId).findLast((e) => e.kind === 'blocked');
     if (blocked === undefined) throw new Error('not blocked');
     const { unblockButton } = await import('../src/kanban/chat-render.js');
@@ -703,37 +705,37 @@ describe("a person's card", () => {
     expect(await chat.card(action(ALICE))).toBe('Unblock changes the board, and needs operator permission.');
     expect(await chat.card(action(OWNER))).toBe(`\`${taskId}\` is unblocked, back to open.`);
     expect(await chat.card(action(OWNER))).toBe(
-      `\`${taskId}\` is not blocked as that notice said any more: \`/kanban show ${taskId}\` says where it is.`,
+      `\`${taskId}\` is not blocked as that notice said any more: \`/kanban task show ${taskId}\` says where it is.`,
     );
   });
 });
 
 describe('tiers and identity', () => {
   it('lets a talk-tier sender read and comment, and refuses every change of the board', async () => {
-    const taskId = created(await say('new A task\nassignee: implementer'));
-    expect(await say('list', GUEST)).toContain(taskId);
-    expect(await say(`show ${taskId}`, GUEST)).toContain('**A task**');
+    const taskId = created(await say('task new A task\nassignee: implementer'));
+    expect(await say('task list', GUEST)).toContain(taskId);
+    expect(await say(`task show ${taskId}`, GUEST)).toContain('**A task**');
     expect(await say(`gate list ${taskId}`, GUEST)).toBe(`Task \`${taskId}\` has no gates.`);
-    expect(await say(`comment ${taskId} the 2024 figures, please`, GUEST)).toBe(
-      `Comment added to \`${taskId}\`, for people: \`/kanban show\` shows it. Only an operator's comment, or its assignee's or reviewer's, is given to the task's agent.`,
+    expect(await say(`task comment ${taskId} the 2024 figures, please`, GUEST)).toBe(
+      `Comment added to \`${taskId}\`, for people: \`/kanban task show\` shows it. Only an operator's comment, or its assignee's or reviewer's, is given to the task's agent.`,
     );
-    expect(await say(`comment ${taskId} use the 2023 figures`)).toContain('An agent working on it gets it');
+    expect(await say(`task comment ${taskId} use the 2023 figures`)).toContain('An agent working on it gets it');
     expect(commentsOf(t.db, taskId).map((c) => [c.author, c.body])).toEqual([
       ['lark:on_guest', 'the 2024 figures, please'],
       ['lark:on_owner', 'use the 2023 figures'],
     ]);
     // Shown to people, and only the operator's steers the agent.
     expect(commentsOf(t.db, taskId, { steering: true }).map((c) => c.author)).toEqual(['lark:on_owner']);
-    expect(await say(`show ${taskId}`, GUEST)).toContain('> the 2024 figures, please');
+    expect(await say(`task show ${taskId}`, GUEST)).toContain('> the 2024 figures, please');
     const before = eventsOf(t.db, taskId).length;
     for (const arg of [
-      'new Another',
-      `assign ${taskId} reviewer`,
-      `link ${taskId} ${taskId}`,
-      `workspace ${taskId} web`,
-      `unblock ${taskId}`,
-      `stop ${taskId}`,
-      `archive ${taskId}`,
+      'task new Another',
+      `task assign ${taskId} reviewer`,
+      `task link ${taskId} ${taskId}`,
+      `task workspace ${taskId} web`,
+      `task unblock ${taskId}`,
+      `task stop ${taskId}`,
+      `task archive ${taskId}`,
       `gate add ${taskId} true`,
       `gate remove ${taskId} 1`,
     ]) {
@@ -744,18 +746,18 @@ describe('tiers and identity', () => {
   });
 
   it('lets a sender Lark gave no union_id read the board, and nothing else', async () => {
-    expect(await say('list', NAMELESS)).toBe('No open tasks. `/kanban list all` shows done and archived ones too.');
-    expect(await say('new A task', NAMELESS)).toMatch(/^Lark did not say who you are/);
+    expect(await say('task list', NAMELESS)).toBe('No open tasks. `/kanban task list all` shows done and archived ones too.');
+    expect(await say('task new A task', NAMELESS)).toMatch(/^Lark did not say who you are/);
     expect(taskCount()).toBe(0);
   });
 });
 
 describe('changing a task', () => {
   it('reassigns, stops and archives, cancelling the turn of the run each decided', async () => {
-    const taskId = created(await say('new Survey the vendors\nassignee: implementer'));
+    const taskId = created(await say('task new Survey the vendors\nassignee: implementer'));
     const first = service.claim(taskId);
     if (!first.ok) throw new Error(first.message);
-    expect(await say(`assign ${taskId} reviewer`)).toBe(
+    expect(await say(`task assign ${taskId} reviewer`)).toBe(
       `\`${taskId}\` is now for role reviewer; its run \`${first.run.runId}\` was superseded.`,
     );
     expect(cancelled).toEqual([first.run.runId]);
@@ -763,40 +765,40 @@ describe('changing a task', () => {
 
     const second = service.claim(taskId);
     if (!second.ok) throw new Error(second.message);
-    expect(await say(`stop ${taskId}`)).toBe(
-      `Stopped \`${taskId}\`: its run was cancelled, and the task is blocked (needs\\_input). \`/kanban unblock ${taskId}\` runs it again.`,
+    expect(await say(`task stop ${taskId}`)).toBe(
+      `Stopped \`${taskId}\`: its run was cancelled, and the task is blocked (needs\\_input). \`/kanban task unblock ${taskId}\` runs it again.`,
     );
     expect(cancelled).toEqual([first.run.runId, second.run.runId]);
     expect(getTask(t.db, taskId)).toMatchObject({ phase: 'blocked', blockKind: 'needs_input', blockReason: 'stopped by lark:on_owner' });
     expect(service.closeRun(second.run.runId).ok).toBe(true);
 
-    expect(await say(`unblock ${taskId} try the 2024 list`)).toBe(`\`${taskId}\` is unblocked, back to open.`);
+    expect(await say(`task unblock ${taskId} try the 2024 list`)).toBe(`\`${taskId}\` is unblocked, back to open.`);
     expect(commentsOf(t.db, taskId).at(-1)).toMatchObject({ author: 'lark:on_owner', body: 'try the 2024 list' });
     const third = service.claim(taskId);
     if (!third.ok) throw new Error(third.message);
-    expect(await say(`archive ${taskId}`)).toBe(`Archived \`${taskId}\`.`);
+    expect(await say(`task archive ${taskId}`)).toBe(`Archived \`${taskId}\`.`);
     expect(getRun(t.db, third.run.runId)?.outcome).toBe('superseded');
     expect(cancelled).toEqual([first.run.runId, second.run.runId, third.run.runId]);
   });
 
   it('links two tasks, and sets a workspace while it is not yet fixed', async () => {
-    const parent = created(await say('new Collect the numbers\nassignee: implementer'));
-    const child = created(await say('new Write them up\nassignee: implementer'));
-    expect(await say(`link ${parent} ${child}`)).toBe(`\`${child}\` now waits for \`${parent}\`.`);
-    expect(await say(`link ${parent} ${child}`)).toBe(`\`${child}\` already waits for \`${parent}\`.`);
-    expect(await say(`workspace ${child} docs`)).toBe(`\`${child}\` works in docs.`);
-    expect(await say(`workspace ${child} web`)).toBe(
+    const parent = created(await say('task new Collect the numbers\nassignee: implementer'));
+    const child = created(await say('task new Write them up\nassignee: implementer'));
+    expect(await say(`task link ${parent} ${child}`)).toBe(`\`${child}\` now waits for \`${parent}\`.`);
+    expect(await say(`task link ${parent} ${child}`)).toBe(`\`${child}\` already waits for \`${parent}\`.`);
+    expect(await say(`task workspace ${child} docs`)).toBe(`\`${child}\` works in docs.`);
+    expect(await say(`task workspace ${child} web`)).toBe(
       `Not done: task ${child.replace(/_/g, '\\_')} works in docs; a fixed workspace does not change`,
     );
-    expect(await say(`assign ${child} @Carol Jones`)).toBe(
+    expect(await say(`task assign ${child} @Carol Jones`)).toBe(
       '@Carol Jones is not someone this message mentions: type @ and pick them, so Lark says who they are.',
     );
-    expect(await say(`assign ${child} implementer`)).toBe(`\`${child}\` is already assigned to role implementer.`);
+    expect(await say(`task assign ${child} implementer`)).toBe(`\`${child}\` is already assigned to role implementer.`);
     expect(eventsOf(t.db, child).some((e) => e.kind === 'assignee_set')).toBe(false);
   });
 
   it('defines, lists and removes gates as the sender, refusing one that holds a known secret, and shows them masked', async () => {
-    const taskId = created(await say('new Publish the page\nassignee: implementer'));
+    const taskId = created(await say('task new Publish the page\nassignee: implementer'));
     expect(await say(`gate add ${taskId} --timeout 60 curl -fsS https://wiki.example/page`)).toBe(
       `Gate 1 added to \`${taskId}\` (60 s): curl -fsS https://wiki.example/page`,
     );
@@ -823,9 +825,30 @@ describe('changing a task', () => {
 
 describe('a wrong command line', () => {
   it('is answered with its usage, and an unknown task as the board says', async () => {
-    expect(await say('done k_missing finished', ALICE)).toBe('Not done: no task k\\_missing');
-    expect(await say('show')).toBe('Usage: `/kanban show <task>`');
-    expect(await say('show k_missing')).toBe('Not done: no task k\\_missing');
+    expect(await say('task done k_missing finished', ALICE)).toBe('Not done: no task k\\_missing');
+    expect(await say('task show')).toBe('Usage: `/kanban task show <task>`');
+    expect(await say('task show k_missing')).toBe('Not done: no task k\\_missing');
     expect(await say('')).toContain('**The task board.**');
+  });
+
+  it('answers a task command in its old form, without task, as an unknown command, from anyone, and changes nothing', async () => {
+    const taskId = created(await say('task new Survey the vendors\nassignee: implementer'));
+    const before = eventsOf(t.db, taskId).length;
+    for (const [arg, sender] of [
+      ['new Another\nassignee: implementer', OWNER],
+      [`assign ${taskId} reviewer`, OWNER],
+      [`stop ${taskId}`, OWNER],
+      [`archive ${taskId}`, OWNER],
+      [`comment ${taskId} hello`, GUEST],
+      [`show ${taskId}`, GUEST],
+      ['list', GUEST],
+      [`done ${taskId} finished`, ALICE],
+    ] as const) {
+      const verb = arg.split(/\s/)[0];
+      expect(await say(arg, sender)).toBe(`Unknown \`/kanban\` command \`${verb}\`. \`/kanban help\` lists them.`);
+    }
+    expect(eventsOf(t.db, taskId)).toHaveLength(before);
+    expect(taskCount()).toBe(1);
+    expect(await say('task')).toMatch(/^`\/kanban task` takes new, list, show, /);
   });
 });

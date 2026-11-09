@@ -122,7 +122,7 @@ describe('subscriptions', () => {
   });
 });
 
-describe('the board, as /kanban list reads it', () => {
+describe('the board, as /kanban task list reads it', () => {
   it('gives every task its derived status, highest priority first, then oldest', () => {
     const parent = newTask(h.db, { title: 'parent' });
     newTask(h.db, { title: 'child', parents: [parent.taskId] });

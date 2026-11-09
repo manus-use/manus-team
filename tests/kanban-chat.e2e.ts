@@ -28,7 +28,7 @@ import { testDb, type TestDb } from './helpers/db.js';
 import { role } from './helpers/dispatch.js';
 
 /**
- * The board from Lark, end to end (spec §9, §11): a person types `/kanban new`
+ * The board from Lark, end to end (spec §9, §11): a person types `/kanban task new`
  * in a group thread; the router hands it to the board's chat commands; the real
  * dispatcher runs the task as a session whose agent is a real process -- the
  * fake CLI agent, through the real CLI driver -- which reports through `mt
@@ -170,7 +170,7 @@ function said(text: string): InboundMessage {
   };
 }
 
-/** The task id the router's reply to /kanban new names. */
+/** The task id the router's reply to /kanban task new names. */
 function createdIn(lark: FakeChannel): string {
   const reply = lark.texts.at(-1)?.text ?? '';
   const id = /^Created `(k_[0-9a-z]+)`/.exec(reply)?.[1];
@@ -179,9 +179,9 @@ function createdIn(lark: FakeChannel): string {
 }
 
 describe('the board from Lark, end to end', () => {
-  it('/kanban new runs the task on a role, and the thread it was created in hears it is done, once', async () => {
+  it('/kanban task new runs the task on a role, and the thread it was created in hears it is done, once', async () => {
     const s = await build('kanban');
-    await s.router.onMessage(said('/kanban new Write the parser\nassignee: implementer\nworkspace: default\nIt reads CSV.'));
+    await s.router.onMessage(said('/kanban task new Write the parser\nassignee: implementer\nworkspace: default\nIt reads CSV.'));
     const taskId = createdIn(s.lark);
     expect(s.lark.texts.at(-1)?.target).toEqual({ chatId: 'oc_team', threadId: 'omt_topic' });
 
@@ -203,8 +203,8 @@ describe('the board from Lark, end to end', () => {
     expect(await s.notifier().deliver()).toBe(0);
     expect(s.lark.texts).toHaveLength(replies + 1);
 
-    // And /kanban show tells the same story.
-    await s.router.onMessage(said(`/kanban show ${taskId}`));
+    // And /kanban task show tells the same story.
+    await s.router.onMessage(said(`/kanban task show ${taskId}`));
     expect(s.lark.texts.at(-1)?.text).toContain('#1 work · role implementer · completed: did: Write the parser');
   });
 
@@ -213,7 +213,7 @@ describe('the board from Lark, end to end', () => {
     await s.router.onMessage(said('/kanban board create web-app'));
     await s.router.onMessage(said('/kanban board use web-app'));
     expect(s.lark.texts.at(-1)?.text).toContain('This chat is on board **web-app** now');
-    await s.router.onMessage(said('/kanban new Write the parser\nassignee: implementer\nIt reads CSV.'));
+    await s.router.onMessage(said('/kanban task new Write the parser\nassignee: implementer\nIt reads CSV.'));
     const taskId = createdIn(s.lark);
 
     await s.dispatcher.idle();
@@ -221,13 +221,13 @@ describe('the board from Lark, end to end', () => {
     expect(await s.notifier().deliver()).toBe(1);
     expect(s.lark.texts.at(-1)?.text).toBe(`Done: **Write the parser** \`${taskId}\`\n> did: Write the parser`);
 
-    await s.router.onMessage(said('/kanban list all'));
+    await s.router.onMessage(said('/kanban task list all'));
     expect(s.lark.texts.at(-1)?.text).toBe(`Board **web-app**:\n\`${taskId}\` **done**: Write the parser · role implementer`);
   });
 
   it("an agent that crashes is retried, then given up on, and the thread hears both", async () => {
     const s = await build('crash');
-    await s.router.onMessage(said('/kanban new Flaky job\nassignee: implementer\nworkspace: default'));
+    await s.router.onMessage(said('/kanban task new Flaky job\nassignee: implementer\nworkspace: default'));
     const taskId = createdIn(s.lark);
     await s.dispatcher.idle();
     expect(getTask(s.t.db, taskId)).toMatchObject({ phase: 'blocked', blockKind: 'gave_up' });

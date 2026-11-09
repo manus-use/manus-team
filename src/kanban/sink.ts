@@ -14,7 +14,7 @@ import type {
  * The channel a kanban run's session posts through (spec §7.1): the `kanban`
  * entry of the registry's channel map, so a run's session never posts to Lark.
  *
- * Card output is discarded: the session log keeps every event, and `/kanban show`
+ * Card output is discarded: the session log keeps every event, and `/kanban task show`
  * reads it there. Nobody is watching a card for a run.
  *
  * An approval card, for a supervised agent, is forwarded to the task's first

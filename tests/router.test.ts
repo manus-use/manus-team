@@ -563,7 +563,7 @@ describe('Router: /kanban', () => {
 
   it('says the board is off when kanban.enabled is not set, and opens no session', async () => {
     const h = harness();
-    await h.router.onMessage(msg({ text: '/kanban list' }));
+    await h.router.onMessage(msg({ text: '/kanban task list' }));
     expect(lastReply(h)).toBe(KANBAN_OFF);
     expect(sessionCount(h)).toBe(0);
   });
@@ -572,11 +572,11 @@ describe('Router: /kanban', () => {
     addSecrets(['sk-board-12345678']);
     const kanban = board(async () => 'Created `k_1`, key sk-board-12345678');
     const h = harness({ kanban });
-    const message = msg({ text: '/kanban new Draft the notes\nassignee: docs-writer', threadId: 'omt_1' });
+    const message = msg({ text: '/kanban task new Draft the notes\nassignee: docs-writer', threadId: 'omt_1' });
     await h.router.onMessage(message);
     expect(kanban.calls).toEqual([
       {
-        arg: 'new Draft the notes\nassignee: docs-writer',
+        arg: 'task new Draft the notes\nassignee: docs-writer',
         messageId: message.messageId,
         key: { channel: CHANNEL, appId: APP, conversationId: CHAT, threadId: 'omt_1' },
       },
@@ -591,7 +591,7 @@ describe('Router: /kanban', () => {
   it('answers while the chat session is busy: it never touches that session', async () => {
     const h = harness({ kanban: board(async () => 'the board') });
     await working(h);
-    await h.router.onMessage(msg({ text: '/kanban list' }));
+    await h.router.onMessage(msg({ text: '/kanban task list' }));
     expect(lastReply(h)).toBe('the board');
   });
 
@@ -602,7 +602,7 @@ describe('Router: /kanban', () => {
         throw new Error('database_locked by sk-thrown-12345678');
       }),
     });
-    await h.router.onMessage(msg({ text: '/kanban list' }));
+    await h.router.onMessage(msg({ text: '/kanban task list' }));
     expect(lastReply(h)).toBe(`The board could not do that: database\\_locked by ${MASK}`);
     expect(h.notes.some((n) => n.includes('kanban command in'))).toBe(true);
   });
@@ -614,7 +614,7 @@ describe('Router: /kanban', () => {
         throw new Error(`first line with sk-noted-12345678\n# second line\n${'x'.repeat(2000)}`);
       }),
     });
-    await h.router.onMessage(msg({ text: '/kanban list' }));
+    await h.router.onMessage(msg({ text: '/kanban task list' }));
     const reply = lastReply(h);
     expect(reply.split('\n')).toHaveLength(1);
     expect(reply.startsWith(`The board could not do that: first line with ${MASK} # second line x`)).toBe(true);

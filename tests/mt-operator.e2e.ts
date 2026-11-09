@@ -145,7 +145,7 @@ async function waitFor(done: () => boolean, what: string): Promise<void> {
 describe('the operator at a terminal, end to end', () => {
   it('creates a task the running gateway starts at once, nudged, and its agent completes', async () => {
     const gw = await gateway('kanban');
-    const r = await operator(gw, ['new', 'Write the parser', '--assignee', 'default', '--workspace', 'default']);
+    const r = await operator(gw, ['task', 'new', 'Write the parser', '--assignee', 'default', '--workspace', 'default']);
     expect(r).toMatchObject({ status: 0, err: '' });
     const taskId = /^created (k_[0-9a-z]+):/.exec(r.out)?.[1] ?? '';
     expect(getTask(gw.t.db, taskId)?.createdVia).toEqual({ kind: 'operator' });
@@ -157,11 +157,11 @@ describe('the operator at a terminal, end to end', () => {
 
   it("stops a running agent's run, whose turn the gateway cancels once nudged", async () => {
     const gw = await gateway('hang');
-    const made = await operator(gw, ['new', 'Never finishes', '--assignee', 'default', '--workspace', 'default']);
+    const made = await operator(gw, ['task', 'new', 'Never finishes', '--assignee', 'default', '--workspace', 'default']);
     const taskId = /^created (k_[0-9a-z]+):/.exec(made.out)?.[1] ?? '';
     await waitFor(() => existsSync(gw.log) && readFileSync(gw.log, 'utf8').trim() !== '', 'the agent to start');
 
-    const stopped = await operator(gw, ['stop', taskId]);
+    const stopped = await operator(gw, ['task', 'stop', taskId]);
     expect(stopped).toMatchObject({ status: 0, err: '' });
     expect(stopped.out).toMatch(new RegExp(`^stopped ${taskId}: its run was cancelled`));
 

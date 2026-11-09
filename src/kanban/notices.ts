@@ -79,7 +79,7 @@ export const ROUND_SENDS = 10;
 export const ROUND_EVENTS = 100;
 /** The longest a send is waited for; past it, it counts as failed. */
 export const NOTICE_SEND_MS = 30_000;
-/** Unblock buttons under one message; a block past them is unblocked by `/kanban unblock`, as its notice says. */
+/** Unblock buttons under one message; a block past them is unblocked by `/kanban task unblock`, as its notice says. */
 export const UNBLOCK_BUTTONS = 5;
 
 /**

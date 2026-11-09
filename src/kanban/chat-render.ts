@@ -98,7 +98,7 @@ function id(taskId: string): string {
 
 const LIST_MAX = 30;
 
-/** The statuses `/kanban list` shows with no filter: everything someone may still act on. */
+/** The statuses `/kanban task list` shows with no filter: everything someone may still act on. */
 const ACTIVE: readonly DisplayStatus[] = ['running', 'reviewing', 'review', 'ready', 'todo', 'blocked'];
 
 /** `/kanban help`: every command, with the tier it needs (spec §9.1). */
@@ -108,6 +108,7 @@ export function renderHelp(): string {
   const assignee = "the task's assignee";
   const reviewer = 'its reviewer, or an operator';
   const lines: Array<[string, string]> = [
+    [USAGE.help, talk],
     [USAGE.new, operate],
     [USAGE.list, talk],
     [USAGE.show, talk],
@@ -138,7 +139,7 @@ export function renderHelp(): string {
     'Name a person with an @-mention: they are sent the task as a card in a direct message, with Done and Block, or a review with Approve and Request changes. A person named may comment on, and report on, their own task.',
     "A task with a `reviewer:` is reviewed before it is done: its assignee's done, or its agent's, goes to the reviewer. An operator may answer any review, ending a reviewer role's run.",
     'The chat a task is created in hears when it is done, needs review, blocks, is retried after a failure, gives up, or is stranded, and who a person was given it.',
-    "A board is a queue of tasks of its own. Each chat is on one, `default` until `/kanban board use` moves it, and its `/kanban new` and `list` act on that board; a task's follow-ups and parents are on its board.",
+    "A board is a queue of tasks of its own. Each chat is on one, `default` until `/kanban board use` moves it, and its `/kanban task new` and `/kanban task list` act on that board; a task's follow-ups and parents are on its board.",
   ].join('\n');
 }
 
@@ -155,7 +156,7 @@ export function listed(entries: readonly BoardEntry[], filter: DisplayStatus | '
 }
 
 /**
- * `/kanban list` (spec §9.1): a board by derived status, the active tasks unless a
+ * `/kanban task list` (spec §9.1): a board by derived status, the active tasks unless a
  * filter is given. A board other than `default` is named (spec §16).
  */
 export function renderList(
@@ -167,14 +168,14 @@ export function renderList(
   const ordered = listed(entries, filter);
   if (ordered.length === 0) {
     return filter === undefined
-      ? `No open tasks${on}. \`/kanban list all\` shows done and archived ones too.`
+      ? `No open tasks${on}. \`/kanban task list all\` shows done and archived ones too.`
       : `No ${filter === 'all' ? '' : `${filter} `}tasks${on}.`;
   }
   const lines = ordered
     .slice(0, LIST_MAX)
     .map((e) => `${id(e.task.taskId)} **${e.status}**: ${label(e.task.title, 120)} · ${who(e.task.assignee)}`);
   const more = ordered.length - LIST_MAX;
-  if (more > 0) lines.push(`… and ${more} more. \`/kanban list <${LIST_FILTERS.join('|')}>\` narrows it.`);
+  if (more > 0) lines.push(`… and ${more} more. \`/kanban task list <${LIST_FILTERS.join('|')}>\` narrows it.`);
   if (on !== '') lines.unshift(`Board **${label(board)}**:`);
   return lines.join('\n');
 }
@@ -230,7 +231,7 @@ function runLine(run: RunRow): string {
 }
 
 /**
- * `/kanban show` (spec §9.1): the task, its contract, gates, runs, latest output
+ * `/kanban task show` (spec §9.1): the task, its contract, gates, runs, latest output
  * and comments. Its board is named once anything is on a board but `default`:
  * the task's, or the chat's it is shown in (spec §16).
  */
@@ -320,7 +321,7 @@ function blockedLine(task: TaskRow, kind: string, reason: string, recurrences: n
       'rewrite the task, or archive it and create a clearer one, rather than unblocking it again.'
     );
   }
-  return `${head}\n\`/kanban unblock ${task.taskId} [comment]\` once it can go on.`;
+  return `${head}\n\`/kanban task unblock ${task.taskId} [comment]\` once it can go on.`;
 }
 
 /** Who a principal is, by name, where the gateway knows one: what a notice or a card calls a person. */
@@ -391,8 +392,8 @@ export function renderNotice(
       const person = whom({ kind: 'human', name: text(p, 'to') }, opts.nameOf);
       const how =
         p['kind'] === 'review'
-          ? `\`/kanban approve ${task.taskId}\` or \`/kanban changes ${task.taskId} <reason>\``
-          : `\`/kanban done ${task.taskId} [summary]\` or \`/kanban block ${task.taskId} <reason>\``;
+          ? `\`/kanban task approve ${task.taskId}\` or \`/kanban task changes ${task.taskId} <reason>\``
+          : `\`/kanban task done ${task.taskId} [summary]\` or \`/kanban task block ${task.taskId} <reason>\``;
       return (
         `Could not send ${person} the card for ${name}: ${label(text(p, 'error'), 300)}\n` +
         `They can answer from any chat with the bot: ${how}.`
@@ -417,7 +418,7 @@ export function renderNotice(
       const kind = text(p, 'blockKind');
       const reason = text(p, 'blockReason');
       if (kind === 'gave_up') {
-        return `Gave up on ${name}: ${label(reason, 800)}\n\`/kanban unblock ${task.taskId} [comment]\` gives it a fresh set of attempts.`;
+        return `Gave up on ${name}: ${label(reason, 800)}\n\`/kanban task unblock ${task.taskId} [comment]\` gives it a fresh set of attempts.`;
       }
       return blockedLine(task, kind, reason, recurrences, opts.blockRecurrenceLimit);
     }
@@ -502,11 +503,11 @@ export function renderTaskCard(f: CardFacts, appId: string): CardView {
     for (const p of parents) {
       out.push(`${id(p.task.taskId)} **${label(p.task.title, 120)}**:`, block(p.summary === '' ? '(no summary)' : p.summary, 600));
     }
-    if (f.parents.length > parents.length) out.push(`… and ${f.parents.length - parents.length} more: \`/kanban show ${task.taskId}\``);
+    if (f.parents.length > parents.length) out.push(`… and ${f.parents.length - parents.length} more: \`/kanban task show ${task.taskId}\``);
   }
   out.push(
     `Type a summary and press **Done**, or why it is blocked and press **Block**. ` +
-      `In any chat with the bot, \`/kanban done ${task.taskId} [summary]\` and \`/kanban block ${task.taskId} <reason>\` do the same.`,
+      `In any chat with the bot, \`/kanban task done ${task.taskId} [summary]\` and \`/kanban task block ${task.taskId} <reason>\` do the same.`,
   );
   const buttons: CardButton[] = [
     { label: 'Done', style: 'primary', value: act(appId, run, 'done', f.attempt) },
@@ -540,7 +541,7 @@ export function renderReviewCard(f: CardFacts, appId: string): CardView {
   out.push(...taskText(task, 1200));
   out.push(
     `Press **Approve**, or type what needs changing and press **Request changes**. ` +
-      `In any chat with the bot, \`/kanban approve ${task.taskId}\` and \`/kanban changes ${task.taskId} <reason>\` do the same.`,
+      `In any chat with the bot, \`/kanban task approve ${task.taskId}\` and \`/kanban task changes ${task.taskId} <reason>\` do the same.`,
   );
   const buttons: CardButton[] = [
     { label: 'Approve', style: 'primary', value: act(appId, run, 'approve', f.attempt) },
