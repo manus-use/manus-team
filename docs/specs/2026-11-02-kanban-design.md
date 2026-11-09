@@ -290,7 +290,7 @@ enforce them.
      Parents with no fixed workspace (an archived parent that was never claimed) are ignored. If the
      parents that count are in different workspaces, the task needs its workspace set (below):
      guessing would review one parent's repository and miss the other's;
-  4. `default` — the implicit workspace of a role that names none, and of a person.
+  4. `default` (or the board's workspace, §16.6): the implicit workspace of a role that names none, and of a person.
 
   A task a worker creates (§7.3) with no `parents` uses the creating run's task in place of parents
   for rule 3 — recorded as `created_from_task` — so a follow-up lands where the work is unless its
@@ -1946,7 +1946,7 @@ board.
 | Masking | a known value masked through each escaper, in composed worker context and `last_output`, and in stored free text and JSON string values; **a secret split across two message chunks masked on the card**; a secret containing `_` masked before escaping, and one containing `"` masked inside JSON; values under 8 characters and `maskExempt` names left alone; a worker token masked only while its run is open; `turn_submitted` input stored unmasked but shown masked; a gate containing a secret refused; a render withholding a trailing prefix of a secret, mid-stream and on a turn that ended part-way through one; ids inside payloads left unmasked; the registry gaining and losing a worker token with its run |
 | Reported commit | clean tree → commit; dirty tree → commit plus "uncommitted changes"; no commit yet → "uncommitted; no commit to review"; not a repo, or no git → nothing recorded, and no state line; recorded for a reviewer agent's `complete`, never for a person's report |
 | Workspaces | a name registered on first sight; a known name repointed to another directory fails startup; no workspace `default` fails startup; a downstream review task inherits its parents' common workspace, a role with its own workspace does not; an unclaimed archived parent ignored; parents in different workspaces make an agent task unresolvable, while a human one is claimed with a null workspace, has gated completion refused, and can then be given one by `/kanban workspace`; a worker-created follow-up uses its creating task's workspace without a link and is claimable at once; an agent claims a workspace while a person's review on another task there is open; a person's run leaves the workspace null and a later agent review claim re-applies the rules |
-| Boards (G) | migration `006` from version 5 with tasks in it, every task on `default`; boards created, set, archived only through the writer, `default` never archived, a board with unfinished tasks not either; a chat's board per conversation; a parent, a link, a dependency block and a worker's follow-up kept on a board; a board's workspace as rule 4; the service's name grammar and `max_running` bound; the boards in turn, and a board's `max_running` inside the gateway's; the board commands at their tiers, and `new`, `list` and `show` on the chat's board; end to end, a chat on a board running its task |
+| Boards (G) | migration `006` from version 5 with tasks in it, every task on `default`; an idempotency key refused across boards; a chat's own board listed even archived; boards created, set, archived only through the writer, `default` never archived, a board with unfinished tasks not either; a chat's board per conversation; a parent, a link, a dependency block and a worker's follow-up kept on a board; a board's workspace as rule 4; the service's name grammar and `max_running` bound; the boards in turn, and a board's `max_running` inside the gateway's; the board commands at their tiers, and `new`, `list` and `show` on the chat's board; end to end, a chat on a board running its task |
 | End to end | the fake CLI agent calling `mt kanban complete` through the real socket |
 
 ---
@@ -2086,18 +2086,19 @@ in it would overwrite each other as two tasks' would.
   and is not archived, in the transaction that creates the task. `kanban_chat_boards.board` is a new
   table's column, and has its foreign key.
 - **No board events.** `kanban_events` rows belong to a task. A board's row says who created it and
-  who last changed it; its history is not kept.
+  who last changed it; its history is not kept. A task's `created` event records its board, and is
+  no notice.
 - **One writer.** `db/kanban.ts` writes both tables, as it writes every `kanban_` table.
 
 ### 16.3 Commands
 
 | Command | Tier | |
 |---|---|---|
-| `/kanban boards [all]` | talk | each board with its tasks by phase, its own `max_running` and workspace where set, and which one this chat is on; `all` adds archived boards |
+| `/kanban boards [all]` | talk | each board with its tasks by phase, its own `max_running` and workspace where set, and which one this chat is on, listed even when archived; `all` adds the other archived boards |
 | `/kanban board create <name>` | operate | a new board, with no settings of its own; a name a board has, or had, is refused |
 | `/kanban board use <name>` | operate | this chat, all its threads, is on the board from now on |
-| `/kanban board set <name> max_running <number\|none>` · `… workspace <workspace\|none>` | operate | §16.5 |
-| `/kanban board archive <name>` | operate | §16.7 |
+| `/kanban board set <name> max_running <number\|none>` · `… workspace <workspace\|none>` | operate | §16.6 |
+| `/kanban board archive <name>` | operate | §16.8 |
 
 **`use` needs operator tier** because it changes where the chat's tasks go, and a board's workspace
 can change where their agents run: a talk-tier person moving an operator's chat would choose the
@@ -2129,6 +2130,9 @@ renaming would rewrite them; a display name, as Hermes gives its boards, can com
   `link`, and a dependency block's parents (§5.4) are refused `other_board` across boards, in the
   writer's transaction: a queue whose tasks wait on another queue's is not separate, and its
   priority, its limit and its archive would all depend on the other.
+- **An idempotency key does not cross boards.** A chat's key whose task is on another board than the
+  one asked for is refused `other_board`, not answered with that task: a message redelivered after
+  its chat moved. A run's key is namespaced by its task (§3.1), so it cannot cross.
 - **`mt kanban gate`** names a task by id, and needs no board.
 
 ### 16.6 A board's `max_running` and workspace

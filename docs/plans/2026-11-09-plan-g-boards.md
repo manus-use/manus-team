@@ -41,27 +41,29 @@
 
 ## Decisions the spec left open
 
-Each has a recommendation and its reason. *The user's decision* marks those the user made before this plan was written; **[you decide]** marks those the user should confirm or change before it is built.
+Each has a recommendation and its reason. *The user's decision* marks those the user made, before this plan was written or on its first draft, each as recommended; **[you decide]** marks one still open.
 
 1. **One database, one dispatcher, a `board` column.** *The user's decision.* Unlike Hermes, whose boards each have a database, a directory and a dispatcher loop, each task records its board. *Why:* a run is a session, and what an agent did is a join (spec §3), and two dispatchers would have to share the per-workspace limit and `kanban.max_running`.
 2. **Queues, not projects.** *The user's decision.* A board has no operators of its own and no list of the roles it may use: whoever may act on one task may act on any, by the tiers as they are. Both are named as later work in spec §16.9.
-3. **Tiers.** `/kanban boards` is talk tier. `/kanban board create`, `use`, `set` and `archive` are operator tier. **[you decide]** on `use`: recommended operator, because moving a chat onto a board changes where its tasks go and, through the board's workspace, the directory its operator's next unsupervised agent runs in; talk tier would let anyone the bot answers do that to an operator's chat. Making it talk tier is a one-line change in `TIERS` (Task 7).
-4. **No rename, no unarchive.** **[you decide]** Recommended. A task stores its board's name, as it stores a workspace's (spec §2.3, a name is a durable identity), so a rename would rewrite every task on the board; and a name is never reused, an archived board's included, so a new board of an old name cannot take over the old tasks. Hermes renames only a display name, which can come later.
-5. **A board's `max_running` and workspace are set from chat**, by `/kanban board set <name> max_running <number|none>` and `… workspace <workspace|none>`, and stored on the board's row. **[you decide]** Recommended over `config.yaml`, because boards are made from chat: a setting in the file would name a board that may not exist yet, and two places would set one thing. The service refuses a `max_running` above the gateway's `kanban.max_running`; if the file later lowers the gateway's, the lower one binds (`min` at each pass). A workspace must be configured, as everywhere a workspace is named (spec §2.3).
+3. **Tiers.** `/kanban boards` is talk tier. `/kanban board create`, `use`, `set` and `archive` are operator tier. *The user's decision*, for `use`: operator, because moving a chat onto a board changes where its tasks go and, through the board's workspace, the directory its operator's next unsupervised agent runs in; talk tier would let anyone the bot answers do that to an operator's chat.
+4. **No rename, no unarchive, and a name is never reused.** *The user's decision.* A task stores its board's name, as it stores a workspace's (spec §2.3, a name is a durable identity), so a rename would rewrite every task on the board; and a name is never reused, an archived board's included, so a new board of an old name cannot take over the old tasks. Hermes renames only a display name, which can come later.
+5. **A board's `max_running` and workspace are set from chat**, by `/kanban board set <name> max_running <number|none>` and `… workspace <workspace|none>`, and stored on the board's row. *The user's decision*, over `config.yaml`, because boards are made from chat: a setting in the file would name a board that may not exist yet, and two places would set one thing. The service refuses a `max_running` above the gateway's `kanban.max_running`; if the file later lowers the gateway's, the lower one binds (`min` at each pass). A workspace must be configured, as everywhere a workspace is named (spec §2.3).
 6. **A board's workspace is spec §2.3's rule 4, in place of `default`.** The last resort, after the task's own, its role's explicit one, and its parents' common one (or its creating task's). Resolved at a claim, as rule 4 is, so setting it moves no task already claimed, and a board's workspace removed from config makes the agent tasks that would land there unresolvable, not silently `default`. A person's task with no other rule gets it too.
-7. **`/kanban show <id>` of a task on another board shows it, naming its board.** **[you decide]** Recommended over refusing it. Task ids are unique across boards, and boards are not permissions; a chat that moved still follows the tasks it created, whose notices carry their ids, typed commands and an Unblock button, and those must keep working. So every command that names a task works on any board by id, and `show` names the board whenever the task's or the chat's board is not `default`.
+7. **`/kanban show <id>` of a task on another board shows it, naming its board.** *The user's decision*, over refusing it. Task ids are unique across boards, and boards are not permissions; a chat that moved still follows the tasks it created, whose notices carry their ids, typed commands and an Unblock button, and those must keep working. So every command that names a task works on any board by id, and `show` names the board whenever the task's or the chat's board is not `default`.
 8. **An agent's `mt kanban create` goes on its run's task's board**, whatever it asks: the worker API has no board field, and the writer derives the board from the creating run, so a follow-up never leaves its board. `mt kanban show` gives the task's `board`, read-only.
 9. **`mt kanban gate` and the worker API need no board.** Gates belong to a task, named by its id, which is unique across boards; the token's scope is its run's task (spec §7.2).
 10. **Fairness: the boards in turn.** A pass orders its claimable tasks as the first of each board, then the second of each, and so on, the boards by name, starting with the board after the one that got the last agent claim, wrapping round (`fairOrder`, `src/kanban/fair.ts`). Within a board, priority then age, as spec §6.2 says; across boards priority does not count, as one board's priorities say nothing about another's. Without the rotation, a board whose first task is always claimable would be offered every slot first. The cursor is in memory; a restart costs one turn of fairness. People's runs are not limited and do not move it.
 11. **One agent per workspace stays global.** A workspace is a directory, and two boards' agents in one checkout would overwrite each other exactly as two tasks' would (spec §6.3).
-12. **Archiving.** `/kanban board archive <name>` is refused for `default`, and while any of the board's tasks is open, in review or blocked; once archived, no task is created on it, from chat or by a run whose task has just completed there, no chat moves onto it, and `/kanban boards` leaves it out unless asked for `all`. Its tasks stay, shown by id. A chat still on it is not moved, and its `/kanban new` is told to move first. **[you decide]** Recommended over archiving the board's tasks with it, which would end runs, and over moving its chats to `default` unasked, which would send their next task where nobody chose.
+12. **Archiving.** `/kanban board archive <name>` is refused for `default`, and while any of the board's tasks is open, in review or blocked; once archived, no task is created on it, from chat or by a run whose task has just completed there, no chat moves onto it, and `/kanban boards` leaves it out unless asked for `all`. Its tasks stay, shown by id. A chat still on it is not moved, and its `/kanban new` is told to move first; its `/kanban boards` still lists it, marked (Decision 20). *The user's decision* on when a board may be archived, and on `default`; not moving its chats is recommended over archiving the board's tasks with it, which would end runs, and over moving its chats to `default` unasked, which would send their next task where nobody chose.
 13. **Existing chats and subscriptions after the migration** are unchanged: every task is on `default`, every chat starts on `default`, and subscriptions follow the chat a task was created in, as before. A chat that moves still hears about the tasks it created.
 14. **`/kanban list all` keeps its meaning:** every status, on the chat's board. **[you decide]** Recommended over "all boards", since `all` already means every status and a list of every board's tasks would mix queues; `/kanban boards` is the view across boards, with each board's tasks by phase.
 15. **A chat is a conversation**, for one bot: a group and every thread in it share one board (`kanban_chat_boards` is keyed without the thread). A thread keyed separately would land a reply in a topic on `default` without anyone choosing it.
 16. **The migration is safe on the live database.** `ALTER TABLE kanban_tasks ADD COLUMN board TEXT NOT NULL DEFAULT 'default'` records the default in the schema and rewrites no row; the whole file runs in `migrate`'s one transaction with `user_version`, so a failure leaves version 5 as it was. There is no `REFERENCES` on the column: SQLite refuses one on a column added with a non-null default while foreign keys are on, as `openDb` sets them, and rebuilding `kanban_tasks` would rewrite the live table. The writer checks the board in the creating transaction instead. `default`'s `created_at` is the migration's own moment, from `julianday('now')`.
 17. **No board events.** `kanban_events` rows belong to a task. A board's row records who created it and who last changed it; there is no history of its settings.
 18. **Replies name a board only when it is not `default`**, so a gateway with one board reads exactly as before, and its tests are unchanged: `/kanban new`'s reply, `/kanban list`'s first line, `/kanban show`'s board.
-19. **Notices are unchanged.** They go to the chats that follow a task and do not name its board; the task id is enough for `/kanban show`.
+19. **Notices are unchanged.** They go to the chats that follow a task and do not name its board; the task id is enough for `/kanban show`. The `created` event records the board, as it records the workspace; it is no notice, so nothing a chat hears changes.
+20. **`/kanban boards` always lists the chat's own board**, archived or not, so the chat is shown which board it is on; other archived boards only with `all`.
+21. **An idempotency key is not a repeat across boards.** `createTask` answers a key it has seen with the task it made, before anything else. A chat's key whose task is on another board than the one asked for is refused `other_board`, rather than handing back a task from another queue: a message redelivered after its chat moved boards. A run's key is namespaced by its run's task (spec §3.1), whose board its follow-ups are on, so it cannot cross.
 
 ## Out of scope, and known limitations
 
@@ -82,7 +84,7 @@ Each has a recommendation and its reason. *The user's decision* marks those the 
 | `schema/006_boards.sql` (create) | `kanban_boards` with `default`, `kanban_chat_boards`, `kanban_tasks.board` |
 | `src/kanban/types.ts` (modify) | `TaskRow.board`, `DEFAULT_BOARD`, `BoardRow`, `ChatAt`; the refusals `unknown_board`, `board_archived`, `other_board` |
 | `src/db/kanban-read.ts` (modify) | decoding `board`; `getBoard`, `boardsOf`, `boardSummaries`, `chatBoardOf`, `openAgentRunCountOn`; `boardList` of one board |
-| `src/db/kanban.ts` (modify) | `createBoard`, `setBoard`, `archiveBoard`, `useBoard`; `createTask` on a board; `other_board` in `createTask` and `linkIn`; the board's workspace in `claim` |
+| `src/db/kanban.ts` (modify) | `createBoard`, `setBoard`, `archiveBoard`, `useBoard`; `createTask` on a board, its `created` event naming it; `other_board` in `createTask`, for a parent or a key used on another board, and in `linkIn`; the board's workspace in `claim` |
 | `src/db/WRITERS.md` (modify) | the two new tables and `kanban_tasks.board` |
 | `src/kanban/workspace.ts` (modify) | rule 4: the board's workspace, else `default` |
 | `src/names.ts` (modify) | `nameProblem` for a board |
@@ -96,9 +98,9 @@ Each has a recommendation and its reason. *The user's decision* marks those the 
 | `src/index.ts` (modify) | the service given `kanban.max_running` |
 | `docs/kanban-guide.md`, `README.md` (modify) | boards, for the people who use them |
 | `tests/kanban-boards-schema.test.ts`, `tests/kanban-boards.test.ts`, `tests/kanban-board-isolation.test.ts`, `tests/kanban-board-workspace.test.ts`, `tests/kanban-board-service.test.ts`, `tests/kanban-board-dispatch.test.ts`, `tests/kanban-board-chat-parse.test.ts`, `tests/kanban-board-chat.test.ts`, `tests/kanban-board-worker.test.ts` (create) | |
-| `tests/kanban-schema.test.ts`, `tests/kanban-prompt.test.ts`, `tests/kanban-chat.e2e.ts` (modify) | the version and tables; a `TaskRow` fixture's board; one end-to-end test |
+| `tests/kanban-schema.test.ts`, `tests/kanban-prompt.test.ts`, `tests/kanban-tasks.test.ts`, `tests/kanban-chat.e2e.ts` (modify) | the version and tables; a `TaskRow` fixture's board; the `created` event's board; one end-to-end test |
 
-Running counts, unit then end to end: Task 1 1375 / 98, Task 2 1384 / 98, Task 3 1390 / 98, Task 4 1395 / 98, Task 5 1402 / 98, Task 6 1408 / 98, Task 7 1412 / 98, Task 8 1421 / 99, Task 9 1423 / 99, Task 10 1423 / 99.
+Running counts, unit then end to end: Task 1 1375 / 98, Task 2 1385 / 98, Task 3 1392 / 98, Task 4 1397 / 98, Task 5 1404 / 98, Task 6 1410 / 98, Task 7 1414 / 98, Task 8 1423 / 99, Task 9 1425 / 99, Task 10 1425 / 99.
 
 ---
 
@@ -430,9 +432,9 @@ git commit -m "Add boards to the schema: a kanban_boards table with default in i
 
 **Files:**
 - Create: `tests/kanban-boards.test.ts`
-- Modify: `src/db/kanban.ts`, `src/db/kanban-read.ts`, `src/db/WRITERS.md`
+- Modify: `src/db/kanban.ts`, `src/db/kanban-read.ts`, `src/db/WRITERS.md`, `tests/kanban-tasks.test.ts`
 
-`createBoard`, `setBoard`, `archiveBoard` and `useBoard`, each one transaction in `db/kanban.ts`, and the reads they and chat need. `createTask` takes a board, `default` unless given, and refuses one that does not exist or is archived; Task 3 keeps a task's family on it. Archiving is refused while a task on the board is unfinished (Decision 12); a name is never reused (Decision 4). `boardList` reads one board.
+`createBoard`, `setBoard`, `archiveBoard` and `useBoard`, each one transaction in `db/kanban.ts`, and the reads they and chat need. `createTask` takes a board, `default` unless given, and refuses one that does not exist or is archived; its `created` event names the board, as it names the workspace, and is still no notice. Task 3 keeps a task's family on it. Archiving is refused while a task on the board is unfinished (Decision 12); a name is never reused (Decision 4). `boardList` reads one board; `boardsOf` and `boardSummaries` leave archived boards out unless asked for them, or for one by name, as a chat's own board is (Decision 20).
 
 - [ ] **Step 2.1: Write the failing tests.**
 
@@ -564,6 +566,14 @@ describe('the board a chat is on', () => {
 });
 
 describe('reading the boards', () => {
+  it('lists archived boards only when asked, or when one is the board asked to include', () => {
+    made('old');
+    expect(archiveBoard(h.db, 'old', ALICE, NOW).ok).toBe(true);
+    expect(boardSummaries(h.db).map((s) => s.board.name)).toEqual(['default']);
+    expect(boardSummaries(h.db, { including: 'old' }).map((s) => s.board.name)).toEqual(['default', 'old']);
+    expect(boardSummaries(h.db, { including: 'nowhere' }).map((s) => s.board.name)).toEqual(['default']);
+  });
+
   it('lists default first, then by name, archived ones only when asked, each with its tasks by phase', () => {
     made('zeta');
     made('alpha');
@@ -576,6 +586,9 @@ describe('reading the boards', () => {
 
     expect(boardsOf(h.db).map((b) => b.name)).toEqual(['default', 'alpha', 'zeta']);
     expect(boardsOf(h.db, { archived: true }).map((b) => b.name)).toEqual(['default', 'alpha', 'old', 'zeta']);
+    // A chat's own board is listed even archived, so the chat can see it is on one.
+    expect(boardsOf(h.db, { including: 'old' }).map((b) => b.name)).toEqual(['default', 'alpha', 'old', 'zeta']);
+    expect(boardsOf(h.db, { including: 'alpha' }).map((b) => b.name)).toEqual(['default', 'alpha', 'zeta']);
     const counts = Object.fromEntries(boardSummaries(h.db).map((s) => [s.board.name, s.counts]));
     expect(counts).toEqual({
       default: { open: 1, review: 0, blocked: 0, done: 0, archived: 1 },
@@ -586,7 +599,28 @@ describe('reading the boards', () => {
 });
 ```
 
-- [ ] **Step 2.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-boards.test.ts`. Expected: `Tests  9 failed (9)`, with `TypeError: (0 , createBoard) is not a function`.
+In `tests/kanban-tasks.test.ts`, replace:
+
+```ts
+          workspace: 'web',
+          parents: [],
+          createdFromTask: null,
+        },
+      ],
+```
+
+with:
+
+```ts
+          workspace: 'web',
+          parents: [],
+          createdFromTask: null,
+          board: 'default',
+        },
+      ],
+```
+
+- [ ] **Step 2.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-boards.test.ts`. Expected: `Tests  10 failed (10)`, with `TypeError: (0 , createBoard) is not a function`.
 
 - [ ] **Step 2.3: Implement.**
 
@@ -694,15 +728,21 @@ export function getBoard(db: Db, name: string): BoardRow | undefined {
   return row === undefined ? undefined : decodeBoard(row);
 }
 
-/** The boards, `default` first, then by name; archived ones only when asked for. */
-export function boardsOf(db: Db, opts: { archived?: boolean } = {}): BoardRow[] {
+/** Which boards to read: archived ones too, or one board whatever it is, as a chat's own board is. */
+export interface BoardsWanted {
+  archived?: boolean;
+  including?: string;
+}
+
+/** The boards, `default` first, then by name; archived ones only when asked for, or when `including` names one. */
+export function boardsOf(db: Db, opts: BoardsWanted = {}): BoardRow[] {
   return db
-    .prepare<[], BoardRaw>(
+    .prepare<[string], BoardRaw>(
       `SELECT ${BOARD_COLS} FROM kanban_boards
-        ${opts.archived === true ? '' : 'WHERE archived_at IS NULL'}
+        ${opts.archived === true ? '' : 'WHERE archived_at IS NULL OR name = ?'}
         ORDER BY name <> 'default', name`,
     )
-    .all()
+    .all(...((opts.archived === true ? [] : [opts.including ?? '']) as [string]))
     .map(decodeBoard);
 }
 
@@ -712,7 +752,7 @@ export interface BoardSummary {
   counts: Record<Phase, number>;
 }
 
-export function boardSummaries(db: Db, opts: { archived?: boolean } = {}): BoardSummary[] {
+export function boardSummaries(db: Db, opts: BoardsWanted = {}): BoardSummary[] {
   const counted = db
     .prepare<[], { board: string; phase: Phase; n: number }>(
       'SELECT board, phase, count(*) AS n FROM kanban_tasks GROUP BY board, phase',
@@ -981,10 +1021,52 @@ with:
     );
 ```
 
+In `src/db/kanban.ts`, replace:
+
+```ts
+          parents,
+          createdFromTask,
+        },
+      },
+      now,
+    );
+    return { ok: true, task: mustGet(d, taskId), existing: false };
+```
+
+with:
+
+```ts
+          parents,
+          createdFromTask,
+          board,
+        },
+      },
+      now,
+    );
+    return { ok: true, task: mustGet(d, taskId), existing: false };
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  'packageHash',
+  'seedDropped',
+]);
+```
+
+with:
+
+```ts
+  'packageHash',
+  'seedDropped',
+  'board',
+]);
+```
+
 In `src/db/WRITERS.md`, replace:
 
 ```markdown
-| `people` | `db/people.ts` |
+| `people` | `db/people.ts` | One row per person per bot (migration 005): the open_id and name Lark last gave with a union_id, noted when a person sends a `/kanban` command, is mentioned in one, or presses a board card's button. How a person named by `lark:<union_id>` alone is checked for talk tier (spec §4.2). |
 ```
 
 with:
@@ -992,22 +1074,22 @@ with:
 ```markdown
 | `kanban_boards` | `db/kanban.ts` | Added by `createBoard` (migration 006 adds `default`); `max_running` and `workspace` set by `setBoard`, `archived_at` once by `archiveBoard`. Never deleted, never renamed: a task keeps the name of its board (spec §16). |
 | `kanban_chat_boards` | `db/kanban.ts` | One row per conversation and bot, written by `useBoard`; a chat with none is on `default`. |
-| `people` | `db/people.ts` |
+| `people` | `db/people.ts` | One row per person per bot (migration 005): the open_id and name Lark last gave with a union_id, noted when a person sends a `/kanban` command, is mentioned in one, or presses a board card's button. How a person named by `lark:<union_id>` alone is checked for talk tier (spec §4.2). |
 ```
 
 In `src/db/WRITERS.md`, replace:
 
 ```markdown
-`workspace` is written once, while null. |
+| `kanban_tasks` | `db/kanban.ts` | `phase` is written only by its named transitions, each of which checks the current phase (spec §4.1). `workspace` is written once, while null. |
 ```
 
 with:
 
 ```markdown
-`workspace` is written once, while null. `board` (migration 006) is set at the insert and never changed. |
+| `kanban_tasks` | `db/kanban.ts` | `phase` is written only by its named transitions, each of which checks the current phase (spec §4.1). `workspace` is written once, while null. `board` (migration 006) is set at the insert and never changed. |
 ```
 
-- [ ] **Step 2.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1384 passed (1384)`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 2.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1385 passed (1385)`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 2.5: Commit.**
 
@@ -1024,7 +1106,7 @@ git commit -m "Create, set and archive boards, and move a chat onto one, in the 
 - Create: `tests/kanban-board-isolation.test.ts`
 - Modify: `src/db/kanban.ts`
 
-A parent and its child are on one board, whether linked at creation, by `link`, or by a dependency block, all of which go through `createTask` or `linkIn`; and a task a run creates is on its run's task's board, whatever it asks (Decision 8). Each is refused `other_board` in the writer's transaction, so nothing is half written.
+A parent and its child are on one board, whether linked at creation, by `link`, or by a dependency block, all of which go through `createTask` or `linkIn`; and a task a run creates is on its run's task's board, whatever it asks (Decision 8). A chat's idempotency key that a task on another board was created with is not a repeat, and is refused rather than answered with that task (Decision 21). Each is refused `other_board` in the writer's transaction, so nothing is half written.
 
 - [ ] **Step 3.1: Write the failing tests.**
 
@@ -1033,7 +1115,7 @@ Create `tests/kanban-board-isolation.test.ts`:
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { archiveBoard, block, createBoard, createTask, link } from '../src/db/kanban.js';
-import { boardList, getRun, getTask, parentsOf } from '../src/db/kanban-read.js';
+import { boardList, eventsOf, getRun, getTask, parentsOf } from '../src/db/kanban-read.js';
 import { testDb, type TestDb } from './helpers/db.js';
 import { ALICE, NOW, VIA, claimed, newTask } from './helpers/kanban.js';
 
@@ -1061,7 +1143,10 @@ function taskCount(): number {
 
 describe('creating a task on a board', () => {
   it('puts it on the board given, and refuses one that does not exist or is archived, writing nothing', () => {
-    expect(newTask(h.db, { board: 'web-app' }).board).toBe('web-app');
+    const made = newTask(h.db, { board: 'web-app' });
+    expect(made.board).toBe('web-app');
+    // Its created event records the board, as it records the workspace.
+    expect(eventsOf(h.db, made.taskId)[0]?.payload).toMatchObject({ board: 'web-app' });
     const before = taskCount();
     expect(createTask(h.db, { title: 'x', board: 'nowhere', createdBy: ALICE, createdVia: VIA }, NOW)).toMatchObject({
       ok: false,
@@ -1089,6 +1174,22 @@ describe('creating a task on a board', () => {
     );
     expect(taskCount()).toBe(before);
     expect(newTask(h.db, { board: 'web-app', parents: [parent.taskId] }).board).toBe('web-app');
+  });
+
+  it('refuses a key a task on another board was created with, and returns that task on its own board', () => {
+    const first = newTask(h.db, { board: 'web-app', idempotencyKey: 'lark:om_1' });
+    const before = taskCount();
+    const again = createTask(h.db, { title: 'x', board: 'billing', idempotencyKey: 'lark:om_1', createdBy: ALICE, createdVia: VIA }, NOW);
+    expect(again).toMatchObject({ ok: false, code: 'other_board' });
+    expect(again.ok ? '' : again.message).toBe(
+      `task ${first.taskId} was created with this idempotency key on board web-app, not billing`,
+    );
+    expect(createTask(h.db, { title: 'x', board: 'web-app', idempotencyKey: 'lark:om_1', createdBy: ALICE, createdVia: VIA }, NOW)).toMatchObject({
+      ok: true,
+      existing: true,
+      task: { taskId: first.taskId },
+    });
+    expect(taskCount()).toBe(before);
   });
 
   it("puts a task a run creates on its run's task's board, whatever it asks for", () => {
@@ -1144,9 +1245,32 @@ describe('a board’s list', () => {
 });
 ```
 
-- [ ] **Step 3.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-board-isolation.test.ts`. Expected: `Tests  4 failed | 2 passed (6)`: a parent, a link and a dependency block cross boards, and the run's follow-up lands where it asked.
+- [ ] **Step 3.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-board-isolation.test.ts`. Expected: `Tests  5 failed | 2 passed (7)`: a parent, a link, a dependency block and a key cross boards, and the run's follow-up lands where it asked.
 
 - [ ] **Step 3.3: Implement.**
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+      const existing = getTaskByKey(d, t.idempotencyKey);
+      if (existing !== undefined) return { ok: true, task: existing, existing: true };
+```
+
+with:
+
+```ts
+      const existing = getTaskByKey(d, t.idempotencyKey);
+      // A chat's key on another board is not a repeat: answering with that board's task would cross boards (spec §16.5).
+      // A run's key is namespaced by its task, so a repeat is always on that task's board.
+      const asked = t.board ?? DEFAULT_BOARD;
+      if (existing !== undefined && t.createdVia.kind === 'chat' && existing.board !== asked) {
+        return refuse(
+          'other_board',
+          `task ${existing.taskId} was created with this idempotency key on board ${existing.board}, not ${asked}`,
+        );
+      }
+      if (existing !== undefined) return { ok: true, task: existing, existing: true };
+```
 
 In `src/db/kanban.ts`, replace:
 
@@ -1229,7 +1353,7 @@ with:
   if (parent.board !== child.board) return refuse('other_board', onOtherBoard(parentId, parent.board, child.board));
 ```
 
-- [ ] **Step 3.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1390 passed (1390)`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 3.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1392 passed (1392)`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 3.5: Commit.**
 
@@ -1390,7 +1514,7 @@ with:
       });
 ```
 
-- [ ] **Step 4.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1395 passed (1395)`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 4.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1397 passed (1397)`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 4.5: Commit.**
 
@@ -1752,8 +1876,8 @@ with:
     return found;
   }
 
-  /** The boards, with their tasks by phase: `/kanban boards`. */
-  boards(opts: { archived?: boolean } = {}): BoardSummary[] {
+  /** The boards, with their tasks by phase: `/kanban boards`. `including`: a chat's own board, archived or not. */
+  boards(opts: { archived?: boolean; including?: string } = {}): BoardSummary[] {
     return boardSummaries(this.#db, opts);
   }
 ```
@@ -1843,7 +1967,7 @@ with:
   }
 ```
 
-- [ ] **Step 5.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1402 passed (1402)`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 5.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1404 passed (1404)`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 5.5: Commit.**
 
@@ -2180,7 +2304,7 @@ with:
       } catch (err) {
 ```
 
-- [ ] **Step 6.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1408 passed (1408)`; the existing "claims by priority, then age" still passes, every task in it being on `default`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 6.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1410 passed (1410)`; the existing "claims by priority, then age" still passes, every task in it being on `default`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 6.5: Commit.**
 
@@ -2394,7 +2518,7 @@ with:
 };
 ```
 
-- [ ] **Step 7.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1412 passed (1412)`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 7.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1414 passed (1414)`. Run `npx vitest run --project e2e`. Expected: `Tests  98 passed (98)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 7.5: Commit.**
 
@@ -2572,7 +2696,7 @@ describe('/kanban board set', () => {
     await say('board create web-app');
     expect(await say('board set web-app max_running 2')).toBe('Board **web-app** runs at most 2 agents at once now.');
     expect(await say('board set web-app max_running none')).toBe(
-      "Board **web-app** has no max_running of its own now: the gateway's kanban.max_running holds.",
+      "Board **web-app** has no max\\_running of its own now: the gateway's kanban.max\\_running holds.",
     );
     expect(await say('board set web-app workspace web')).toBe(
       "Board **web-app**'s tasks work in web now, unless their own workspace, their role's or their parents' says otherwise.",
@@ -2605,8 +2729,10 @@ describe('/kanban board archive', () => {
       'This chat is on board **web-app**, which is archived: `/kanban board use <board>` moves it to another first.',
     );
     expect(await say('board use web-app', OTHER)).toBe('Not done: board web-app is archived');
-    expect(await say('boards')).not.toContain('**web-app**');
-    expect((await say('boards all')).split('\n')[1]).toBe('**web-app** (archived, this chat): no tasks');
+    // A chat on an archived board still sees it, marked; another chat does not.
+    expect((await say('boards')).split('\n')[1]).toBe('**web-app** (archived, this chat): no tasks');
+    expect(await say('boards', OTHER)).not.toContain('**web-app**');
+    expect((await say('boards all', OTHER)).split('\n')[1]).toBe('**web-app** (archived): no tasks');
     expect(await say('board archive default')).toBe('Not done: board default is where every chat starts; it is never archived');
   });
 });
@@ -2796,7 +2922,7 @@ export function renderBoards(summaries: readonly BoardSummary[], current: string
   const lines = summaries.map((s) => {
     const b = s.board;
     const settings = [
-      ...(b.maxRunning === null ? [] : [`max_running ${b.maxRunning}`]),
+      ...(b.maxRunning === null ? [] : [`max\\_running ${b.maxRunning}`]),
       ...(b.workspace === null ? [] : [`workspace ${label(b.workspace)}`]),
     ];
     const marks = [...(b.archivedAt === null ? [] : ['archived']), ...(b.name === current ? ['this chat'] : [])];
@@ -2950,11 +3076,11 @@ with:
         const gates = this.#deps.service.listGates(command.taskId);
         return renderShow(r.view, gates.ok ? gates.gates : [], this.#deps.service.chatBoard(chatAt(key)).name);
       }
-      case 'boards':
-        return renderBoards(
-          this.#deps.service.boards({ archived: command.archived }),
-          this.#deps.service.chatBoard(chatAt(key)).name,
-        );
+      case 'boards': {
+        // This chat's own board is always listed, archived or not, so it is marked.
+        const current = this.#deps.service.chatBoard(chatAt(key)).name;
+        return renderBoards(this.#deps.service.boards({ archived: command.archived, including: current }), current);
+      }
 ```
 
 In `src/kanban/chat.ts`, replace:
@@ -3005,7 +3131,7 @@ with:
         const b = r.board;
         if (command.change.maxRunning !== undefined) {
           return b.maxRunning === null
-            ? `Board ${boardName(b)} has no max_running of its own now: the gateway's kanban.max_running holds.`
+            ? `Board ${boardName(b)} has no max\\_running of its own now: the gateway's kanban.max\\_running holds.`
             : `Board ${boardName(b)} runs at most ${b.maxRunning} agent${b.maxRunning === 1 ? '' : 's'} at once now.`;
         }
         return `Board ${boardName(b)}'s tasks work in ${label(b.workspace ?? 'default')} now, unless their own workspace, their role's or their parents' says otherwise.`;
@@ -3056,7 +3182,7 @@ with:
       `${task.board === DEFAULT_BOARD ? '' : `, on board ${boardName(task.board)}`}.${card} ` +
 ```
 
-- [ ] **Step 8.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1421 passed (1421)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 8.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1423 passed (1423)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 8.5: Commit.**
 
@@ -3196,7 +3322,7 @@ with:
     });
 ```
 
-- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1423 passed (1423)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1425 passed (1425)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 9.5: Commit.**
 
@@ -3336,7 +3462,8 @@ from then on; a task already working somewhere stays there. `none` clears it.
 It is refused while any of the board's tasks is open, in review or blocked: finish or archive
 them first. Once it is archived, nothing more is added to it, and no chat can move onto it; its
 tasks stay, and `/kanban show` still shows them. A chat still on it is told to move before its
-next `/kanban new`. `default` is never archived.
+next `/kanban new`, and its `/kanban boards` still lists it, marked archived. `default` is never
+archived.
 
 ### Who may do what
 
@@ -3414,7 +3541,7 @@ with:
 - A person's name, in a notice or a card, is the one Lark last gave with their ids, and can be
 ```
 
-- [ ] **Step 10.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `git diff -U0 docs/kanban-guide.md README.md | grep '^+' | grep -c "$(printf '\342\200\224')"`, which counts the long dashes added. Expected: `0`. Run `npx vitest run --project unit`. Expected: `Tests  1423 passed (1423)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 10.2: Check.** Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `git diff -U0 docs/kanban-guide.md README.md | grep '^+' | grep -c "$(printf '\342\200\224')"`, which counts the long dashes added. Expected: `0`. Run `npx vitest run --project unit`. Expected: `Tests  1425 passed (1425)`. Run `npx vitest run --project e2e`. Expected: `Tests  99 passed (99)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 10.3: Commit.**
 
@@ -3427,7 +3554,7 @@ git commit -m "Describe boards in the usage guide and the README: making one, mo
 
 ## Done when
 
-- `npx vitest run --project unit` gives `Tests  1423 passed (1423)`. `npx vitest run --project e2e` gives `Tests  99 passed (99)`. `npm run typecheck` reports no errors. All under Node 22, in the worktree.
+- `npx vitest run --project unit` gives `Tests  1425 passed (1425)`. `npx vitest run --project e2e` gives `Tests  99 passed (99)`. `npm run typecheck` reports no errors. All under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - Migration 006 takes a version 5 database with tasks to version 6, every task on `default`, nothing else of them changed (`tests/kanban-boards-schema.test.ts`).
 - Boards are created, set and archived, and chats moved onto them, only through `db/kanban.ts` (`tests/kanban-boards.test.ts`, `src/db/WRITERS.md`).
@@ -3440,10 +3567,10 @@ git commit -m "Describe boards in the usage guide and the README: making one, mo
 
 For the user, once the plan is built and deployed, with `kanban.enabled: true`. Use a role on a cheap model; `<role>` below is its name. Run the `sqlite3` lines with the gateway stopped, as its own user.
 
-0. **Before the deploy**, with the gateway stopped: `sqlite3 ~/.manus-team/gateway.db "PRAGMA user_version; SELECT count(*) FROM kanban_tasks"` (or `$MT_DB` if set) prints `5` and the number of tasks. Keep a copy of the file. Start the new build, stop it once it is up, and run `sqlite3 ~/.manus-team/gateway.db "PRAGMA user_version; SELECT board, count(*) FROM kanban_tasks GROUP BY board"`: `6`, then `default` and the same number. Start it again.
+0. **Before the deploy**, with the gateway stopped: `sqlite3 ~/.manus-team/gateway.db "PRAGMA user_version; SELECT count(*) FROM kanban_tasks"` (or `$MT_DB` if set) prints `5` and the number of tasks. Keep a copy with `sqlite3 ~/.manus-team/gateway.db ".backup ~/.manus-team/gateway-v5.db"`, not by copying the file: in WAL mode the latest changes may still be in the separate `-wal` file. Start the new build, stop it once it is up, and run `sqlite3 ~/.manus-team/gateway.db "PRAGMA user_version; SELECT board, count(*) FROM kanban_tasks GROUP BY board"`: `6`, then `default` and the same number. Start it again.
 1. In a group that used the board before: `/kanban boards` shows `**default** (this chat)` with its tasks; `/kanban list` shows what it showed before, with no board line.
 2. In a direct message with the bot: `/kanban board create smoke`, then `/kanban board use smoke`. `/kanban list` says `No open tasks on board smoke.`
-3. There: `/kanban new Smoke: reply with the word hello` and a line `assignee: <role>`. The reply ends `on board **smoke**.`; the task runs, and this chat hears it done.
+3. There: `/kanban new Smoke: reply with the word hello` and a line `assignee: <role>`. The reply contains `on board **smoke**.`; the task runs, and this chat hears it done.
 4. In the group: `/kanban list all` does not show it; `/kanban show k_…` with its id shows it, with `board: smoke`.
 5. In the direct message: `/kanban new Child`, with `assignee: <role>` and `parent:` naming one of the group's tasks. It is refused: the parent is on board default.
 6. `/kanban board set smoke max_running 1`, then `/kanban boards`: `**smoke** (this chat): 1 done · max_running 1`.
