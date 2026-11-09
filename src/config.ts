@@ -123,6 +123,12 @@ export interface KanbanSettings {
   enabled: boolean;
   /** Open agent runs at once. Default `maxLiveSessions`, and never above it (spec §6.3). */
   maxRunning: number;
+  /**
+   * Open agent runs as any one role at once, for a role whose config.yaml sets
+   * no `max_running` of its own; absent, such a role has no limit of its own.
+   * Never above `maxRunning` (spec §6.3).
+   */
+  maxRunningPerRole?: number;
   /** Counted failures that block a task as gave_up (spec §8.2). */
   failureLimit: number;
   /** Throttled runs in a row that block a task as transient (spec §8.2). */
@@ -159,6 +165,7 @@ export const KANBAN_DEFAULTS: Omit<KanbanSettings, 'maxRunning'> = {
 /** The section's numeric keys, as the file spells them, and the setting each sets. */
 const KANBAN_NUMBERS = {
   max_running: 'maxRunning',
+  max_running_per_role: 'maxRunningPerRole',
   failure_limit: 'failureLimit',
   transient_limit: 'transientLimit',
   transient_cooldown_s: 'transientCooldownS',
@@ -178,6 +185,7 @@ const KANBAN_NUMBERS = {
  */
 const KANBAN_MAXIMA: Readonly<Record<keyof typeof KANBAN_NUMBERS, number>> = {
   max_running: 256,
+  max_running_per_role: 256,
   failure_limit: 100,
   transient_limit: 1000,
   transient_cooldown_s: 3600,
@@ -209,7 +217,16 @@ export interface TeamSettings {
   /** Workspace name → declared absolute path. Always has `default`. */
   workspaces: Readonly<Record<string, string>>;
   agent: AgentConfig | undefined;
+  /**
+   * The limits a role's own `max_running` is checked against, and the default it
+   * overrides (spec §6.3). Absent -- settings a test builds by hand -- a role's is
+   * not bounded.
+   */
+  kanban?: RoleLimits;
 }
+
+/** What `loadTeam` and `mt role` need of the `kanban:` section: the gateway's limit, and every role's default. */
+export type RoleLimits = Pick<KanbanSettings, 'maxRunning' | 'maxRunningPerRole'>;
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -256,7 +273,7 @@ export function loadConfig(
   const allowOperate = envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate;
   const liveFromEnv = envInteger(env, 'MT_MAX_LIVE_SESSIONS');
   const maxLiveSessions = liveFromEnv ?? file.maxLiveSessions ?? 8;
-  const maxRunning = file.kanban.maxRunning ?? maxLiveSessions;
+  const maxRunning = team.kanban?.maxRunning ?? maxLiveSessions;
   if (maxRunning > maxLiveSessions) {
     // A run is a session, and its actor is pinned while it is open (spec §6.3):
     // more runs than live sessions would hold the gateway over its cap.
@@ -306,6 +323,7 @@ export function loadConfig(
     kanban: {
       enabled: file.kanban.enabled ?? KANBAN_DEFAULTS.enabled,
       maxRunning,
+      ...(file.kanban.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: file.kanban.maxRunningPerRole }),
       failureLimit: file.kanban.failureLimit ?? KANBAN_DEFAULTS.failureLimit,
       transientLimit: file.kanban.transientLimit ?? KANBAN_DEFAULTS.transientLimit,
       transientCooldownS: file.kanban.transientCooldownS ?? KANBAN_DEFAULTS.transientCooldownS,
@@ -384,6 +402,16 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     );
   }
   const agent = file.agentPresent || agentVariables.length > 0 ? legacyAgent(env, file, opts) : undefined;
+  // As loadConfig has it: kanban.max_running defaults to the session limit.
+  const maxRunning = file.kanban.maxRunning ?? envInteger(env, 'MT_MAX_LIVE_SESSIONS') ?? file.maxLiveSessions ?? 8;
+  const perRole = file.kanban.maxRunningPerRole;
+  if (perRole !== undefined && perRole > maxRunning) {
+    // As a board's own max_running is held inside the gateway's (spec §16.6).
+    throw new ConfigError(
+      `${path}: kanban.max_running_per_role (${perRole}) is above kanban.max_running (${maxRunning}); ` +
+        "a role's runs are agent runs, so its limit is a whole number from 1 to the gateway's",
+    );
+  }
   return {
     home,
     configPath: text === undefined ? undefined : path,
@@ -391,6 +419,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     ...(file.kanban.enabled === undefined ? {} : { kanbanEnabled: file.kanban.enabled }),
     workspaces,
     agent,
+    kanban: { maxRunning, ...(perRole === undefined ? {} : { maxRunningPerRole: perRole }) },
   };
 }
 
@@ -838,7 +867,7 @@ export function bool(path: string, key: string, value: unknown): boolean | undef
   return value;
 }
 
-function positiveInt(path: string, key: string, value: unknown): number | undefined {
+export function positiveInt(path: string, key: string, value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     throw new ConfigError(`${path}: ${key} must be a positive integer, got ${JSON.stringify(value)}`);

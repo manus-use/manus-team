@@ -11,6 +11,7 @@ import {
   checkCommand,
   driverOf,
   passEnvValues,
+  positiveInt,
   reject,
   requireSupervisionMatch,
   section,
@@ -56,6 +57,28 @@ export interface Role {
   skills: readonly Skill[];
   /** Every value this role's agent is given from a secret source, except names in maskExempt, for masking (spec §10.1). */
   secretValues: readonly string[];
+  /**
+   * Its config.yaml's `max_running`: open agent runs as this role at once (spec
+   * §6.3). Absent, `kanban.max_running_per_role` applies, if set; `roleLimit`
+   * says which.
+   */
+  maxRunning?: number;
+}
+
+/** A role's limit in effect, and where it comes from: its own config.yaml, or the gateway's default. */
+export interface RoleLimit {
+  limit: number;
+  from: 'role' | 'default';
+}
+
+/**
+ * The open agent runs a role may have at once (spec §6.3): its own `max_running`,
+ * else `kanban.max_running_per_role`, else none -- undefined, when only the
+ * gateway's and the boards' limits hold.
+ */
+export function roleLimit(role: Pick<Role, 'maxRunning'>, perRole: number | undefined): RoleLimit | undefined {
+  if (role.maxRunning !== undefined) return { limit: role.maxRunning, from: 'role' };
+  return perRole === undefined ? undefined : { limit: perRole, from: 'default' };
 }
 
 /** Drivers that can enforce a role's tool policy. None yet (spec §2.2). */
@@ -144,7 +167,7 @@ export function loadRoleDir(
   }
   const root = section(configPath, '', parsed ?? {});
   const agentRaw = subsection(configPath, root, 'agent');
-  reject(configPath, '', root, ['description', 'workspace', 'tools', 'agent'], HINTS);
+  reject(configPath, '', root, ['description', 'workspace', 'max_running', 'tools', 'agent'], HINTS);
   reject(
     configPath,
     'agent',
@@ -194,6 +217,7 @@ export function loadRoleDir(
   const skills = [...own, ...imported];
   const maskExempt = strings(configPath, 'agent.maskExempt', agentRaw['maskExempt']);
   const native = bool(configPath, 'agent.native', agentRaw['native']);
+  const maxRunning = positiveInt(configPath, 'max_running', root['max_running']);
   return {
     role: {
       name,
@@ -216,6 +240,7 @@ export function loadRoleDir(
       skills,
       // Empty values are not secrets, and the registry ignores short ones (spec §10.1).
       secretValues: secretValuesOf({ ...fromGateway, ...fromFile }, maskExempt),
+      ...(maxRunning === undefined ? {} : { maxRunning }),
     },
     notes,
   };

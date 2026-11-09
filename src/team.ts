@@ -38,6 +38,15 @@ export function loadTeam(config: TeamSettings, env: Env, opts: LoadOptions = {})
   const roles = new Map<string, Role>();
   for (const name of found.names) {
     const loaded = loadRoleDir(name, join(rolesDir, name), env, workspaceNames, opts);
+    const own = loaded.role.maxRunning;
+    if (own !== undefined && config.kanban !== undefined && own > config.kanban.maxRunning) {
+      // Refused, as a board's own above the gateway's is (spec §16.6): a limit
+      // that could never bind is a mistake to fix, not one to run with.
+      throw new ConfigError(
+        `${join(rolesDir, name, 'config.yaml')}: max_running (${own}) is above the gateway's kanban.max_running ` +
+          `(${config.kanban.maxRunning}); a role's max_running is a whole number from 1 to it`,
+      );
+    }
     roles.set(name, loaded.role);
     notes.push(...loaded.notes);
   }
