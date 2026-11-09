@@ -20,6 +20,7 @@ import {
   loadTeamSettings,
   type AgentConfig,
   type Env,
+  type RoleLimits,
 } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { RESUME_MIN_VERSION } from '../driver/cli/driver.js';
@@ -47,14 +48,13 @@ export function roleList(io: MtIo): number {
   const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
   const rolesDir = join(settings.home, 'roles');
   const found = discoverRoles(rolesDir);
-  const perRole = settings.kanban?.maxRunningPerRole;
   const rows: string[][] = [];
   if (settings.agent !== undefined && !found.names.includes('default')) {
-    rows.push(['default', settings.agent.driver, 'agent: block', limitCell(undefined, perRole), '']);
+    rows.push(['default', settings.agent.driver, 'agent: block', limitCell(undefined, settings.kanban), '']);
   }
   for (const name of found.names) {
     const summary = summarize(join(rolesDir, name, 'config.yaml'));
-    rows.push([name, summary.driver, `roles/${name}`, limitCell(summary.maxRunning, perRole), summary.description]);
+    rows.push([name, summary.driver, `roles/${name}`, limitCell(summary.maxRunning, settings.kanban), summary.description]);
   }
   if (rows.length === 0) io.out('no roles: create one with mt role create <name>');
   for (const line of table(rows)) io.out(line);
@@ -64,13 +64,15 @@ export function roleList(io: MtIo): number {
 
 /**
  * A role's max_running in `mt role list` (spec §6.3): its own, marked `(role)`;
- * else `kanban.max_running_per_role`, marked `(default)`; else none. `?` for one
- * its config.yaml sets to something that is not a limit.
+ * else `kanban.max_running_per_role`, marked `(per_role)`; else none. `?` for one
+ * its config.yaml sets to something startup refuses: not a limit, or above
+ * `kanban.max_running`.
  */
-function limitCell(own: number | 'invalid' | undefined, perRole: number | undefined): string {
-  if (own === 'invalid') return 'max_running ?';
-  const limit = roleLimit(own === undefined ? {} : { maxRunning: own }, perRole);
-  return limit === undefined ? 'max_running none' : `max_running ${limit.limit} (${limit.from})`;
+function limitCell(own: number | 'invalid' | undefined, kanban: RoleLimits | undefined): string {
+  if (own === 'invalid' || (own !== undefined && kanban !== undefined && own > kanban.maxRunning)) return 'max_running ?';
+  const limit = roleLimit(own === undefined ? {} : { maxRunning: own }, kanban?.maxRunningPerRole);
+  if (limit === undefined) return 'max_running none';
+  return `max_running ${limit.limit} (${limit.from === 'role' ? 'role' : 'per_role'})`;
 }
 
 /** Read loosely, so a broken role still gets a line; `mt role check` says what is wrong with it. */
@@ -471,7 +473,7 @@ function limitLine(role: Role, perRole: number | undefined): string {
   if (limit === undefined) {
     return `max_running: role ${role.name} has no limit of its own: kanban.max_running and the boards' limits hold`;
   }
-  const at = `${limit.limit} agent${limit.limit === 1 ? '' : 's'} at once`;
+  const at = `${limit.limit} agent run${limit.limit === 1 ? '' : 's'} at once`;
   return `max_running: role ${role.name} runs at most ${at}, from ${limit.from === 'role' ? 'its config.yaml' : 'kanban.max_running_per_role'}`;
 }
 

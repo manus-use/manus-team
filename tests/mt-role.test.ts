@@ -76,10 +76,13 @@ describe('mt role list', () => {
     roleDir('broken', `max_running: lots\n${ACP_AGENT}`);
     const r = await fx.run(['role', 'list']);
     expect(r.code).toBe(0);
-    expect(r.out).toMatch(/^default\s+structured-cli\s+agent: block\s+max_running 2 \(default\)$/m);
+    expect(r.out).toMatch(/^default\s+structured-cli\s+agent: block\s+max_running 2 \(per_role\)$/m);
     expect(r.out).toMatch(/^implementer\s+acp\s+roles\/implementer\s+max_running 3 \(role\)$/m);
-    expect(r.out).toMatch(/^reviewer\s+acp\s+roles\/reviewer\s+max_running 2 \(default\)$/m);
+    expect(r.out).toMatch(/^reviewer\s+acp\s+roles\/reviewer\s+max_running 2 \(per_role\)$/m);
     expect(r.out).toMatch(/^broken\s+acp\s+roles\/broken\s+max_running \?$/m);
+    // Above kanban.max_running, which check and startup refuse, it is not shown as a limit either.
+    roleDir('greedy', `max_running: 5\n${ACP_AGENT}`);
+    expect((await fx.run(['role', 'list'])).out).toMatch(/^greedy\s+acp\s+roles\/greedy\s+max_running \?$/m);
   });
 
   it('refuses an unknown option as a usage error', async () => {
@@ -516,9 +519,9 @@ describe('mt role check', () => {
     const r = await fx.run(['role', 'check']);
     expect(r.code, r.out).toBe(0);
     expect(r.out.split('\n').filter((l) => l.startsWith('max_running: '))).toEqual([
-      'max_running: role default runs at most 2 agents at once, from kanban.max_running_per_role',
-      'max_running: role implementer runs at most 3 agents at once, from its config.yaml',
-      'max_running: role reviewer runs at most 2 agents at once, from kanban.max_running_per_role',
+      'max_running: role default runs at most 2 agent runs at once, from kanban.max_running_per_role',
+      'max_running: role implementer runs at most 3 agent runs at once, from its config.yaml',
+      'max_running: role reviewer runs at most 2 agent runs at once, from kanban.max_running_per_role',
     ]);
 
     const bare = mtFixture();
@@ -528,7 +531,7 @@ describe('mt role check', () => {
       const one = await bare.run(['role', 'check']);
       expect(one.out.split('\n').filter((l) => l.startsWith('max_running: '))).toEqual([
         "max_running: role default has no limit of its own: kanban.max_running and the boards' limits hold",
-        'max_running: role solo runs at most 1 agent at once, from its config.yaml',
+        'max_running: role solo runs at most 1 agent run at once, from its config.yaml',
       ]);
     } finally {
       bare.cleanup();
