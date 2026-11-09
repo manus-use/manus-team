@@ -3,7 +3,17 @@ import type { SessionRegistry } from '../core/registry.js';
 import type { SessionActor } from '../core/session-actor.js';
 import { bindingsOnChannel } from '../db/bindings.js';
 import type { Db } from '../db/open.js';
-import { claimableTasks, commentsOf, getRun, getTask, openAgentRunCount, openRuns, runBySession } from '../db/kanban-read.js';
+import {
+  boardsOf,
+  claimableTasks,
+  commentsOf,
+  getRun,
+  getTask,
+  openAgentRunCount,
+  openAgentRunCountOn,
+  openRuns,
+  runBySession,
+} from '../db/kanban-read.js';
 import { getSession } from '../db/sessions.js';
 import { nativeFor, renderNative, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
 import type { Role } from '../roles.js';
@@ -12,6 +22,7 @@ import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, Principal, TurnTerminal } from '../types.js';
 import { briefFor } from './brief.js';
 import { classifyFailure } from './classify.js';
+import { fairOrder } from './fair.js';
 import { composeForwarded, composeNudge, composePrompt } from './prompt.js';
 import type { Claimed, KanbanService } from './service.js';
 import { hadSideEffects, lastTurnOf, toolCallsOf } from './session-log.js';
@@ -168,6 +179,8 @@ export class Dispatcher {
   readonly #inflight = new Set<Promise<void>>();
   /** What the last pass found nobody could be given, and why: the sweep's stranded candidates. */
   #unassignable = new Map<string, string>();
+  /** The board of the last agent claim: the next pass starts with the board after it (spec §16). */
+  #lastBoard: string | undefined;
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
 
@@ -346,12 +359,18 @@ export class Dispatcher {
    * One pass (spec §6.2): claim what can be claimed, in order, and start each run.
    * Synchronous up to each run's first prompt, so a pass sees the runs the one
    * before it opened. Runs go on in the background; `idle()` waits for them.
+   *
+   * The boards take turns (spec §16): a task from each, then the next from each,
+   * starting after the board of the last agent claim, priority and age deciding
+   * only within a board. A board's own max_running holds inside the gateway's.
    */
   pass(): void {
     if (this.#stopped) return;
     let tasks: ReturnType<typeof claimableTasks>;
+    let limits: Map<string, number | null>;
     try {
-      tasks = claimableTasks(this.#deps.db, this.#clock.now());
+      tasks = fairOrder(claimableTasks(this.#deps.db, this.#clock.now()), this.#lastBoard);
+      limits = new Map(boardsOf(this.#deps.db, { archived: true }).map((b) => [b.name, b.maxRunning]));
     } catch (err) {
       this.#note(`kanban: reading the claimable tasks failed: ${message(err)}`);
       return;
@@ -365,6 +384,8 @@ export class Dispatcher {
         // Counted from the board, so a run opened earlier in this pass counts. A
         // person's run holds no process, and is not limited (spec §6.3).
         if (who?.kind === 'role' && openAgentRunCount(this.#deps.db) >= this.#deps.settings.maxRunning) continue;
+        const own = limits.get(task.board) ?? null;
+        if (who?.kind === 'role' && own !== null && openAgentRunCountOn(this.#deps.db, task.board) >= own) continue;
         // An agent run gets a token (spec §7.2); a person's run reports through chat.
         const token = who?.kind === 'role' ? mintToken() : undefined;
         const claimed = this.#claim(task.taskId, token);
@@ -374,6 +395,7 @@ export class Dispatcher {
           if (claimed.code === 'unassignable') unassignable.set(task.taskId, claimed.message);
           continue;
         }
+        if (claimed.run.assignee.kind === 'role') this.#lastBoard = task.board;
         this.#track(this.#run(claimed, token));
       } catch (err) {
         this.#note(`kanban: claiming ${task.taskId} failed: ${message(err)}`);

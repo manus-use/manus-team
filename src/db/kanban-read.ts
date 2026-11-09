@@ -646,6 +646,17 @@ export function openAgentRunCount(db: Db): number {
   return row?.n ?? 0;
 }
 
+/** Open agent runs on one board's tasks: what a board's own max_running counts (spec §16). */
+export function openAgentRunCountOn(db: Db, board: string): number {
+  const row = db
+    .prepare<[string], { n: number }>(
+      `SELECT count(*) AS n FROM kanban_runs r JOIN kanban_tasks t ON t.task_id = r.task_id
+        WHERE r.ended_at IS NULL AND r.assignee_kind = 'role' AND t.board = ?`,
+    )
+    .get(board);
+  return row?.n ?? 0;
+}
+
 /**
  * Tasks a pass may try to claim (spec §6.2 step 1), highest priority first, then
  * oldest: in open or review, with no open run of any kind, every parent finished,
