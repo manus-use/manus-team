@@ -1,5 +1,6 @@
 import { ConfigError, type Env } from '../config.js';
 import { parse, refuse, UsageError } from './args.js';
+import { LIST_FILTERS } from '../kanban/chat-parse.js';
 import { gateAdd, gateList, gateRemove, inBoardRun } from './gate.js';
 import { kanbanCommand } from './kanban.js';
 import { operatorCommand } from './operator.js';
@@ -55,6 +56,17 @@ const USAGE = [
   '  mt kanban board set <name> max_running <number|none> [--json]',
   '  mt kanban board set <name> workspace <workspace|none> [--json]',
   '  mt kanban board archive <name> [--json]',
+  '  mt kanban new <title> [--board <name>] [--assignee <role>] [--reviewer <role>] [--workspace <name>]',
+  '      [--parent <task>]... [--outcome "..."] [--verify "..."] [--constraints "..."] [--boundaries "..."]',
+  '      [--stop-when "..."] [--body "..." | --body-file <path|->] [--json]',
+  `  mt kanban list [${LIST_FILTERS.join('|')}] [--board <name>] [--json]`,
+  '  mt kanban show <task_id> [--board <name>] [--json]',
+  '  mt kanban assign <task_id> <role> [--board <name>] [--json]',
+  '  mt kanban link <parent_id> <child_id> [--board <name>] [--json]',
+  '  mt kanban unblock <task_id> [comment...] [--board <name>] [--json]',
+  '  mt kanban stop <task_id> [--board <name>] [--json]',
+  '  mt kanban archive <task_id> [--board <name>] [--json]',
+  '  mt kanban comment <task_id> <text...> [--board <name>] [--json]',
   '  mt kanban gate add <task_id> [--timeout <s>] -- <command...>',
   '  mt kanban gate list <task_id>',
   '  mt kanban gate remove <task_id> <gate_id>',
@@ -97,7 +109,7 @@ function gate(argv: readonly string[], io: MtIo): number {
 /** The worker CLI's commands that no operator's has: the worker's wherever they are typed. */
 const WORKER_ONLY: readonly string[] = ['complete', 'review', 'changes', 'block', 'create'];
 /** The operator's commands that the worker CLI has not got: the operator's wherever they are typed. */
-const OPERATOR_ONLY: readonly string[] = ['gate', 'board'];
+const OPERATOR_ONLY: readonly string[] = ['gate', 'board', 'new', 'list', 'assign', 'unblock', 'stop', 'archive'];
 
 /**
  * Whose `mt kanban <command>` this is: the worker CLI's (spec §7.3) or the
