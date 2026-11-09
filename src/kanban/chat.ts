@@ -4,9 +4,18 @@ import type { CardView } from '../channel/types.js';
 import { boardCardNonce } from '../core/ids.js';
 import type { InboundCardAction } from '../core/router.js';
 import type { BindingKey, InboundMention, InboundMessage, Principal, Tier } from '../types.js';
-import { isPerson, parseKanban, type KanbanCommand, type NewTaskCommand, type ReportCommand, type ReviewCommand } from './chat-parse.js';
+import {
+  isPerson,
+  parseKanban,
+  type BoardCommand,
+  type KanbanCommand,
+  type NewTaskCommand,
+  type ReportCommand,
+  type ReviewCommand,
+} from './chat-parse.js';
 import {
   label,
+  renderBoards,
   renderCardOutcome,
   renderGateFailure,
   renderGates,
@@ -20,7 +29,17 @@ import {
 import { redactKnownSecrets } from '../secrets.js';
 import { personPrincipal, type PeopleDirectory } from './people.js';
 import type { KanbanService } from './service.js';
-import type { Assignee, PersonReportsAs, Refusal, Reporter, RunRow, TaskRow } from './types.js';
+import {
+  DEFAULT_BOARD,
+  type Assignee,
+  type BoardRow,
+  type ChatAt,
+  type PersonReportsAs,
+  type Refusal,
+  type Reporter,
+  type RunRow,
+  type TaskRow,
+} from './types.js';
 import { WORKER_LIMITS } from './worker.js';
 
 /**
@@ -97,6 +116,16 @@ const TIERS: Readonly<Record<KanbanCommand['verb'], Tier>> = {
   'board set': 'operate',
   'board archive': 'operate',
 };
+
+/** The chat a command came from, for the board it is on: its conversation, whatever the thread (spec §16). */
+function chatAt(key: BindingKey): ChatAt {
+  return { channel: key.channel, appId: key.appId, conversationId: key.conversationId };
+}
+
+/** A board, by name, as a reply names it. */
+function boardName(board: BoardRow | string): string {
+  return `**${label(typeof board === 'string' ? board : board.name)}**`;
+}
 
 /** The board's principal for a chat sender: `lark:<union_id>`, or undefined when Lark gave none. */
 export function principalOf(sender: Principal): string | undefined {
@@ -219,13 +248,22 @@ export class KanbanChat {
     switch (command.verb) {
       case 'help':
         return renderHelp();
-      case 'list':
-        return renderList(this.#deps.service.list(), command.filter);
+      case 'list': {
+        // The chat's board alone (spec §16).
+        const board = this.#deps.service.chatBoard(chatAt(key)).name;
+        return renderList(this.#deps.service.list(board), command.filter, board);
+      }
       case 'show': {
+        // A task on any board, by id, with its board named (spec §16).
         const r = this.#deps.service.show(command.taskId);
         if (!r.ok) return refused(r);
         const gates = this.#deps.service.listGates(command.taskId);
-        return renderShow(r.view, gates.ok ? gates.gates : []);
+        return renderShow(r.view, gates.ok ? gates.gates : [], this.#deps.service.chatBoard(chatAt(key)).name);
+      }
+      case 'boards': {
+        // This chat's own board is always listed, archived or not, so it is marked.
+        const current = this.#deps.service.chatBoard(chatAt(key)).name;
+        return renderBoards(this.#deps.service.boards({ archived: command.archived, including: current }), current);
       }
       case 'gate list': {
         const r = this.#deps.service.listGates(command.taskId);
@@ -331,8 +369,48 @@ export class KanbanChat {
         return this.#report(command, by, message.sender);
       case 'review':
         return this.#review(command, by, message);
+      case 'board create':
+      case 'board use':
+      case 'board set':
+      case 'board archive':
+        return this.#board(command, by, key);
       default:
         return renderHelp();
+    }
+  }
+
+  /** `/kanban board …` (spec §16): boards made, set and archived, and the chat moved onto one. */
+  #board(command: BoardCommand, by: string, key: BindingKey): string {
+    const service = this.#deps.service;
+    switch (command.verb) {
+      case 'board create': {
+        const r = service.createBoard(command.board, by);
+        if (!r.ok) return refused(r);
+        return `Created board ${boardName(r.board)}. \`/kanban board use ${r.board.name}\` puts a chat on it.`;
+      }
+      case 'board use': {
+        const r = service.useBoard(chatAt(key), command.board, by);
+        if (!r.ok) return refused(r);
+        return `This chat is on board ${boardName(r.board)} now: its \`/kanban new\` adds tasks to it, and \`/kanban list\` shows them.`;
+      }
+      case 'board set': {
+        const r = service.setBoard(command.board, command.change, by);
+        if (!r.ok) return refused(r);
+        // A higher limit, or a workspace, can make a task claimable.
+        this.#changed();
+        const b = r.board;
+        if (command.change.maxRunning !== undefined) {
+          return b.maxRunning === null
+            ? `Board ${boardName(b)} has no max\\_running of its own now: the gateway's kanban.max\\_running holds.`
+            : `Board ${boardName(b)} runs at most ${b.maxRunning} agent${b.maxRunning === 1 ? '' : 's'} at once now.`;
+        }
+        return `Board ${boardName(b)}'s tasks work in ${label(b.workspace ?? 'default')} now, unless their own workspace, their role's or their parents' says otherwise.`;
+      }
+      case 'board archive': {
+        const r = service.archiveBoard(command.board, by);
+        if (!r.ok) return refused(r);
+        return `Archived board ${boardName(r.board)}. Its tasks stay, and \`/kanban show\` still shows them; nothing more is added to it.`;
+      }
     }
   }
 
@@ -697,7 +775,13 @@ export class KanbanChat {
     }
     const tooBig = oversized(command);
     if (tooBig !== undefined) return tooBig;
+    // On the chat's board (spec §16).
+    const board = this.#deps.service.chatBoard(chatAt(key));
+    if (board.archivedAt !== null) {
+      return `This chat is on board ${boardName(board)}, which is archived: \`/kanban board use <board>\` moves it to another first.`;
+    }
     const r = this.#deps.service.create({
+      board: board.name,
       title: command.title,
       ...(command.body === '' ? {} : { body: command.body }),
       contract: command.contract,
@@ -726,7 +810,8 @@ export class KanbanChat {
       task.assignee?.kind === 'human' ? ' They are sent it as a card, in a direct message, once it is ready.' : '';
     return (
       `Created ${id(task.taskId)}: **${label(task.title)}**, for ${whom}` +
-      `${task.workspace === null ? '' : `, in ${label(task.workspace)}`}.${card} ` +
+      `${task.workspace === null ? '' : `, in ${label(task.workspace)}`}` +
+      `${task.board === DEFAULT_BOARD ? '' : `, on board ${boardName(task.board)}`}.${card} ` +
       'This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.'
     );
   }

@@ -1,13 +1,13 @@
 import { forDisplay, forMarkdown } from '../channel/escape.js';
 import type { CardButton, CardView } from '../channel/types.js';
 import { boardCardNonce } from '../core/ids.js';
-import type { BoardEntry, ReviewRequest, TaskView } from '../db/kanban-read.js';
+import type { BoardEntry, BoardSummary, ReviewRequest, TaskView } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
 import { LIST_FILTERS, USAGE } from './chat-parse.js';
 import { describeReported } from './commit.js';
 import type { DisplayStatus } from './status.js';
-import type { Assignee, FailedGate, GateRow, KanbanEvent, RunRow, TaskRow } from './types.js';
+import { DEFAULT_BOARD, type Assignee, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow } from './types.js';
 
 /**
  * What `/kanban` says in chat (spec §9.3), and the notices a subscription hears
@@ -123,6 +123,11 @@ export function renderHelp(): string {
     [USAGE.review, assignee],
     [USAGE.approve, reviewer],
     [USAGE.changes, reviewer],
+    [USAGE.boards, talk],
+    [USAGE['board create'], operate],
+    [USAGE['board use'], operate],
+    [USAGE['board set'], operate],
+    [USAGE['board archive'], operate],
   ];
   return [
     '**The task board.** A task is any work -- research, a document, an operation in Lark, a chore, a change to code -- given to a role, whose agent runs it in a workspace, or to a person.',
@@ -130,18 +135,27 @@ export function renderHelp(): string {
     'Name a person with an @-mention: they are sent the task as a card in a direct message, with Done and Block, or a review with Approve and Request changes. A person named may comment on, and report on, their own task.',
     "A task with a `reviewer:` is reviewed before it is done: its assignee's done, or its agent's, goes to the reviewer. An operator may answer any review, ending a reviewer role's run.",
     'The chat a task is created in hears when it is done, needs review, blocks, is retried after a failure, gives up, or is stranded, and who a person was given it.',
+    "A board is a queue of tasks of its own. Each chat is on one, `default` until `/kanban board use` moves it, and its `/kanban new` and `list` act on that board; a task's follow-ups and parents are on its board.",
   ].join('\n');
 }
 
-/** `/kanban list` (spec §9.1): the board by derived status, the active tasks unless a filter is given. */
-export function renderList(entries: readonly BoardEntry[], filter: DisplayStatus | 'all' | undefined): string {
+/**
+ * `/kanban list` (spec §9.1): a board by derived status, the active tasks unless a
+ * filter is given. A board other than `default` is named (spec §16).
+ */
+export function renderList(
+  entries: readonly BoardEntry[],
+  filter: DisplayStatus | 'all' | undefined,
+  board: string = DEFAULT_BOARD,
+): string {
+  const on = board === DEFAULT_BOARD ? '' : ` on board ${label(board)}`;
   const shown = entries.filter((e) =>
     filter === undefined ? ACTIVE.includes(e.status) : filter === 'all' || e.status === filter,
   );
   if (shown.length === 0) {
     return filter === undefined
-      ? 'No open tasks. `/kanban list all` shows done and archived ones too.'
-      : `No ${filter === 'all' ? '' : `${filter} `}tasks.`;
+      ? `No open tasks${on}. \`/kanban list all\` shows done and archived ones too.`
+      : `No ${filter === 'all' ? '' : `${filter} `}tasks${on}.`;
   }
   const ordered =
     filter === undefined ? ACTIVE.flatMap((status) => shown.filter((e) => e.status === status)) : [...shown];
@@ -150,7 +164,46 @@ export function renderList(entries: readonly BoardEntry[], filter: DisplayStatus
     .map((e) => `${id(e.task.taskId)} **${e.status}**: ${label(e.task.title, 120)} · ${who(e.task.assignee)}`);
   const more = ordered.length - LIST_MAX;
   if (more > 0) lines.push(`… and ${more} more. \`/kanban list <${LIST_FILTERS.join('|')}>\` narrows it.`);
+  if (on !== '') lines.unshift(`Board **${label(board)}**:`);
   return lines.join('\n');
+}
+
+/** How many of a board's tasks are where, leaving out what is none. */
+function counted(s: BoardSummary): string {
+  const parts = (
+    [
+      [s.counts.open, 'open'],
+      [s.counts.review, 'in review'],
+      [s.counts.blocked, 'blocked'],
+      [s.counts.done, 'done'],
+    ] as const
+  )
+    .filter(([n]) => n > 0)
+    .map(([n, what]) => `${n} ${what}`);
+  return parts.length === 0 ? 'no tasks' : parts.join(', ');
+}
+
+/**
+ * `/kanban boards` (spec §16): each board, its tasks by phase, its own
+ * max_running and workspace where it sets them, and which one this chat is on.
+ */
+export function renderBoards(summaries: readonly BoardSummary[], current: string): string {
+  const lines = summaries.map((s) => {
+    const b = s.board;
+    const settings = [
+      ...(b.maxRunning === null ? [] : [`max\\_running ${b.maxRunning}`]),
+      ...(b.workspace === null ? [] : [`workspace ${label(b.workspace)}`]),
+    ];
+    const marks = [...(b.archivedAt === null ? [] : ['archived']), ...(b.name === current ? ['this chat'] : [])];
+    return (
+      `**${label(b.name)}**${marks.length === 0 ? '' : ` (${marks.join(', ')})`}: ${counted(s)}` +
+      settings.map((x) => ` · ${x}`).join('')
+    );
+  });
+  return [
+    ...lines,
+    `\`/kanban board use <name>\` moves this chat to another board; \`/kanban board create <name>\` makes one.`,
+  ].join('\n');
 }
 
 function runLine(run: RunRow): string {
@@ -160,12 +213,17 @@ function runLine(run: RunRow): string {
   return said === null || said === '' ? head : `${head}: ${label(said, 300)}`;
 }
 
-/** `/kanban show` (spec §9.1): the task, its contract, gates, runs, latest output and comments. */
-export function renderShow(view: TaskView, gates: readonly GateRow[]): string {
+/**
+ * `/kanban show` (spec §9.1): the task, its contract, gates, runs, latest output
+ * and comments. Its board is named once anything is on a board but `default`:
+ * the task's, or the chat's it is shown in (spec §16).
+ */
+export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard: string = DEFAULT_BOARD): string {
   const { task } = view;
+  const board = task.board === DEFAULT_BOARD && chatBoard === DEFAULT_BOARD ? '' : ` · board: ${label(task.board)}`;
   const out: string[] = [
     `**${label(task.title)}** ${id(task.taskId)}: ${view.status}`,
-    `assignee: ${who(task.assignee)} · reviewer: ${who(task.reviewer)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}`,
+    `assignee: ${who(task.assignee)} · reviewer: ${who(task.reviewer)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}${board}`,
   ];
   if (task.phase === 'blocked' && task.blockKind !== null) {
     out.push(`blocked (${forDisplay(task.blockKind)}): ${label(task.blockReason ?? '', 500)}`);
