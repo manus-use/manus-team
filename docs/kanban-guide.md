@@ -34,10 +34,8 @@ needs operator tier, except a person's reports on their own task.
 
 | Who | Commands |
 |---|---|
-```markdown
 | Anyone at talk tier | `/kanban help`, `list`, `show`, `comment`, `gate list`, `boards` |
 | Operators | `/kanban new`, `assign`, `link`, `workspace`, `unblock`, `stop`, `archive`, `gate add`, `gate remove`, `board create`, `board use`, `board set`, `board archive`, and every talk-tier command |
-```
 | The person a task is assigned to | `/kanban done`, `block` and `review` on that task, while it is being worked on |
 | The person named as a task's reviewer, or any operator | `/kanban approve` and `changes` on that task, while it waits for review |
 
@@ -765,7 +763,7 @@ Fix it with `/kanban assign`, or, for parents in different workspaces, set the w
 > `k_…` works in worker.
 
 A task's workspace is fixed at its first start and never changes after; `/kanban workspace` is
-refused once it is fixed. A ready task queued behind another in its workspace is not stranded.
+refused once it is fixed. A ready task queued behind another in its workspace, or waiting for a free slot under the gateway's or its board's `max_running`, is not stranded.
 
 ### Stop, assign and archive
 
@@ -836,7 +834,8 @@ and every chat starts on it. A gateway that never makes another board works as i
 
 A board's name follows the rule for role and workspace names: lowercase letters, digits and
 `-`, starting with a letter, not ending with `-`, at most 40 characters. A name is never renamed
-or reused, an archived board's included.
+or reused, an archived board's included. `none` and `all` are not board names: in the board
+commands, `none` means "clear" and `all` means every board.
 
 ```
 /kanban board use web-app
@@ -853,8 +852,9 @@ bot can move between boards as you need.
 
 - `/kanban new` creates the task on this chat's board. The reply names the board, unless it is
   `default`.
-- `/kanban list` shows this chat's board alone, under a line naming it. `all` still means every
-  status, on this board.
+- `/kanban list` shows this chat's board alone. On a board other than `default`, a line of its
+  own names the board above the tasks; on `default` there is none, as before. `all` still means
+  every status, on this board.
 - `/kanban show k_…` shows a task on any board, by its id, and names its board once any board
   but `default` is involved.
 - Every other command that names a task (`assign`, `comment`, `approve` and the rest) works on
@@ -862,7 +862,8 @@ bot can move between boards as you need.
   working after the chat has moved.
 - A task's follow-ups stay on its board: those its agent creates with `mt kanban create`, and
   those a done task is given.
-- `parent:` and `/kanban link` cannot cross boards:
+- `parent:` and `/kanban link` cannot cross boards. A follow-up created from chat with `parent:`
+  must be created from a chat on the parent's board; from a chat on another board it is refused:
 
   > Not done: task k\_… is on board default, not web-app: a task and its parents are on one board
 
@@ -902,7 +903,10 @@ across boards: two boards' tasks in one workspace take turns.
 
 A board's workspace is the last resort, in place of `default`, for a task with no `workspace:`
 line, whose role names no workspace, and whose parents have none. It applies to tasks claimed
-from then on; a task already working somewhere stays there. `none` clears it.
+from then on; a task already working somewhere stays there. `none` clears it, so a workspace
+called `none` cannot be a board's workspace. If a board's workspace is removed from config, its
+agent tasks that would land there wait as stranded, but a person's task claimed there keeps that
+workspace as its own.
 
 ### Archiving a board
 

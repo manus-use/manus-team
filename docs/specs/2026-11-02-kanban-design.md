@@ -761,7 +761,10 @@ session status already follows (`core/status.ts`, channel spec §7), for the sam
   that make a task ready are on other tasks, or are no event at all, such as a cooldown ending), its
   subscribers are told it is stranded and why, once — `stranded_notified_at` records that the notice
   is due: the `stranded` event written with it is what the subscriptions deliver (§9.4). Only tasks that *cannot* be claimed are stranded; a ready task waiting its turn behind
-  the per-workspace limit (§6.3) is queued, not stranded, and is never reported as such.
+  the per-workspace limit (§6.3), or `kanban.max_running`, or its board's own `max_running` (§16.6),
+  is queued, not stranded, and is never reported as such. The limits are checked before the claim, so
+  an agent task skipped for one is not tried, and its being unassignable is not seen either: a task
+  that cannot be claimed is reported stranded only once a pass has a slot to try it in.
 
 ### 4.3 The completion contract
 
@@ -1946,7 +1949,7 @@ board.
 | Masking | a known value masked through each escaper, in composed worker context and `last_output`, and in stored free text and JSON string values; **a secret split across two message chunks masked on the card**; a secret containing `_` masked before escaping, and one containing `"` masked inside JSON; values under 8 characters and `maskExempt` names left alone; a worker token masked only while its run is open; `turn_submitted` input stored unmasked but shown masked; a gate containing a secret refused; a render withholding a trailing prefix of a secret, mid-stream and on a turn that ended part-way through one; ids inside payloads left unmasked; the registry gaining and losing a worker token with its run |
 | Reported commit | clean tree → commit; dirty tree → commit plus "uncommitted changes"; no commit yet → "uncommitted; no commit to review"; not a repo, or no git → nothing recorded, and no state line; recorded for a reviewer agent's `complete`, never for a person's report |
 | Workspaces | a name registered on first sight; a known name repointed to another directory fails startup; no workspace `default` fails startup; a downstream review task inherits its parents' common workspace, a role with its own workspace does not; an unclaimed archived parent ignored; parents in different workspaces make an agent task unresolvable, while a human one is claimed with a null workspace, has gated completion refused, and can then be given one by `/kanban workspace`; a worker-created follow-up uses its creating task's workspace without a link and is claimable at once; an agent claims a workspace while a person's review on another task there is open; a person's run leaves the workspace null and a later agent review claim re-applies the rules |
-| Boards (G) | migration `006` from version 5 with tasks in it, every task on `default`; an idempotency key refused across boards; a chat's own board listed even archived; boards created, set, archived only through the writer, `default` never archived, a board with unfinished tasks not either; a chat's board per conversation; a parent, a link, a dependency block and a worker's follow-up kept on a board; a board's workspace as rule 4; the service's name grammar and `max_running` bound; the boards in turn, and a board's `max_running` inside the gateway's; the board commands at their tiers, and `new`, `list` and `show` on the chat's board; end to end, a chat on a board running its task |
+| Boards (G) | migration `006` from version 5 with tasks in it, every task on `default`; an idempotency key refused across boards, however its task was created; a chat's own board listed even archived; boards created, set, archived only through the writer, `default` never archived, a board with unfinished tasks not either; a chat's board per conversation; a parent, a link, a dependency block and a worker's follow-up kept on a board; a board's workspace as rule 4; the service's name grammar, with `none` and `all` reserved and a hidden character shown escaped, checked again in the writer, an empty `set` refused, and the `max_running` bound; the boards in turn, a board whose head task waits keeping its turn with its next, and a board's `max_running` inside the gateway's; a task waiting only on a limit never stranded; a chat moved to another board still told of the tasks it created; the board commands at their tiers, and `new`, `list` and `show` on the chat's board; end to end, a chat on a board running its task |
 | End to end | the fake CLI agent calling `mt kanban complete` through the real socket |
 
 ---
@@ -2095,7 +2098,7 @@ in it would overwrite each other as two tasks' would.
 | Command | Tier | |
 |---|---|---|
 | `/kanban boards [all]` | talk | each board with its tasks by phase, its own `max_running` and workspace where set, and which one this chat is on, listed even when archived; `all` adds the other archived boards |
-| `/kanban board create <name>` | operate | a new board, with no settings of its own; a name a board has, or had, is refused |
+| `/kanban board create <name>` | operate | a new board, with no settings of its own; a name a board has, or had, is refused, and so are `none` and `all` |
 | `/kanban board use <name>` | operate | this chat, all its threads, is on the board from now on |
 | `/kanban board set <name> max_running <number\|none>` · `… workspace <workspace\|none>` | operate | §16.6 |
 | `/kanban board archive <name>` | operate | §16.8 |
@@ -2104,6 +2107,14 @@ in it would overwrite each other as two tasks' would.
 can change where their agents run: a talk-tier person moving an operator's chat would choose the
 directory of the operator's next unsupervised agent. There is no rename: tasks carry the name, and
 renaming would rewrite them; a display name, as Hermes gives its boards, can come later.
+
+**A board's name** is in the grammar of role and workspace names, checked by the service, which says
+why, and again, cheaply, by the writer. **`none` and `all` are reserved**: in `board set`, `none`
+means "clear", so a workspace called `none` cannot be a board's workspace, and `all` lists every
+board. A refusal that quotes a name writes each character that does not print (a control, a
+zero-width or other format character, a separator other than a plain space) as `\uXXXX`, so a name
+that cannot be valid does not look like one that is. A `set` that changes neither setting is refused
+`invalid`, and the board is left unstamped.
 
 ### 16.4 A chat's board, and what acts on it
 
@@ -2130,9 +2141,13 @@ renaming would rewrite them; a display name, as Hermes gives its boards, can com
   `link`, and a dependency block's parents (§5.4) are refused `other_board` across boards, in the
   writer's transaction: a queue whose tasks wait on another queue's is not separate, and its
   priority, its limit and its archive would all depend on the other.
-- **An idempotency key does not cross boards.** A chat's key whose task is on another board than the
-  one asked for is refused `other_board`, not answered with that task: a message redelivered after
-  its chat moved. A run's key is namespaced by its task (§3.1), so it cannot cross.
+- **An idempotency key does not cross boards.** The writer works out the new task's board first, its
+  run's task's for a run and the one asked for otherwise, and refuses `other_board` a key whose
+  existing task is on another board, however that task was created, rather than answering with it:
+  a message redelivered after its chat moved, say. A run's key is namespaced by its task (§3.1), so
+  it does not cross in practice; the check does not depend on that.
+- **A follow-up created from chat with `parent:`** is created on the chat's board, so it must come from
+  a chat on the parent's board; from another it is refused, as any parent across boards is.
 - **`mt kanban gate`** names a task by id, and needs no board.
 
 ### 16.6 A board's `max_running` and workspace
@@ -2145,17 +2160,24 @@ renaming would rewrite them; a display name, as Hermes gives its boards, can com
 - **`workspace`** is §2.3's rule 4 for the board's tasks, in place of `default`: the last resort, after
   the task's own workspace, its role's explicit one and its parents' common one. It is resolved at a
   claim, as rule 4 is, so setting it moves no task already claimed. A board's workspace removed from
-  config makes the agent tasks that would land there unresolvable (§4.2), not moved to `default`.
+  config makes the agent tasks that would land there unresolvable (§4.2), not moved to `default`;
+  a person's claim, which needs no configured workspace (§2.3), fixes the removed one on its task.
 
 ### 16.7 The dispatcher takes boards in turn
 
-A pass (§6.2) orders its claimable tasks by board: the first of each board, then the second of
-each, and so on, the boards by name, **starting with the board after the one that got the previous
-agent claim**, wrapping round. Within a board the order is §6.2's, priority then age. Without the
-rotation, a board whose first task is always claimable would be offered every free slot first; with
-it, one board's burst cannot starve another, whatever its priorities, which say nothing about
-another board's. The cursor is in memory: a restart starts again from the first board, which costs
-one turn of fairness. Human runs are not limited, and do not move the cursor.
+A pass (§6.2) gives each board a turn in rotation, the boards by name, **starting with the board
+after the one that got the previous agent claim**, wrapping round, and goes round again until every
+board's claimable tasks have been tried. **A board's turn is its first task that can actually be
+claimed:** its tasks are tried in §6.2's order, priority then age, until one agent claim succeeds or
+the board has none left, and only then does the next board get its turn. So a head task that waits
+(on a busy workspace, say) does not cost its board the turn: the next task behind it is offered the
+slot, not left behind every other board's first task. A person's claim holds no slot (§6.3), and
+does not end the board's turn. A board at its own `max_running` (§16.6) skips every agent task it has
+left, and so gives up its turn for the rest of the pass. Without the rotation, a board whose first
+task is always claimable would be offered every free slot first; with it, one board's burst cannot
+starve another, whatever its priorities, which say nothing about another board's. The cursor is in
+memory: a restart starts again from the first board, which costs one turn of fairness. Human runs
+are not limited, and do not move the cursor.
 
 ### 16.8 Archiving a board
 

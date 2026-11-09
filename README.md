@@ -409,9 +409,9 @@ refused.
 | `/kanban approve <task> [comment]` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
 | `/kanban changes <task> <reason>` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
 | `/kanban boards [all]` | talk: each board, its tasks, its own limit and workspace, and which one this chat is on |
-| `/kanban board create <name>` | operate: a new board, named as roles and workspaces are |
+| `/kanban board create <name>` | operate: a new board, named as roles and workspaces are, but never `none` or `all` |
 | `/kanban board use <name>` | operate: this chat, all its threads, is on that board from now on |
-| `/kanban board set <name> max_running <number\|none>`, or `workspace <workspace\|none>` | operate: the board's own limit, inside `kanban.max_running`, or its tasks' default workspace |
+| `/kanban board set <name> max_running <number\|none>`, or `workspace <workspace\|none>` | operate: the board's own limit, inside `kanban.max_running`, or its tasks' default workspace; `none` clears either |
 | `/kanban board archive <name>` | operate: refused while any of its tasks is open, in review or blocked; never `default` |
 | `/kanban help` | talk |
 
@@ -494,6 +494,9 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
   work under review, but nothing enforces that.
 - A board's name is never renamed, and an archived board is never brought back: make a new one.
 - A board's own settings keep only who changed them last, and when; there is no history of them.
+- An agent task nobody can be given is not seen as stranded while `kanban.max_running`, or its
+  board's own `max_running`, is reached: the limit is checked first, so it is not tried. It is
+  reported once a slot frees and a pass tries it.
 - A person's name, in a notice or a card, is the one Lark last gave with their ids, and can be
   out of date.
 

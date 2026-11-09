@@ -68,7 +68,7 @@ Each has a recommendation and its reason. *The user's decision* marks those the 
 ## Out of scope, and known limitations
 
 - **Projects:** per-board operators and role allow-lists (spec §16.9), by the user's choice.
-- **A workspace called `none`** cannot be a board's workspace: `none` clears it.
+- **A workspace called `none`** cannot be a board's workspace: `none` clears it. `none` and `all` are not board names either.
 - **No rename and no unarchive** (Decision 4); a board's display name is later.
 - **No history of a board's settings** (Decision 17).
 - **Fairness after a restart** starts from the first board by name (Decision 10).
@@ -76,6 +76,7 @@ Each has a recommendation and its reason. *The user's decision* marks those the 
 - **A chat's board is the conversation's**; a thread cannot have its own (Decision 15).
 - **An archived board's chats stay on it** until an operator moves them (Decision 12).
 - **Boards are made in chat only**: `mt` has no board commands.
+- **Stranded behind a limit:** an agent task skipped because `kanban.max_running`, or its board's own `max_running`, is reached is not tried, so it is never recorded as unassignable, and a task nobody can be given is reported stranded only once a slot frees. A task waiting only on a limit is never reported stranded.
 
 ## File structure
 
@@ -100,7 +101,7 @@ Each has a recommendation and its reason. *The user's decision* marks those the 
 | `tests/kanban-boards-schema.test.ts`, `tests/kanban-boards.test.ts`, `tests/kanban-board-isolation.test.ts`, `tests/kanban-board-workspace.test.ts`, `tests/kanban-board-service.test.ts`, `tests/kanban-board-dispatch.test.ts`, `tests/kanban-board-chat-parse.test.ts`, `tests/kanban-board-chat.test.ts`, `tests/kanban-board-worker.test.ts` (create) | |
 | `tests/kanban-schema.test.ts`, `tests/kanban-prompt.test.ts`, `tests/kanban-tasks.test.ts`, `tests/kanban-chat.e2e.ts` (modify) | the version and tables; a `TaskRow` fixture's board; the `created` event's board; one end-to-end test |
 
-Running counts, unit then end to end: Task 1 1375 / 98, Task 2 1385 / 98, Task 3 1392 / 98, Task 4 1397 / 98, Task 5 1404 / 98, Task 6 1410 / 98, Task 7 1414 / 98, Task 8 1423 / 99, Task 9 1425 / 99, Task 10 1425 / 99.
+Running counts, unit then end to end: Task 1 1375 / 98, Task 2 1385 / 98, Task 3 1392 / 98, Task 4 1397 / 98, Task 5 1404 / 98, Task 6 1410 / 98, Task 7 1414 / 98, Task 8 1423 / 99, Task 9 1425 / 99, Task 10 1425 / 99, review follow-ups 1433 / 99.
 
 ---
 
@@ -3554,7 +3555,7 @@ git commit -m "Describe boards in the usage guide and the README: making one, mo
 
 ## Done when
 
-- `npx vitest run --project unit` gives `Tests  1425 passed (1425)`. `npx vitest run --project e2e` gives `Tests  99 passed (99)`. `npm run typecheck` reports no errors. All under Node 22, in the worktree.
+- `npx vitest run --project unit` gives `Tests  1433 passed (1433)` (1425 at Task 10, and 8 from the review follow-ups). `npx vitest run --project e2e` gives `Tests  99 passed (99)`. `npm run typecheck` reports no errors. All under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - Migration 006 takes a version 5 database with tasks to version 6, every task on `default`, nothing else of them changed (`tests/kanban-boards-schema.test.ts`).
 - Boards are created, set and archived, and chats moved onto them, only through `db/kanban.ts` (`tests/kanban-boards.test.ts`, `src/db/WRITERS.md`).
@@ -3562,6 +3563,24 @@ git commit -m "Describe boards in the usage guide and the README: making one, mo
 - A board's workspace places the tasks nothing else does (`tests/kanban-board-workspace.test.ts`).
 - The dispatcher takes boards in turn and holds each to its own `max_running` inside the gateway's (`tests/kanban-board-dispatch.test.ts`).
 - In chat, `/kanban boards` and `/kanban board …` work at their tiers, and a chat's `new`, `list` and `show` act on its board, end to end through the router (`tests/kanban-board-chat.test.ts`, `tests/kanban-chat.e2e.ts`).
+
+## Review follow-ups
+
+After Task 10 (`e449bdf`, 1425 / 99), a review of the plan's work found the items below. Each behaviour fix was written test first. Counts after them: 1433 / 99.
+
+| Item | Outcome | Commit |
+|---|---|---|
+| A skipped head task loses its board's turn: `fairOrder` fixed rounds before any skip, so a board whose head task waited on a busy workspace had its next task behind every other board's first | Fixed. `fair.ts` gives each board's queue (`boardQueues`), and a pass tries a board's queue in order until one agent claim succeeds or it runs out, then moves on. A person's claim does not end the turn; a board at its own limit gives its turn up for the pass; priority within a board and the rotation cursor are kept. The reproduction (gamma holding `web`, alpha's busy head task, beta's four) is a regression test; `fairOrder` and its tests stay. Spec §16.7 reworded | `8e1280e` |
+| The guide's tier table rendered two rows as a code block: the plan's `markdown` fence lines were pasted in | Fixed: both lines deleted. The rest of the guide's fences are balanced, and each holds a message or a command | this commit |
+| A task skipped because its board, or the gateway, is at its limit is never recorded as unassignable | Documented as a known limitation here, in the README and in spec §4.2: such a task is not tried, so one nobody can be given is reported stranded only once a slot frees. A test checks a task waiting only on a limit, the gateway's or its board's, is never reported stranded | `8e1280e` |
+| A workspace named `none` can never be a board's workspace, and boards could be named `none` or `all` | `none` and `all` are reserved in the name check (`RESERVED_BOARD_NAMES`). The guide, the README and spec §16.3 say `none` means "clear" | `c8f28f1` |
+| A zero-width character in a board name was refused, but the refusal looked like it named a valid board | A refusal that quotes a name writes each non-printing character as `\uXXXX` (`visible` in `src/names.ts`): the name grammar's refusal, an unknown board, and an unconfigured workspace | `c8f28f1` |
+| `setBoard(name, {})` stamped the board without changing anything | Refused `invalid` in the service; the board is left unstamped | `c8f28f1` |
+| The writer's board check for a reused idempotency key ran only for chat-created tasks | The writer works out the new task's board first (its run's task's, or the one asked for), then refuses `other_board` any existing task on another board, however it was created. Spec §16.5 | `c8f28f1` |
+| `createBoard` in the writer did no name check | A cheap one added: the name pattern and the reserved names | `c8f28f1` |
+| Guide, "What a board changes": the list's board line, and a follow-up's `parent:` from chat | Said: the line naming the board appears only off `default`; a follow-up with `parent:` must come from a chat on the parent's board, or it is refused | this commit |
+| Guide: a person's claim on a board whose workspace was removed from config fixes that workspace on the task | A note added under "A board's own limit and workspace", and in spec §16.6 | this commit |
+| Notices after a chat moves | A unit test: a task created on `default`, the chat moved to `web-app`, the task done, and the Done notice still reaches the chat | `c8f28f1` |
 
 ## Before using boards: a smoke test against the live gateway
 
