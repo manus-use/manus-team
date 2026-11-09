@@ -167,6 +167,11 @@ function mustGetBoard(d: Db, name: string): BoardRow {
   return board;
 }
 
+/** Why a parent cannot hold back a child on another board (spec §16). */
+function onOtherBoard(parentId: string, parentBoard: string, childBoard: string): string {
+  return `task ${parentId} is on board ${parentBoard}, not ${childBoard}: a task and its parents are on one board`;
+}
+
 /** A board that exists and is not archived: what a task is added to, and a chat moved onto. */
 function liveBoard(d: Db, name: string): Result<{ board: BoardRow }> {
   const board = getBoard(d, name);
@@ -298,20 +303,33 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
   return tx(db, (d) => {
     if (t.idempotencyKey !== undefined && t.idempotencyKey !== null) {
       const existing = getTaskByKey(d, t.idempotencyKey);
+      // A chat's key on another board is not a repeat: answering with that board's task would cross boards (spec §16.5).
+      // A run's key is namespaced by its task, so a repeat is always on that task's board.
+      const asked = t.board ?? DEFAULT_BOARD;
+      if (existing !== undefined && t.createdVia.kind === 'chat' && existing.board !== asked) {
+        return refuse(
+          'other_board',
+          `task ${existing.taskId} was created with this idempotency key on board ${existing.board}, not ${asked}`,
+        );
+      }
       if (existing !== undefined) return { ok: true, task: existing, existing: true };
     }
-    const board = t.board ?? DEFAULT_BOARD;
-    const live = liveBoard(d, board);
-    if (!live.ok) return refuse(live.code, `${live.message}; no task is added to it`);
-    const parents = [...new Set(t.parents ?? [])];
-    for (const parent of parents) {
-      if (getTask(d, parent) === undefined) return refuse('not_found', `no task ${parent} to be a parent`);
-    }
     let createdFromTask: string | null = null;
+    let board = t.board ?? DEFAULT_BOARD;
     if (t.createdVia.kind === 'run') {
       const run = getRun(d, t.createdVia.runId);
       if (run === undefined) return refuse('not_found', `no run ${t.createdVia.runId}`);
       createdFromTask = run.taskId;
+      // A run's follow-ups stay on its task's board, whatever it asked for (spec §16).
+      board = mustGet(d, run.taskId).board;
+    }
+    const live = liveBoard(d, board);
+    if (!live.ok) return refuse(live.code, `${live.message}; no task is added to it`);
+    const parents = [...new Set(t.parents ?? [])];
+    for (const parent of parents) {
+      const p = getTask(d, parent);
+      if (p === undefined) return refuse('not_found', `no task ${parent} to be a parent`);
+      if (p.board !== board) return refuse('other_board', onOtherBoard(parent, p.board, board));
     }
 
     const taskId = newTaskId();
@@ -822,9 +840,13 @@ function linkIn(
   now: number,
   blockingRun?: string,
 ): Result<{ added: boolean }> {
-  if (getTask(d, parentId) === undefined) return refuse('not_found', `no task ${parentId}`);
+  const parent = getTask(d, parentId);
+  if (parent === undefined) return refuse('not_found', `no task ${parentId}`);
   if (parentId === childId) return refuse('cycle', `task ${childId} cannot be its own parent`);
   if (linked(d, parentId, childId)) return { ok: true, added: false };
+  // Boards are separate queues: a task on one never waits for a task on another (spec §16).
+  const child = mustGet(d, childId);
+  if (parent.board !== child.board) return refuse('other_board', onOtherBoard(parentId, parent.board, child.board));
   const cycle = d
     .prepare<[string, string], { n: number }>(
       `WITH RECURSIVE up(id) AS (
