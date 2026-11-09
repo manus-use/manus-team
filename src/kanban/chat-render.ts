@@ -28,7 +28,10 @@ import { DEFAULT_BOARD, type Assignee, type FailedGate, type GateRow, type Kanba
  * any piece, before it is reshaped -- spaces collapsed, trimmed, cut -- since a
  * reshaped secret no longer matches. Then a CRLF or a lone CR becomes a newline,
  * which `stripControl` keeps: a body from the worker CLI, a summary, an output or
- * a comment can hold one, and quoting splits lines on newlines only.
+ * a comment can hold one, and quoting splits lines on newlines only. A secret
+ * split by a character that shows nothing (a zero-width or bidi character, a
+ * direction mark) is masked whole, since masking reads past them; elsewhere they
+ * are kept, as a joined emoji and right-to-left text need them.
  */
 function masked(text: string): string {
   return redactKnownSecrets(stripControl(text)).replace(/\r\n?/g, '\n');

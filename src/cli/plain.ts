@@ -3,7 +3,7 @@ import { counted, listed, runState } from '../kanban/chat-render.js';
 import type { DisplayStatus } from '../kanban/status.js';
 import type { Assignee, GateRow } from '../kanban/types.js';
 import { redactKnownSecrets } from '../secrets.js';
-import { stripControl } from '../text.js';
+import { INVISIBLE, stripControl } from '../text.js';
 import { table } from './args.js';
 
 /**
@@ -12,21 +12,19 @@ import { table } from './args.js';
  * Which tasks a list shows, in what order, and how a board's tasks are counted
  * are chat's own functions, so the two never disagree.
  *
- * Every piece is masked, and stripped of control characters and of the
- * characters that reorder text (bidi embeddings, overrides and isolates), first:
- * a task's text is untrusted, an escape sequence in a title would drive the
- * terminal, and an override would make a line read as something it is not.
- * Nothing is escaped, since a terminal renders no markdown.
+ * Every piece is stripped of control characters and of the characters that
+ * show nothing (`INVISIBLE`: the bidi controls, the zero-width characters and
+ * the direction marks), then masked: a task's text is untrusted, an escape
+ * sequence in a title would drive the terminal, an override would make a line
+ * read as something it is not, and a secret split by any of them would read
+ * whole on screen. Nothing is escaped, since a terminal renders no markdown.
  */
 
 const LOW_SURROGATE = /^[\uDC00-\uDFFF]/;
 
-/** The characters that reorder what follows them: U+202A to U+202E, and U+2066 to U+2069. */
-export const BIDI = /[\u202A-\u202E\u2066-\u2069]/g;
-
-/** Masked and stripped, with every line break a newline. */
+/** Stripped, then masked, with every line break a newline: CR, CRLF, U+2028 and U+2029. */
 function clean(text: string): string {
-  return redactKnownSecrets(stripControl(text)).replace(BIDI, '').replace(/\r\n?/g, '\n');
+  return redactKnownSecrets(stripControl(text).replace(INVISIBLE, '')).replace(/\r\n?|[\u2028\u2029]/g, '\n');
 }
 
 /** The first `max` UTF-16 units at most, with `marker` when anything was cut, on a character boundary. */

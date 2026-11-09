@@ -164,3 +164,17 @@ describe('the escapers mask known secrets before escaping', () => {
     expect(forDisplay('k sk_ctrl\u0007_abcdef')).toBe(`k ${MASK}`);
   });
 });
+
+describe('a secret split by a character that shows nothing', () => {
+  beforeEach(() => clearSecrets());
+
+  it('is masked by every escaper, and such characters elsewhere are kept', () => {
+    addSecrets(['sk-live-1234567890']);
+    for (const c of ['\u200B', '\u200D', '\uFEFF', '\u200E', '\u061C', '\u202E', '\u2066']) {
+      const text = `key sk-live-12${c}34567890 \u{1F468}\u200D\u{1F469}`;
+      expect(forDisplay(text)).toBe(`key ${MASK} \u{1F468}\u200D\u{1F469}`);
+      expect(forMarkdown(text)).toBe(`key ${MASK} \u{1F468}\u200D\u{1F469}`);
+      expect(forPlainText(text)).toBe(`key ${MASK} \u{1F468}\u200D\u{1F469}`);
+    }
+  });
+});

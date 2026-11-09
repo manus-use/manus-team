@@ -4,7 +4,7 @@ import { KanbanService } from '../src/kanban/service.js';
 import { addSecrets, clearSecrets } from '../src/secrets.js';
 import { ManualClock, testDb, type TestDb } from './helpers/db.js';
 import { DEFAULT_ROLES } from './helpers/dispatch.js';
-import { WORKSPACES } from './helpers/kanban.js';
+import { claimed, WORKSPACES } from './helpers/kanban.js';
 
 /** The operator's `mt kanban` output (spec §2.6): the board as chat shows it, in plain text, masked. */
 
@@ -37,6 +37,48 @@ function create(title: string, extra: { board?: string; body?: string } = {}): s
 describe('line', () => {
   it('drops the characters that reorder text, as it drops control characters', () => {
     expect(line('evil\u202Etxt.exe\u202C and \u2066isolated\u2069\u0007')).toBe('eviltxt.exe and isolated');
+  });
+});
+
+/** Each kind of character that shows nothing, which plain text drops before it masks. */
+const INVISIBLES: Array<[string, string]> = [
+  ['an embedding', '\u202A'],
+  ['an override', '\u202E'],
+  ['a pop', '\u202C'],
+  ['an isolate', '\u2066'],
+  ['a pop of an isolate', '\u2069'],
+  ['a zero-width space', '\u200B'],
+  ['a zero-width non-joiner', '\u200C'],
+  ['a zero-width joiner', '\u200D'],
+  ['a byte order mark', '\uFEFF'],
+  ['a left-to-right mark', '\u200E'],
+  ['a right-to-left mark', '\u200F'],
+  ['an Arabic letter mark', '\u061C'],
+];
+
+describe('the invisible characters', () => {
+  it.each(INVISIBLES)('masks a secret split by %s, in a line, a body and an output, and drops it', (_name, c) => {
+    // Registered after the task is written, so the writer has not masked it already.
+    const taskId = create('Deploy', { body: `key sk-live-12${c}34567890` });
+    const run = claimed(t.db, taskId);
+    addSecrets(['sk-live-1234567890']);
+    expect(line(`key sk-live-12${c}34567890 a${c}b`)).toBe('key •••• ab');
+    const shown = service.show(taskId);
+    if (!shown.ok) throw new Error('not shown');
+    const view = { ...shown.view, runs: [{ ...run, lastOutput: `out sk-live-1234${c}567890` }] };
+    const text = showText(view, []).join('\n');
+    expect(text).toContain('    key ••••');
+    expect(text).toContain('latest output:\n    out ••••');
+    expect(text).not.toContain('sk-live');
+    expect(text).not.toContain(c);
+  });
+
+  it('makes U+2028 and U+2029 line breaks', () => {
+    const taskId = create('Notes', { body: 'one\u2028two\u2029three' });
+    const shown = service.show(taskId);
+    if (!shown.ok) throw new Error('not shown');
+    expect(showText(shown.view, [])).toEqual(expect.arrayContaining(['    one', '    two', '    three']));
+    expect(line('one\u2028two')).toBe('one two');
   });
 });
 

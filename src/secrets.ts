@@ -12,14 +12,19 @@
  * the one site that forgets. So the projection is pure *given the secret set*, and
  * tests set the set explicitly.
  *
- * Exact matches only. A secret the agent found by itself, a known secret encoded
- * or reformatted, and anything shorter than MIN_SECRET_LENGTH are not caught.
+ * Exact matches only, but for the characters that show nothing (`INVISIBLE`:
+ * bidi controls, zero-width characters, direction marks). A secret split by one
+ * still reads whole on screen, so it is matched as if they were not there, and
+ * masked with them. They are not stripped: outside a secret, a joined emoji and
+ * right-to-left text need them. A secret the agent found by itself, a known
+ * secret encoded or reformatted otherwise, and anything shorter than
+ * MIN_SECRET_LENGTH are not caught.
  *
  * This is not `mask()` in channel/escape.ts. That one shows a secret's prefix in a
  * render that means to show the secret.
  */
 
-import { stripControl } from './text.js';
+import { INVISIBLE, isInvisible, stripControl } from './text.js';
 
 export const MASK = '••••';
 
@@ -70,8 +75,9 @@ function reorder(): void {
 }
 
 /**
- * The forms a value is known by: itself, and itself with control characters
- * stripped, because the escapers strip before they match. A form shorter than
+ * The forms a value is known by: itself, itself with control characters
+ * stripped, because the escapers strip before they match, and that without its
+ * invisible characters, which matching skips. A form shorter than
  * MIN_SECRET_LENGTH is not a secret. A value containing MASK's character is
  * ignored, so that withholding a fragment of it can never eat a MASK.
  *
@@ -85,6 +91,8 @@ function forms(value: string): string[] {
   if (value.length >= MIN_SECRET_LENGTH) out.push(value);
   const stripped = stripControl(value);
   if (stripped !== value && stripped.length >= MIN_SECRET_LENGTH) out.push(stripped);
+  const seen = stripped.replace(INVISIBLE, '');
+  if (seen !== stripped && seen.length >= MIN_SECRET_LENGTH) out.push(seen);
   return out;
 }
 
@@ -119,13 +127,25 @@ export function clearSecrets(): void {
 }
 
 /**
- * Every exact occurrence of a known secret, replaced with MASK.
- *
- * Occurrences are found for every secret first, overlapping ones included, and
- * spans that overlap or touch become one MASK. Masking one secret at a time would
- * leave the rest of an overlapping one in plain view.
+ * Text without its invisible characters, as it reads on screen, and where in
+ * `text` each of its UTF-16 units is; or undefined when it has none.
  */
-export function redactKnownSecrets(text: string): string {
+function onScreen(text: string): { text: string; at: number[] } | undefined {
+  let found = false;
+  for (let i = 0; i < text.length && !found; i += 1) found = isInvisible(text.charCodeAt(i));
+  if (!found) return undefined;
+  const at: number[] = [];
+  let out = '';
+  for (let i = 0; i < text.length; i += 1) {
+    if (isInvisible(text.charCodeAt(i))) continue;
+    at.push(i);
+    out += text[i];
+  }
+  return { text: out, at };
+}
+
+/** Every known secret's occurrences in `text`, a run of overlapping or touching ones of a secret as one span. */
+function occurrences(text: string): Array<[number, number]> {
   const spans: Array<[number, number]> = [];
   for (const secret of ordered) {
     // One secret's occurrences come in order, so an overlapping or touching one
@@ -140,13 +160,38 @@ export function redactKnownSecrets(text: string): string {
       }
     }
   }
+  return spans;
+}
+
+/** Whether `text` from `from` to `to` holds only invisible characters. */
+function onlyInvisible(text: string, from: number, to: number): boolean {
+  for (let i = from; i < to; i += 1) if (!isInvisible(text.charCodeAt(i))) return false;
+  return true;
+}
+
+/**
+ * Every occurrence of a known secret, replaced with MASK: as written, and as it
+ * reads on screen, without its invisible characters, which are masked with it.
+ *
+ * Occurrences are found for every secret first, overlapping ones included, and
+ * spans that overlap or touch, or are apart only by invisible characters, become
+ * one MASK. Masking one secret at a time would leave the rest of an overlapping
+ * one in plain view.
+ */
+export function redactKnownSecrets(text: string): string {
+  if (ordered.length === 0) return text;
+  const spans = occurrences(text);
+  const seen = onScreen(text);
+  if (seen !== undefined) {
+    for (const [s, e] of occurrences(seen.text)) spans.push([seen.at[s] as number, (seen.at[e - 1] as number) + 1]);
+  }
   if (spans.length === 0) return text;
   spans.sort((a, b) => a[0] - b[0]);
   let out = '';
   let written = 0;
   let [start, end] = spans[0] as [number, number];
   for (const [s, e] of spans) {
-    if (s <= end) {
+    if (s <= end || onlyInvisible(text, end, s)) {
       end = Math.max(end, e);
       continue;
     }
@@ -170,9 +215,19 @@ export function redactKnownSecrets(text: string): string {
  * Masked first, a secret inside a longer one would hide the longer one's start.
  * A complete secret is never cut part-way: when the cut falls inside one, it
  * moves back to that secret's start, so the kept text never ends in a fragment
- * that no longer matches.
+ * that no longer matches. A fragment split by an invisible character is
+ * withheld too, as redactKnownSecrets matches one.
  */
 export function withholdSecretPrefix(text: string): string {
+  const keep = prefixKept(text);
+  const seen = onScreen(text);
+  if (seen === undefined) return text.slice(0, keep);
+  const kept = prefixKept(seen.text);
+  return text.slice(0, Math.min(keep, kept >= seen.text.length ? text.length : (seen.at[kept] as number)));
+}
+
+/** How much of `text` withholdSecretPrefix keeps, as written. */
+function prefixKept(text: string): number {
   let cut = 0;
   for (const secret of ordered) {
     const floor = Math.max(cut, MIN_PREFIX_LENGTH - 1);
@@ -183,7 +238,7 @@ export function withholdSecretPrefix(text: string): string {
       }
     }
   }
-  if (cut === 0) return text;
+  if (cut === 0) return text.length;
   let keep = text.length - cut;
   // Each move is backwards, so this ends.
   for (let moved = true; moved; ) {
@@ -197,7 +252,7 @@ export function withholdSecretPrefix(text: string): string {
       }
     }
   }
-  return text.slice(0, keep);
+  return keep;
 }
 
 /**
@@ -208,9 +263,19 @@ export function withholdSecretPrefix(text: string): string {
  *
  * Apply this to raw text, before redactKnownSecrets, and mask what it returns. A
  * complete secret is never cut part-way: when the cut falls inside one, it moves
- * on to that secret's end.
+ * on to that secret's end. A fragment split by an invisible character is
+ * dropped too.
  */
 export function withholdSecretSuffix(text: string): string {
+  const drop = suffixDropped(text);
+  const seen = onScreen(text);
+  if (seen === undefined) return text.slice(drop);
+  const dropped = suffixDropped(seen.text);
+  return text.slice(Math.max(drop, dropped === 0 ? 0 : (seen.at[dropped - 1] as number) + 1));
+}
+
+/** How much of `text`'s start withholdSecretSuffix drops, as written. */
+function suffixDropped(text: string): number {
   let cut = 0;
   for (const secret of ordered) {
     const floor = Math.max(cut, MIN_PREFIX_LENGTH - 1);
@@ -221,7 +286,7 @@ export function withholdSecretSuffix(text: string): string {
       }
     }
   }
-  if (cut === 0) return text;
+  if (cut === 0) return 0;
   let drop = cut;
   // Each move is forwards, so this ends.
   for (let moved = true; moved; ) {
@@ -236,7 +301,7 @@ export function withholdSecretSuffix(text: string): string {
       }
     }
   }
-  return text.slice(drop);
+  return drop;
 }
 
 /**

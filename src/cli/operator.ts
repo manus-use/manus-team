@@ -10,7 +10,8 @@ import { parse, UsageError } from './args.js';
 import { operatorName, withBoard } from './gate.js';
 import { ask, why } from './kanban.js';
 import type { MtIo } from './mt.js';
-import { BIDI, boardsText, line, listText, showText, who } from './plain.js';
+import { BIDI } from '../text.js';
+import { boardsText, line, listText, showText, who } from './plain.js';
 
 /**
  * The operator's `mt kanban` (spec §2.6): chat's `/kanban` commands at a
