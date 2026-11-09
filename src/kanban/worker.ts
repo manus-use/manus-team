@@ -135,6 +135,20 @@ const SCHEMAS: Record<WorkerCommand, Readonly<Record<string, Field>>> = {
 
 const ENVELOPE = ['run', 'token', 'command', 'input'];
 
+/**
+ * The one request that needs no token (spec §7.3, §10): it asks for a
+ * dispatcher pass and does nothing else. An operator's `mt kanban` sends it after
+ * a change made beside the gateway, so the change is acted on at once rather
+ * than at the next sweep. It names nothing and changes nothing, and a pass is
+ * what the sweep does every minute anyway, so whoever can reach the socket
+ * gains nothing by it. A burst of nudges asks for one pass, on the next tick.
+ */
+export const NUDGE = { nudge: true } as const;
+
+function isNudge(raw: Record<string, unknown>): boolean {
+  return raw['nudge'] === true && Object.keys(raw).length === 1;
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
@@ -254,6 +268,8 @@ export class WorkerApi {
   readonly #service: KanbanService;
   readonly #changed: () => void;
   readonly #nameOf: ((principal: string) => string | undefined) | undefined;
+  /** A nudge's pass is waiting for the next tick: the nudges after it until then ask for nothing more. */
+  #nudged = false;
 
   constructor(deps: WorkerApiDeps) {
     this.#db = deps.db;
@@ -284,6 +300,16 @@ export class WorkerApi {
 
   async #handle(raw: unknown, opts: HandleOptions): Promise<WorkerResponse> {
     if (!isRecord(raw)) return refused('bad_request', 'a request is a JSON object');
+    if (isNudge(raw)) {
+      if (!this.#nudged) {
+        this.#nudged = true;
+        setImmediate(() => {
+          this.#nudged = false;
+          this.#changed();
+        });
+      }
+      return { ok: true };
+    }
     for (const key of Object.keys(raw)) {
       if (!ENVELOPE.includes(key)) return refused('bad_request', `a request has only ${ENVELOPE.join(', ')}`);
     }
