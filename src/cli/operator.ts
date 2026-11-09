@@ -4,13 +4,14 @@ import { boardSetting, isPerson, LIST_FILTERS, tooBig, type NewTaskCommand } fro
 import type { KanbanService } from '../kanban/service.js';
 import { maskAll, workerSocketPath } from '../kanban/socket.js';
 import { DEFAULT_BOARD, type BoardRow, type Contract, type Refusal } from '../kanban/types.js';
-import { NUDGE, WORKER_LIMITS } from '../kanban/worker.js';
+import { WORKER_LIMITS } from '../kanban/limits.js';
+import { NUDGE } from '../kanban/worker.js';
 import { visible } from '../names.js';
 import { parse, UsageError } from './args.js';
 import { operatorName, withBoard } from './gate.js';
-import { ask, why } from './kanban.js';
+import { ask } from './kanban.js';
 import type { MtIo } from './mt.js';
-import { BIDI } from '../text.js';
+import { BIDI, INVISIBLE } from '../text.js';
 import { boardsText, line, listText, showText, who } from './plain.js';
 
 /**
@@ -33,9 +34,11 @@ import { boardsText, line, listText, showText, who } from './plain.js';
  * is followed here by a request for one, over the gateway's socket: the one
  * request that needs no token, and does nothing else (`NUDGE`). A gateway that
  * does not answer, stopped, loses nothing: the change stands, and its next
- * sweep, or its next start, acts on it. A gateway whose config does not set
- * `kanban.enabled` is not asked, and the command says nothing will run the
- * change until the board is turned on.
+ * sweep, or its next start, acts on it. The command is never said to be worth
+ * trying again: it has been made, and a second `new` would make a second task.
+ * A gateway whose config does not set `kanban.enabled`, or sets it to false, is
+ * not asked, and the command says nothing will run the change until the board
+ * is turned on.
  */
 
 /** How long a nudge waits for the gateway's answer: a pass is quick, and the change is made already. */
@@ -60,11 +63,11 @@ function refused(r: Refusal | { code: string; message: string }): Outcome {
 const JSON_FLAG = { json: { type: 'boolean' } } as const;
 
 /**
- * Characters JSON leaves as they are that a terminal or a reader may act on: C1
- * controls, the line and paragraph separators, and the bidi controls. Escaped
+ * Characters JSON leaves as they are that a terminal or a reader may act on: DEL
+ * and the C1 controls, the line and paragraph separators, and the bidi controls. Escaped
  * as `\uXXXX`, which every JSON reader reads back as the same string.
  */
-const UNSAFE_IN_JSON = /[\u0080-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]/g;
+const UNSAFE_IN_JSON = /[\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]/g;
 
 /** One line of JSON, masked, with nothing in it a terminal acts on. */
 export function jsonLine(value: unknown): string {
@@ -83,6 +86,20 @@ function boardJson(b: BoardRow): Record<string, unknown> {
   return { name: b.name, max_running: b.maxRunning, workspace: b.workspace, archived: b.archivedAt !== null };
 }
 
+/** The socket refused, or dropped the connection: a gateway that is too busy, or one that stopped and left its socket. */
+const DEAD = ['ECONNREFUSED', 'ECONNRESET', 'EPIPE'];
+
+/**
+ * Why the nudge was not answered, in a few words. Never "try again", as the
+ * worker CLI's `why` says of a request it did not make: this change was made.
+ */
+function unanswered(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT') return 'ENOENT; is the gateway running?';
+  if (code !== undefined && DEAD.includes(code)) return `${code}; it may be busy, or stopped`;
+  return code ?? (err instanceof Error ? err.message : String(err));
+}
+
 /**
  * Ask the gateway at `home` for a dispatcher pass, at the socket it listens on:
  * `failed` says why not, in a few words, when it did not answer.
@@ -99,7 +116,7 @@ export async function nudgeGateway(home: string, timeoutMs = NUDGE_TIMEOUT_MS): 
     if ((answer as { ok?: unknown } | null)?.ok === true) return { socket };
     return { socket, failed: 'it did not take the nudge' };
   } catch (err) {
-    return { socket, failed: err instanceof SyntaxError ? 'it gave no answer' : why(err) };
+    return { socket, failed: err instanceof SyntaxError ? 'it gave no answer' : unanswered(err) };
   }
 }
 
@@ -115,12 +132,12 @@ async function act(
 ): Promise<number> {
   const no = (code: string, message: string): number => {
     if (json) io.out(jsonLine({ ok: false, code, message }));
-    else io.err(`mt: ${message.replace(BIDI, '')}`);
+    else io.err(`mt: ${message.replace(INVISIBLE, '')}`);
     return 1;
   };
   let outcome: Outcome | undefined;
   let home = '';
-  let enabled = true;
+  let enabled: boolean | undefined = true;
   const code = withBoard(
     io,
     what,
@@ -136,10 +153,11 @@ async function act(
   if (!outcome.ok) return no(outcome.code, outcome.message);
   const done: Done = outcome;
   let nudged: boolean | undefined;
-  if (done.nudge === true && !enabled) {
+  if (done.nudge === true && enabled !== true) {
     nudged = false;
+    const config = enabled === false ? 'sets kanban.enabled to false' : 'does not set kanban.enabled';
     io.err(
-      "mt: the board is off on this gateway (its config does not set kanban.enabled): the change is recorded, " +
+      `mt: the board is off on this gateway (its config ${config}): the change is recorded, ` +
         'and nothing runs it until the board is turned on and the gateway restarted',
     );
   } else if (done.nudge === true) {
@@ -147,8 +165,8 @@ async function act(
     nudged = r.failed === undefined;
     if (r.failed !== undefined) {
       io.err(
-        `mt: no gateway answered at ${r.socket} (${r.failed}); the change stands: a running gateway acts on it ` +
-          'at its next sweep, and a stopped one when it next starts',
+        `mt: no gateway answered at ${r.socket} (${r.failed}); the change stands, and running the command again ` +
+          'would make it twice: a running gateway acts on it at its next sweep, and a stopped one when it next starts',
       );
     }
   }
@@ -324,10 +342,15 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
     'body-file': text,
   });
   const json = values.json === true;
-  const title = positionals.join(' ').trim();
+  const words = positionals.join(' ');
+  // One line, as chat's title is: a line break, a control character or a bidi
+  // control is refused, not silently changed. Checked before trimming, so a
+  // trailing newline or a leading tab is refused too.
+  if (/[\p{Cc}\u2028\u2029]/u.test(words) || new RegExp(BIDI.source).test(words)) {
+    throw new UsageError('a title is one line, with no control characters and no bidi controls');
+  }
+  const title = words.trim();
   if (title === '') throw new UsageError('kanban new takes a title');
-  // One line, as chat's title is: a line break or a control character is refused, not silently changed.
-  if (/[\p{Cc}\u2028\u2029]/u.test(title)) throw new UsageError('a title is one line, with no control characters');
   for (const flag of ['board', 'assignee', 'reviewer', 'workspace', ...Object.keys(CONTRACT_FLAGS)] as const) {
     const v = values[flag as keyof typeof values];
     if (typeof v === 'string' && v.trim() === '') throw new UsageError(`--${flag} needs a value`);
@@ -460,8 +483,11 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
 /** `mt kanban assign <task> <role>`: an undecided run ends `superseded`, and the gateway's pass cancels its turn. */
 function assign(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
-  const [taskId, name, extra] = positionals;
-  if (taskId === undefined || name === undefined || extra !== undefined) throw new UsageError('kanban assign takes a task id and a role');
+  const [taskId, role, extra] = positionals;
+  const name = role?.trim();
+  if (taskId === undefined || name === undefined || name === '' || extra !== undefined) {
+    throw new UsageError('kanban assign takes a task id and a role');
+  }
   const board = boardFlag(values.board);
   return act(io, values.json === true, 'mt kanban assign', (service, by) => {
     const person = personRefused(name);
@@ -469,9 +495,9 @@ function assign(rest: readonly string[], io: MtIo): Promise<number> {
     const guard = offBoard(service, board, taskId);
     if (guard !== undefined) return guard;
     const now = service.show(taskId);
-    const current = now.ok ? now.view.task.assignee : null;
-    if (current !== null && current.name === name) {
-      return { ok: true, lines: [`${now.ok ? now.view.task.taskId : taskId} is already assigned to ${who(current)}`], json: { task_id: taskId, changed: false } };
+    if (now.ok && now.view.task.assignee !== null && now.view.task.assignee.name === name) {
+      const task = now.view.task;
+      return { ok: true, lines: [`${task.taskId} is already assigned to ${who(task.assignee)}`], json: { task_id: task.taskId, changed: false } };
     }
     const r = service.assign(taskId, name, by);
     if (!r.ok) return refused(r);

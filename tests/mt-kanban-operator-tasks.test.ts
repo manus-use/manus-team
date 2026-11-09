@@ -147,11 +147,11 @@ describe('mt kanban new', () => {
     expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 0 });
   });
 
-  it('refuses a title holding a line break or a control character, as a wrong command line', async () => {
-    for (const title of ['two\nlines', 'a\u0007bell', 'a\u2028separator']) {
-      const r = await mt(['new', title]);
+  it('refuses a title holding a line break, a control character or a bidi control, as a wrong command line', async () => {
+    for (const words of [['two\nlines'], ['a\u0007bell'], ['a\u2028separator'], ['line\n'], ['\tlead'], ['ok', 'trail\r'], ['evil\u202Etxt'], ['an', '\u2066isolate\u2069']]) {
+      const r = await mt(['new', ...words]);
       expect(r.code).toBe(2);
-      expect(r.err.split('\n')[0]).toBe('mt: a title is one line, with no control characters');
+      expect(r.err.split('\n')[0]).toBe('mt: a title is one line, with no control characters and no bidi controls');
     }
     expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 0 });
   });
@@ -230,6 +230,8 @@ describe('the task commands', () => {
     expect(getRun(gateway, run.runId)?.outcome).toBe('cancelled');
     expect((await mt(['unblock', taskId, 'try', 'again'])).out).toBe(`${taskId} is unblocked, back to open`);
     expect((await mt(['assign', taskId, 'default'])).out).toBe(`${taskId} is already assigned to role default`);
+    expect((await mt(['assign', taskId, ' default '])).out).toBe(`${taskId} is already assigned to role default`);
+    expect(JSON.parse((await mt(['assign', taskId, 'default', '--json'])).out)).toEqual({ ok: true, task_id: taskId, changed: false });
     expect((await mt(['comment', taskId, 'look', 'at', 'the', 'lexer'])).out).toBe(
       `comment added to ${taskId}: an agent working on it gets it when its current turn ends; otherwise the next run reads it`,
     );
@@ -296,6 +298,33 @@ describe("in a board run's shell", () => {
       expect(r.err).toMatch(/is an operator's command, not a board run's/);
     }
     expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 0 });
+  });
+
+  it('refuses before reading its command line or stdin: a wrong one, a body on stdin, a gate, in JSON with --json', async () => {
+    const said = (what: string) =>
+      `mt: ${what} is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or MT_KANBAN_TOKEN set. ` +
+      'Run it from your own shell';
+    let read = false;
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runMt(['kanban', 'new', 'x', '--body-file', '-'], {
+      env: { ...f.env, HOME: f.root, ...RUN },
+      out: (l) => out.push(l),
+      err: (l) => err.push(l),
+      stdinIsTTY: false,
+      stdin: async () => {
+        read = true;
+        return 'body';
+      },
+    });
+    expect({ code, out, err, read }).toEqual({ code: 1, out: [], err: [said('mt kanban new')], read: false });
+    expect(await mt(['new'], { env: RUN })).toEqual({ code: 1, out: '', err: said('mt kanban new') });
+    expect(await mt(['board', 'set', 'x', 'colour', 'blue'], { env: RUN })).toEqual({ code: 1, out: '', err: said('mt kanban board set') });
+    expect(await mt(['gate', 'add'], { env: RUN })).toEqual({ code: 1, out: '', err: said('mt kanban gate add') });
+    expect(await mt(['assign', '--nonsense'], { env: RUN })).toEqual({ code: 1, out: '', err: said('mt kanban assign') });
+    const json = await mt(['list', '--json'], { env: RUN });
+    expect(json.code).toBe(1);
+    expect(JSON.parse(json.out)).toMatchObject({ ok: false, code: 'operator_command' });
   });
 
   it("takes show, comment and link as the worker's, which never take the operator's arguments", async () => {

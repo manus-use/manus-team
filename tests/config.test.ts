@@ -659,10 +659,12 @@ describe('loadTeamSettings', () => {
       home: c.home,
       configPath: c.configPath,
       dbPath: c.dbPath,
-      kanbanEnabled: c.kanban.enabled,
       workspaces: c.workspaces,
       agent: c.agent,
     });
+    // kanban.enabled is unset: absent here, off there.
+    expect(s.kanbanEnabled).toBeUndefined();
+    expect(c.kanban.enabled).toBe(false);
   });
 });
 

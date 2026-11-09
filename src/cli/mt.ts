@@ -1,7 +1,8 @@
 import { ConfigError, type Env } from '../config.js';
 import { parse, refuse, UsageError } from './args.js';
+import { jsonLine } from './operator.js';
 import { LIST_FILTERS } from '../kanban/chat-parse.js';
-import { gateAdd, gateList, gateRemove, inBoardRun } from './gate.js';
+import { gateAdd, gateList, gateRemove, inBoardRun, runShellRefusal } from './gate.js';
 import { kanbanCommand } from './kanban.js';
 import { operatorCommand } from './operator.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
@@ -124,6 +125,28 @@ function isWorkers(command: string | undefined, io: MtIo): boolean {
   return inBoardRun(io.env);
 }
 
+/** The subcommands whose name a run's refusal gives: `mt kanban board set`, not just `mt kanban board`. */
+const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
+  board: ['list', 'create', 'set', 'archive', 'use'],
+  gate: ['add', 'list', 'remove'],
+};
+
+/**
+ * The operator's command refused in a board run's shell, before its command
+ * line is parsed or its stdin read: an agent gets the refusal, whatever it
+ * typed, and nothing waits on its input. In JSON when `--json` is among the
+ * words, as the command itself would answer.
+ */
+function refuseInRun(command: string | undefined, rest: readonly string[], io: MtIo): number {
+  const sub = rest[0];
+  const named = command !== undefined && sub !== undefined && SUBCOMMANDS[command]?.includes(sub) === true;
+  const what = ['mt kanban', ...(command === undefined ? [] : [command]), ...(named ? [sub] : [])].join(' ');
+  const message = runShellRefusal(what);
+  if (command !== 'gate' && rest.includes('--json')) io.out(jsonLine({ ok: false, code: 'operator_command', message }));
+  else refuse(io, message);
+  return 1;
+}
+
 /** Exit codes: 0 done, 1 refused or a check failed, 2 the command line was wrong. */
 export async function runMt(argv: readonly string[], io: MtIo): Promise<number> {
   const [group, command] = argv;
@@ -171,6 +194,7 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, io);
     }
     if (group === 'kanban' && isWorkers(command, io)) return await kanbanCommand(command, rest, io);
+    if (group === 'kanban' && inBoardRun(io.env)) return refuseInRun(command, rest, io);
     if (group === 'kanban' && command === 'gate') return gate(rest, io);
     if (group === 'kanban') return await operatorCommand(command, rest, io);
     if (group === 'workspace' && command === 'list') {

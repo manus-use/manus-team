@@ -52,6 +52,14 @@ export function inBoardRun(env: Env): boolean {
   return env['MT_KANBAN_RUN'] !== undefined || env['MT_KANBAN_TOKEN'] !== undefined;
 }
 
+/** What an operator's command, `what`, says in a board run's shell. */
+export function runShellRefusal(what: string): string {
+  return (
+    `${what} is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or MT_KANBAN_TOKEN set. ` +
+    'Run it from your own shell'
+  );
+}
+
 /** How an operator's command says it refused, and its exit code: on stderr, or as JSON for `--json`. */
 export type Refuse = (code: string, message: string) => number;
 
@@ -59,8 +67,8 @@ export interface BoardAccess {
   service: KanbanService;
   /** The gateway's home, where its socket is (spec §7.2). */
   home: string;
-  /** `kanban.enabled`: whether the gateway runs the board at all. */
-  kanbanEnabled: boolean;
+  /** `kanban.enabled` as the config sets it, undefined when it does not: the board runs only when it is true. */
+  kanbanEnabled: boolean | undefined;
   close(): void;
 }
 
@@ -75,11 +83,7 @@ export interface OpenOptions {
 export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): BoardAccess | number {
   const no = opts.refuse ?? ((_code: string, message: string) => refuse(io, message));
   if (inBoardRun(io.env)) {
-    return no(
-      'operator_command',
-      `${what} is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or MT_KANBAN_TOKEN set. ` +
-        'Run it from your own shell',
-    );
+    return no('operator_command', runShellRefusal(what));
   }
   const unset: string[] = [];
   const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: unset });
@@ -116,7 +120,7 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     workspaces: new Set(team.workspaces.keys()),
     supervisedRoles: true,
   });
-  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled === true, close: () => db.close() };
+  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, close: () => db.close() };
 }
 
 /** A write the gateway held the lock through, every retry: not this command's fault. */

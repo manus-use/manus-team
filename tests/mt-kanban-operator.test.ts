@@ -1,6 +1,8 @@
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { dirname } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { jsonLine } from '../src/cli/operator.js';
 import { boardsOf, getBoard } from '../src/db/kanban-read.js';
@@ -164,8 +166,9 @@ describe('the nudge after a change', () => {
     expect(r.code).toBe(0);
     expect(r.out).toBe('board web-app runs at most 2 agents at once now');
     expect(r.err).toBe(
-      `mt: no gateway answered at ${workerSocketPath(f.home)} (ENOENT; is the gateway running?); the change stands: ` +
-        'a running gateway acts on it at its next sweep, and a stopped one when it next starts',
+      `mt: no gateway answered at ${workerSocketPath(f.home)} (ENOENT; is the gateway running?); the change stands, ` +
+        'and running the command again would make it twice: a running gateway acts on it at its next sweep, ' +
+        'and a stopped one when it next starts',
     );
     expect(getBoard(gateway, 'web-app')?.maxRunning).toBe(2);
     const quiet = await mt(['board', 'set', 'web-app', 'max_running', '1', '--json']);
@@ -173,7 +176,43 @@ describe('the nudge after a change', () => {
   });
 });
 
+describe('a socket nothing listens on', () => {
+  it('gives the reason, says the change stands, and never says to try again', async () => {
+    const socket = workerSocketPath(f.home);
+    mkdirSync(dirname(socket), { recursive: true });
+    const dead = createServer();
+    await new Promise<void>((resolve) => dead.listen(`${socket}.dead`, resolve));
+    renameSync(`${socket}.dead`, socket);
+    await new Promise<void>((resolve) => dead.close(() => resolve()));
+    await mt(['board', 'create', 'web-app']);
+    const r = await mt(['board', 'set', 'web-app', 'max_running', '2']);
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      `mt: no gateway answered at ${socket} (ECONNREFUSED; it may be busy, or stopped); the change stands, ` +
+        'and running the command again would make it twice: a running gateway acts on it at its next sweep, ' +
+        'and a stopped one when it next starts',
+    );
+    expect(r.err).not.toContain('try again');
+  });
+});
+
 describe('a gateway whose board is off', () => {
+  it('says so when the config sets kanban.enabled to false, and asks no gateway', async () => {
+    writeFileSync(
+      f.configPath,
+      `workspace: ${f.workspace}\nkanban:\n  enabled: false\nagent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n`,
+    );
+    await listening();
+    await mt(['board', 'create', 'web-app']);
+    const r = await mt(['board', 'set', 'web-app', 'max_running', '2']);
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      'mt: the board is off on this gateway (its config sets kanban.enabled to false): the change is recorded, ' +
+        'and nothing runs it until the board is turned on and the gateway restarted',
+    );
+    expect(requests).toEqual([]);
+  });
+
   it('says the change is recorded and nothing runs it, and asks no gateway', async () => {
     writeFileSync(f.configPath, `workspace: ${f.workspace}\nagent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n`);
     await listening();
@@ -191,9 +230,9 @@ describe('a gateway whose board is off', () => {
 
 describe('jsonLine', () => {
   it('escapes what a terminal may act on that JSON leaves alone, and reads back the same', () => {
-    const value = { text: 'a\u0085b\u2028c\u2029d\u202Ee\u2066f\u0007g' };
+    const value = { text: 'a\u0085b\u2028c\u2029d\u202Ee\u2066f\u0007g\u007Fh' };
     const out = jsonLine(value);
-    expect(out).toBe('{"text":"a\\u0085b\\u2028c\\u2029d\\u202ee\\u2066f\\u0007g"}');
+    expect(out).toBe('{"text":"a\\u0085b\\u2028c\\u2029d\\u202ee\\u2066f\\u0007g\\u007fh"}');
     expect(JSON.parse(out)).toEqual(value);
   });
 });
