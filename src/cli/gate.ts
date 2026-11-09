@@ -6,7 +6,8 @@ import { KanbanService } from '../kanban/service.js';
 import type { GateRow } from '../kanban/types.js';
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { loadTeam, teamSecrets } from '../team.js';
-import { refuse, table, type MtIo } from './mt.js';
+import { refuse, table } from './args.js';
+import type { MtIo } from './mt.js';
 
 /**
  * `mt kanban gate add|list|remove` (spec §2.6, §7.7): an operator defining a

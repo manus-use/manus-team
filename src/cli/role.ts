@@ -27,7 +27,8 @@ import { isReservedRoleName, nameProblem } from '../names.js';
 import { nativeFor } from '../render/native.js';
 import { discoverRoles, gatewayOwnsVariable, type Role } from '../roles.js';
 import { loadTeam } from '../team.js';
-import { refuse, table, type MtIo } from './mt.js';
+import { refuse, table } from './args.js';
+import type { MtIo } from './mt.js';
 import {
   addedMessage,
   addToConfig,

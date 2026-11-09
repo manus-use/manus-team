@@ -1,5 +1,5 @@
-import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { ConfigError, type Env } from '../config.js';
+import { parse, refuse, UsageError } from './args.js';
 import { gateAdd, gateList, gateRemove } from './gate.js';
 import { kanbanCommand } from './kanban.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
@@ -52,32 +52,8 @@ const USAGE = [
   '  mt kanban gate remove <task_id> <gate_id>',
 ].join('\n');
 
-class UsageError extends Error {}
-
-/** Strict: an unknown option is a usage error, not something to guess at. */
-function parse<T extends NonNullable<ParseArgsConfig['options']>>(args: readonly string[], options: T) {
-  try {
-    return parseArgs({ args: [...args], options, allowPositionals: true, strict: true });
-  } catch (err) {
-    throw new UsageError(err instanceof Error ? err.message : String(err));
-  }
-}
-
 function expectNothing(positionals: readonly string[], what: string): void {
   if (positionals.length > 0) throw new UsageError(`${what} takes no arguments`);
-}
-
-/** Prints a refusal and returns its exit code. */
-export function refuse(io: MtIo, message: string): number {
-  io.err(`mt: ${message}`);
-  return 1;
-}
-
-/** Rows as aligned columns, for the list commands. */
-export function table(rows: readonly (readonly string[])[]): string[] {
-  const widths: number[] = [];
-  for (const row of rows) row.forEach((cell, i) => (widths[i] = Math.max(widths[i] ?? 0, cell.length)));
-  return rows.map((row) => row.map((cell, i) => cell.padEnd(widths[i] ?? 0)).join('  ').trimEnd());
 }
 
 /** `mt kanban gate …`: the operator's gate commands. A command's words are joined with spaces, as ssh joins them. */
