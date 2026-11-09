@@ -382,7 +382,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
   return {
     home,
     configPath: text === undefined ? undefined : path,
-    dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'gateway.db'),
+    dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'team.db'),
     workspaces,
     agent,
   };

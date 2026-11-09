@@ -33,7 +33,7 @@ beforeEach(() => {
   mkdirSync(workspace);
   startupEnv = {
     MT_HOME: home,
-    MT_DB: join(home, 'gateway.db'),
+    MT_DB: join(home, 'team.db'),
     MT_WORKSPACE: workspace,
     MT_OWNER_OPEN_ID: 'ou_owner',
     LARK_APP_ID: 'cli_app',

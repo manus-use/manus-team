@@ -80,7 +80,7 @@ describe('mt workspace add', () => {
 
   it('refuses a name the database recorded for a different directory', async () => {
     fx = mtFixture();
-    const db = openDb(join(fx.home, 'gateway.db'));
+    const db = openDb(join(fx.home, 'team.db'));
     migrate(db, SCHEMA_DIR);
     registerWorkspaces(db, new Map([['docs', '/elsewhere']]), 0);
     db.close();
@@ -238,7 +238,7 @@ describe('mt workspace add --clone', () => {
 describe('mt workspace list', () => {
   it('lists each workspace and whether the gateway has registered it', async () => {
     fx = mtFixture();
-    const db = openDb(join(fx.home, 'gateway.db'));
+    const db = openDb(join(fx.home, 'team.db'));
     migrate(db, SCHEMA_DIR);
     registerWorkspaces(db, new Map([['default', fx.workspace], ['old', '/srv/old']]), 0);
     db.close();

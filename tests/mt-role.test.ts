@@ -339,7 +339,7 @@ describe('mt role create --own-workspace', () => {
 
   it('refuses a name the database recorded for another directory, and leaves nothing behind', async () => {
     fx = mtFixture();
-    const db = openDb(join(fx.home, 'gateway.db'));
+    const db = openDb(join(fx.home, 'team.db'));
     migrate(db, SCHEMA_DIR);
     registerWorkspaces(db, new Map([['researcher', '/elsewhere']]), 0);
     db.close();
@@ -355,7 +355,7 @@ describe('mt role create --own-workspace', () => {
   it.skipIf(process.getuid?.() === 0)('refuses a recorded name before writing anything', async () => {
     fx = mtFixture();
     // Outside the home, so the database can still be read once the home is read-only.
-    const dbPath = join(fx.root, 'gateway.db');
+    const dbPath = join(fx.root, 'team.db');
     const db = openDb(dbPath);
     migrate(db, SCHEMA_DIR);
     registerWorkspaces(db, new Map([['researcher', '/elsewhere']]), 0);
@@ -588,7 +588,7 @@ describe('mt role check', () => {
 
   it('refuses a workspace the database recorded at another directory', async () => {
     fx = mtFixture();
-    const db = openDb(join(fx.home, 'gateway.db'));
+    const db = openDb(join(fx.home, 'team.db'));
     migrate(db, SCHEMA_DIR);
     registerWorkspaces(db, new Map([['default', '/elsewhere']]), 0);
     db.close();

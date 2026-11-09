@@ -18,7 +18,7 @@ beforeEach(() => {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'mt-ws-')));
   home = join(root, 'home');
   mkdirSync(home);
-  db = join(home, 'gateway.db');
+  db = join(home, 'team.db');
   writeFileSync(db, '');
 });
 
@@ -84,13 +84,13 @@ describe('resolveWorkspaces', () => {
     const real = dir('real');
     const link = join(root, 'link');
     symlinkSync(real, link);
-    const r = resolveWorkspaces({ default: link }, join(link, 'not-yet-home'), join(link, 'not-yet-home', 'gateway.db'));
+    const r = resolveWorkspaces({ default: link }, join(link, 'not-yet-home'), join(link, 'not-yet-home', 'team.db'));
     expect('error' in r && r.error).toMatch(/contains the gateway's home/);
   });
 
   it('refuses a workspace that contains the database, wherever it is', () => {
     const elsewhere = dir('data');
-    const otherDb = join(elsewhere, 'gateway.db');
+    const otherDb = join(elsewhere, 'team.db');
     writeFileSync(otherDb, '');
     const r = resolveWorkspaces({ default: elsewhere }, home, otherDb);
     expect('error' in r && r.error).toMatch(/contains the gateway's database/);

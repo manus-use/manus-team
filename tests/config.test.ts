@@ -175,7 +175,7 @@ describe('loadConfig: required values', () => {
 
   it('derives the paths that are not set from MT_HOME', () => {
     const cfg = load();
-    expect(cfg.dbPath).toBe(join(HOME, 'gateway.db'));
+    expect(cfg.dbPath).toBe(join(HOME, 'team.db'));
     expect(cfg.downloadDir).toBe(join(HOME, 'downloads'));
   });
 
@@ -521,7 +521,7 @@ describe('loadConfig: against a real file', () => {
     const cfg = loadConfig({ MT_HOME: dir, LARK_APP_SECRET: 'app-secret' });
     expect(cfg.configPath).toBe(join(dir, 'config.yaml'));
     expect(cfg.workspaces['default']).toBe('/srv/repo');
-    expect(cfg.dbPath).toBe(join(dir, 'gateway.db'));
+    expect(cfg.dbPath).toBe(join(dir, 'team.db'));
   });
 
   it('loads the example file the README tells people to copy', () => {
@@ -638,7 +638,7 @@ describe('loadTeamSettings', () => {
     expect(s).toMatchObject({
       home: '/srv/mt',
       configPath: undefined,
-      dbPath: '/srv/mt/gateway.db',
+      dbPath: '/srv/mt/team.db',
       workspaces: { default: '/srv/repo' },
     });
     expect(s.agent?.command).toBe('claude-agent-acp');

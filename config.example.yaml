@@ -26,7 +26,7 @@ workspace: /srv/repo
 maxLiveSessions: 8
 
 # SQLite file and the inbound attachment directory. Both default under $MT_HOME.
-# db: /var/lib/manus-team/gateway.db
+# db: /var/lib/manus-team/team.db
 # downloads: /var/lib/manus-team/downloads
 
 lark:
