@@ -582,7 +582,7 @@ export class KanbanService {
     if (done.phase !== 'done') {
       return board.refuse('illegal_transition', `task ${taskId} is ${done.phase}; only a done task gets follow-ups`);
     }
-    return this.create({ board: done.board, ...req, parents: [taskId, ...(req.parents ?? [])] });
+    return this.create({ ...req, board: done.board, parents: [taskId, ...(req.parents ?? [])] });
   }
 
   link(parentId: string, childId: string, by: string): Result<{ added: boolean }> {

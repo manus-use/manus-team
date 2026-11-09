@@ -26,7 +26,9 @@ export function boardQueues<T extends { board: string }>(tasks: readonly T[], af
 
 /**
  * The order a pass tries the tasks in when every claim succeeds: the first task
- * of each board's queue, then the second of each, and so on.
+ * of each board's queue, then the second of each, and so on. A description of
+ * the rotation, for tests: the dispatcher works from `boardQueues` itself, so a
+ * board whose head task is skipped still gets its turn with its next one.
  */
 export function fairOrder<T extends { board: string }>(tasks: readonly T[], after?: string): T[] {
   const queues = boardQueues(tasks, after);
