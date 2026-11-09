@@ -148,7 +148,7 @@ itself, for instance in a file it reads, is not known to the gateway and is not 
 | `kanban.sweep_interval_s`, `kanban.stranded_after_s` | — | How often the dispatcher checks runtimes, cooldowns and stranded tasks (default 60 s), and how long a task nobody can take waits before it is reported stranded (default 30 min). At most 3600 s and 30 days. |
 | `kanban.nudge_limit` | — | Reminders sent into a run whose turn ended without a report, before the run ends as a protocol violation. Default 2; 0 sends none. At most 10. |
 | `kanban.block_recurrence_limit` | — | Blocks of the same kind in a row, unblocked in between, at which a blocked notice stops inviting another unblock and suggests rewriting the task. Default 2, at most 100. |
-| `db`, `downloads` | `MT_DB`, `MT_DOWNLOAD_DIR` | Derived from `MT_HOME` unless set. |
+| `db`, `downloads` | `MT_DB`, `MT_DOWNLOAD_DIR` | `$MT_HOME/team.db` and `$MT_HOME/downloads` unless set. |
 | — | `MT_HOME` | State directory, and where the config file is looked for. Default `~/.manus-team`. |
 
 Three rules make a mistake fail loudly instead of silently:
@@ -255,8 +255,8 @@ including `MT_AGENT_ENV_*`: any of them still counts as a second definition of t
 
 ### The mt command
 
-`mt` creates and checks roles and workspaces, and is how a board run's agent reports. In a
-checkout, run it as `npm run -s mt -- …`.
+`mt` creates and checks roles and workspaces, drives the board from a terminal, and is how a
+board run's agent reports. In a checkout, run it as `npm run -s mt -- …`.
 
 ```
 mt role create <name> [--clone-from <role>] [--description "..."] [--own-workspace]
@@ -265,18 +265,36 @@ mt role check [<name>]
 mt workspace add <name> <absolute-path>
 mt workspace add <name> --clone <git-url>
 mt workspace list
-mt kanban <show|complete|review|changes|block|comment|create|link> < input.json
+mt kanban board list [all]
+mt kanban board create <name>
+mt kanban board set <name> max_running <number|none>
+mt kanban board set <name> workspace <workspace|none>
+mt kanban board archive <name>
+mt kanban new <title> [--board <name>] [--assignee <role>] [--reviewer <role>] [--workspace <name>]
+    [--parent <task_id>]... [--outcome "..."] [--verify "..."] [--constraints "..."]
+    [--boundaries "..."] [--stop-when "..."] [--body "..." | --body-file <path|->]
+mt kanban list [todo|ready|running|review|reviewing|blocked|done|archived|all] [--board <name>]
+mt kanban show <task_id> [--board <name>]
+mt kanban assign <task_id> <role> [--board <name>]
+mt kanban link <parent_id> <child_id> [--board <name>]
+mt kanban unblock <task_id> [comment...] [--board <name>]
+mt kanban stop <task_id> [--board <name>]
+mt kanban archive <task_id> [--board <name>]
+mt kanban comment <task_id> <text...> [--board <name>]
 mt kanban gate add <task_id> [--timeout <s>] -- <command...>
 mt kanban gate list <task_id>
 mt kanban gate remove <task_id> <gate_id>
+
+# only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:
+mt kanban <show|complete|review|changes|block|comment|create|link> < input.json
 ```
 
-The role, workspace and gate commands find the home, config file and database the way the
-gateway does (`MT_HOME`, `MT_CONFIG`, `MT_DB`), from the shell they run in, and need no Lark
-settings. The role and workspace commands only write files and never contact the gateway;
-changes take effect at the next start. The gate commands are the one exception: they write the
-board's database, beside a running gateway, through the board's own service, and take effect
-at once.
+The role, workspace and operator's board commands find the home, config file and database the
+way the gateway does (`MT_HOME`, `MT_CONFIG`, `MT_DB`; the database is `$MT_HOME/team.db` unless
+set), from the shell they run in, and need no Lark settings. The role and workspace commands
+only write files and never contact the gateway; changes take effect at the next start. The
+operator's `mt kanban` commands are the one exception: they write the board's database, beside
+a running gateway, through the board's own service, and take effect at once.
 
 - `role create` writes `config.yaml` (from the role `default`, or `--clone-from`), a starter
   `role.md`, `skills/`, an empty `0600` `.env` and a `.gitignore`. A `.env` is never copied.
@@ -290,8 +308,34 @@ at once.
   role's runs are rendered as a native agent package, and why not.
 - `workspace add` edits `workspaces:` in the config file, keeping its comments, and refuses
   anything the next start would refuse. `--clone` clones into `$MT_HOME/workspaces/<name>`.
-- `kanban` is for the agent of a board run, not for a person: it works only with the run's
-  `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN` and `MT_KANBAN_SOCKET`, which the gateway gives each run.
+- The operator's `kanban` commands are chat's `/kanban` commands at a terminal, with the same
+  meaning, for whoever runs the gateway: `board list`, `create`, `set` and `archive`, and `new`,
+  `list`, `show`, `assign`, `link`, `unblock`, `stop`, `archive` and `comment`. There is no
+  `board use`, since a terminal is no chat: `new` and `list` take `--board <name>`, `default`
+  unless given. The commands that name a task work on a task on any board, by id; given
+  `--board <name>`, they refuse (`other_board`) a task on another board, and `link` refuses
+  unless both tasks are on it. A `--board` naming no board is refused. They record who acted as
+  `operator:<login>`, the login of the account the command runs as: run under `sudo -u`, that
+  is the service account, not you. `new` takes `/kanban new`'s lines as flags; its title is the
+  words that are not flags, on one line, and its body `--body`, or `--body-file` with a regular
+  file, or `-` for stdin.
+  `assign`, `--assignee` and `--reviewer` take a role: a person is given work from chat, by
+  @-mention, where the gateway can check their tier. A task created here is followed by no
+  chat, so nobody is told when it is done or blocks: `mt kanban show` and `list` tell you. Each
+  prints plain text, or with `--json` one line of JSON, `{"ok": true, ...}` or
+  `{"ok": false, "code": "...", "message": "..."}`; each exits 0 when done, 1 when refused, and
+  2 for a wrong command line, said on stderr. After `new`, `assign`, `unblock`, `stop`,
+  `archive` and `board set`, as after their chat forms, the gateway is asked over its socket to
+  look for work at once, which also cancels the turn of an agent run the change ended; if no
+  gateway answers, the change stands, and the gateway acts on it at its next sweep, or when it
+  next starts. If the config does not set `kanban.enabled`, they say the board is off: the
+  change is recorded, and nothing runs it until the board is turned on. They refuse to run in a
+  board run's shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set.
+- `kanban` in a board run's shell is for the run's agent, not for a person: it works only with
+  the run's `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN` and `MT_KANBAN_SOCKET`, which the gateway gives
+  each run. There, `show`, `comment` and `link` are the agent's, which take no arguments, and
+  the operator's commands are refused; elsewhere, `complete`, `review`, `changes`, `block` and
+  `create` say they work only inside a run.
   It reads its input as JSON on stdin and prints one line of JSON, `{"ok": true, ...}` or
   `{"ok": false, "code": "...", "message": "..."}`. It exits 0 when the command was done, 1 when
   it was refused, and 2 for a wrong command line. `link` takes only the tasks the run's own
@@ -408,7 +452,7 @@ refused.
 | `/kanban review <task> [summary]`, and a line `reviewer: <role or @person>` unless the task names one | the task's assignee |
 | `/kanban approve <task> [comment]` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
 | `/kanban changes <task> <reason>` | the task's reviewer, a person, or an operator; an operator's answer ends a reviewer role's open run |
-| `/kanban boards [all]` | talk: each board, its tasks, its own limit and workspace, and which one this chat is on |
+| `/kanban board list [all]` | talk: each board, its tasks, its own limit and workspace, and which one this chat is on |
 | `/kanban board create <name>` | operate: a new board, named as roles and workspaces are, but never `none` or `all` |
 | `/kanban board use <name>` | operate: this chat, all its threads, is on that board from now on |
 | `/kanban board set <name> max_running <number\|none>`, or `workspace <workspace\|none>` | operate: the board's own limit, inside `kanban.max_running`, or its tasks' default workspace; `none` clears either |
@@ -441,7 +485,9 @@ and is where every chat starts; `/kanban board use` moves a chat, and `/kanban n
 `/kanban list` act on the chat's board. `/kanban show` and the commands that name a task work
 on any board, by id. A task's follow-ups, its parents and its links stay on its board, and its
 notices go to the chat it was created in, as before. One agent at a time per workspace still
-holds across boards. See section 10 of [docs/kanban-guide.md](docs/kanban-guide.md).
+holds across boards. See section 10 of [docs/kanban-guide.md](docs/kanban-guide.md). From a
+terminal, `mt kanban board …` and `mt kanban new|list --board <name>` do the same (see "The mt
+command" above).
 
 **People.** Name a person with an @-mention — type @ and pick them, so Lark sends who they
 are — as `assignee:` or `reviewer:`, or in `/kanban assign`. Being named lets a person report on
@@ -497,6 +543,12 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
 - An agent task nobody can be given is not seen as stranded while `kanban.max_running`, or its
   board's own `max_running`, is reached: the limit is checked first, so it is not tried. It is
   reported once a slot frees and a pass tries it.
+- A task created with `mt kanban new` is followed by no chat: nobody hears its notices, and a
+  supervised role's approval requests on it reach nobody, as for any task no chat follows.
+- `mt kanban` at a terminal cannot give a person work: assign people from chat.
+- `mt kanban` refuses to run in a board run's shell, but that is not a security boundary: an
+  agent runs as your user, could unset `MT_KANBAN_RUN` and `MT_KANBAN_TOKEN`, and could write
+  the database itself. The same holds for `mt kanban gate`.
 - A person's name, in a notice or a card, is the one Lark last gave with their ids, and can be
   out of date.
 
