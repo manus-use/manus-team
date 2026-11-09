@@ -133,8 +133,13 @@ describe("loadTeam: a role's max_running", () => {
     expect(() => teamWith({ max_running: 3 })).toThrow(
       `${join(home, 'roles', 'implementer', 'config.yaml')}: max_running (4) is above the gateway's kanban.max_running (3)`,
     );
-    // kanban.max_running's default is maxLiveSessions.
-    expect(() => teamFor(env({ MT_MAX_LIVE_SESSIONS: '3' }))).toThrow(/max_running \(4\) is above the gateway's kanban\.max_running \(3\)/);
+    // kanban.max_running's default is the session limit, and the refusal says where it came from.
+    expect(() => teamFor(env({ MT_MAX_LIVE_SESSIONS: '3' }))).toThrow(
+      /max_running \(4\) is above the gateway's kanban\.max_running \(3, from MT_MAX_LIVE_SESSIONS\)/,
+    );
+    expect(() => loadTeam(loadConfig(env(), () => 'maxLiveSessions: 2\n'), env())).toThrow(
+      /max_running \(4\) is above the gateway's kanban\.max_running \(2, from maxLiveSessions\)/,
+    );
     expect(teamWith({ max_running: 4 }).roles.get('implementer')?.maxRunning).toBe(4);
   });
 

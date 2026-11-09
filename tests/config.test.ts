@@ -661,7 +661,7 @@ describe('loadTeamSettings', () => {
       dbPath: c.dbPath,
       workspaces: c.workspaces,
       agent: c.agent,
-      kanban: { maxRunning: c.kanban.maxRunning },
+      kanban: { maxRunning: c.kanban.maxRunning, maxRunningFrom: 'maxLiveSessions' },
     });
     // kanban.enabled is unset: absent here, off there.
     expect(s.kanbanEnabled).toBeUndefined();
@@ -674,6 +674,7 @@ describe('loadConfig: the kanban section', () => {
     expect(load().kanban).toEqual({
       enabled: false,
       maxRunning: 8,
+      maxRunningFrom: 'maxLiveSessions',
       failureLimit: 2,
       transientLimit: 10,
       transientCooldownS: 300,
@@ -760,14 +761,24 @@ describe('loadConfig: the kanban section', () => {
     expect(() => load({}, yamlFile({ kanban: { max_running: 3, max_running_per_role: 4 } }))).toThrow(
       `${DEFAULT_PATH}: kanban.max_running_per_role (4) is above kanban.max_running (3)`,
     );
-    // max_running's own default, maxLiveSessions, bounds it too.
+    // max_running's own default, the session limit, bounds it too, and is named.
     expect(() => load({}, yamlFile({ maxLiveSessions: 2, kanban: { max_running_per_role: 3 } }))).toThrow(
-      `${DEFAULT_PATH}: kanban.max_running_per_role (3) is above kanban.max_running (2)`,
+      `${DEFAULT_PATH}: kanban.max_running_per_role (3) is above kanban.max_running (2, from maxLiveSessions)`,
+    );
+    expect(() => load({ MT_MAX_LIVE_SESSIONS: '2' }, yamlFile({ kanban: { max_running_per_role: 3 } }))).toThrow(
+      `${DEFAULT_PATH}: kanban.max_running_per_role (3) is above kanban.max_running (2, from MT_MAX_LIVE_SESSIONS)`,
+    );
+    expect(() => load({}, yamlFile({ maxLiveSessions: undefined, kanban: { max_running_per_role: 9 } }))).toThrow(
+      `${DEFAULT_PATH}: kanban.max_running_per_role (9) is above kanban.max_running (8, from maxLiveSessions)`,
     );
     expect(() => loadTeamSettings({ MT_HOME: HOME }, () => yamlFile({ kanban: { max_running: 3, max_running_per_role: 4 } }))).toThrow(
       'kanban.max_running_per_role (4) is above kanban.max_running (3)',
     );
     expect(load({}, yamlFile({ kanban: { max_running: 3, max_running_per_role: 3 } })).kanban.maxRunningPerRole).toBe(3);
+    // Set in the file, it is named alone.
+    expect(() => load({ MT_MAX_LIVE_SESSIONS: '5' }, yamlFile({ kanban: { max_running: 3, max_running_per_role: 4 } }))).toThrow(
+      /is above kanban\.max_running \(3\); /,
+    );
   });
 
   it('names MT_MAX_LIVE_SESSIONS when that is where the session limit came from', () => {

@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { type AgentConfig, ConfigError, type Env, type LoadOptions, type TeamSettings } from './config.js';
+import { type AgentConfig, ConfigError, type Env, type LoadOptions, type TeamSettings, maxRunningText } from './config.js';
 import { discoverRoles, loadRoleDir, secretValuesOf, type Role } from './roles.js';
 import { resolveWorkspaces } from './workspaces.js';
 
@@ -43,8 +43,8 @@ export function loadTeam(config: TeamSettings, env: Env, opts: LoadOptions = {})
       // Refused, as a board's own above the gateway's is (spec §16.6): a limit
       // that could never bind is a mistake to fix, not one to run with.
       throw new ConfigError(
-        `${join(rolesDir, name, 'config.yaml')}: max_running (${own}) is above the gateway's kanban.max_running ` +
-          `(${config.kanban.maxRunning}); a role's max_running is a whole number from 1 to it`,
+        `${join(rolesDir, name, 'config.yaml')}: max_running (${own}) is above the gateway's ` +
+          `${maxRunningText(config.kanban)}; a role's max_running is a whole number from 1 to it`,
       );
     }
     roles.set(name, loaded.role);

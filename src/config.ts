@@ -129,6 +129,8 @@ export interface KanbanSettings {
    * Never above `maxRunning` (spec §6.3).
    */
   maxRunningPerRole?: number;
+  /** Where `maxRunning` came from when the file does not set it: the session limit it defaults to. */
+  maxRunningFrom?: SessionLimitSource;
   /** Counted failures that block a task as gave_up (spec §8.2). */
   failureLimit: number;
   /** Throttled runs in a row that block a task as transient (spec §8.2). */
@@ -150,7 +152,28 @@ export interface KanbanSettings {
   blockRecurrenceLimit: number;
 }
 
-export const KANBAN_DEFAULTS: Omit<KanbanSettings, 'maxRunning'> = {
+/** The setting the session limit came from. */
+export type SessionLimitSource = 'MT_MAX_LIVE_SESSIONS' | 'maxLiveSessions';
+
+/**
+ * The session limit and `kanban.max_running`, worked out once for `loadConfig`
+ * and `teamSettingsFrom`: the session limit from MT_MAX_LIVE_SESSIONS, else the
+ * file, else 8; `kanban.max_running` from the file, else the session limit.
+ */
+function runningLimits(
+  env: Env,
+  file: FileConfig,
+): { maxLiveSessions: number; liveName: SessionLimitSource; maxRunning: number; maxRunningFrom: SessionLimitSource | undefined } {
+  const liveFromEnv = envInteger(env, 'MT_MAX_LIVE_SESSIONS');
+  const maxLiveSessions = liveFromEnv ?? file.maxLiveSessions ?? 8;
+  const liveName = liveFromEnv === undefined ? 'maxLiveSessions' : 'MT_MAX_LIVE_SESSIONS';
+  const own = file.kanban.maxRunning;
+  return own === undefined
+    ? { maxLiveSessions, liveName, maxRunning: maxLiveSessions, maxRunningFrom: liveName }
+    : { maxLiveSessions, liveName, maxRunning: own, maxRunningFrom: undefined };
+}
+
+export const KANBAN_DEFAULTS: Omit<KanbanSettings, 'maxRunning' | 'maxRunningFrom'> = {
   enabled: false,
   failureLimit: 2,
   transientLimit: 10,
@@ -225,8 +248,17 @@ export interface TeamSettings {
   kanban?: RoleLimits;
 }
 
-/** What `loadTeam` and `mt role` need of the `kanban:` section: the gateway's limit, and every role's default. */
-export type RoleLimits = Pick<KanbanSettings, 'maxRunning' | 'maxRunningPerRole'>;
+/** What `loadTeam` and `mt role` need of the `kanban:` section: the gateway's limit, where it came from, and every role's default. */
+export type RoleLimits = Pick<KanbanSettings, 'maxRunning' | 'maxRunningFrom' | 'maxRunningPerRole'>;
+
+/**
+ * `kanban.max_running` as a refusal names it: alone when the file sets it, else
+ * with the session limit it defaulted to, `kanban.max_running (2, from MT_MAX_LIVE_SESSIONS)`.
+ */
+export function maxRunningText(limits: RoleLimits): string {
+  const from = limits.maxRunningFrom === undefined ? '' : `, from ${limits.maxRunningFrom}`;
+  return `kanban.max_running (${limits.maxRunning}${from})`;
+}
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -271,13 +303,10 @@ export function loadConfig(
 
   const allowTalk = envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk;
   const allowOperate = envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate;
-  const liveFromEnv = envInteger(env, 'MT_MAX_LIVE_SESSIONS');
-  const maxLiveSessions = liveFromEnv ?? file.maxLiveSessions ?? 8;
-  const maxRunning = team.kanban?.maxRunning ?? maxLiveSessions;
+  const { maxLiveSessions, liveName, maxRunning, maxRunningFrom } = runningLimits(env, file);
   if (maxRunning > maxLiveSessions) {
     // A run is a session, and its actor is pinned while it is open (spec §6.3):
     // more runs than live sessions would hold the gateway over its cap.
-    const liveName = liveFromEnv === undefined ? 'maxLiveSessions' : 'MT_MAX_LIVE_SESSIONS';
     throw new ConfigError(
       `${located.path}: kanban.max_running (${maxRunning}) is above ${liveName} (${maxLiveSessions}); ` +
         'a run is a live session, so the two limits must not disagree',
@@ -323,6 +352,7 @@ export function loadConfig(
     kanban: {
       enabled: file.kanban.enabled ?? KANBAN_DEFAULTS.enabled,
       maxRunning,
+      ...(maxRunningFrom === undefined ? {} : { maxRunningFrom }),
       ...(file.kanban.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: file.kanban.maxRunningPerRole }),
       failureLimit: file.kanban.failureLimit ?? KANBAN_DEFAULTS.failureLimit,
       transientLimit: file.kanban.transientLimit ?? KANBAN_DEFAULTS.transientLimit,
@@ -402,13 +432,17 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     );
   }
   const agent = file.agentPresent || agentVariables.length > 0 ? legacyAgent(env, file, opts) : undefined;
-  // As loadConfig has it: kanban.max_running defaults to the session limit.
-  const maxRunning = file.kanban.maxRunning ?? envInteger(env, 'MT_MAX_LIVE_SESSIONS') ?? file.maxLiveSessions ?? 8;
-  const perRole = file.kanban.maxRunningPerRole;
+  const { maxRunning, maxRunningFrom } = runningLimits(env, file);
+  const limits: RoleLimits = {
+    maxRunning,
+    ...(maxRunningFrom === undefined ? {} : { maxRunningFrom }),
+    ...(file.kanban.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: file.kanban.maxRunningPerRole }),
+  };
+  const perRole = limits.maxRunningPerRole;
   if (perRole !== undefined && perRole > maxRunning) {
     // As a board's own max_running is held inside the gateway's (spec §16.6).
     throw new ConfigError(
-      `${path}: kanban.max_running_per_role (${perRole}) is above kanban.max_running (${maxRunning}); ` +
+      `${path}: kanban.max_running_per_role (${perRole}) is above ${maxRunningText(limits)}; ` +
         "a role's runs are agent runs, so its limit is a whole number from 1 to the gateway's",
     );
   }
@@ -419,7 +453,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     ...(file.kanban.enabled === undefined ? {} : { kanbanEnabled: file.kanban.enabled }),
     workspaces,
     agent,
-    kanban: { maxRunning, ...(perRole === undefined ? {} : { maxRunningPerRole: perRole }) },
+    kanban: limits,
   };
 }
 
