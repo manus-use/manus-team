@@ -5,12 +5,14 @@ import { isResumableProviderId } from '../provider-id.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import type { GateRun } from '../kanban/gates.js';
 import { resolveTaskWorkspace } from '../kanban/workspace.js';
-import { ENDED_OUTCOMES, GATE_LIMITS, REPORTED_OUTCOMES } from '../kanban/types.js';
+import { DEFAULT_BOARD, ENDED_OUTCOMES, GATE_LIMITS, REPORTED_OUTCOMES } from '../kanban/types.js';
 import type {
   ActivePhase,
   AgentSnapshot,
   Assignee,
   BlockKind,
+  BoardRow,
+  ChatAt,
   CommentRow,
   Contract,
   CreatedVia,
@@ -30,6 +32,7 @@ import type {
   TaskRow,
 } from '../kanban/types.js';
 import {
+  getBoard,
   getRun,
   getTask,
   getTaskByKey,
@@ -109,6 +112,7 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'workspace',
   'packageHash',
   'seedDropped',
+  'board',
 ]);
 
 /** One row of the board's log, masked value by value. */
@@ -154,6 +158,109 @@ function mustGet(d: Db, taskId: string): TaskRow {
 }
 
 // ---------------------------------------------------------------------------
+// Boards (spec §16)
+// ---------------------------------------------------------------------------
+
+function mustGetBoard(d: Db, name: string): BoardRow {
+  const board = getBoard(d, name);
+  if (board === undefined) throw new Error(`board ${name} vanished inside its own transaction`);
+  return board;
+}
+
+/** A board that exists and is not archived: what a task is added to, and a chat moved onto. */
+function liveBoard(d: Db, name: string): Result<{ board: BoardRow }> {
+  const board = getBoard(d, name);
+  if (board === undefined) return refuse('unknown_board', `there is no board ${name}`);
+  if (board.archivedAt !== null) return refuse('board_archived', `board ${name} is archived`);
+  return { ok: true, board };
+}
+
+/**
+ * A new board, with no max_running or workspace of its own. A name is never
+ * reused, an archived board's included: tasks keep the name of the board they
+ * were on, and a second board of that name would take them over.
+ */
+export function createBoard(db: Db, name: string, by: string, now: number): Result<{ board: BoardRow }> {
+  return tx(db, (d) => {
+    const existing = getBoard(d, name);
+    if (existing !== undefined) {
+      return refuse('invalid', `board ${name} exists already${existing.archivedAt === null ? '' : ', archived'}`);
+    }
+    d.prepare('INSERT INTO kanban_boards (name, created_by, created_at) VALUES (?, ?, ?)').run(name, by, now);
+    return { ok: true, board: mustGetBoard(d, name) };
+  });
+}
+
+/** A board's own settings (spec §16); a field left out is left as it is, and null clears it. */
+export interface BoardChange {
+  maxRunning?: number | null;
+  workspace?: string | null;
+}
+
+/**
+ * Set a board's max_running or workspace. The service has checked the values:
+ * a max_running inside the gateway's, a configured workspace. A workspace set
+ * here is used by the tasks claimed from now on whose workspace is still null.
+ */
+export function setBoard(db: Db, name: string, change: BoardChange, by: string, now: number): Result<{ board: BoardRow }> {
+  return tx(db, (d) => {
+    const live = liveBoard(d, name);
+    if (!live.ok) return live;
+    const next = {
+      maxRunning: change.maxRunning === undefined ? live.board.maxRunning : change.maxRunning,
+      workspace: change.workspace === undefined ? live.board.workspace : change.workspace,
+    };
+    d.prepare(
+      'UPDATE kanban_boards SET max_running = ?, workspace = ?, updated_by = ?, updated_at = ? WHERE name = ?',
+    ).run(next.maxRunning, next.workspace, by, now, name);
+    return { ok: true, board: mustGetBoard(d, name) };
+  });
+}
+
+/**
+ * Archive a board: nothing is added to it from then on, and no chat moves onto
+ * it. Refused while any of its tasks is still open, in review or blocked: its
+ * work would have nowhere to go but a board nobody may add to. `default` is
+ * never archived, as every chat starts on it.
+ */
+export function archiveBoard(db: Db, name: string, by: string, now: number): Result<{ board: BoardRow }> {
+  return tx(db, (d) => {
+    if (name === DEFAULT_BOARD) return refuse('invalid', `board ${DEFAULT_BOARD} is where every chat starts; it is never archived`);
+    const live = liveBoard(d, name);
+    if (!live.ok) return live;
+    const unfinished =
+      d
+        .prepare<[string], { n: number }>(
+          "SELECT count(*) AS n FROM kanban_tasks WHERE board = ? AND phase IN ('open', 'review', 'blocked')",
+        )
+        .get(name)?.n ?? 0;
+    if (unfinished > 0) {
+      return refuse(
+        'illegal_transition',
+        `board ${name} has ${unfinished} task${unfinished === 1 ? '' : 's'} not yet done or archived; finish or archive ${unfinished === 1 ? 'it' : 'them'} first`,
+      );
+    }
+    d.prepare('UPDATE kanban_boards SET archived_at = ?, updated_by = ?, updated_at = ? WHERE name = ?').run(now, by, now, name);
+    return { ok: true, board: mustGetBoard(d, name) };
+  });
+}
+
+/** Move a chat onto a board (spec §16): its new tasks go there, and its list shows that board. */
+export function useBoard(db: Db, at: ChatAt, name: string, by: string, now: number): Result<{ board: BoardRow }> {
+  return tx(db, (d) => {
+    const live = liveBoard(d, name);
+    if (!live.ok) return live;
+    d.prepare(
+      `INSERT INTO kanban_chat_boards (channel, account_id, conversation_id, board, set_by, set_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (channel, account_id, conversation_id)
+       DO UPDATE SET board = excluded.board, set_by = excluded.set_by, set_at = excluded.set_at`,
+    ).run(at.channel, at.appId, at.conversationId, name, by, now);
+    return { ok: true, board: live.board };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Creating tasks, and comments
 // ---------------------------------------------------------------------------
 
@@ -172,6 +279,8 @@ export interface NewTask {
   maxRuntimeS?: number | null;
   createdBy: string;
   createdVia: CreatedVia;
+  /** The board it goes on (spec §16); `default` unless given. */
+  board?: string;
 }
 
 /**
@@ -191,6 +300,9 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
       const existing = getTaskByKey(d, t.idempotencyKey);
       if (existing !== undefined) return { ok: true, task: existing, existing: true };
     }
+    const board = t.board ?? DEFAULT_BOARD;
+    const live = liveBoard(d, board);
+    if (!live.ok) return refuse(live.code, `${live.message}; no task is added to it`);
     const parents = [...new Set(t.parents ?? [])];
     for (const parent of parents) {
       if (getTask(d, parent) === undefined) return refuse('not_found', `no task ${parent} to be a parent`);
@@ -207,8 +319,8 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
       `INSERT INTO kanban_tasks
          (task_id, title, body, contract, assignee_kind, assignee, reviewer_kind, reviewer,
           workspace, phase, priority, idempotency_key, failure_limit, retry_on_crash,
-          max_runtime_s, created_by, created_via, created_at, created_from_task)
-       VALUES (?, ?, ?, jsonb(?), ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, jsonb(?), ?, ?)`,
+          max_runtime_s, created_by, created_via, created_at, created_from_task, board)
+       VALUES (?, ?, ?, jsonb(?), ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, jsonb(?), ?, ?, ?)`,
     ).run(
       taskId,
       mask(t.title),
@@ -228,6 +340,7 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
       JSON.stringify(t.createdVia),
       now,
       createdFromTask,
+      board,
     );
     const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
     for (const parent of parents) link.run(parent, taskId, now);
@@ -247,6 +360,7 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
           workspace: t.workspace ?? null,
           parents,
           createdFromTask,
+          board,
         },
       },
       now,
