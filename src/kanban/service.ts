@@ -582,7 +582,9 @@ export class KanbanService {
     if (done.phase !== 'done') {
       return board.refuse('illegal_transition', `task ${taskId} is ${done.phase}; only a done task gets follow-ups`);
     }
-    return this.create({ ...req, board: done.board, parents: [taskId, ...(req.parents ?? [])] });
+    // The done task's board unless the request names one; one that names another
+    // board is refused `other_board` by the parent check, rather than moved quietly.
+    return this.create({ board: done.board, ...req, parents: [taskId, ...(req.parents ?? [])] });
   }
 
   link(parentId: string, childId: string, by: string): Result<{ added: boolean }> {
