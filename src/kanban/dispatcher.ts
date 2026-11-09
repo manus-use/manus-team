@@ -22,7 +22,7 @@ import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, Principal, TurnTerminal } from '../types.js';
 import { briefFor } from './brief.js';
 import { classifyFailure } from './classify.js';
-import { fairOrder } from './fair.js';
+import { boardQueues } from './fair.js';
 import { composeForwarded, composeNudge, composePrompt } from './prompt.js';
 import type { Claimed, KanbanService } from './service.js';
 import { hadSideEffects, lastTurnOf, toolCallsOf } from './session-log.js';
@@ -360,48 +360,71 @@ export class Dispatcher {
    * Synchronous up to each run's first prompt, so a pass sees the runs the one
    * before it opened. Runs go on in the background; `idle()` waits for them.
    *
-   * The boards take turns (spec §16): a task from each, then the next from each,
-   * starting after the board of the last agent claim, priority and age deciding
-   * only within a board. A board's own max_running holds inside the gateway's.
+   * The boards take turns (spec §16.7), starting after the board of the last
+   * agent claim. A board's turn is its first task that can be claimed: its
+   * queue, in priority and age order, is tried until one agent claim succeeds or
+   * the queue runs out, so a head task that waits -- on a busy workspace, say --
+   * does not cost its board the turn. A person's claim holds no slot, and does
+   * not end the turn. A board's own max_running holds inside the gateway's.
    */
   pass(): void {
     if (this.#stopped) return;
-    let tasks: ReturnType<typeof claimableTasks>;
+    let queues: Array<ReturnType<typeof claimableTasks>>;
     let limits: Map<string, number | null>;
     try {
-      tasks = fairOrder(claimableTasks(this.#deps.db, this.#clock.now()), this.#lastBoard);
+      queues = boardQueues(claimableTasks(this.#deps.db, this.#clock.now()), this.#lastBoard);
       limits = new Map(boardsOf(this.#deps.db, { archived: true }).map((b) => [b.name, b.maxRunning]));
     } catch (err) {
       this.#note(`kanban: reading the claimable tasks failed: ${message(err)}`);
       return;
     }
     const unassignable = new Map<string, string>();
-    for (const task of tasks) {
-      // One task's failure is that task's: the pass goes on to the next, and
-      // never throws to the sweep, the boot or the run that called it.
-      try {
-        const who = task.phase === 'review' ? task.reviewer : task.assignee;
-        // Counted from the board, so a run opened earlier in this pass counts. A
-        // person's run holds no process, and is not limited (spec §6.3).
-        if (who?.kind === 'role' && openAgentRunCount(this.#deps.db) >= this.#deps.settings.maxRunning) continue;
-        const own = limits.get(task.board) ?? null;
-        if (who?.kind === 'role' && own !== null && openAgentRunCountOn(this.#deps.db, task.board) >= own) continue;
-        // An agent run gets a token (spec §7.2); a person's run reports through chat.
-        const token = who?.kind === 'role' ? mintToken() : undefined;
-        const claimed = this.#claim(task.taskId, token);
-        // Refusals are the board's to record: the claim notes a task nobody can be
-        // given; a busy workspace or a racing claim leaves it for the next pass.
-        if (!claimed.ok) {
-          if (claimed.code === 'unassignable') unassignable.set(task.taskId, claimed.message);
-          continue;
+    while (queues.some((queue) => queue.length > 0)) {
+      for (const queue of queues) {
+        for (let task = queue.shift(); task !== undefined; task = queue.shift()) {
+          if (this.#tryClaim(task, limits, unassignable)) break;
         }
-        if (claimed.run.assignee.kind === 'role') this.#lastBoard = task.board;
-        this.#track(this.#run(claimed, token));
-      } catch (err) {
-        this.#note(`kanban: claiming ${task.taskId} failed: ${message(err)}`);
       }
     }
     this.#unassignable = unassignable;
+  }
+
+  /**
+   * Try one task of a pass: true when it opened an agent run, which ends its
+   * board's turn. One task's failure is that task's: the pass goes on to the
+   * next, and never throws to the sweep, the boot or the run that called it.
+   */
+  #tryClaim(
+    task: ReturnType<typeof claimableTasks>[number],
+    limits: ReadonlyMap<string, number | null>,
+    unassignable: Map<string, string>,
+  ): boolean {
+    try {
+      const who = task.phase === 'review' ? task.reviewer : task.assignee;
+      // Counted from the board, so a run opened earlier in this pass counts. A
+      // person's run holds no process, and is not limited (spec §6.3). A board
+      // at its own limit skips every agent task it has left, so it gives up its
+      // turn for the whole pass.
+      if (who?.kind === 'role' && openAgentRunCount(this.#deps.db) >= this.#deps.settings.maxRunning) return false;
+      const own = limits.get(task.board) ?? null;
+      if (who?.kind === 'role' && own !== null && openAgentRunCountOn(this.#deps.db, task.board) >= own) return false;
+      // An agent run gets a token (spec §7.2); a person's run reports through chat.
+      const token = who?.kind === 'role' ? mintToken() : undefined;
+      const claimed = this.#claim(task.taskId, token);
+      // Refusals are the board's to record: the claim notes a task nobody can be
+      // given; a busy workspace or a racing claim leaves it for the next pass.
+      if (!claimed.ok) {
+        if (claimed.code === 'unassignable') unassignable.set(task.taskId, claimed.message);
+        return false;
+      }
+      const agent = claimed.run.assignee.kind === 'role';
+      if (agent) this.#lastBoard = task.board;
+      this.#track(this.#run(claimed, token));
+      return agent;
+    } catch (err) {
+      this.#note(`kanban: claiming ${task.taskId} failed: ${message(err)}`);
+      return false;
+    }
   }
 
   /**
