@@ -19,7 +19,7 @@ import {
   type TaskView,
 } from '../db/kanban-read.js';
 import { buildEnv } from '../driver/env.js';
-import { nameProblem } from '../names.js';
+import { nameProblem, visible } from '../names.js';
 import { redactKnownSecrets } from '../secrets.js';
 import type { Role } from '../roles.js';
 import { stripControl } from '../text.js';
@@ -334,6 +334,9 @@ export class KanbanService {
       return board.refuse('invalid', 'a board is a name, and a change an object');
     }
     const { maxRunning, workspace } = change;
+    if (maxRunning === undefined && workspace === undefined) {
+      return board.refuse('invalid', "a board's change sets its max_running, its workspace, or both");
+    }
     const within = (n: number) => Number.isSafeInteger(n) && n >= 1 && n <= this.#maxRunning;
     if (maxRunning !== undefined && maxRunning !== null && !within(maxRunning)) {
       return board.refuse(
@@ -342,7 +345,7 @@ export class KanbanService {
       );
     }
     if (workspace !== undefined && workspace !== null && (!isText(workspace) || !this.#workspaces.has(workspace))) {
-      return board.refuse('unknown_workspace', `workspace ${JSON.stringify(workspace)} is not configured`);
+      return board.refuse('unknown_workspace', `workspace ${visible(JSON.stringify(workspace))} is not configured`);
     }
     return board.setBoard(this.#db, name, change, by, this.#clock.now());
   }
@@ -390,7 +393,7 @@ export class KanbanService {
     const contract = this.#contract(req.contract);
     if (!contract.ok) return contract;
     if (req.workspace !== undefined && !this.#workspaces.has(req.workspace)) {
-      return board.refuse('unknown_workspace', `workspace ${JSON.stringify(req.workspace)} is not configured`);
+      return board.refuse('unknown_workspace', `workspace ${visible(JSON.stringify(req.workspace))} is not configured`);
     }
     if (
       !isWhole(req.priority, Number.MIN_SAFE_INTEGER) ||
@@ -594,7 +597,7 @@ export class KanbanService {
     if (ids !== undefined) return ids;
     if (!isText(workspace)) return board.refuse('invalid', 'a workspace is a name');
     if (!this.#workspaces.has(workspace)) {
-      return board.refuse('unknown_workspace', `workspace ${JSON.stringify(workspace)} is not configured`);
+      return board.refuse('unknown_workspace', `workspace ${visible(JSON.stringify(workspace))} is not configured`);
     }
     return board.setWorkspace(this.#db, taskId, workspace, by, this.#clock.now());
   }

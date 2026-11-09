@@ -7,8 +7,9 @@ import { ALICE, NOW, newTask } from './helpers/kanban.js';
 
 /**
  * Boards in the board's writer (spec §16): created, set, archived, and the board
- * each chat is on. Whether a name is well formed, or a workspace configured, is
- * the service's; what the rows allow is here.
+ * each chat is on. Whether a workspace is configured, and why a name is not
+ * well formed, are the service's; what the rows allow is here, with a cheap
+ * name check behind the service's.
  */
 
 let h: TestDb;
@@ -49,6 +50,15 @@ describe('createBoard', () => {
     expect(archiveBoard(h.db, 'web-app', ALICE, NOW).ok).toBe(true);
     for (const name of ['web-app', 'default']) {
       expect(createBoard(h.db, name, ALICE, NOW)).toMatchObject({ ok: false, code: 'invalid' });
+    }
+  });
+});
+
+describe('createBoard: the name, checked again', () => {
+  it('refuses a name outside the grammar, or reserved, though the service checks it first', () => {
+    for (const name of ['Web', 'a/b', '', 'web\u200bapp', 'none', 'all']) {
+      expect(createBoard(h.db, name, ALICE, NOW)).toMatchObject({ ok: false, code: 'invalid' });
+      expect(getBoard(h.db, name)).toBeUndefined();
     }
   });
 });

@@ -77,6 +77,22 @@ describe('creating a task on a board', () => {
     expect(taskCount()).toBe(before);
   });
 
+  it("refuses a run's key a task on another board has, however that task was created", () => {
+    const other = newTask(h.db, { board: 'billing', idempotencyKey: 'run-task:k_x:report' });
+    const run = claimed(h.db, newTask(h.db, { board: 'web-app' }).taskId);
+    const before = taskCount();
+    const r = createTask(
+      h.db,
+      { title: 'x', idempotencyKey: 'run-task:k_x:report', createdBy: `run:${run.runId}`, createdVia: { kind: 'run', runId: run.runId } },
+      NOW,
+    );
+    expect(r).toMatchObject({ ok: false, code: 'other_board' });
+    expect(r.ok ? '' : r.message).toBe(
+      `task ${other.taskId} was created with this idempotency key on board billing, not web-app`,
+    );
+    expect(taskCount()).toBe(before);
+  });
+
   it("puts a task a run creates on its run's task's board, whatever it asks for", () => {
     const task = newTask(h.db, { board: 'web-app' });
     const run = claimed(h.db, task.taskId);

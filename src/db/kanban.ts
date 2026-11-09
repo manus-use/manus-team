@@ -2,6 +2,7 @@ import type { Db } from './open.js';
 import { txImmediate } from './open.js';
 import { newRunId, newTaskId } from '../core/ids.js';
 import { isResumableProviderId } from '../provider-id.js';
+import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import type { GateRun } from '../kanban/gates.js';
 import { resolveTaskWorkspace } from '../kanban/workspace.js';
@@ -175,7 +176,7 @@ function onOtherBoard(parentId: string, parentBoard: string, childBoard: string)
 /** A board that exists and is not archived: what a task is added to, and a chat moved onto. */
 function liveBoard(d: Db, name: string): Result<{ board: BoardRow }> {
   const board = getBoard(d, name);
-  if (board === undefined) return refuse('unknown_board', `there is no board ${name}`);
+  if (board === undefined) return refuse('unknown_board', `there is no board ${visible(name)}`);
   if (board.archivedAt !== null) return refuse('board_archived', `board ${name} is archived`);
   return { ok: true, board };
 }
@@ -186,6 +187,10 @@ function liveBoard(d: Db, name: string): Result<{ board: BoardRow }> {
  * were on, and a second board of that name would take them over.
  */
 export function createBoard(db: Db, name: string, by: string, now: number): Result<{ board: BoardRow }> {
+  // The service checks the name, and says why; this is the cheap check behind it.
+  if (!NAME_PATTERN.test(name) || RESERVED_BOARD_NAMES.has(name)) {
+    return refuse('invalid', `${visible(JSON.stringify(name))} is not a board name`);
+  }
   return tx(db, (d) => {
     const existing = getBoard(d, name);
     if (existing !== undefined) {
@@ -301,19 +306,6 @@ export interface NewTask {
  */
 export function createTask(db: Db, t: NewTask, now: number): Result<{ task: TaskRow; existing: boolean }> {
   return tx(db, (d) => {
-    if (t.idempotencyKey !== undefined && t.idempotencyKey !== null) {
-      const existing = getTaskByKey(d, t.idempotencyKey);
-      // A chat's key on another board is not a repeat: answering with that board's task would cross boards (spec §16.5).
-      // A run's key is namespaced by its task, so a repeat is always on that task's board.
-      const asked = t.board ?? DEFAULT_BOARD;
-      if (existing !== undefined && t.createdVia.kind === 'chat' && existing.board !== asked) {
-        return refuse(
-          'other_board',
-          `task ${existing.taskId} was created with this idempotency key on board ${existing.board}, not ${asked}`,
-        );
-      }
-      if (existing !== undefined) return { ok: true, task: existing, existing: true };
-    }
     let createdFromTask: string | null = null;
     let board = t.board ?? DEFAULT_BOARD;
     if (t.createdVia.kind === 'run') {
@@ -322,6 +314,18 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
       createdFromTask = run.taskId;
       // A run's follow-ups stay on its task's board, whatever it asked for (spec §16).
       board = mustGet(d, run.taskId).board;
+    }
+    if (t.idempotencyKey !== undefined && t.idempotencyKey !== null) {
+      const existing = getTaskByKey(d, t.idempotencyKey);
+      // A key on another board is not a repeat, however its task was created:
+      // answering with that board's task would cross boards (spec §16.5).
+      if (existing !== undefined && existing.board !== board) {
+        return refuse(
+          'other_board',
+          `task ${existing.taskId} was created with this idempotency key on board ${existing.board}, not ${board}`,
+        );
+      }
+      if (existing !== undefined) return { ok: true, task: existing, existing: true };
     }
     const live = liveBoard(d, board);
     if (!live.ok) return refuse(live.code, `${live.message}; no task is added to it`);

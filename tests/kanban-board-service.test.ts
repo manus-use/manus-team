@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { complete } from '../src/db/kanban.js';
+import { complete, type BoardChange } from '../src/db/kanban.js';
+import { getBoard } from '../src/db/kanban-read.js';
 import { KanbanService, type CreateRequest } from '../src/kanban/service.js';
 import type { ChatAt } from '../src/kanban/types.js';
 import { ManualClock, testDb, type TestDb } from './helpers/db.js';
@@ -45,6 +46,23 @@ describe('KanbanService: creating a board', () => {
     }
     expect(s.createBoard(3 as unknown as string, ALICE)).toMatchObject({ ok: false, code: 'invalid' });
   });
+
+  it('refuses none and all, which the board commands read as clear and every board', () => {
+    for (const name of ['none', 'all']) {
+      const r = s.createBoard(name, ALICE);
+      expect(r).toMatchObject({ ok: false, code: 'invalid' });
+      expect(r.ok ? '' : r.message).toBe(`board name "${name}" is reserved: none clears a setting, and all lists every board`);
+    }
+  });
+
+  it('shows a hidden character in a refused name, so the refusal does not look like a valid name', () => {
+    const r = s.createBoard('web\u200bapp', ALICE);
+    expect(r).toMatchObject({ ok: false, code: 'invalid' });
+    expect(r.ok ? '' : r.message).toContain('board name "web\\u200bapp" must be');
+    const used = s.useBoard(CHAT, 'web\u00adapp', ALICE);
+    expect(used).toMatchObject({ ok: false, code: 'unknown_board' });
+    expect(used.ok ? '' : used.message).toBe('there is no board web\\u00adapp');
+  });
 });
 
 describe('KanbanService: a board’s own settings', () => {
@@ -57,6 +75,17 @@ describe('KanbanService: a board’s own settings', () => {
       expect(r.ok ? '' : r.message).toContain("the gateway's kanban.max_running, 4");
     }
     expect(ok(s.setBoard('web-app', { maxRunning: null }, ALICE)).board.maxRunning).toBeNull();
+  });
+
+  it('refuses a change that changes nothing, leaving the board unstamped', () => {
+    ok(s.createBoard('web-app', ALICE));
+    // An explicit undefined is what a caller outside TypeScript can send.
+    for (const change of [{}, { maxRunning: undefined }, { workspace: undefined }] as BoardChange[]) {
+      const r = s.setBoard('web-app', change, ALICE);
+      expect(r).toMatchObject({ ok: false, code: 'invalid' });
+      expect(r.ok ? '' : r.message).toBe("a board's change sets its max_running, its workspace, or both");
+    }
+    expect(getBoard(h.db, 'web-app')).toMatchObject({ updatedBy: null, updatedAt: null });
   });
 
   it('takes a configured workspace, and none', () => {
