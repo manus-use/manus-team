@@ -70,7 +70,7 @@ export function boardsText(summaries: readonly BoardSummary[]): string[] {
   });
 }
 
-/** `mt kanban list` (spec §9.1): one board's tasks, as chat lists them, every one rather than the first 30. */
+/** `mt kanban task list` (spec §9.1): one board's tasks, as chat lists them, every one rather than the first 30. */
 export function listText(
   entries: readonly BoardEntry[],
   filter: DisplayStatus | 'all' | undefined,
@@ -81,7 +81,7 @@ export function listText(
   if (shown.length === 0) {
     return [
       filter === undefined
-        ? `no open tasks ${on}; mt kanban list all shows done and archived ones too`
+        ? `no open tasks ${on}; mt kanban task list all shows done and archived ones too`
         : `no ${filter === 'all' ? '' : `${filter} `}tasks ${on}`,
     ];
   }
@@ -89,7 +89,7 @@ export function listText(
   return table([['task', 'status', 'assignee', 'title'], ...rows]);
 }
 
-/** `mt kanban show` (spec §9.1): what chat's shows, the task's board always named. */
+/** `mt kanban task show` (spec §9.1): what chat's shows, the task's board always named. */
 export function showText(view: TaskView, gates: readonly GateRow[]): string[] {
   const { task } = view;
   const out: string[] = [

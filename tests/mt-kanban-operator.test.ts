@@ -70,7 +70,7 @@ describe('mt kanban board', () => {
   it('creates, sets, lists and archives a board, as the operator', async () => {
     expect(await mt(['board', 'create', 'web-app'])).toEqual({
       code: 0,
-      out: 'created board web-app; mt kanban new --board web-app adds a task to it',
+      out: 'created board web-app; mt kanban task new --board web-app adds a task to it',
       err: '',
     });
     expect(getBoard(gateway, 'web-app')).toMatchObject({ createdBy: ME });
@@ -133,7 +133,7 @@ describe('mt kanban board', () => {
   it('has no use: a terminal has no chat to move', async () => {
     const r = await mt(['board', 'use', 'default']);
     expect(r.code).toBe(2);
-    expect(r.err.split('\n')[0]).toBe('mt: kanban board use moves a chat, and a terminal has none: give new and list --board <name>');
+    expect(r.err.split('\n')[0]).toBe('mt: kanban board use moves a chat, and a terminal has none: give task new and task list --board <name>');
   });
 
   it("refuses in a board run's shell, where it is not the operator's", async () => {

@@ -104,7 +104,7 @@ describe('boardsText', () => {
 describe('listText', () => {
   it('lists the active tasks as a table, every one, and says when there are none', () => {
     expect(listText(service.list('default'), undefined, 'default')).toEqual([
-      'no open tasks on board default; mt kanban list all shows done and archived ones too',
+      'no open tasks on board default; mt kanban task list all shows done and archived ones too',
     ]);
     expect(listText(service.list('default'), 'done', 'default')).toEqual(['no done tasks on board default']);
     const ids = Array.from({ length: 31 }, (_, i) => create(`task ${i}`));

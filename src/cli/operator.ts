@@ -15,16 +15,17 @@ import { BIDI, INVISIBLE } from '../text.js';
 import { boardsText, line, listText, showText, who } from './plain.js';
 
 /**
- * The operator's `mt kanban` (spec §2.6): chat's `/kanban` commands at a
- * terminal, with chat's semantics and an operator's authority -- whoever runs
+ * The operator's `mt kanban task …` and `mt kanban board …` (spec §2.6): chat's
+ * `/kanban` commands at a terminal, with chat's semantics and an operator's authority -- whoever runs
  * them is the gateway's user, who could edit its files anyway. They write the
  * board's database beside a running gateway, through `KanbanService`, as `mt
  * kanban gate` does, and record who acted as `operator:<login>`.
  *
- * **Never the worker's.** These refuse to run in a board run's shell, and there
- * `show`, `comment` and `link` are the worker's commands (spec §7.3); the
- * worker's take no arguments and read JSON on stdin, these take their task and
- * text as arguments. `src/cli/mt.ts` decides which a command line is.
+ * **Never the worker's.** These refuse to run in a board run's shell. The
+ * worker's commands (spec §7.3), `mt kanban show`, `comment`, `link` and the
+ * rest, are named without a group, take no arguments and read JSON on stdin;
+ * these are under `task`, and take their task and text as arguments.
+ * `src/cli/mt.ts` decides which a command line is.
  *
  * **Output** is plain text, masked, or with `--json` one line of JSON, as the
  * worker's is: `{"ok": true, ...}` or `{"ok": false, "code": ..., "message": ...}`.
@@ -203,8 +204,8 @@ async function board(args: readonly string[], io: MtIo): Promise<number> {
         if (!r.ok) return refused(r);
         const lines =
           sub === 'create'
-            ? [`created board ${line(r.board.name, 80)}; mt kanban new --board ${line(r.board.name, 80)} adds a task to it`]
-            : [`archived board ${line(r.board.name, 80)}: its tasks stay, and mt kanban show still shows them; nothing more is added to it`];
+            ? [`created board ${line(r.board.name, 80)}; mt kanban task new --board ${line(r.board.name, 80)} adds a task to it`]
+            : [`archived board ${line(r.board.name, 80)}: its tasks stay, and mt kanban task show still shows them; nothing more is added to it`];
         return { ok: true, lines, json: { board: boardJson(r.board) } };
       });
     }
@@ -229,7 +230,7 @@ async function board(args: readonly string[], io: MtIo): Promise<number> {
       });
     }
     case 'use':
-      throw new UsageError('kanban board use moves a chat, and a terminal has none: give new and list --board <name>');
+      throw new UsageError('kanban board use moves a chat, and a terminal has none: give task new and task list --board <name>');
     default:
       throw new UsageError('kanban board takes list, create, set or archive');
   }
@@ -257,7 +258,7 @@ function personRefused(name: string): Outcome | undefined {
 /** One task id, and nothing else. */
 function oneTask(positionals: readonly string[], what: string): string {
   const [taskId, extra] = positionals;
-  if (taskId === undefined || extra !== undefined) throw new UsageError(`kanban ${what} takes a task id`);
+  if (taskId === undefined || extra !== undefined) throw new UsageError(`kanban task ${what} takes a task id`);
   return taskId;
 }
 
@@ -292,7 +293,7 @@ function offBoard(service: KanbanService, board: string | undefined, ...taskIds:
 /** The new task's body: `--body`, or `--body-file`, `-` for stdin; or why not, already said. */
 async function bodyOf(values: { body?: string | undefined; 'body-file'?: string | undefined }, io: MtIo, json: boolean): Promise<string | number> {
   const file = values['body-file'];
-  if (values.body !== undefined && file !== undefined) throw new UsageError('kanban new takes --body or --body-file, not both');
+  if (values.body !== undefined && file !== undefined) throw new UsageError('kanban task new takes --body or --body-file, not both');
   if (file === undefined) return values.body ?? '';
   const max = WORKER_LIMITS.body;
   if (file === '-') {
@@ -314,7 +315,7 @@ async function bodyOf(values: { body?: string | undefined; 'body-file'?: string 
   }
 }
 
-/** The flags of `mt kanban new`, and the contract field each fills (spec §4.3). */
+/** The flags of `mt kanban task new`, and the contract field each fills (spec §4.3). */
 const CONTRACT_FLAGS = {
   outcome: 'outcome',
   verify: 'verification',
@@ -323,7 +324,7 @@ const CONTRACT_FLAGS = {
   'stop-when': 'stop_when',
 } as const;
 
-/** `mt kanban new <title> [--board …] [--assignee …] …` (spec §9.1): `/kanban new`'s fields as flags. */
+/** `mt kanban task new <title> [--board …] [--assignee …] …` (spec §9.1): `/kanban task new`'s fields as flags. */
 async function create(rest: readonly string[], io: MtIo): Promise<number> {
   const text = { type: 'string' } as const;
   const { values, positionals } = parse(rest, {
@@ -350,7 +351,7 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
     throw new UsageError('a title is one line, with no control characters and no bidi controls');
   }
   const title = words.trim();
-  if (title === '') throw new UsageError('kanban new takes a title');
+  if (title === '') throw new UsageError('kanban task new takes a title');
   for (const flag of ['board', 'assignee', 'reviewer', 'workspace', ...Object.keys(CONTRACT_FLAGS)] as const) {
     const v = values[flag as keyof typeof values];
     if (typeof v === 'string' && v.trim() === '') throw new UsageError(`--${flag} needs a value`);
@@ -377,7 +378,7 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
   const big = tooBig(command);
   if (big !== undefined) return early(io, json, 'too_large', big);
   const board = boardFlag(values.board) ?? DEFAULT_BOARD;
-  return act(io, json, 'mt kanban new', (service, by) => {
+  return act(io, json, 'mt kanban task new', (service, by) => {
     for (const name of [command.assignee, command.reviewer]) {
       const person = name === undefined ? undefined : personRefused(name);
       if (person !== undefined) return person;
@@ -396,7 +397,7 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
     });
     if (!r.ok) return refused(r);
     const { task } = r;
-    const whom = task.assignee === null ? `nobody yet (mt kanban assign ${task.taskId} <role> gives it to someone)` : who(task.assignee);
+    const whom = task.assignee === null ? `nobody yet (mt kanban task assign ${task.taskId} <role> gives it to someone)` : who(task.assignee);
     const where = task.workspace === null ? '' : `, in ${line(task.workspace, 80)}`;
     return {
       ok: true,
@@ -407,16 +408,16 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** `mt kanban list [<status>|all] [--board <name>]` (spec §9.1): one board's tasks, `default`'s unless named. */
+/** `mt kanban task list [<status>|all] [--board <name>]` (spec §9.1): one board's tasks, `default`'s unless named. */
 function list(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [word, extra] = positionals;
   const filter = word === undefined ? undefined : LIST_FILTERS.find((f) => f === word.toLowerCase());
   if (extra !== undefined || (word !== undefined && filter === undefined)) {
-    throw new UsageError(`kanban list takes at most one of ${LIST_FILTERS.join(', ')}`);
+    throw new UsageError(`kanban task list takes at most one of ${LIST_FILTERS.join(', ')}`);
   }
   const board = boardFlag(values.board) ?? DEFAULT_BOARD;
-  return act(io, values.json === true, 'mt kanban list', (service) => {
+  return act(io, values.json === true, 'mt kanban task list', (service) => {
     const missing = noSuchBoard(service, board);
     if (missing !== undefined) return missing;
     const entries = service.list(board);
@@ -431,12 +432,12 @@ function list(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** `mt kanban show <task> [--board <name>]`: a task on any board, by id, or on the one named (spec §16.4). */
+/** `mt kanban task show <task> [--board <name>]`: a task on any board, by id, or on the one named (spec §16.4). */
 function show(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const taskId = oneTask(positionals, 'show');
   const board = boardFlag(values.board);
-  return act(io, values.json === true, 'mt kanban show', (service) => {
+  return act(io, values.json === true, 'mt kanban task show', (service) => {
     const guard = offBoard(service, board, taskId);
     if (guard !== undefined) return guard;
     const r = service.show(taskId);
@@ -480,16 +481,16 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** `mt kanban assign <task> <role>`: an undecided run ends `superseded`, and the gateway's pass cancels its turn. */
+/** `mt kanban task assign <task> <role>`: an undecided run ends `superseded`, and the gateway's pass cancels its turn. */
 function assign(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [taskId, role, extra] = positionals;
   const name = role?.trim();
   if (taskId === undefined || name === undefined || name === '' || extra !== undefined) {
-    throw new UsageError('kanban assign takes a task id and a role');
+    throw new UsageError('kanban task assign takes a task id and a role');
   }
   const board = boardFlag(values.board);
-  return act(io, values.json === true, 'mt kanban assign', (service, by) => {
+  return act(io, values.json === true, 'mt kanban task assign', (service, by) => {
     const person = personRefused(name);
     if (person !== undefined) return person;
     const guard = offBoard(service, board, taskId);
@@ -511,15 +512,15 @@ function assign(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** `mt kanban link <parent> <child>`. */
+/** `mt kanban task link <parent> <child>`. */
 function link(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [parentId, childId, extra] = positionals;
   if (parentId === undefined || childId === undefined || extra !== undefined) {
-    throw new UsageError('kanban link takes a parent task id and a child task id');
+    throw new UsageError('kanban task link takes a parent task id and a child task id');
   }
   const board = boardFlag(values.board);
-  return act(io, values.json === true, 'mt kanban link', (service, by) => {
+  return act(io, values.json === true, 'mt kanban task link', (service, by) => {
     const guard = offBoard(service, board, parentId, childId);
     if (guard !== undefined) return guard;
     const r = service.link(parentId, childId, by);
@@ -529,16 +530,16 @@ function link(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** `mt kanban unblock <task> [comment]`, `stop <task>` and `archive <task>`: chat's, with the same outcomes. */
+/** `mt kanban task unblock <task> [comment]`, `stop <task>` and `archive <task>`: chat's, with the same outcomes. */
 function decide(verb: 'unblock' | 'stop' | 'archive', rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [taskId, ...words] = positionals;
   if (taskId === undefined || (verb !== 'unblock' && words.length > 0)) {
-    throw new UsageError(`kanban ${verb} takes a task id${verb === 'unblock' ? ', and a comment if you like' : ''}`);
+    throw new UsageError(`kanban task ${verb} takes a task id${verb === 'unblock' ? ', and a comment if you like' : ''}`);
   }
   const comment = words.join(' ').trim();
   const board = boardFlag(values.board);
-  return act(io, values.json === true, `mt kanban ${verb}`, (service, by) => {
+  return act(io, values.json === true, `mt kanban task ${verb}`, (service, by) => {
     const guard = offBoard(service, board, taskId);
     if (guard !== undefined) return guard;
     switch (verb) {
@@ -554,7 +555,7 @@ function decide(verb: 'unblock' | 'stop' | 'archive', rest: readonly string[], i
         const id = r.task.taskId;
         const said =
           r.run.outcome === 'cancelled'
-            ? `stopped ${id}: its run was cancelled, and the task is blocked (needs_input); mt kanban unblock ${id} runs it again`
+            ? `stopped ${id}: its run was cancelled, and the task is blocked (needs_input); mt kanban task unblock ${id} runs it again`
             : `${id}'s run had already reported (${r.run.outcome ?? 'undecided'}); it closes when its agent's turn ends, and the task keeps that outcome`;
         return { ok: true, lines: [said], json: { task_id: id, run_id: r.run.runId, run_outcome: r.run.outcome }, nudge: true };
       }
@@ -567,17 +568,17 @@ function decide(verb: 'unblock' | 'stop' | 'archive', rest: readonly string[], i
   });
 }
 
-/** `mt kanban comment <task> <text>`: an operator's comment, which steers the task's agent (spec §7.5). */
+/** `mt kanban task comment <task> <text>`: an operator's comment, which steers the task's agent (spec §7.5). */
 function comment(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [taskId, ...words] = positionals;
   const text = words.join(' ').trim();
-  if (taskId === undefined || text === '') throw new UsageError('kanban comment takes a task id and the comment');
+  if (taskId === undefined || text === '') throw new UsageError('kanban task comment takes a task id and the comment');
   const board = boardFlag(values.board);
   if (Buffer.byteLength(text, 'utf8') > WORKER_LIMITS.comment) {
     return Promise.resolve(early(io, values.json === true, 'too_large', `A comment is at most ${WORKER_LIMITS.comment} bytes.`));
   }
-  return act(io, values.json === true, 'mt kanban comment', (service, by) => {
+  return act(io, values.json === true, 'mt kanban task comment', (service, by) => {
     const guard = offBoard(service, board, taskId);
     if (guard !== undefined) return guard;
     const r = service.comment(taskId, text, by, { steers: true });
@@ -591,11 +592,13 @@ function comment(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** `mt kanban <command>` outside a board run: the operator's. */
-export async function operatorCommand(command: string | undefined, rest: readonly string[], io: MtIo): Promise<number> {
-  switch (command) {
-    case 'board':
-      return board(rest, io);
+/** The verbs of `mt kanban task`: chat's task commands that a terminal has (spec §2.6). */
+export const TASK_COMMANDS: readonly string[] = ['new', 'list', 'show', 'assign', 'link', 'unblock', 'stop', 'archive', 'comment'];
+
+/** `mt kanban task <verb> …`. */
+function task(args: readonly string[], io: MtIo): Promise<number> {
+  const [verb, ...rest] = args;
+  switch (verb) {
     case 'new':
       return create(rest, io);
     case 'list':
@@ -609,10 +612,17 @@ export async function operatorCommand(command: string | undefined, rest: readonl
     case 'unblock':
     case 'stop':
     case 'archive':
-      return decide(command, rest, io);
+      return decide(verb, rest, io);
     case 'comment':
       return comment(rest, io);
     default:
-      throw new UsageError(`unknown command: kanban${command === undefined ? '' : ` ${command}`}`);
+      throw new UsageError(`kanban task takes ${TASK_COMMANDS.slice(0, -1).join(', ')} or ${TASK_COMMANDS.at(-1)}`);
   }
+}
+
+/** `mt kanban task …` and `mt kanban board …`, outside a board run: the operator's. */
+export async function operatorCommand(command: string, rest: readonly string[], io: MtIo): Promise<number> {
+  if (command === 'board') return board(rest, io);
+  if (command === 'task') return task(rest, io);
+  throw new UsageError(`unknown command: kanban ${command}`);
 }

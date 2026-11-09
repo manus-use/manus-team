@@ -45,8 +45,8 @@ export function operatorName(io: MtIo): string {
 
 /**
  * A board run's shell: the environment the gateway gives a run's agent (spec
- * §7.2). The operator's commands refuse to run in one, and there `mt kanban show`,
- * `comment` and `link` are the worker's.
+ * §7.2). The operator's commands, `mt kanban task`, `board` and `gate`, refuse
+ * to run in one.
  */
 export function inBoardRun(env: Env): boolean {
   return env['MT_KANBAN_RUN'] !== undefined || env['MT_KANBAN_TOKEN'] !== undefined;
