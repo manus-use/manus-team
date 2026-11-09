@@ -27,6 +27,10 @@ import type { MtIo } from './mt.js';
  */
 export const ANSWER_TIMEOUT_MS = 15 * 60_000;
 
+/** What a worker command says outside a board run. */
+export const NOT_IN_A_RUN =
+  'mt kanban works only inside a board run: MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET must all be set';
+
 const USAGE = `usage: mt kanban <${WORKER_COMMANDS.join('|')}>, with its input as JSON on stdin`;
 
 /** All of a stream, or undefined once it passes `maxBytes`. */
@@ -84,7 +88,7 @@ export async function kanbanCommand(command: string | undefined, rest: readonly 
     say({
       ok: false,
       code: 'not_in_a_run',
-      message: 'mt kanban works only inside a board run: MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET must all be set',
+      message: NOT_IN_A_RUN,
     });
     return 1;
   }

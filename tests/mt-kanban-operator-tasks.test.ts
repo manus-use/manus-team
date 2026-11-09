@@ -303,13 +303,13 @@ describe('the task commands', () => {
       const r = await mt([verb, 'k_1']);
       expect(r.code).toBe(2);
       expect(r.out).toBe('');
-      expect(r.err.split('\n')[0]).toBe(`mt: unknown command: kanban ${verb}`);
+      expect(r.err.split('\n')[0]).toBe(`mt: unknown command: kanban ${verb}; the operator's command is mt kanban task ${verb}`);
     }
-    // show, comment and link are the worker's names, here as in a run: they take no arguments.
+    // show, comment and link are the worker's names, here as in a run: outside one, they need one.
     for (const argv of [['show', 'k_1'], ['comment', 'k_1', 'hello'], ['link', 'k_1', 'k_2'], ['show', 'k_1', '--json']]) {
       const r = await mt(argv);
-      expect(r.code).toBe(2);
-      expect(JSON.parse(r.out)).toMatchObject({ ok: false, code: 'bad_request' });
+      expect(r.code).toBe(1);
+      expect(JSON.parse(r.out)).toMatchObject({ ok: false, code: 'not_in_a_run' });
     }
     expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 0 });
     expect(nudges).toBe(0);

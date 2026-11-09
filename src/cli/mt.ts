@@ -4,7 +4,7 @@ import { jsonLine } from './operator.js';
 import { LIST_FILTERS } from '../kanban/chat-parse.js';
 import { gateAdd, gateList, gateRemove, inBoardRun, runShellRefusal } from './gate.js';
 import { WORKER_COMMANDS } from '../kanban/worker.js';
-import { kanbanCommand } from './kanban.js';
+import { kanbanCommand, NOT_IN_A_RUN } from './kanban.js';
 import { operatorCommand, TASK_COMMANDS } from './operator.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
@@ -141,10 +141,12 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
 /**
  * Whose `mt kanban <command>` this is. `task`, `board` and `gate` are the
  * operator's, refused in a board run's shell. A worker's name is the worker
- * CLI's in any shell, where outside a run it says it needs one; so an agent's
- * `show`, `comment` and `link` are always the worker's. Any other name is
- * answered in the worker's JSON in a run's shell, which an agent acts on, and
- * with the usage elsewhere.
+ * CLI's in any shell, so an agent's `show`, `comment` and `link` are always the
+ * worker's; outside a run it says it needs one, before looking at its
+ * arguments, and for those three that the operator's is under `task`. Any other
+ * name is answered in the worker's JSON in a run's shell, which an agent acts
+ * on, and with the usage elsewhere, which names `mt kanban task <name>` when
+ * the name is a task verb: a hint, never an alias.
  */
 async function kanban(command: string | undefined, rest: readonly string[], io: MtIo): Promise<number> {
   if (command !== undefined && OPERATOR_GROUPS.includes(command)) {
@@ -152,8 +154,16 @@ async function kanban(command: string | undefined, rest: readonly string[], io: 
     return command === 'gate' ? gate(rest, io) : await operatorCommand(command, rest, io);
   }
   const workers = command !== undefined && (WORKER_COMMANDS as readonly string[]).includes(command);
-  if (workers || inBoardRun(io.env)) return await kanbanCommand(command, rest, io);
-  throw new UsageError(`unknown command: kanban${command === undefined ? '' : ` ${command}`}`);
+  if (inBoardRun(io.env)) return await kanbanCommand(command, rest, io);
+  // An operator's task command's name is the operator's hint: `mt kanban show k_1` needs `task`.
+  const operators = command !== undefined && TASK_COMMANDS.includes(command);
+  if (workers) {
+    const hint = operators ? `; the operator's is mt kanban task ${command}` : '';
+    io.out(JSON.stringify({ ok: false, code: 'not_in_a_run', message: `${NOT_IN_A_RUN}${hint}` }));
+    return 1;
+  }
+  const hint = operators ? `; the operator's command is mt kanban task ${command}` : '';
+  throw new UsageError(`unknown command: kanban${command === undefined ? '' : ` ${command}`}${hint}`);
 }
 
 /** Exit codes: 0 done, 1 refused or a check failed, 2 the command line was wrong. */
