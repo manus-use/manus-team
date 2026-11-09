@@ -73,7 +73,7 @@ const USAGE = [
   '  mt kanban gate add <task_id> [--timeout <s>] -- <command...>',
   '  mt kanban gate list <task_id>',
   '  mt kanban gate remove <task_id> <gate_id>',
-  "in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
+  "the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
   '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
 ].join('\n');
 
