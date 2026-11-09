@@ -610,6 +610,7 @@ export function claim(db: Db, input: ClaimInput, now: number): Result<{ run: Run
         own: null,
         roleWorkspace: agent ? input.claimant.roleWorkspace : undefined,
         upstream: parents.length > 0 ? parents.map((p) => p.workspace) : from === undefined ? [] : [from.workspace],
+        boardWorkspace: getBoard(d, task.board)?.workspace ?? null,
       });
       if ('conflict' in resolved) {
         if (agent) {

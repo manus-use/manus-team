@@ -9,7 +9,7 @@ import { DEFAULT_WORKSPACE } from '../core/registry.js';
  * 2. the assignee role's, if the role sets one explicitly;
  * 3. its parents' -- or, with no parents, the task it was created from -- if
  *    those with a fixed workspace all share one;
- * 4. `default`.
+ * 4. its board's workspace, if the board names one (spec §16); else `default`.
  *
  * When the parents disagree, rule 4 is not applied either: `default` would be the
  * same guess with a different name. The caller decides what that means -- an
@@ -25,6 +25,8 @@ export interface WorkspaceFacts {
    * Null for one never fixed -- an archived parent nobody claimed -- which is ignored.
    */
   upstream: readonly (string | null)[];
+  /** The workspace of the task's board, if it names one: rule 4 in place of `default`. */
+  boardWorkspace?: string | null;
 }
 
 export type WorkspaceResolution = { workspace: string } | { conflict: readonly string[] };
@@ -36,5 +38,5 @@ export function resolveTaskWorkspace(f: WorkspaceFacts): WorkspaceResolution {
   const [only] = fixed;
   if (fixed.length === 1 && only !== undefined) return { workspace: only };
   if (fixed.length > 1) return { conflict: fixed };
-  return { workspace: DEFAULT_WORKSPACE };
+  return { workspace: f.boardWorkspace ?? DEFAULT_WORKSPACE };
 }
