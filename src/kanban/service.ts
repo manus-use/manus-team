@@ -369,7 +369,7 @@ export class KanbanService {
     return found;
   }
 
-  /** The boards, with their tasks by phase: `/kanban boards`. `including`: a chat's own board, archived or not. */
+  /** The boards, with their tasks by phase: `/kanban board list`. `including`: a chat's own board, archived or not. */
   boards(opts: { archived?: boolean; including?: string } = {}): BoardSummary[] {
     return boardSummaries(this.#db, opts);
   }

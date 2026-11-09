@@ -108,7 +108,7 @@ const TIERS: Readonly<Record<KanbanCommand['verb'], Tier>> = {
   review: 'talk',
   approve: 'talk',
   changes: 'talk',
-  boards: 'talk',
+  'board list': 'talk',
   // Moving a chat onto a board changes where its tasks go, and so which workspace
   // an agent may run in: an operator's, as creating a task is (spec §16).
   'board create': 'operate',
@@ -260,7 +260,7 @@ export class KanbanChat {
         const gates = this.#deps.service.listGates(command.taskId);
         return renderShow(r.view, gates.ok ? gates.gates : [], this.#deps.service.chatBoard(chatAt(key)).name);
       }
-      case 'boards': {
+      case 'board list': {
         // This chat's own board is always listed, archived or not, so it is marked.
         const current = this.#deps.service.chatBoard(chatAt(key)).name;
         return renderBoards(this.#deps.service.boards({ archived: command.archived, including: current }), current);

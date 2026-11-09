@@ -123,7 +123,7 @@ export function renderHelp(): string {
     [USAGE.review, assignee],
     [USAGE.approve, reviewer],
     [USAGE.changes, reviewer],
-    [USAGE.boards, talk],
+    [USAGE['board list'], talk],
     [USAGE['board create'], operate],
     [USAGE['board use'], operate],
     [USAGE['board set'], operate],
@@ -184,7 +184,7 @@ function counted(s: BoardSummary): string {
 }
 
 /**
- * `/kanban boards` (spec §16): each board, its tasks by phase, its own
+ * `/kanban board list` (spec §16): each board, its tasks by phase, its own
  * max_running and workspace where it sets them, and which one this chat is on.
  */
 export function renderBoards(summaries: readonly BoardSummary[], current: string): string {

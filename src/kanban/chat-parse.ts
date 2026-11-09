@@ -70,7 +70,7 @@ export type KanbanCommand =
   | { verb: 'gate remove'; taskId: string; gateId: number }
   | ReportCommand
   | ReviewCommand
-  | { verb: 'boards'; archived: boolean }
+  | { verb: 'board list'; archived: boolean }
   | BoardCommand;
 
 /** `/kanban board …` (spec §16): a board's name as typed, which the service checks. */
@@ -100,7 +100,7 @@ export const USAGE = {
   review: '/kanban review <task> [summary], and a line reviewer: <role or @person> unless the task names one',
   approve: '/kanban approve <task> [comment]',
   changes: '/kanban changes <task> <reason>',
-  boards: '/kanban boards [all]',
+  'board list': '/kanban board list [all]',
   'board create': '/kanban board create <name>',
   'board use': '/kanban board use <name>',
   'board set': '/kanban board set <name> max_running <number|none>, or workspace <workspace|none>',
@@ -253,12 +253,6 @@ export function parseKanban(arg: string): ParsedKanban {
     }
     case 'review':
       return parseReview(rest);
-    case 'boards': {
-      const w = words(rest, 0) ?? words(rest, 1);
-      const all = w?.[0]?.toLowerCase();
-      if (w === undefined || (all !== undefined && all !== 'all')) return usage('boards');
-      return { ok: true, command: { verb: 'boards', archived: all === 'all' } };
-    }
     case 'board':
       return parseBoard(rest);
     default:
@@ -292,12 +286,19 @@ function parseReview(text: string): ParsedKanban {
 }
 
 /**
- * `/kanban board create|use|archive <name>`, and `/kanban board set <name>` with
- * `max_running <number|none>` or `workspace <workspace|none>` (spec §16).
+ * `/kanban board list [all]`, `/kanban board create|use|archive <name>`, and
+ * `/kanban board set <name>` with `max_running <number|none>` or
+ * `workspace <workspace|none>` (spec §16).
  */
 function parseBoard(text: string): ParsedKanban {
   const [rawSub, rest] = shift(text);
   const sub = rawSub.toLowerCase();
+  if (sub === 'list') {
+    const w = words(rest, 0) ?? words(rest, 1);
+    const all = w?.[0]?.toLowerCase();
+    if (w === undefined || (all !== undefined && all !== 'all')) return usage('board list');
+    return { ok: true, command: { verb: 'board list', archived: all === 'all' } };
+  }
   if (sub === 'create' || sub === 'use' || sub === 'archive') {
     const verb = `board ${sub}` as const;
     const w = words(rest, 1);
@@ -319,7 +320,7 @@ function parseBoard(text: string): ParsedKanban {
         return usage('board set');
     }
   }
-  const verbs = (['board create', 'board use', 'board set', 'board archive'] as const).map((v) => `\`${USAGE[v]}\``);
+  const verbs = (['board list', 'board create', 'board use', 'board set', 'board archive'] as const).map((v) => `\`${USAGE[v]}\``);
   return { ok: false, usage: `Usage: ${verbs.join(', ')}` };
 }
 
