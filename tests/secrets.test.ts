@@ -183,10 +183,14 @@ describe('removeSecrets: reference-counted', () => {
  * keeps them, since a joined emoji and right-to-left text need them.
  */
 const INVISIBLES: Array<[string, string]> = [
-  ['an embedding', '\u202A'],
-  ['an override', '\u202E'],
+  ['a left-to-right embedding', '\u202A'],
+  ['a right-to-left embedding', '\u202B'],
   ['a pop', '\u202C'],
-  ['an isolate', '\u2066'],
+  ['a left-to-right override', '\u202D'],
+  ['a right-to-left override', '\u202E'],
+  ['a left-to-right isolate', '\u2066'],
+  ['a right-to-left isolate', '\u2067'],
+  ['a first-strong isolate', '\u2068'],
   ['a pop of an isolate', '\u2069'],
   ['a zero-width space', '\u200B'],
   ['a zero-width non-joiner', '\u200C'],
@@ -228,5 +232,20 @@ describe('redactKnownSecrets: invisible characters', () => {
     addSecrets(['sk-test-123456']);
     expect(withholdSecretPrefix('the key is sk-t\u200Be')).toBe('the key is ');
     expect(withholdSecretSuffix('t-12\u200B3456 and more')).toBe(' and more');
+  });
+
+  it('never cuts inside a secret complete on screen, for one that holds an invisible character itself', () => {
+    // Found by fuzzing: the cut as written falls inside the secret as it reads on screen.
+    const prefixSecret = '$\u202A$(?*[\\[$$(';
+    addSecrets([prefixSecret]);
+    const streamed = '$\u202A\u2069\u200C$\u202A$(?\u2068*[\u2069\\[\u200C$\u202A$(';
+    const kept = withholdSecretPrefix(streamed);
+    expect(kept).toBe('$\u202A\u2069\u200C');
+    expect(redactKnownSecrets(kept)).not.toMatch(/[(?*[\\]/);
+    clearSecrets();
+    addSecrets(['321133\u202E21']);
+    const tail = withholdSecretSuffix('3\u202E2113321 x');
+    expect(tail).toBe(' x');
+    expect(redactKnownSecrets(tail)).not.toMatch(/[123]/);
   });
 });

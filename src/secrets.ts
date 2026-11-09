@@ -126,22 +126,52 @@ export function clearSecrets(): void {
   reorder();
 }
 
+/** Whether text holds any of INVISIBLE's characters: not global, so it keeps no state between calls. */
+const ANY_INVISIBLE = new RegExp(INVISIBLE.source);
+
 /**
- * Text without its invisible characters, as it reads on screen, and where in
- * `text` each of its UTF-16 units is; or undefined when it has none.
+ * Text as it reads on screen, without its invisible characters, and where in
+ * the text they were, in order; or undefined when it has none, the common case,
+ * which then costs one regular expression test.
  */
-function onScreen(text: string): { text: string; at: number[] } | undefined {
-  let found = false;
-  for (let i = 0; i < text.length && !found; i += 1) found = isInvisible(text.charCodeAt(i));
-  if (!found) return undefined;
-  const at: number[] = [];
-  let out = '';
-  for (let i = 0; i < text.length; i += 1) {
-    if (isInvisible(text.charCodeAt(i))) continue;
-    at.push(i);
-    out += text[i];
+interface OnScreen {
+  text: string;
+  invisible: number[];
+}
+
+function onScreen(text: string): OnScreen | undefined {
+  if (!ANY_INVISIBLE.test(text)) return undefined;
+  const invisible: number[] = [];
+  for (const m of text.matchAll(INVISIBLE)) invisible.push(m.index);
+  return { text: text.replace(INVISIBLE, ''), invisible };
+}
+
+/**
+ * Where in the text the on-screen unit `k` is. The invisible character `j`
+ * comes after `invisible[j] - j` visible ones, which never decreases as `j`
+ * grows, so the ones before unit `k` are found by a binary search.
+ */
+function fromScreen(seen: OnScreen, k: number): number {
+  let lo = 0;
+  let hi = seen.invisible.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if ((seen.invisible[mid] as number) - mid <= k) lo = mid + 1;
+    else hi = mid;
   }
-  return { text: out, at };
+  return k + lo;
+}
+
+/** How many on-screen units come before position `at` of the text. */
+function toScreen(seen: OnScreen, at: number): number {
+  let lo = 0;
+  let hi = seen.invisible.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if ((seen.invisible[mid] as number) < at) lo = mid + 1;
+    else hi = mid;
+  }
+  return at - lo;
 }
 
 /** Every known secret's occurrences in `text`, a run of overlapping or touching ones of a secret as one span. */
@@ -183,7 +213,7 @@ export function redactKnownSecrets(text: string): string {
   const spans = occurrences(text);
   const seen = onScreen(text);
   if (seen !== undefined) {
-    for (const [s, e] of occurrences(seen.text)) spans.push([seen.at[s] as number, (seen.at[e - 1] as number) + 1]);
+    for (const [s, e] of occurrences(seen.text)) spans.push([fromScreen(seen, s), fromScreen(seen, e - 1) + 1]);
   }
   if (spans.length === 0) return text;
   spans.sort((a, b) => a[0] - b[0]);
@@ -191,7 +221,7 @@ export function redactKnownSecrets(text: string): string {
   let written = 0;
   let [start, end] = spans[0] as [number, number];
   for (const [s, e] of spans) {
-    if (s <= end || onlyInvisible(text, end, s)) {
+    if (s <= end || (seen !== undefined && onlyInvisible(text, end, s))) {
       end = Math.max(end, e);
       continue;
     }
@@ -223,7 +253,38 @@ export function withholdSecretPrefix(text: string): string {
   const seen = onScreen(text);
   if (seen === undefined) return text.slice(0, keep);
   const kept = prefixKept(seen.text);
-  return text.slice(0, Math.min(keep, kept >= seen.text.length ? text.length : (seen.at[kept] as number)));
+  const stricter = Math.min(keep, kept >= seen.text.length ? text.length : fromScreen(seen, kept));
+  return text.slice(0, settleKept(text, seen, stricter));
+}
+
+/**
+ * The stricter of the two cuts may fall inside a secret complete in the other
+ * form: one holding an invisible character, whole on screen but cut as written.
+ * So the cut moves back to the start of any secret it falls inside, as written
+ * or on screen, until it stops moving. Each move is backwards, so this ends.
+ */
+function settleKept(text: string, seen: OnScreen, from: number): number {
+  let keep = from;
+  for (let moved = true; moved; ) {
+    moved = false;
+    for (const secret of ordered) {
+      const at = text.indexOf(secret, Math.max(0, keep - secret.length + 1));
+      if (at !== -1 && at < keep) {
+        keep = at;
+        moved = true;
+      }
+    }
+    let shown = toScreen(seen, keep);
+    for (const secret of ordered) {
+      const at = seen.text.indexOf(secret, Math.max(0, shown - secret.length + 1));
+      if (at !== -1 && at < shown) {
+        keep = fromScreen(seen, at);
+        shown = at;
+        moved = true;
+      }
+    }
+  }
+  return keep;
 }
 
 /** How much of `text` withholdSecretPrefix keeps, as written. */
@@ -271,7 +332,35 @@ export function withholdSecretSuffix(text: string): string {
   const seen = onScreen(text);
   if (seen === undefined) return text.slice(drop);
   const dropped = suffixDropped(seen.text);
-  return text.slice(Math.max(drop, dropped === 0 ? 0 : (seen.at[dropped - 1] as number) + 1));
+  const stricter = Math.max(drop, dropped === 0 ? 0 : fromScreen(seen, dropped - 1) + 1);
+  return text.slice(settleDropped(text, seen, stricter));
+}
+
+/** settleKept's mirror: the cut moves on to the end of any secret it falls inside. Each move is forwards, so this ends. */
+function settleDropped(text: string, seen: OnScreen, from: number): number {
+  let drop = from;
+  for (let moved = true; moved; ) {
+    moved = false;
+    for (const secret of ordered) {
+      if (drop === 0) continue;
+      const at = text.lastIndexOf(secret, drop - 1);
+      if (at !== -1 && at + secret.length > drop) {
+        drop = at + secret.length;
+        moved = true;
+      }
+    }
+    let shown = toScreen(seen, drop);
+    for (const secret of ordered) {
+      if (shown === 0) continue;
+      const at = seen.text.lastIndexOf(secret, shown - 1);
+      if (at !== -1 && at + secret.length > shown) {
+        drop = fromScreen(seen, at + secret.length - 1) + 1;
+        shown = at + secret.length;
+        moved = true;
+      }
+    }
+  }
+  return drop;
 }
 
 /** How much of `text`'s start withholdSecretSuffix drops, as written. */

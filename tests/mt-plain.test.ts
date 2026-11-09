@@ -42,10 +42,14 @@ describe('line', () => {
 
 /** Each kind of character that shows nothing, which plain text drops before it masks. */
 const INVISIBLES: Array<[string, string]> = [
-  ['an embedding', '\u202A'],
-  ['an override', '\u202E'],
+  ['a left-to-right embedding', '\u202A'],
+  ['a right-to-left embedding', '\u202B'],
   ['a pop', '\u202C'],
-  ['an isolate', '\u2066'],
+  ['a left-to-right override', '\u202D'],
+  ['a right-to-left override', '\u202E'],
+  ['a left-to-right isolate', '\u2066'],
+  ['a right-to-left isolate', '\u2067'],
+  ['a first-strong isolate', '\u2068'],
   ['a pop of an isolate', '\u2069'],
   ['a zero-width space', '\u200B'],
   ['a zero-width non-joiner', '\u200C'],
