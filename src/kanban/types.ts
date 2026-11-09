@@ -42,7 +42,7 @@ export const ENDED_OUTCOMES = [
   'interrupted',
 ] as const;
 /** Recorded by a person's action, not by the run: `/kanban stop`, assign, archive. */
-const SUPERSEDING_OUTCOMES = ['cancelled', 'superseded'] as const;
+export const SUPERSEDING_OUTCOMES = ['cancelled', 'superseded'] as const;
 
 export type ReportedOutcome = (typeof REPORTED_OUTCOMES)[number];
 export type EndedOutcome = (typeof ENDED_OUTCOMES)[number];
