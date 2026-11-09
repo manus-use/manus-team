@@ -1,5 +1,5 @@
 import type { BoardEntry, BoardSummary, TaskView } from '../db/kanban-read.js';
-import { counted, listed, runState } from '../kanban/chat-render.js';
+import { counted, listed, runState, waitingLine } from '../kanban/chat-render.js';
 import type { DisplayStatus } from '../kanban/status.js';
 import type { Assignee, GateRow } from '../kanban/types.js';
 import { redactKnownSecrets } from '../secrets.js';
@@ -96,6 +96,7 @@ export function showText(view: TaskView, gates: readonly GateRow[]): string[] {
     `${line(task.title)} (${task.taskId}): ${view.status}`,
     `assignee: ${who(task.assignee)} · reviewer: ${who(task.reviewer)} · workspace: ${task.workspace === null ? 'not yet fixed' : line(task.workspace, 80)} · board: ${line(task.board, 80)}`,
   ];
+  if (view.waitingOn !== undefined) out.push(waitingLine(view.waitingOn));
   if (task.phase === 'blocked' && task.blockKind !== null) {
     out.push(`blocked (${task.blockKind}): ${line(task.blockReason ?? '', 500)}`);
   }

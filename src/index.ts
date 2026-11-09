@@ -226,6 +226,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       checks: { workspaceDirs: team.workspaces, env: process.env },
       // A board's own max_running is held inside the gateway's (spec §16).
       maxRunning: config.kanban.maxRunning,
+      // So /kanban task show can say a task is waiting on its role's limit (spec §6.3).
+      ...(config.kanban.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: config.kanban.maxRunningPerRole }),
     });
     const socket = workerSocketPath(config.home);
     dispatcher = new Dispatcher({

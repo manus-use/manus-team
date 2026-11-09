@@ -119,6 +119,8 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     roles: team.roles,
     workspaces: new Set(team.workspaces.keys()),
     supervisedRoles: true,
+    // So mt kanban task show can say a task is waiting on its role's limit (spec §6.3).
+    ...(settings.kanban?.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: settings.kanban.maxRunningPerRole }),
   });
   return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, close: () => db.close() };
 }

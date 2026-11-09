@@ -11,6 +11,7 @@ import {
   getBoard,
   getRun,
   getTask,
+  openAgentRunCountAs,
   runsOf,
   taskView,
   type BoardEntry,
@@ -21,7 +22,7 @@ import {
 import { buildEnv } from '../driver/env.js';
 import { nameProblem, visible } from '../names.js';
 import { redactKnownSecrets } from '../secrets.js';
-import type { Role } from '../roles.js';
+import { roleLimit, type Role } from '../roles.js';
 import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
@@ -119,6 +120,11 @@ export interface KanbanServiceDeps {
    * §16). Absent -- tests of the board alone -- a board's is not bounded.
    */
   maxRunning?: number;
+  /**
+   * The gateway's `kanban.max_running_per_role`, for a role with none of its own:
+   * so `show` can say a task is waiting on its role's limit (spec §6.3).
+   */
+  maxRunningPerRole?: number;
 }
 
 /** A report's options: aborted when the gateway stops, which kills its gates and applies nothing. */
@@ -305,6 +311,7 @@ export class KanbanService {
   readonly #supervisedRoles: boolean;
   readonly #checks: ReportChecks | undefined;
   readonly #maxRunning: number;
+  readonly #maxRunningPerRole: number | undefined;
   /**
    * Tasks a report is running its checks for, with the task's workspace and the
    * report's end. One at a time per task: a second report would run the same
@@ -324,6 +331,7 @@ export class KanbanService {
     this.#supervisedRoles = deps.supervisedRoles ?? false;
     this.#checks = deps.checks;
     this.#maxRunning = deps.maxRunning ?? Number.MAX_SAFE_INTEGER;
+    this.#maxRunningPerRole = deps.maxRunningPerRole;
   }
 
   /**
@@ -983,7 +991,28 @@ export class KanbanService {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
     const view = taskView(this.#db, taskId);
-    return view === undefined ? board.refuse('not_found', `no task ${taskId}`) : { ok: true, view };
+    if (view === undefined) return board.refuse('not_found', `no task ${taskId}`);
+    const waitingOn = this.#waitingOnRole(view);
+    return { ok: true, view: waitingOn === undefined ? view : { ...view, waitingOn } };
+  }
+
+  /**
+   * The role limit a task the dispatcher would otherwise try is waiting on (spec
+   * §6.3): ready for work, or in review with nobody reviewing yet, with no open
+   * run and no cooldown, and its role at its max_running. Only the role's limit:
+   * a busy workspace, or the gateway's or a board's limit, is not said.
+   */
+  #waitingOnRole(view: TaskView): TaskView['waitingOn'] {
+    const { task } = view;
+    if (view.status !== 'ready' && view.status !== 'review') return undefined;
+    if (view.runs.some((r) => r.endedAt === null)) return undefined;
+    if (task.cooldownUntil !== null && task.cooldownUntil > this.#clock.now()) return undefined;
+    const who = task.phase === 'review' ? task.reviewer : task.assignee;
+    if (who?.kind !== 'role') return undefined;
+    const role = this.#roles.get(who.name);
+    const limit = role === undefined ? undefined : roleLimit(role, this.#maxRunningPerRole);
+    if (limit === undefined || openAgentRunCountAs(this.#db, who.name) < limit.limit) return undefined;
+    return { role: who.name, maxRunning: limit.limit };
   }
 
   /** Every task on a board -- or on every board -- with its display status (spec §4.1): `/kanban task list`. */
