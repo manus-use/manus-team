@@ -519,6 +519,15 @@ agent runs at once, across all workspaces. It defaults to `maxLiveSessions` (8 u
 cannot be above it. Set it lower to keep room for chat sessions. A person's task holds no
 workspace and does not count.
 
+A role can be capped too, so a burst of one role's tasks across many workspaces does not take
+every slot. `max_running: 2` in `roles/worker/config.yaml` lets at most two of `worker`'s runs be
+open at once; `kanban.max_running_per_role` in the gateway's config is the limit for every role
+that sets none of its own. A work run counts against the task's assignee, a review run against
+its reviewer. Both are read at startup and refused above `kanban.max_running`. A task whose role
+is at its limit waits, `/kanban task show` says so, and the tasks behind it, for other roles,
+still start. Here, `max_running: 2` on `worker` would run two of the three vendor tasks at once,
+and the third as soon as one of them ends.
+
 ### The tasks
 
 The research task:
@@ -557,7 +566,7 @@ How it runs:
 
 - The survey runs first; the three vendor tasks are todo until it is done.
 - Then all three are ready together and start in parallel, one in each workspace, up to
-  `kanban.max_running`.
+  `kanban.max_running` and `worker`'s own `max_running`, if it has one.
 - The write-up is todo until **all three** are done. It runs in `worker`, the role's own
   workspace, and its prompt holds all three summaries.
 - The vendor tasks' files stay in their own workspaces. That is why each is told to put its
@@ -768,7 +777,7 @@ Fix it with `/kanban task assign`, or, for parents in different workspaces, set 
 > `k_…` works in worker.
 
 A task's workspace is fixed at its first start and never changes after; `/kanban task workspace` is
-refused once it is fixed. A ready task queued behind another in its workspace, or waiting for a free slot under the gateway's or its board's `max_running`, is not stranded.
+refused once it is fixed. A ready task queued behind another in its workspace, or waiting for a free slot under the gateway's, its board's or its role's `max_running`, is not stranded.
 
 ### Stop, assign and archive
 
@@ -897,7 +906,9 @@ bot can move between boards as you need.
 
 The gateway's own `kanban.max_running` still holds over every board together, so a board's own
 is at most that; `none` clears it. One agent at a time per workspace is still the gateway's rule,
-across boards: two boards' tasks in one workspace take turns.
+across boards: two boards' tasks in one workspace take turns. A role's own `max_running` holds
+across boards too: a role at its limit waits on every board, and each board goes on to its tasks
+for other roles.
 
 ```
 /kanban board set web-app workspace web

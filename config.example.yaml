@@ -101,3 +101,15 @@ agent:
   passEnv: []
   # passEnv:
   #   - ANTHROPIC_API_KEY
+
+# The task board. Off by default; these keys are snake_case, as the kanban
+# design spells them, and are set in this file only.
+# kanban:
+#   enabled: true
+#   # Open agent runs at once, across every board and role. Defaults to
+#   # maxLiveSessions, and may not be above it.
+#   max_running: 6
+#   # Open agent runs as any one role at once, for a role whose config.yaml sets
+#   # no max_running of its own. Unset, a role has no limit of its own. May not
+#   # be above max_running.
+#   max_running_per_role: 2
