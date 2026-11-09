@@ -33,7 +33,7 @@ beforeEach(() => {
   mkdirSync(workspace);
   startupEnv = {
     MT_HOME: home,
-    MT_DB: join(home, 'gateway.db'),
+    MT_DB: join(home, 'team.db'),
     MT_WORKSPACE: workspace,
     MT_OWNER_OPEN_ID: 'ou_owner',
     LARK_APP_ID: 'cli_app',
@@ -91,6 +91,20 @@ describe('createGateway', () => {
     const gateway = await createGateway(config, team);
     try {
       expect(redactKnownSecrets(`x ${config.lark.appSecret} y`)).toBe(`x ${MASK} y`);
+    } finally {
+      await gateway.stop();
+    }
+  });
+
+  it('logs the schema version with the database it is in, so a wrong file shows at once', async () => {
+    const lines: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    const gateway = await createGateway(config, team);
+    try {
+      expect(lines.some((l) => l.endsWith(` schema at version 6 (${config.dbPath})\n`))).toBe(true);
     } finally {
       await gateway.stop();
     }

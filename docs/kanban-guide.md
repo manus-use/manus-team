@@ -34,7 +34,7 @@ needs operator tier, except a person's reports on their own task.
 
 | Who | Commands |
 |---|---|
-| Anyone at talk tier | `/kanban help`, `list`, `show`, `comment`, `gate list`, `boards` |
+| Anyone at talk tier | `/kanban help`, `list`, `show`, `comment`, `gate list`, `board list` |
 | Operators | `/kanban new`, `assign`, `link`, `workspace`, `unblock`, `stop`, `archive`, `gate add`, `gate remove`, `board create`, `board use`, `board set`, `board archive`, and every talk-tier command |
 | The person a task is assigned to | `/kanban done`, `block` and `review` on that task, while it is being worked on |
 | The person named as a task's reviewer, or any operator | `/kanban approve` and `changes` on that task, while it waits for review |
@@ -873,14 +873,14 @@ bot can move between boards as you need.
 ### Listing the boards
 
 ```
-/kanban boards
+/kanban board list
 ```
 
 > **default**: 2 open, 14 done
 > **web-app** (this chat): 3 open, 1 in review · max\_running 1 · workspace web
 > `/kanban board use <name>` moves this chat to another board; `/kanban board create <name>` makes one.
 
-`/kanban boards all` lists archived boards too.
+`/kanban board list all` lists archived boards too.
 
 ### A board's own limit and workspace
 
@@ -917,7 +917,7 @@ workspace as its own.
 It is refused while any of the board's tasks is open, in review or blocked: finish or archive
 them first. Once it is archived, nothing more is added to it, and no chat can move onto it; its
 tasks stay, and `/kanban show` still shows them. A chat still on it is told to move before its
-next `/kanban new`, and its `/kanban boards` still lists it, marked archived. `default` is never
+next `/kanban new`, and its `/kanban board list` still lists it, marked archived. `default` is never
 archived.
 
 ### Who may do what
@@ -926,7 +926,49 @@ Anyone at talk tier may list the boards. Creating, using, setting and archiving 
 operator commands: moving a chat onto a board changes where its tasks go, and so which workspace
 an agent may run in.
 
-## 11. Rules of thumb
+## 11. From a terminal
+
+Whoever runs the gateway can drive the board from a shell on its host, with `mt kanban`: chat's
+commands, with the same meaning, recorded as `operator:<login>`, the login of the account `mt`
+runs as (under `sudo -u`, the service account). It needs no Lark settings,
+and works beside the running gateway.
+
+```
+mt kanban board create web-app
+mt kanban new "Draft the Q3 summary" --board web-app --assignee docs-writer --workspace docs \
+    --outcome "a page in the team wiki" --verify "the page links every source" \
+    --body "Use last quarter's page as the model."
+mt kanban list --board web-app
+mt kanban show k_…
+mt kanban stop k_…
+```
+
+> created k\_…: Draft the Q3 summary, for role docs-writer, in docs, on board web-app
+
+- There is no `board use`: a terminal is no chat. `new` and `list` take `--board <name>`, and
+  are on `default` without it.
+- The commands that name a task (`show`, `assign`, `link`, `unblock`, `stop`, `archive` and
+  `comment`) work on a task on any board, by id. Give them `--board <name>` to be sure: a task
+  on another board is then refused, and for `link` both tasks must be on it.
+
+  > mt: task k\_… is on board default, not web-app
+- `new` takes the lines of `/kanban new` as flags: `--assignee`, `--reviewer`, `--workspace`,
+  `--parent` (as often as needed), `--outcome`, `--verify`, `--constraints`, `--boundaries` and
+  `--stop-when`. The body is `--body "…"`, or `--body-file` with a file, or `-` to read it from
+  stdin.
+- Only roles: give a person work from chat, by @-mention.
+- No chat follows a task created here, so nobody is told when it is done or blocks. Look with
+  `mt kanban show`, or create it from chat if a group should hear.
+- After a change, the running gateway is told to look for work at once, and to stop the agent
+  of a run the change ended. If no gateway answers, `mt` says so, and why; the change stands,
+  and the gateway acts on it at its next sweep, or when it next starts. Do not run the command
+  again: a second `new` makes a second task. If the board is off on the gateway
+  (`kanban.enabled` unset, or false), `mt` says that instead: nothing runs the change until it
+  is turned on.
+- Add `--json` for one line of JSON, for scripts. `mt` exits 0 when done, 1 when refused, and
+  2 for a wrong command line.
+
+## 12. Rules of thumb
 
 - Write `outcome:` and `verify:` on every task you care about, and `stop when:` on anything
   risky.

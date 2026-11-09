@@ -3,6 +3,7 @@ import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
 import type { DisplayStatus } from './status.js';
 import type { Contract } from './types.js';
+import { WORKER_LIMITS } from './limits.js';
 
 /**
  * `/kanban` as typed in chat (spec §9.1), parsed into what to do. Pure: no
@@ -70,13 +71,19 @@ export type KanbanCommand =
   | { verb: 'gate remove'; taskId: string; gateId: number }
   | ReportCommand
   | ReviewCommand
-  | { verb: 'boards'; archived: boolean }
+  | { verb: 'board list'; archived: boolean }
   | BoardCommand;
+
+/** What `board set` changes (spec §16.6): a board's own max_running, or its workspace; null clears either. */
+export interface BoardSetting {
+  maxRunning?: number | null;
+  workspace?: string | null;
+}
 
 /** `/kanban board …` (spec §16): a board's name as typed, which the service checks. */
 export type BoardCommand =
   | { verb: 'board create' | 'board use' | 'board archive'; board: string }
-  | { verb: 'board set'; board: string; change: { maxRunning?: number | null; workspace?: string | null } };
+  | { verb: 'board set'; board: string; change: BoardSetting };
 
 export type ParsedKanban = { ok: true; command: KanbanCommand } | { ok: false; usage: string };
 
@@ -100,7 +107,7 @@ export const USAGE = {
   review: '/kanban review <task> [summary], and a line reviewer: <role or @person> unless the task names one',
   approve: '/kanban approve <task> [comment]',
   changes: '/kanban changes <task> <reason>',
-  boards: '/kanban boards [all]',
+  'board list': '/kanban board list [all]',
   'board create': '/kanban board create <name>',
   'board use': '/kanban board use <name>',
   'board set': '/kanban board set <name> max_running <number|none>, or workspace <workspace|none>',
@@ -157,6 +164,49 @@ function echoed(word: string, max: number): string {
   const text = redactKnownSecrets(stripControl(word));
   if (text.length <= max) return forDisplay(text);
   return forDisplay(`${text.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, '')}…`);
+}
+
+/**
+ * `board set`'s setting and value, as typed, in chat or at a terminal (spec
+ * §16.3): `max_running` a whole number from 1, or `none`; `workspace` a name, or
+ * `none`, which the service checks. Undefined for anything else.
+ */
+export function boardSetting(setting: string, value: string): BoardSetting | undefined {
+  const none = value.toLowerCase() === 'none';
+  switch (setting.toLowerCase()) {
+    case 'max_running': {
+      const n = Number(value);
+      if (!none && !(/^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(n))) return undefined;
+      return { maxRunning: none ? null : n };
+    }
+    case 'workspace':
+      return { workspace: none ? null : value };
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * What a new task may hold, from chat or a terminal: the limits a worker's `mt
+ * kanban create` has (`WORKER_LIMITS`), so a task is the same size whoever made
+ * it. Undefined when it fits; otherwise why not, with a contract field's name
+ * given through `name`, which chat escapes.
+ */
+export function tooBig(
+  task: { title: string; body: string; contract: Contract },
+  name: (field: string) => string = (field) => field,
+): string | undefined {
+  const size = (text: string) => Buffer.byteLength(text, 'utf8');
+  if (size(task.title) > WORKER_LIMITS.title) {
+    return `A title is at most ${WORKER_LIMITS.title} bytes; put the rest in the body.`;
+  }
+  if (size(task.body) > WORKER_LIMITS.body) return `A body is at most ${WORKER_LIMITS.body} bytes.`;
+  for (const [field, value] of Object.entries(task.contract)) {
+    if (value !== undefined && size(value) > WORKER_LIMITS.contractField) {
+      return `The contract's ${name(field)} is at most ${WORKER_LIMITS.contractField} bytes.`;
+    }
+  }
+  return undefined;
 }
 
 function usage(verb: keyof typeof USAGE): ParsedKanban {
@@ -253,12 +303,6 @@ export function parseKanban(arg: string): ParsedKanban {
     }
     case 'review':
       return parseReview(rest);
-    case 'boards': {
-      const w = words(rest, 0) ?? words(rest, 1);
-      const all = w?.[0]?.toLowerCase();
-      if (w === undefined || (all !== undefined && all !== 'all')) return usage('boards');
-      return { ok: true, command: { verb: 'boards', archived: all === 'all' } };
-    }
     case 'board':
       return parseBoard(rest);
     default:
@@ -292,12 +336,19 @@ function parseReview(text: string): ParsedKanban {
 }
 
 /**
- * `/kanban board create|use|archive <name>`, and `/kanban board set <name>` with
- * `max_running <number|none>` or `workspace <workspace|none>` (spec §16).
+ * `/kanban board list [all]`, `/kanban board create|use|archive <name>`, and
+ * `/kanban board set <name>` with `max_running <number|none>` or
+ * `workspace <workspace|none>` (spec §16).
  */
 function parseBoard(text: string): ParsedKanban {
   const [rawSub, rest] = shift(text);
   const sub = rawSub.toLowerCase();
+  if (sub === 'list') {
+    const w = words(rest, 0) ?? words(rest, 1);
+    const all = w?.[0]?.toLowerCase();
+    if (w === undefined || (all !== undefined && all !== 'all')) return usage('board list');
+    return { ok: true, command: { verb: 'board list', archived: all === 'all' } };
+  }
   if (sub === 'create' || sub === 'use' || sub === 'archive') {
     const verb = `board ${sub}` as const;
     const w = words(rest, 1);
@@ -306,20 +357,10 @@ function parseBoard(text: string): ParsedKanban {
   if (sub === 'set') {
     const [board, setting, value] = words(rest, 3) ?? [];
     if (board === undefined || setting === undefined || value === undefined) return usage('board set');
-    const none = value.toLowerCase() === 'none';
-    switch (setting.toLowerCase()) {
-      case 'max_running': {
-        const n = Number(value);
-        if (!none && !(/^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(n))) return usage('board set');
-        return { ok: true, command: { verb: 'board set', board, change: { maxRunning: none ? null : n } } };
-      }
-      case 'workspace':
-        return { ok: true, command: { verb: 'board set', board, change: { workspace: none ? null : value } } };
-      default:
-        return usage('board set');
-    }
+    const change = boardSetting(setting, value);
+    return change === undefined ? usage('board set') : { ok: true, command: { verb: 'board set', board, change } };
   }
-  const verbs = (['board create', 'board use', 'board set', 'board archive'] as const).map((v) => `\`${USAGE[v]}\``);
+  const verbs = (['board list', 'board create', 'board use', 'board set', 'board archive'] as const).map((v) => `\`${USAGE[v]}\``);
   return { ok: false, usage: `Usage: ${verbs.join(', ')}` };
 }
 

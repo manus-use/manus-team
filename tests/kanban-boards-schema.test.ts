@@ -23,7 +23,7 @@ function migratedTo(version: number): Db {
   for (const f of readdirSync(SCHEMA_DIR)) {
     if (/^\d+_.*\.sql$/.test(f) && Number(f.slice(0, f.indexOf('_'))) <= version) copyFileSync(join(SCHEMA_DIR, f), join(only, f));
   }
-  const d = openDb(join(dir, 'gateway.db'));
+  const d = openDb(join(dir, 'team.db'));
   migrate(d, only);
   return d;
 }

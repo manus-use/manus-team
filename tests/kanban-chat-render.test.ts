@@ -176,6 +176,23 @@ describe('/kanban show', () => {
     expect(renderList(boardList(h.db), undefined)).toContain(`: Rotate ${MASK} today ·`);
   });
 
+  it('masks a secret split by a character that shows nothing, and keeps such characters elsewhere', () => {
+    // Written before the secret is known, as a task written before a role's .env changed.
+    const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+    const k = newTask(h.db, {
+      title: `Rotate sk-live-12\u200B34567890 ${family}`,
+      body: `key sk-live-\u202E1234567890 and שלום\u200F ok`,
+    });
+    addSecrets(['sk-live-1234567890']);
+    const view = taskView(h.db, k.taskId);
+    if (view === undefined) throw new Error('no view');
+    const text = renderShow(view, []);
+    expect(text.split('\n')[0]).toBe(`**Rotate ${MASK} ${family}** \`${k.taskId}\`: ready`);
+    expect(text).toContain(`key ${MASK} and שלום\u200F ok`);
+    expect(text).not.toContain('sk-live');
+    expect(renderList(boardList(h.db), undefined)).toContain(`: Rotate ${MASK} ${family} ·`);
+  });
+
   it('escapes a line that would open or close a code fence inside a quoted body', () => {
     const k = newTask(h.db, { body: 'before\n```\n~~~~ tilde\n  ```js\nafter' });
     const view = taskView(h.db, k.taskId);

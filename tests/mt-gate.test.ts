@@ -34,7 +34,7 @@ beforeEach(() => {
       '',
     ].join('\n'),
   );
-  gateway = openDb(join(f.home, 'gateway.db'));
+  gateway = openDb(join(f.home, 'team.db'));
   migrate(gateway, SCHEMA_DIR);
   const r = createTask(gateway, { title: 'a task', workspace: 'default', createdBy: ALICE, createdVia: VIA }, NOW);
   if (!r.ok) throw new Error(r.message);
@@ -119,7 +119,7 @@ describe('mt kanban gate', () => {
     gateway = openDb(join(f.root, 'unused.db'));
     expect(await mt(['list', 'k_1'])).toMatchObject({
       code: 1,
-      err: `mt: there is no board at ${join(f.home, 'gateway.db')}: the gateway creates its database when it first starts`,
+      err: `mt: there is no board at ${join(f.home, 'team.db')}: the gateway creates its database when it first starts`,
     });
   });
 
@@ -163,7 +163,7 @@ describe('mt kanban gate', () => {
 
 describe('the board shared with a running gateway', () => {
   it("writes beside the gateway's reads, which see it at once", () => {
-    const shell = openDb(join(f.home, 'gateway.db'));
+    const shell = openDb(join(f.home, 'team.db'));
     try {
       gateway.exec('BEGIN');
       expect(gatesOf(gateway, taskId)).toEqual([]);
@@ -177,7 +177,7 @@ describe('the board shared with a running gateway', () => {
   });
 
   it("waits out the gateway's write, retrying, and writes nothing if it never ends", () => {
-    const shell = openDb(join(f.home, 'gateway.db'));
+    const shell = openDb(join(f.home, 'team.db'));
     try {
       shell.pragma('busy_timeout = 5');
       const s = new KanbanService({ db: shell, roles: new Map(), workspaces: new Set(['default']) });

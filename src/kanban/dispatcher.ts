@@ -28,7 +28,7 @@ import type { Claimed, KanbanService } from './service.js';
 import { hadSideEffects, lastTurnOf, toolCallsOf } from './session-log.js';
 import { KANBAN_CHANNEL } from './sink.js';
 import { hashToken, mintToken } from './token.js';
-import type { CommentRow, RunKind, RunRow } from './types.js';
+import { SUPERSEDING_OUTCOMES, type CommentRow, type RunKind, type RunRow } from './types.js';
 
 /**
  * The dispatcher (spec §6): the one component that turns "a task became ready"
@@ -366,9 +366,15 @@ export class Dispatcher {
    * the queue runs out, so a head task that waits -- on a busy workspace, say --
    * does not cost its board the turn. A person's claim holds no slot, and does
    * not end the turn. A board's own max_running holds inside the gateway's.
+   *
+   * First, the turns of runs a person's action decided are cancelled, as
+   * `cancel()` does when chat asks: a change made beside the gateway, by an
+   * operator's `mt kanban` (spec §2.6), cannot ask, and its nudge, or the next
+   * sweep, brings it here.
    */
   pass(): void {
     if (this.#stopped) return;
+    this.#cancelDecided();
     let queues: Array<ReturnType<typeof claimableTasks>>;
     let limits: Map<string, number | null>;
     try {
@@ -570,6 +576,28 @@ export class Dispatcher {
     this.#note(`kanban: run ${runId} was decided ${outcome} by the board; cancelling its turn`);
     void actor.cancel();
     return true;
+  }
+
+  /**
+   * Cancel the turn of every run this process started that is not being
+   * cancelled yet, and that a person's action decided -- `cancelled` by a stop,
+   * `superseded` by an assign, an archive or an operator's answer to a review --
+   * whoever made the change. A run that decided itself, by its report, ends its
+   * own turn, and one already closing needs nothing. One run's failure is noted,
+   * and never ends the pass.
+   */
+  #cancelDecided(): void {
+    for (const open of [...this.#open.values()]) {
+      if (open.cancelling || open.closing !== undefined) continue;
+      try {
+        const outcome = getRun(this.#deps.db, open.runId)?.outcome;
+        if (outcome !== null && outcome !== undefined && (SUPERSEDING_OUTCOMES as readonly string[]).includes(outcome)) {
+          this.cancel(open.runId);
+        }
+      } catch (err) {
+        this.#note(`kanban: cancelling run ${open.runId} failed: ${message(err)}`);
+      }
+    }
   }
 
   /** Tell, once, about each task the last pass found nobody to give to, if it has waited long enough (spec §4.2). */

@@ -23,7 +23,7 @@ export interface TestDb {
 
 export function testDb(): TestDb {
   const dir = mkdtempSync(join(tmpdir(), 'prime-gw-test-'));
-  const db = openDb(join(dir, 'gateway.db'));
+  const db = openDb(join(dir, 'team.db'));
   migrate(db, SCHEMA_DIR);
   return {
     db,

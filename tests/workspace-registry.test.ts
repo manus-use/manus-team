@@ -69,7 +69,7 @@ describe('registrationsAt', () => {
   it('is empty for a database that does not exist, and does not create one', () => {
     const dir = mkdtempSync(join(tmpdir(), 'mt-reg-'));
     try {
-      const path = join(dir, 'gateway.db');
+      const path = join(dir, 'team.db');
       expect(registrationsAt(path)).toEqual(new Map());
       expect(existsSync(path)).toBe(false);
     } finally {
@@ -80,13 +80,13 @@ describe('registrationsAt', () => {
   it('reads what the gateway registered', () => {
     const t = db();
     registerWorkspaces(t.db, new Map([['default', '/srv/a']]), NOW);
-    expect(registrationsAt(join(t.dir, 'gateway.db'))).toEqual(new Map([['default', '/srv/a']]));
+    expect(registrationsAt(join(t.dir, 'team.db'))).toEqual(new Map([['default', '/srv/a']]));
   });
 
   it('is empty for a database the migrations have not reached', () => {
     const dir = mkdtempSync(join(tmpdir(), 'mt-reg-'));
     try {
-      const path = join(dir, 'gateway.db');
+      const path = join(dir, 'team.db');
       const raw = new Database(path);
       raw.exec('CREATE TABLE other (a TEXT)');
       raw.close();

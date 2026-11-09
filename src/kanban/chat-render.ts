@@ -28,7 +28,10 @@ import { DEFAULT_BOARD, type Assignee, type FailedGate, type GateRow, type Kanba
  * any piece, before it is reshaped -- spaces collapsed, trimmed, cut -- since a
  * reshaped secret no longer matches. Then a CRLF or a lone CR becomes a newline,
  * which `stripControl` keeps: a body from the worker CLI, a summary, an output or
- * a comment can hold one, and quoting splits lines on newlines only.
+ * a comment can hold one, and quoting splits lines on newlines only. A secret
+ * split by a character that shows nothing (a zero-width or bidi character, a
+ * direction mark) is masked whole, since masking reads past them; elsewhere they
+ * are kept, as a joined emoji and right-to-left text need them.
  */
 function masked(text: string): string {
   return redactKnownSecrets(stripControl(text)).replace(/\r\n?/g, '\n');
@@ -123,7 +126,7 @@ export function renderHelp(): string {
     [USAGE.review, assignee],
     [USAGE.approve, reviewer],
     [USAGE.changes, reviewer],
-    [USAGE.boards, talk],
+    [USAGE['board list'], talk],
     [USAGE['board create'], operate],
     [USAGE['board use'], operate],
     [USAGE['board set'], operate],
@@ -140,6 +143,18 @@ export function renderHelp(): string {
 }
 
 /**
+ * The tasks `list` shows, in chat or at a terminal (spec §9.1): the active ones,
+ * grouped by status in that order, unless a filter is given; with one, those of
+ * that status, or every one for `all`, in the board's order.
+ */
+export function listed(entries: readonly BoardEntry[], filter: DisplayStatus | 'all' | undefined): BoardEntry[] {
+  const shown = entries.filter((e) =>
+    filter === undefined ? ACTIVE.includes(e.status) : filter === 'all' || e.status === filter,
+  );
+  return filter === undefined ? ACTIVE.flatMap((status) => shown.filter((e) => e.status === status)) : shown;
+}
+
+/**
  * `/kanban list` (spec §9.1): a board by derived status, the active tasks unless a
  * filter is given. A board other than `default` is named (spec §16).
  */
@@ -149,16 +164,12 @@ export function renderList(
   board: string = DEFAULT_BOARD,
 ): string {
   const on = board === DEFAULT_BOARD ? '' : ` on board ${label(board)}`;
-  const shown = entries.filter((e) =>
-    filter === undefined ? ACTIVE.includes(e.status) : filter === 'all' || e.status === filter,
-  );
-  if (shown.length === 0) {
+  const ordered = listed(entries, filter);
+  if (ordered.length === 0) {
     return filter === undefined
       ? `No open tasks${on}. \`/kanban list all\` shows done and archived ones too.`
       : `No ${filter === 'all' ? '' : `${filter} `}tasks${on}.`;
   }
-  const ordered =
-    filter === undefined ? ACTIVE.flatMap((status) => shown.filter((e) => e.status === status)) : [...shown];
   const lines = ordered
     .slice(0, LIST_MAX)
     .map((e) => `${id(e.task.taskId)} **${e.status}**: ${label(e.task.title, 120)} · ${who(e.task.assignee)}`);
@@ -168,8 +179,8 @@ export function renderList(
   return lines.join('\n');
 }
 
-/** How many of a board's tasks are where, leaving out what is none. */
-function counted(s: BoardSummary): string {
+/** How many of a board's tasks are where, leaving out what is none: chat's and the terminal's board list. */
+export function counted(s: BoardSummary): string {
   const parts = (
     [
       [s.counts.open, 'open'],
@@ -184,7 +195,7 @@ function counted(s: BoardSummary): string {
 }
 
 /**
- * `/kanban boards` (spec §16): each board, its tasks by phase, its own
+ * `/kanban board list` (spec §16): each board, its tasks by phase, its own
  * max_running and workspace where it sets them, and which one this chat is on.
  */
 export function renderBoards(summaries: readonly BoardSummary[], current: string): string {
@@ -206,8 +217,13 @@ export function renderBoards(summaries: readonly BoardSummary[], current: string
   ].join('\n');
 }
 
+/** A run's outcome, or `working` while it is open and undecided, or `undecided` once closed without one. */
+export function runState(run: RunRow): string {
+  return run.outcome === null ? (run.endedAt === null ? 'working' : 'undecided') : run.outcome;
+}
+
 function runLine(run: RunRow): string {
-  const outcome = run.outcome === null ? (run.endedAt === null ? 'working' : 'undecided') : run.outcome;
+  const outcome = runState(run);
   const head = `#${run.attempt} ${run.kind} · ${who(run.assignee)} · ${forDisplay(outcome)}`;
   const said = run.summary ?? run.error;
   return said === null || said === '' ? head : `${head}: ${label(said, 300)}`;

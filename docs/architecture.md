@@ -154,7 +154,7 @@ Most combinations are legal. The illegal ones are declared as compatibility cons
 
 ## 3. Core data model
 
-SQLite, WAL mode, single file at `$MT_HOME/gateway.db` (`MT_DB` or `db:` overrides it).
+SQLite, WAL mode, single file at `$MT_HOME/team.db` (`MT_DB` or `db:` overrides it).
 
 `schema/001_initial.sql` and `schema/002_lark_channel.sql` are the authority for everything in
 this section; where the DDL below differs, the migrations win.

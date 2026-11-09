@@ -778,7 +778,7 @@ export function boardsOf(db: Db, opts: BoardsWanted = {}): BoardRow[] {
     .map(decodeBoard);
 }
 
-/** A board, and how many of its tasks are in each phase: what `/kanban boards` shows. */
+/** A board, and how many of its tasks are in each phase: what `/kanban board list` shows. */
 export interface BoardSummary {
   board: BoardRow;
   counts: Record<Phase, number>;

@@ -1,7 +1,10 @@
-import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { ConfigError, type Env } from '../config.js';
-import { gateAdd, gateList, gateRemove } from './gate.js';
+import { parse, refuse, UsageError } from './args.js';
+import { jsonLine } from './operator.js';
+import { LIST_FILTERS } from '../kanban/chat-parse.js';
+import { gateAdd, gateList, gateRemove, inBoardRun, runShellRefusal } from './gate.js';
 import { kanbanCommand } from './kanban.js';
+import { operatorCommand } from './operator.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
 
@@ -14,11 +17,14 @@ import { workspaceAdd, workspaceList } from './workspace.js';
  * the same user and could edit the same files by hand -- nothing it did not
  * already have. A change takes effect at the gateway's next start.
  *
- * `mt kanban` is the one that talks to the gateway, through its socket, and only
- * with the authority of a run's token, from the run's environment.
+ * In a board run's shell, `mt kanban` is the worker CLI, which talks to the
+ * gateway through its socket, with the authority of the run's token, from the
+ * run's environment (spec §7.3).
  *
- * `mt kanban gate` is the operator's, and the one exception to writing files
- * only: it writes the board's database, through the board's own service (spec §7.7).
+ * Elsewhere it is the operator's (spec §2.6): chat's `/kanban` commands, and `mt
+ * kanban gate`, the exception to writing files only. They write the board's
+ * database, through the board's own service, and after a change ask the gateway
+ * for a dispatcher pass, a request that needs no token and does nothing else.
  */
 
 export type Git = (args: readonly string[]) => Promise<{ code: number; stderr: string }>;
@@ -46,38 +52,31 @@ const USAGE = [
   '  mt workspace add <name> <absolute-path>',
   '  mt workspace add <name> --clone <git-url>',
   '  mt workspace list',
-  '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
+  '  mt kanban board list [all] [--json]',
+  '  mt kanban board create <name> [--json]',
+  '  mt kanban board set <name> max_running <number|none> [--json]',
+  '  mt kanban board set <name> workspace <workspace|none> [--json]',
+  '  mt kanban board archive <name> [--json]',
+  '  mt kanban new <title> [--board <name>] [--assignee <role>] [--reviewer <role>] [--workspace <name>]',
+  '      [--parent <task>]... [--outcome "..."] [--verify "..."] [--constraints "..."] [--boundaries "..."]',
+  '      [--stop-when "..."] [--body "..." | --body-file <path|->] [--json]',
+  `  mt kanban list [${LIST_FILTERS.join('|')}] [--board <name>] [--json]`,
+  '  mt kanban show <task_id> [--board <name>] [--json]',
+  '  mt kanban assign <task_id> <role> [--board <name>] [--json]',
+  '  mt kanban link <parent_id> <child_id> [--board <name>] [--json]',
+  '  mt kanban unblock <task_id> [comment...] [--board <name>] [--json]',
+  '  mt kanban stop <task_id> [--board <name>] [--json]',
+  '  mt kanban archive <task_id> [--board <name>] [--json]',
+  '  mt kanban comment <task_id> <text...> [--board <name>] [--json]',
   '  mt kanban gate add <task_id> [--timeout <s>] -- <command...>',
   '  mt kanban gate list <task_id>',
   '  mt kanban gate remove <task_id> <gate_id>',
+  "in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
+  '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
 ].join('\n');
-
-class UsageError extends Error {}
-
-/** Strict: an unknown option is a usage error, not something to guess at. */
-function parse<T extends NonNullable<ParseArgsConfig['options']>>(args: readonly string[], options: T) {
-  try {
-    return parseArgs({ args: [...args], options, allowPositionals: true, strict: true });
-  } catch (err) {
-    throw new UsageError(err instanceof Error ? err.message : String(err));
-  }
-}
 
 function expectNothing(positionals: readonly string[], what: string): void {
   if (positionals.length > 0) throw new UsageError(`${what} takes no arguments`);
-}
-
-/** Prints a refusal and returns its exit code. */
-export function refuse(io: MtIo, message: string): number {
-  io.err(`mt: ${message}`);
-  return 1;
-}
-
-/** Rows as aligned columns, for the list commands. */
-export function table(rows: readonly (readonly string[])[]): string[] {
-  const widths: number[] = [];
-  for (const row of rows) row.forEach((cell, i) => (widths[i] = Math.max(widths[i] ?? 0, cell.length)));
-  return rows.map((row) => row.map((cell, i) => cell.padEnd(widths[i] ?? 0)).join('  ').trimEnd());
 }
 
 /** `mt kanban gate …`: the operator's gate commands. A command's words are joined with spaces, as ssh joins them. */
@@ -106,6 +105,46 @@ function gate(argv: readonly string[], io: MtIo): number {
     return gateRemove(taskId, Number(gateId), io);
   }
   throw new UsageError('kanban gate takes add, list or remove');
+}
+
+/** The worker CLI's commands that no operator's has: the worker's wherever they are typed. */
+const WORKER_ONLY: readonly string[] = ['complete', 'review', 'changes', 'block', 'create'];
+/** The operator's commands that the worker CLI has not got: the operator's wherever they are typed. */
+const OPERATOR_ONLY: readonly string[] = ['gate', 'board', 'new', 'list', 'assign', 'unblock', 'stop', 'archive'];
+
+/**
+ * Whose `mt kanban <command>` this is: the worker CLI's (spec §7.3) or the
+ * operator's (spec §2.6). In a board run's shell, every name both have, and any
+ * name neither has, is the worker's, so an agent always gets the worker's JSON
+ * answer; the operator's commands refuse to run there. Elsewhere they are the
+ * operator's, and the worker's own names say they work only inside a run.
+ */
+function isWorkers(command: string | undefined, io: MtIo): boolean {
+  if (command !== undefined && WORKER_ONLY.includes(command)) return true;
+  if (command !== undefined && OPERATOR_ONLY.includes(command)) return false;
+  return inBoardRun(io.env);
+}
+
+/** The subcommands whose name a run's refusal gives: `mt kanban board set`, not just `mt kanban board`. */
+const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
+  board: ['list', 'create', 'set', 'archive', 'use'],
+  gate: ['add', 'list', 'remove'],
+};
+
+/**
+ * The operator's command refused in a board run's shell, before its command
+ * line is parsed or its stdin read: an agent gets the refusal, whatever it
+ * typed, and nothing waits on its input. In JSON when `--json` is among the
+ * words, as the command itself would answer.
+ */
+function refuseInRun(command: string | undefined, rest: readonly string[], io: MtIo): number {
+  const sub = rest[0];
+  const named = command !== undefined && sub !== undefined && SUBCOMMANDS[command]?.includes(sub) === true;
+  const what = ['mt kanban', ...(command === undefined ? [] : [command]), ...(named ? [sub] : [])].join(' ');
+  const message = runShellRefusal(what);
+  if (command !== 'gate' && rest.includes('--json')) io.out(jsonLine({ ok: false, code: 'operator_command', message }));
+  else refuse(io, message);
+  return 1;
 }
 
 /** Exit codes: 0 done, 1 refused or a check failed, 2 the command line was wrong. */
@@ -154,8 +193,10 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       // reported as `mt: …` rather than escaping as a stack trace.
       return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, io);
     }
+    if (group === 'kanban' && isWorkers(command, io)) return await kanbanCommand(command, rest, io);
+    if (group === 'kanban' && inBoardRun(io.env)) return refuseInRun(command, rest, io);
     if (group === 'kanban' && command === 'gate') return gate(rest, io);
-    if (group === 'kanban') return await kanbanCommand(command, rest, io);
+    if (group === 'kanban') return await operatorCommand(command, rest, io);
     if (group === 'workspace' && command === 'list') {
       expectNothing(parse(rest, {}).positionals, 'workspace list');
       return workspaceList(io);

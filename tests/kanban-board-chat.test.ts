@@ -11,7 +11,7 @@ import { DEFAULT_ROLES } from './helpers/dispatch.js';
 import { WORKSPACES } from './helpers/kanban.js';
 
 /**
- * Boards in chat (spec §16): `/kanban boards` and `/kanban board …`, each chat
+ * Boards in chat (spec §16): `/kanban board list` and the rest of `/kanban board …`, each chat
  * on its own board, and `/kanban new`, `list` and `show` acting on it.
  */
 
@@ -83,14 +83,14 @@ function created(reply: string): string {
   return m[1];
 }
 
-describe('/kanban boards and /kanban board create', () => {
+describe('/kanban board list and /kanban board create', () => {
   it('lists default, and the boards an operator creates, marking this chat’s', async () => {
-    expect(await say('boards')).toBe(
+    expect(await say('board list')).toBe(
       '**default** (this chat): no tasks\n' +
         '`/kanban board use <name>` moves this chat to another board; `/kanban board create <name>` makes one.',
     );
     expect(await say('board create web-app')).toBe('Created board **web-app**. `/kanban board use web-app` puts a chat on it.');
-    expect((await say('boards', TEAM, GUEST)).split('\n').slice(0, 2)).toEqual(['**default** (this chat): no tasks', '**web-app**: no tasks']);
+    expect((await say('board list', TEAM, GUEST)).split('\n').slice(0, 2)).toEqual(['**default** (this chat): no tasks', '**web-app**: no tasks']);
   });
 
   it('refuses a talk-tier sender, and a name out of the grammar, creating nothing', async () => {
@@ -165,7 +165,7 @@ describe('/kanban board set', () => {
     expect(await say('board set web-app max_running 1', TEAM, GUEST)).toBe(
       '`/kanban board set` changes the board, and needs operator permission.',
     );
-    expect((await say('boards')).split('\n')[1]).toBe('**web-app**: no tasks · workspace web');
+    expect((await say('board list')).split('\n')[1]).toBe('**web-app**: no tasks · workspace web');
   });
 });
 
@@ -186,9 +186,9 @@ describe('/kanban board archive', () => {
     );
     expect(await say('board use web-app', OTHER)).toBe('Not done: board web-app is archived');
     // A chat on an archived board still sees it, marked; another chat does not.
-    expect((await say('boards')).split('\n')[1]).toBe('**web-app** (archived, this chat): no tasks');
-    expect(await say('boards', OTHER)).not.toContain('**web-app**');
-    expect((await say('boards all', OTHER)).split('\n')[1]).toBe('**web-app** (archived): no tasks');
+    expect((await say('board list')).split('\n')[1]).toBe('**web-app** (archived, this chat): no tasks');
+    expect(await say('board list', OTHER)).not.toContain('**web-app**');
+    expect((await say('board list all', OTHER)).split('\n')[1]).toBe('**web-app** (archived): no tasks');
     expect(await say('board archive default')).toBe('Not done: board default is where every chat starts; it is never archived');
   });
 });
@@ -196,7 +196,8 @@ describe('/kanban board archive', () => {
 describe('/kanban help', () => {
   it('lists the board commands, with who may run them', () => {
     const help = renderHelp();
-    expect(help).toContain('`/kanban boards [all]` (anyone allowed)');
+    expect(help).toContain('`/kanban board list [all]` (anyone allowed)');
+    expect(help).not.toContain('/kanban boards');
     for (const verb of ['create <name>', 'use <name>', 'archive <name>']) {
       expect(help).toContain(`\`/kanban board ${verb}\` (operator)`);
     }

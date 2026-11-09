@@ -136,7 +136,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
 
   const db = openDb(config.dbPath);
   const version = migrate(db, config.schemaDir);
-  note(`schema at version ${version}`);
+  note(`schema at version ${version} (${config.dbPath})`);
 
   // Before anything can open a session in one. A name whose directory moved would
   // orphan the provider sessions opened there (spec §2.3).
@@ -409,6 +409,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // above, decides no run whose turn ends from here on: the next boot ends
       // them (spec §8.4), so the stop itself never fails a run.
       await workerServer?.close();
+      // And a pass a nudge asked for, still waiting for its window: the dispatcher is stopped.
+      worker?.api.stop();
       // A notice being sent finishes while the channel is still connected; bounded by the drain, not a
       // send's 30 s, so a hung send never holds the stop: its batch goes again after the next boot.
       // Together, under one bound: the notices, the cards, and the card presses being

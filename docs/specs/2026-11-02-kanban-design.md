@@ -435,7 +435,7 @@ mt workspace list
 
 **Where the commands get the gateway's state.** They find the gateway's home, config file and
 database exactly as the gateway does — `MT_CONFIG`, else `$MT_HOME/config.yaml`; `MT_DB`, else `db:`, else
-`$MT_HOME/gateway.db` — and read registered workspaces from that database, opened read-only and
+`$MT_HOME/team.db` (plan H renamed it from `gateway.db`; nothing else keys on the file's name) — and read registered workspaces from that database, opened read-only and
 never checkpointed, so the running gateway is not disturbed. A database that does not exist yet (a
 fresh install) has no registrations. A deployment with no config file (environment-only) cannot have
 `workspaces:` added to it; `workspace add` refuses and says to create one.
@@ -497,6 +497,40 @@ fresh install) has no registrations. A deployment with no config file (environme
   take effect at once. They refuse to run when `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set, so an agent
   does not define gates by accident; that is not a security boundary, since an agent runs as the same
   user and could unset them, as it could edit `config.yaml` or a role's files.
+- **The operator's board commands (plan H)** are the same exception, built the same way, through the
+  same `openBoard`: chat's `/kanban` commands at a terminal, with chat's semantics, recorded as
+  `operator:<login>`. Whoever has a shell as the gateway's user holds operator tier.
+
+  ```
+  mt kanban board list [all] | create <name> | set <name> max_running <n|none> | set <name> workspace <ws|none> | archive <name>
+  mt kanban new <title…> [--board] [--assignee] [--reviewer] [--workspace] [--parent …] [--outcome] [--verify]
+                         [--constraints] [--boundaries] [--stop-when] [--body "…" | --body-file <path|->]
+  mt kanban list [<status>|all] [--board <name>]
+  mt kanban show|stop|archive <task> · assign <task> <role> · link <parent> <child>   [--board <name>]
+  mt kanban unblock <task> [comment…] · comment <task> <text…>                       [--board <name>]
+  ```
+
+  Every one takes `--json`: plain text by default, stripped of control characters and masked, or one
+  line of JSON shaped as the worker's; exit 0 done, 1 refused, 2 a wrong command line. There is no
+  `board use`, as a terminal is no chat: `new` and `list` take `--board`, `default` unless given; the
+  commands that name a task work on any board by id (§16.4), and with `--board` refuse `other_board`
+  a task on another board (§16.5). `new`'s title is one line, with no control character and no bidi
+  control, checked before it is trimmed, so a trailing newline or a leading tab is refused; its body
+  is read from stdin only for `--body-file -`, otherwise from a regular file. They record the login
+  of the account they run as, the service account under `sudo -u`. Plain output drops control
+  characters and the characters that show nothing (bidi controls, zero-width characters, direction
+  marks) before it masks, so a secret split by one is masked, and makes U+2028 and U+2029 line
+  breaks; `--json` writes DEL, C1 controls, U+2028, U+2029 and bidi controls as `\uXXXX`. Only roles are given work here: a person needs talk tier, which the Lark
+  allowlist decides, and these read no Lark settings. A task created here is created via
+  `{kind: operator}`, which no chat follows. After `new`, `assign`, `unblock`, `stop`, `archive` and
+  `board set`, the changes chat follows with a pass (§9.1), the command sends the gateway's socket
+  the nudge (§7.3), and the pass cancels the turn of a run the change decided (§6.2); a gateway that
+  does not answer loses nothing, as its next sweep or start acts on the change, and the command says
+  why it did not answer and that the change stands, never to try again: a second `new` would make a
+  second task. When the config does not set `kanban.enabled`, or sets it to false, no gateway is
+  asked, and the command says which, that the board is off, and that nothing runs the change until it
+  is turned on. They refuse a board run's shell, as the gate commands do, before their command line
+  is parsed or stdin read, and that is not a security boundary either.
 - Not taken from comparable tools, deliberately: a role is not its own command (roles are run by the
   board, not by hand); a role has no memory of its own (each vendor agent keeps its own); a role has
   no bot token or gateway of its own (there is one gateway).
@@ -577,7 +611,7 @@ the fallback.
 
 ## 3. Schema (migration `003_kanban.sql`)
 
-Same database (`gateway.db`), all tables prefixed `kanban_`. One database is deliberate: a run is
+Same database (`team.db`, named `gateway.db` before plan H), all tables prefixed `kanban_`. One database is deliberate: a run is
 a session, and "what happened to task X, and what did its agent actually do" must be answerable
 with a join, not by correlating two files.
 
@@ -603,7 +637,7 @@ with a join, not by correlating two files.
 | `consecutive_transient`, `cooldown_until` | §8.2 |
 | `block_recurrences` | §5.4 |
 | `stranded_notified_at` | §4.2; cleared when the task is next claimed |
-| `created_by`, `created_via`, `created_at`, `closed_at` | `created_via` includes the chat it was created in (§9.2) |
+| `created_by`, `created_via`, `created_at`, `closed_at` | `created_via` is the chat it was created in (§9.2), the run that created it, or `{kind: operator}` for a task an operator created at a terminal (§2.6), which no chat follows |
 | `created_from_task` | set when a worker creates the task: the creating run's task, used by §2.3 rule 3 when the task has no parents; not a link |
 | `board` | migration `006`: the board the task is on (§16), `default` for every task before it; set at creation, never changed |
 
@@ -971,6 +1005,11 @@ while the rest of the file is camelCase.
 
 ### 6.2 A pass
 
+0. First, cancel the turn of every agent run this dispatcher started that a person's action decided
+   (`cancelled`, `superseded`) and that is not already being cancelled, as `cancel()` does when chat
+   asks (§5.1). A change made by another process, the operator's `mt kanban` (§2.6), cannot ask, and
+   its nudge (§7.3), or the next sweep, brings this pass. A run that decided itself ends its own turn,
+   and one already closing is skipped. A cancel that fails is noted, and never ends the pass.
 1. Collect claimable tasks with **no open run of any kind**: **ready** (§4.1) for work, **review**
    for review. A task whose previous run has reported but not yet closed is skipped until it closes;
    claiming it would only fail on the one-open-run index (§3.3). Order by priority, higher first, then
@@ -1168,6 +1207,17 @@ mt kanban link       < link.json    # {parent_id, child_id}
   `{"ok": true, ...}` or `{"ok": false, "code": "...", "message": "..."}`, so the agent can act on an
   error rather than parse prose. `mt kanban` exits 0 when the command was done, 1 when it was refused,
   and 2 for a wrong command line.
+- **Two grammars under one name (plan H).** `mt kanban` is also the operator's (§2.6), and `show`,
+  `comment` and `link` are both's. `complete`, `review`, `changes`, `block` and `create` are always the
+  worker's; `gate`, `board`, `new`, `list`, `assign`, `unblock`, `stop` and `archive` always the
+  operator's; the shared names, and any name neither has, are the worker's in a board run's shell
+  (`MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` set) and the operator's elsewhere. The shapes never overlap
+  either: the worker's take no arguments, the operator's `show`, `comment` and `link` always a task id.
+- **The nudge** is the one request on the socket that needs no token: exactly `{"nudge": true}`,
+  answered `{"ok": true}`. It triggers a dispatcher pass and nothing else, and is what the operator's
+  commands send after a change. Throttled: a nudge's pass runs on the next tick, and at most one in
+  each 100 ms; a nudge inside that window brings one more pass at its end, shared by every later
+  nudge in it, so the last is never lost.
 - **Why a CLI and not tools in the agent's schema:** the gateway drives vendor agents it cannot add
   tools to. `bytesec run` has no way to receive tools; every coding agent has a shell. The handler
   behind the CLI is one module, and an MCP server for agents that accept one is a second front end to
@@ -1518,7 +1568,7 @@ getting nowhere, which no liveness check catches.
 | `/kanban gate list <id>` | talk | the task's gates, masked |
 | `/kanban gate remove <id> <gate>` | operate | |
 | `/kanban archive <id>` | operate | |
-| `/kanban boards [all]` · `/kanban board create\|use\|set\|archive …` | talk for `boards`, operate for the rest | §16.3 |
+| `/kanban board list [all]` · `/kanban board create\|use\|set\|archive …` | talk for `board list`, operate for the rest | §16.3; `board list` replaced `/kanban boards` in plan H, with no alias |
 | `/kanban help` | talk | every command, with its tier |
 
 - **Unknown names are refused at creation:** an unknown workspace (§2.3), and an unknown role. A
@@ -1576,7 +1626,7 @@ people (§12).
   to go yet. `/kanban done`, `block`, `review`, `approve` and `changes` were answered the same way,
   rather than as unknown commands. Plan D2 lifts all of it, as below.
 - **After a change the dispatcher is told:** a pass after `new`, `assign`, `workspace`, `unblock`,
-  `stop` and `archive`; and for `assign`, `stop`, `archive`, and from plan D2 an operator's
+  `stop`, `archive` and `board set`; and for `assign`, `stop`, `archive`, and from plan D2 an operator's
   `approve` or `changes` that ended a role reviewer's run, the cancel of the agent run's turn
   that the change decided (§5.1), which closes it. A `comment` needs neither: the dispatcher forwards
   it when the run's turn ends (§7.5).
@@ -1824,6 +1874,14 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   gateway's user, and recorded with who defined them (`created_by`, and a `gate_added` event). An
   operator defines them with `mt kanban gate` and, from plan D1, `/kanban gate`, both through the
   service (§2.6, §7.7).
+- **The operator's terminal** (§2.6) is the gateway's user's: its commands write the database as
+  that user, as the gate commands do, and take no authority from the socket. They refuse a board run's
+  shell so an agent does not act as an operator by accident; an agent runs as the same user and could
+  unset the run's variables, or open the database itself, so it is not a boundary.
+- **The nudge** (§7.3) needs no token because it names nothing and changes nothing: a pass is what
+  the sweep runs anyway. Only the gateway's user can reach the socket. A flood of nudges runs ten
+  passes a second at most (§7.3), and could keep the gateway that busy, as that user could stop it
+  outright.
 - **No secrets in the handoff.** Summaries, metadata and comments are durable and shown in chat. The
   worker protocol says so, and known secrets are masked (§10.1).
 - **Agent-written task text cannot spoof a mention** (§9.3).
@@ -1836,7 +1894,11 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
 
 Anything an agent writes — a summary, a comment, its output — is shown in chat and, on the board,
 passed to other agents. So the gateway masks **every secret value it holds itself**, replacing each
-exact occurrence with `••••`:
+exact occurrence with `••••`. The characters that show nothing (bidi controls U+202A to U+202E and
+U+2066 to U+2069, zero-width characters U+200B to U+200D and U+FEFF, direction marks U+200E,
+U+200F and U+061C) are skipped as it matches, and masked with the secret, since a secret split by
+one reads whole on screen; they are not stripped elsewhere, as a joined emoji and right-to-left text
+need them:
 
 - the Lark app secret;
 - every environment value the gateway passes to an agent: every value in every role's `.env`
@@ -1957,7 +2019,7 @@ board.
 ## 12. Plans
 
 Separate implementation plans. Each ends with everything built so far working and tested. Order: A, A2, B, F, C1,
-C2, R, C3, C4, then D1 and D2, then G; E is independent once B is done. B is delivered as B1 (roles and workspaces in
+C2, R, C3, C4, then D1 and D2, then G, then H; E is independent once B is done. B is delivered as B1 (roles and workspaces in
 configuration), B2 (the session layer) and B3 (the `mt` commands). C is delivered as C1 (the board),
 C2 (agent runs), C3 (the worker CLI) and C4 (review, rework and gates), in that order; R comes
 between C2 and C3, so the runs C3 makes reportable already get their role natively. **Before F**,
@@ -1978,6 +2040,7 @@ branch.
 | **E. Native resume** | the CLI driver captures the provider session id and passes `--session` (architecture §6.3), with transcript replay as the fallback. As built (`docs/plans/2026-11-05-plan-e-native-resume.md`), on bytesec 0.7.4 or later, which `mt role check` warns of: the id read from `--session-id-file` after each turn — for a resumed run, from its events' `session_id`, since the file echoes the id sent — and reported as a `session-observed` driver event, stored as the observed `provider_session_id` and logged as `provider_session_observed`; a resumed turn sends only the new message; a refused id — exit 1, nothing on stdout, and `persistence: session not found` or `unknown agent:` as stderr's last line — runs the same turn again with the transcript, automatically; a `cli:` id from before never seeds a rework; nudges and a seeded rework resume with no change to the board; `/status` shows the provider session and how the last turn reached it | B; independent of C and D |
 | **R. Native rendering** | the spike, done on bytesec 0.7.4: `BYTESEC_LOCAL_APM_PATH=<one package dir>` with `bytesec run --agent <name>` loads that package's agent, whose body becomes the system prompt, and its skills; a directory of packages fails silently; a package's agent may use only the package's skills. Then (§2.7): the role grammar tightened so a name cannot end in `-`; `agent.native`; `agent.skills`, imported from where bytesec finds a user's skills, since a native agent sees only its package's; `StartOptions.args` and the registry's `argsFor`; a renderer interface with bytesec's renderer; content-addressed, atomic packages under `$MT_HOME/rendered`, swept; the dispatcher rendering just after the claim, recording on the run whether it is native and by which package, and falling back to prompt injection when a render fails; the prompt leaving `role.md` and the skills out of a native run; `mt role check` saying which roles run natively. Claude Code's renderer is later. Prompt injection (§7.1) stays the fallback | B2, C2 |
 | **G. Boards** | isolated task queues on one database (§16): migration `006`, with `kanban_boards`, `default` in it, `kanban_chat_boards` and `kanban_tasks.board`, every existing task on `default`; boards created, set and archived, and each chat moved onto one, from chat (`/kanban boards`, `/kanban board create\|use\|set\|archive`); `/kanban new`, `list` and `show` on the chat's board; follow-ups, parents, links and dependency blocks kept on a board; a board's `max_running`, inside the gateway's, and its workspace as §2.3's rule 4; the dispatcher taking boards in turn; `mt kanban show` giving the board. Plan: `docs/plans/2026-11-09-plan-g-boards.md` | D2 |
+| **H. The operator at a terminal** | `/kanban board list [all]` in place of `/kanban boards`; the operator's `mt kanban board list\|create\|set\|archive` and `new\|list\|show\|assign\|link\|unblock\|stop\|archive\|comment` beside the gateway, through `KanbanService`, as `operator:<login>`, plain text or `--json` (§2.6); the two grammars of `mt kanban` (§7.3); the token-less nudge; each pass cancelling the turns of runs a person's action decided (§6.2); `created_via` `{kind: operator}`; the default database `team.db`, moved by hand at deploy. Plan: `docs/plans/2026-11-09-plan-h-operator-cli.md` | G |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D2, nothing can deliver a card to a person, so **plans C and D1 refuse human assignees and
@@ -1990,7 +2053,9 @@ turns them on: the gateway gives its service `people` and `supervisedRoles`, sen
 cards, and forwards a supervised agent's approvals to the chat following its task.
 
 Nor can a person create a task before D1: `/kanban new` arrives there, and every `mt kanban` command
-needs a run's token. C does **not** add a token-less way in. Agents run as the gateway's own user, so
+needs a run's token. C does **not** add a token-less way in. (C4's `mt kanban gate` and plan H's
+operator commands are not one either: they write the database as the gateway's user, which an agent
+already is, and plan H's nudge, the socket's one token-less request, only asks for a pass.) Agents run as the gateway's own user, so
 a command that trusts "whoever can reach the socket" would trust every agent, and let any of them act
 as an operator. C is therefore proven by its service API and its end-to-end tests — a fake agent
 running a real task through the real socket — and the board becomes usable by people in D.
@@ -2097,7 +2162,7 @@ in it would overwrite each other as two tasks' would.
 
 | Command | Tier | |
 |---|---|---|
-| `/kanban boards [all]` | talk | each board with its tasks by phase, its own `max_running` and workspace where set, and which one this chat is on, listed even when archived; `all` adds the other archived boards |
+| `/kanban board list [all]` | talk | each board with its tasks by phase, its own `max_running` and workspace where set, and which one this chat is on, listed even when archived; `all` adds the other archived boards |
 | `/kanban board create <name>` | operate | a new board, with no settings of its own; a name a board has, or had, is refused, and so are `none` and `all` |
 | `/kanban board use <name>` | operate | this chat, all its threads, is on the board from now on |
 | `/kanban board set <name> max_running <number\|none>` · `… workspace <workspace\|none>` | operate | §16.6 |
@@ -2107,6 +2172,11 @@ in it would overwrite each other as two tasks' would.
 can change where their agents run: a talk-tier person moving an operator's chat would choose the
 directory of the operator's next unsupervised agent. There is no rename: tasks carry the name, and
 renaming would rewrite them; a display name, as Hermes gives its boards, can come later.
+
+**At a terminal** (§2.6), `mt kanban board list|create|set|archive` are the same commands, at operator
+tier; there is no `board use`, since a terminal is no chat, and `--board <name>` names the board
+instead (§16.5). `/kanban board list` was `/kanban boards`
+until plan H, which kept no alias.
 
 **A board's name** is in the grammar of role and workspace names, checked by the service, which says
 why, and again, cheaply, by the writer. **`none` and `all` are reserved**: in `board set`, `none`
@@ -2123,7 +2193,7 @@ that cannot be valid does not look like one that is. A `set` that changes neithe
 - **`/kanban new`** creates the task on the chat's board, and its reply names the board unless it is
   `default`. A chat on an archived board is told to move first, and nothing is created.
 - **`/kanban list`** shows the chat's board alone, under a line naming it unless it is `default`.
-  `all` keeps its meaning, every status, on this board; `/kanban boards` is the view across boards.
+  `all` keeps its meaning, every status, on this board; `/kanban board list` is the view across boards.
 - **`/kanban show <id>`**, and every command that names a task, work on any board by the task's id:
   task ids are unique across boards, and a chat that moved still follows the tasks it created, whose
   notices give their ids and an Unblock button. `show` names the task's board once any board but
@@ -2148,7 +2218,12 @@ that cannot be valid does not look like one that is. A `set` that changes neithe
   it does not cross in practice; the check does not depend on that.
 - **A follow-up created from chat with `parent:`** is created on the chat's board, so it must come from
   a chat on the parent's board; from another it is refused, as any parent across boards is.
-- **`mt kanban gate`** names a task by id, and needs no board.
+- **`mt kanban gate`** names a task by id, and needs no board. The operator's other commands (§2.6)
+  take `--board <name>`: `new` and `list` act on that board, `default` unless given. The commands
+  that name a task (`show`, `assign`, `link`, `unblock`, `stop`, `archive`, `comment`) work on a
+  task on any board without it, as chat's do; with it, they refuse `other_board` unless the task is
+  on that board, and for `link` unless both are, and a board that does not exist `unknown_board`,
+  changing nothing. `board set` and `board archive` name their board positionally.
 
 ### 16.6 A board's `max_running` and workspace
 
@@ -2183,7 +2258,7 @@ are not limited, and do not move the cursor.
 
 Refused for `default`, and while any of the board's tasks is `open`, `review` or `blocked`: their
 work would be left on a board nothing may be added to. Once archived, no task is created on it, from chat or
-by a run whose task has just completed there; no chat moves onto it; and `/kanban boards` leaves
+by a run whose task has just completed there; no chat moves onto it; and `/kanban board list` leaves
 it out unless asked for `all`. Its tasks stay, by id. A chat still on it is
 not moved: putting it back on `default` unasked would send its next task somewhere its operator did
 not choose.

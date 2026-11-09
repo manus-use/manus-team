@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { parseKanban, USAGE } from '../src/kanban/chat-parse.js';
 
-/** `/kanban boards` and `/kanban board …` as typed (spec §16). */
+/** `/kanban board …` as typed (spec §16). */
 
 describe('parseKanban: boards', () => {
-  it('reads /kanban boards, with all for the archived ones too', () => {
-    expect(parseKanban('boards')).toEqual({ ok: true, command: { verb: 'boards', archived: false } });
-    expect(parseKanban('Boards ALL')).toEqual({ ok: true, command: { verb: 'boards', archived: true } });
-    expect(parseKanban('boards web-app')).toEqual({ ok: false, usage: `Usage: \`${USAGE.boards}\`` });
+  it('reads /kanban board list, with all for the archived ones too', () => {
+    expect(parseKanban('board list')).toEqual({ ok: true, command: { verb: 'board list', archived: false } });
+    expect(parseKanban('Board LIST ALL')).toEqual({ ok: true, command: { verb: 'board list', archived: true } });
+    expect(parseKanban('board list web-app')).toEqual({ ok: false, usage: `Usage: \`${USAGE['board list']}\`` });
+  });
+
+  it('no longer knows /kanban boards: board list replaced it', () => {
+    expect(parseKanban('boards')).toEqual({ ok: false, usage: 'Unknown `/kanban` command `boards`. `/kanban help` lists them.' });
+    expect(parseKanban('boards all')).toEqual({ ok: false, usage: 'Unknown `/kanban` command `boards`. `/kanban help` lists them.' });
   });
 
   it('reads create, use and archive, each with one name, kept as typed', () => {

@@ -42,13 +42,13 @@ export async function readAll(stream: Readable, maxBytes: number): Promise<strin
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/** One request line to the socket, and the gateway's one answer line. */
-function ask(socket: string, line: string): Promise<string> {
+/** One request line to the socket, and the gateway's one answer line, waited for up to `timeoutMs`. */
+export function ask(socket: string, line: string, timeoutMs = ANSWER_TIMEOUT_MS): Promise<string> {
   return new Promise((resolve, reject) => {
     const conn = createConnection(socket);
     let got = '';
     conn.setEncoding('utf8');
-    conn.setTimeout(ANSWER_TIMEOUT_MS, () => conn.destroy(new Error('no answer in time')));
+    conn.setTimeout(timeoutMs, () => conn.destroy(new Error('no answer in time')));
     conn.on('data', (d: string) => (got += d));
     conn.once('error', reject);
     conn.once('close', () => resolve(got));
@@ -60,7 +60,7 @@ function ask(socket: string, line: string): Promise<string> {
 const BUSY = ['ECONNREFUSED', 'ECONNRESET', 'EPIPE'];
 
 /** Why the socket could not be asked, and what to do about it. */
-function why(err: unknown): string {
+export function why(err: unknown): string {
   const code = (err as NodeJS.ErrnoException).code;
   if (code === 'ENOENT') return 'ENOENT; is the gateway running?';
   if (code !== undefined && BUSY.includes(code)) return `${code}; if it is running, it may be busy: try again`;

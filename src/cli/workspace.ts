@@ -18,7 +18,8 @@ import { loadTeamSettings, type Env, type TeamSettings } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { nameProblem } from '../names.js';
 import { resolveWorkspaces } from '../workspaces.js';
-import { refuse, table, type Git, type MtIo } from './mt.js';
+import { refuse, table } from './args.js';
+import type { Git, MtIo } from './mt.js';
 
 export type AddTarget = { path: string } | { cloneUrl: string };
 

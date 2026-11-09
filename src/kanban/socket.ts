@@ -286,8 +286,11 @@ async function clearStale(path: string, opts: ProbeOptions): Promise<void> {
   unlinkSync(path);
 }
 
-/** Every string in a response, keys too, masked: JSON escaping would hide a secret holding `"` or `\`. */
-function maskAll(value: unknown): unknown {
+/**
+ * Every string in a response, keys too, masked: JSON escaping would hide a
+ * secret holding `"` or `\`. The operator's `mt kanban --json` masks its output so too.
+ */
+export function maskAll(value: unknown): unknown {
   if (typeof value === 'string') return redactKnownSecrets(value);
   if (Array.isArray(value)) return value.map(maskAll);
   if (value !== null && typeof value === 'object') {

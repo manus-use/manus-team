@@ -175,3 +175,77 @@ describe('removeSecrets: reference-counted', () => {
     expect(redactKnownSecrets('k sk-test-123456')).toBe(`k ${MASK}`);
   });
 });
+
+/**
+ * The characters that show nothing: the bidi controls, the zero-width
+ * characters and the direction marks. Split by one, a secret still reads whole
+ * on screen, so it is matched as if they were not there; text outside a secret
+ * keeps them, since a joined emoji and right-to-left text need them.
+ */
+const INVISIBLES: Array<[string, string]> = [
+  ['a left-to-right embedding', '\u202A'],
+  ['a right-to-left embedding', '\u202B'],
+  ['a pop', '\u202C'],
+  ['a left-to-right override', '\u202D'],
+  ['a right-to-left override', '\u202E'],
+  ['a left-to-right isolate', '\u2066'],
+  ['a right-to-left isolate', '\u2067'],
+  ['a first-strong isolate', '\u2068'],
+  ['a pop of an isolate', '\u2069'],
+  ['a zero-width space', '\u200B'],
+  ['a zero-width non-joiner', '\u200C'],
+  ['a zero-width joiner', '\u200D'],
+  ['a byte order mark', '\uFEFF'],
+  ['a left-to-right mark', '\u200E'],
+  ['a right-to-left mark', '\u200F'],
+  ['an Arabic letter mark', '\u061C'],
+];
+
+describe('redactKnownSecrets: invisible characters', () => {
+  it.each(INVISIBLES)('masks a secret split by %s, the character with it', (_name, c) => {
+    addSecrets(['sk-live-1234567890']);
+    expect(redactKnownSecrets(`key sk-live-12${c}34567890 end`)).toBe(`key ${MASK} end`);
+    expect(redactKnownSecrets(`key ${c}sk-live-${c}${c}1234567890${c}`)).toBe(`key ${c}${MASK}${c}`);
+  });
+
+  it('keeps them in text outside a secret: a joined emoji, a mark in right-to-left text', () => {
+    addSecrets(['sk-live-1234567890']);
+    const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+    const hebrew = 'שלום\u200F 42';
+    expect(redactKnownSecrets(`${family} ${hebrew} sk-live-1234567890`)).toBe(`${family} ${hebrew} ${MASK}`);
+    expect(redactKnownSecrets(`${family} ${hebrew}`)).toBe(`${family} ${hebrew}`);
+  });
+
+  it('masks two secrets touching but for an invisible character as one span', () => {
+    addSecrets(['abcdefgh12', 'zyxwvuts98']);
+    expect(redactKnownSecrets('k abcdefgh12\u200Bzyxwvuts98 z')).toBe(`k ${MASK} z`);
+  });
+
+  it('masks a secret registered with an invisible character, however it is written', () => {
+    addSecrets(['sk-zw\u200B-abcdefgh']);
+    expect(redactKnownSecrets('k sk-zw\u200B-abcdefgh')).toBe(`k ${MASK}`);
+    expect(redactKnownSecrets('k sk-zw-abcdefgh')).toBe(`k ${MASK}`);
+    expect(redactKnownSecrets('k sk-zw-abc\u2066defgh')).toBe(`k ${MASK}`);
+  });
+
+  it('withholds the start of a secret split by one while it streams, and the end of one when cut', () => {
+    addSecrets(['sk-test-123456']);
+    expect(withholdSecretPrefix('the key is sk-t\u200Be')).toBe('the key is ');
+    expect(withholdSecretSuffix('t-12\u200B3456 and more')).toBe(' and more');
+  });
+
+  it('never cuts inside a secret complete on screen, for one that holds an invisible character itself', () => {
+    // Found by fuzzing: the cut as written falls inside the secret as it reads on screen.
+    const prefixSecret = '$\u202A$(?*[\\[$$(';
+    addSecrets([prefixSecret]);
+    const streamed = '$\u202A\u2069\u200C$\u202A$(?\u2068*[\u2069\\[\u200C$\u202A$(';
+    const kept = withholdSecretPrefix(streamed);
+    expect(kept).toBe('$\u202A\u2069\u200C');
+    expect(redactKnownSecrets(kept)).not.toMatch(/[(?*[\\]/);
+    clearSecrets();
+    addSecrets(['321133\u202E21']);
+    const tail = withholdSecretSuffix('3\u202E2113321 x');
+    expect(tail).toBe(' x');
+    expect(redactKnownSecrets(tail)).not.toMatch(/[123]/);
+  });
+});

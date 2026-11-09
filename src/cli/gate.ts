@@ -1,12 +1,13 @@
 import { existsSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { loadTeamSettings } from '../config.js';
+import { loadTeamSettings, type Env } from '../config.js';
 import { openDb } from '../db/open.js';
 import { KanbanService } from '../kanban/service.js';
 import type { GateRow } from '../kanban/types.js';
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { loadTeam, teamSecrets } from '../team.js';
-import { refuse, table, type MtIo } from './mt.js';
+import { refuse, table } from './args.js';
+import type { MtIo } from './mt.js';
 
 /**
  * `mt kanban gate add|list|remove` (spec §2.6, §7.7): an operator defining a
@@ -42,19 +43,47 @@ export function operatorName(io: MtIo): string {
   return `operator:${login === undefined || login === '' ? 'unknown' : login}`;
 }
 
-interface Board {
+/**
+ * A board run's shell: the environment the gateway gives a run's agent (spec
+ * §7.2). The operator's commands refuse to run in one, and there `mt kanban show`,
+ * `comment` and `link` are the worker's.
+ */
+export function inBoardRun(env: Env): boolean {
+  return env['MT_KANBAN_RUN'] !== undefined || env['MT_KANBAN_TOKEN'] !== undefined;
+}
+
+/** What an operator's command, `what`, says in a board run's shell. */
+export function runShellRefusal(what: string): string {
+  return (
+    `${what} is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or MT_KANBAN_TOKEN set. ` +
+    'Run it from your own shell'
+  );
+}
+
+/** How an operator's command says it refused, and its exit code: on stderr, or as JSON for `--json`. */
+export type Refuse = (code: string, message: string) => number;
+
+export interface BoardAccess {
   service: KanbanService;
+  /** The gateway's home, where its socket is (spec §7.2). */
+  home: string;
+  /** `kanban.enabled` as the config sets it, undefined when it does not: the board runs only when it is true. */
+  kanbanEnabled: boolean | undefined;
   close(): void;
 }
 
+export interface OpenOptions {
+  /** How a refusal is said; on stderr, as `mt: …`, unless given. */
+  refuse?: Refuse;
+  /** What a `passEnv` name unset in this shell means for the command; a gate's refusal of a secret, unless given. */
+  unsetNote?: string;
+}
+
 /** The board, as the gateway's own service over its database; or why not, already said. */
-function openBoard(io: MtIo, what: string): Board | number {
-  if (io.env['MT_KANBAN_RUN'] !== undefined || io.env['MT_KANBAN_TOKEN'] !== undefined) {
-    return refuse(
-      io,
-      `${what} is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or MT_KANBAN_TOKEN set. ` +
-        'Run it from your own shell',
-    );
+export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): BoardAccess | number {
+  const no = opts.refuse ?? ((_code: string, message: string) => refuse(io, message));
+  if (inBoardRun(io.env)) {
+    return no('operator_command', runShellRefusal(what));
   }
   const unset: string[] = [];
   const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: unset });
@@ -62,30 +91,36 @@ function openBoard(io: MtIo, what: string): Board | number {
   const lark = io.env['LARK_APP_SECRET'];
   addSecrets([...(lark === undefined || lark === '' ? [] : [lark]), ...teamSecrets(team)]);
   if (unset.length > 0) {
-    io.err(`mt: ${unset.join(', ')} not set in this shell, so a gate holding those values cannot be refused here`);
+    io.err(`mt: ${unset.join(', ')} not set in this shell, so ${opts.unsetNote ?? 'a gate holding those values cannot be refused here'}`);
   }
   if (!existsSync(settings.dbPath)) {
-    return refuse(io, `there is no board at ${settings.dbPath}: the gateway creates its database when it first starts`);
+    return no('no_board', `there is no board at ${settings.dbPath}: the gateway creates its database when it first starts`);
   }
   let db: ReturnType<typeof openDb>;
   let migrated: unknown;
   try {
     db = openDb(settings.dbPath);
   } catch (err) {
-    return refuse(io, failed(err));
+    return no('failed', failed(err));
   }
   try {
     migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kanban_gates'").get();
   } catch (err) {
     db.close();
-    return refuse(io, failed(err));
+    return no('failed', failed(err));
   }
   if (migrated === undefined) {
     db.close();
-    return refuse(io, `the database at ${settings.dbPath} has no board yet: start the gateway once, so it is migrated`);
+    return no('no_board', `the database at ${settings.dbPath} has no board yet: start the gateway once, so it is migrated`);
   }
-  const service = new KanbanService({ db, roles: team.roles, workspaces: new Set(team.workspaces.keys()) });
-  return { service, close: () => db.close() };
+  // As the gateway builds its own: a supervised role's approvals go to the chat that follows its task (spec §7.1).
+  const service = new KanbanService({
+    db,
+    roles: team.roles,
+    workspaces: new Set(team.workspaces.keys()),
+    supervisedRoles: true,
+  });
+  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, close: () => db.close() };
 }
 
 /** A write the gateway held the lock through, every retry: not this command's fault. */
@@ -100,14 +135,16 @@ function failed(err: unknown): string {
   return `the board's database failed: ${redactKnownSecrets(message)}`;
 }
 
-function withBoard(io: MtIo, what: string, fn: (b: Board) => number): number {
-  const board = openBoard(io, what);
+/** `fn` on the board, which is closed after it; a failure of the database's is said, masked, as a refusal. */
+export function withBoard(io: MtIo, what: string, fn: (b: BoardAccess) => number, opts: OpenOptions = {}): number {
+  const no = opts.refuse ?? ((_code: string, message: string) => refuse(io, message));
+  const board = openBoard(io, what, opts);
   if (typeof board === 'number') return board;
   try {
     return fn(board);
   } catch (err) {
-    if (busy(err)) return refuse(io, 'the board is busy: the gateway kept its database locked; try again');
-    return refuse(io, failed(err));
+    if (busy(err)) return no('busy', 'the board is busy: the gateway kept its database locked; try again');
+    return no('failed', failed(err));
   } finally {
     board.close();
   }
