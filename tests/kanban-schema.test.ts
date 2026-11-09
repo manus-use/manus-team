@@ -64,14 +64,16 @@ function run(
 
 describe('migration 003', () => {
   it('creates every kanban table, all STRICT', () => {
-    // 004 adds a column to kanban_comments and an index, 005 the people table; every kanban table is 003's.
-    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(5);
+    // 004 adds a column to kanban_comments and an index, 005 the people table, 006 the boards' two tables.
+    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(6);
     const tables = h.db
       .prepare<[], { name: string; strict: number }>(
         "SELECT name, strict FROM pragma_table_list WHERE name LIKE 'kanban_%' ORDER BY name",
       )
       .all();
     expect(tables).toEqual([
+      { name: 'kanban_boards', strict: 1 },
+      { name: 'kanban_chat_boards', strict: 1 },
       { name: 'kanban_comments', strict: 1 },
       { name: 'kanban_events', strict: 1 },
       { name: 'kanban_gates', strict: 1 },

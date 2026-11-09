@@ -65,6 +65,7 @@ interface TaskRaw {
   created_at: number;
   closed_at: number | null;
   created_from_task: string | null;
+  board: string;
 }
 
 function decodeTask(r: TaskRaw): TaskRow {
@@ -95,6 +96,7 @@ function decodeTask(r: TaskRaw): TaskRow {
     createdAt: r.created_at,
     closedAt: r.closed_at,
     createdFromTask: r.created_from_task,
+    board: r.board,
   };
 }
 
@@ -102,7 +104,7 @@ const TASK_COLS = `task_id, title, body, json(contract) AS contract, assignee_ki
   reviewer_kind, reviewer, workspace, phase, blocked_from, block_kind, block_reason, priority,
   idempotency_key, failure_limit, retry_on_crash, max_runtime_s, consecutive_failures,
   consecutive_transient, cooldown_until, block_recurrences, stranded_notified_at, created_by,
-  json(created_via) AS created_via, created_at, closed_at, created_from_task`;
+  json(created_via) AS created_via, created_at, closed_at, created_from_task, board`;
 
 interface RunRaw {
   run_id: string;

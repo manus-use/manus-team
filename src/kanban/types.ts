@@ -117,6 +117,37 @@ export interface TaskRow {
   createdAt: number;
   closedAt: number | null;
   createdFromTask: string | null;
+  /** The board the task is on (spec §16): fixed at creation, and its follow-ups' too. */
+  board: string;
+}
+
+/** The board every task was on before there were others, and every chat starts on (spec §16). */
+export const DEFAULT_BOARD = 'default';
+
+/**
+ * A board (spec §16): a queue of tasks, with its own list in chat and its own
+ * turn in each dispatcher pass. One database and one dispatcher serve them all.
+ */
+export interface BoardRow {
+  /** The role grammar (spec §2.1); never renamed. */
+  name: string;
+  /** Open agent runs on this board at once, inside the gateway's `kanban.max_running`; null for no limit of its own. */
+  maxRunning: number | null;
+  /** The workspace of a task on this board that no other rule gives one (spec §2.3 rule 4); null for `default`. */
+  workspace: string | null;
+  createdBy: string;
+  createdAt: number;
+  updatedBy: string | null;
+  updatedAt: number | null;
+  /** Set once archived: no task is added to it, and no chat moves onto it. */
+  archivedAt: number | null;
+}
+
+/** A chat, for the board it is on: a conversation, for one bot, with all its threads (spec §16). */
+export interface ChatAt {
+  channel: string;
+  appId: string;
+  conversationId: string;
 }
 
 /** An agent run's agent, as it was at the claim. Environment names only, never values. */
@@ -280,7 +311,13 @@ export type RefusalCode =
   /** The task has gates that cannot run now: no workspace, or no role to run them as, or the gateway stopping. */
   | 'gates_cannot_run'
   /** A report on the task is still running its gates. */
-  | 'report_in_progress';
+  | 'report_in_progress'
+  /** No board of that name (spec §16). */
+  | 'unknown_board'
+  /** The board is archived: nothing is added to it, and no chat moves onto it. */
+  | 'board_archived'
+  /** A parent and its child would be on different boards (spec §16). */
+  | 'other_board';
 
 /** The gate that refused a report, as the reporter is shown it (spec §7.7). */
 export interface FailedGate {
