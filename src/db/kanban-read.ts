@@ -510,6 +510,11 @@ export interface TaskView {
   children: TaskRow[];
   runs: RunRow[];
   comments: CommentRow[];
+  /**
+   * The role whose max_running a claimable task is waiting on (spec §6.3). Set by
+   * the service's `show`, which knows the roles' limits; never by `taskView`.
+   */
+  waitingOn?: { role: string; maxRunning: number };
 }
 
 export function taskView(db: Db, taskId: string): TaskView | undefined {
@@ -654,6 +659,21 @@ export function openAgentRunCountOn(db: Db, board: string): number {
         WHERE r.ended_at IS NULL AND r.assignee_kind = 'role' AND t.board = ?`,
     )
     .get(board);
+  return row?.n ?? 0;
+}
+
+/**
+ * Open agent runs as one role, decided or not: what a role's max_running counts
+ * (spec §6.3). A run counts as the role it runs as, its snapshot of the
+ * assignee: a work run's assignee role, a review run's reviewer role. A
+ * person's run is never counted.
+ */
+export function openAgentRunCountAs(db: Db, role: string): number {
+  const row = db
+    .prepare<[string], { n: number }>(
+      "SELECT count(*) AS n FROM kanban_runs WHERE ended_at IS NULL AND assignee_kind = 'role' AND assignee = ?",
+    )
+    .get(role);
   return row?.n ?? 0;
 }
 

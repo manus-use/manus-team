@@ -143,6 +143,7 @@ itself, for instance in a file it reads, is not known to the gateway and is not 
 | `maxLiveSessions` | `MT_MAX_LIVE_SESSIONS` | Concurrent agent processes. Default 8. |
 | `kanban.enabled` | — | Run the board: its dispatcher, the worker socket, `/kanban` in chat and its notices, people's cards, and forwarding supervised roles' approvals to the chat that follows a task. Default **off**, and opt-in: without it chat runs as it always did, and `/kanban` says the board is off. The `kanban:` keys are snake_case, as the kanban design spells them; the rest of the file is camelCase. They are set in the file only, and each number has a ceiling (below); a value above it is a startup error. |
 | `kanban.max_running` | — | Open agent runs at once. Default `maxLiveSessions`, and refused above it: a run is a live session. Set it lower to keep room for chat. At most 256. |
+| `kanban.max_running_per_role` | — | Open agent runs as any one role at once, for every role whose `config.yaml` sets no `max_running` of its own. Unset, a role has no limit of its own. Refused above `kanban.max_running`. At most 256. |
 | `kanban.failure_limit` | — | Counted failures before a task gives up and blocks. Default 2: a first attempt and one retry. At most 100. |
 | `kanban.transient_limit`, `kanban.transient_cooldown_s` | — | A throttled run is retried after a cooldown, 300 s by default, doubling each time up to an hour; after 10 in a row the task blocks. At most 1000 in a row, and a first cooldown of at most 3600 s. |
 | `kanban.default_max_runtime_s` | — | A run's wall-clock limit unless its task sets one. Default 4 hours, at most 7 days. |
@@ -179,7 +180,7 @@ A **role** is who does a kind of work, and how it is run. Each is a directory un
 
 ```
 roles/implementer/
-  config.yaml     # the coding agent, an optional workspace, an optional description
+  config.yaml     # the coding agent, an optional workspace, description and max_running
   role.md         # optional standing instructions
   skills/<name>/SKILL.md   # optional; front matter gives name and description
   .env            # optional; this role's own secrets, owner-only (e.g. 0600)
@@ -195,6 +196,17 @@ agent:
   args: [run, -m, bytesec/modelhub-sg/gpt-5.6-sol]
   unsupervised: true
 ```
+
+A role's `max_running: N`, a positive whole number, lets at most N of its agent runs be open at
+once, however many workspaces are free. A run counts against the role it runs as: a work run
+against the task's assignee, a review run against its reviewer; a person's run never counts.
+A role that sets none takes `kanban.max_running_per_role`, and with neither it has no limit of
+its own. Either is refused at startup above `kanban.max_running`, which, like a board's own
+`max_running`, still holds over every role together. A task whose role is at its limit waits,
+and the board goes on to its next task; it is not reported stranded, and `/kanban task show`
+says what it is waiting on. `mt role list` and `mt role check` show each role's limit and where
+it comes from, and `mt role create` writes none. As with the rest of `config.yaml`, a change
+takes effect at the next start.
 
 A role may also use skills from the user's own, by name: `agent.skills: [lark-doc, lark-im]` in
 its `config.yaml`. Each name is looked up where bytesec keeps a user's skills, in this order:
@@ -551,9 +563,11 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
   work under review, but nothing enforces that.
 - A board's name is never renamed, and an archived board is never brought back: make a new one.
 - A board's own settings keep only who changed them last, and when; there is no history of them.
-- An agent task nobody can be given is not seen as stranded while `kanban.max_running`, or its
-  board's own `max_running`, is reached: the limit is checked first, so it is not tried. It is
-  reported once a slot frees and a pass tries it.
+- An agent task nobody can be given is not seen as stranded while `kanban.max_running`, its
+  board's own `max_running` or its role's is reached: the limit is checked first, so it is not
+  tried. It is reported once a slot frees and a pass tries it.
+- `/kanban task show` says a ready task is waiting on its role's `max_running`, but not that it
+  is waiting on a busy workspace, or on the gateway's or its board's limit.
 - A task created with `mt kanban task new` is followed by no chat: nobody hears its notices, and a
   supervised role's approval requests on it reach nobody, as for any task no chat follows.
 - `mt kanban` at a terminal cannot give a person work: assign people from chat.

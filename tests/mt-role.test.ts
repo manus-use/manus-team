@@ -35,6 +35,22 @@ function roleDir(name: string, config: string): string {
 
 const ACP_AGENT = 'agent:\n  driver: acp\n  command: claude-agent-acp\n';
 
+/** The fixture's own config, with a kanban: section of these limits. */
+function limitsConfig(kanban: Record<string, number>): (workspace: string) => string {
+  return (workspace) =>
+    [
+      `workspace: ${workspace}`,
+      'agent:',
+      '  driver: structured-cli',
+      '  command: bytesec',
+      '  args: [run, -m, test-model]',
+      '  unsupervised: true',
+      'kanban:',
+      ...Object.entries(kanban).map(([k, v]) => `  ${k}: ${v}`),
+      '',
+    ].join('\n');
+}
+
 /** Every regular file under `dir`, not following symlinks. */
 function filesUnder(dir: string): string[] {
   return readdirSync(dir, { recursive: true, withFileTypes: true })
@@ -48,8 +64,25 @@ describe('mt role list', () => {
     roleDir('reviewer', `description: Reviews code\n${ACP_AGENT}`);
     const r = await fx.run(['role', 'list']);
     expect(r.code).toBe(0);
-    expect(r.out).toMatch(/^default\s+structured-cli\s+agent: block$/m);
-    expect(r.out).toMatch(/^reviewer\s+acp\s+roles\/reviewer\s+Reviews code$/m);
+    expect(r.out).toMatch(/^default\s+structured-cli\s+agent: block\s+max_running none$/m);
+    expect(r.out).toMatch(/^reviewer\s+acp\s+roles\/reviewer\s+max_running none\s+Reviews code$/m);
+  });
+
+  it("shows each role's max_running and where it comes from: the role, the default, or none", async () => {
+    fx = mtFixture(limitsConfig({ max_running: 4, max_running_per_role: 2 }));
+    roleDir('implementer', `max_running: 3\n${ACP_AGENT}`);
+    roleDir('reviewer', ACP_AGENT);
+    // Read loosely, as the rest of the line is: mt role check says what is wrong.
+    roleDir('broken', `max_running: lots\n${ACP_AGENT}`);
+    const r = await fx.run(['role', 'list']);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^default\s+structured-cli\s+agent: block\s+max_running 2 \(per_role\)$/m);
+    expect(r.out).toMatch(/^implementer\s+acp\s+roles\/implementer\s+max_running 3 \(role\)$/m);
+    expect(r.out).toMatch(/^reviewer\s+acp\s+roles\/reviewer\s+max_running 2 \(per_role\)$/m);
+    expect(r.out).toMatch(/^broken\s+acp\s+roles\/broken\s+max_running \?$/m);
+    // Above kanban.max_running, which check and startup refuse, it is not shown as a limit either.
+    roleDir('greedy', `max_running: 5\n${ACP_AGENT}`);
+    expect((await fx.run(['role', 'list'])).out).toMatch(/^greedy\s+acp\s+roles\/greedy\s+max_running \?$/m);
   });
 
   it('refuses an unknown option as a usage error', async () => {
@@ -89,6 +122,24 @@ describe('mt role create', () => {
     const config = readFileSync(join(fx.home, 'roles', 'reviewer', 'config.yaml'), 'utf8');
     expect(config).toMatch(/other-model/);
     expect(`${r.out}${r.err}${config}`).not.toMatch(/sk-not-for-printing/);
+  });
+
+  it('writes no max_running by default, and leaves out the one roles/default has', async () => {
+    fx = mtFixture();
+    expect((await fx.run(['role', 'create', 'plain'])).code).toBe(0);
+    expect(readFileSync(join(fx.home, 'roles', 'plain', 'config.yaml'), 'utf8')).not.toMatch(/max_running/);
+
+    roleDir('default', `max_running: 2\n${ACP_AGENT}`);
+    const settings = fx.configPath;
+    writeFileSync(settings, `workspace: ${fx.workspace}\n`);
+    expect((await fx.run(['role', 'create', 'fresh'])).code).toBe(0);
+    expect(readFileSync(join(fx.home, 'roles', 'fresh', 'config.yaml'), 'utf8')).not.toMatch(/max_running/);
+    expect((await fx.run(['role', 'create', 'described', '--description', 'Writes'])).code).toBe(0);
+    expect(readFileSync(join(fx.home, 'roles', 'described', 'config.yaml'), 'utf8')).not.toMatch(/max_running/);
+    // A clone keeps it: it copies the role it names.
+    roleDir('capped', `max_running: 2\n${ACP_AGENT}`);
+    expect((await fx.run(['role', 'create', 'twin', '--clone-from', 'capped'])).code).toBe(0);
+    expect(parseYaml(readFileSync(join(fx.home, 'roles', 'twin', 'config.yaml'), 'utf8'))).toMatchObject({ max_running: 2 });
   });
 
   it('refuses a bad name, a reserved name, and a role that exists', async () => {
@@ -459,6 +510,44 @@ describe('mt role check', () => {
     expect(r.out).toMatch(/^files: ok$/m);
     expect(r.out).toMatch(/^this shell's environment: ok$/m);
     expect(r.out).toMatch(/service's environment may differ/);
+  });
+
+  it("says, a line a role, its max_running and where it comes from", async () => {
+    fx = mtFixture(limitsConfig({ max_running: 4, max_running_per_role: 2 }));
+    roleDir('implementer', `max_running: 3\n${ACP_AGENT}`);
+    roleDir('reviewer', ACP_AGENT);
+    const r = await fx.run(['role', 'check']);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out.split('\n').filter((l) => l.startsWith('max_running: '))).toEqual([
+      'max_running: role default runs at most 2 agent runs at once, from kanban.max_running_per_role',
+      'max_running: role implementer runs at most 3 agent runs at once, from its config.yaml',
+      'max_running: role reviewer runs at most 2 agent runs at once, from kanban.max_running_per_role',
+    ]);
+
+    const bare = mtFixture();
+    try {
+      mkdirSync(join(bare.home, 'roles', 'solo'), { recursive: true });
+      writeFileSync(join(bare.home, 'roles', 'solo', 'config.yaml'), `max_running: 1\n${ACP_AGENT}`);
+      const one = await bare.run(['role', 'check']);
+      expect(one.out.split('\n').filter((l) => l.startsWith('max_running: '))).toEqual([
+        "max_running: role default has no limit of its own: kanban.max_running and the boards' limits hold",
+        'max_running: role solo runs at most 1 agent run at once, from its config.yaml',
+      ]);
+    } finally {
+      bare.cleanup();
+    }
+  });
+
+  it("reports a role's max_running above kanban.max_running, or not a positive whole number", async () => {
+    fx = mtFixture(limitsConfig({ max_running: 2 }));
+    roleDir('implementer', `max_running: 3\n${ACP_AGENT}`);
+    const above = await fx.run(['role', 'check']);
+    expect(above.code).toBe(1);
+    expect(above.out).toMatch(/^files:\n {2}.*implementer\/config\.yaml: max_running \(3\) is above the gateway's kanban\.max_running \(2\)/m);
+    roleDir('implementer', `max_running: 0\n${ACP_AGENT}`);
+    const zero = await fx.run(['role', 'check']);
+    expect(zero.code).toBe(1);
+    expect(zero.out).toMatch(/max_running must be a positive integer, got 0/);
   });
 
   it('reports a skill named in agent.skills that cannot be found under the files', async () => {

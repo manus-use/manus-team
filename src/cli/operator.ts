@@ -462,6 +462,9 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
           board: task.board,
           block_kind: task.blockKind,
           block_reason: task.blockReason,
+          // The role whose max_running the task is waiting on (spec §6.3), or null.
+          waiting_on_role:
+            r.view.waitingOn === undefined ? null : { role: r.view.waitingOn.role, max_running: r.view.waitingOn.maxRunning },
         },
         parents: r.view.parents.map((p) => ({ task_id: p.taskId, phase: p.phase })),
         children: r.view.children.map((c) => ({ task_id: c.taskId, phase: c.phase })),

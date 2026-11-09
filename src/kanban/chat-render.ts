@@ -231,6 +231,15 @@ function runLine(run: RunRow): string {
 }
 
 /**
+ * A task the dispatcher skips because its role is at its max_running (spec
+ * §6.3): `/kanban task show` and `mt kanban task show` say so, in the same words.
+ */
+export function waitingLine(w: { role: string; maxRunning: number }, escape: (text: string) => string = (t) => t): string {
+  const runs = `${w.maxRunning} agent run${w.maxRunning === 1 ? '' : 's'}`;
+  return `waiting: role ${escape(w.role)} is at its ${escape('max_running')}, ${runs} at once; it is claimed when one of them ends`;
+}
+
+/**
  * `/kanban task show` (spec §9.1): the task, its contract, gates, runs, latest output
  * and comments. Its board is named once anything is on a board but `default`:
  * the task's, or the chat's it is shown in (spec §16).
@@ -242,6 +251,7 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
     `**${label(task.title)}** ${id(task.taskId)}: ${view.status}`,
     `assignee: ${who(task.assignee)} · reviewer: ${who(task.reviewer)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}${board}`,
   ];
+  if (view.waitingOn !== undefined) out.push(waitingLine(view.waitingOn, label));
   if (task.phase === 'blocked' && task.blockKind !== null) {
     out.push(`blocked (${forDisplay(task.blockKind)}): ${label(task.blockReason ?? '', 500)}`);
   }

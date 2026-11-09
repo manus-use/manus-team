@@ -140,6 +140,7 @@ called `acp` would make those rows ambiguous.
 |---|---|
 | `agent` | required; the coding agent, below |
 | `workspace` | optional; a workspace name. Set, it always applies to the role's tasks; unset, a task takes its parents' workspace, else `default` (§2.3) |
+| `max_running` | optional; a positive whole number, at most the gateway's `kanban.max_running`: open agent runs as this role at once (§6.3). Unset, `kanban.max_running_per_role` applies, and with neither the role has no limit of its own |
 | `tools` | optional; `allow` / `deny` lists of tool names (§2.2) |
 | `description` | optional; unused by v1 — what an orchestrating agent would read to route work |
 
@@ -174,7 +175,8 @@ keep working unchanged. Each of these is a startup error:
 - **both** a `roles/default/` directory **and** an `agent:` block or `MT_AGENT_*` overrides — a
   silent override is how a deployment ends up running a command nobody can find in its config;
 - **neither** — chat sessions need a `default` role;
-- a role directory whose `config.yaml` is missing or invalid, or which names an unknown workspace;
+- a role directory whose `config.yaml` is missing or invalid, which names an unknown workspace, or
+  whose `max_running` is not a positive whole number or is above `kanban.max_running` (§6.3);
 - a role's `role.md` or a skill file that exists but cannot be read, or a skill without the required
   front matter;
 - a skill named in `agent.skills` that is not found, is not a name bytesec's skill-name rule
@@ -800,7 +802,7 @@ session status already follows (`core/status.ts`, channel spec §7), for the sam
   subscribers are told it is stranded and why, once — `stranded_notified_at` records that the notice
   is due: the `stranded` event written with it is what the subscriptions deliver (§9.4). Only tasks that *cannot* be claimed are stranded; a ready task waiting its turn behind
   the per-workspace limit (§6.3), or `kanban.max_running`, or its board's own `max_running` (§16.6),
-  is queued, not stranded, and is never reported as such. The limits are checked before the claim, so
+  or its role's `max_running` (§6.3), is queued, not stranded, and is never reported as such. The limits are checked before the claim, so
   an agent task skipped for one is not tried, and its being unassignable is not seen either: a task
   that cannot be claimed is reported stranded only once a pass has a slot to try it in.
 
@@ -1020,7 +1022,10 @@ while the rest of the file is camelCase.
    age, oldest first, within each board; across boards, take them in turn (§16.7).
 2. Skip any whose `cooldown_until` is in the future, whose assignee (or reviewer) does not resolve
    (§4.2), or — for an agent run — whose workspace already has an open agent run (§6.3), or when
-   `kanban.max_running` agent runs are open, or its board's own `max_running` of them (§16.6).
+   `kanban.max_running` agent runs are open, or its board's own `max_running` of them (§16.6), or
+   its role's `max_running` of them (§6.3). The global limit, the board's, the role's and one agent
+   per workspace all hold together; a task skipped on its role's limit, like one on a busy
+   workspace, does not end its board's turn (§16.7), and is not unassignable, so never stranded.
 3. Claim, in one transaction: if the task's workspace is null, resolve it by the rules of §2.3 — which
    may leave it null for a person — then insert the run and write `claimed`. The case where an agent
    task's workspace cannot be resolved is caught by step 2 as unresolvable, before any claim, so an
@@ -1034,6 +1039,29 @@ at most one open agent run at a time.** Tasks in different workspaces run in par
 `kanban.max_running` (default `maxLiveSessions`, which already caps live runtimes — a run is a
 session, and the two limits must not disagree, so a `max_running` above `maxLiveSessions` is refused at
 startup). Human runs are not limited.
+
+**A role's limit.** A role may also be capped: at most its `config.yaml`'s `max_running` (§2.1)
+open agent runs as that role at once, else `kanban.max_running_per_role`, the gateway's default for
+every role that sets none; with neither, the role has no limit of its own. A run counts against
+the role it runs as, the snapshot of its assignee (§3.3): a work run against the task's assignee
+role, a review run against its reviewer role. Person runs never count. It counts as the gateway's
+limit does, decided or not: a run that has reported still holds its slot until it closes. Both
+values are positive whole numbers, read at startup, and refused above `kanban.max_running`, as a
+board's own is (§16.6); a change takes effect at the next start, as every role edit does. `mt role
+list` and `mt role check` show each role's limit and where it comes from (the role, the default,
+or none); `mt role create` writes none, and a role made from `default` does not take
+`default`'s. `/kanban task show` and `mt kanban task show` say when a ready task, or one waiting
+for its reviewer, is waiting on its role's limit; they do not say when it waits on a busy
+workspace or on the gateway's or a board's limit.
+
+*Added on 2026-11-09.* The user asked for a per-role cap, Hermes's `max_in_progress_per_profile`
+(a Hermes profile is a role here), so a burst of one role's tasks across many workspaces cannot
+take every slot. The user chose the role's own `max_running` in its `config.yaml`, the gateway's
+`kanban.max_running_per_role` as the default it overrides, unset in both meaning no cap, and no
+rename of `kanban.max_running` or a board's `max_running`. A role's limit is refused at startup
+above the gateway's, where a board's, set from chat, is refused when it is set; lowering the
+gateway's limit below a board's lets the gateway's bind, while lowering it below a role's stops
+the next start, since both are read then and the mistake can be named.
 
 A board that fills every live slot leaves no room for chat sessions: open runs' actors are pinned
 (§2.4), and the registry's capacity eviction goes over its cap rather than refusing a chat session
@@ -2018,7 +2046,7 @@ board.
 | Transitions | every legal move, and every illegal one refused, against a real SQLite |
 | Links | cycle refusal; link onto a task with an open run, or past its parents gate, refused; a dependency block's parents linked with it, from a work run (task stays open) and from a review run (task stays in review, its next review claim waiting on them) |
 | Classifier | a table of real error strings → classes, including the 400 that was transient |
-| Dispatcher | fake driver: claim race (two passes, one run); one open agent run per workspace, parallel across workspaces, `max_running`; workspace resolved at a claim while null — explicit, else the role's explicit one, else the parents' common one, else `default` — and reused by review, retry and later gates; `/kanban task workspace` refused once the workspace is non-null; an agent claim on a task a person left null re-applies the rules; an unknown workspace refused at create; a removed workspace makes its tasks unresolvable; cooldown and doubling; stranded notice once, never for queued tasks; max runtime → `timed_out`, but a decided run past the limit keeps its outcome; a reporting run holds its workspace until it closes; dispatcher-cancel reason wins over the classifier |
+| Dispatcher | fake driver: claim race (two passes, one run); one open agent run per workspace, parallel across workspaces, `max_running`; a role's `max_running`, its default and its override, a review run counted against its reviewer, and a capped task not ending its board's turn; workspace resolved at a claim while null — explicit, else the role's explicit one, else the parents' common one, else `default` — and reused by review, retry and later gates; `/kanban task workspace` refused once the workspace is non-null; an agent claim on a task a person left null re-applies the rules; an unknown workspace refused at create; a removed workspace makes its tasks unresolvable; cooldown and doubling; stranded notice once, never for queued tasks; max runtime → `timed_out`, but a decided run past the limit keeps its outcome; a reporting run holds its workspace until it closes; dispatcher-cancel reason wins over the classifier |
 | Prompt | `role.md`, skills list, protocol, task and context, in order; the run records `role_md_hash` and `agent_config`; a native run's prompt without `role.md` and the skills, and otherwise the same; imported skills listed like the role's own |
 | Native rendering | `agent.skills` found in bytesec's order under a made-up home, a symlink not followed, an unknown, misnamed or duplicated-with-own name a startup error and a `role check` file problem, never the real home read; which roles are rendered, and each reason one is not; the package's layout and `role.md`'s bytes unchanged; content-addressed, reused, never rewritten; atomic, `0700`, regular files only, no `.env`; a too-large package and a symlinked `SKILL.md` refused; old packages swept but those of open runs, and unconfigured roles' at boot; `--agent` and `BYTESEC_LOCAL_APM_PATH` reaching the fake CLI agent's argv and environment on every turn; the ACP driver refusing per-session arguments; a failed render falling back to the prompt with a note; imported skills copied into the package and in its hash; the walk stopping at the file limit; a run's `native` and `packageHash` recorded once in `agent_config`; `mt role check`'s line; no test runs real bytesec |
 | Retry | `failure_limit` 2 → one retry; `gave_up` and its unblock reset; `rate_limited` not counted; `if-no-side-effects` against `readOnlyTools`; the retry's context containing the previous run's tool calls |
@@ -2270,7 +2298,8 @@ board's claimable tasks have been tried. **A board's turn is its first task that
 claimed:** its tasks are tried in §6.2's order, priority then age, until one agent claim succeeds or
 the board has none left, and only then does the next board get its turn. So a head task that waits
 (on a busy workspace, say) does not cost its board the turn: the next task behind it is offered the
-slot, not left behind every other board's first task. A person's claim holds no slot (§6.3), and
+slot, not left behind every other board's first task. A task whose role is at its own `max_running`
+(§6.3) waits the same way: skipped, with the board's next task tried. A person's claim holds no slot (§6.3), and
 does not end the board's turn. A board at its own `max_running` (§16.6) skips every agent task it has
 left, and so gives up its turn for the rest of the pass. Without the rotation, a board whose first
 task is always claimable would be offered every free slot first; with it, one board's burst cannot

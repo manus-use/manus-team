@@ -218,6 +218,36 @@ describe('the task commands', () => {
     expect(await mt(['task', 'show', 'k_missing'])).toMatchObject({ code: 1, err: 'mt: no task k_missing' });
   });
 
+  it("gives, in JSON, the role limit a task is waiting on, or null", async () => {
+    // The role default from the agent: block, held to kanban.max_running_per_role.
+    writeFileSync(
+      f.configPath,
+      [
+        `workspace: ${f.workspace}`,
+        'kanban:',
+        '  enabled: true',
+        '  max_running_per_role: 1',
+        'agent:',
+        '  driver: structured-cli',
+        '  command: bytesec',
+        '  unsupervised: true',
+        '  passEnv: [API_KEY]',
+        '',
+      ].join('\n'),
+    );
+    const running = created((await mt(['task', 'new', 'Running', '--assignee', 'default'])).out);
+    const waiting = created((await mt(['task', 'new', 'Waiting', '--assignee', 'default'])).out);
+    const json = async (taskId: string) =>
+      (JSON.parse((await mt(['task', 'show', taskId, '--json'])).out) as { task: { waiting_on_role: unknown } }).task.waiting_on_role;
+    expect(await json(waiting)).toBeNull();
+    claimed(gateway, running);
+    expect(await json(waiting)).toEqual({ role: 'default', max_running: 1 });
+    expect(await json(running)).toBeNull();
+    expect((await mt(['task', 'show', waiting])).out).toMatch(
+      /^waiting: role default is at its max_running, 1 agent run at once; it is claimed when one of them ends$/m,
+    );
+  });
+
   it('assigns, stops, unblocks, comments, links and archives, as the operator, nudging after what chat follows with a pass', async () => {
     const taskId = created((await mt(['task', 'new', 'Work', '--assignee', 'default'])).out);
     const later = (await mt(['task', 'new', 'Later'])).out;

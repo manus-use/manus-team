@@ -103,3 +103,51 @@ describe('loadTeam', () => {
     expect(team.roles.has('reviewer')).toBe(true);
   });
 });
+
+describe("loadTeam: a role's max_running", () => {
+  /** A config file, read for every path: the kanban limits come from the file only. */
+  function teamWith(kanban: Record<string, number>, extra: Record<string, string | undefined> = {}) {
+    const lines = ['kanban:', ...Object.entries(kanban).map(([k, v]) => `  ${k}: ${v}`), ''].join('\n');
+    const e = env(extra);
+    return loadTeam(loadConfig(e, () => lines), e);
+  }
+
+  it("reads a role's own max_running; unset, the role has none of its own", () => {
+    roleDir('implementer', `max_running: 2\n${ROLE_AGENT}`);
+    roleDir('reviewer', ROLE_AGENT);
+    const team = teamFor(env());
+    expect(team.roles.get('implementer')?.maxRunning).toBe(2);
+    expect(team.roles.get('reviewer')?.maxRunning).toBeUndefined();
+    expect(team.roles.get('default')?.maxRunning).toBeUndefined();
+  });
+
+  it('refuses one that is not a positive whole number', () => {
+    for (const bad of ['0', '-1', '1.5', 'two', '[2]']) {
+      roleDir('implementer', `max_running: ${bad}\n${ROLE_AGENT}`);
+      expect(() => teamFor(env()), bad).toThrow(/config\.yaml: max_running must be a positive integer/);
+    }
+  });
+
+  it("refuses one above the gateway's kanban.max_running, as a board's is refused", () => {
+    roleDir('implementer', `max_running: 4\n${ROLE_AGENT}`);
+    expect(() => teamWith({ max_running: 3 })).toThrow(
+      `${join(home, 'roles', 'implementer', 'config.yaml')}: max_running (4) is above the gateway's kanban.max_running (3)`,
+    );
+    // kanban.max_running's default is the session limit, and the refusal says where it came from.
+    expect(() => teamFor(env({ MT_MAX_LIVE_SESSIONS: '3' }))).toThrow(
+      /max_running \(4\) is above the gateway's kanban\.max_running \(3, from MT_MAX_LIVE_SESSIONS\)/,
+    );
+    expect(() => loadTeam(loadConfig(env(), () => 'maxLiveSessions: 2\n'), env())).toThrow(
+      /max_running \(4\) is above the gateway's kanban\.max_running \(2, from maxLiveSessions\)/,
+    );
+    expect(teamWith({ max_running: 4 }).roles.get('implementer')?.maxRunning).toBe(4);
+  });
+
+  it('may be above or below kanban.max_running_per_role: its own overrides the default', () => {
+    roleDir('implementer', `max_running: 3\n${ROLE_AGENT}`);
+    roleDir('reviewer', `max_running: 1\n${ROLE_AGENT}`);
+    const team = teamWith({ max_running: 4, max_running_per_role: 2 });
+    expect(team.roles.get('implementer')?.maxRunning).toBe(3);
+    expect(team.roles.get('reviewer')?.maxRunning).toBe(1);
+  });
+});

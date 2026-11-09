@@ -10,13 +10,14 @@ import {
   getRun,
   getTask,
   openAgentRunCount,
+  openAgentRunCountAs,
   openAgentRunCountOn,
   openRuns,
   runBySession,
 } from '../db/kanban-read.js';
 import { getSession } from '../db/sessions.js';
 import { nativeFor, renderNative, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
-import type { Role } from '../roles.js';
+import { roleLimit, type Role } from '../roles.js';
 import { addSecrets, removeSecrets } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, Principal, TurnTerminal } from '../types.js';
@@ -59,6 +60,8 @@ import { SUPERSEDING_OUTCOMES, type CommentRow, type RunKind, type RunRow } from
 export interface DispatcherSettings {
   /** Open agent runs at once (spec §6.3). */
   maxRunning: number;
+  /** Open agent runs as one role at once, for a role with no max_running of its own; absent, none (spec §6.3). */
+  maxRunningPerRole?: number;
   /** A run's wall-clock limit unless its task sets one (spec §8.5). */
   defaultMaxRuntimeS: number;
   /** How long a task nobody can be given waits before it is reported stranded (spec §4.2). */
@@ -366,6 +369,8 @@ export class Dispatcher {
    * the queue runs out, so a head task that waits -- on a busy workspace, say --
    * does not cost its board the turn. A person's claim holds no slot, and does
    * not end the turn. A board's own max_running holds inside the gateway's.
+   * A task whose role is at its own max_running (spec §6.3) waits like one on a
+   * busy workspace: it is skipped, and its board's queue goes on to the next.
    *
    * First, the turns of runs a person's action decided are cancelled, as
    * `cancel()` does when chat asks: a change made beside the gateway, by an
@@ -414,6 +419,10 @@ export class Dispatcher {
       if (who?.kind === 'role' && openAgentRunCount(this.#deps.db) >= this.#deps.settings.maxRunning) return false;
       const own = limits.get(task.board) ?? null;
       if (who?.kind === 'role' && own !== null && openAgentRunCountOn(this.#deps.db, task.board) >= own) return false;
+      // A role's limit skips only its own tasks, so the board's next task, as
+      // another role, is still tried. A role that is not loaded has no limit
+      // here: the claim refuses it as unassignable, so it can be reported stranded.
+      if (who?.kind === 'role' && this.#atRoleLimit(who.name)) return false;
       // An agent run gets a token (spec §7.2); a person's run reports through chat.
       const token = who?.kind === 'role' ? mintToken() : undefined;
       const claimed = this.#claim(task.taskId, token);
@@ -431,6 +440,13 @@ export class Dispatcher {
       this.#note(`kanban: claiming ${task.taskId} failed: ${message(err)}`);
       return false;
     }
+  }
+
+  /** The role has as many open agent runs as its max_running allows (spec §6.3). */
+  #atRoleLimit(name: string): boolean {
+    const role = this.#deps.roles.get(name);
+    const limit = role === undefined ? undefined : roleLimit(role, this.#deps.settings.maxRunningPerRole);
+    return limit !== undefined && openAgentRunCountAs(this.#deps.db, name) >= limit.limit;
   }
 
   /**
