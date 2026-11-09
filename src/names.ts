@@ -22,8 +22,8 @@ export function isBytesecSkillName(name: string): boolean {
   return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) && !name.includes('--') && name.length <= 64;
 }
 
-/** Why `name` is not a valid role or workspace name, or undefined if it is. */
-export function nameProblem(kind: 'role' | 'workspace', name: string): string | undefined {
+/** Why `name` is not a valid role, workspace or board name, or undefined if it is. */
+export function nameProblem(kind: 'role' | 'workspace' | 'board', name: string): string | undefined {
   if (NAME_PATTERN.test(name)) return undefined;
   return (
     `${kind} name ${JSON.stringify(name)} must be lowercase letters, digits and '-', ` +
