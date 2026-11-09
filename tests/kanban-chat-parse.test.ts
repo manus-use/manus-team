@@ -105,6 +105,18 @@ describe('/kanban task new', () => {
       });
     }
     expect(parseKanban('\u200btask \u2060show k_1')).toEqual({ ok: true, command: { verb: 'show', taskId: 'k_1' } });
+    // Joined to the group word, before its verb or with nothing between them.
+    for (const z of zw) {
+      for (const text of [`task${z} show k_1`, `task${z}show k_1`, `TASK${z}${z}\tshow k_1`, `task${z}\nshow k_1`]) {
+        expect([text, parseKanban(text)]).toEqual([text, { ok: true, command: { verb: 'show', taskId: 'k_1' } }]);
+      }
+      expect(parseKanban(`task${z}new Notes\nassignee: docs-writer`)).toMatchObject({
+        ok: true,
+        command: { verb: 'new', title: 'Notes', assignee: 'docs-writer' },
+      });
+      expect(parseKanban(`board${z}list`)).toEqual({ ok: true, command: { verb: 'board list', archived: false } });
+      expect(parseKanban(`help${z}`)).toEqual({ ok: true, command: { verb: 'help' } });
+    }
   });
 });
 

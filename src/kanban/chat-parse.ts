@@ -174,6 +174,9 @@ const FIELD_LINE = new RegExp(
 /** Zero-width characters at the start of a line, after any indent. */
 const LEADING_ZW = new RegExp(`^([ \\t]*)[${ZW}]+`, 'gm');
 
+/** A word with zero-width characters in it: what comes before the first of them, and what follows them. */
+const GROUP_ZW = new RegExp(`^([^${ZW}]*)[${ZW}]+([\\s\\S]*)$`);
+
 /** Zero-width characters at the start of the text, after any spaces: before `task`'s verb, where they would hide it. */
 const START_ZW = new RegExp(`^([ \\t]*)[${ZW}]+`);
 
@@ -269,7 +272,12 @@ const TASK_TAKES = `\`/kanban task\` takes ${TASK_VERBS.slice(0, -1).join(', ')}
 export function parseKanban(arg: string): ParsedKanban {
   // One kind of line break from here on: a pasted CRLF, or a lone CR, is a newline.
   // And no zero-width character at a line's start, where it would hide a verb or a label.
-  const [rawGroup, rest] = shift(arg.replace(/\r\n?/g, '\n').replace(LEADING_ZW, '$1'));
+  const [word, after] = shift(arg.replace(/\r\n?/g, '\n').replace(LEADING_ZW, '$1'));
+  // A zero-width character joined to the group word ends it, as a space would: `task\u200bnew` is `task new`.
+  const joined = GROUP_ZW.exec(word);
+  const rawGroup = joined === null ? word : (joined[1] ?? '');
+  const tail = joined === null ? '' : (joined[2] ?? '');
+  const rest = tail === '' ? after : `${tail} ${after}`;
   switch (rawGroup.toLowerCase()) {
     case '':
     case 'help':
