@@ -122,7 +122,7 @@ An independent dry run of the first draft confirmed every quoted text and every 
 | `tests/kanban-board-chat-parse.test.ts`, `tests/kanban-board-chat.test.ts` (modify) | `board list` |
 | `tests/kanban-command-parts.test.ts`, `tests/kanban-operator-created.test.ts`, `tests/kanban-worker-nudge.test.ts`, `tests/kanban-cancel-decided.test.ts`, `tests/mt-plain.test.ts`, `tests/mt-kanban-operator.test.ts`, `tests/mt-kanban-operator-tasks.test.ts`, `tests/mt-operator.e2e.ts` (create) | |
 
-Running counts, unit then end to end: Task 1 1433 / 99, Task 2 1434 / 99, Task 3 1438 / 99, Task 4 1440 / 99, Task 5 1444 / 99, Task 6 1447 / 99, Task 7 1447 / 99, Task 8 1451 / 99, Task 9 1462 / 99, Task 10 1475 / 99, Task 11 1475 / 101, Task 12 1475 / 101, the review follow-ups 1512 / 101.
+Running counts, unit then end to end: Task 1 1433 / 99, Task 2 1434 / 99, Task 3 1438 / 99, Task 4 1440 / 99, Task 5 1444 / 99, Task 6 1447 / 99, Task 7 1447 / 99, Task 8 1451 / 99, Task 9 1462 / 99, Task 10 1475 / 99, Task 11 1475 / 101, Task 12 1475 / 101, the review follow-ups 1512 / 101, the final review's 1521 / 101.
 
 ---
 
@@ -4245,7 +4245,7 @@ git commit -m "Describe the operator's mt kanban commands in the README and the 
 
 ## Done when
 
-- `npx vitest run --project unit` gives `Tests  1512 passed (1512)` (1475 at Task 12, before the review follow-ups). `npx vitest run --project e2e` gives `Tests  101 passed (101)`. `npm run typecheck` reports no errors. All under Node 22, in the worktree.
+- `npx vitest run --project unit` gives `Tests  1521 passed (1521)` (1475 at Task 12, before the review follow-ups, and 1512 after them, before the final review's). `npx vitest run --project e2e` gives `Tests  101 passed (101)`. `npm run typecheck` reports no errors. All under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - The default database is `$MT_HOME/team.db`, and `mt` finds it there (`tests/config.test.ts`, `tests/mt-gate.test.ts`).
 - `/kanban board list [all]` answers as `/kanban boards` did, and `/kanban boards` is unknown (`tests/kanban-board-chat-parse.test.ts`, `tests/kanban-board-chat.test.ts`).
@@ -4256,7 +4256,7 @@ git commit -m "Describe the operator's mt kanban commands in the README and the 
 
 ## Before using it: the deploy, and a smoke test against the live gateway
 
-For the user, once the plan is built. The database is moved by hand, since the build has no transition code (Decision 17). If the service sets `MT_DB`, or `config.yaml` sets `db:`, the file is named there and keeps its name: skip step 3. Run the `sqlite3` and `mv` lines as the gateway's own user.
+For the user, once the plan is built. The database is moved by hand, since the build has no transition code (Decision 17). If the service sets `MT_DB`, or `config.yaml` sets `db:`, the file is named there and keeps its name: back up that file in step 2, skip step 3, and check that file in step 5. Run the `sqlite3` and `mv` lines as the gateway's own user.
 
 **Start neither build, and make sure no service manager (launchd, systemd, a supervisor) restarts the old one, from step 1 until step 5 starts the new one.** What each does if started at the wrong moment, whether or not `kanban.enabled` is set:
 
@@ -4266,13 +4266,14 @@ For the user, once the plan is built. The database is moved by hand, since the b
 Either way the gateway's startup log names the file it opened, as `schema at version 6 (<path>)`, so a wrong file shows at once. Every step below works in `"${MT_HOME:-$HOME/.manus-team}"`, the gateway's home; set `MT_HOME` first if the service sets it.
 
 1. Stop the gateway.
-2. Back up, from the home:
+2. Back up, from the home. `db` is `gateway.db`, or the file `MT_DB` names; if `config.yaml` sets `db:`, set `db` to that path by hand first:
    ```bash
    cd "${MT_HOME:-$HOME/.manus-team}" || exit 1
-   [ -e gateway.db ] || { echo "no gateway.db here: stop"; exit 1; }
-   sqlite3 gateway.db ".backup gateway-pre-rename.db" || exit 1
+   db="${db:-${MT_DB:-gateway.db}}"
+   [ -e "$db" ] || { echo "no $db here: stop"; exit 1; }
+   sqlite3 "$db" ".backup gateway-pre-rename.db" || exit 1
    ```
-   (`.backup` takes what is still in the `-wal` file too, which a `cp` could miss.)
+   (`.backup` takes what is still in the `-wal` file too, which a `cp` could miss.) With `MT_DB` or `db:` set, skip step 3.
 3. `mv` gateway.db, gateway.db-wal and gateway.db-shm (if they exist) to team.db, team.db-wal and team.db-shm, after checking that `gateway.db` is there and none of the new names is:
    ```bash
    cd "${MT_HOME:-$HOME/.manus-team}" || exit 1
@@ -4282,16 +4283,17 @@ Either way the gateway's startup log names the file it opened, as `schema at ver
    if [ -e gateway.db-wal ]; then mv gateway.db-wal team.db-wal || exit 1; fi
    if [ -e gateway.db-shm ]; then mv gateway.db-shm team.db-shm || exit 1; fi
    ```
-   Run each block in a subshell (`( … )`) or a script, so its `exit` does not close your terminal. All three move together: SQLite finds a database's WAL by its name, and a `-wal` left behind would lose what is in it. If the check stops it on a `team.db`, a new build has started since step 1: stop it, and count the tasks in the stray file before removing anything, `sqlite3 team.db "SELECT count(*) FROM kanban_tasks"`. It should print `0`, or fail with `no such table` if it was not migrated; then remove `team.db`, `team.db-wal` and `team.db-shm` and run step 3 again. Any other number means tasks were created in it: stop, and keep all the files until you have looked.
-4. Merge `operator-cli` into `main`, and update the checkout the gateway runs from.
-5. Start the gateway. Its log says `schema at version 6 (…/team.db)`. Check that the task count is unchanged, and that no `gateway.db` was created beside it:
+   Run each block in a subshell (`( … )`) or a script, so its `exit` does not close your terminal. All three move together: SQLite finds a database's WAL by its name, and a `-wal` left behind would lose what is in it. If the check stops it on a `team.db`, a new build has started since step 1: stop it, and count the tasks in the stray file before removing anything, `sqlite3 team.db "SELECT count(*) FROM kanban_tasks"`. It should print `0`, or fail with `no such table` if it was not migrated; then remove `team.db`, `team.db-wal` and `team.db-shm` and run step 3 again. Any other number means tasks were created in it: stop, and keep all the files until you have looked. Run the count only when `team.db` itself exists: with only a `team.db-wal` there, `sqlite3 team.db` creates an empty `team.db` and drops the WAL file, and what it held is lost.
+4. Merge `operator-cli` into `main`, and update the checkout the gateway runs from. If the gateway runs under `npm run dev` (`tsx watch`), stop the whole `npm run dev`, not just the child process, before step 3. A running watcher restarts on the merge, before the move. If it runs from `dist/`, run `npm ci && npm run build` before starting.
+5. Start the gateway. Its log says `schema at version 6 (…/team.db)`, or the file `MT_DB` or `db:` names. Check that the task count is unchanged, and that no `gateway.db` was created beside it:
    ```bash
    cd "${MT_HOME:-$HOME/.manus-team}" || exit 1
-   sqlite3 team.db "PRAGMA user_version; SELECT count(*) FROM kanban_tasks"
+   db="${db:-${MT_DB:-team.db}}"
+   sqlite3 "$db" "PRAGMA user_version; SELECT count(*) FROM kanban_tasks"
    sqlite3 gateway-pre-rename.db "SELECT count(*) FROM kanban_tasks"
-   [ -e gateway.db ] && echo "a gateway.db was created: an old build ran"
+   if [ "$db" = team.db ] && [ -e gateway.db ]; then echo "a gateway.db was created: an old build ran"; fi
    ```
-   The first prints `6` and the same count as the second; the last prints nothing.
+   The first prints `6` and the same count as the second; the last prints nothing. (With `db:` set in `config.yaml`, set `db` to its path by hand first, as in step 2.)
 
 Then, with `kanban.enabled: true`, on a role on a cheap model; `<role>` below is its name. In a checkout, `mt` is `npm run -s mt -- …`, run from a shell as the gateway's user, which is the login the board records.
 
@@ -4308,7 +4310,7 @@ A review of the built branch, at 1475 unit and 101 end-to-end tests, found these
 
 | # | Finding | Outcome |
 |---|---|---|
-| 1 | A bidi control inside a secret defeated the terminal's mask: `clean()` removed bidi controls after masking, so `line('key sk-live-12<U+202E>34567890')` printed the secret. Chat had the same gap: `masked()`, the escapers, notices, cards and the router's answers masked before anything removed such a character, so a secret split by a zero-width or bidi character showed in Lark with an invisible break | Two parts. The terminal's `clean()` now strips control characters, then `INVISIBLE` (the bidi controls U+202A to U+202E and U+2066 to U+2069, the zero-width characters U+200B to U+200D and U+FEFF, and the marks U+200E, U+200F and U+061C, in `src/text.ts`), then masks, then makes CR, CRLF, U+2028 and U+2029 newlines. For chat and every other display, the shared place is `redactKnownSecrets` in `src/secrets.ts`: it matches each secret both as written and on the text with those characters skipped, and masks the span with them inside it; two spans apart only by such characters become one `••••`; a secret registered with one is known without it too; and `withholdSecretPrefix` and `withholdSecretSuffix` withhold a fragment split by one. Chosen over stripping them before display, which would harm legitimate text: the zero-width joiner holds emoji sequences together (a family emoji falls apart without it), the non-joiner is part of Persian and Indic spelling, and the direction marks keep right-to-left text with numbers and punctuation in order. Outside a secret they are kept, and tested so. Tested with the secret split by each of the twelve characters in `line`, a body (`indented`) and an output (`tailOf`), and through `forDisplay`, `forMarkdown`, `forPlainText` and `/kanban show` and `list` |
+| 1 | A bidi control inside a secret defeated the terminal's mask: `clean()` removed bidi controls after masking, so `line('key sk-live-12<U+202E>34567890')` printed the secret. Chat had the same gap: `masked()`, the escapers, notices, cards and the router's answers masked before anything removed such a character, so a secret split by a zero-width or bidi character showed in Lark with an invisible break | Two parts. The terminal's `clean()` now strips control characters, then `INVISIBLE` (the bidi controls U+202A to U+202E and U+2066 to U+2069, the zero-width characters U+200B to U+200D and U+FEFF, and the marks U+200E, U+200F and U+061C, in `src/text.ts`), then masks, then makes CR, CRLF, U+2028 and U+2029 newlines. For chat and every other display, the shared place is `redactKnownSecrets` in `src/secrets.ts`: it matches each secret both as written and on the text with those characters skipped, and masks the span with them inside it; two spans apart only by such characters become one `••••`; a secret registered with one is known without it too; and `withholdSecretPrefix` and `withholdSecretSuffix` withhold a fragment split by one. Chosen over stripping them before display, which would harm legitimate text: the zero-width joiner holds emoji sequences together (a family emoji falls apart without it), the non-joiner is part of Persian and Indic spelling, and the direction marks keep right-to-left text with numbers and punctuation in order. Outside a secret they are kept, and tested so. Tested with the secret split by each of the sixteen characters in `line`, a body (`indented`) and an output (`tailOf`), and through `forDisplay`, `forMarkdown`, `forPlainText` and `/kanban show` and `list` |
 | 2 | `jsonLine` left DEL unescaped | The range is `\u007F-\u009F` |
 | 3 | Socket nudges each got their own pass, since they arrive on separate ticks, so Decision 9 overstated the coalescing | Throttled: at most one nudge-driven pass in each 100 ms (`NUDGE_INTERVAL_MS`), with a trailing timer so the last nudge in a window is never lost; `WorkerApi.stop()`, called as the gateway stops, drops a waiting one. Tested with fake timers. Decision 9, the known limitation, and the spec's §7.3 and §10 say so |
 | 4 | The title was trimmed before the control-character check, so `$'line\n'` and a leading tab were accepted | The joined words are checked first, then trimmed |
@@ -4319,3 +4321,17 @@ A review of the built branch, at 1475 unit and 101 end-to-end tests, found these
 | 9 | The deploy's smoke test used `~/.manus-team` in some steps, moved without checking `gateway.db` was there, removed a stray `team.db` unseen, and did not say what each build does when started at the wrong moment | Every step works in `"${MT_HOME:-$HOME/.manus-team}"`; the backup and the move refuse when `gateway.db` is missing, and each `mv` is followed by `|| exit 1`; a stray `team.db` has its tasks counted before it is removed; and the section says what the old build and the new build each do if started before or after the move |
 | 10 | The startup log did not name the database | `schema at version 6 (<path>)`; a test asserts it (none asserted the old line) |
 | 11 | `chat-parse.ts`, described as pure, imported `worker.js` at run time for `WORKER_LIMITS` | `WORKER_LIMITS` moved to the leaf module `src/kanban/limits.ts`, which both import; `worker.ts` re-exports it, so its importers are unchanged |
+
+### The final review
+
+The final review found the branch ready to merge, with nothing critical; it fuzzed the masker against a reference, 240k cases, which agreed. Its last points, each fixed test first where behaviour changed; the counts after them are 1521 unit and 101 end to end.
+
+| # | Finding | Outcome |
+|---|---|---|
+| 1 | The masker had become slow on text with no invisible characters, about 1 ms per 100 KB per function, since it built a position map on every call: a 100 KB answer streamed as 500 renders went from 63 to 520 ms | A fast path: one non-global regular expression test, and when it finds nothing, the code path from before the follow-ups exactly. With invisible characters, the stripped text is `text.replace(INVISIBLE, '')`, and their positions are kept in a sorted list, mapped by binary search, in place of a per-character loop and map. Measured on 100 KB with 20 secrets (redact, prefix, suffix, then 500 streamed renders): before the follow-ups, plain 0.53, 0.012, 0.017 ms, 123 ms, and right-to-left text with a mark every 15 characters 0.20, 0.005, 0.013 ms, 48 ms; after them, plain 0.89, 0.37, 0.37 ms, 236 ms, right-to-left 2.0, 1.5, 1.5 ms, 834 ms; now, plain 0.49, 0.013, 0.015 ms, 113 ms, right-to-left 0.82, 0.47, 0.44 ms, 319 ms |
+| 2 | For a secret holding an invisible character itself, the stricter of the cut as written and the cut on screen could fall inside a secret complete in the other form, so a streamed fragment showed | After the stricter cut is taken, it moves back (for a prefix) or on (for a suffix) past any secret it falls inside, as written or on screen, until it stops moving. The fuzzer's prefix case and its mirror are tests |
+| 3 | The runbook did not say what a `tsx watch` gateway or a `dist/` one needs | Step 4 says to stop the whole `npm run dev` before step 3, since a watcher restarts on the merge, before the move; and to run `npm ci && npm run build` before starting from `dist/` |
+| 4 | Step 5's last line returned 1 on success | `if [ … ] && [ -e gateway.db ]; then echo …; fi` |
+| 5 | With `MT_DB` or `db:` set, step 2 stopped for want of a `gateway.db` | Step 2 backs up the file named (`db`, from `MT_DB`, or set by hand for `db:`), step 3 is skipped, and step 5 checks that file |
+| 6 | Counting a stray `team.db` when only its `-wal` exists creates an empty `team.db` and drops the WAL | Said in step 3: count only when `team.db` itself exists |
+| 7 | `INVISIBLE` has 16 characters, not 12 | U+202B, U+202D, U+2067 and U+2068 added to the tables in `tests/secrets.test.ts` and `tests/mt-plain.test.ts`; item 1 above says sixteen |
