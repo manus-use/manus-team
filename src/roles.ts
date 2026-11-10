@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
@@ -21,7 +21,7 @@ import {
   withUnsetRecorded,
 } from './config.js';
 import type { KnownDriver } from './driver/registry.js';
-import { parseEnvFile } from './dotenv.js';
+import { parseEnvFile, readPrivateEnvFile } from './dotenv.js';
 import { isBytesecSkillName, isReservedRoleName, nameProblem } from './names.js';
 
 /**
@@ -251,46 +251,13 @@ export function loadRoleDir(
 // ---------------------------------------------------------------------------
 
 /**
- * A role's own secrets (spec §2.5). The one file the gateway reads secrets from,
- * so it is checked at every point where it could leak or travel: it must be a
- * regular file (a symlink could point anywhere), owned by the gateway's user,
- * and readable by nobody else. A loose mode is refused, not fixed: a file that
- * was readable may already have been read, and tightening it quietly hides that.
+ * A role's own secrets (spec §2.5), checked as the gateway's own `.env` is
+ * (`readPrivateEnvFile`), and holding none of the gateway's names.
  */
 function readRoleEnv(dir: string): Record<string, string> {
   const path = join(dir, '.env');
-  // Opened once and checked on that descriptor, so the file that passes the
-  // checks is the file that is read. O_NOFOLLOW refuses a symlink at the open
-  // itself; O_NONBLOCK keeps a FIFO from hanging the open before fstat sees it.
-  let fd: number;
-  try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') return {};
-    if (code === 'ELOOP') {
-      throw new ConfigError(`${path} is a symlink; a role's .env must be a regular file, so it cannot point anywhere else`);
-    }
-    throw new ConfigError(`cannot inspect ${path}: ${(err as Error).message}`);
-  }
-  let text: string;
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile()) throw new ConfigError(`${path} is not a regular file`);
-    const uid = process.getuid?.();
-    if (uid !== undefined && stat.uid !== uid) {
-      throw new ConfigError(`${path} is owned by another user; it must belong to the user the gateway runs as`);
-    }
-    if ((stat.mode & 0o077) !== 0) {
-      throw new ConfigError(
-        `${path} can be read or written by other users (mode ${(stat.mode & 0o777).toString(8)}); ` +
-          'it must be readable and writable only by its owner (for example 0600). The gateway does not change it itself: a file that was readable may already have been read.',
-      );
-    }
-    text = readFileSync(fd, 'utf8');
-  } finally {
-    closeSync(fd);
-  }
+  const text = readPrivateEnvFile(path, "a role's .env");
+  if (text === undefined) return {};
 
   const parsed = parseEnvFile(text, path);
   if ('error' in parsed) throw new ConfigError(parsed.error);
