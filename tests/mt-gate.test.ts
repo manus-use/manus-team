@@ -1,3 +1,4 @@
+import { chmodSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -158,6 +159,22 @@ describe('mt kanban gate', () => {
     ]) {
       expect((await mt(argv)).code).toBe(2);
     }
+  });
+});
+
+describe("mt kanban gate and the gateway's .env", () => {
+  it('accepts a gate naming a path or id the file sets, and refuses one holding its secret', async () => {
+    const path = join(f.home, '.env');
+    writeFileSync(path, `MT_WORKSPACE=${f.workspace}\nLARK_APP_ID=cli_app_id_123456\nMT_AGENT_ENV_GH_TOKEN=ghp_from_file_123456\n`);
+    chmodSync(path, 0o600);
+    // The config's workspace, not MT_WORKSPACE as well: the file sets it, so the config must not.
+    writeFileSync(f.configPath, ['agent:', '  driver: structured-cli', '  command: bytesec', '  unsupervised: true', '  passEnv: [API_KEY]', ''].join('\n'));
+    const added = await mt(['add', taskId, '--', 'test', '-d', f.workspace, '&&', 'echo', 'cli_app_id_123456']);
+    expect(added, added.err).toMatchObject({ code: 0, err: '' });
+    const refused = await mt(['add', taskId, '--', 'curl', '-H', 'ghp_from_file_123456']);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toMatch(/holds a known secret/);
+    expect(`${refused.out}${refused.err}`).not.toContain('ghp_from_file_123456');
   });
 });
 

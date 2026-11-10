@@ -95,7 +95,7 @@ export function registerConfiguredSecrets(config: GatewayConfig, team: Team): vo
 /**
  * What startup reads, in order: the gateway's .env, then the config and the team,
  * from `env` over that file. Every secret is registered as soon as it is known --
- * the file's values as it is read -- so an error raised on the way is masked.
+ * the file's secrets as it is read -- so an error raised on the way is masked.
  * `env` itself is left as it was: an agent's environment is built from the
  * process environment, which the file never enters.
  */

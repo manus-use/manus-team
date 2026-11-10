@@ -19,8 +19,8 @@ import { addSecrets } from './secrets.js';
  *
  * The rules are a role's `.env`'s: the same syntax and the same checks on the
  * file (owner-only, a regular file, not a symlink, owned by the gateway's user).
- * Every value is a secret to the masker from the moment it is read, so a
- * refusal after this, from `loadConfig` say, is masked too. A name the gateway
+ * Its secrets (`isSecretName`) are known to the masker from the moment it is
+ * read, so a refusal after this, from `loadConfig` say, is masked too. A name the gateway
  * does not read is refused, as an unknown config key is: a typo'd name would
  * otherwise be a setting that silently never applied.
  */
@@ -45,6 +45,17 @@ const LOCATING: ReadonlySet<string> = new Set(['MT_HOME', 'MT_CONFIG', 'MT_DB'])
 
 const ACCEPTED: ReadonlySet<string> = new Set(GATEWAY_ENV_NAMES.filter((name) => !LOCATING.has(name)));
 
+/**
+ * The names in the file whose values are secrets, and masked: the Lark app
+ * secret, and what is given to an agent, which a role's `.env` values are too.
+ * The rest are paths, ids and limits, shown as written, as they are from the
+ * config file: a masked workspace path or app id would hide where things are
+ * in every line that names them, and stop a gate naming the workspace.
+ */
+export function isSecretName(name: string): boolean {
+  return name === 'LARK_APP_SECRET' || (name.startsWith(AGENT_ENV_PREFIX) && name.length > AGENT_ENV_PREFIX.length);
+}
+
 /** Where the gateway's .env is: `$MT_HOME/.env`. */
 export function gatewayEnvPath(env: Env): string {
   return join(gatewayHome(env), '.env');
@@ -57,9 +68,13 @@ export function readGatewayEnv(env: Env): GatewayEnvFile {
   if (text === undefined) return { path, present: false, values: {} };
   const parsed = parseEnvFile(text, path);
   if ('error' in parsed) throw new ConfigError(parsed.error);
-  // Masked before any name is checked: the refusals below name no value, but
-  // whatever is thrown next should find them known.
-  addSecrets(Object.values(parsed.values).filter((value) => value !== ''));
+  // The secrets masked before any name is checked: the refusals below name no
+  // value, but whatever is thrown next should find them known.
+  addSecrets(
+    Object.entries(parsed.values)
+      .filter(([name, value]) => isSecretName(name) && value !== '')
+      .map(([, value]) => value),
+  );
 
   const lines = text.split(/\r?\n/);
   for (const name of Object.keys(parsed.values)) {

@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -113,6 +113,22 @@ describe('readGatewayEnv', () => {
     expect([...read].filter((name) => !(GATEWAY_ENV_NAMES as readonly string[]).includes(name))).toEqual([]);
   });
 
+  it('knows every MT_ and LARK_ name read from an environment anywhere in src/, but for MT_KANBAN_*', () => {
+    const root = new URL('../src/', import.meta.url);
+    const files = readdirSync(root, { recursive: true, encoding: 'utf8' }).filter((f) => f.endsWith('.ts'));
+    const read = new Set<string>();
+    const pattern =
+      /(?:env\[\s*['"]|env\.|env(?:String|List|Flag|Integer)\(\s*\w+,\s*['"])((?:MT|LARK)_[A-Z0-9_]*[A-Z0-9])/g;
+    for (const file of files) {
+      for (const m of readFileSync(new URL(file, root), 'utf8').matchAll(pattern)) read.add(m[1] ?? '');
+    }
+    const names = [...read].filter((name) => !name.startsWith('MT_KANBAN_'));
+    // Found at all, so the scan is not vacuous.
+    expect(names).toContain('LARK_APP_SECRET');
+    expect(names).toContain('MT_CONFIG');
+    expect(names.filter((name) => !(GATEWAY_ENV_NAMES as readonly string[]).includes(name))).toEqual([]);
+  });
+
   it('refuses MT_HOME, MT_CONFIG and MT_DB: they say where the files are', () => {
     for (const name of ['MT_HOME', 'MT_CONFIG', 'MT_DB']) {
       envFile(`${name}=/elsewhere\n`);
@@ -127,10 +143,16 @@ describe('readGatewayEnv', () => {
     expect(() => readGatewayEnv({ MT_HOME: home })).toThrow(`${join(home, '.env')}:1: unterminated quote`);
   });
 
-  it('masks every value it read, from the moment it is read', () => {
-    envFile(`LARK_APP_SECRET=${SECRET}\nMT_AGENT_ENV_API_KEY=sk-agent-0000\n`);
+  it('masks the secrets it read, from the moment it is read, and only those', () => {
+    envFile(
+      `LARK_APP_SECRET=${SECRET}\nMT_AGENT_ENV_API_KEY=sk-agent-0000\n` +
+        `MT_WORKSPACE=${workspace}\nLARK_APP_ID=cli_app_id_123456\nMT_OWNER_OPEN_ID=ou_owner_123456\n`,
+    );
     readGatewayEnv({ MT_HOME: home });
     expect(redactKnownSecrets(`a ${SECRET} b sk-agent-0000`)).toBe(`a ${MASK} b ${MASK}`);
+    // Paths, ids and limits are settings, shown as written.
+    const shown = `in ${workspace} as cli_app_id_123456 for ou_owner_123456`;
+    expect(redactKnownSecrets(shown)).toBe(shown);
   });
 });
 

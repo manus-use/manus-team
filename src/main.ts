@@ -14,7 +14,7 @@ import { redactKnownSecrets } from './secrets.js';
  * operator hits most often, always at the first deploy, and a 40-frame trace
  * buries the name of the variable they forgot.
  *
- * Both writes are masked, but only for the secrets known by then: the values in
+ * Both writes are masked, but only for the secrets known by then: the secrets in
  * the gateway's .env as soon as it is read, and the rest once loadTeam has
  * returned, so an error from loadConfig or loadTeam itself can mask only the
  * first. None names a value.
