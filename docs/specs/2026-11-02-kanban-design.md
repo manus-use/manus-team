@@ -385,8 +385,8 @@ A role may need its own credentials: a reviewer with a read-only repository toke
 with a write token, or each role billed to its own API key. So each role has a `.env`, and its
 values are given to that role's agent — and to no other role's.
 
-This is the one place the gateway reads secrets from a file. Elsewhere credentials live only in the
-environment, because the agent runs as the gateway's user and can read anything on disk, and
+This is one of two places the gateway reads secrets from a file; the other is its own `.env`, below.
+Elsewhere credentials live only in the environment, because the agent runs as the gateway's user and can read anything on disk, and
 because files persist and travel. A role directory is exactly the thing that is copied, cloned,
 committed and shared, so its `.env` is guarded at every point where it could travel or leak:
 
@@ -423,6 +423,45 @@ them. Only a separate OS user or a container per role does that (architecture mi
 
 The README's rule changes with this, from "credentials never go in the file" to "credentials go in
 the environment, or in a role's `.env` — `0600`, never cloned, masked".
+
+**The gateway's own `.env`.** The gateway reads its own secrets and settings from `$MT_HOME/.env`
+(default `~/.manus-team/.env`) as well as from its environment; it is the recommended home for
+`LARK_APP_SECRET`. It is optional. It follows a role's `.env`: the same parser and syntax, and the
+same checks on the file (a regular file, not a symlink, owned by the gateway's user, readable and
+writable by its owner alone, refused rather than fixed), and every value in it joins the
+known-secret set as it is read (§10.1), so a refusal raised after it, by the config, is masked
+too. Errors name a line or a variable, never a value.
+
+- **Which names.** Only those the gateway reads from its environment: `LARK_APP_ID`,
+  `LARK_APP_SECRET`, `LARK_DOMAIN`, the `MT_*` overrides of the config file, and
+  `MT_AGENT_ENV_<NAME>`. Any other name is a startup error, as an unknown config key is. `MT_HOME`,
+  `MT_CONFIG` and `MT_DB` are refused too: they say where the gateway's files are, this one among
+  them.
+- **The environment wins**, name by name: a name the environment sets at all, even to an empty
+  value, is the environment's. So an emergency override never needs a file edit, as for the config
+  file.
+- **Who reads it.** The gateway at startup, and the `mt` commands that load its settings (`mt
+  role`, `mt workspace`, and the operator's `mt kanban task`, `board` and `gate`), under their
+  shell's environment, so `mt role check` and the operator's commands see what the gateway sees.
+  `mt role check` reports whether it exists and the names it sets, never their values. The worker
+  CLI, in a board run's shell, never reads it.
+- **Never an agent's.** It is merged only into what the config and team loaders read. An agent's
+  process environment is built from the gateway's own process environment by allowlist, which
+  the file never enters, and its names are those `passEnv` refuses to forward (§2.1). An
+  `MT_AGENT_ENV_<NAME>` value reaches the role `default` made from the `agent:` block as `<NAME>`,
+  as it would from the environment, since that is what the name asks for. A process `mt` starts,
+  such as `mt role check`'s `--version` of an agent, gets the shell's environment without it.
+
+*Added on 2026-11-10.* The user chose a gateway-level `.env` so the Lark app secret need not be
+exported in every shell and service definition, with the environment winning over it and the
+safeguards of a role's `.env`. Refusing `MT_HOME` is forced: it locates the file. `MT_CONFIG` and
+`MT_DB` are refused rather than ignored with a note, so where everything lives is decided in one
+place, by how the gateway is started, and a home's `.env` cannot leave that home's `config.yaml`
+or `team.db` silently unused; an ignored name would be a setting that never applied, which is
+what refusing unknown names exists to stop. The config file's `db:` remains for a database
+elsewhere. There is no `mt` command that writes the file: the one shell line in the README writes
+it owner-only from the start, and a command taking the secret would be one more process holding
+it, on its command line or its input, for no check the startup and `mt role check` do not make.
 
 ### 2.6 The `mt role` and `mt workspace` commands
 
@@ -1910,10 +1949,12 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   skills are not masked in a prompt: a secret an operator typed into `role.md` reaches the agent
   either way, and the masker still masks it in what the agent writes back if it is a known value.
   The package's path is not a secret.
-- **A role's `.env`** is the only file the gateway reads secrets from, and it is `0600`, never cloned,
-  gitignored, masked, and given only to that role's agent (§2.5). Every agent runs as the same OS
-  user, so one could still read another role's `.env` from disk; that boundary needs per-role users
-  or containers.
+- **A role's `.env`** is `0600`, never cloned, gitignored, masked, and given only to that role's
+  agent (§2.5). Every agent runs as the same OS user, so one could still read another role's `.env`
+  from disk; that boundary needs per-role users or containers.
+- **The gateway's `.env`**, `$MT_HOME/.env`, is the only other file the gateway reads secrets
+  from: `0600`, the gateway's names only, masked, and never given to an agent (§2.5). An agent can
+  read it from disk as it can a role's, for the same reason.
 - **Worker tokens** are run-scoped and hashed at rest (§7.2); the socket is `0600`, at
   `$MT_HOME/run/kanban.sock` in a `0700` directory — or, when that path is too long for a socket
   (104 bytes on macOS), in a `0700` directory of the gateway's user under the temporary directory,
@@ -1950,7 +1991,7 @@ U+200F and U+061C) are skipped as it matches, and masked with the secret, since 
 one reads whole on screen; they are not stripped elsewhere, as a joined emoji and right-to-left text
 need them:
 
-- the Lark app secret;
+- the Lark app secret, and every value in the gateway's `.env` (§2.5), from the moment it is read;
 - every environment value the gateway passes to an agent: every value in every role's `.env`
   (§2.5), the `MT_AGENT_ENV_*` values of the role `default` made from the `agent:` block, and the
   resolved values of each role's `passEnv` names — except names a role lists in `maskExempt`, for

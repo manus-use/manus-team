@@ -7,10 +7,22 @@
 # CREDENTIALS DO NOT GO IN THIS FILE. The agent runs as the same user as the
 # gateway and is not sandboxed in this build, so anything on disk it can read. A
 # key that looks like a credential (secret, token, password, apiKey, ...) is
-# refused at boot rather than quietly accepted. Secrets live in the environment:
+# refused at boot rather than quietly accepted. Secrets live in the gateway's
+# own .env, $MT_HOME/.env (default ~/.manus-team/.env), or in the environment,
+# which wins over the file name by name:
 #
 #   LARK_APP_SECRET=...            the Feishu app secret. Required.
 #   MT_AGENT_ENV_<NAME>=...       passed to the agent as <NAME>.
+#
+# The .env must be owner-only (chmod 600), a regular file, not a symlink, or the
+# gateway refuses to start. It takes NAME=value lines and # comments, as a
+# role's .env does, and only names the gateway reads from its environment: any
+# other, and MT_HOME, MT_CONFIG and MT_DB, are refused. Every value in it is
+# masked, and no agent is given it. Create it, in a shell that holds the secret:
+#
+#   (umask 077; printf 'LARK_APP_SECRET=%s\n' "$LARK_APP_SECRET" > ~/.manus-team/.env) && chmod 600 ~/.manus-team/.env
+#
+# mt role check reports whether it exists and the names it sets.
 #
 # An unknown or misspelled key is an error, not a default.
 
