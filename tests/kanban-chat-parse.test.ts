@@ -172,6 +172,25 @@ describe('the other /kanban commands', () => {
     expect(parseKanban('gate remove k_1 3')).toEqual({ ok: true, command: { verb: 'gate remove', taskId: 'k_1', gateId: 3 } });
   });
 
+  it("drops a leading -- before a gate's command, as the terminal's form takes one", () => {
+    const add = (command: string, timeoutS?: number) => ({ ok: true, command: { verb: 'gate add', taskId: 'k_1', command, timeoutS } });
+    expect(parseKanban('gate add k_1 -- npm test')).toEqual(add('npm test'));
+    expect(parseKanban('gate add k_1 --\tnpm test')).toEqual(add('npm test'));
+    expect(parseKanban('gate add k_1 --timeout 60 -- npm test')).toEqual(add('npm test', 60));
+    expect(parseKanban('gate add k_1 --timeout=60 -- npm test')).toEqual(add('npm test', 60));
+    // Only the first `--` is the separator; a later one, or a --timeout in the command, is the command's.
+    expect(parseKanban('gate add k_1 -- npm test -- --watch=false')).toEqual(add('npm test -- --watch=false'));
+    expect(parseKanban('gate add k_1 -- curl --timeout 5 https://example.invalid')).toEqual(
+      add('curl --timeout 5 https://example.invalid'),
+    );
+    // A word that only starts with -- is no separator.
+    expect(parseKanban('gate add k_1 --version-check')).toEqual(add('--version-check'));
+    // Nothing after the separator, or a timeout after it, which goes before it: the usage.
+    for (const text of ['gate add k_1 --', 'gate add k_1 --   ', 'gate add k_1 --timeout 60 --', 'gate add k_1 -- --timeout 60 npm test']) {
+      expect([text, parseKanban(text)]).toEqual([text, { ok: false, usage: expect.stringMatching(/^Usage: `\/kanban gate add/) }]);
+    }
+  });
+
   it("reads a person's reports on their own task, the summary or the reason as written", () => {
     expect(parseKanban('task done k_1 the page is up\nlinks checked')).toEqual({
       ok: true,
