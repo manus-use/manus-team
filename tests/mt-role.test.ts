@@ -666,6 +666,29 @@ describe('mt role check', () => {
     expect(r.out).toMatch(/role reviewer names REVIEW_TOKEN in agent.passEnv, and it is not set in this shell/);
   });
 
+  it('warns of a passEnv name set in this shell, which a service started by launchd or systemd will not have', async () => {
+    fx = mtFixture();
+    const dir = roleDir('reviewer', `${ACP_AGENT}  passEnv: [REVIEW_TOKEN]\n`);
+    const r = await fx.run(['role', 'check', 'reviewer'], { env: { REVIEW_TOKEN: 'tok-never-printed' } });
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^this shell's environment: ok$/m);
+    expect(r.out).toContain(
+      `warning: role reviewer takes REVIEW_TOKEN from this shell through agent.passEnv; a service started by launchd or systemd will not have it: put it in ${join(dir, '.env')} and remove it from passEnv`,
+    );
+    expect(r.out + r.err).not.toContain('tok-never-printed');
+  });
+
+  it("warns of a passEnv name of the agent: block set in this shell, pointing at MT_AGENT_ENV_*", async () => {
+    fx = mtFixture((ws) =>
+      [`workspace: ${ws}`, 'agent:', '  driver: acp', '  command: claude-agent-acp', '  passEnv: [SVC_TOKEN]', ''].join('\n'),
+    );
+    const r = await fx.run(['role', 'check'], { env: { SVC_TOKEN: 'svc-never-printed' } });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      `warning: role default takes SVC_TOKEN from this shell through agent.passEnv; a service started by launchd or systemd will not have it: set MT_AGENT_ENV_SVC_TOKEN in ${join(fx.home, '.env')} and remove it from agent.passEnv`,
+    );
+  });
+
   it("reports MT_AGENT_* variables beside roles/default as this shell's", async () => {
     fx = mtFixture((ws) => `workspace: ${ws}\n`);
     roleDir('default', ACP_AGENT);

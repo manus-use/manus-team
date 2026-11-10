@@ -23,7 +23,7 @@ import {
   type RoleLimits,
 } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
-import { readGatewayEnv, withGatewayEnv, type GatewayEnvFile } from '../gateway-env.js';
+import { gatewayEnvPath, readGatewayEnv, withGatewayEnv, type GatewayEnvFile } from '../gateway-env.js';
 import { inBoardRun } from './gate.js';
 import { RESUME_MIN_VERSION } from '../driver/cli/driver.js';
 import { isReservedRoleName, nameProblem } from '../names.js';
@@ -485,6 +485,7 @@ export function roleCheck(only: string | undefined, io: MtIo): number {
   }
   // One line a role: how many of its runs may be open at once, and why (spec §6.3).
   for (const role of real.roles ?? []) io.out(limitLine(role, real.perRole));
+  for (const line of servicePassEnv(real.roles ?? [], io)) io.out(line);
   resumeVersions(real.roles ?? [], io);
   for (const note of real.notes) io.out(`note: ${note}`);
   io.out("note: the environment was checked in this shell; the service's environment may differ");
@@ -503,6 +504,29 @@ function reportGatewayEnv(file: GatewayEnvFile, io: MtIo): void {
     if (io.env[name] === undefined) continue;
     io.out(`note: ${name} is set both in this shell and in ${file.path}; the environment wins`);
   }
+}
+
+/**
+ * A warning for each passEnv name this shell sets: the check passes here, but a
+ * gateway started by launchd or systemd (`mt service`) has only PATH and
+ * MT_HOME, and no shell's variables, so it would refuse to start. Names only.
+ */
+function servicePassEnv(roles: readonly Role[], io: MtIo): string[] {
+  const out: string[] = [];
+  for (const role of roles) {
+    for (const name of role.agent.passEnv) {
+      if ((io.env[name] ?? '') === '') continue;
+      const fix =
+        role.source === 'agent-block' || role.dir === undefined
+          ? `set ${AGENT_ENV_PREFIX}${name} in ${gatewayEnvPath(io.env)} and remove it from agent.passEnv`
+          : `put it in ${join(role.dir, '.env')} and remove it from passEnv`;
+      out.push(
+        `warning: role ${role.name} takes ${name} from this shell through agent.passEnv; ` +
+          `a service started by launchd or systemd will not have it: ${fix}`,
+      );
+    }
+  }
+  return out;
 }
 
 /** `mt role check`'s line for a role's max_running, and where it comes from. */
