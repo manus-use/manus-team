@@ -60,18 +60,25 @@ new_enough() {
   [ "$major" -gt 22 ] || { [ "$major" -eq 22 ] && [ "$minor" -ge 12 ]; }
 }
 
-# The newest nvm 22.x that is 22.12 or later, by version, not by name.
+# The newest nvm 22.x that is 22.12 or later, by minor then patch, not by name.
 nvm_node() {
-  local dir best='' best_minor=-1 minor
+  local dir best='' best_minor=-1 best_patch=-1 minor patch name
   local base="${NVM_DIR:-$HOME/.nvm}/versions/node"
   [ -d "$base" ] || return 0
   for dir in "$base"/v22.*; do
     [ -x "$dir/bin/node" ] || continue
-    minor="$(basename "$dir" | cut -d. -f2)"
-    case "$minor" in '' | *[!0-9]*) continue ;; esac
-    if [ "$minor" -gt "$best_minor" ] && new_enough "$dir/bin/node"; then
+    name="$(basename "$dir")"
+    minor="$(printf '%s' "$name" | cut -d. -f2)"
+    patch="$(printf '%s' "$name" | cut -d. -f3)"
+    case "$minor$patch" in '' | *[!0-9]*) continue ;; esac
+    [ -n "$minor" ] && [ -n "$patch" ] || continue
+    if [ "$minor" -lt "$best_minor" ] || { [ "$minor" -eq "$best_minor" ] && [ "$patch" -le "$best_patch" ]; }; then
+      continue
+    fi
+    if new_enough "$dir/bin/node"; then
       best="$dir/bin/node"
       best_minor="$minor"
+      best_patch="$patch"
     fi
   done
   printf '%s' "$best"
@@ -114,8 +121,13 @@ else
   say "wrote $home/config.yaml from config.example.yaml: edit it, at least lark.appId and workspace"
 fi
 
-# One argument in single quotes, for a line the user pastes.
-quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+# One argument in single quotes, for a line the user pastes: each ' becomes '\''.
+# The replacement is in a variable, which bash 3.2 (macOS's /bin/bash) needs: it
+# keeps the backslashes of one written inline.
+quote() {
+  local q="'\\''"
+  printf "'%s'" "${1//\'/$q}"
+}
 
 if [ ! -e "$home/.env" ]; then
   say ''
@@ -155,7 +167,8 @@ case ":$PATH:" in
     rc=''
     case "$(basename "${SHELL:-}")" in
       zsh) rc="$HOME/.zshrc" ;;
-      bash) rc="$HOME/.bashrc" ;;
+      # A login shell, which macOS's terminals start, reads ~/.bash_profile, not ~/.bashrc.
+      bash) if [ "$(uname -s)" = Darwin ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi ;;
     esac
     say "To put mt on PATH, add this line to your shell's rc file:"
     say "  $path_line"

@@ -74,7 +74,8 @@ function fixture(): Fx {
     bin,
     record,
     run(args = [], env = {}) {
-      const r = spawnSync('bash', [join(checkout, 'install.sh'), ...args], {
+      // /bin/bash, which is bash 3.2 on macOS: the oldest the script must run under.
+      const r = spawnSync('/bin/bash', [join(checkout, 'install.sh'), ...args], {
         cwd: root,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -150,10 +151,45 @@ describe('install.sh', () => {
     expect(r.out).toMatch(/kept .*config\.yaml/);
   });
 
-  it('uses ~/.bashrc for bash', () => {
+  it('uses ~/.bash_profile for bash on macOS, which login shells read, and ~/.bashrc elsewhere', () => {
     fx = fixture();
     expect(fx.run(['--yes'], { SHELL: '/bin/bash' }).code).toBe(0);
-    expect(readFileSync(join(fx.home, '.bashrc'), 'utf8')).toContain(join(fx.home, '.manus-team', 'bin'));
+    const rc = process.platform === 'darwin' ? '.bash_profile' : '.bashrc';
+    expect(readFileSync(join(fx.home, rc), 'utf8')).toContain(join(fx.home, '.manus-team', 'bin'));
+    expect(existsSync(join(fx.home, process.platform === 'darwin' ? '.bashrc' : '.bash_profile'))).toBe(false);
+  });
+
+  it("quotes a ' in a path in every line it prints and writes, under bash 3.2", () => {
+    fx = fixture();
+    const other = join(fx.root, "it's home");
+    const r = fx.run(['--yes'], { MT_HOME: other });
+    expect(r.err).toBe('');
+    expect(r.code).toBe(0);
+    const q = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
+    const pathLine = `export PATH=${q(join(other, 'bin'))}:"$PATH"`;
+    expect(r.out).toContain(pathLine);
+    expect(r.out).toContain(`> ${q(join(other, '.env'))}) && chmod 600 ${q(join(other, '.env'))}`);
+    // The line appended works: a shell that runs it finds the home's bin first.
+    const rc = readFileSync(join(fx.home, '.zshrc'), 'utf8');
+    expect(rc).toContain(pathLine);
+    const sourced = spawnSync('/bin/sh', ['-c', `${pathLine}; printf %s "$PATH"`], { encoding: 'utf8', env: { PATH: '/usr/bin' } });
+    expect(sourced.stdout).toBe(`${join(other, 'bin')}:/usr/bin`);
+    // So does the launcher.
+    expect(spawnSync(join(other, 'bin', 'mt'), ['role', 'list'], { env: { PATH: '/usr/bin:/bin' } }).status).toBe(0);
+    expect(calls(fx)).toContain(`mt role list MT_HOME=`);
+  });
+
+  it("picks nvm's newest 22 by minor and then patch", () => {
+    fx = fixture();
+    const base = join(fx.home, '.nvm', 'versions', 'node');
+    for (const v of ['v22.15.0', 'v22.15.1', 'v22.9.9', 'v22.14.7']) {
+      mkdirSync(join(base, v, 'bin'), { recursive: true });
+      writeFileSync(join(base, v, 'bin', 'node'), `#!/bin/sh\n[ "$1" = --version ] && echo ${v} && exit 0\nexec '${process.execPath}' "$@"\n`);
+      chmodSync(join(base, v, 'bin', 'node'), 0o755);
+    }
+    const r = fx.run();
+    expect(r.err).toBe('');
+    expect(readFileSync(join(fx.home, '.manus-team', 'bin', 'mt'), 'utf8')).toContain(`exec '${join(base, 'v22.15.1', 'bin', 'node')}'`);
   });
 
   it('honours MT_HOME', () => {
