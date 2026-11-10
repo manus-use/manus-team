@@ -1,5 +1,6 @@
 import { ConfigError, type Env } from '../config.js';
 import { loadGatewayEnv, type GatewayEnvFile } from '../gateway-env.js';
+import { redactKnownSecrets } from '../secrets.js';
 import { parse, refuse, UsageError } from './args.js';
 import { jsonLine } from './operator.js';
 import { LIST_FILTERS } from '../kanban/chat-parse.js';
@@ -178,11 +179,13 @@ async function kanban(command: string | undefined, rest: readonly string[], io: 
 /**
  * `io` for a command that loads the gateway's settings: its environment this
  * shell's over the gateway's .env, as the gateway's is over the file, so the
- * command sees what the gateway sees. The file's values are masked from here
- * on. A refused file is a ConfigError, as it stops the gateway. Never for the
- * worker CLI: a board run's shell is an agent's, and gets nothing of the file.
+ * command sees what the gateway sees. The file's secrets are masked from here
+ * on. A refused file is a ConfigError, as it stops the gateway. Never in a
+ * board run's shell: that is an agent's, and gets nothing of the file, so
+ * there the command sees that shell alone.
  */
 export function withGatewayFile(io: MtIo): MtIo {
+  if (inBoardRun(io.env)) return io;
   const loaded = loadGatewayEnv(io.env);
   return { ...io, env: loaded.env, shellEnv: io.env, gatewayEnv: loaded.file };
 }
@@ -241,7 +244,7 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
     throw new UsageError(`unknown command: ${[group, command].filter((s) => s !== undefined).join(' ')}`);
   } catch (err) {
     if (err instanceof UsageError) {
-      io.err(`mt: ${err.message}`);
+      io.err(`mt: ${redactKnownSecrets(err.message)}`);
       io.err(USAGE);
       return 2;
     }

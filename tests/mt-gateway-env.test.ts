@@ -1,6 +1,7 @@
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { addSecrets, clearSecrets } from '../src/secrets.js';
 import { mtFixture, type MtFixture } from './helpers/mt.js';
 
 /**
@@ -9,7 +10,10 @@ import { mtFixture, type MtFixture } from './helpers/mt.js';
  * and which names it sets, never their values.
  */
 let fx: MtFixture;
-afterEach(() => fx.cleanup());
+afterEach(() => {
+  clearSecrets();
+  fx.cleanup();
+});
 
 const SECRET = 'lark-secret-from-file-1234';
 
@@ -65,7 +69,7 @@ describe("mt and the gateway's .env", () => {
     envFile('MT_AGENT_DRIVER=nonesuch\n');
     const r = await fx.run(['role', 'check']);
     expect(r.code).toBe(1);
-    expect(r.out).toMatch(/^files:\n {2}agent\.driver must be one of/m);
+    expect(r.out).toMatch(/^files:\n {2}MT_AGENT_DRIVER must be one of/m);
     expect(r.out).toMatch(/^this shell's environment: ok$/m);
   });
 
@@ -120,5 +124,60 @@ describe("mt and the gateway's .env", () => {
       expect(r.err).toMatch(/can be read or written by other users \(mode 640\)/);
       expect(`${r.out}\n${r.err}`).not.toContain(SECRET);
     }
+  });
+});
+
+describe('mt never prints a value in a refusal', () => {
+  const VALUE = 'xyzzy-not-for-printing-42';
+
+  it('masks a known secret in a refusal and in a usage error', async () => {
+    fx = mtFixture();
+    // Registered as the file is read, before the refusal is written.
+    envFile(`MT_AGENT_ENV_TOKEN=${VALUE}\n`);
+    const refused = await fx.run(['workspace', 'add', 'docs', `/nonexistent/${VALUE}`]);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toMatch(/^mt: /);
+    expect(`${refused.out}${refused.err}`).not.toContain(VALUE);
+
+    addSecrets([VALUE]);
+    const usage = await fx.run(['role', 'list', `--${VALUE}`]);
+    expect(usage.code).toBe(2);
+    expect(usage.err).toMatch(/^mt: /);
+    expect(usage.err).not.toContain(VALUE);
+  });
+
+  it('names the variable, not its value, for a bad MT_MAX_LIVE_SESSIONS, MT_WORKSPACE or MT_AGENT_COMMAND', async () => {
+    fx = mtFixture(noWorkspace);
+    const cases: Array<[Record<string, string>, RegExp]> = [
+      [{ MT_WORKSPACE: fx.workspace, MT_MAX_LIVE_SESSIONS: VALUE }, /MT_MAX_LIVE_SESSIONS must be a positive integer/],
+      [{ MT_WORKSPACE: `relative/${VALUE}` }, /MT_WORKSPACE must be an absolute path/],
+      [{ MT_WORKSPACE: fx.workspace, MT_AGENT_COMMAND: `acp ${VALUE}` }, /MT_AGENT_COMMAND contains a space, and is not a path/],
+    ];
+    for (const [env, message] of cases) {
+      for (const where of ['shell', 'file'] as const) {
+        if (where === 'file') envFile(Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n'));
+        else rmSync(join(fx.home, '.env'), { force: true });
+        const r = await fx.run(['role', 'list'], where === 'shell' ? { env } : {});
+        expect(r.code, `${where}: ${r.err}`).toBe(1);
+        expect(r.err).toMatch(message);
+        expect(r.err).not.toContain(VALUE);
+        expect(r.err).not.toMatch(/\bacp\b/);
+      }
+    }
+  });
+});
+
+describe("a board run's shell and the gateway's .env", () => {
+  const RUN = { MT_KANBAN_RUN: 'r_1', MT_KANBAN_TOKEN: 'tok-not-for-printing-1234', MT_KANBAN_SOCKET: '/nonexistent.sock' };
+
+  it('never reads the file: a loose one stops neither mt role list nor mt role check, and neither mentions it', async () => {
+    fx = mtFixture();
+    envFile(`LARK_APP_SECRET=${SECRET}\n`, 0o644);
+    const list = await fx.run(['role', 'list'], { env: RUN });
+    expect(list.code, list.err).toBe(0);
+    const check = await fx.run(['role', 'check'], { env: RUN });
+    expect(check.code, check.out).toBe(0);
+    expect(check.out).not.toMatch(/gateway \.env/);
+    expect(`${list.out}${list.err}${check.out}${check.err}`).not.toContain('.env');
   });
 });

@@ -419,7 +419,12 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
   if (!isAbsolute(defaultWorkspace)) {
     // Relative resolves against the gateway's cwd, which is whatever the service
     // manager set. The workspace would then depend on how the process was launched.
-    throw new ConfigError(`the workspace must be an absolute path, got ${JSON.stringify(defaultWorkspace)}`);
+    // A value from the environment is named, not quoted: errors from it never echo it.
+    throw new ConfigError(
+      envString(env, 'MT_WORKSPACE') !== undefined
+        ? 'MT_WORKSPACE must be an absolute path, and is relative'
+        : `the workspace must be an absolute path, got ${JSON.stringify(defaultWorkspace)}`,
+    );
   }
 
   // The agent block is optional: a role directory may define the role default
@@ -482,14 +487,17 @@ export function loadTeamSettings(
 
 /** The legacy `agent:` block, with its `MT_AGENT_*` overrides applied. */
 function legacyAgent(env: Env, file: FileConfig, opts: LoadOptions = {}): AgentConfig {
+  const fromEnv = envString(env, 'MT_AGENT_COMMAND');
   const command =
-    envString(env, 'MT_AGENT_COMMAND') ??
+    fromEnv ??
     file.agent.command ??
     fail('an agent command is required: set agent.command in the config file, or MT_AGENT_COMMAND');
-  checkCommand(command);
+  checkCommand(command, fromEnv === undefined ? undefined : 'MT_AGENT_COMMAND');
   const argsFromEnv = envString(env, 'MT_AGENT_ARGS');
   const args = argsFromEnv === undefined ? file.agent.args : shellWords(argsFromEnv);
-  const driver = driverOf(envString(env, 'MT_AGENT_DRIVER') ?? file.agent.driver ?? 'acp');
+  const driverFromEnv = envString(env, 'MT_AGENT_DRIVER');
+  const driver =
+    driverFromEnv === undefined ? driverOf(file.agent.driver ?? 'acp') : driverOf(driverFromEnv, 'MT_AGENT_DRIVER');
   const unsupervised = envFlag(env, 'MT_AGENT_UNSUPERVISED') ?? file.agent.unsupervised ?? false;
   requireSupervisionMatch(driver, unsupervised);
   return {
@@ -516,9 +524,19 @@ function legacyAgent(env: Env, file: FileConfig, opts: LoadOptions = {}): AgentC
  * space and fails as an ENOENT at the first prompt -- long after boot, and
  * reported as the agent not starting rather than as a typo here. Absolute paths
  * are exempt: `/Applications/My App/bin/agent` is a real thing.
+ *
+ * `variable` names the environment variable the command came from, which the
+ * error then names instead of quoting the command: an error never echoes a
+ * value read from the environment.
  */
-export function checkCommand(command: string): void {
+export function checkCommand(command: string, variable?: string): void {
   if (!/\s/.test(command) || isAbsolute(command)) return;
+  if (variable !== undefined) {
+    throw new ConfigError(
+      `${variable} contains a space, and is not a path. Arguments belong in MT_AGENT_ARGS. ` +
+        'Use an absolute path if the binary really is named that.',
+    );
+  }
   const [first = '', ...rest] = command.split(/\s+/);
   throw new ConfigError(
     `the agent command ${JSON.stringify(command)} contains a space, and is not a path. ` +
@@ -531,10 +549,13 @@ export function checkCommand(command: string): void {
 // Which driver, and on what terms
 // ---------------------------------------------------------------------------
 
-export function driverOf(value: string): KnownDriver {
+/** `variable`, when the value came from the environment, is named instead of the value. */
+export function driverOf(value: string, variable?: string): KnownDriver {
   if ((KNOWN_DRIVERS as readonly string[]).includes(value)) return value as KnownDriver;
   throw new ConfigError(
-    `agent.driver must be one of ${KNOWN_DRIVERS.join(', ')}, got ${JSON.stringify(value)}`,
+    variable === undefined
+      ? `agent.driver must be one of ${KNOWN_DRIVERS.join(', ')}, got ${JSON.stringify(value)}`
+      : `${variable} must be one of ${KNOWN_DRIVERS.join(', ')}`,
   );
 }
 
@@ -993,7 +1014,7 @@ function envFlag(env: Env, key: string): boolean | undefined {
   if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
   // Not defaulted. A typo'd flag silently taking its default is how a setting
   // someone deliberately changed turns out never to have applied.
-  throw new ConfigError(`${key}: expected a boolean, got ${JSON.stringify(value)}`);
+  throw new ConfigError(`${key}: expected a boolean (true or false, 1 or 0, yes or no, on or off)`);
 }
 
 function envInteger(env: Env, key: string): number | undefined {
@@ -1001,7 +1022,7 @@ function envInteger(env: Env, key: string): number | undefined {
   if (value === undefined) return undefined;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new ConfigError(`${key}: expected a positive integer, got ${JSON.stringify(value)}`);
+    throw new ConfigError(`${key} must be a positive integer`);
   }
   return parsed;
 }

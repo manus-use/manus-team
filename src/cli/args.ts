@@ -1,5 +1,6 @@
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 import type { MtIo } from './mt.js';
+import { redactKnownSecrets } from '../secrets.js';
 
 /**
  * The parts every `mt` command shares: reading its arguments, refusing, and
@@ -20,9 +21,9 @@ export function parse<T extends NonNullable<ParseArgsConfig['options']>>(args: r
   }
 }
 
-/** Prints a refusal and returns its exit code. */
+/** Prints a refusal, masked, and returns its exit code. */
 export function refuse(io: MtIo, message: string): number {
-  io.err(`mt: ${message}`);
+  io.err(`mt: ${redactKnownSecrets(message)}`);
   return 1;
 }
 

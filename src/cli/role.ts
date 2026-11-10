@@ -24,6 +24,7 @@ import {
 } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
 import { readGatewayEnv, withGatewayEnv, type GatewayEnvFile } from '../gateway-env.js';
+import { inBoardRun } from './gate.js';
 import { RESUME_MIN_VERSION } from '../driver/cli/driver.js';
 import { isReservedRoleName, nameProblem } from '../names.js';
 import { nativeFor } from '../render/native.js';
@@ -446,9 +447,10 @@ export function roleCheck(only: string | undefined, io: MtIo): number {
   const files: string[] = [];
   // The gateway's .env first, as the gateway reads it first. Refused, it is a
   // file problem, and the rest is checked against this shell alone.
+  // Not in a board run's shell, which is an agent's and gets nothing of it.
   let gatewayEnv: GatewayEnvFile | undefined;
   try {
-    gatewayEnv = readGatewayEnv(io.env);
+    if (!inBoardRun(io.env)) gatewayEnv = readGatewayEnv(io.env);
   } catch (err) {
     if (!(err instanceof ConfigError)) throw err;
     files.push(err.message);
