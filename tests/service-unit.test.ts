@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -60,12 +60,15 @@ describe('the launchd plist', () => {
     expect(plist).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?>\n<!DOCTYPE plist/);
     expect(plist).toMatch(/<key>Label<\/key>\s*<string>team\.manus\.gateway<\/string>/);
     expect(plist).toMatch(
-      /<key>ProgramArguments<\/key>\s*<array>\s*<string>\/Users\/me\/My Tools\/node &amp; co\/bin\/node<\/string>\s*<string>\/Users\/me\/Dev\/the &quot;gateway&quot;\/dist\/main\.js<\/string>\s*<\/array>/,
+      /<key>ProgramArguments<\/key>\s*<array>\s*<string>\/Users\/me\/My Tools\/node &amp; co\/bin\/node<\/string>\s*<string>--enable-source-maps<\/string>\s*<string>\/Users\/me\/Dev\/the &quot;gateway&quot;\/dist\/main\.js<\/string>\s*<\/array>/,
     );
     expect(plist).toMatch(/<key>WorkingDirectory<\/key>\s*<string>\/Users\/me\/Dev\/the &quot;gateway&quot;<\/string>/);
     expect(plist).toMatch(/<key>RunAtLoad<\/key>\s*<true\/>/);
     expect(plist).toMatch(/<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>\s*<\/dict>/);
     expect(plist).toMatch(/<key>ThrottleInterval<\/key>\s*<integer>30<\/integer>/);
+    // Standard, not Background: launchd gives a Background job low CPU and I/O priority, and its agents inherit it.
+    expect(plist).toMatch(/<key>ProcessType<\/key>\s*<string>Standard<\/string>/);
+    expect(plist).not.toContain('Background');
     expect(plist).toMatch(/<key>StandardOutPath<\/key>\s*<string>\/Users\/me\/team &lt;home&gt;&apos;s\/logs\/gateway\.log<\/string>/);
     expect(plist).toMatch(/<key>StandardErrorPath<\/key>\s*<string>\/Users\/me\/team &lt;home&gt;&apos;s\/logs\/gateway\.log<\/string>/);
   });
@@ -108,7 +111,7 @@ describe('the systemd unit', () => {
   it('runs node on dist/main.js from the checkout, restarted on failure, logging under the home', () => {
     const unit = systemdUnit(SPEC);
     expect(unit).toMatch(/^\[Unit\]\n/m);
-    expect(unit).toContain('ExecStart="/Users/me/My Tools/node & co/bin/node" "/Users/me/Dev/the \\"gateway\\"/dist/main.js"\n');
+    expect(unit).toContain('ExecStart="/Users/me/My Tools/node & co/bin/node" "--enable-source-maps" "/Users/me/Dev/the \\"gateway\\"/dist/main.js"\n');
     expect(unit).toContain('WorkingDirectory=/Users/me/Dev/the "gateway"\n');
     expect(unit).toContain('Environment="PATH=/Users/me/My Tools/bin:/usr/bin:/bin"\n');
     expect(unit).toContain(`Environment="MT_HOME=/Users/me/team <home>'s"\n`);
@@ -118,6 +121,8 @@ describe('the systemd unit', () => {
     expect(unit).toMatch(/^RestartSec=30$/m);
     // A configuration error (EX_CONFIG) is not retried: it stays failed until it is fixed.
     expect(unit).toMatch(/^RestartPreventExitStatus=78$/m);
+    // SIGTERM to the gateway alone first, so it drains before its agents are killed.
+    expect(unit).toMatch(/^KillMode=mixed$/m);
     expect(unit).toMatch(/^\[Install\]\nWantedBy=default\.target$/m);
   });
 
@@ -172,6 +177,8 @@ describe('log rotation', () => {
     const inode = statSync(log).ino;
     expect(rotateLog(log, 100)).toBe(true);
     expect(readFileSync(`${log}.1`, 'utf8')).toBe('x'.repeat(200));
+    expect(statSync(`${log}.1`).mode & 0o777).toBe(0o600);
+    expect(statSync(log).mode & 0o777).toBe(0o600);
     expect(readFileSync(log, 'utf8')).toBe('');
     // The same file, so the fd launchd or systemd opened stays the one written to.
     expect(statSync(log).ino).toBe(inode);
@@ -198,5 +205,10 @@ describe('log rotation', () => {
     expect(readFileSync(log, 'utf8')).toHaveLength(50);
     expect(rotateOwnLog(home, () => ({ dev: st.dev, ino: st.ino }), 10)).toBe(true);
     expect(readFileSync(log, 'utf8')).toBe('');
+    // Owner-only, however launchd or systemd created it.
+    chmodSync(log, 0o644);
+    writeFileSync(log, 'z');
+    expect(rotateOwnLog(home, () => ({ dev: st.dev, ino: st.ino }), 10)).toBe(false);
+    expect(statSync(log).mode & 0o777).toBe(0o600);
   });
 });

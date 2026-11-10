@@ -35,6 +35,9 @@ export type Recorded = Omit<ServiceSpec, 'label'>;
 const DEFAULT_LABEL = 'team.manus.gateway';
 const DEFAULT_UNIT = 'manus-team';
 
+/** Node's first argument in both units: a crash's stack names the TypeScript source, as `npm start` does. */
+const NODE_FLAG = '--enable-source-maps';
+
 /** Seconds launchd and systemd wait before starting the gateway again after it stopped. */
 export const RESTART_DELAY_S = 30;
 
@@ -112,6 +115,7 @@ export function launchdPlist(spec: ServiceSpec): string {
     '  <key>ProgramArguments</key>',
     '  <array>',
     `    ${string(spec.node)}`,
+    `    ${string(NODE_FLAG)}`,
     `    ${string(spec.main)}`,
     '  </array>',
     '  <key>WorkingDirectory</key>',
@@ -129,8 +133,10 @@ export function launchdPlist(spec: ServiceSpec): string {
     '  </dict>',
     '  <key>ThrottleInterval</key>',
     `  <integer>${RESTART_DELAY_S}</integer>`,
+    // Standard, not Background: launchd gives a Background job low CPU and I/O
+    // priority, which every agent the gateway starts would inherit.
     '  <key>ProcessType</key>',
-    '  <string>Background</string>',
+    '  <string>Standard</string>',
     '  <key>StandardOutPath</key>',
     `  ${string(spec.log)}`,
     '  <key>StandardErrorPath</key>',
@@ -152,7 +158,8 @@ export function readPlist(text: string): Recorded | undefined {
   const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1];
   const env = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(text)?.[1] ?? '';
   const words = [...(args ?? '').matchAll(/<string>([^<]*)<\/string>/g)].map((m) => xmlUnescape(m[1] ?? ''));
-  const [node, main] = words;
+  const node = words[0];
+  const main = words.length > 1 ? words[words.length - 1] : undefined;
   const checkout = plistString(text, 'WorkingDirectory');
   const log = plistString(text, 'StandardOutPath');
   const path = plistString(env, 'PATH');
@@ -200,7 +207,7 @@ export function systemdUnit(spec: ServiceSpec): string {
     '',
     '[Service]',
     'Type=simple',
-    `ExecStart=${systemdQuote(spec.node)} ${systemdQuote(spec.main)}`,
+    `ExecStart=${systemdQuote(spec.node)} ${systemdQuote(NODE_FLAG)} ${systemdQuote(spec.main)}`,
     `WorkingDirectory=${systemdPath('the checkout', spec.checkout)}`,
     ...env.map((e) => `Environment=${systemdQuote(e, { dollar: false })}`),
     `StandardOutput=append:${systemdPath('the log path', spec.log)}`,
@@ -208,6 +215,8 @@ export function systemdUnit(spec: ServiceSpec): string {
     'Restart=on-failure',
     `RestartSec=${RESTART_DELAY_S}`,
     'RestartPreventExitStatus=78',
+    // SIGTERM to the gateway alone, so it drains and stops its agents itself; whatever is left is killed after the timeout.
+    'KillMode=mixed',
     '',
     '[Install]',
     'WantedBy=default.target',
@@ -232,7 +241,9 @@ export function readUnit(text: string): Recorded | undefined {
       .split('\n')
       .filter((l) => l.startsWith(`${key}=`))
       .map((l) => l.slice(key.length + 1));
-  const [node, main] = systemdWords(line('ExecStart')[0] ?? '');
+  const words = systemdWords(line('ExecStart')[0] ?? '');
+  const node = words[0];
+  const main = words.length > 1 ? words[words.length - 1] : undefined;
   const checkout = line('WorkingDirectory')[0]?.replaceAll('%%', '%');
   const log = line('StandardOutput')[0]?.replace(/^append:/, '').replaceAll('%%', '%');
   const env = new Map(
