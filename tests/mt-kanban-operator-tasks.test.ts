@@ -199,11 +199,26 @@ describe('mt kanban task new', () => {
       err: '',
     });
     const json = await mt(['task', 'new', 'Nightly', 'report', '--key', 'nightly-1', '--json']);
-    expect(JSON.parse(json.out)).toEqual({ ok: true, task_id: taskId, board: 'default', existing: true });
+    // A repeat changes nothing, so it sends no nudge, and says so.
+    expect(JSON.parse(json.out)).toEqual({ ok: true, task_id: taskId, board: 'default', existing: true, nudged: false });
     const fresh = await mt(['task', 'new', 'Weekly', '--key', 'weekly-1', '--json']);
     expect(JSON.parse(fresh.out)).toMatchObject({ ok: true, board: 'default', existing: false });
     expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 2 });
     expect(nudges).toBe(2);
+    // An archived task's key still names it, and the line says it is archived.
+    expect((await mt(['task', 'archive', taskId])).code).toBe(0);
+    expect((await mt(['task', 'new', 'Nightly', '--key', 'nightly-1'])).out).toBe(
+      `task ${taskId} already exists with key nightly-1: Nightly report (archived), on board default; nothing new was created`,
+    );
+  });
+
+  it('refuses a --key holding a control character or a bidi control, as a wrong command line', async () => {
+    for (const key of ['a\nb', 'a\u0007b', 'a\u2028b', 'evil\u202Ekey', '\u2066k\u2069', 'tab\tbed']) {
+      const r = await mt(['task', 'new', 'x', '--key', key]);
+      expect([key, r.code]).toEqual([key, 2]);
+      expect(r.err.split('\n')[0]).toBe('mt: a key is one line, with no control characters and no bidi controls');
+    }
+    expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 0 });
   });
 
   it("refuses a --key used on another board, as chat's are, and a blank or chat-shaped one", async () => {

@@ -96,6 +96,15 @@ describe('mt kanban board', () => {
     expect((await mt(['board', 'list', 'ALL'])).out).toContain('web-app (archived): no tasks');
   });
 
+  it("caps a board's max_running at the gateway's kanban.max_running, as chat does", async () => {
+    expect((await mt(['board', 'create', 'web-app'])).code).toBe(0);
+    const over = await mt(['board', 'set', 'web-app', 'max_running', '9', '--json']);
+    expect(over.code).toBe(1);
+    expect(JSON.parse(over.out)).toMatchObject({ ok: false, code: 'invalid', message: expect.stringMatching(/kanban\.max_running, 8$/) });
+    expect(getBoard(gateway, 'web-app')?.maxRunning).toBeNull();
+    expect((await mt(['board', 'set', 'web-app', 'max_running', '8'])).code).toBe(0);
+  });
+
   it('prints one line of JSON with --json, a refusal too', async () => {
     const made = await mt(['board', 'create', 'web-app', '--json']);
     expect(made.code).toBe(0);

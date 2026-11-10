@@ -183,6 +183,11 @@ describe('the other /kanban commands', () => {
     expect(parseKanban('gate add k_1 -- curl --timeout 5 https://example.invalid')).toEqual(
       add('curl --timeout 5 https://example.invalid'),
     );
+    // On its own line, after a blank line, or before a non-breaking space: still the separator.
+    expect(parseKanban('gate add k_1 --timeout 60\n-- npm test')).toEqual(add('npm test', 60));
+    expect(parseKanban('gate add k_1 --timeout 60\n\n-- npm test')).toEqual(add('npm test', 60));
+    expect(parseKanban('gate add k_1\n\n-- npm test')).toEqual(add('npm test'));
+    expect(parseKanban('gate add k_1 --\u00a0npm test')).toEqual(add('npm test'));
     // A word that only starts with -- is no separator.
     expect(parseKanban('gate add k_1 --version-check')).toEqual(add('--version-check'));
     // Nothing after the separator, or a timeout after it, which goes before it: the usage.

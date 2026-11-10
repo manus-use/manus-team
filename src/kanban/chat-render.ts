@@ -377,8 +377,9 @@ export function blocksTask(event: KanbanEvent): boolean {
 
 /**
  * The notice a subscription hears of one event (spec §9.4), or undefined when
- * the event is none: completed, review requested, blocked with its kind and
- * reason, retrying after a failure, gave up, stranded. A dependency block is not
+ * the event is none: completed, review requested, changes requested with who
+ * asked and the reason, blocked with its kind and reason, retrying after a
+ * failure, gave up, stranded. A dependency block is not
  * one, since nobody needs to act; a throttled run's cooldown is not either, as it
  * clears by itself, and blocks as transient at its limit, which is one. For
  * people: the one line that says who a person's claim gave the task to (spec
@@ -387,7 +388,12 @@ export function blocksTask(event: KanbanEvent): boolean {
 export function renderNotice(
   event: KanbanEvent,
   task: TaskRow,
-  opts: { blockRecurrenceLimit: number; nameOf?: NameOf },
+  opts: {
+    blockRecurrenceLimit: number;
+    nameOf?: NameOf;
+    /** A run's assignee, for an event from before its reviewer was recorded in it; undefined once the run is gone. */
+    runAssignee?: (runId: string) => Assignee | undefined;
+  },
 ): string | undefined {
   const p = payloadOf(event);
   const name = `**${label(task.title)}** ${id(task.taskId)}`;
@@ -446,10 +452,13 @@ export function renderNotice(
     case 'changes_requested': {
       // A run's reviewer as the event recorded it; a person by the name Lark last gave; anyone else as recorded.
       const reviewer = text(p, 'reviewer');
+      const run = reviewer === '' && event.actor.startsWith('run:') ? opts.runAssignee?.(event.actor.slice(4)) : undefined;
       const by =
-        reviewer === ''
-          ? label(stopper(event.actor, opts.nameOf), 80)
-          : whom({ kind: p['reviewerKind'] === 'human' ? 'human' : 'role', name: reviewer }, opts.nameOf);
+        reviewer !== ''
+          ? whom({ kind: p['reviewerKind'] === 'human' ? 'human' : 'role', name: reviewer }, opts.nameOf)
+          : run !== undefined
+            ? whom(run, opts.nameOf)
+            : label(stopper(event.actor, opts.nameOf), 80);
       return `Changes requested on ${name} by ${by}: ${label(text(p, 'reason'), 500)}`;
     }
     case 'stranded':

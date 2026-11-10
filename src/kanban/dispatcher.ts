@@ -425,7 +425,7 @@ export class Dispatcher {
           boardMaxRunning: limits.get(task.board) ?? null,
           role: who.name,
           roleMaxRunning: this.#roleLimit(who.name),
-        }).length > 0
+        }, { first: true }).length > 0
       ) {
         return false;
       }

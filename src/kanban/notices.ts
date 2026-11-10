@@ -1,6 +1,6 @@
 import { ChannelError, type CardButton, type Channel, type SendTarget } from '../channel/types.js';
 import { noticeBatchUuid } from '../core/ids.js';
-import { dueSubscriptions, eventsAfter, getTask, type DueSubscription } from '../db/kanban-read.js';
+import { dueSubscriptions, eventsAfter, getRun, getTask, type DueSubscription } from '../db/kanban-read.js';
 import type { Db } from '../db/open.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
@@ -375,6 +375,7 @@ export class Notifier {
     for (const event of events) {
       const text = renderNotice(event, task, {
         blockRecurrenceLimit: this.#deps.blockRecurrenceLimit,
+        runAssignee: (runId) => getRun(this.#deps.db, runId)?.assignee,
         ...(this.#deps.nameOf === undefined ? {} : { nameOf: this.#deps.nameOf }),
       });
       if (text !== undefined) notices.push({ event, text });

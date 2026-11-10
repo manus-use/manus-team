@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { limitsReached } from '../src/kanban/waiting.js';
 import { eventsOf, openAgentRunCount, openAgentRunCountAs, runsOf } from '../src/db/kanban-read.js';
 import { completes, dispatchHarness, holds, reportComplete, role, until, type DispatchHarness } from './helpers/dispatch.js';
 import { ALICE } from './helpers/kanban.js';
@@ -340,6 +341,27 @@ describe("the service's show: which tasks are waiting on their role's limit", ()
     held.end('completed', () => reportComplete(h, runOf(h, holder.taskId)));
     await h.dispatcher.idle();
     expect([gone, single, split].map((t) => runsOf(h.t.db, t.taskId).map((r) => r.outcome))).toEqual([['completed'], ['completed'], []]);
+  });
+});
+
+describe('limitsReached', () => {
+  it('stops at the first limit reached for the pass, and gives every one for show', async () => {
+    const h = harness({ roles: [role('implementer', { maxRunning: 1 })], settings: { maxRunning: 1 } });
+    const first = h.create({ title: 'first', workspace: 'web' });
+    const held = holds(h.driver('implementer'));
+    h.dispatcher.pass();
+    await until(() => held.started, 'the first run');
+    const limits = { maxRunning: 1, board: 'default', boardMaxRunning: 1, role: 'implementer', roleMaxRunning: 1 };
+    const prepare = vi.spyOn(h.t.db, 'prepare');
+    expect(limitsReached(h.t.db, limits, { first: true })).toEqual([{ kind: 'gateway', maxRunning: 1 }]);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    prepare.mockClear();
+    expect(limitsReached(h.t.db, limits).map((w) => w.kind)).toEqual(['gateway', 'board', 'role']);
+    expect(prepare).toHaveBeenCalledTimes(3);
+    prepare.mockRestore();
+    completes(h, h.driver('implementer'));
+    held.end('completed', () => reportComplete(h, runOf(h, first.taskId)));
+    await h.dispatcher.idle();
   });
 });
 

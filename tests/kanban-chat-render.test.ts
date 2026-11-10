@@ -394,6 +394,13 @@ describe('notices', () => {
     );
     expect(renderNotice(event(ALICE), task(k.taskId), LIMIT)).toBe(`Changes requested on ${name} by lark:on\\_alice: tighten it`);
     expect(renderNotice(event('operator:alice'), task(k.taskId), LIMIT)).toBe(`Changes requested on ${name} by operator:alice: tighten it`);
+    // An event from before the reviewer was recorded: the run's role, while the run is on the board.
+    const old = { ...last(k.taskId), actor: `run:${review.runId}`, payload: { reason: 'tighten it' } };
+    const runAssignee = (runId: string) => (runId === review.runId ? review.assignee : undefined);
+    expect(renderNotice(old, task(k.taskId), { ...LIMIT, runAssignee })).toBe(`Changes requested on ${name} by role reviewer: tighten it`);
+    expect(renderNotice({ ...old, actor: 'run:r_gone' }, task(k.taskId), { ...LIMIT, runAssignee })).toBe(
+      `Changes requested on ${name} by run:r\\_gone: tighten it`,
+    );
     // A long reason is cut, still on one line.
     const long = renderNotice({ ...event(ALICE), payload: { reason: 'x'.repeat(2000) } }, task(k.taskId), LIMIT) ?? '';
     expect(long.split('\n')).toHaveLength(1);

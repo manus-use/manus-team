@@ -383,6 +383,10 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
   const big = tooBig(command);
   if (big !== undefined) return early(io, json, 'too_large', big);
   const board = boardFlag(values.board) ?? DEFAULT_BOARD;
+  // One line, as a title is: a control character or a bidi control is refused, not changed.
+  if (values.key !== undefined && (/[\p{Cc}\u2028\u2029]/u.test(values.key) || new RegExp(BIDI.source).test(values.key))) {
+    throw new UsageError('a key is one line, with no control characters and no bidi controls');
+  }
   const key = values.key?.trim();
   return act(io, json, 'mt kanban task new', (service, by) => {
     for (const name of [command.assignee, command.reviewer]) {
@@ -409,9 +413,11 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
       return {
         ok: true,
         lines: [
-          `task ${task.taskId} already exists with key ${line(key ?? '', 80)}: ${line(task.title)}, on board ${line(task.board, 80)}; nothing new was created`,
+          `task ${task.taskId} already exists with key ${line(key ?? '', 80)}: ${line(task.title)}` +
+            `${task.phase === 'archived' ? ' (archived)' : ''}, on board ${line(task.board, 80)}; nothing new was created`,
         ],
-        json: { task_id: task.taskId, board: task.board, existing: true },
+        // Nothing changed, so the gateway was not asked to look.
+        json: { task_id: task.taskId, board: task.board, existing: true, nudged: false },
       };
     }
     const whom = task.assignee === null ? `nobody yet (mt kanban task assign ${task.taskId} <role> gives it to someone)` : who(task.assignee);

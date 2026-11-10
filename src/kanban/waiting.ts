@@ -23,15 +23,19 @@ export interface ClaimLimits {
 
 /**
  * Every limit an agent claim would pass that is reached, in the order the pass
- * checks them. Counted from the board, so a run opened earlier in the same
+ * checks them; with `first`, only the first, as the pass needs. Counted from the board, so a run opened earlier in the same
  * pass counts; a person's run is never counted (spec §6.3).
  */
-export function limitsReached(db: Db, l: ClaimLimits): Waiting[] {
+export function limitsReached(db: Db, l: ClaimLimits, opts: { first?: boolean } = {}): Waiting[] {
   const reached: Waiting[] = [];
+  // The pass needs only whether one is reached: it stops at the first, so a full gateway costs one count.
+  const done = () => opts.first === true && reached.length > 0;
   if (openAgentRunCount(db) >= l.maxRunning) reached.push({ kind: 'gateway', maxRunning: l.maxRunning });
+  if (done()) return reached;
   if (l.boardMaxRunning !== null && openAgentRunCountOn(db, l.board) >= l.boardMaxRunning) {
     reached.push({ kind: 'board', board: l.board, maxRunning: l.boardMaxRunning });
   }
+  if (done()) return reached;
   if (l.roleMaxRunning !== undefined && openAgentRunCountAs(db, l.role) >= l.roleMaxRunning) {
     reached.push({ kind: 'role', role: l.role, maxRunning: l.roleMaxRunning });
   }

@@ -449,7 +449,8 @@ function parseGate(text: string): ParsedKanban {
   }
   // `gate add k_1 -- npm test`, as the terminal's form is written: the `--` is
   // no part of the command. Only the first one: a later `--` is the command's.
-  const separated = /^[ \t]*--(?:\s+|$)([\s\S]*)$/.exec(command);
+  // It may stand on a line of its own, after the timeout's.
+  const separated = /^\s*--(?:\s+|$)([\s\S]*)$/.exec(command);
   if (separated !== null) command = separated[1] ?? '';
   command = command.trim();
   // A timeout that could not be read, a second one, or one after the `--`, is not the start of a command.
