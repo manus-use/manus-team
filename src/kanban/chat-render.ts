@@ -138,7 +138,7 @@ export function renderHelp(): string {
     ...lines.map(([usage, tier]) => `\`${usage}\` (${tier})`),
     'Name a person with an @-mention: they are sent the task as a card in a direct message, with Done and Block, or a review with Approve and Request changes. A person named may comment on, and report on, their own task.',
     "A task with a `reviewer:` is reviewed before it is done: its assignee's done, or its agent's, goes to the reviewer. An operator may answer any review, ending a reviewer role's run.",
-    'The chat a task is created in hears when it is done, needs review, blocks, is retried after a failure, gives up, or is stranded, and who a person was given it.',
+    'The chat a task is created in hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up, or is stranded, and who a person was given it.',
     "A board is a queue of tasks of its own. Each chat is on one, `default` until `/kanban board use` moves it, and its `/kanban task new` and `/kanban task list` act on that board; a task's follow-ups and parents are on its board.",
   ].join('\n');
 }
@@ -442,6 +442,15 @@ export function renderNotice(
         return `Gave up on ${name}: ${label(reason, 800)}\n\`/kanban task unblock ${task.taskId} [comment]\` gives it a fresh set of attempts.`;
       }
       return blockedLine(task, kind, reason, recurrences, opts.blockRecurrenceLimit);
+    }
+    case 'changes_requested': {
+      // A run's reviewer as the event recorded it; a person by the name Lark last gave; anyone else as recorded.
+      const reviewer = text(p, 'reviewer');
+      const by =
+        reviewer === ''
+          ? label(stopper(event.actor, opts.nameOf), 80)
+          : whom({ kind: p['reviewerKind'] === 'human' ? 'human' : 'role', name: reviewer }, opts.nameOf);
+      return `Changes requested on ${name} by ${by}: ${label(text(p, 'reason'), 500)}`;
     }
     case 'stranded':
       return `Stranded: ${name}. Nobody can be given it: ${label(text(p, 'reason'), 500)}`;

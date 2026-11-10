@@ -441,8 +441,11 @@ describe('requestChanges', () => {
       run: { runId: review.runId, outcome: 'changes_requested', summary: 'handle empty input' },
     });
     expect(rework).toMatchObject({ kind: 'work', attempt: 3, seededFromRun: work.runId });
+    // The run's reviewer, as it was, for the notice: the actor is the run.
     expect(eventsOf(h.db, task.taskId).find((e) => e.kind === 'changes_requested')?.payload).toEqual({
       reason: 'handle empty input',
+      reviewer: 'reviewer',
+      reviewerKind: 'role',
     });
   });
 

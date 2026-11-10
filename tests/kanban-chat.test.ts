@@ -143,7 +143,7 @@ describe('/kanban task new', () => {
     const taskId = created(reply);
     expect(reply).toBe(
       `Created \`${taskId}\`: **Draft the Q3 summary**, for role docs-writer, in docs. ` +
-        'This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.',
+        'This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.',
     );
     expect(getTask(t.db, taskId)).toMatchObject({
       title: 'Draft the Q3 summary',
@@ -192,7 +192,7 @@ describe('people, named by @-mention', () => {
     expect(reply).toBe(
       `Created \`${taskId}\`: **Check the links**, for Alice Smith (lark:on\\_alice). ` +
         'They are sent it as a card, in a direct message, once it is ready. ' +
-        'This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.',
+        'This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.',
     );
     expect(getTask(t.db, taskId)).toMatchObject({
       assignee: { kind: 'human', name: 'lark:on_alice' },

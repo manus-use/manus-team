@@ -120,6 +120,22 @@ describe('the notifier', () => {
     expect(lark.texts).toHaveLength(1);
   });
 
+  it("tells the chat following a task of changes requested, with the reason, batched with the rest", async () => {
+    const r = service.create({ title: 'Draft the notes', assignee: 'implementer', reviewer: 'reviewer', createdBy: ALICE, createdVia: VIA });
+    if (!r.ok) throw new Error(r.message);
+    const a = r.task;
+    const person = { kind: 'person' as const, principal: ALICE };
+    expect((await service.requestReview(a.taskId, person, { summary: 'v1' })).ok).toBe(true);
+    expect(service.requestChanges(a.taskId, person, 'cite the sources\nall of them').ok).toBe(true);
+    const n = notifier({ nameOf: (p) => (p === ALICE ? 'Alice' : undefined) });
+    expect(await n.deliver()).toBe(2);
+    expect(lark.texts).toHaveLength(1);
+    expect(lark.texts[0]?.text.split('\n\n')).toEqual([
+      `Review requested for **Draft the notes** \`${a.taskId}\`, from role reviewer.`,
+      `Changes requested on **Draft the notes** \`${a.taskId}\` by Alice: cite the sources all of them`,
+    ]);
+  });
+
   it('puts an Unblock under a message for each task its notices left blocked, the latest block of each, and none under one without', async () => {
     const a = create('Draft the notes');
     const b = create('Check the links');

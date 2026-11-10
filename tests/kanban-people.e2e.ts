@@ -357,7 +357,7 @@ describe('people on the board, end to end', () => {
     expect((await press(s, first, 'Request changes', BOB, 'again')).card).toMatch(/\nThis card is out of date/);
     expect(getTask(s.t.db, taskId)?.phase).toBe('done');
 
-    // The thread heard each request for review, who had each review, and the end.
+    // The thread heard each request for review, who had each review, the changes Bob's card asked for, and the end.
     await s.notifier().deliver();
     const told = s.lark.texts
       .filter((m) => m.target.threadId === 'omt_topic' && !m.text.startsWith('Created'))
@@ -366,6 +366,7 @@ describe('people on the board, end to end', () => {
     expect(told).toEqual([
       `Review requested for ${name}, from Bob.`,
       `📋 ${name}, review assigned to Bob`,
+      `Changes requested on ${name} by Bob: cite the sources`,
       `Review requested for ${name}, from Bob.`,
       `📋 ${name}, review assigned to Bob`,
       // Approved with nothing more to say.
