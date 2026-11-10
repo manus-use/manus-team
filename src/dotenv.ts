@@ -6,8 +6,8 @@ import { ConfigError } from './config.js';
  *
  * `KEY=value` lines, blank lines, and comments starting with `#`. A value may be
  * wrapped in one pair of single or double quotes, which are removed. Nothing is
- * expanded, there is no `export`, and there are no multi-line values. Anything
- * else is an error naming the line: a guess at what an unusual line meant is how
+ * expanded, there is no `export`, there are no multi-line values, and there is
+ * no control character but the tab (a NUL is one). Anything else is an error naming the line: a guess at what an unusual line meant is how
  * a secret ends up half-read.
  *
  * Errors name lines and valid keys, never values or other line text -- the
@@ -18,13 +18,23 @@ export type EnvFileResult = { values: Record<string, string> } | { error: string
 
 const VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/** C0 controls but the tab, and DEL. A CR before the LF is the line ending, removed by the split. */
+const CONTROL = /[\u0000-\u0008\u000a-\u001f\u007f]/;
+
 export function parseEnvFile(text: string, source: string): EnvFileResult {
   const values: Record<string, string> = {};
   const lines = text.split(/\r?\n/);
 
   for (let i = 0; i < lines.length; i += 1) {
-    const line = (lines[i] ?? '').trim();
+    const raw = lines[i] ?? '';
     const at = `${source}:${i + 1}`;
+    // Before anything else, comments included: a NUL or an escape in a value is
+    // a pasted mistake, cut short or rewritten by whatever reads it next, and a
+    // terminal would act on one in an error that quoted it.
+    if (CONTROL.test(raw)) {
+      return { error: `${at}: the line holds a control character; only printable text and tabs are allowed` };
+    }
+    const line = raw.trim();
     if (line === '' || line.startsWith('#')) continue;
 
     if (line.startsWith('export ')) {
