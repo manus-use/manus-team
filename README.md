@@ -328,7 +328,8 @@ A role that sets none takes `kanban.max_running_per_role`, and with neither it h
 its own. Either is refused at startup above `kanban.max_running`, which, like a board's own
 `max_running`, still holds over every role together. A task whose role is at its limit waits,
 and the board goes on to its next task; it is not reported stranded, and `/kanban task show`
-says what it is waiting on. `mt role list` and `mt role check` show each role's limit and where
+says what it is waiting on, as it says a wait on `kanban.max_running`, on its board's own
+`max_running`, or on another task's agent run in its workspace. `mt role list` and `mt role check` show each role's limit and where
 it comes from, and `mt role create` writes none. As with the rest of `config.yaml`, a change
 takes effect at the next start.
 
@@ -414,7 +415,7 @@ mt kanban board set <name> workspace <workspace|none>
 mt kanban board archive <name>
 mt kanban task new <title> [--board <name>] [--assignee <role>] [--reviewer <role>] [--workspace <name>]
     [--parent <task_id>]... [--outcome "..."] [--verify "..."] [--constraints "..."]
-    [--boundaries "..."] [--stop-when "..."] [--body "..." | --body-file <path|->]
+    [--boundaries "..."] [--stop-when "..."] [--body "..." | --body-file <path|->] [--key <key>]
 mt kanban task list [todo|ready|running|review|reviewing|blocked|done|archived|all] [--board <name>]
 mt kanban task show <task_id> [--board <name>]
 mt kanban task assign <task_id> <role> [--board <name>]
@@ -468,7 +469,11 @@ a running gateway, through the board's own service, and take effect at once.
   `operator:<login>`, the login of the account the command runs as: run under `sudo -u`, that
   is the service account, not you. `task new` takes `/kanban task new`'s lines as flags; its title is the
   words that are not flags, on one line, with no control character or bidi control, and its
-  body `--body`, or `--body-file` with a regular file, or `-` for stdin.
+  body `--body`, or `--body-file` with a regular file, or `-` for stdin. `--key <key>` makes it
+  safe to run again: a second `task new` with the same key creates nothing, and returns the task
+  the first made (`"existing": true` with `--json`, and a line saying it already exists). The key
+  is stored as `operator:<key>`, so it never meets a key of chat's or of a run's, and one used on
+  another board is refused (`other_board`). Archiving the task does not free its key.
   `assign`, `--assignee` and `--reviewer` take a role: a person is given work from chat, by
   @-mention, where the gateway can check their tier. A task created here is followed by no
   chat, so nobody is told when it is done or blocks: `mt kanban task show` and `task list` tell you. Each
@@ -478,7 +483,8 @@ a running gateway, through the board's own service, and take effect at once.
   `archive` and `board set`, as after their chat forms, the gateway is asked over its socket to
   look for work at once, which also cancels the turn of an agent run the change ended; if no
   gateway answers, they say why, and that the change stands: the gateway acts on it at its next
-  sweep, or when it next starts, and running the command again would make it twice. If the
+  sweep, or when it next starts, and running the command again would make it twice (a `task new`
+  with `--key` says that running it again returns the task). If the
   config does not set `kanban.enabled`, or sets it to false, they say which, and that the board
   is off: the change is recorded, and nothing runs it until the board is turned on. They refuse
   to run in a board run's shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set, before
@@ -595,7 +601,7 @@ typed without `task`, such as `/kanban new`, is an unknown command.
 |---|---|
 | `/kanban task new <title>` + lines | operate |
 | `/kanban task list [todo\|ready\|running\|review\|reviewing\|blocked\|done\|archived\|all]` | talk; without a status, the tasks someone may still act on |
-| `/kanban task show <task>` | talk: the task, its contract, gates, runs, latest output and comments |
+| `/kanban task show <task>` | talk: the task, its parents and children with their status, its contract, gates, runs, latest output and comments; for a claimable task the dispatcher passes over, a `waiting:` line for each reason |
 | `/kanban task assign <task> <role or @person>` | operate: an undecided run ends `superseded` |
 | `/kanban task link <parent> <child>` | operate: refused for a child past `open`, or with a run open |
 | `/kanban task workspace <task> <name>` | operate: refused once the workspace is fixed |
@@ -603,7 +609,7 @@ typed without `task`, such as `/kanban new`, is an unknown command.
 | `/kanban task unblock <task> [comment]` | operate |
 | `/kanban task stop <task>` | operate: the run ends `cancelled`, and the task blocks |
 | `/kanban task archive <task>` | operate |
-| `/kanban gate add <task> [--timeout <s>] <command>` | operate: the rest of the message is the command, as written |
+| `/kanban gate add <task> [--timeout <s>] <command>` | operate: the rest of the message is the command, as written; a `--` before it, as the terminal's form takes, is dropped |
 | `/kanban gate list <task>` | talk |
 | `/kanban gate remove <task> <gate>` | operate |
 | `/kanban task done <task> [summary]` | the task's assignee, a person; on a task that names a reviewer, it asks for review instead |
@@ -623,7 +629,8 @@ read the board but not change it. Everything shown is escaped, so a task's text 
 anyone, and masked, gate commands included.
 
 **Notices.** The chat, or thread, a task was created in follows it, and the tasks its runs
-create. It hears when a task is done, needs review, blocks (with the kind and the reason),
+create. It hears when a task is done, needs review, has changes requested (by whom, with the
+reason on one line), blocks (with the kind and the reason),
 is retried after a failure, gives up, or is stranded with nobody able to take it. A run cut
 short by a gateway restart is retried quietly. A task that keeps blocking for the same reason,
 `kanban.block_recurrence_limit` times after an unblock, is flagged for rewriting instead. Each
@@ -702,8 +709,8 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
 - An agent task nobody can be given is not seen as stranded while `kanban.max_running`, its
   board's own `max_running` or its role's is reached: the limit is checked first, so it is not
   tried. It is reported once a slot frees and a pass tries it.
-- `/kanban task show` says a ready task is waiting on its role's `max_running`, but not that it
-  is waiting on a busy workspace, or on the gateway's or its board's limit.
+- `/kanban task show` says nothing of a ready task whose workspace is running another task's
+  report gates: that wait is the gateway's, in memory, and a terminal cannot see it.
 - A task created with `mt kanban task new` is followed by no chat: nobody hears its notices, and a
   supervised role's approval requests on it reach nobody, as for any task no chat follows.
 - `mt kanban` at a terminal cannot give a person work: assign people from chat.

@@ -559,7 +559,7 @@ fresh install) has no registrations. A deployment with no config file (environme
   ```
   mt kanban board list [all] | create <name> | set <name> max_running <n|none> | set <name> workspace <ws|none> | archive <name>
   mt kanban task new <title…> [--board] [--assignee] [--reviewer] [--workspace] [--parent …] [--outcome] [--verify]
-                              [--constraints] [--boundaries] [--stop-when] [--body "…" | --body-file <path|->]
+                              [--constraints] [--boundaries] [--stop-when] [--body "…" | --body-file <path|->] [--key <k>]
   mt kanban task list [<status>|all] [--board <name>]
   mt kanban task show|stop|archive <task> · assign <task> <role> · link <parent> <child>   [--board <name>]
   mt kanban task unblock <task> [comment…] · comment <task> <text…>                       [--board <name>]
@@ -585,7 +585,7 @@ fresh install) has no registrations. A deployment with no config file (environme
   the nudge (§7.3), and the pass cancels the turn of a run the change decided (§6.2); a gateway that
   does not answer loses nothing, as its next sweep or start acts on the change, and the command says
   why it did not answer and that the change stands, never to try again: a second `new` would make a
-  second task. When the config does not set `kanban.enabled`, or sets it to false, no gateway is
+  second task, unless it has a `--key`, when it returns the first. When the config does not set `kanban.enabled`, or sets it to false, no gateway is
   asked, and the command says which, that the board is off, and that nothing runs the change until it
   is turned on. They refuse a board run's shell, as the gate commands do, before their command line
   is parsed or stdin read, and that is not a security boundary either.
@@ -701,7 +701,13 @@ with a join, not by correlating two files.
 
 - **`idempotency_key` is unique** because creation is retried by everything that can create: Lark
   redelivers a message, and an agent re-runs a command whose output it did not see. A repeated
-  create with the same key returns the existing task instead of a second card.
+  create with the same key returns the existing task instead of a second card. The service
+  namespaces every key by who creates: chat's is `lark:<message_id>`; a run's is
+  `run-task:<its task>:<key>`; the operator's `mt kanban task new --key <k>` is `operator:<k>`. A
+  key in another's namespace is refused (`invalid`), so none can return a task another kind of
+  creator made. A repeat answers `existing: true`, and `mt` says in plain text that the task
+  already exists; a key used on another board is refused `other_board` (§16.5), however its task
+  was created. A key is kept for good: archiving its task does not free it.
 - **`consecutive_failures` and `block_recurrences` reset only on success**: completion resets both,
   and work handed to review resets `consecutive_failures`; with one deliberate exception for
   `gave_up` (§8.2). Resetting `block_recurrences` on unblock is the amnesia that lets
@@ -1103,8 +1109,17 @@ board's own is (§16.6); a change takes effect at the next start, as every role 
 list` and `mt role check` show each role's limit and where it comes from (the role, the default,
 or none); `mt role create` writes none, and a role made from `default` does not take
 `default`'s. `/kanban task show` and `mt kanban task show` say when a ready task, or one waiting
-for its reviewer, is waiting on its role's limit; they do not say when it waits on a busy
-workspace or on the gateway's or a board's limit.
+for its reviewer, is waiting, one `waiting:` line for each reason a pass skips it, in the order
+the pass checks them: the gateway's `kanban.max_running`, its board's own `max_running`, its
+role's limit, and its workspace held by another task's open agent run, which the line names. The
+dispatcher's checks and `show` share one function (`src/kanban/waiting.ts`), and the busy
+workspace is the claim's own query, so the two cannot disagree. Nothing is said of a task the
+claim would refuse whatever the limits: no assignee or reviewer, a person's, a role not
+configured or whose files cannot be read, a workspace not configured, or parents in different
+workspaces. A workspace running another task's report gates is not said either: that wait is the
+gateway's, in memory, and the terminal cannot see it. `mt kanban task show --json` gives the
+reasons as `waiting`, a list of `{reason: gateway|board|role|workspace, ...}`, and keeps
+`waiting_on_role`, the role's entry or null.
 
 *Added on 2026-11-09.* The user asked for a per-role cap, Hermes's `max_in_progress_per_profile`
 (a Hermes profile is a role here), so a burst of one role's tasks across many workspaces cannot
@@ -1464,7 +1479,9 @@ Gates are deterministic where a contract is prose: a red test suite is evidence 
 and no reviewer has to notice. Defining a gate requires **operator** tier: a gate is a shell command
 the gateway will execute. An operator defines, lists and removes gates with `mt kanban gate add`,
 `list` and `remove` (§2.6), recorded as `operator:<login>`, and from plan D1 with `/kanban gate`, recorded as `lark:<union_id>`; both
-call the service's `addGate`, `listGates` and `removeGate`. The worker CLI has no gate command.
+call the service's `addGate`, `listGates` and `removeGate`. The terminal's form puts `--` before
+the command; chat's takes one too, and drops it, so `/kanban gate add k_1 -- npm test` stores
+`npm test`, as `mt kanban gate add k_1 -- npm test` does. A `--timeout` goes before the `--`. The worker CLI has no gate command.
 Wherever a gate's command is shown — `mt kanban gate list`, `mt kanban show`, the task prompt — it is
 masked, since a secret may have become known after the gate was defined; plan D1's chat masks it
 too wherever it shows one — `/kanban gate list`, `/kanban task show`, and the reply to `/kanban gate add`. A gate
@@ -1642,7 +1659,7 @@ getting nowhere, which no liveness check catches.
 |---|---|---|
 | `/kanban task new <title>` + body lines | operate | creates a task; lines starting `assignee:`, `reviewer:`, `workspace:`, `parent:`, `outcome:`, `verify:`, `constraints:`, `boundaries:`, `stop when:` fill fields; the rest is the body |
 | `/kanban task list [status\|all]` | talk | the chat's board (§16.4), by derived status |
-| `/kanban task show <id>` | talk | task, contract, gates, runs, latest output, comments |
+| `/kanban task show <id>` | talk | task, why it waits, parents and children with their status, contract, gates, runs, latest output, comments |
 | `/kanban task assign <id> <assignee>` | operate | an undecided run ends `superseded`; a decided one is closed |
 | `/kanban task link <parent> <child>` | operate | |
 | `/kanban task workspace <id> <name>` | operate | sets a task's workspace; refused once one is fixed (§2.3) |
@@ -1652,7 +1669,7 @@ getting nowhere, which no liveness check catches.
 | `/kanban task done <id> [summary]` · `/kanban task block <id> <reason>` | the assignee | report on a human task; on a task that names a reviewer, `done` asks for review (§5.3) |
 | `/kanban task review <id> [summary]`, with a line `reviewer: <role or @person>` unless the task names one | the assignee | ask for same-task review of a human task's work (§5.3) |
 | `/kanban task stop <id>` | operate | the run ends `cancelled`; the task blocks as `needs_input` |
-| `/kanban gate add <id> [--timeout <s>] <command>` | operate | the rest of the message is the command, as written (§7.7); `--timeout=<s>` is read too, and a timeout that cannot be read, or a task id starting `--`, is refused with the usage line rather than taken into the command |
+| `/kanban gate add <id> [--timeout <s>] <command>` | operate | the rest of the message is the command, as written (§7.7); `--timeout=<s>` is read too, and a timeout that cannot be read, or a task id starting `--`, is refused with the usage line rather than taken into the command; a `--` before the command, as the terminal's form takes, is dropped, only the first, and a `--timeout` after it is refused |
 | `/kanban gate list <id>` | talk | the task's gates, masked |
 | `/kanban gate remove <id> <gate>` | operate | |
 | `/kanban task archive <id>` | operate | |
@@ -1707,9 +1724,11 @@ people (§12).
 - **`/kanban task list`.** Without a status, the tasks someone may still act on — running, reviewing,
   review, ready, todo and blocked, grouped in that order; with one, only those; `all` lists every
   task. At most 30 lines, then how many more. From plan G, all of them on the chat's board (§16.4).
-- **`/kanban task show`** gives the task, its contract, its gates (masked), its last five runs, the end of
-  the latest run's output (its last 800 characters, after a line saying the rest was cut), and its
-  last five comments.
+- **`/kanban task show`** gives the task, a `waiting:` line for each reason a pass skips it (§6.3),
+  its parents and children each with its display status (§4.1), not its phase, its contract, its
+  gates (masked), its last five runs, the end of the latest run's output (its last 800 characters,
+  after a line saying the rest was cut), and its last five comments. `mt kanban task show` gives
+  the same; its `--json` gives each parent and child its `phase` and its `status`.
 - **`/kanban task assign`** to the task's current assignee says so and changes nothing. A person's name
   there may hold spaces (`@Alice Smith`), and is refused as a person, not as a wrong command line.
 - **Who acted** is recorded as `lark:<union_id>`, the principal people are assigned as. A sender
@@ -1874,8 +1893,8 @@ notice, and a bot that mentions people whenever work moves trains them to ignore
 ### 9.4 Subscriptions
 
 The chat where a task is created is subscribed to it, and to the tasks created from it. A subscriber
-hears: completed, review requested, blocked (with the kind and reason), retrying after a failure,
-gave up, stranded. Delivery is at-least-once, each message with a uuid derived from the
+hears: completed, review requested, changes requested (by whom, with the reason), blocked (with
+the kind and reason), retrying after a failure, gave up, stranded. Delivery is at-least-once, each message with a uuid derived from the
 `(subscription, event)` pairs it carries, so a redelivered message keeps its uuid.
 
 **As plan D1 builds it:**
@@ -1884,13 +1903,17 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   in — channel, app, chat, thread. It is written in `createTask`'s own transaction, with no event of
   its own. A task a run creates gets every subscription of the run's task (§7.3), so "the tasks
   created from it" are its runs' follow-ups, and theirs in turn.
-- **What is a notice.** From the task's events: `completed`; `review_requested`; `blocked` of any
+- **What is a notice.** From the task's events: `completed`; `review_requested`; `changes_requested`,
+  whoever asked: a reviewer role's run, named as the role its event records (`reviewer`,
+  `reviewerKind`), a person by card or by `/kanban task changes`, named by the name Lark last gave,
+  or anyone else, an operator's answer among them, as recorded; its reason masked, on one line,
+  and cut at 500 characters; `blocked` of any
   kind but `dependency`; `stopped`, which blocks the task as `needs_input`; `run_ended` that retries
   after `failed`, `crashed`, `timed_out` or `protocol_violation`; `run_ended` that blocks — "gave
   up" for `gave_up`, otherwise as a block with its kind and reason, which the event now carries as
   `blockReason`; and `stranded`. A run interrupted by a gateway restart is retried quietly: the task
   did nothing wrong. A throttled run's cooldown is not one either: it clears by itself, and blocks as
-  `transient` at its limit, which is. Nor are a comment, a claim, a link, `changes_requested` or an
+  `transient` at its limit, which is. Nor are a comment, a claim, a link or an
   archive. A block's notice tells how to unblock, unless the block has recurred
   `kanban.block_recurrence_limit` times (§5.4) — counted as the event recorded it (`blocked`,
   `stopped` and `run_ended` carry `blockRecurrences`), not as the task stands when the notice goes.
