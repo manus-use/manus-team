@@ -44,11 +44,110 @@ the gateway comes back.
 
 Requires Node 22.12+ and an ACP-capable agent on `PATH`.
 
+### Installing
+
+From a checkout:
+
 ```bash
-npm install
-npm run build
-npm start
+./install.sh            # build, make ~/.manus-team, put mt on PATH
+./install.sh --service  # the same, then mt service install
 ```
+
+Stop an `npm run dev` gateway from this checkout first: `npm ci` replaces `node_modules` under
+the running `tsx watch`.
+
+`install.sh` is safe to run again. It:
+
+- picks nvm's newest node 22 (22.12 or later) when nvm has one, else the `node` on `PATH`, or
+  the one `--node <path>` names, and the `npm` beside it;
+- runs `npm ci && npm run build`;
+- creates `$MT_HOME` (default `~/.manus-team`) owner-only, and `config.yaml` from
+  `config.example.yaml` when there is none. It never overwrites a config;
+- prints the line that creates the `.env` when there is none (see "Configuration" below). It
+  never asks for the secret and never prints it;
+- writes `$MT_HOME/bin/mt`, the same launcher the gateway writes at each start: this checkout's
+  `dist/mt.js` run by that node. It does not use `npm link`, which would put `mt` in one nvm
+  version's global `bin`, beside every other global command, pointing at whichever checkout
+  ran it last;
+- prints the line that puts `$MT_HOME/bin` on `PATH`, and appends it, once, to `~/.zshrc` for
+  zsh, or for bash to `~/.bash_profile` on macOS (whose terminals start login shells) and
+  `~/.bashrc` elsewhere, only with `--yes` or when you answer yes at a terminal.
+
+To run it by hand instead: `npm ci && npm run build && npm start`. `npm run dev` runs the
+source under `tsx watch`, which restarts at every change to it, a merge included.
+
+### Running as a service
+
+`mt service` runs the built gateway, `node dist/main.js`, as a LaunchAgent on macOS and a systemd
+user unit on Linux, started at login and restarted when it fails:
+
+```
+mt service install      # write the unit, load it and start it
+mt service status       # loaded, running, its pid, what it runs, the log, the pid lock
+mt service logs [-f] [-n <lines>]
+mt service start|stop|restart
+mt service uninstall    # stop it and remove the unit; $MT_HOME is left as it is
+```
+
+`install` records the absolute path of the node running it, this checkout, and `PATH` as it is
+in that shell, plus `MT_HOME` when it is set. Run it again to rewrite the unit, after changing
+node or `PATH`, say. A home other than `~/.manus-team` gets a service of its own, named with a
+hash of its path, so two homes never replace each other.
+
+- **macOS:** `~/Library/LaunchAgents/team.manus.gateway.plist`, loaded with `launchctl
+  bootstrap gui/<uid>`. `KeepAlive` restarts it when it exits other than cleanly, at most every
+  30 seconds. `mt service restart` sends the gateway SIGTERM, waits up to 60 seconds for it to
+  drain and exit, then starts it; `kickstart -k` only if it has not exited by then.
+  `mt service stop` boots it out, since a killed job would be restarted; it loads again at the
+  next login or `mt service start`. A LaunchAgent needs someone logged in at the Mac's console:
+  over ssh alone there is no `gui/<uid>` domain, and `install` says so. macOS shows a
+  "Background Items Added" notice for the new item; switching it off in System Settings >
+  General > Login Items makes `launchctl bootstrap` fail until it is switched on again.
+- **Linux:** `~/.config/systemd/user/manus-team.service`, with `Restart=on-failure` after 30
+  seconds, but not after a configuration error (exit 78), which stays failed until it is fixed:
+  see `mt service logs`. `KillMode=mixed` sends SIGTERM to the gateway alone, so it drains and
+  stops its agents itself before systemd kills what is left. On a server, run `loginctl enable-linger $USER` once, or the user's
+  services stop when you log out.
+
+**Deploying.** The service runs `dist/`, so a merge does not restart it. A deploy is:
+
+```bash
+git pull && npm ci && npm run build && mt service restart
+```
+
+**The service has no shell environment.** It gets `PATH` and `MT_HOME` and nothing else you
+exported, so:
+
+- the secret must be in `$MT_HOME/.env`: `install` refuses without a `.env` that sets
+  `LARK_APP_SECRET`. Any other `MT_*` or `LARK_*` setting this shell holds and the `.env` does
+  not is a warning: put it in the `.env`;
+- `install` loads the configuration as the service would, with only `PATH`, `MT_HOME` and the
+  `.env`, and refuses when the gateway would not start on it, a missing `lark.appId` or owner,
+  say, rather than load a unit sure to fail and be retried every 30 seconds;
+- every `agent.passEnv` name, which forwards a variable from the gateway's environment, is
+  missing there, and the gateway would refuse to start. `install` warns of each, without
+  refusing, and
+  `mt role check` warns of each this shell sets. Put the value in the role's `.env` and remove
+  it from `passEnv`, or, for the `agent:` block, set `MT_AGENT_ENV_<NAME>` in the gateway's
+  `.env`.
+
+**Logs** go to `$MT_HOME/logs/gateway.log`, stdout and stderr both, owner-only in an owner-only
+directory. Each run starts with `node --enable-source-maps`, so a stack names the TypeScript
+source. When the gateway starts as the service and the log is over 10 MiB, it is copied to
+`gateway.log.1`, owner-only, replacing the one before, and emptied in place, so every restart keeps it
+bounded with no newsyslog or logrotate set up. A gateway that runs for months without a restart
+is not rotated: restart it, or add a newsyslog (macOS) or logrotate (`copytruncate`) rule.
+
+**Moving from `npm run dev`:**
+
+1. Stop the `npm run dev` gateway. `install` warns while it holds `$MT_HOME/run/gateway.pid`,
+   and the service cannot take the home until it stops.
+2. Make sure `$MT_HOME/.env` sets `LARK_APP_SECRET`, and run `mt role check`: fix each
+   `passEnv` warning.
+3. `npm run build && mt service install`
+4. `mt service status`, then `mt service logs -f` until it is connected.
+
+To go back, `mt service uninstall`, then `npm run dev`.
 
 ### Feishu/Lark app setup
 
@@ -303,6 +402,11 @@ mt role check [<name>]
 mt workspace add <name> <absolute-path>
 mt workspace add <name> --clone <git-url>
 mt workspace list
+mt service install
+mt service uninstall
+mt service start|stop|restart
+mt service status
+mt service logs [-f] [-n <lines>]
 mt kanban board list [all]
 mt kanban board create <name>
 mt kanban board set <name> max_running <number|none>
@@ -623,6 +727,8 @@ src/driver/acp/         ACP client: spawn, initialize, resume, prompt, permissio
 src/driver/cli/         CLI fallback: one process per turn, argv in, NDJSON out
 src/policy/auth.ts      allowlist tiers and the silent-refusal rule
 src/config.ts           the file/environment split, validated at boot
+src/service/            the launchd plist and systemd unit mt service writes, and the log's rotation
+install.sh              build, make the home, put mt on PATH, optionally install the service
 schema/                 migrations; the event log is the system of record
 docs/architecture.md    full design document
 docs/specs/             the Lark channel design

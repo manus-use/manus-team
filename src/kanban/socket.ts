@@ -131,7 +131,7 @@ export interface GatewayLock {
 }
 
 /** The pid a lock file names, or undefined for one that names none. Refuses what is not a file of its own. */
-function lockHolder(path: string): number | undefined {
+export function lockHolder(path: string): number | undefined {
   let fd: number;
   try {
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);

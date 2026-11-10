@@ -1,7 +1,8 @@
-import { ConfigError } from './config.js';
+import { ConfigError, gatewayHome } from './config.js';
 import { installCrashHandlers } from './crash.js';
 import { main } from './index.js';
 import { redactKnownSecrets } from './secrets.js';
+import { rotateOwnLog } from './service/log.js';
 
 /**
  * The executable. Everything it does is turn a failure into an exit code.
@@ -23,6 +24,12 @@ import { redactKnownSecrets } from './secrets.js';
  * rejection is printed through the masker, not by Node, and exits 1.
  */
 installCrashHandlers();
+// Run as a service, the log launchd or systemd opened is bounded at each start (service/log.ts).
+try {
+  rotateOwnLog(gatewayHome(process.env));
+} catch (err) {
+  process.stderr.write(`note: the service log was not rotated: ${redactKnownSecrets(String(err))}\n`);
+}
 try {
   await main();
 } catch (err) {
