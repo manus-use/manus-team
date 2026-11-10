@@ -38,6 +38,16 @@ describe('parseEnvFile', () => {
     expect(values('A=$HOME/x')).toEqual({ A: '$HOME/x' });
   });
 
+  it('refuses a control character anywhere on a line, NUL included, naming the line only', () => {
+    for (const c of ['\u0000', '\u0007', '\u001b', '\u007f', '\u000b']) {
+      const message = error(`A=1\nB=secret${c}value\n`);
+      expect(message).toBe('.env:2: the line holds a control character; only printable text and tabs are allowed');
+    }
+    expect(error('# a comment\u0000\n')).toMatch(/^\.env:1: the line holds a control character/);
+    // A tab is text, and a CRLF line ending is a line ending.
+    expect(values('A=x\ty\r\nB=2\r\n')).toEqual({ A: 'x\ty', B: '2' });
+  });
+
   it('refuses export, naming the line', () => {
     expect(error('A=1\nexport B=2')).toMatch(/^\.env:2: `export` is not supported/);
   });

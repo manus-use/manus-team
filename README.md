@@ -89,31 +89,56 @@ end of docs/plans/2026-11-05-plan-d2-kanban-people.md against the live tenant fi
 
 ### Configuration
 
-Settings live in a YAML file; credentials live in the environment. Start from
-[`config.example.yaml`](config.example.yaml):
+Settings live in a YAML file; credentials live in the gateway's `.env` or the environment.
+Start from [`config.example.yaml`](config.example.yaml):
 
 ```bash
 cp config.example.yaml ~/.manus-team/config.yaml
-export LARK_APP_SECRET=...
+(umask 077; printf 'LARK_APP_SECRET=%s\n' "${LARK_APP_SECRET:?is not set}" > ~/.manus-team/.env) && chmod 600 ~/.manus-team/.env
 ```
+
+Run that second line in a shell that already holds the secret: it writes the value without
+printing it, refuses to write anything if `LARK_APP_SECRET` is not set, and the `umask` keeps
+the file owner-only from the moment it exists. The `>` replaces an existing `.env` whole, so if
+you already have one, add the line to it with an editor instead. If you set
+`LARK_APP_SECRET` in the service's environment today, that is the whole migration: run the line,
+run `mt role check` to see the file listed, then remove the variable from the service's
+environment and restart. Until you remove it the environment's value is the one used.
 
 `MT_CONFIG` names the file if you keep it elsewhere; otherwise it is
 `$MT_HOME/config.yaml`, default `~/.manus-team/config.yaml`. A file that is named but
 missing is an error, while the default location being absent is an ordinary
 environment-only deploy.
 
-**Credentials go in the environment, or in a role's `.env`.** The agent runs as the same
+**Credentials go in the gateway's `.env`, the environment, or a role's `.env`.** The agent runs as the same
 user and is not sandboxed in this build, so anything on disk it can read. The environment
 is not airtight either — a same-uid process can read `/proc/<pid>/environ` on Linux — but
 it does not persist, is not backed up, cannot be copied into a worktree, and cannot be
 committed by accident. A key that looks like a credential (`secret`, `token`, `password`,
 `apiKey`, …) is refused at boot rather than quietly accepted, and so is `agent.env`, which
-would put values in the file rather than names. A role's `.env` is the one file secrets are
-read from: it must be a regular file owned by the gateway's user, readable and writable only
-by its owner (for example `0600` or `0400`). It may not set `MT_*`, `LARK_*` or `PATH`.
+would put values in the file rather than names. Two files hold secrets, and are checked alike: each
+must be a regular file (not a symlink) owned by the gateway's user, readable and writable only
+by its owner (for example `0600` or `0400`), or the gateway refuses to start. Both take
+`NAME=value` lines, `#` comments and one pair of optional quotes, with no `export`, no
+expansion and no control characters but the tab. A comment must be on a line of its own: an
+unquoted value keeps everything after the `=`, a ` # note` after it included, and a quoted
+value followed by one is refused.
 
-The gateway masks every secret it holds itself — the Lark app secret, and every value it gives
-an agent from a role's `.env`, `passEnv` or `MT_AGENT_ENV_*`, except names the role lists in
+- **The gateway's `.env`**, at `$MT_HOME/.env` (default `~/.manus-team/.env`), is the
+  recommended home for `LARK_APP_SECRET`. It may set any variable in the table below, and
+  `MT_AGENT_ENV_*`; any other name is refused at startup, as an unknown config key is. It may
+  not set `MT_HOME`, `MT_CONFIG` or `MT_DB`: they say where the gateway's files are, this one
+  among them, so they belong to the environment the gateway starts with. The environment wins
+  over it, name by name, so an emergency override still needs no file edit. It is optional.
+  The gateway and the `mt` commands that read its settings read it; no agent is given it, nor
+  any of its values but an `MT_AGENT_ENV_*` one, which reaches the agent as it would from the
+  environment. Only its secrets are masked, `LARK_APP_SECRET` and `MT_AGENT_ENV_*`; paths, ids
+  and limits such as `MT_WORKSPACE`, `LARK_APP_ID` and `MT_MAX_LIVE_SESSIONS` are shown as
+  written, as they are from the config file.
+- **A role's `.env`** holds that role's own secrets. It may not set `MT_*`, `LARK_*` or `PATH`.
+
+The gateway masks every secret it holds itself — the Lark app secret, the `MT_AGENT_ENV_*`
+values in its own `.env`, and every value it gives an agent from a role's `.env`, `passEnv` or `MT_AGENT_ENV_*`, except names the role lists in
 `agent.maskExempt` — as `••••` in everything it shows in chat, and in what it stores in its event
 log and approvals. A secret split by a character that shows nothing (a zero-width or bidi
 character, a direction mark) is masked too. Values shorter than 8 characters are not masked. A secret the agent finds by
@@ -121,7 +146,7 @@ itself, for instance in a file it reads, is not known to the gateway and is not 
 
 | File setting | Env override | Meaning |
 |---|---|---|
-| — | `LARK_APP_SECRET` **(required)** | The app secret. Environment only; never written to disk or the event log. |
+| — | `LARK_APP_SECRET` **(required)** | The app secret. Best kept in `$MT_HOME/.env` (0600); the environment wins over it. Never in the config file, and never written to the event log. |
 | `lark.appId` | `LARK_APP_ID` | App id. Required from one source or the other. |
 | `lark.domain` | `LARK_DOMAIN` | Set for Lark (`https://open.larksuite.com`); omitted means Feishu. |
 | `auth.owner` | `MT_OWNER_OPEN_ID` | Your `open_id`. Required. Always in both allowlists — an allowlist that excludes the owner locks out the only person who can fix it. |
@@ -151,7 +176,7 @@ itself, for instance in a file it reads, is not known to the gateway and is not 
 | `kanban.nudge_limit` | — | Reminders sent into a run whose turn ended without a report, before the run ends as a protocol violation. Default 2; 0 sends none. At most 10. |
 | `kanban.block_recurrence_limit` | — | Blocks of the same kind in a row, unblocked in between, at which a blocked notice stops inviting another unblock and suggests rewriting the task. Default 2, at most 100. |
 | `db`, `downloads` | `MT_DB`, `MT_DOWNLOAD_DIR` | `$MT_HOME/team.db` and `$MT_HOME/downloads` unless set. |
-| — | `MT_HOME` | State directory, and where the config file is looked for. Default `~/.manus-team`. |
+| — | `MT_HOME` | State directory, and where the config file and the gateway's `.env` are looked for. Default `~/.manus-team`. Environment only. |
 
 Three rules make a mistake fail loudly instead of silently:
 
@@ -304,7 +329,9 @@ mt kanban <show|complete|review|changes|block|comment|create|link> < input.json
 
 The role, workspace and operator's board commands find the home, config file and database the
 way the gateway does (`MT_HOME`, `MT_CONFIG`, `MT_DB`; the database is `$MT_HOME/team.db` unless
-set), from the shell they run in, and need no Lark settings. The role and workspace commands
+set), from the shell they run in, and need no Lark settings. They read the gateway's `.env` as
+the gateway does, under this shell's environment, so they see what it sees, and refuse a file it
+would refuse. No `mt` command reads it in a board run's shell. The role and workspace commands
 only write files and never contact the gateway; changes take effect at the next start. The
 operator's `mt kanban` commands are the one exception: they write the board's database, beside
 a running gateway, through the board's own service, and take effect at once.
@@ -317,8 +344,11 @@ a running gateway, through the board's own service, and take effect at once.
   the role's `workspace:` to it, for a role that does not work on a repository; without it, a
   role's tasks follow their parents' workspace, which is what a reviewer needs.
 - `role check` runs the startup checks, and reports what comes from this shell's environment
-  separately: the service's environment may differ. It says, a line a role, whether the
-  role's runs are rendered as a native agent package, and why not.
+  separately: the service's environment may differ. It says whether the gateway's `.env`
+  exists and the names it sets, never their values, and which of those this shell sets too;
+  a file that is not owner-only, or sets a name the gateway does not read, is reported under
+  `files`. It says, a line a role, whether the role's runs are rendered as a native agent
+  package, and why not.
 - `workspace add` edits `workspaces:` in the config file, keeping its comments, and refuses
   anything the next start would refuse. `--clone` clones into `$MT_HOME/workspaces/<name>`.
 - The operator's `kanban` commands are chat's `/kanban` commands at a terminal, in the same
@@ -382,7 +412,7 @@ a running gateway, through the board's own service, and take effect at once.
   spaces; quote it to keep its own quoting; words before `--` join it too, so write the whole
   command after `--`), `list` and `remove`, which record you as
   `operator:<your login>`. They check the secrets this shell knows: every role's values, and
-  the Lark app secret if `LARK_APP_SECRET` is set here. They refuse to run in a board run's
+  the Lark app secret if `LARK_APP_SECRET` is set here or in the gateway's `.env`. They refuse to run in a board run's
   shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set, so an agent does not define gates by
   accident; that is not a security boundary, since an agent runs as your user and could unset
   them, as it could edit `config.yaml` or a role's files. Gate commands are shown masked. One

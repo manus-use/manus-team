@@ -1,4 +1,6 @@
 import { ConfigError, type Env } from '../config.js';
+import { loadGatewayEnv, type GatewayEnvFile } from '../gateway-env.js';
+import { redactKnownSecrets } from '../secrets.js';
 import { parse, refuse, UsageError } from './args.js';
 import { jsonLine } from './operator.js';
 import { LIST_FILTERS } from '../kanban/chat-parse.js';
@@ -32,8 +34,15 @@ import { workspaceAdd, workspaceList } from './workspace.js';
 export type Git = (args: readonly string[]) => Promise<{ code: number; stderr: string }>;
 
 export interface MtIo {
-  /** The shell's environment. The service's may differ, and output says so where it matters. */
+  /**
+   * The shell's environment. The service's may differ, and output says so where it matters.
+   * For a command that loads the gateway's settings, this shell's over the gateway's .env.
+   */
   env: Env;
+  /** The shell's own environment, without the gateway's .env: what a process mt starts is given. Set with gatewayEnv. */
+  shellEnv?: Env;
+  /** The gateway's .env, for a command that loads the gateway's settings (`withGatewayFile`). */
+  gatewayEnv?: GatewayEnvFile;
   out: (line: string) => void;
   err: (line: string) => void;
   /** Runs git; injectable so a failed clone can be tested. */
@@ -151,7 +160,8 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
 async function kanban(command: string | undefined, rest: readonly string[], io: MtIo): Promise<number> {
   if (command !== undefined && OPERATOR_GROUPS.includes(command)) {
     if (inBoardRun(io.env)) return refuseInRun(command, rest, io);
-    return command === 'gate' ? gate(rest, io) : await operatorCommand(command, rest, io);
+    const operator = withGatewayFile(io);
+    return command === 'gate' ? gate(rest, operator) : await operatorCommand(command, rest, operator);
   }
   const workers = command !== undefined && (WORKER_COMMANDS as readonly string[]).includes(command);
   if (inBoardRun(io.env)) return await kanbanCommand(command, rest, io);
@@ -164,6 +174,20 @@ async function kanban(command: string | undefined, rest: readonly string[], io: 
   }
   const hint = operators ? `; the operator's command is mt kanban task ${command}` : '';
   throw new UsageError(`unknown command: kanban${command === undefined ? '' : ` ${command}`}${hint}`);
+}
+
+/**
+ * `io` for a command that loads the gateway's settings: its environment this
+ * shell's over the gateway's .env, as the gateway's is over the file, so the
+ * command sees what the gateway sees. The file's secrets are masked from here
+ * on. A refused file is a ConfigError, as it stops the gateway. Never in a
+ * board run's shell: that is an agent's, and gets nothing of the file, so
+ * there the command sees that shell alone.
+ */
+export function withGatewayFile(io: MtIo): MtIo {
+  if (inBoardRun(io.env)) return io;
+  const loaded = loadGatewayEnv(io.env);
+  return { ...io, env: loaded.env, shellEnv: io.env, gatewayEnv: loaded.file };
 }
 
 /** Exit codes: 0 done, 1 refused or a check failed, 2 the command line was wrong. */
@@ -181,7 +205,7 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
     }
     if (group === 'role' && command === 'list') {
       expectNothing(parse(rest, {}).positionals, 'role list');
-      return roleList(io);
+      return roleList(withGatewayFile(io));
     }
     if (group === 'role' && command === 'create') {
       const { values, positionals } = parse(rest, {
@@ -195,7 +219,7 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
           cloneFrom: values['clone-from'],
           description: values.description,
           ownWorkspace: values['own-workspace'],
-        }, io);
+        }, withGatewayFile(io));
     }
     if (group === 'role' && command === 'check') {
       const [name, extra] = parse(rest, {}).positionals;
@@ -210,17 +234,17 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       }
       // `await`, so a ConfigError from the async command is caught below and
       // reported as `mt: …` rather than escaping as a stack trace.
-      return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, io);
+      return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, withGatewayFile(io));
     }
     if (group === 'kanban') return await kanban(command, rest, io);
     if (group === 'workspace' && command === 'list') {
       expectNothing(parse(rest, {}).positionals, 'workspace list');
-      return workspaceList(io);
+      return workspaceList(withGatewayFile(io));
     }
     throw new UsageError(`unknown command: ${[group, command].filter((s) => s !== undefined).join(' ')}`);
   } catch (err) {
     if (err instanceof UsageError) {
-      io.err(`mt: ${err.message}`);
+      io.err(`mt: ${redactKnownSecrets(err.message)}`);
       io.err(USAGE);
       return 2;
     }

@@ -25,6 +25,12 @@ const BUNDLED_SCHEMA_DIR = fileURLToPath(new URL('../schema', import.meta.url));
  * file names credentials and never holds them, and a file that does hold one is
  * refused at boot rather than quietly accepted.
  *
+ * The environment here is the gateway's process environment over its own
+ * `$MT_HOME/.env` (`gateway-env.ts`), merged by the caller before `loadConfig`
+ * sees it: a file of secrets alone, owner-only, in a role's `.env` syntax, which
+ * no agent is given. `loadConfig` itself reads only what it is handed, so a test
+ * never reads the real home.
+ *
  * Four rules, all about failing safely:
  *
  * 1. **Everything is validated here, at boot.** A missing app secret discovered on
@@ -327,8 +333,11 @@ export function loadConfig(
         envString(env, 'LARK_APP_ID') ??
         file.lark.appId ??
         fail('an app id is required: set lark.appId in the config file, or LARK_APP_ID'),
-      // Environment only, and refused in the file. See the note at the top.
-      appSecret: envString(env, 'LARK_APP_SECRET') ?? fail('LARK_APP_SECRET is required'),
+      // The environment or the gateway's .env, and refused in the config file.
+      // See the note at the top.
+      appSecret:
+        envString(env, 'LARK_APP_SECRET') ??
+        fail(`LARK_APP_SECRET is required: set it in ${join(located.home, '.env')} (mode 0600), or in the environment`),
       ...domainOf(envString(env, 'LARK_DOMAIN') ?? file.lark.domain),
     },
 
@@ -373,8 +382,13 @@ interface Located {
   file: FileConfig;
 }
 
+/** The directory the gateway's files live under: MT_HOME, else ~/.manus-team. */
+export function gatewayHome(env: Env): string {
+  return envString(env, 'MT_HOME') ?? join(homedir(), '.manus-team');
+}
+
 function locate(env: Env, readFile: FileReader): Located {
-  const home = envString(env, 'MT_HOME') ?? join(homedir(), '.manus-team');
+  const home = gatewayHome(env);
   const explicit = envString(env, 'MT_CONFIG');
   const path = explicit ?? join(home, 'config.yaml');
 
@@ -405,7 +419,12 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
   if (!isAbsolute(defaultWorkspace)) {
     // Relative resolves against the gateway's cwd, which is whatever the service
     // manager set. The workspace would then depend on how the process was launched.
-    throw new ConfigError(`the workspace must be an absolute path, got ${JSON.stringify(defaultWorkspace)}`);
+    // A value from the environment is named, not quoted: errors from it never echo it.
+    throw new ConfigError(
+      envString(env, 'MT_WORKSPACE') !== undefined
+        ? 'MT_WORKSPACE must be an absolute path, and is relative'
+        : `the workspace must be an absolute path, got ${JSON.stringify(defaultWorkspace)}`,
+    );
   }
 
   // The agent block is optional: a role directory may define the role default
@@ -468,14 +487,17 @@ export function loadTeamSettings(
 
 /** The legacy `agent:` block, with its `MT_AGENT_*` overrides applied. */
 function legacyAgent(env: Env, file: FileConfig, opts: LoadOptions = {}): AgentConfig {
+  const fromEnv = envString(env, 'MT_AGENT_COMMAND');
   const command =
-    envString(env, 'MT_AGENT_COMMAND') ??
+    fromEnv ??
     file.agent.command ??
     fail('an agent command is required: set agent.command in the config file, or MT_AGENT_COMMAND');
-  checkCommand(command);
+  checkCommand(command, fromEnv === undefined ? undefined : 'MT_AGENT_COMMAND');
   const argsFromEnv = envString(env, 'MT_AGENT_ARGS');
   const args = argsFromEnv === undefined ? file.agent.args : shellWords(argsFromEnv);
-  const driver = driverOf(envString(env, 'MT_AGENT_DRIVER') ?? file.agent.driver ?? 'acp');
+  const driverFromEnv = envString(env, 'MT_AGENT_DRIVER');
+  const driver =
+    driverFromEnv === undefined ? driverOf(file.agent.driver ?? 'acp') : driverOf(driverFromEnv, 'MT_AGENT_DRIVER');
   const unsupervised = envFlag(env, 'MT_AGENT_UNSUPERVISED') ?? file.agent.unsupervised ?? false;
   requireSupervisionMatch(driver, unsupervised);
   return {
@@ -502,9 +524,19 @@ function legacyAgent(env: Env, file: FileConfig, opts: LoadOptions = {}): AgentC
  * space and fails as an ENOENT at the first prompt -- long after boot, and
  * reported as the agent not starting rather than as a typo here. Absolute paths
  * are exempt: `/Applications/My App/bin/agent` is a real thing.
+ *
+ * `variable` names the environment variable the command came from, which the
+ * error then names instead of quoting the command: an error never echoes a
+ * value read from the environment.
  */
-export function checkCommand(command: string): void {
+export function checkCommand(command: string, variable?: string): void {
   if (!/\s/.test(command) || isAbsolute(command)) return;
+  if (variable !== undefined) {
+    throw new ConfigError(
+      `${variable} contains a space, and is not a path. Arguments belong in MT_AGENT_ARGS. ` +
+        'Use an absolute path if the binary really is named that.',
+    );
+  }
   const [first = '', ...rest] = command.split(/\s+/);
   throw new ConfigError(
     `the agent command ${JSON.stringify(command)} contains a space, and is not a path. ` +
@@ -517,10 +549,13 @@ export function checkCommand(command: string): void {
 // Which driver, and on what terms
 // ---------------------------------------------------------------------------
 
-export function driverOf(value: string): KnownDriver {
+/** `variable`, when the value came from the environment, is named instead of the value. */
+export function driverOf(value: string, variable?: string): KnownDriver {
   if ((KNOWN_DRIVERS as readonly string[]).includes(value)) return value as KnownDriver;
   throw new ConfigError(
-    `agent.driver must be one of ${KNOWN_DRIVERS.join(', ')}, got ${JSON.stringify(value)}`,
+    variable === undefined
+      ? `agent.driver must be one of ${KNOWN_DRIVERS.join(', ')}, got ${JSON.stringify(value)}`
+      : `${variable} must be one of ${KNOWN_DRIVERS.join(', ')}`,
   );
 }
 
@@ -576,6 +611,32 @@ export const AGENT_ENV_PREFIX = 'MT_AGENT_ENV_';
 
 /** The `MT_AGENT_*` variables that override a field of the `agent:` block. */
 export const AGENT_OVERRIDES = ['MT_AGENT_COMMAND', 'MT_AGENT_ARGS', 'MT_AGENT_DRIVER', 'MT_AGENT_UNSUPERVISED'] as const;
+
+/**
+ * Every variable the gateway reads its own settings from, but for the
+ * `MT_AGENT_ENV_<NAME>` family: the names its `.env` may hold (`gateway-env.ts`),
+ * less the three that say where its files are. A name read here and missing from
+ * this list is refused in that file; tests/gateway-env.test.ts checks the two agree.
+ */
+export const GATEWAY_ENV_NAMES = [
+  'MT_HOME',
+  'MT_CONFIG',
+  'MT_DB',
+  'MT_SCHEMA_DIR',
+  'MT_DOWNLOAD_DIR',
+  'MT_WORKSPACE',
+  'MT_OWNER_OPEN_ID',
+  'MT_ALLOW_TALK',
+  'MT_ALLOW_OPERATE',
+  'MT_ALLOW_CHATS',
+  'MT_ALLOW_DM',
+  'MT_ALLOW_MENTION_ALL',
+  'MT_MAX_LIVE_SESSIONS',
+  ...AGENT_OVERRIDES,
+  'LARK_APP_ID',
+  'LARK_APP_SECRET',
+  'LARK_DOMAIN',
+] as const;
 
 /** Values for `passEnv` names, from the gateway's environment. `where` prefixes the errors. */
 export function passEnvValues(
@@ -953,7 +1014,7 @@ function envFlag(env: Env, key: string): boolean | undefined {
   if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
   // Not defaulted. A typo'd flag silently taking its default is how a setting
   // someone deliberately changed turns out never to have applied.
-  throw new ConfigError(`${key}: expected a boolean, got ${JSON.stringify(value)}`);
+  throw new ConfigError(`${key}: expected a boolean (true or false, 1 or 0, yes or no, on or off)`);
 }
 
 function envInteger(env: Env, key: string): number | undefined {
@@ -961,7 +1022,7 @@ function envInteger(env: Env, key: string): number | undefined {
   if (value === undefined) return undefined;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new ConfigError(`${key}: expected a positive integer, got ${JSON.stringify(value)}`);
+    throw new ConfigError(`${key} must be a positive integer`);
   }
   return parsed;
 }

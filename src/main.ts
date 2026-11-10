@@ -14,9 +14,10 @@ import { redactKnownSecrets } from './secrets.js';
  * operator hits most often, always at the first deploy, and a 40-frame trace
  * buries the name of the variable they forgot.
  *
- * Both writes are masked, but only for the secrets known by then: main() registers
- * them once loadTeam has returned, so an error from loadConfig or loadTeam itself
- * comes before any is known.
+ * Both writes are masked, but only for the secrets known by then: the secrets in
+ * the gateway's .env as soon as it is read, and the rest once loadTeam has
+ * returned, so an error from loadConfig or loadTeam itself can mask only the
+ * first. None names a value.
  *
  * So is a crash, from the first line: an uncaught exception or an unhandled
  * rejection is printed through the masker, not by Node, and exits 1.

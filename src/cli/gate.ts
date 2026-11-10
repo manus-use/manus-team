@@ -22,8 +22,9 @@ import type { MtIo } from './mt.js';
  * gateway's own writers do (`txImmediate`).
  *
  * The secrets checked are the ones this shell can know, registered as the
- * gateway registers them: every role's environment values, and the Lark app
- * secret when `LARK_APP_SECRET` is set here. A `passEnv` name unset in this shell
+ * gateway registers them: every role's environment values, every value in the
+ * gateway's .env, and the Lark app secret when `LARK_APP_SECRET` is set here or
+ * there. A `passEnv` name unset in this shell
  * is said to be unchecked.
  *
  * **Not a security boundary.** They refuse a board run's environment

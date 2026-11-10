@@ -410,13 +410,15 @@ describe('loadConfig: the agent process', () => {
     // `command: bytesec acp` asks for a file whose name contains a space, because
     // the agent is spawned with `shell: false`. It fails as an ENOENT at the first
     // prompt -- long after boot, and reported as the agent not starting.
+    // From the file it says what to write instead, since the fix is not obvious from the symptom.
     expect(() => load({}, yamlFile({ agent: { command: 'bytesec acp' } }))).toThrow(
-      /contains a space, and is not a path/,
+      /contains a space, and is not a path\. Arguments belong in agent\.args: command: bytesec, args: \[acp\]/,
     );
-    // And says what to write instead, since the fix is not obvious from the symptom.
+    // From the environment it names the variable and never echoes the value.
     expect(() => load({ MT_AGENT_COMMAND: 'bytesec acp' })).toThrow(
-      /command: bytesec, args: \[acp\]/,
+      /^MT_AGENT_COMMAND contains a space, and is not a path\. Arguments belong in MT_AGENT_ARGS\./,
     );
+    expect(() => load({ MT_AGENT_COMMAND: 'bytesec acp' })).not.toThrow(/acp/);
   });
 
   it('allows a space in an absolute path, which is a real binary name', () => {
