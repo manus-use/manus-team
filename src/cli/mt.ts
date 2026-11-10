@@ -74,7 +74,7 @@ const USAGE = [
   '  mt kanban board archive <name> [--json]',
   '  mt kanban task new <title> [--board <name>] [--assignee <role>] [--reviewer <role>] [--workspace <name>]',
   '      [--parent <task>]... [--outcome "..."] [--verify "..."] [--constraints "..."] [--boundaries "..."]',
-  '      [--stop-when "..."] [--body "..." | --body-file <path|->] [--json]',
+  '      [--stop-when "..."] [--body "..." | --body-file <path|->] [--key <key>] [--json]',
   `  mt kanban task list [${LIST_FILTERS.join('|')}] [--board <name>] [--json]`,
   '  mt kanban task show <task_id> [--board <name>] [--json]',
   '  mt kanban task assign <task_id> <role> [--board <name>] [--json]',

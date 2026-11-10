@@ -291,6 +291,8 @@ function handoffRefused(by: Reporter, handoff: unknown): Refusal | undefined {
 const RUN_KEY = 'run-task:';
 /** Chat's keys: the message that asked, `lark:<message_id>`. */
 const CHAT_KEY = 'lark:';
+/** The operator's `mt kanban task new --key <k>`, stored as `operator:<k>`, so it never meets chat's or a run's. */
+const OPERATOR_KEY = 'operator:';
 
 /**
  * A report refused while another on the task runs its gates: what to look at
@@ -1153,7 +1155,9 @@ export class KanbanService {
   /**
    * The key the task is stored under (spec §3.1). A chat's key is the message's,
    * and only chat may use one; a run's is namespaced by the run's task, so a
-   * worker repeating a command gets its own task back and nobody else's.
+   * worker repeating a command gets its own task back and nobody else's; the
+   * operator's is namespaced as `operator:<key>`, so a script run again at a
+   * terminal gets its own tasks back, never a chat's or a run's.
    */
   #idempotencyKey(req: CreateRequest): Result<{ key: string | null }> {
     const key: unknown = req.idempotencyKey;
@@ -1167,6 +1171,10 @@ export class KanbanService {
     if (req.createdVia.kind !== 'chat' && key.startsWith(CHAT_KEY)) {
       return board.refuse('invalid', `an idempotency key starting ${CHAT_KEY} is for chat`);
     }
+    if (req.createdVia.kind !== 'operator' && key.startsWith(OPERATOR_KEY)) {
+      return board.refuse('invalid', `an idempotency key starting ${OPERATOR_KEY} is for the terminal`);
+    }
+    if (req.createdVia.kind === 'operator') return { ok: true, key: `${OPERATOR_KEY}${key}` };
     if (req.createdVia.kind !== 'run') return { ok: true, key };
     const run = getRun(this.#db, req.createdVia.runId);
     if (run === undefined) return board.refuse('not_found', `no run ${req.createdVia.runId}`);

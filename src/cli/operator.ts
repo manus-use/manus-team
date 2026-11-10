@@ -36,7 +36,8 @@ import { boardsText, line, listText, showText, who } from './plain.js';
  * request that needs no token, and does nothing else (`NUDGE`). A gateway that
  * does not answer, stopped, loses nothing: the change stands, and its next
  * sweep, or its next start, acts on it. The command is never said to be worth
- * trying again: it has been made, and a second `new` would make a second task.
+ * trying again: it has been made, and a second `new` would make a second task,
+ * unless it has a `--key`, when it returns the first.
  * A gateway whose config does not set `kanban.enabled`, or sets it to false, is
  * not asked, and the command says nothing will run the change until the board
  * is turned on.
@@ -51,6 +52,8 @@ interface Done {
   lines: string[];
   json: Record<string, unknown>;
   nudge?: boolean;
+  /** A `task new --key`: running it again returns the task, rather than making it twice. */
+  keyed?: boolean;
 }
 
 type Outcome = Done | { ok: false; code: string; message: string };
@@ -167,7 +170,8 @@ async function act(
     if (r.failed !== undefined) {
       io.err(
         `mt: no gateway answered at ${r.socket} (${r.failed}); the change stands, and running the command again ` +
-          'would make it twice: a running gateway acts on it at its next sweep, and a stopped one when it next starts',
+          `${done.keyed === true ? 'with the same --key returns this task' : 'would make it twice'}: ` +
+          'a running gateway acts on it at its next sweep, and a stopped one when it next starts',
       );
     }
   }
@@ -341,6 +345,7 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
     'stop-when': text,
     body: text,
     'body-file': text,
+    key: text,
   });
   const json = values.json === true;
   const words = positionals.join(' ');
@@ -352,7 +357,7 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
   }
   const title = words.trim();
   if (title === '') throw new UsageError('kanban task new takes a title');
-  for (const flag of ['board', 'assignee', 'reviewer', 'workspace', ...Object.keys(CONTRACT_FLAGS)] as const) {
+  for (const flag of ['board', 'assignee', 'reviewer', 'workspace', 'key', ...Object.keys(CONTRACT_FLAGS)] as const) {
     const v = values[flag as keyof typeof values];
     if (typeof v === 'string' && v.trim() === '') throw new UsageError(`--${flag} needs a value`);
   }
@@ -378,6 +383,7 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
   const big = tooBig(command);
   if (big !== undefined) return early(io, json, 'too_large', big);
   const board = boardFlag(values.board) ?? DEFAULT_BOARD;
+  const key = values.key?.trim();
   return act(io, json, 'mt kanban task new', (service, by) => {
     for (const name of [command.assignee, command.reviewer]) {
       const person = name === undefined ? undefined : personRefused(name);
@@ -392,18 +398,30 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
       ...(command.reviewer === undefined ? {} : { reviewer: command.reviewer }),
       ...(command.workspace === undefined ? {} : { workspace: command.workspace }),
       ...(command.parents.length === 0 ? {} : { parents: command.parents }),
+      ...(key === undefined ? {} : { idempotencyKey: key }),
       createdBy: by,
       createdVia: { kind: 'operator' },
     });
     if (!r.ok) return refused(r);
     const { task } = r;
+    // The key's task, made by an earlier run of the command: nothing changed, so no nudge.
+    if (r.existing) {
+      return {
+        ok: true,
+        lines: [
+          `task ${task.taskId} already exists with key ${line(key ?? '', 80)}: ${line(task.title)}, on board ${line(task.board, 80)}; nothing new was created`,
+        ],
+        json: { task_id: task.taskId, board: task.board, existing: true },
+      };
+    }
     const whom = task.assignee === null ? `nobody yet (mt kanban task assign ${task.taskId} <role> gives it to someone)` : who(task.assignee);
     const where = task.workspace === null ? '' : `, in ${line(task.workspace, 80)}`;
     return {
       ok: true,
       lines: [`created ${task.taskId}: ${line(task.title)}, for ${whom}${where}, on board ${line(task.board, 80)}`],
-      json: { task_id: task.taskId, board: task.board },
+      json: { task_id: task.taskId, board: task.board, existing: false },
       nudge: true,
+      ...(key === undefined ? {} : { keyed: true }),
     };
   });
 }

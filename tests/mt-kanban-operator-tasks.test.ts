@@ -186,6 +186,41 @@ describe('mt kanban task new', () => {
     }
   });
 
+  it('returns the task a --key made before, and creates nothing, nor nudges', async () => {
+    const first = await mt(['task', 'new', 'Nightly', 'report', '--assignee', 'default', '--key', 'nightly-1']);
+    const taskId = created(first.out);
+    expect(getTask(gateway, taskId)?.idempotencyKey).toBe('operator:nightly-1');
+    expect(nudges).toBe(1);
+    // Another title, or other fields, do not matter: the key names the task.
+    const again = await mt(['task', 'new', 'Something', 'else', '--key', 'nightly-1']);
+    expect(again).toEqual({
+      code: 0,
+      out: `task ${taskId} already exists with key nightly-1: Nightly report, on board default; nothing new was created`,
+      err: '',
+    });
+    const json = await mt(['task', 'new', 'Nightly', 'report', '--key', 'nightly-1', '--json']);
+    expect(JSON.parse(json.out)).toEqual({ ok: true, task_id: taskId, board: 'default', existing: true });
+    const fresh = await mt(['task', 'new', 'Weekly', '--key', 'weekly-1', '--json']);
+    expect(JSON.parse(fresh.out)).toMatchObject({ ok: true, board: 'default', existing: false });
+    expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 2 });
+    expect(nudges).toBe(2);
+  });
+
+  it("refuses a --key used on another board, as chat's are, and a blank or chat-shaped one", async () => {
+    expect((await mt(['board', 'create', 'web-app'])).code).toBe(0);
+    const taskId = created((await mt(['task', 'new', 'On default', '--key', 'k1'])).out);
+    expect(await mt(['task', 'new', 'On web', '--board', 'web-app', '--key', 'k1'])).toEqual({
+      code: 1,
+      out: '',
+      err: `mt: task ${taskId} was created with this idempotency key on board default, not web-app`,
+    });
+    const json = await mt(['task', 'new', 'On web', '--board', 'web-app', '--key', 'k1', '--json']);
+    expect(JSON.parse(json.out)).toMatchObject({ ok: false, code: 'other_board' });
+    expect((await mt(['task', 'new', 'x', '--key', '  '])).code).toBe(2);
+    expect(await mt(['task', 'new', 'x', '--key', 'lark:om_1'])).toMatchObject({ code: 1, err: 'mt: an idempotency key starting lark: is for chat' });
+    expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 1 });
+  });
+
   it('puts the task on the board --board names, and lists that board', async () => {
     expect((await mt(['board', 'create', 'web-app'])).code).toBe(0);
     const taskId = created((await mt(['task', 'new', 'On web', '--board', 'web-app'])).out);

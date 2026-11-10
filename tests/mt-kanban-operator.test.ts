@@ -176,6 +176,18 @@ describe('the nudge after a change', () => {
   });
 });
 
+describe('the nudge after a keyed task new', () => {
+  it('says, when no gateway answered, that running it again with its key returns the task', async () => {
+    const r = await mt(['task', 'new', 'Nightly', '--key', 'n1']);
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      `mt: no gateway answered at ${workerSocketPath(f.home)} (ENOENT; is the gateway running?); the change stands, ` +
+        'and running the command again with the same --key returns this task: a running gateway acts on it at its next sweep, ' +
+        'and a stopped one when it next starts',
+    );
+  });
+});
+
 describe('a socket nothing listens on', () => {
   it('gives the reason, says the change stands, and never says to try again', async () => {
     const socket = workerSocketPath(f.home);

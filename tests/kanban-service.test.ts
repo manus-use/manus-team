@@ -577,6 +577,26 @@ describe('KanbanService: idempotency keys', () => {
     expect(s.create(request({ idempotencyKey: 'lark:om_1' }))).toMatchObject({ ok: true, existing: false });
   });
 
+  it("namespaces the operator's key, so it never meets chat's or a run's, and refuses its shape from anyone else", () => {
+    const s = service();
+    const as = { createdBy: 'operator:me', createdVia: { kind: 'operator' } as const };
+    const chat = ok(s.create(request({ idempotencyKey: 'plain' }))).task;
+    const first = ok(s.create(request({ title: 'from the terminal', idempotencyKey: 'plain', ...as })));
+    expect(first.existing).toBe(false);
+    expect(first.task.taskId).not.toBe(chat.taskId);
+    expect(first.task.idempotencyKey).toBe('operator:plain');
+    expect(s.create(request({ title: 'again', idempotencyKey: 'plain', ...as }))).toEqual({ ok: true, task: first.task, existing: true });
+    const { as: run } = working(s, 'web');
+    expect(s.create(request({ idempotencyKey: 'operator:plain' }))).toEqual({
+      ok: false,
+      code: 'invalid',
+      message: 'an idempotency key starting operator: is for the terminal',
+    });
+    expect(s.create(request({ idempotencyKey: 'operator:x', ...run }))).toMatchObject({ ok: false, code: 'invalid' });
+    expect(s.create(request({ idempotencyKey: 'run-task:k_x:step', ...as }))).toMatchObject({ ok: false, code: 'invalid' });
+    expect(s.create(request({ idempotencyKey: 'lark:om_1', ...as }))).toMatchObject({ ok: false, code: 'invalid' });
+  });
+
   it("keeps two runs' keys apart, and gives a run its own task back", () => {
     const s = service();
     const one = working(s, 'web');
