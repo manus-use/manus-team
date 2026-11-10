@@ -9,6 +9,7 @@ import { WORKER_COMMANDS } from '../kanban/worker.js';
 import { kanbanCommand, NOT_IN_A_RUN } from './kanban.js';
 import { operatorCommand, TASK_COMMANDS } from './operator.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
+import { SERVICE_USAGE, serviceCommand, type ServiceDeps } from './service.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
 
 /**
@@ -53,6 +54,8 @@ export interface MtIo {
   stdinIsTTY?: boolean;
   /** An agent command's version, from `<command> --version`; injectable so `mt role check` is tested without one. */
   agentVersion?: (command: string) => string | undefined;
+  /** launchctl, systemctl and the user's home for `mt service`; injectable so no test runs either or writes under the real home. */
+  service?: ServiceDeps;
 }
 
 const USAGE = [
@@ -63,6 +66,7 @@ const USAGE = [
   '  mt workspace add <name> <absolute-path>',
   '  mt workspace add <name> --clone <git-url>',
   '  mt workspace list',
+  SERVICE_USAGE,
   '  mt kanban board list [all] [--json]',
   '  mt kanban board create <name> [--json]',
   '  mt kanban board set <name> max_running <number|none> [--json]',
@@ -237,6 +241,11 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, withGatewayFile(io));
     }
     if (group === 'kanban') return await kanban(command, rest, io);
+    if (group === 'service') {
+      // An agent restarting or removing the gateway would end its own run, and every other.
+      if (inBoardRun(io.env)) return refuse(io, runShellRefusal('mt service'));
+      return await serviceCommand(argv.slice(1), io);
+    }
     if (group === 'workspace' && command === 'list') {
       expectNothing(parse(rest, {}).positionals, 'workspace list');
       return workspaceList(withGatewayFile(io));
