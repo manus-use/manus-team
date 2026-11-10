@@ -2385,7 +2385,7 @@ user unit on Linux (`~/.config/systemd/user/manus-team.service`), behind the sam
 `install.sh`, at the repo root, builds a checkout, makes the home and puts `mt` on `PATH`, and
 with `--service` runs `mt service install`. The decisions, and what forces each:
 
-- **The built code, not `tsx watch`.** The unit runs `node dist/main.js`, with the absolute path
+- **The built code, not `tsx watch`.** The unit runs `node --enable-source-maps dist/main.js`, with the absolute path
   of the node that ran `install`, from the checkout. `tsx watch` restarts at every change to
   the source, so every merge restarted the live gateway and ended its runs; with `dist/`, a
   deploy is a decision: `npm run build && mt service restart`. The node is recorded, not found
@@ -2396,7 +2396,11 @@ with `--service` runs `mt service install`. The decisions, and what forces each:
   `LARK_APP_SECRET`: a unit file is world-readable, and a secret in it would be in every backup
   of `~/Library` or `~/.config`. A `passEnv` name (§2.1) forwards a variable from that missing
   environment, so `install` warns of each, and `mt role check` warns of each this shell sets:
-  the check passes in the shell and the service would refuse to start.
+  the check passes in the shell and the service would refuse to start. Anything else that
+  would stop the gateway, loaded as the service loads it (only `PATH`, `MT_HOME` and the
+  `.env`, each passEnv name given a stand-in), is a refusal at `install`, as the missing
+  secret is: a unit sure to fail would be retried every 30 seconds on macOS. passEnv names stay
+  warnings, since fixing one is moving a value, which `install` cannot check.
 - **One service per home.** The default home's label is `team.manus.gateway`; any other's is
   `team.manus.gateway.<hash>`, and its unit `manus-team-<hash>.service`, the hash being the
   first ten hex digits of the SHA-256 of the home's path. A slug of the path could collide
@@ -2406,7 +2410,19 @@ with `--service` runs `mt service install`. The decisions, and what forces each:
   seconds (`ThrottleInterval`, `RestartSec`), so a crash loop is one start every 30 seconds,
   not a tight loop. systemd also has `RestartPreventExitStatus=78`: a configuration error
   (EX_CONFIG) stays failed, since a restart could only fail the same way; launchd has no
-  equivalent and retries it every 30 seconds.
+  equivalent and retries it every 30 seconds. `ProcessType` is `Standard`, not `Background`:
+  launchd gives a Background job low CPU and I/O priority, which every agent the gateway
+  starts would inherit. systemd's `KillMode=mixed` sends SIGTERM to the gateway alone, so it
+  drains and stops its agents itself before what is left is killed.
+- **Restart drains on macOS.** launchctl's manual does not say which signal `kickstart -k`
+  sends, so `mt service restart` does not rely on it: it sends `launchctl kill SIGTERM` and
+  waits, up to 60 seconds, until the job is not running or runs under a new pid (KeepAlive
+  started it again), then `kickstart`s it, a no-op on one already running. Only a gateway
+  still running after 60 seconds gets `kickstart -k`, with a warning.
+- **No GUI session.** A LaunchAgent lives in `gui/<uid>`, which exists only while the user is
+  logged in at the console. A failed `enable` or `bootstrap` that names the domain says so;
+  any other failed bootstrap points at Login Items, where switching the item off after
+  macOS's "Background Items Added" notice makes bootstrap fail.
 - **Stop is bootout on macOS.** `KeepAlive` restarts a killed job, so `mt service stop` boots it
   out; it loads again at the next login or `mt service start`. `install` boots out a loaded job
   and waits for launchd to let it go before bootstrapping the new plist, since a bootstrap
@@ -2418,7 +2434,9 @@ with `--service` runs `mt service install`. The decisions, and what forces each:
   gateway would refuse the home and be retried until it stops. `status` says whether the lock
   names the service's pid. The lock is taken only with `kanban.enabled`, and `status` says so.
 - **Logs.** stdout and stderr both go to `$MT_HOME/logs/gateway.log`, in an owner-only
-  directory, one file so their lines stay in order. Rotation is by size at the gateway's start:
+  directory, one file so their lines stay in order. `install` creates it `0600` before launchd
+  or systemd first opens it, which would give it the umask's mode; each start, and each
+  rotation, makes it and `.1` `0600` again. Rotation is by size at the gateway's start:
   over 10 MiB, the file is copied to `gateway.log.1` and emptied in place, not renamed,
   because launchd and systemd opened it for the gateway's stdout, appending, and a rename would
   leave the gateway writing to `.1`. Only when the gateway's stdout is that file, so a gateway
@@ -2427,7 +2445,9 @@ with `--service` runs `mt service install`. The decisions, and what forces each:
   deploy's or a crash's; a gateway that runs for months unrestarted needs one of them.
 - **`mt` on PATH.** `install.sh` writes `$MT_HOME/bin/mt`, the launcher the gateway writes at
   each start (§7.2), rather than `npm link`, which would put `mt` in one nvm version's global
-  `bin`, beside every other global command, pointing at whichever checkout ran it last.
+  `bin`, beside every other global command, pointing at whichever checkout ran it last. Every
+  path it prints or writes is single-quoted with each `'` as `'\''`, built from a variable,
+  since bash 3.2, macOS's `/bin/bash`, keeps the backslashes of an inline replacement.
 - **Testable without either manager.** Every `launchctl`, `systemctl` and `tail` call goes
   through an injectable runner, and every file is under an injectable user home or the
   gateway's home: tests use a temporary home and a runner that records calls and runs none.

@@ -53,6 +53,9 @@ From a checkout:
 ./install.sh --service  # the same, then mt service install
 ```
 
+Stop an `npm run dev` gateway from this checkout first: `npm ci` replaces `node_modules` under
+the running `tsx watch`.
+
 `install.sh` is safe to run again. It:
 
 - picks nvm's newest node 22 (22.12 or later) when nvm has one, else the `node` on `PATH`, or
@@ -66,8 +69,9 @@ From a checkout:
   `dist/mt.js` run by that node. It does not use `npm link`, which would put `mt` in one nvm
   version's global `bin`, beside every other global command, pointing at whichever checkout
   ran it last;
-- prints the line that puts `$MT_HOME/bin` on `PATH`, and appends it to `~/.zshrc` or
-  `~/.bashrc` (by `$SHELL`) only with `--yes` or when you answer yes at a terminal.
+- prints the line that puts `$MT_HOME/bin` on `PATH`, and appends it, once, to `~/.zshrc` for
+  zsh, or for bash to `~/.bash_profile` on macOS (whose terminals start login shells) and
+  `~/.bashrc` elsewhere, only with `--yes` or when you answer yes at a terminal.
 
 To run it by hand instead: `npm ci && npm run build && npm start`. `npm run dev` runs the
 source under `tsx watch`, which restarts at every change to it, a merge included.
@@ -92,11 +96,17 @@ hash of its path, so two homes never replace each other.
 
 - **macOS:** `~/Library/LaunchAgents/team.manus.gateway.plist`, loaded with `launchctl
   bootstrap gui/<uid>`. `KeepAlive` restarts it when it exits other than cleanly, at most every
-  30 seconds. `mt service stop` boots it out, since a killed job would be restarted; it loads
-  again at the next login or `mt service start`.
+  30 seconds. `mt service restart` sends the gateway SIGTERM, waits up to 60 seconds for it to
+  drain and exit, then starts it; `kickstart -k` only if it has not exited by then.
+  `mt service stop` boots it out, since a killed job would be restarted; it loads again at the
+  next login or `mt service start`. A LaunchAgent needs someone logged in at the Mac's console:
+  over ssh alone there is no `gui/<uid>` domain, and `install` says so. macOS shows a
+  "Background Items Added" notice for the new item; switching it off in System Settings >
+  General > Login Items makes `launchctl bootstrap` fail until it is switched on again.
 - **Linux:** `~/.config/systemd/user/manus-team.service`, with `Restart=on-failure` after 30
   seconds, but not after a configuration error (exit 78), which stays failed until it is fixed:
-  see `mt service logs`. On a server, run `loginctl enable-linger $USER` once, or the user's
+  see `mt service logs`. `KillMode=mixed` sends SIGTERM to the gateway alone, so it drains and
+  stops its agents itself before systemd kills what is left. On a server, run `loginctl enable-linger $USER` once, or the user's
   services stop when you log out.
 
 **Deploying.** The service runs `dist/`, so a merge does not restart it. A deploy is:
@@ -111,15 +121,20 @@ exported, so:
 - the secret must be in `$MT_HOME/.env`: `install` refuses without a `.env` that sets
   `LARK_APP_SECRET`. Any other `MT_*` or `LARK_*` setting this shell holds and the `.env` does
   not is a warning: put it in the `.env`;
+- `install` loads the configuration as the service would, with only `PATH`, `MT_HOME` and the
+  `.env`, and refuses when the gateway would not start on it, a missing `lark.appId` or owner,
+  say, rather than load a unit sure to fail and be retried every 30 seconds;
 - every `agent.passEnv` name, which forwards a variable from the gateway's environment, is
-  missing there, and the gateway would refuse to start. `install` warns of each, and
+  missing there, and the gateway would refuse to start. `install` warns of each, without
+  refusing, and
   `mt role check` warns of each this shell sets. Put the value in the role's `.env` and remove
   it from `passEnv`, or, for the `agent:` block, set `MT_AGENT_ENV_<NAME>` in the gateway's
   `.env`.
 
-**Logs** go to `$MT_HOME/logs/gateway.log`, stdout and stderr both, in an owner-only
-directory. When the gateway starts as the service and the log is over 10 MiB, it is copied to
-`gateway.log.1`, replacing the one before, and emptied in place, so every restart keeps it
+**Logs** go to `$MT_HOME/logs/gateway.log`, stdout and stderr both, owner-only in an owner-only
+directory. Each run starts with `node --enable-source-maps`, so a stack names the TypeScript
+source. When the gateway starts as the service and the log is over 10 MiB, it is copied to
+`gateway.log.1`, owner-only, replacing the one before, and emptied in place, so every restart keeps it
 bounded with no newsyslog or logrotate set up. A gateway that runs for months without a restart
 is not rotated: restart it, or add a newsyslog (macOS) or logrotate (`copytruncate`) rule.
 
