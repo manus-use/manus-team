@@ -557,7 +557,9 @@ work â€” research, a document, an operation in Lark, a chore, a change to code â
 role, whose agent runs it in a workspace, which is just a directory, or to a person.
 
 For a walk-through with messages to paste, from one task to chains, fan-out and review, see
-[docs/kanban-guide.md](docs/kanban-guide.md).
+[docs/kanban-guide.md](docs/kanban-guide.md). Its section 12 has recipes for whole graphs of
+tasks: parallel branches, build, review and release, a planner role that writes the graph, a
+script that builds one from a terminal, rerouting around a failed task, and two boards.
 
 ```
 /kanban task new Draft the Q3 summary

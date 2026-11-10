@@ -2,7 +2,8 @@
 
 This guide is for people on the team who drive the manus-team board from Lark: operators who
 create and steer tasks, and the people tasks and reviews are given to. It starts with one task
-for one agent and builds up to chains, fan-out and review.
+for one agent and builds up to chains, fan-out and review. Section 12 has recipes for whole
+graphs of tasks.
 
 A task is any work, not only code: research, writing a document, a script, an ops chore. It is
 given to a **role**, whose agent runs it in a **workspace** (a directory on the gateway's host),
@@ -988,7 +989,766 @@ mt kanban task stop k_…
 - Add `--json` for one line of JSON, for scripts. `mt` exits 0 when done, 1 when refused, and
   2 for a wrong command line.
 
-## 12. Rules of thumb
+## 12. Recipes: graphs of tasks
+
+Each recipe below is a small graph of tasks (a DAG: each task waits for its parents, and nothing
+waits on itself), with the messages to paste, what happens at each step, and what goes wrong.
+They use the roles as one team runs them:
+
+- `worker`: a bytesec agent, in its own workspace, `worker`.
+- `reviewer`: a bytesec agent with no workspace of its own, so its review runs work where the
+  task under review works.
+- `planner`: a bytesec agent, in its own workspace, `planner`, that splits a goal into tasks
+  (recipe 3).
+- `watched`: the supervised test role. No recipe needs it.
+
+And the limits, in the gateway's config:
+
+```yaml
+kanban:
+  enabled: true
+  max_running: 4            # agent runs at once, across every board and role
+  max_running_per_role: 2   # agent runs at once as any one role that sets no max_running
+```
+
+Neither `worker` nor `reviewer` sets a `max_running` of its own, so each may have two agent runs
+open at once. On top of both limits, a workspace runs one agent at a time.
+
+Ids in the replies are shown as `k_…`; the chat gives the real ones.
+
+### Recipe 1: research, then parallel work, then a write-up
+
+```
+                Write the caching options brief          (worker, in worker)
+               /               |               \
+   Prototype option A   Prototype option B   Prototype option C   (worker, in research-a, -b, -c)
+               \               |               /
+                Write the caching recommendation          (worker, in worker)
+```
+
+**Before you start: one workspace per parallel task.** All three prototypes are for `worker`,
+whose own workspace is `worker`. Without a `workspace:` line, each would run there, and since a
+workspace runs one agent at a time, they would run one after the other. On the gateway's host:
+
+```
+mt workspace add research-a /srv/work/research-a
+mt workspace add research-b /srv/work/research-b
+mt workspace add research-c /srv/work/research-c
+mt service restart
+```
+
+Each directory must exist first. The gateway reads its workspaces when it starts, so restart it
+(`mt service restart` for the service; stop and start it otherwise). A `workspace:` naming a
+workspace the gateway does not have yet is refused at once, and nothing is created.
+
+**The tasks.** The brief:
+
+```
+/kanban task new Write the caching options brief
+assignee: worker
+outcome: a brief naming three caching options for the reports API, each with what to measure
+verify: each option names one benchmark command
+constraints: put the brief itself in your summary, not only in a file
+Read docs/reports-api.md and propose three ways to cache report results.
+```
+
+> Created `k_…`: **Write the caching options brief**, for role worker. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+
+Each prototype, with the brief's id as parent, and its own workspace (change the letter for B and
+C):
+
+```
+/kanban task new Prototype caching option A
+parent: k_…
+workspace: research-a
+assignee: worker
+outcome: a measured p95 latency for option A, with and without the cache
+constraints: put the numbers and how you got them in your summary
+Take option A from the parent's brief. Build the smallest prototype that can be measured.
+```
+
+> Created `k_…`: **Prototype caching option A**, for role worker, in research-a. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+
+The reply names the workspace when the task has its own. The write-up, with the three prototypes
+as parents, on one line:
+
+```
+/kanban task new Write the caching recommendation
+parent: k_…, k_…, k_…
+assignee: worker
+outcome: docs/caching.md, one table of the three options and a recommendation
+verify: every number in the table comes from a parent's summary
+```
+
+`/kanban task list` now shows:
+
+> `k_…` **ready**: Write the caching options brief · role worker
+> `k_…` **todo**: Prototype caching option A · role worker
+> `k_…` **todo**: Prototype caching option B · role worker
+> `k_…` **todo**: Prototype caching option C · role worker
+> `k_…` **todo**: Write the caching recommendation · role worker
+
+**What happens:**
+
+1. The brief starts at once, in `worker`. The prototypes and the write-up are todo.
+2. The brief's agent reports complete. The chat hears:
+
+   > Done: **Write the caching options brief** `k_…`
+   > > Brief: A) per-report memo cache, B) Redis with 10-minute TTL, C) precomputed nightly snapshots. Benchmark: npm run bench:reports.
+
+3. All three prototypes are ready together. `worker` may have two agent runs open at once
+   (`max_running_per_role: 2`), so the dispatcher starts A and B, the oldest first, in
+   research-a and research-b. C waits, and `/kanban task show` on it says:
+
+   > waiting: role worker is at its max\_running, 2 agent runs at once; it is claimed when one of them ends
+
+   C starts as soon as A's or B's run ends. The gateway's `max_running: 4` does not bind here:
+   only two runs are open.
+4. Each prototype's prompt holds the brief's summary and metadata, under "The tasks this one
+   depends on, and what each handed off". The brief's files stay in `worker`; a prototype in
+   research-a cannot find them by a relative path. That is why the brief is told to put the brief
+   itself in its summary.
+5. The write-up stays todo until all three prototypes are done, then runs in `worker`, the role's
+   own workspace. Its prompt holds each parent's handoff:
+
+   ```
+   The tasks this one depends on, and what each handed off:
+
+   ## Parent k_…: Prototype caching option A (done)
+   Summary: Option A: p95 410 ms with the cache, 900 ms without (npm run bench:reports, 200 runs).
+
+   ## Parent k_…: Prototype caching option B (done)
+   Summary: Option B: p95 120 ms with the cache, 900 ms without (npm run bench:reports, 200 runs).
+
+   ## Parent k_…: Prototype caching option C (done)
+   Summary: Option C: p95 35 ms with the cache, 900 ms without (npm run bench:reports, 200 runs).
+   ```
+
+   Each parent's metadata follows its summary, when it reported any.
+
+**Pitfalls:**
+
+- **No `workspace:` lines, no parallelism.** The three prototypes would all run in `worker`, one
+  at a time, whatever the role's limit. `/kanban task show` does not say a task waits on a busy
+  workspace: it just stays ready.
+- **The role's limit, not the workspaces, sets the width.** With `max_running_per_role: 2`, three
+  workspaces still run two prototypes at once. To run all three, set `max_running: 3` in
+  `roles/worker/config.yaml` (at most `kanban.max_running`), and restart the gateway.
+- **The write-up reads summaries, not files.** Each prototype's files are in its own workspace.
+  Tell every parallel task to put its findings in its summary, as the `constraints:` line does.
+- **The write-up does not follow its parents' workspaces.** Its role names `worker`, which comes
+  before the parents' workspace in the order a workspace is chosen. For a role with no workspace
+  of its own, such as `reviewer`, a task whose parents are in three different workspaces is
+  stranded until you give it one with `/kanban task workspace k_… <name>`.
+
+### Recipe 2: build, review, release
+
+```
+   Add CSV export to the reports API     (worker, in api; reviewer: role reviewer; gate: npm test)
+        |   work -> review -> changes -> rework -> review -> approved
+        v
+   Release the CSV export                (Dana Park, as a card)
+```
+
+`api` is a workspace holding the repository (`mt workspace add api /srv/repos/api`).
+
+**The tasks.** Create the implementation with no `assignee:` line, so the gate is in place before
+its agent starts and its prompt lists it:
+
+```
+/kanban task new Add CSV export to the reports API
+workspace: api
+reviewer: reviewer
+outcome: GET /reports/:id.csv returns the report as CSV, with a header row
+verify: npm test passes, and a new test covers the CSV route
+constraints: do not change the JSON route's output
+stop when: the report model has fields that cannot be flattened to columns
+```
+
+> Created `k_…`: **Add CSV export to the reports API**, for nobody yet (`/kanban task assign k_… <role or @person>` gives it to someone), in api. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+
+Add the gate. Everything after the task id is the command, as typed:
+
+```
+/kanban gate add k_… npm test
+```
+
+> Gate 1 added to `k_…` (300 s): npm test
+
+For work that is not code, a gate is any check that exits 0, such as
+`/kanban gate add k_… grep -q "CSV export" CHANGELOG.md`.
+
+Then give it to the role:
+
+```
+/kanban task assign k_… worker
+```
+
+> `k_…` is now for role worker.
+
+The release, for a person, with the implementation as parent. Type @ and pick her from Lark's
+list:
+
+```
+/kanban task new Release the CSV export
+parent: k_…
+assignee: @Dana Park
+outcome: v2.4.0 tagged and deployed, and the changelog says CSV export is new
+Deploy with the usual checklist in docs/release.md.
+```
+
+> Created `k_…`: **Release the CSV export**, for Dana Park (lark:on\_…). They are sent it as a card, in a direct message, once it is ready. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+
+**What happens:**
+
+1. The implementation starts in `api`. Its prompt names the reviewer and lists the gate. The
+   release is todo; Dana gets nothing yet.
+2. The agent reports. Since the task names a reviewer, its report goes to review whether it asks
+   for review or reports complete; `npm test` runs first, and a failing gate refuses the report
+   and shows the agent why. The chat hears:
+
+   > Review requested for **Add CSV export to the reports API** `k_…`, from role reviewer.
+
+3. A review run of `reviewer` starts in `api`, the task's workspace, so it reads the checkout the
+   implementer left. Its prompt holds the handoff, the reported commit when `api` is a git repository, the
+   contract and the gate.
+   It counts against `reviewer`'s limit of two, and holds `api` while it runs.
+4. **Request changes.** The reviewer asks for changes with a reason. The chat hears nothing of
+   it: a request for changes is not a notice. `/kanban task show k_…` shows it under the runs:
+
+   > **Runs**
+   > #1 work · role worker · review\_requested: Added GET /reports/:id.csv in src/routes/reports.ts, with test/export.test.ts. npm test passes.
+   > #2 review · role reviewer · changes\_requested: Values with commas are not quoted: a report titled "A, B" breaks the row. Quote fields per RFC 4180 and add a test.
+
+   A person, or an operator, asks for changes the same way from chat:
+
+   ```
+   /kanban task changes k_… Values with commas are not quoted: a report titled "A, B" breaks the row. Quote fields per RFC 4180 and add a test.
+   ```
+
+   > Changes requested on `k_…`: it goes back to its assignee, with your reason.
+
+5. **Rework.** A new work run of `worker` starts in `api`. Its prompt carries the reason and the
+   previous handoff in full, and on bytesec it continues the implementer's own session where it
+   can. When it reports, the gate runs again, and the chat hears "Review requested for …" again.
+6. **Approve.** The reviewer approves; the gate runs once more, and the chat hears:
+
+   > Done: **Add CSV export to the reports API** `k_…`
+   > > Approved: quoting is right, and the JSON route is unchanged.
+
+7. The release is ready. Dana gets a card in a direct message. Under "From its parents" it shows
+   the implementer's last handoff, the rework's, not the approval. The chat hears:
+
+   > 📋 **Release the CSV export** `k_…`, assigned to Dana Park
+
+8. She does the release, types a summary in the card's box and presses **Done**, or types:
+
+   ```
+   /kanban task done k_… Tagged v2.4.0 and deployed; changelog updated.
+   ```
+
+   > Done: `k_…` is complete.
+
+   and the chat hears "Done: **Release the CSV export** `k_…`" with her summary.
+
+**Pitfalls:**
+
+- **No `--` in chat.** `/kanban gate add k_… -- npm test` stores `-- npm test` as the command,
+  which fails. `--` belongs to the terminal form, `mt kanban gate add k_… -- npm test`.
+- **A gate added after the agent starts** is not in its prompt, though it still runs on its
+  report. Hence the order above: create, gate, assign.
+- **Choose one way to review.** Do not also put a review task under the implementation: it would
+  be reviewed twice.
+- **The release card waits for the approval.** A task in review is not done, so its children stay
+  todo through every round of changes.
+- **Dana must be known to the gateway and have talk tier**, or the release is refused when you
+  create it (section 4).
+
+### Recipe 3: a planner breaks work into a DAG
+
+Instead of writing each task yourself, give a goal to a role whose agent writes the graph. The
+`planner` role's `role.md` says what to make. An excerpt, from
+`~/.manus-team/roles/planner/role.md` on the gateway's host:
+
+```markdown
+You plan; you do not do the work. Split the goal in your task into 3 to 8 tasks for the role
+`worker`. Give each task a contract with an "outcome" and a "verification". Where a task's
+result needs checking, name `reviewer` as its "reviewer".
+
+Create the tasks with `mt kanban create`, in dependency order: a task's "parents" name the tasks
+it needs, so create those first. Give every task an "idempotency_key" made from its step, such as
+"step-2-serializer", so that running the same command again does not make it twice.
+
+When every task is created, report complete, with a summary that lists each task's id and title
+in order.
+```
+
+**The task.** A goal, and a contract for the plan:
+
+```
+/kanban task new Plan the reports CSV export
+assignee: planner
+outcome: 3 to 8 tasks for worker on the board, in dependency order, that together ship CSV export for every report type
+verify: each task has an outcome and a verify line, and only the tasks that need it have a reviewer
+stop when: it is unclear which report types are in scope
+Goal: every report in the reports API can be downloaded as CSV. The code is in the api workspace: give every task "workspace": "api". Release is done by people, not by these tasks.
+```
+
+> Created `k_…`: **Plan the reports CSV export**, for role planner. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+
+**What the planner does.** Its agent runs in `planner`, reads the goal, and sends one
+`mt kanban create` a task, each answered with the new id:
+
+```json
+{"title": "Write the CSV column mapping for every report type", "body": "List each report type and its columns in docs/csv-columns.md.", "assignee": "worker", "workspace": "api", "contract": {"outcome": "docs/csv-columns.md covers every report type", "verification": "each report type in src/reports/ appears in it"}, "idempotency_key": "step-1-columns"}
+```
+
+```json
+{"ok":true,"task_id":"k_…","existing":false}
+```
+
+```json
+{"title": "Add the CSV serializer", "body": "Implement src/csv.ts from the mapping in docs/csv-columns.md.", "assignee": "worker", "reviewer": "reviewer", "workspace": "api", "parents": ["k_…"], "idempotency_key": "step-2-serializer"}
+```
+
+and so on: the routes, with the serializer as parent and `reviewer` as reviewer, then the docs,
+with the routes as parent. Sending a create again with the same key answers with the same id and
+`"existing":true`, and makes nothing. A key is the planning task's own: another planning task can
+use the same keys. The planner then reports complete, and the chat hears:
+
+> Done: **Plan the reports CSV export** `k_…`
+> > Created 4 tasks for worker, in order: k\_… column mapping; k\_… serializer (reviewer: reviewer); k\_… routes (reviewer: reviewer); k\_… docs.
+
+The chat hears nothing as each task is created; the planner's summary is the list.
+
+**Where the tasks go:**
+
+- **On the planner's board.** A task an agent creates is on the board of the task it ran, whatever
+  it asks for: a planning task created from a chat on board `web-app` fills `web-app`.
+- **This chat follows them.** Each created task inherits the planning task's subscriptions, so the
+  chat that created the plan hears when each one is done, needs review, blocks, gives up or is
+  stranded, and so on down the line.
+- **They are not the plan's children.** The planning task does not wait for them, and is done as
+  soon as it reports. A created task with no `parents` can start at once, even while the planner
+  is still at work: here, the column mapping starts while the planner creates the rest.
+- **They run in `worker`, unless the plan names a workspace.** `worker` has its own workspace, so
+  without `"workspace"` every task runs there, one at a time, however wide the graph. Here the body
+  asks for `api`, where the code is. To run branches in parallel, give each branch its own
+  workspace, in the body or in `role.md`.
+
+**Checking the graph.** `/kanban task list`:
+
+> `k_…` **running**: Write the CSV column mapping for every report type · role worker
+> `k_…` **todo**: Add the CSV serializer · role worker
+> `k_…` **todo**: Add the CSV routes · role worker
+> `k_…` **todo**: Document CSV export · role worker
+
+`/kanban task show k_…` on any of them gives its parents and children, so you can walk the graph:
+
+> **Add the CSV serializer** `k_…`: todo
+> assignee: role worker · reviewer: role reviewer · workspace: api
+> parents: `k_…` (open)
+> children: `k_…` (open)
+> > Implement src/csv.ts from the mapping in docs/csv-columns.md.
+
+The parents and children lines give each task's phase, not its status: `open` is a task that is
+todo, ready or running; the others are `review`, `blocked`, `done` and `archived`. Check that
+every task but the first has a parent, that no task you expected in parallel has a sibling as
+parent, and that the reviewers are where checking is needed.
+
+**Pitfalls:**
+
+- **A vague goal gets blocked.** The board tells every agent to block on genuine ambiguity, and
+  `stop when:` says where that is. The chat hears, for example:
+
+  > **Plan the reporting work** `k_…` is blocked (needs\_input): The goal does not say what "better" means: faster, more formats, or new report types? Name the outcome you want.
+  > `/kanban task unblock k_… [comment]` once it can go on.
+
+  Answer the question in the unblock; the next run reads it:
+
+  ```
+  /kanban task unblock k_… Better means CSV export for every report type; the rest is out of scope.
+  ```
+
+  > `k_…` is unblocked, back to open.
+
+- **The planner must create tasks in order.** `mt kanban link` only works on a task that has not
+  started, and only on a task the planner's own task created. A created task with no parents is
+  claimed at once, so linking it afterwards is refused:
+
+  ```json
+  {"ok":false,"code":"run_open","message":"task k_… has an open run, r_…; a parent added now could not hold it back"}
+  ```
+
+  Naming the parents in each `create` is what holds a task back.
+- **Too many tasks at the root.** Every task created with no parents starts as soon as there is
+  room. Keep the plan to one or two roots.
+
+### Recipe 4: a DAG scripted from the terminal
+
+The graph of recipe 1, made with `mt kanban task new` on the gateway's host. `--json` prints one
+line of JSON:
+
+```
+$ mt kanban task new "Write the caching options brief" --board web-app --assignee worker --json
+{"ok":true,"task_id":"k_…","board":"web-app","nudged":true}
+```
+
+and a refusal, with exit status 1:
+
+```
+{"ok":false,"code":"unknown_board","message":"there is no board nope; no task is added to it"}
+```
+
+`nudged` says whether the running gateway was told to look for work at once; when it is false,
+`mt` also says why on stderr, and the task waits for the gateway's next sweep, or its next start.
+
+The script reads each id with `node -e`, and passes it on as `--parent`. A terminal's `task new`
+takes no idempotency key, and running it twice makes two tasks, so the script records each id it
+gets in a file, and on a second run uses the ids recorded there instead of creating them again.
+After a failure halfway, run it again: it makes only what is missing.
+
+```sh
+#!/bin/sh
+# A brief, three prototypes in parallel, and a recommendation that waits for all three.
+# Safe to run again: the tasks it has made are listed in $STATE, and not made twice.
+set -eu
+BOARD=${BOARD:-web-app}
+STATE=${STATE:-./caching-dag.$BOARD.ids}
+touch "$STATE"
+
+# The task_id in mt's --json line; on a refusal, its message on stderr, and exit 1.
+task_id() {
+  node -e '
+    let s = "";
+    process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      if (s.trim() === "") process.exit(1); // mt printed its usage on stderr
+      const r = JSON.parse(s);
+      if (!r.ok) { console.error(`refused: ${r.message}`); process.exit(1); }
+      console.log(r.task_id);
+    });'
+}
+
+# new <name> <title> [flags...]: the id of the task this script calls <name>, made on the first run only.
+new() {
+  name=$1 title=$2
+  shift 2
+  id=$(sed -n "s/^$name //p" "$STATE")
+  if [ -z "$id" ]; then
+    id=$(mt kanban task new "$title" --board "$BOARD" --json "$@" | task_id)
+    echo "$name $id" >> "$STATE"
+  fi
+  echo "$id"
+}
+
+brief=$(new brief "Write the caching options brief" --assignee worker \
+  --outcome "a brief naming three caching options for the reports API, each with what to measure" \
+  --constraints "put the brief itself in your summary, not only in a file" \
+  --body "Read docs/reports-api.md and propose three ways to cache report results.")
+
+proto() {
+  new "proto-$1" "Prototype caching option $1" --assignee worker --workspace "research-$1" \
+    --parent "$brief" \
+    --outcome "a measured p95 latency for option $1, with and without the cache" \
+    --constraints "put the numbers, and how you got them, in your summary"
+}
+a=$(proto a)
+b=$(proto b)
+c=$(proto c)
+
+report=$(new report "Write the caching recommendation" --assignee worker \
+  --parent "$a" --parent "$b" --parent "$c" \
+  --outcome "docs/caching.md, one table of the three options and a recommendation" \
+  --verify "every number in the table comes from a parent's summary")
+
+echo "brief:      $brief"
+echo "prototypes: $a $b $c"
+echo "report:     $report"
+```
+
+Make the board first, once (`mt kanban board create web-app`), then run it:
+
+```
+$ sh caching-dag.sh
+brief:      k_…
+prototypes: k_… k_… k_…
+report:     k_…
+$ cat caching-dag.web-app.ids
+brief k_…
+proto-a k_…
+proto-b k_…
+proto-c k_…
+report k_…
+$ mt kanban task list --board web-app
+task  status  assignee     title
+k_…   ready   role worker  Write the caching options brief
+k_…   todo    role worker  Prototype caching option a
+k_…   todo    role worker  Prototype caching option b
+k_…   todo    role worker  Prototype caching option c
+k_…   todo    role worker  Write the caching recommendation
+```
+
+A second `sh caching-dag.sh` prints the same ids and creates nothing. `BOARD=billing sh
+caching-dag.sh` makes the same graph on `billing`, with a state file of its own.
+
+Notes:
+
+- **Every command names its board.** `task new` and `task list` are on `default` without
+  `--board`. Give `--board` to `show`, `link` and the rest too: a task on another board is then
+  refused rather than changed.
+- **`sed` works too.** The JSON is one line, written by `JSON.stringify`, and ids are lowercase
+  letters and digits, so `sed -n 's/.*"task_id":"\(k_[0-9a-z]*\)".*/\1/p'` finds the id. It
+  prints nothing for a refusal, where `node -e` also prints the reason.
+- **The state file is the only guard against duplicates.** A run stopped between `mt` creating a
+  task and the script writing its id makes that task again on the next run. Delete the file to
+  start over: the tasks already made stay on the board, and archiving them is up to you.
+- **No chat follows these tasks**, so nobody is told when they are done or block. Watch with
+  `mt kanban task list --board web-app`, or create the first task from chat.
+- **Gates** are `mt kanban gate add k_… -- npm test`, with `--` before the command, and take no
+  `--board`.
+
+### Recipe 5: when a task in the middle fails
+
+```
+   Export last quarter's invoices        done
+              |
+   Reconcile with the ledger             blocked
+        /            \
+   Write the report   Flag unpaid        todo: waiting for their parent
+```
+
+**It blocks, and everything under it waits.** The middle task's agent cannot reach the finance
+database and blocks. The chat hears:
+
+> **Reconcile the invoices with the ledger** `k_…` is blocked (capability): The finance database refuses this role: permission denied for schema ledger.
+> `/kanban task unblock k_… [comment]` once it can go on.
+
+A task that fails twice (by default) blocks the same way, with "Gave up on …" and the last error.
+The two children stay todo, since a blocked parent is not finished. The chat hears nothing about
+them until they move.
+
+**See why.**
+
+```
+/kanban task list blocked
+```
+
+> `k_…` **blocked**: Reconcile the invoices with the ledger · role worker
+
+`/kanban task list todo` shows what is waiting. Then:
+
+```
+/kanban task show k_…
+```
+
+> **Reconcile the invoices with the ledger** `k_…`: blocked
+> assignee: role worker · reviewer: nobody · workspace: worker
+> blocked (capability): The finance database refuses this role: permission denied for schema ledger.
+> parents: `k_…` (done)
+> children: `k_…` (open), `k_…` (open)
+> > Compare data/invoices-q3.csv with the ledger in the finance database.
+> **Runs**
+> #1 work · role worker · blocked: The finance database refuses this role: permission denied for schema ledger.
+
+**Unblock it** once the cause is fixed, with a comment that answers the block:
+
+```
+/kanban task unblock k_… The role has read access to the ledger schema now; try again.
+```
+
+> `k_…` is unblocked, back to open.
+
+The next run reads the comment, and when it is done, the children start as they would have.
+
+**Reroute it** when it cannot be fixed. Create a replacement, with the failed task's parents as
+its own:
+
+```
+/kanban task new Reconcile the invoices from the ledger export
+parent: k_…
+assignee: worker
+Finance put the ledger export in data/ledger-q3.csv. Compare it with data/invoices-q3.csv; do not use the finance database.
+```
+
+Link it into each child that has not started, the replacement's id first:
+
+```
+/kanban task link k_… k_…
+```
+
+> `k_…` now waits for `k_…`.
+
+Then archive the failed task:
+
+```
+/kanban task archive k_…
+```
+
+> Archived `k_…`.
+
+Each child now waits for the replacement alone. `/kanban task show` on one:
+
+> **Write the reconciliation report** `k_…`: todo
+> assignee: role worker · reviewer: nobody · workspace: not yet fixed
+> parents: `k_…` (archived), `k_…` (open)
+
+When the replacement is done, the children start, and their prompts hold its handoff. Under the
+archived parent they read "No handoff: it was never completed."
+
+**Pitfalls:**
+
+- **Link first, archive last.** An archived parent counts as finished. Archive the failed task
+  before linking the replacement, and a child whose other parents are done starts at once, with
+  no handoff from the failed task, and can no longer be linked.
+- **Only a child that has not started can be linked.** A link onto a task that has started, or
+  finished, is refused:
+
+  > Not done: task k\_… is done; a parent added now could not hold it back
+
+- **A link that would make a cycle is refused**, such as the replacement under one of its own
+  children:
+
+  > Not done: task k\_… is already upstream of k\_…; the link would make a cycle
+
+- **A done task is never reopened.** If a task finished, and its result turns out wrong, create a
+  follow-up with the done task as parent, and the new evidence in its body:
+
+  ```
+  /kanban task new Recheck the reconciliation with the corrected ledger
+  parent: k_…
+  assignee: worker
+  Finance corrected 3 ledger rows after the reconciliation ran; see data/ledger-q3-fixed.csv.
+  ```
+
+  The follow-up takes the done task's place. Link it into any of the done task's children that
+  have not started yet; most will have started as soon as it was done, and those keep the handoff
+  they were given.
+- **Unblocking without changing anything** blocks again for the same reason. After two such
+  unblocks (by default) the notice says to rewrite the task, or archive it and create a clearer
+  one.
+
+### Recipe 6: two projects side by side
+
+```
+   board web-app (group "Web")           board billing (group "Billing")
+   Redesign the login page                Add proration to plan changes
+              |                                       |
+   Ship the login page                    Review the proration rules
+```
+
+**Make the boards and put each group on its own.** An operator, in any chat:
+
+```
+/kanban board create web-app
+```
+
+> Created board **web-app**. `/kanban board use web-app` puts a chat on it.
+
+and `/kanban board create billing`. Then in the Web group:
+
+```
+/kanban board use web-app
+```
+
+> This chat is on board **web-app** now: its `/kanban task new` adds tasks to it, and `/kanban task list` shows them.
+
+and in the Billing group, `/kanban board use billing`.
+
+**Give each its limit and workspace:**
+
+```
+/kanban board set web-app max_running 2
+```
+
+> Board **web-app** runs at most 2 agents at once now.
+
+```
+/kanban board set web-app workspace web
+```
+
+> Board **web-app**'s tasks work in web now, unless their own workspace, their role's or their parents' says otherwise.
+
+and the same for `billing`, with its workspace `billing`. A board's `max_running` is at most the
+gateway's:
+
+> Not done: a board's max\_running is a whole number from 1 to the gateway's kanban.max\_running, 4
+
+From the terminal: `mt kanban board create billing`, `mt kanban board set billing max_running 2`,
+`mt kanban board set billing workspace billing`. There is no `board use` at a terminal; give
+`--board` instead.
+
+`/kanban board list`:
+
+> **default**: 10 open, 11 done
+> **billing**: 2 open · max\_running 2 · workspace billing
+> **web-app** (this chat): 1 open · max\_running 2 · workspace web
+> `/kanban board use <name>` moves this chat to another board; `/kanban board create <name>` makes one.
+
+**Each board's DAG is its own.** Build each graph from its own group, as in recipes 1 to 5.
+`/kanban task list` in the Web group shows web-app's tasks alone, under "Board **web-app**:". A
+task's follow-ups, and the tasks a planner makes from it, stay on its board.
+
+**No parents across boards.** From the Billing group, a `parent:` naming a web-app task, or a
+link between the two, is refused:
+
+> Not done: task k\_… is on board web-app, not billing: a task and its parents are on one board
+
+If billing's work really waits on web-app's, keep both on one board, or start billing's task once
+web-app's is done.
+
+**Fairness.** Each dispatcher pass gives the boards turns, by name, starting after the board that
+got the last agent run, so a burst on web-app cannot hold billing's tasks back. Within a board,
+priority and then age decide. A board at its own `max_running` gives up its turn.
+
+**Limits that hold across boards:**
+
+- the gateway's `max_running: 4`, over both boards together;
+- each role's limit: `worker` has at most two agent runs open, on web-app and billing together. A
+  `worker` task on billing waits while two web-app `worker` tasks run, and `/kanban task show`
+  says it is waiting on its role's `max_running`. Billing's turn goes on to its tasks for other
+  roles;
+- one agent per workspace: two boards' tasks in one workspace take turns.
+
+**Pitfalls:**
+
+- **A board's workspace does not apply to `worker`'s or `planner`'s tasks.** It is the last
+  resort, after the task's own `workspace:`, its role's own workspace, and its parents'. `worker`
+  has its own, so a `worker` task on billing with no `workspace:` line runs in `worker`, not in
+  `billing`:
+
+  > assignee: role worker · reviewer: nobody · workspace: worker · board: billing
+
+  Both boards' `worker` tasks then share `worker`, one at a time. Give `worker`'s tasks a
+  `workspace:` line on each board. A board's workspace does apply to a task for `reviewer`, or for
+  a person, that has no parents to follow, since they name no workspace of their own.
+- **Moving a chat moves only that chat.** A group and its threads are one chat. Tasks created
+  before a move stay on their board, and their notices still come to the chat.
+- **A board's `max_running` cannot raise the role's.** With two boards at 2 each, `worker` still
+  has two runs open in all.
+
+### Recipe 7: rules of thumb for DAGs
+
+- **Set every link when you create the task**, with `parent:` lines, `--parent`, or `parents` in
+  `mt kanban create`. A task with no parents is claimed within moments, and a link onto a task
+  that has started is refused.
+- **One workspace per parallel branch.** Tasks that share a workspace run one after the other,
+  however wide the graph. Then check the role's `max_running`: it caps the width too.
+- **Name a reviewer on the task, or use a separate review task, not both.** Both means two
+  reviews.
+- **Keep tasks small and checkable.** Give each an `outcome:` and a `verify:`, and a gate where a
+  command can check it. A small task that blocks costs little to reroute.
+- **Prefer shallow graphs.** Each level waits for the slowest task above it, and a block anywhere
+  holds back everything under it. Two or three levels are usually enough.
+- **Put the handoff in the summary.** A child, and a reviewer, read their parents' summaries
+  first, and a child in another workspace cannot read its parents' files by relative path.
+- **Use idempotency keys when scripting.** An agent's `mt kanban create` takes an
+  `idempotency_key`; give one to every task it makes. The terminal's `mt kanban task new` takes
+  none, so a script keeps its own record of what it made (recipe 4).
+- **Use `--board` on scripted commands**, every one, so that a task lands on, and a command acts
+  on, the board you mean.
+- **Reroute with link first, archive last** (recipe 5).
+
+## 13. Rules of thumb
 
 - Write `outcome:` and `verify:` on every task you care about, and `stop when:` on anything
   risky.
