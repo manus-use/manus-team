@@ -94,11 +94,13 @@ Start from [`config.example.yaml`](config.example.yaml):
 
 ```bash
 cp config.example.yaml ~/.manus-team/config.yaml
-(umask 077; printf 'LARK_APP_SECRET=%s\n' "$LARK_APP_SECRET" > ~/.manus-team/.env) && chmod 600 ~/.manus-team/.env
+(umask 077; printf 'LARK_APP_SECRET=%s\n' "${LARK_APP_SECRET:?is not set}" > ~/.manus-team/.env) && chmod 600 ~/.manus-team/.env
 ```
 
-Run that second line in a shell that already holds the secret (it writes the value without
-printing it, and the `umask` keeps the file owner-only from the moment it exists). If you set
+Run that second line in a shell that already holds the secret: it writes the value without
+printing it, refuses to write anything if `LARK_APP_SECRET` is not set, and the `umask` keeps
+the file owner-only from the moment it exists. The `>` replaces an existing `.env` whole, so if
+you already have one, add the line to it with an editor instead. If you set
 `LARK_APP_SECRET` in the service's environment today, that is the whole migration: run the line,
 run `mt role check` to see the file listed, then remove the variable from the service's
 environment and restart. Until you remove it the environment's value is the one used.
@@ -117,8 +119,10 @@ committed by accident. A key that looks like a credential (`secret`, `token`, `p
 would put values in the file rather than names. Two files hold secrets, and are checked alike: each
 must be a regular file (not a symlink) owned by the gateway's user, readable and writable only
 by its owner (for example `0600` or `0400`), or the gateway refuses to start. Both take
-`NAME=value` lines, `#` comments and one pair of optional quotes, with no `export` and no
-expansion.
+`NAME=value` lines, `#` comments and one pair of optional quotes, with no `export`, no
+expansion and no control characters but the tab. A comment must be on a line of its own: an
+unquoted value keeps everything after the `=`, a ` # note` after it included, and a quoted
+value followed by one is refused.
 
 - **The gateway's `.env`**, at `$MT_HOME/.env` (default `~/.manus-team/.env`), is the
   recommended home for `LARK_APP_SECRET`. It may set any variable in the table below, and
@@ -128,12 +132,13 @@ expansion.
   over it, name by name, so an emergency override still needs no file edit. It is optional.
   The gateway and the `mt` commands that read its settings read it; no agent is given it, nor
   any of its values but an `MT_AGENT_ENV_*` one, which reaches the agent as it would from the
-  environment. Every value in it is masked, so keep settings that are not secret, such as
-  paths and ids, in the config file.
+  environment. Only its secrets are masked, `LARK_APP_SECRET` and `MT_AGENT_ENV_*`; paths, ids
+  and limits such as `MT_WORKSPACE`, `LARK_APP_ID` and `MT_MAX_LIVE_SESSIONS` are shown as
+  written, as they are from the config file.
 - **A role's `.env`** holds that role's own secrets. It may not set `MT_*`, `LARK_*` or `PATH`.
 
-The gateway masks every secret it holds itself — the Lark app secret, every value in its own
-`.env`, and every value it gives an agent from a role's `.env`, `passEnv` or `MT_AGENT_ENV_*`, except names the role lists in
+The gateway masks every secret it holds itself — the Lark app secret, the `MT_AGENT_ENV_*`
+values in its own `.env`, and every value it gives an agent from a role's `.env`, `passEnv` or `MT_AGENT_ENV_*`, except names the role lists in
 `agent.maskExempt` — as `••••` in everything it shows in chat, and in what it stores in its event
 log and approvals. A secret split by a character that shows nothing (a zero-width or bidi
 character, a direction mark) is masked too. Values shorter than 8 characters are not masked. A secret the agent finds by
@@ -326,7 +331,7 @@ The role, workspace and operator's board commands find the home, config file and
 way the gateway does (`MT_HOME`, `MT_CONFIG`, `MT_DB`; the database is `$MT_HOME/team.db` unless
 set), from the shell they run in, and need no Lark settings. They read the gateway's `.env` as
 the gateway does, under this shell's environment, so they see what it sees, and refuse a file it
-would refuse. The worker's commands, in a board run's shell, never read it. The role and workspace commands
+would refuse. No `mt` command reads it in a board run's shell. The role and workspace commands
 only write files and never contact the gateway; changes take effect at the next start. The
 operator's `mt kanban` commands are the one exception: they write the board's database, beside
 a running gateway, through the board's own service, and take effect at once.

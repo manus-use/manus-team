@@ -15,12 +15,16 @@
 #   MT_AGENT_ENV_<NAME>=...       passed to the agent as <NAME>.
 #
 # The .env must be owner-only (chmod 600), a regular file, not a symlink, or the
-# gateway refuses to start. It takes NAME=value lines and # comments, as a
-# role's .env does, and only names the gateway reads from its environment: any
-# other, and MT_HOME, MT_CONFIG and MT_DB, are refused. Every value in it is
-# masked, and no agent is given it. Create it, in a shell that holds the secret:
+# gateway refuses to start. It takes NAME=value lines and # comments on lines
+# of their own, as a role's .env does (an unquoted value keeps everything after
+# the =, a trailing # note included), and only names the gateway reads from its
+# environment: any other, and MT_HOME, MT_CONFIG and MT_DB, are refused.
+# LARK_APP_SECRET and MT_AGENT_ENV_* values are masked; paths, ids and limits
+# are shown as written. No agent is given the file. Create it, in a shell that
+# holds the secret (it refuses if LARK_APP_SECRET is not set, and > replaces an
+# existing .env):
 #
-#   (umask 077; printf 'LARK_APP_SECRET=%s\n' "$LARK_APP_SECRET" > ~/.manus-team/.env) && chmod 600 ~/.manus-team/.env
+#   (umask 077; printf 'LARK_APP_SECRET=%s\n' "${LARK_APP_SECRET:?is not set}" > ~/.manus-team/.env) && chmod 600 ~/.manus-team/.env
 #
 # mt role check reports whether it exists and the names it sets.
 #

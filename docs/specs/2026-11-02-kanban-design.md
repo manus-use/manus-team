@@ -407,7 +407,8 @@ committed and shared, so its `.env` is guarded at every point where it could tra
 **The file.** Read at startup, like `config.yaml`; editing it needs a restart. A role without a `.env`
 is valid — it has no secrets of its own. The format is deliberately small: `KEY=value` lines, blank
 lines, and comments starting with `#`; a value may be wrapped in single or double quotes, which are
-removed; no `export`, no variable expansion, no multi-line values. Anything else is an error naming
+removed; no `export`, no variable expansion, no multi-line values, no control characters but the
+tab. A comment is a line of its own: an unquoted value keeps everything after the `=`. Anything else is an error naming
 the line, not a guess. It must be a regular file — not a symlink, which could point anywhere — owned
 by the gateway's user.
 
@@ -428,9 +429,13 @@ the environment, or in a role's `.env` — `0600`, never cloned, masked".
 (default `~/.manus-team/.env`) as well as from its environment; it is the recommended home for
 `LARK_APP_SECRET`. It is optional. It follows a role's `.env`: the same parser and syntax, and the
 same checks on the file (a regular file, not a symlink, owned by the gateway's user, readable and
-writable by its owner alone, refused rather than fixed), and every value in it joins the
-known-secret set as it is read (§10.1), so a refusal raised after it, by the config, is masked
-too. Errors name a line or a variable, never a value.
+writable by its owner alone, refused rather than fixed). Its secrets, `LARK_APP_SECRET` and every
+`MT_AGENT_ENV_*` value, join the known-secret set as it is read (§10.1), so a refusal raised after
+it, by the config, is masked too; its paths, ids and limits (`MT_WORKSPACE`, `LARK_APP_ID`,
+`MT_MAX_LIVE_SESSIONS`, …) are settings, shown as written, as they are from the config file. Errors
+name a line or a variable, never a value, and a bad value the config reads from the environment,
+from the file or not, is named by its variable rather than quoted. `mt` masks every refusal and
+usage error it prints.
 
 - **Which names.** Only those the gateway reads from its environment: `LARK_APP_ID`,
   `LARK_APP_SECRET`, `LARK_DOMAIN`, the `MT_*` overrides of the config file, and
@@ -443,8 +448,9 @@ too. Errors name a line or a variable, never a value.
 - **Who reads it.** The gateway at startup, and the `mt` commands that load its settings (`mt
   role`, `mt workspace`, and the operator's `mt kanban task`, `board` and `gate`), under their
   shell's environment, so `mt role check` and the operator's commands see what the gateway sees.
-  `mt role check` reports whether it exists and the names it sets, never their values. The worker
-  CLI, in a board run's shell, never reads it.
+  `mt role check` reports whether it exists and the names it sets, never their values. No `mt`
+  command reads it in a board run's shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set: the
+  worker CLI, and `mt role` and `mt workspace` there, see that shell alone.
 - **Never an agent's.** It is merged only into what the config and team loaders read. An agent's
   process environment is built from the gateway's own process environment by allowlist, which
   the file never enters, and its names are those `passEnv` refuses to forward (§2.1). An
@@ -462,6 +468,13 @@ what refusing unknown names exists to stop. The config file's `db:` remains for 
 elsewhere. There is no `mt` command that writes the file: the one shell line in the README writes
 it owner-only from the start, and a command taking the secret would be one more process holding
 it, on its command line or its input, for no check the startup and `mt role check` do not make.
+The migration line refuses an unset `LARK_APP_SECRET` (`${LARK_APP_SECRET:?…}`) rather than write
+an empty one.
+
+*Amended on 2026-11-10.* The user chose to mask only the file's secrets, `LARK_APP_SECRET` and
+`MT_AGENT_ENV_*`, after review found that masking every value hid workspace paths and ids in
+chat and refused a gate whose command named the workspace. A board run's shell never reads the
+file, `mt role check` included.
 
 ### 2.6 The `mt role` and `mt workspace` commands
 
@@ -1953,7 +1966,7 @@ gave up, stranded. Delivery is at-least-once, each message with a uuid derived f
   agent (§2.5). Every agent runs as the same OS user, so one could still read another role's `.env`
   from disk; that boundary needs per-role users or containers.
 - **The gateway's `.env`**, `$MT_HOME/.env`, is the only other file the gateway reads secrets
-  from: `0600`, the gateway's names only, masked, and never given to an agent (§2.5). An agent can
+  from: `0600`, the gateway's names only, its secrets masked, and never given to an agent (§2.5). An agent can
   read it from disk as it can a role's, for the same reason.
 - **Worker tokens** are run-scoped and hashed at rest (§7.2); the socket is `0600`, at
   `$MT_HOME/run/kanban.sock` in a `0700` directory — or, when that path is too long for a socket
@@ -1991,7 +2004,8 @@ U+200F and U+061C) are skipped as it matches, and masked with the secret, since 
 one reads whole on screen; they are not stripped elsewhere, as a joined emoji and right-to-left text
 need them:
 
-- the Lark app secret, and every value in the gateway's `.env` (§2.5), from the moment it is read;
+- the Lark app secret, from the gateway's `.env` (§2.5) from the moment it is read, and the
+  `MT_AGENT_ENV_*` values there with it; the file's other values are settings, not secrets;
 - every environment value the gateway passes to an agent: every value in every role's `.env`
   (§2.5), the `MT_AGENT_ENV_*` values of the role `default` made from the `agent:` block, and the
   resolved values of each role's `passEnv` names — except names a role lists in `maskExempt`, for
