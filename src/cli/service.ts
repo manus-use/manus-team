@@ -177,6 +177,10 @@ export async function serviceCommand(argv: readonly string[], io: MtIo): Promise
 
 class CommandFailed extends Error {}
 
+/** How long restart waits for the gateway to drain and exit after SIGTERM, and how often it looks. */
+const RESTART_WAIT_MS = 60_000;
+const POLL_MS = 250;
+
 interface State {
   loaded: boolean;
   running: boolean;
@@ -277,8 +281,40 @@ class Service {
 
   /** Bootstrap the plist, enabled first, since a disabled job refuses to load. */
   private bootstrap(): void {
-    this.must('launchctl', ['enable', this.job]);
-    this.must('launchctl', ['bootstrap', this.t.domain, this.t.file]);
+    try {
+      this.must('launchctl', ['enable', this.job]);
+      this.must('launchctl', ['bootstrap', this.t.domain, this.t.file]);
+    } catch (err) {
+      if (!(err instanceof CommandFailed)) throw err;
+      const hint = /domain/i.test(err.message)
+        ? `${this.t.domain} does not exist until someone logs in: log in at the Mac's console (a LaunchAgent cannot run from an ssh session alone), then run this again`
+        : 'if System Settings > General > Login Items has this item switched off under Allow in the Background, switch it on and run this again';
+      throw new CommandFailed(`${err.message}. ${hint}`);
+    }
+  }
+
+  /**
+   * Restart a loaded job, letting the gateway drain. `kickstart -k` is not
+   * documented to send SIGTERM rather than SIGKILL, so the gateway is sent
+   * SIGTERM, waited for, and kickstarted; past RESTART_WAIT_MS, `kickstart -k`.
+   */
+  private async restartJob(state: State): Promise<void> {
+    if (!state.running) {
+      this.must('launchctl', ['kickstart', this.job]);
+      return;
+    }
+    this.must('launchctl', ['kill', 'SIGTERM', this.job]);
+    for (let waited = 0; waited < RESTART_WAIT_MS; waited += POLL_MS) {
+      const now = this.state();
+      // Gone, or a new process: KeepAlive starts one again when the old one exits other than cleanly.
+      if (!now.running || (now.pid !== undefined && now.pid !== state.pid)) {
+        this.must('launchctl', ['kickstart', this.job]);
+        return;
+      }
+      await this.deps.sleep(POLL_MS);
+    }
+    this.io.out(`warning: ${this.t.name} did not exit within ${RESTART_WAIT_MS / 1000} seconds of SIGTERM; killing it`);
+    this.must('launchctl', ['kickstart', '-k', this.job]);
   }
 
   /** Boot the job out, and wait until launchd has let it go: bootstrap right after can fail while it is still stopping. */
@@ -310,9 +346,21 @@ class Service {
     } catch (err) {
       return refuse(io, (err as Error).message);
     }
-    for (const warning of this.environmentWarnings(file, path)) io.out(`warning: ${warning}`);
+    const checked = this.checkEnvironment(file, path);
+    for (const warning of checked.warnings) io.out(`warning: ${warning}`);
+    // Refused, as a missing secret is: a unit sure to fail would be retried every 30 seconds.
+    if (checked.problem !== undefined) {
+      return refuse(
+        io,
+        `the gateway would not start as the service, which has only PATH, MT_HOME and ${file.path}: ${checked.problem}. ` +
+          'Fix it, check with mt role check, and run mt service install again',
+      );
+    }
 
     privateDir(join(t.mtHome, 'logs'), 'the service log');
+    // Created owner-only before launchd or systemd first opens it, which would give it the umask's mode.
+    writeFileSync(t.log, '', { flag: 'a', mode: 0o600 });
+    chmodSync(t.log, 0o600);
     mkdirSync(dirname(t.file), { recursive: true });
     const staging = join(dirname(t.file), `.${t.name}-${randomUUID()}`);
     try {
@@ -374,10 +422,15 @@ class Service {
     return file;
   }
 
-  /** What the service's environment lacks that this shell's has, and every passEnv name. Names only, never a value. */
-  private environmentWarnings(file: GatewayEnvFile, path: string): string[] {
+  /**
+   * What the service's environment lacks that this shell's has, and every
+   * passEnv name, as warnings; and the first reason the gateway would not start
+   * as the service, a passEnv name aside, as a problem. Names only, never a value.
+   */
+  private checkEnvironment(file: GatewayEnvFile, path: string): { warnings: string[]; problem: string | undefined } {
     const { t, io } = this;
     const out: string[] = [];
+    const problems: string[] = [];
     for (const [name, value] of Object.entries(io.env)) {
       if (value === undefined || name === 'MT_HOME' || name in file.values) continue;
       const gateways = (GATEWAY_ENV_NAMES as readonly string[]).includes(name) || name.startsWith(AGENT_ENV_PREFIX);
@@ -396,7 +449,7 @@ class Service {
       defaultFromBlock = team.roles.get('default')?.source !== 'directory';
     } catch (err) {
       if (!(err instanceof ConfigError)) throw err;
-      out.push(`the roles do not load as the service would load them: ${err.message}; run mt role check`);
+      problems.push(err.message);
     }
     const names = [...new Set(unset)];
     for (const entry of names) {
@@ -414,9 +467,9 @@ class Service {
       loadConfig(filled);
     } catch (err) {
       if (!(err instanceof ConfigError)) throw err;
-      out.push(`the gateway would not start as the service: ${err.message}`);
+      problems.push(err.message);
     }
-    return out;
+    return { warnings: out, problem: problems[0] };
   }
 
   async uninstall(): Promise<number> {
@@ -452,7 +505,8 @@ class Service {
       const state = this.state();
       this.warnOtherGateway(() => state.pid);
       if (!state.loaded) this.bootstrap();
-      else this.must('launchctl', ['kickstart', ...(restart ? ['-k'] : []), this.job]);
+      else if (restart) await this.restartJob(state);
+      else this.must('launchctl', ['kickstart', this.job]);
     } else {
       this.warnOtherGateway(() => this.state().pid);
       this.systemctl(restart ? 'restart' : 'start', t.name);

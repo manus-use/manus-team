@@ -7,6 +7,11 @@ import type { RunResult, ServiceDeps } from '../src/cli/service.js';
 import { readPlist, readUnit } from '../src/service/unit.js';
 
 const SECRET = 'lark-secret-never-printed-0000';
+
+/** A config the gateway starts on, given the fixture's .env: an owner, a workspace and an agent. */
+function config(workspace: string, agentExtra = ''): string {
+  return `workspace: ${workspace}\nauth:\n  owner: ou_owner\nagent:\n  driver: acp\n  command: claude-agent-acp\n${agentExtra}`;
+}
 const UID = 501;
 
 interface Call {
@@ -45,7 +50,7 @@ function fixture(opts: { dirName?: string; built?: boolean; env?: string | false
   if (opts.built !== false) writeFileSync(join(checkout, 'dist', 'main.js'), '');
   mkdirSync(join(root, 'node bin'));
   writeFileSync(join(root, 'node bin', 'node'), '');
-  writeFileSync(join(mtHome, 'config.yaml'), `workspace: ${checkout}\nagent:\n  driver: acp\n  command: claude-agent-acp\n`);
+  writeFileSync(join(mtHome, 'config.yaml'), config(checkout));
   if (opts.env !== false) {
     writeFileSync(join(mtHome, '.env'), opts.env ?? `LARK_APP_SECRET=${SECRET}\nLARK_APP_ID=cli_test\n`, { mode: 0o600 });
   }
@@ -138,11 +143,12 @@ describe('mt service install on macOS', () => {
     ]);
     expect(r.out).toContain(`wrote ${plistPath(fx)}`);
     expect(r.out).toContain('mt service status');
+    expect(r.out).not.toMatch(/warning/);
     expect(statSync(plistPath(fx)).mode & 0o777).toBe(0o644);
   });
 
   it('never writes a secret into the plist, nor prints one', async () => {
-    fx = fixture({ env: `LARK_APP_SECRET=${SECRET}\nMT_AGENT_ENV_API_KEY=sk-agent-0000\n` });
+    fx = fixture({ env: `LARK_APP_SECRET=${SECRET}\nLARK_APP_ID=cli_test\nMT_AGENT_ENV_API_KEY=sk-agent-0000\n` });
     notLoaded(fx);
     const r = await fx.run(['service', 'install'], { env: { OTHER_SECRET: 'shell-secret-1111' } });
     expect(r.code).toBe(0);
@@ -158,13 +164,16 @@ describe('mt service install on macOS', () => {
     notLoaded(fx);
     expect((await fx.run(['service', 'install'])).code).toBe(0);
     expect(statSync(join(fx.mtHome, 'logs')).mode & 0o777).toBe(0o700);
+    // Created owner-only before launchd first opens it, which would give it the umask's mode.
+    expect(statSync(join(fx.mtHome, 'logs', 'gateway.log')).mode & 0o777).toBe(0o600);
   });
 
   it('records MT_HOME when it is set, and names a home other than the default by a hash', async () => {
     fx = fixture();
     const other = join(fx.root, 'other home');
     mkdirSync(other, { mode: 0o700 });
-    writeFileSync(join(other, '.env'), `LARK_APP_SECRET=${SECRET}\n`, { mode: 0o600 });
+    writeFileSync(join(other, '.env'), `LARK_APP_SECRET=${SECRET}\nLARK_APP_ID=cli_test\n`, { mode: 0o600 });
+    writeFileSync(join(other, 'config.yaml'), config(fx.checkout));
     notLoaded(fx);
     const r = await fx.run(['service', 'install'], { env: { MT_HOME: other } });
     expect(r.err).toBe('');
@@ -252,7 +261,7 @@ describe('mt service install on macOS', () => {
     fx = fixture();
     writeFileSync(
       join(fx.mtHome, 'config.yaml'),
-      `workspace: ${fx.checkout}\nagent:\n  driver: acp\n  command: claude-agent-acp\n  passEnv: [GH_TOKEN]\n`,
+      config(fx.checkout, '  passEnv: [GH_TOKEN]\n'),
     );
     const role = join(fx.mtHome, 'roles', 'reviewer');
     mkdirSync(role, { recursive: true });
@@ -274,6 +283,58 @@ describe('mt service install on macOS', () => {
     expect(r.out).toMatch(/warning: MT_ALLOW_TALK is set in this shell.*service will not have it/);
     // In the .env too: the service has it.
     expect(r.out).not.toMatch(/warning: LARK_APP_ID/);
+  });
+
+  it('refuses a configuration the gateway would not start on, as the service would load it, and loads nothing', async () => {
+    fx = fixture();
+    writeFileSync(join(fx.mtHome, 'config.yaml'), `workspace: ${fx.checkout}\nagent:\n  driver: acp\n  command: claude-agent-acp\n`);
+    const r = await fx.run(['service', 'install']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/the gateway would not start as the service.*an owner is required/);
+    expect(r.err).toMatch(/mt role check/);
+    expect(fx.calls).toEqual([]);
+    expect(existsSync(plistPath(fx))).toBe(false);
+  });
+
+  it('refuses when a setting the gateway needs is only in this shell, and says to put it in the .env', async () => {
+    fx = fixture({ env: `LARK_APP_SECRET=${SECRET}\n` });
+    const r = await fx.run(['service', 'install'], { env: { LARK_APP_ID: 'cli_shell' } });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/warning: LARK_APP_ID is set in this shell.*put it in/);
+    expect(r.err).toMatch(/an app id is required/);
+    expect(fx.calls).toEqual([]);
+  });
+
+  it('refuses roles that would not load, a passEnv name aside', async () => {
+    fx = fixture();
+    const role = join(fx.mtHome, 'roles', 'broken');
+    mkdirSync(role, { recursive: true });
+    writeFileSync(join(role, 'config.yaml'), 'agent:\n  driver: nonsense\n');
+    const r = await fx.run(['service', 'install']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/the gateway would not start as the service.*agent\.driver must be one of/);
+    expect(fx.calls).toEqual([]);
+  });
+
+  it('says a console login is needed when there is no gui domain, as over ssh', async () => {
+    fx = fixture();
+    notLoaded(fx);
+    fx.answers.unshift({
+      match: (c) => c.args[0] === 'bootstrap' || c.args[0] === 'enable',
+      result: { code: 125, stderr: 'Bootstrap failed: 125: Domain does not support specified action' },
+    });
+    const r = await fx.run(['service', 'install']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(new RegExp(`gui/${UID} does not exist.*log in at the Mac's console`));
+  });
+
+  it("points at Login Items when bootstrap fails otherwise", async () => {
+    fx = fixture();
+    notLoaded(fx);
+    fx.answers.unshift({ match: (c) => c.args[0] === 'bootstrap', result: { code: 5, stderr: 'Bootstrap failed: 5: Input/output error' } });
+    const r = await fx.run(['service', 'install']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/System Settings > General > Login Items/);
   });
 
   it('warns when another gateway holds the home, as npm run dev does', async () => {
@@ -383,12 +444,56 @@ describe('mt service start, stop and restart on macOS', () => {
     fx.answers = [];
   }
 
-  it('restart kickstarts a loaded job with -k', async () => {
+  it('restart sends SIGTERM, waits for the gateway to exit, then kickstarts it', async () => {
+    await installed();
+    let killed = false;
+    let polls = 0;
+    fx.answers.push({
+      match: (c) => c.args[0] === 'print',
+      // Running until the SIGTERM, then two more polls before it has drained and exited.
+      result: () => (killed && ++polls > 2 ? { stdout: '\tstate = not running\n' } : { stdout: '\tstate = running\n\tpid = 10\n' }),
+    });
+    fx.answers.push({ match: (c) => c.args[0] === 'kill', result: () => ((killed = true), {}) });
+    const r = await fx.run(['service', 'restart']);
+    expect(r.code).toBe(0);
+    const job = `gui/${UID}/team.manus.gateway`;
+    expect(words(fx)).toEqual([
+      `launchctl print ${job}`,
+      `launchctl kill SIGTERM ${job}`,
+      `launchctl print ${job}`,
+      `launchctl print ${job}`,
+      `launchctl print ${job}`,
+      `launchctl kickstart ${job}`,
+    ]);
+  });
+
+  it('restart counts a new pid as the old gateway gone, as when KeepAlive started it again', async () => {
+    await installed();
+    let killed = false;
+    fx.answers.push({
+      match: (c) => c.args[0] === 'print',
+      result: () => ({ stdout: `\tstate = running\n\tpid = ${killed ? 11 : 10}\n` }),
+    });
+    fx.answers.push({ match: (c) => c.args[0] === 'kill', result: () => ((killed = true), {}) });
+    expect((await fx.run(['service', 'restart'])).code).toBe(0);
+    expect(words(fx).slice(-1)).toEqual([`launchctl kickstart gui/${UID}/team.manus.gateway`]);
+  });
+
+  it('restart falls back to kickstart -k when the gateway does not exit in time', async () => {
     await installed();
     loaded(fx, 10);
     const r = await fx.run(['service', 'restart']);
     expect(r.code).toBe(0);
-    expect(words(fx)).toEqual([`launchctl print gui/${UID}/team.manus.gateway`, `launchctl kickstart -k gui/${UID}/team.manus.gateway`]);
+    expect(r.out).toMatch(/warning: .* did not exit within 60 seconds of SIGTERM/);
+    expect(words(fx).slice(-1)).toEqual([`launchctl kickstart -k gui/${UID}/team.manus.gateway`]);
+    expect(words(fx).filter((w) => w.includes(' print '))).toHaveLength(1 + 240);
+  });
+
+  it('restart of a loaded job that is not running kickstarts it', async () => {
+    await installed();
+    loaded(fx);
+    expect((await fx.run(['service', 'restart'])).code).toBe(0);
+    expect(words(fx)).toEqual([`launchctl print gui/${UID}/team.manus.gateway`, `launchctl kickstart gui/${UID}/team.manus.gateway`]);
   });
 
   it('restart and start bootstrap a job that is not loaded', async () => {
