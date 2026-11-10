@@ -1,6 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { ConfigError, loadConfig, type GatewayConfig } from './config.js';
+import { ConfigError, loadConfig, type Env, type GatewayConfig } from './config.js';
+import { loadGatewayEnv, type GatewayEnvFile } from './gateway-env.js';
 import { loadTeam, teamSecrets, type Team } from './team.js';
 import { migrate, openDb, type Db } from './db/open.js';
 import { sweepSeen } from './db/dedup.js';
@@ -89,6 +90,23 @@ export function findingUuid(appId: string, sessionId: string, key: BindingKey, b
  */
 export function registerConfiguredSecrets(config: GatewayConfig, team: Team): void {
   addSecrets([config.lark.appSecret, ...teamSecrets(team)]);
+}
+
+/**
+ * What startup reads, in order: the gateway's .env, then the config and the team,
+ * from `env` over that file. Every secret is registered as soon as it is known --
+ * the file's values as it is read -- so an error raised on the way is masked.
+ * `env` itself is left as it was: an agent's environment is built from the
+ * process environment, which the file never enters.
+ */
+export function loadStartup(env: Env = process.env): { config: GatewayConfig; team: Team; gatewayEnv: GatewayEnvFile } {
+  const loaded = loadGatewayEnv(env);
+  const config = loadConfig(loaded.env);
+  // Read and checked before anything starts: a broken role or workspace found
+  // later strands work; found here it is a line in the startup error.
+  const team = loadTeam(config, loaded.env);
+  registerConfiguredSecrets(config, team);
+  return { config, team, gatewayEnv: loaded.file };
 }
 
 /** How long a shutdown waits for the dispatcher's work before it closes the database. */
@@ -461,13 +479,13 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
  * and a shutdown that ignores that is one they have to `kill -9`.
  */
 export async function main(): Promise<void> {
-  const config = loadConfig();
-  // Read and checked before anything starts: a broken role or workspace found
-  // later strands work; found here it is a line in the startup error.
-  const team = loadTeam(config, process.env);
-  // Registered here, before anything else can fail, so an error raised between
-  // loadTeam and the gateway starting is masked whatever createGateway does first.
-  registerConfiguredSecrets(config, team);
+  // Secrets registered inside, before anything else can fail, so an error raised
+  // between loadTeam and the gateway starting is masked whatever createGateway does first.
+  const { config, team, gatewayEnv } = loadStartup();
+  if (gatewayEnv.present) {
+    // Names only, as mt role check gives them.
+    process.stderr.write(`gateway .env: ${gatewayEnv.path} sets ${Object.keys(gatewayEnv.values).sort().join(', ') || 'nothing'}\n`);
+  }
   const gateway = await createGateway(config, team);
   await gateway.start();
 

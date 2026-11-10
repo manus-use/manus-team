@@ -25,6 +25,12 @@ const BUNDLED_SCHEMA_DIR = fileURLToPath(new URL('../schema', import.meta.url));
  * file names credentials and never holds them, and a file that does hold one is
  * refused at boot rather than quietly accepted.
  *
+ * The environment here is the gateway's process environment over its own
+ * `$MT_HOME/.env` (`gateway-env.ts`), merged by the caller before `loadConfig`
+ * sees it: a file of secrets alone, owner-only, in a role's `.env` syntax, which
+ * no agent is given. `loadConfig` itself reads only what it is handed, so a test
+ * never reads the real home.
+ *
  * Four rules, all about failing safely:
  *
  * 1. **Everything is validated here, at boot.** A missing app secret discovered on
@@ -327,8 +333,11 @@ export function loadConfig(
         envString(env, 'LARK_APP_ID') ??
         file.lark.appId ??
         fail('an app id is required: set lark.appId in the config file, or LARK_APP_ID'),
-      // Environment only, and refused in the file. See the note at the top.
-      appSecret: envString(env, 'LARK_APP_SECRET') ?? fail('LARK_APP_SECRET is required'),
+      // The environment or the gateway's .env, and refused in the config file.
+      // See the note at the top.
+      appSecret:
+        envString(env, 'LARK_APP_SECRET') ??
+        fail(`LARK_APP_SECRET is required: set it in ${join(located.home, '.env')} (mode 0600), or in the environment`),
       ...domainOf(envString(env, 'LARK_DOMAIN') ?? file.lark.domain),
     },
 
@@ -373,8 +382,13 @@ interface Located {
   file: FileConfig;
 }
 
+/** The directory the gateway's files live under: MT_HOME, else ~/.manus-team. */
+export function gatewayHome(env: Env): string {
+  return envString(env, 'MT_HOME') ?? join(homedir(), '.manus-team');
+}
+
 function locate(env: Env, readFile: FileReader): Located {
-  const home = envString(env, 'MT_HOME') ?? join(homedir(), '.manus-team');
+  const home = gatewayHome(env);
   const explicit = envString(env, 'MT_CONFIG');
   const path = explicit ?? join(home, 'config.yaml');
 
@@ -576,6 +590,32 @@ export const AGENT_ENV_PREFIX = 'MT_AGENT_ENV_';
 
 /** The `MT_AGENT_*` variables that override a field of the `agent:` block. */
 export const AGENT_OVERRIDES = ['MT_AGENT_COMMAND', 'MT_AGENT_ARGS', 'MT_AGENT_DRIVER', 'MT_AGENT_UNSUPERVISED'] as const;
+
+/**
+ * Every variable the gateway reads its own settings from, but for the
+ * `MT_AGENT_ENV_<NAME>` family: the names its `.env` may hold (`gateway-env.ts`),
+ * less the three that say where its files are. A name read here and missing from
+ * this list is refused in that file; tests/gateway-env.test.ts checks the two agree.
+ */
+export const GATEWAY_ENV_NAMES = [
+  'MT_HOME',
+  'MT_CONFIG',
+  'MT_DB',
+  'MT_SCHEMA_DIR',
+  'MT_DOWNLOAD_DIR',
+  'MT_WORKSPACE',
+  'MT_OWNER_OPEN_ID',
+  'MT_ALLOW_TALK',
+  'MT_ALLOW_OPERATE',
+  'MT_ALLOW_CHATS',
+  'MT_ALLOW_DM',
+  'MT_ALLOW_MENTION_ALL',
+  'MT_MAX_LIVE_SESSIONS',
+  ...AGENT_OVERRIDES,
+  'LARK_APP_ID',
+  'LARK_APP_SECRET',
+  'LARK_DOMAIN',
+] as const;
 
 /** Values for `passEnv` names, from the gateway's environment. `where` prefixes the errors. */
 export function passEnvValues(
