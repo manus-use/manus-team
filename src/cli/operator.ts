@@ -3,7 +3,7 @@ import { listed } from '../kanban/chat-render.js';
 import { boardSetting, isPerson, LIST_FILTERS, tooBig, type NewTaskCommand } from '../kanban/chat-parse.js';
 import type { KanbanService } from '../kanban/service.js';
 import { maskAll, workerSocketPath } from '../kanban/socket.js';
-import { DEFAULT_BOARD, type BoardRow, type Contract, type Refusal } from '../kanban/types.js';
+import { DEFAULT_BOARD, type BoardRow, type Contract, type Refusal, type Waiting } from '../kanban/types.js';
 import { WORKER_LIMITS } from '../kanban/limits.js';
 import { NUDGE } from '../kanban/worker.js';
 import { visible } from '../names.js';
@@ -450,6 +450,20 @@ function list(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
+/** One reason a task waits, as `--json` gives it: snake_case, as the rest of the output is. */
+function waitingJson(w: Waiting): Record<string, unknown> {
+  switch (w.kind) {
+    case 'gateway':
+      return { reason: 'gateway', max_running: w.maxRunning };
+    case 'board':
+      return { reason: 'board', board: w.board, max_running: w.maxRunning };
+    case 'role':
+      return { reason: 'role', role: w.role, max_running: w.maxRunning };
+    case 'workspace':
+      return { reason: 'workspace', workspace: w.workspace, task_id: w.taskId, run_id: w.runId };
+  }
+}
+
 /** `mt kanban task show <task> [--board <name>]`: a task on any board, by id, or on the one named (spec §16.4). */
 function show(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
@@ -463,6 +477,7 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
     const gates = service.listGates(taskId);
     const g = gates.ok ? gates.gates : [];
     const { task } = r.view;
+    const roleWait = r.view.waiting?.find((w) => w.kind === 'role');
     return {
       ok: true,
       lines: showText(r.view, g),
@@ -481,11 +496,12 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
           block_kind: task.blockKind,
           block_reason: task.blockReason,
           // The role whose max_running the task is waiting on (spec §6.3), or null.
-          waiting_on_role:
-            r.view.waitingOn === undefined ? null : { role: r.view.waitingOn.role, max_running: r.view.waitingOn.maxRunning },
+          waiting_on_role: roleWait === undefined ? null : { role: roleWait.role, max_running: roleWait.maxRunning },
+          // Every reason a pass skips it, in the order the pass checks them; empty for none.
+          waiting: (r.view.waiting ?? []).map(waitingJson),
         },
-        parents: r.view.parents.map((p) => ({ task_id: p.taskId, phase: p.phase })),
-        children: r.view.children.map((c) => ({ task_id: c.taskId, phase: c.phase })),
+        parents: r.view.parents.map((p) => ({ task_id: p.taskId, phase: p.phase, status: r.view.statuses.get(p.taskId) ?? null })),
+        children: r.view.children.map((c) => ({ task_id: c.taskId, phase: c.phase, status: r.view.statuses.get(c.taskId) ?? null })),
         gates: g.map((x) => ({ gate_id: x.id, command: x.command, timeout_s: x.timeoutS, by: x.createdBy })),
         runs: r.view.runs.map((run) => ({
           run_id: run.runId,

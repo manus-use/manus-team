@@ -343,3 +343,13 @@ export interface Refusal {
 }
 
 export type Result<T extends object> = ({ ok: true } & T) | Refusal;
+
+/**
+ * Why a claimable agent task is not claimed yet (spec §6.2, §6.3, §16): the
+ * limits a pass holds it to, and the busy workspace its claim refuses.
+ */
+export type Waiting =
+  | { kind: 'gateway'; maxRunning: number }
+  | { kind: 'board'; board: string; maxRunning: number }
+  | { kind: 'role'; role: string; maxRunning: number }
+  | { kind: 'workspace'; workspace: string; taskId: string; runId: string };

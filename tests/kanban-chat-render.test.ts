@@ -158,6 +158,22 @@ describe('/kanban task show', () => {
     ]);
   });
 
+  it("gives a parent's and a child's derived status, not the phase open", () => {
+    const parent = newTask(h.db, { title: 'parent' });
+    const child = newTask(h.db, { title: 'child', parents: [parent.taskId] });
+    const grandchild = newTask(h.db, { title: 'grandchild', parents: [child.taskId] });
+    const show = (taskId: string) => {
+      const view = taskView(h.db, taskId);
+      if (view === undefined) throw new Error('no view');
+      return renderShow(view, []).split('\n');
+    };
+    expect(show(child.taskId)).toEqual(expect.arrayContaining([`parents: \`${parent.taskId}\` (ready)`, `children: \`${grandchild.taskId}\` (todo)`]));
+    claimed(h.db, parent.taskId);
+    expect(show(child.taskId)).toContain(`parents: \`${parent.taskId}\` (running)`);
+    expect(show(parent.taskId)).toContain(`children: \`${child.taskId}\` (todo)`);
+    expect(taskView(h.db, child.taskId)?.statuses.get(parent.taskId)).toBe('running');
+  });
+
   it("shows the end of the latest output, masked whole before it is cut, and marks the cut", () => {
     addSecrets(['sk-tail-1234567890']);
     const k = newTask(h.db);

@@ -96,12 +96,12 @@ export function showText(view: TaskView, gates: readonly GateRow[]): string[] {
     `${line(task.title)} (${task.taskId}): ${view.status}`,
     `assignee: ${who(task.assignee)} · reviewer: ${who(task.reviewer)} · workspace: ${task.workspace === null ? 'not yet fixed' : line(task.workspace, 80)} · board: ${line(task.board, 80)}`,
   ];
-  if (view.waitingOn !== undefined) out.push(waitingLine(view.waitingOn));
+  for (const w of view.waiting ?? []) out.push(waitingLine(w, (t) => line(t, 80)));
   if (task.phase === 'blocked' && task.blockKind !== null) {
     out.push(`blocked (${task.blockKind}): ${line(task.blockReason ?? '', 500)}`);
   }
-  if (view.parents.length > 0) out.push(`parents: ${view.parents.map((p) => `${p.taskId} (${p.phase})`).join(', ')}`);
-  if (view.children.length > 0) out.push(`children: ${view.children.map((c) => `${c.taskId} (${c.phase})`).join(', ')}`);
+  if (view.parents.length > 0) out.push(`parents: ${view.parents.map((p) => `${p.taskId} (${view.statuses.get(p.taskId) ?? p.phase})`).join(', ')}`);
+  if (view.children.length > 0) out.push(`children: ${view.children.map((c) => `${c.taskId} (${view.statuses.get(c.taskId) ?? c.phase})`).join(', ')}`);
   if (task.body.trim() !== '') out.push('', ...indented(task.body, 4000), '');
   const contract = Object.entries(task.contract).filter(([, v]) => v !== undefined && v.trim() !== '');
   if (contract.length > 0) {

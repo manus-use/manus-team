@@ -7,7 +7,7 @@ import { stripControl } from '../text.js';
 import { LIST_FILTERS, USAGE } from './chat-parse.js';
 import { describeReported } from './commit.js';
 import type { DisplayStatus } from './status.js';
-import { DEFAULT_BOARD, type Assignee, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow } from './types.js';
+import { DEFAULT_BOARD, type Assignee, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow, type Waiting } from './types.js';
 
 /**
  * What `/kanban` says in chat (spec §9.3), and the notices a subscription hears
@@ -231,12 +231,23 @@ function runLine(run: RunRow): string {
 }
 
 /**
- * A task the dispatcher skips because its role is at its max_running (spec
- * §6.3): `/kanban task show` and `mt kanban task show` say so, in the same words.
+ * Why the dispatcher skips a claimable task (spec §6.2, §6.3, §16):
+ * `/kanban task show` and `mt kanban task show` say so, in the same words, one
+ * line for each reason. `escape` is a label's, and `taskId` a task id's, as the
+ * line is shown.
  */
-export function waitingLine(w: { role: string; maxRunning: number }, escape: (text: string) => string = (t) => t): string {
-  const runs = `${w.maxRunning} agent run${w.maxRunning === 1 ? '' : 's'}`;
-  return `waiting: role ${escape(w.role)} is at its ${escape('max_running')}, ${runs} at once; it is claimed when one of them ends`;
+export function waitingLine(
+  w: Waiting,
+  escape: (text: string) => string = (t) => t,
+  taskId: (id: string) => string = (t) => t,
+): string {
+  if (w.kind === 'workspace') {
+    return `waiting: workspace ${escape(w.workspace)} is busy with task ${taskId(w.taskId)}'s agent run; it is claimed when that run ends`;
+  }
+  const runs = `${w.maxRunning} agent run${w.maxRunning === 1 ? '' : 's'} at once; it is claimed when one of them ends`;
+  if (w.kind === 'gateway') return `waiting: the gateway is at its ${escape('kanban.max_running')}, ${runs}`;
+  const whose = w.kind === 'board' ? `board ${escape(w.board)}` : `role ${escape(w.role)}`;
+  return `waiting: ${whose} is at its ${escape('max_running')}, ${runs}`;
 }
 
 /**
@@ -251,15 +262,15 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
     `**${label(task.title)}** ${id(task.taskId)}: ${view.status}`,
     `assignee: ${who(task.assignee)} · reviewer: ${who(task.reviewer)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}${board}`,
   ];
-  if (view.waitingOn !== undefined) out.push(waitingLine(view.waitingOn, label));
+  for (const w of view.waiting ?? []) out.push(waitingLine(w, label, id));
   if (task.phase === 'blocked' && task.blockKind !== null) {
     out.push(`blocked (${forDisplay(task.blockKind)}): ${label(task.blockReason ?? '', 500)}`);
   }
   if (view.parents.length > 0) {
-    out.push(`parents: ${view.parents.map((p) => `${id(p.taskId)} (${p.phase})`).join(', ')}`);
+    out.push(`parents: ${view.parents.map((p) => `${id(p.taskId)} (${view.statuses.get(p.taskId) ?? p.phase})`).join(', ')}`);
   }
   if (view.children.length > 0) {
-    out.push(`children: ${view.children.map((c) => `${id(c.taskId)} (${c.phase})`).join(', ')}`);
+    out.push(`children: ${view.children.map((c) => `${id(c.taskId)} (${view.statuses.get(c.taskId) ?? c.phase})`).join(', ')}`);
   }
   if (task.body.trim() !== '') out.push(block(task.body, 1500));
   const contract = Object.entries(task.contract).filter(([, v]) => v !== undefined && v.trim() !== '');

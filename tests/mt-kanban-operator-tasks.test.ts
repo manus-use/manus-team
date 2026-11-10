@@ -253,6 +253,16 @@ describe('the task commands', () => {
     expect(await mt(['task', 'show', 'k_missing'])).toMatchObject({ code: 1, err: 'mt: no task k_missing' });
   });
 
+  it("gives a parent's and a child's derived status, in plain text and JSON", async () => {
+    const parent = created((await mt(['task', 'new', 'Parent', '--assignee', 'default'])).out);
+    const child = created((await mt(['task', 'new', 'Child', '--assignee', 'default', '--parent', parent])).out);
+    claimed(gateway, parent);
+    expect((await mt(['task', 'show', child])).out.split('\n')).toContain(`parents: ${parent} (running)`);
+    expect((await mt(['task', 'show', parent])).out.split('\n')).toContain(`children: ${child} (todo)`);
+    const json = JSON.parse((await mt(['task', 'show', child, '--json'])).out) as { parents: unknown };
+    expect(json.parents).toEqual([{ task_id: parent, phase: 'open', status: 'running' }]);
+  });
+
   it("gives, in JSON, the role limit a task is waiting on, or null", async () => {
     // The role default from the agent: block, held to kanban.max_running_per_role.
     writeFileSync(
@@ -281,6 +291,49 @@ describe('the task commands', () => {
     expect((await mt(['task', 'show', waiting])).out).toMatch(
       /^waiting: role default is at its max_running, 1 agent run at once; it is claimed when one of them ends$/m,
     );
+  });
+
+  it("says every reason a pass skips the task: the gateway's limit, its board's, and its workspace's run", async () => {
+    const config = (maxRunning: number) =>
+      writeFileSync(
+        f.configPath,
+        [
+          `workspace: ${f.workspace}`,
+          'kanban:',
+          '  enabled: true',
+          `  max_running: ${maxRunning}`,
+          'agent:',
+          '  driver: structured-cli',
+          '  command: bytesec',
+          '  unsupervised: true',
+          '  passEnv: [API_KEY]',
+          '',
+        ].join('\n'),
+      );
+    const show = async (taskId: string) =>
+      JSON.parse((await mt(['task', 'show', taskId, '--json'])).out) as { task: { waiting: unknown; waiting_on_role: unknown } };
+    const said = async (taskId: string) => (await mt(['task', 'show', taskId])).out.split('\n').filter((l) => l.startsWith('waiting:'));
+    // A board's own limit, under a gateway's that is not reached.
+    config(4);
+    expect((await mt(['board', 'create', 'web-app'])).code).toBe(0);
+    expect((await mt(['board', 'set', 'web-app', 'max_running', '1'])).code).toBe(0);
+    const running = created((await mt(['task', 'new', 'Running', '--board', 'web-app', '--assignee', 'default'])).out);
+    const next = created((await mt(['task', 'new', 'Next', '--board', 'web-app', '--assignee', 'default'])).out);
+    const waiting = created((await mt(['task', 'new', 'Waiting', '--assignee', 'default'])).out);
+    expect((await show(next)).task.waiting).toEqual([]);
+    const run = claimed(gateway, running);
+    const busy = { reason: 'workspace', workspace: 'default', task_id: running, run_id: run.runId };
+    expect((await show(next)).task).toMatchObject({ waiting: [{ reason: 'board', board: 'web-app', max_running: 1 }, busy], waiting_on_role: null });
+    expect(await said(next)).toEqual([
+      'waiting: board web-app is at its max_running, 1 agent run at once; it is claimed when one of them ends',
+      `waiting: workspace default is busy with task ${running}'s agent run; it is claimed when that run ends`,
+    ]);
+    // Another board's task waits only on the workspace, until the gateway's own limit is reached.
+    expect((await show(waiting)).task.waiting).toEqual([busy]);
+    config(1);
+    expect((await show(waiting)).task.waiting).toEqual([{ reason: 'gateway', max_running: 1 }, busy]);
+    expect((await said(waiting))[0]).toBe('waiting: the gateway is at its kanban.max_running, 1 agent run at once; it is claimed when one of them ends');
+    expect((await show(running)).task.waiting).toEqual([]);
   });
 
   it('assigns, stops, unblocks, comments, links and archives, as the operator, nudging after what chat follows with a pass', async () => {

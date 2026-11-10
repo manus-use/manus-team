@@ -11,7 +11,6 @@ import {
   getBoard,
   getRun,
   getTask,
-  openAgentRunCountAs,
   runsOf,
   taskView,
   type BoardEntry,
@@ -27,6 +26,7 @@ import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
+import { limitsReached, workspaceBusy } from './waiting.js';
 import { resolveTaskWorkspace } from './workspace.js';
 import {
   BLOCK_KINDS,
@@ -49,6 +49,7 @@ import {
   type RetryOnCrash,
   type RunRow,
   type TaskRow,
+  type Waiting,
 } from './types.js';
 
 /**
@@ -995,29 +996,32 @@ export class KanbanService {
     if (ids !== undefined) return ids;
     const view = taskView(this.#db, taskId);
     if (view === undefined) return board.refuse('not_found', `no task ${taskId}`);
-    const waitingOn = this.#waitingOnRole(view);
-    return { ok: true, view: waitingOn === undefined ? view : { ...view, waitingOn } };
+    const waiting = this.#waiting(view);
+    return { ok: true, view: waiting.length === 0 ? view : { ...view, waiting } };
   }
 
   /**
-   * The role limit a task the dispatcher would otherwise try is waiting on (spec
-   * §6.3): ready for work, or in review with nobody reviewing yet, with no open
-   * run and no cooldown, and its role at its max_running. Only the role's limit:
-   * a busy workspace, or the gateway's or a board's limit, is not said. Nor is it
-   * said of a task the claim would refuse whatever the limit: one whose
-   * workspace, fixed or as it would be resolved (spec §2.3), is not configured,
-   * or whose parents are in different workspaces.
+   * Why a task the dispatcher would try is not claimed yet (spec §6.2, §6.3,
+   * §16): a ready task, or one in review with nobody reviewing yet, with no open
+   * run and no cooldown, for a role. The gateway's `kanban.max_running`, its
+   * board's and its role's, and a workspace held by another task's agent run:
+   * every one that holds, by the dispatcher's own checks (`waiting.ts`) and the
+   * claim's own query. Nothing is said of a task the claim would refuse
+   * whatever the limits: one whose role is not configured or cannot be read,
+   * whose workspace, fixed or as it would be resolved (spec §2.3), is not
+   * configured, or whose parents are in different workspaces.
    */
-  #waitingOnRole(view: TaskView): TaskView['waitingOn'] {
+  #waiting(view: TaskView): Waiting[] {
     const { task } = view;
-    if (view.status !== 'ready' && view.status !== 'review') return undefined;
-    if (view.runs.some((r) => r.endedAt === null)) return undefined;
-    if (task.cooldownUntil !== null && task.cooldownUntil > this.#clock.now()) return undefined;
+    if (view.status !== 'ready' && view.status !== 'review') return [];
+    if (view.runs.some((r) => r.endedAt === null)) return [];
+    if (task.cooldownUntil !== null && task.cooldownUntil > this.#clock.now()) return [];
     const who = task.phase === 'review' ? task.reviewer : task.assignee;
-    if (who?.kind !== 'role') return undefined;
-    const role = this.#roles.get(who.name);
-    const limit = role === undefined ? undefined : roleLimit(role, this.#maxRunningPerRole);
-    if (limit === undefined || openAgentRunCountAs(this.#db, who.name) < limit.limit) return undefined;
+    if (who?.kind !== 'role') return [];
+    // As the claim reads the role: not configured, or its files unreadable, is no wait.
+    const claimant = this.#claimant(task);
+    if (!claimant.ok) return [];
+    const role = claimant.role;
     // The workspace the claim would give it, resolved as the claim resolves it.
     let workspace = task.workspace;
     if (workspace === null) {
@@ -1028,11 +1032,19 @@ export class KanbanService {
         upstream: view.parents.length > 0 ? view.parents.map((p) => p.workspace) : from === undefined ? [] : [from.workspace],
         boardWorkspace: getBoard(this.#db, task.board)?.workspace ?? null,
       });
-      if ('conflict' in resolved) return undefined;
+      if ('conflict' in resolved) return [];
       workspace = resolved.workspace;
     }
-    if (!this.#workspaces.has(workspace)) return undefined;
-    return { role: who.name, maxRunning: limit.limit };
+    if (!this.#workspaces.has(workspace)) return [];
+    const reached = limitsReached(this.#db, {
+      maxRunning: this.#maxRunning,
+      board: task.board,
+      boardMaxRunning: getBoard(this.#db, task.board)?.maxRunning ?? null,
+      role: who.name,
+      roleMaxRunning: role === undefined ? undefined : roleLimit(role, this.#maxRunningPerRole)?.limit,
+    });
+    const busy = workspaceBusy(this.#db, workspace);
+    return busy === undefined ? reached : [...reached, busy];
   }
 
   /** Every task on a board -- or on every board -- with its display status (spec §4.1): `/kanban task list`. */
