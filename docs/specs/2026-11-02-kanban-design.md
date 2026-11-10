@@ -2376,3 +2376,62 @@ not choose.
 - **Projects:** per-board operators, and a board's list of the roles it may use, checked in the
   service beside the tiers. The user chose queues without them.
 - A display name, renaming, unarchiving; a board's settings history; naming the board in notices.
+
+## 17. Running as a service
+
+`mt service install|uninstall|start|stop|restart|status|logs` runs the gateway as a LaunchAgent
+on macOS (`~/Library/LaunchAgents/team.manus.gateway.plist`, in `gui/<uid>`) and a systemd
+user unit on Linux (`~/.config/systemd/user/manus-team.service`), behind the same commands.
+`install.sh`, at the repo root, builds a checkout, makes the home and puts `mt` on `PATH`, and
+with `--service` runs `mt service install`. The decisions, and what forces each:
+
+- **The built code, not `tsx watch`.** The unit runs `node dist/main.js`, with the absolute path
+  of the node that ran `install`, from the checkout. `tsx watch` restarts at every change to
+  the source, so every merge restarted the live gateway and ended its runs; with `dist/`, a
+  deploy is a decision: `npm run build && mt service restart`. The node is recorded, not found
+  on `PATH`, so an nvm switch in some shell never changes what the service runs.
+- **No shell environment, so no secret in the unit.** The unit sets `PATH`, as recorded at
+  install time, and `MT_HOME` when it was set, and nothing else. The secret is read from
+  `$MT_HOME/.env` (§2.5), which is why `install` refuses without one that sets
+  `LARK_APP_SECRET`: a unit file is world-readable, and a secret in it would be in every backup
+  of `~/Library` or `~/.config`. A `passEnv` name (§2.1) forwards a variable from that missing
+  environment, so `install` warns of each, and `mt role check` warns of each this shell sets:
+  the check passes in the shell and the service would refuse to start.
+- **One service per home.** The default home's label is `team.manus.gateway`; any other's is
+  `team.manus.gateway.<hash>`, and its unit `manus-team-<hash>.service`, the hash being the
+  first ten hex digits of the SHA-256 of the home's path. A slug of the path could collide
+  for two paths and be too long for a label; the hash cannot, in practice.
+- **Restarts.** launchd's `KeepAlive` is `SuccessfulExit: false` and systemd's
+  `Restart=on-failure`: a crash restarts, a clean exit after SIGTERM does not. Both wait 30
+  seconds (`ThrottleInterval`, `RestartSec`), so a crash loop is one start every 30 seconds,
+  not a tight loop. systemd also has `RestartPreventExitStatus=78`: a configuration error
+  (EX_CONFIG) stays failed, since a restart could only fail the same way; launchd has no
+  equivalent and retries it every 30 seconds.
+- **Stop is bootout on macOS.** `KeepAlive` restarts a killed job, so `mt service stop` boots it
+  out; it loads again at the next login or `mt service start`. `install` boots out a loaded job
+  and waits for launchd to let it go before bootstrapping the new plist, since a bootstrap
+  right after a bootout can fail while the old job is still stopping. On Linux, `install`
+  runs `daemon-reload`, `enable` and `restart`, so a rewritten unit takes effect on a running
+  service too.
+- **The pid lock.** A gateway already holding `$MT_HOME/run/gateway.pid` that is not the
+  service, `npm run dev` say, is a warning at `install`, `start` and `restart`: the service's
+  gateway would refuse the home and be retried until it stops. `status` says whether the lock
+  names the service's pid. The lock is taken only with `kanban.enabled`, and `status` says so.
+- **Logs.** stdout and stderr both go to `$MT_HOME/logs/gateway.log`, in an owner-only
+  directory, one file so their lines stay in order. Rotation is by size at the gateway's start:
+  over 10 MiB, the file is copied to `gateway.log.1` and emptied in place, not renamed,
+  because launchd and systemd opened it for the gateway's stdout, appending, and a rename would
+  leave the gateway writing to `.1`. Only when the gateway's stdout is that file, so a gateway
+  run by hand never empties the service's log. Chosen over newsyslog or logrotate, which need
+  root (newsyslog) or a rule the user has to add, and it bounds the log at every restart, a
+  deploy's or a crash's; a gateway that runs for months unrestarted needs one of them.
+- **`mt` on PATH.** `install.sh` writes `$MT_HOME/bin/mt`, the launcher the gateway writes at
+  each start (§7.2), rather than `npm link`, which would put `mt` in one nvm version's global
+  `bin`, beside every other global command, pointing at whichever checkout ran it last.
+- **Testable without either manager.** Every `launchctl`, `systemctl` and `tail` call goes
+  through an injectable runner, and every file is under an injectable user home or the
+  gateway's home: tests use a temporary home and a runner that records calls and runs none.
+  Every value in the plist is escaped as XML, and every value in the unit is quoted as systemd
+  reads it, `%` and `$` included; a control character in either is refused.
+- **Not in a board run's shell.** `mt service` is refused there, as the operator's commands
+  are: an agent restarting the gateway would end its own run and every other.
