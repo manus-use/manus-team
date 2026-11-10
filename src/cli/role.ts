@@ -23,6 +23,7 @@ import {
   type RoleLimits,
 } from '../config.js';
 import { movedMessage, registrationsAt } from '../db/workspaces.js';
+import { readGatewayEnv, withGatewayEnv, type GatewayEnvFile } from '../gateway-env.js';
 import { RESUME_MIN_VERSION } from '../driver/cli/driver.js';
 import { isReservedRoleName, nameProblem } from '../names.js';
 import { nativeFor } from '../render/native.js';
@@ -336,7 +337,12 @@ function reportLegacyCopy(dir: string, io: MtIo): void {
   for (const key of AGENT_OVERRIDES) {
     const value = io.env[key];
     if (value !== undefined && value.trim() !== '') {
-      io.out(`applied ${key} from this shell (the service's environment may differ)`);
+      const fromFile = io.shellEnv !== undefined && io.shellEnv[key] === undefined && io.gatewayEnv !== undefined;
+      io.out(
+        fromFile
+          ? `applied ${key} from ${io.gatewayEnv?.path ?? "the gateway's .env"}`
+          : `applied ${key} from this shell (the service's environment may differ)`,
+      );
     }
   }
   const secrets = Object.keys(io.env)
@@ -355,7 +361,11 @@ function reportLegacyCopy(dir: string, io: MtIo): void {
     }
   }
   // Always, even when this shell holds none: the service may hold some this shell does not.
-  io.out("  (only this shell's MT_AGENT_ENV_* names are listed; check the service's environment for others)");
+  io.out(
+    io.gatewayEnv === undefined
+      ? "  (only this shell's MT_AGENT_ENV_* names are listed; check the service's environment for others)"
+      : `  (only this shell's and ${io.gatewayEnv.path}'s MT_AGENT_ENV_* names are listed; check the service's environment for others)`,
+  );
 }
 
 function reportCutover(dir: string, configPath: string | undefined, io: MtIo): void {
@@ -433,8 +443,18 @@ function withoutAgentVariables(env: Env): Env {
  * goes away without this shell's MT_AGENT_* variables is the environment's.
  */
 export function roleCheck(only: string | undefined, io: MtIo): number {
-  const real = attempt(io.env, only);
   const files: string[] = [];
+  // The gateway's .env first, as the gateway reads it first. Refused, it is a
+  // file problem, and the rest is checked against this shell alone.
+  let gatewayEnv: GatewayEnvFile | undefined;
+  try {
+    gatewayEnv = readGatewayEnv(io.env);
+  } catch (err) {
+    if (!(err instanceof ConfigError)) throw err;
+    files.push(err.message);
+  }
+  const withFile = (env: Env): Env => (gatewayEnv === undefined ? env : withGatewayEnv(env, gatewayEnv));
+  const real = attempt(withFile(io.env), only);
   const environment = real.unset.map((entry) => {
     const [role, key] = entry.split(': ');
     return `role ${role} names ${key} in agent.passEnv, and it is not set in this shell`;
@@ -443,11 +463,13 @@ export function roleCheck(only: string | undefined, io: MtIo): number {
     // The files are at fault only when the error survives removing this shell's
     // MT_AGENT_* variables unchanged. A different error from the stripped run is
     // not a file problem either: an environment-only deployment, stripped, has
-    // no role default at all.
-    const stripped = attempt(withoutAgentVariables(io.env), only);
+    // no role default at all. The gateway's .env is a file: its MT_AGENT_*
+    // variables stay.
+    const stripped = attempt(withFile(withoutAgentVariables(io.env)), only);
     if (stripped.error === real.error) files.push(real.error);
     else environment.push(real.error);
   }
+  if (gatewayEnv !== undefined) reportGatewayEnv(gatewayEnv, io);
   report('files', files, io);
   report("this shell's environment", environment, io);
   // One line a role: whether its runs get role.md and skills natively (plan R).
@@ -467,6 +489,20 @@ export function roleCheck(only: string | undefined, io: MtIo): number {
   return files.length + environment.length === 0 ? 0 : 1;
 }
 
+/** `mt role check`'s lines for the gateway's .env: whether it is there, and the names it sets, never their values. */
+function reportGatewayEnv(file: GatewayEnvFile, io: MtIo): void {
+  if (!file.present) {
+    io.out(`gateway .env: ${file.path} does not exist; it is optional`);
+    return;
+  }
+  const names = Object.keys(file.values).sort();
+  io.out(`gateway .env: ${file.path} is owner-only, and sets ${names.length === 0 ? 'nothing' : names.join(', ')}`);
+  for (const name of names) {
+    if (io.env[name] === undefined) continue;
+    io.out(`note: ${name} is set both in this shell and in ${file.path}; the environment wins`);
+  }
+}
+
 /** `mt role check`'s line for a role's max_running, and where it comes from. */
 function limitLine(role: Role, perRole: number | undefined): string {
   const limit = roleLimit(role, perRole);
@@ -484,7 +520,8 @@ function limitLine(role: Role, perRole: number | undefined): string {
  * was never measured, so it may work, or not. Each command is asked once.
  */
 function resumeVersions(roles: readonly Role[], io: MtIo): void {
-  const ask = io.agentVersion ?? ((command: string) => readAgentVersion(command, io.env));
+  // This shell's own environment: the gateway's .env is never given to a process mt starts.
+  const ask = io.agentVersion ?? ((command: string) => readAgentVersion(command, io.shellEnv ?? io.env));
   const versions = new Map<string, string | undefined>();
   for (const role of roles) {
     const { driver, command } = role.agent;

@@ -58,7 +58,7 @@ export function checkNewWorkspace(name: string, settings: TeamSettings, env: Env
     const single = name === 'default' && (doc.has('workspace') || (env['MT_WORKSPACE'] ?? '') !== '');
     return {
       error: single
-        ? "the workspace default is already set by workspace: in the config file, or by MT_WORKSPACE in this shell (the service's environment may differ)"
+        ? "the workspace default is already set by workspace: in the config file, or by MT_WORKSPACE in this shell or the gateway's .env (the service's environment may differ)"
         : `workspace ${name} is already in ${configPath}`,
     };
   }
