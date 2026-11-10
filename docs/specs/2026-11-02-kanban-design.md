@@ -705,7 +705,7 @@ with a join, not by correlating two files.
   namespaces every key by who creates: chat's is `lark:<message_id>`; a run's is
   `run-task:<its task>:<key>`; the operator's `mt kanban task new --key <k>` is `operator:<k>`. A
   key in another's namespace is refused (`invalid`), so none can return a task another kind of
-  creator made. A repeat answers `existing: true`, and `mt` says in plain text that the task
+  creator made. A repeat answers `existing: true` and `nudged: false`, as it changes nothing, and `mt` says in plain text that the task
   already exists; a key used on another board is refused `other_board` (§16.5), however its task
   was created. A key is kept for good: archiving its task does not free it.
 - **`consecutive_failures` and `block_recurrences` reset only on success**: completion resets both,

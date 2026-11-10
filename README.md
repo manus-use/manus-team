@@ -471,7 +471,9 @@ a running gateway, through the board's own service, and take effect at once.
   words that are not flags, on one line, with no control character or bidi control, and its
   body `--body`, or `--body-file` with a regular file, or `-` for stdin. `--key <key>` makes it
   safe to run again: a second `task new` with the same key creates nothing, and returns the task
-  the first made (`"existing": true` with `--json`, and a line saying it already exists). The key
+  the first made (`"existing": true` and `"nudged": false` with `--json`, and a line saying it
+  already exists, and whether it is archived). A key is one line, with no control character or
+  bidi control. The key
   is stored as `operator:<key>`, so it never meets a key of chat's or of a run's, and one used on
   another board is refused (`other_board`). Archiving the task does not free its key.
   `assign`, `--assignee` and `--reviewer` take a role: a person is given work from chat, by

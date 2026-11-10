@@ -1429,7 +1429,7 @@ and a refusal, with exit status 1:
 
 `--key <key>` makes a `task new` safe to run again. The first run with a key makes the task; a
 later one with the same key makes nothing and returns the task it made, with `"existing":true` in
-the JSON, and in plain text:
+the JSON, and `"nudged":false`, since nothing changed for the gateway to act on; in plain text:
 
 ```
 $ mt kanban task new "Write the caching options brief" --board web-app --key caching-dag:web-app:brief
@@ -1437,7 +1437,8 @@ task k_… already exists with key caching-dag:web-app:brief: Write the caching 
 ```
 
 The key names the task, whatever the rest of the command says: a second run with another title
-still returns the first task. A key is the terminal's own, so it never returns a task made from
+still returns the first task, with "(archived)" after its title if it has been archived since. A
+key holding a control character or a bidi control is refused, as a title is. A key is the terminal's own, so it never returns a task made from
 chat or by an agent. A key already used on one board is refused on another, `other_board`, so
 the script puts the board in its keys.
 
