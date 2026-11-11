@@ -1139,7 +1139,7 @@ export function reportCheck(
     if (busy !== undefined && !(r.supersedes && busy.runId === r.run?.runId)) {
       return refuse(
         'workspace_busy',
-        `task ${taskId}'s gates run in workspace ${workspace}, where task ${busy.taskId}'s agent run ${busy.runId} is open; ` +
+        `task ${taskId}'s gates run in ${placeName(workspace)}, where task ${busy.taskId}'s agent run ${busy.runId} is open; ` +
           'report again once it has finished',
       );
     }

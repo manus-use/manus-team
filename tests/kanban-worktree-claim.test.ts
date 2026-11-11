@@ -147,6 +147,28 @@ describe('a claim in an isolated workspace', () => {
       code: 'workspace_busy',
     });
   });
+
+  it("names a task's own directory by its task when another agent run is open there", () => {
+    const own = newTask(t.db, { workspace: 'web' });
+    const work = claimIn(own.taskId);
+    if (!work.ok) throw new Error(work.message);
+    const asked = requestReview(t.db, own.taskId, { kind: 'run', runId: work.run.runId }, { summary: 'done', reviewer: { kind: 'human', name: ALICE } }, NOW);
+    if (!asked.ok) throw new Error(asked.message);
+    closeRun(t.db, work.run.runId, NOW);
+    addGate(t.db, own.taskId, { command: 'true', timeoutS: 5 }, ALICE, NOW);
+    // Another task's agent run, recorded as working in this task's own directory.
+    const other = newTask(t.db, { workspace: 'web' });
+    const intruder = claimIn(other.taskId);
+    if (!intruder.ok) throw new Error(intruder.message);
+    t.db.prepare('UPDATE kanban_runs SET workspace = ? WHERE run_id = ?').run(`wt:${own.taskId}`, intruder.run.runId);
+    expect(reportCheck(t.db, own.taskId, { kind: 'person', principal: ALICE, as: 'reviewer' }, 'complete')).toMatchObject({
+      ok: false,
+      code: 'workspace_busy',
+      message:
+        `task ${own.taskId}'s gates run in task ${own.taskId}'s directory, where task ${other.taskId}'s agent run ${intruder.run.runId} is open; ` +
+        'report again once it has finished',
+    });
+  });
 });
 
 describe('a run that could not start for a reason only a person can put right', () => {
