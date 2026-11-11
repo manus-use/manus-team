@@ -396,7 +396,8 @@ workspaces:
 Here `worker` is a plain folder. A research task fans out into three note-taking tasks, which
 run at once, each in an empty folder of its own under `$MT_HOME/worktrees/worker/`; the write-up
 task that waits for all three is told, in its prompt, the folders they left their notes in, and
-reads them there. Nothing is copied, and nothing is said to the agents about git.
+reads them there. Nothing is copied, and nothing is said to the agents about git. Each folder
+starts empty, and its prompt names `worker`'s own folder for shared inputs, so keep those there.
 
 The same works for a git repository, and git is used only there:
 
@@ -464,7 +465,7 @@ mt kanban task unblock <task_id> [comment...] [--board <name>]
 mt kanban task stop <task_id> [--board <name>]
 mt kanban task archive <task_id> [--board <name>]
 mt kanban task comment <task_id> <text...> [--board <name>]
-mt kanban task worktree <task_id> [--board <name>] [--json]
+mt kanban task worktree <task_id> [--board <name>]
 mt kanban gate add <task_id> [--timeout <s>] -- <command...>
 mt kanban gate list <task_id>
 mt kanban gate remove <task_id> <gate_id>

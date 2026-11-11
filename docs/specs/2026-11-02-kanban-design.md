@@ -2519,7 +2519,8 @@ workspaces:
 - **A workspace may be written as a mapping**, beside the plain path, which keeps its meaning.
   `path` is required; `isolated` is `true` or `false`, and `false` is the plain path; `base`
   is allowed only with `isolated: true`, and is a branch, a tag or a commit, with no leading
-  `-` (git would read it as an option) and no space or control character. Any other key is
+  `-` (git would read it as an option), no space, no control character (C0 or C1) and no bidi
+  control, which would make it read as other than it is. Any other key is
   refused, as everywhere in the file. The path is checked at startup by every rule of §2.3.
 - **Read at startup**, like the rest of the file: switching a workspace takes effect at the
   next start, which ends every open run (§8.4).
@@ -2552,7 +2553,8 @@ workspaces:
   only the tasks working there count against it. A report's gates holding back claims and other
   reports (§7.7), and `workspace_busy` for a person's report, are per place too; and `task show`
   does not say a task waits on the shared directory's agent (§6.3) when its claim would give it
-  a directory of its own.
+  a directory of its own. A refusal that names a task's own directory names it as `task
+  <task_id>'s directory`, never by its `wt:` id.
 
 ### 18.3 Where the directories live
 
@@ -2564,6 +2566,8 @@ workspaces:
   or the database: a task's directory contains neither, nor any role's `.env`. `$MT_HOME/
   worktrees` and its `<workspace>` directories must be real directories, as `$MT_HOME/workspaces`
   must (§2.6): a symlink would put a task's directory somewhere else, so it blocks the task.
+  Both are looked at before anything is made, so nothing is made in a symlink's target, and a
+  dangling symlink is named as a symlink.
 - **Recorded once made**, in the `workspaces` table (schema `001`), as architecture §9 planned:
   id `wt:<task_id>`, kind `git-worktree` or `plain-dir`, `root_path` its real path, `repo_root`
   the workspace's directory, and `branch` for a worktree. Written once, by `db/workspaces.ts`'s
@@ -2580,7 +2584,8 @@ workspaces:
 - **Found again by every later run.** The dispatcher asks before each run. A recorded folder that
   is still there is used as it is; a recorded worktree must still be on its branch, or the task
   blocks, naming the branch it is on: its branch is what its children start from and what its
-  reported commit names. Until the task's first session starts, its fan-in's merges are taken up
+  reported commit names. Its `HEAD` is compared as the full ref, `refs/heads/mt/<task_id>`, so a
+  tag of the branch's name does not make it look off its branch. Until the task's first session starts, its fan-in's merges are taken up
   again too (§18.5).
 - **Never removed by the board, and no branch is ever deleted.** A done task's branch is what its
   children start from, a folder task's children read its folder, and a person may still be
@@ -2598,7 +2603,9 @@ of them that have a worktree in the same workspace, in the order they were linke
 parent was abandoned: its branch is not merged, and the prompt lists its directory as abandoned.
 
 - **None:** the workspace's `base`, else whatever its directory has checked out (`HEAD`), at
-  the moment the worktree is made. A detached `HEAD` is a commit like any other. Uncommitted
+  the moment the worktree is made. A `base` that names both a branch and a tag is the branch:
+  `refs/heads/<base>` is taken when it exists, and otherwise the name is resolved as given, a
+  tag or a commit. A detached `HEAD` is a commit like any other. Uncommitted
   changes in the workspace's directory are not in the worktree: a worktree starts from a commit,
   and git does not need the base checkout clean to make one.
 - **One:** that parent's branch, as it is then.
@@ -2652,9 +2659,11 @@ parent was abandoned: its branch is not merged, and the prompt lists its directo
   (git removes the directory and keeps the branch). At any other commit it is refused, never
   taken over: it may be a person's.
 - **A directory at the task's path that the board has not recorded** is refused, saying what to
-  run (`git worktree unlock <path>` if `git worktree list` shows it locked, then `git worktree
-  remove --force <path>`, or move it aside): a `git worktree add` that was stopped leaves one,
-  half made and locked as initializing, and that add's own reason already gives the steps.
+  do: for a path `git worktree list` shows, a registered worktree, which moved aside would stay
+  registered, to move out anything needed, then run `git worktree unlock <path>` if it is locked,
+  and `git worktree remove --force <path>`; for any other path, to move it aside. A `git worktree
+  add` that was stopped leaves one, half made and locked as initializing, and that add's own
+  reason already gives the steps.
 - **A shallow clone** makes worktrees as any repository does; a fan-in whose merge base is
   missing fails with git's message, and blocks.
 - **Two claims in one repository** make their worktrees one after the other: the dispatcher
@@ -2681,10 +2690,17 @@ Unblocking the task claims it again.
   reporting, since the tasks after it start from the branch and nothing is merged for it; for a
   review run, that the work under review is there; for a folder, that it is the task's own and
   its results go there, or for a review that the work under review is there, with nothing of
-  commits, branches or git. Then
+  commits, branches or git. A folder's prompt also names the workspace's own directory (for
+  example `~/.manus-team/workspaces/worker`) as the place to read shared inputs from, the task's
+  results still going in its own folder; a worktree's does not, as the worktree already has the
+  repository's files. Then
   the directories of the upstream tasks that have one, to read, at most twenty, an archived one
   marked abandoned. A task in a shared directory whose parents have directories of their own is
   told where they are too.
+- **An earlier attempt that never started** (its directory could not be made, or its session not
+  opened) is given under the prompt's attempts as `did not start: <reason>`, the reason cut at
+  its first clause: the rest is a person's how-to, which an agent could take for its own
+  instructions.
 - **Gates** run in the task's directory (§7.7). A task given a directory of its own at a claim
   whose directory is not made yet, which a person's report could meet before its agent run
   starts, refuses them `gates_cannot_run`, saying so. A task with no agent run yet has no
@@ -2737,3 +2753,11 @@ git refused to read became a folder; and that archived parents were merged, whic
 are. A recorded worktree off its branch blocks its task, the user's decision. A second review
 found that a git workspace whose directory was gone became a folder for good, and that a process
 git left holding its output could hold up its answer; both are closed.
+*Amended on 2026-11-11, again.* A third review found that a tag named `mt/<task_id>` made a
+recorded worktree look off its branch, so `HEAD` is compared as the full ref; that a symlinked
+or dangling worktrees directory had a directory made in it, or gave ENOENT, so both are looked at
+first; that a `base` naming a branch and a tag took the tag, so the branch wins; and that a
+registered worktree in a task's way was suggested to be moved aside, so git is named to remove
+it. In line with the user's direction that a task is any work, the main agent decided that a
+task in an isolated plain folder is also told the workspace's own folder, to read shared inputs
+from, since its own folder starts empty; a worktree is not, having the repository's files.

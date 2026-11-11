@@ -525,19 +525,27 @@ mt workspace add vendor-c /srv/work/vendor-c
 A `workspace:` line on the task beats the role's own workspace.
 
 Or make `worker`'s workspace **isolated**, and give each task a directory of its own, with no
-new workspaces at all. In the gateway's config:
+new workspaces at all. In the gateway's config, write `worker` as a mapping, keeping its path,
+and add `isolated: true`:
 
 ```yaml
 workspaces:
   worker:
-    path: /srv/work/research
+    path: /home/me/.manus-team/workspaces/worker
     isolated: true
 ```
 
-Then the three vendor tasks run at once. Where `worker` is a plain folder, as research usually
-is, each vendor task gets an empty folder of its own, and the comparison's prompt lists the three
-folders their notes are in, to read. Nothing is copied, and nothing is said about git.
-`/kanban task show` says where a task's directory is.
+Keep its path: a workspace keeps the directory it was first used with. Then the vendor tasks
+below drop their `workspace: vendor-x` lines, and the three run at once. Where `worker` is a
+plain folder, as research usually is, each task gets a folder of its own under
+`$MT_HOME/worktrees/worker/`, and the comparison's prompt lists the three folders their notes
+are in, to read. Nothing is copied, and nothing is said about git. `/kanban task show` says where
+a task's directory is.
+
+Each task's folder starts empty. Its prompt also names `worker`'s own folder, the path above, as
+the place to read shared inputs from, while the task's results go in its own folder. So put
+input files such as `vendors/candidates.md` in `worker`'s own folder, or have a parent task
+write them in its results.
 
 Where the workspace is a git repository, and only there, git is used: each task's directory is a
 worktree on its own branch, `mt/<task_id>`, and the write-up starts from a merge of the three
@@ -1085,8 +1093,11 @@ Each directory must exist first. The gateway reads its workspaces when it starts
 workspace the gateway does not have yet is refused at once, and nothing is created.
 
 Simpler, once your gateway has isolated workspaces: mark `worker`'s own workspace `isolated: true`
-(section 6) and restart. Then the three prototypes need no `workspace:` line: each runs at once in
-a folder of its own in `worker`, and the recommendation's prompt lists their folders to read.
+(section 6), keeping its path, and restart. Then the three prototypes need no `workspace:` line:
+each runs at once in a folder of its own under `$MT_HOME/worktrees/worker/`, and the
+recommendation's prompt lists their folders to read. Each folder starts empty, and each prompt
+names `worker`'s own folder for shared inputs: keep an input file, such as `docs/reports-api.md`
+below, there, or in a parent's results.
 
 **The tasks.** The brief:
 
@@ -1386,8 +1397,8 @@ The chat hears nothing as each task is created; the planner's summary is the lis
   without `"workspace"` every task runs there, one at a time, however wide the graph. Here the body
   asks for `api`, where the code is. To run branches in parallel, give each branch its own
   workspace, in the body or in `role.md`, or make the workspace they share isolated (section 6):
-  with `worker`'s marked `isolated: true`, the planner's parallel tasks run at once with no
-  `"workspace"` at all.
+  with `api` marked `isolated: true`, the planner's parallel tasks each get a worktree of `api`
+  and run at once.
 
 **Checking the graph.** `/kanban task list`:
 
