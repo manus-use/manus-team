@@ -225,6 +225,18 @@ export function parentsOf(db: Db, taskId: string): TaskRow[] {
     .map(decodeTask);
 }
 
+/** The task's parents in the order they were linked: the order a fan-in merges their branches in (spec §18.5). */
+export function parentsInLinkOrder(db: Db, taskId: string): TaskRow[] {
+  return db
+    .prepare<[string], TaskRaw>(
+      `SELECT ${TASK_COLS} FROM kanban_tasks
+         JOIN (SELECT parent_id, rowid AS link FROM kanban_links WHERE child_id = ?) ON parent_id = task_id
+        ORDER BY link`,
+    )
+    .all(taskId)
+    .map(decodeTask);
+}
+
 export function childrenOf(db: Db, taskId: string): TaskRow[] {
   return db
     .prepare<[string], TaskRaw>(
