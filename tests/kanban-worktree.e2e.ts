@@ -227,6 +227,26 @@ describe('a task with parents', () => {
   });
 });
 
+describe('a follow-up with no parents', () => {
+  it('starts from the work its creator committed, while its creator is still open', async () => {
+    const d = directories();
+    const creator = claimed();
+    const creatorDir = await made(d, creator);
+    const work = commit(creatorDir, 'found.txt', 'found by the creator\n');
+    const follow = newTask(t.db, { createdVia: { kind: 'run', runId: claimantRun(creator) } });
+    const r = claim(t.db, { taskId: follow.taskId, claimant: claimantFor(t.db, follow.taskId), workspaces: new Set(['web']), isolated: new Set(['web']) }, NOW);
+    if (!r.ok) throw new Error(r.message);
+    expect(getTask(t.db, creator.taskId)?.phase).toBe('open');
+    const path = await made(d, r.task);
+    expect(readFileSync(join(path, 'found.txt'), 'utf8')).toBe('found by the creator\n');
+    expect(git(path, 'rev-parse', 'HEAD')).toBe(work);
+    // What the creator commits before the follow-up's first session starts is merged in at its next prepare.
+    commit(creatorDir, 'more.txt', 'more\n');
+    expect(await made(d, r.task)).toBe(path);
+    expect(readFileSync(join(path, 'more.txt'), 'utf8')).toBe('more\n');
+  });
+});
+
 describe('what it refuses, changing nothing', () => {
   it('a branch of its name that is there already, at another commit than it would start from', async () => {
     const task = claimed();
@@ -247,9 +267,31 @@ describe('what it refuses, changing nothing', () => {
     const r = await d.prepare(task);
     expect(r).toEqual({
       ok: false,
-      reason: `its directory ${path} is gone; make it again from its branch with git worktree add ${path} mt/${task.taskId}, in ${repo}, then unblock the task`,
+      reason: `its directory ${path} is gone; make it again from its branch with git worktree add -f ${path} mt/${task.taskId}, in ${repo}, then unblock the task`,
     });
     expect(git(repo, 'branch', '--list', `mt/${task.taskId}`)).toContain(`mt/${task.taskId}`);
+    // The person runs the command exactly as it is printed, and the task goes on.
+    const printed = /with (git worktree add .*), in /.exec(r.ok ? '' : r.reason)?.[1] ?? '';
+    const ran = spawnSync('sh', ['-c', printed], { cwd: repo, env, encoding: 'utf8' });
+    expect(ran.status, ran.stderr).toBe(0);
+    expect(await made(d, task)).toBe(path);
+    expect(git(path, 'symbolic-ref', '--short', 'HEAD')).toBe(`mt/${task.taskId}`);
+  });
+
+  it('a directory that is gone, and that git no longer lists, with the plain command', async () => {
+    const d = directories();
+    const task = claimed();
+    const path = await made(d, task);
+    rmSync(path, { recursive: true, force: true });
+    git(repo, 'worktree', 'prune');
+    const r = await d.prepare(task);
+    expect(r).toEqual({
+      ok: false,
+      reason: `its directory ${path} is gone; make it again from its branch with git worktree add ${path} mt/${task.taskId}, in ${repo}, then unblock the task`,
+    });
+    const printed = /with (git worktree add .*), in /.exec(r.ok ? '' : r.reason)?.[1] ?? '';
+    expect(spawnSync('sh', ['-c', printed], { cwd: repo, env }).status).toBe(0);
+    expect(await made(d, task)).toBe(path);
   });
 
   it('a symlinked directory for the worktrees', async () => {

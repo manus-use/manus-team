@@ -177,6 +177,13 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** A branch a task starts from, and whose it is, as a reason names it. */
+interface Upstream {
+  taskId: string;
+  branch: string;
+  of: string;
+}
+
 function fail(reason: string): Prepared {
   return { ok: false, reason };
 }
@@ -210,7 +217,7 @@ export class TaskDirectories implements Workdirs {
     if (worktree === null || workspace === null) return fail(`task ${taskId} has no directory of its own`);
     const made = worktreeOf(this.#deps.db, worktree);
     if (made !== undefined) {
-      if (!isDirectory(made.rootPath)) return fail(gone(made));
+      if (!isDirectory(made.rootPath)) return fail(await this.#gone(made));
       if (made.kind === 'plain-dir' || made.branch === null) return { ok: true, dir: made };
       return this.#serial(await this.#commonDir(made.repoRoot), () => this.#again(task, made));
     }
@@ -296,7 +303,7 @@ export class TaskDirectories implements Workdirs {
         start.code === null
           ? this.#said(start)
           : first !== undefined
-            ? `the branch ${first.branch} of its parent ${first.taskId} is not there`
+            ? `the branch ${first.branch} of ${first.of} is not there`
             : configured !== undefined
               ? `the base ${configured} of workspace ${task.workspace ?? ''} is not a commit there`
               : `workspace ${task.workspace ?? ''} has no commit to start from`,
@@ -344,7 +351,7 @@ export class TaskDirectories implements Workdirs {
   }
 
   /** Each parent's branch not yet in the worktree merged in, one at a time; a conflict left for a person. */
-  async #merges(dir: TaskDirectory, starts: ReadonlyArray<{ taskId: string; branch: string }>): Promise<Prepared> {
+  async #merges(dir: TaskDirectory, starts: readonly Upstream[]): Promise<Prepared> {
     const path = dir.rootPath;
     const merging = await this.#run(path, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
     if (merging.code === 0) {
@@ -354,7 +361,7 @@ export class TaskDirectories implements Workdirs {
       const ref = `refs/heads/${s.branch}`;
       const inside = await this.#run(path, ['merge-base', '--is-ancestor', ref, 'HEAD']);
       if (inside.code === 0) continue;
-      if (inside.code !== 1) return fail(`the branch ${s.branch} of its parent ${s.taskId} cannot be read: ${this.#said(inside)}`);
+      if (inside.code !== 1) return fail(`the branch ${s.branch} of ${s.of} cannot be read: ${this.#said(inside)}`);
       const merged = await this.#run(path, [
         'merge', '--quiet', '--no-stat', '--no-edit', '--ff', '--no-gpg-sign', '--no-verify-signatures',
         '-m', `Merge ${s.branch} into ${dir.branch ?? ''}`, ref,
@@ -362,10 +369,10 @@ export class TaskDirectories implements Workdirs {
       if (merged.code === 0) continue;
       const conflicted = await this.#run(path, ['diff', '--name-only', '--diff-filter=U']);
       const files = conflicted.stdout.split('\n').filter((f) => f !== '');
-      if (files.length === 0) return fail(`merging the branch ${s.branch} of its parent ${s.taskId} failed: ${this.#said(merged)}`);
+      if (files.length === 0) return fail(`merging the branch ${s.branch} of ${s.of} failed: ${this.#said(merged)}`);
       const more = files.length > FILES_NAMED ? ` and ${files.length - FILES_NAMED} more` : '';
       return fail(
-        `merging the branch ${s.branch} of its parent ${s.taskId} conflicts in ${files.slice(0, FILES_NAMED).join(', ')}${more}. ` +
+        `merging the branch ${s.branch} of ${s.of} conflicts in ${files.slice(0, FILES_NAMED).join(', ')}${more}. ` +
           `Resolve it in ${path}: fix those files and commit there, then unblock the task`,
       );
     }
@@ -373,20 +380,25 @@ export class TaskDirectories implements Workdirs {
   }
 
   /**
-   * The branches a git task starts from: its parents that are done -- or, with
-   * none, the task that created it, as §2.3 uses it in place of parents -- that
-   * have a worktree in the same workspace, in the order they were linked. An
-   * archived parent's work was abandoned, and is not merged.
+   * The branches a git task starts from: its parents that are done, or, with
+   * none, the task that created it, as §2.3 uses it in place of parents, done or
+   * not (a follow-up is claimable at once, usually while its creator still
+   * runs), so long as it is not archived; of those, the ones with a worktree in
+   * the same workspace, in the order they were linked. An archived task's work
+   * was abandoned, and is not merged.
    */
-  #upstream(task: TaskRow): Array<{ taskId: string; branch: string }> {
+  #upstream(task: TaskRow): Upstream[] {
     const db = this.#deps.db;
     const parents = parentsInLinkOrder(db, task.taskId);
     const from = parents.length === 0 && task.createdFromTask !== null ? getTask(db, task.createdFromTask) : undefined;
     const upstream = parents.length > 0 ? parents : from === undefined ? [] : [from];
+    const counts = (p: TaskRow): boolean => (p === from ? p.phase !== 'archived' : p.phase === 'done');
     return upstream.flatMap((p) => {
-      if (p.phase !== 'done' || p.worktree === null || p.workspace !== task.workspace) return [];
+      if (!counts(p) || p.worktree === null || p.workspace !== task.workspace) return [];
       const dir = worktreeOf(db, p.worktree);
-      return dir?.kind === 'git-worktree' && dir.branch !== null ? [{ taskId: p.taskId, branch: dir.branch }] : [];
+      return dir?.kind === 'git-worktree' && dir.branch !== null
+        ? [{ taskId: p.taskId, branch: dir.branch, of: p === from ? `the task ${p.taskId} that created it` : `its parent ${p.taskId}` }]
+        : [];
     });
   }
 
@@ -403,22 +415,37 @@ export class TaskDirectories implements Workdirs {
    * would leave registered, so git is used to remove it; any other is moved aside.
    */
   async #clearAway(base: string, path: string): Promise<string> {
-    const listed = await this.#run(base, ['worktree', 'list', '--porcelain']);
-    const real = (p: string): string => {
-      try {
-        return realpathSync(p);
-      } catch {
-        return resolve(p);
-      }
-    };
-    const mine = real(path);
-    const registered =
-      listed.code === 0 &&
-      listed.stdout.split('\n').some((l) => l.startsWith('worktree ') && real(l.slice('worktree '.length)) === mine);
-    return registered
+    return (await this.#listed(base, path)) !== undefined
       ? `In ${base}, move out anything you need, then run git worktree unlock ${path} if it is locked, ` +
           `and git worktree remove --force ${path}; then unblock the task`
       : `If it holds nothing you need, move it aside; then unblock the task`;
+  }
+
+  /**
+   * A recorded directory that is gone, and how to make it again from its
+   * branch: a path git still lists (removed with `rm -rf`) is one git refuses to
+   * add again without `-f`.
+   */
+  async #gone(dir: TaskDirectory): Promise<string> {
+    if (dir.kind !== 'git-worktree' || dir.branch === null) {
+      return `its directory ${dir.rootPath} is gone; make the folder again, then unblock the task`;
+    }
+    const force = (await this.#listed(dir.repoRoot, dir.rootPath)) === undefined ? '' : '-f ';
+    return (
+      `its directory ${dir.rootPath} is gone; make it again from its branch with git worktree add ${force}${dir.rootPath} ${dir.branch}, ` +
+      `in ${dir.repoRoot}, then unblock the task`
+    );
+  }
+
+  /** What `git worktree list --porcelain` says of a path, if it lists it: its lines, `HEAD`, `branch`, `locked` and the rest. */
+  async #listed(base: string, path: string): Promise<string[] | undefined> {
+    const listed = await this.#run(base, ['worktree', 'list', '--porcelain']);
+    if (listed.code !== 0) return undefined;
+    const mine = real(path);
+    return listed.stdout
+      .split('\n\n')
+      .map((entry) => entry.split('\n').filter((l) => l !== ''))
+      .find((lines) => lines[0]?.startsWith('worktree ') === true && real(lines[0].slice('worktree '.length)) === mine);
   }
 
   #record(dir: TaskDirectory): Prepared {
@@ -461,10 +488,13 @@ export class TaskDirectories implements Workdirs {
   }
 }
 
-function gone(dir: TaskDirectory): string {
-  return dir.kind === 'git-worktree' && dir.branch !== null
-    ? `its directory ${dir.rootPath} is gone; make it again from its branch with git worktree add ${dir.rootPath} ${dir.branch}, in ${dir.repoRoot}, then unblock the task`
-    : `its directory ${dir.rootPath} is gone; make the folder again, then unblock the task`;
+/** A path as it really is, or as given when it is not there. */
+function real(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
 }
 
 function isDirectory(path: string): boolean {
