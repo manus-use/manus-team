@@ -5,7 +5,8 @@ import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import type { GateRun } from '../kanban/gates.js';
-import { resolveTaskWorkspace } from '../kanban/workspace.js';
+import { placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
+import { worktreeId } from './workspaces.js';
 import { DEFAULT_BOARD, ENDED_OUTCOMES, GATE_LIMITS, REPORTED_OUTCOMES } from '../kanban/types.js';
 import type {
   ActivePhase,
@@ -553,9 +554,15 @@ export interface ClaimInput {
   /** The configured workspace names: an agent run in any other is unassignable. */
   workspaces: ReadonlySet<string>;
   /**
-   * The workspaces whose gates a report is running now, each with the task
+   * The isolated workspaces (spec §18): a task's first agent claim in one gives
+   * the task a directory of its own. Absent, none is.
+   */
+  isolated?: ReadonlySet<string>;
+  /**
+   * The places -- a workspace's shared directory, by name, or a task's own, by
+   * its `wt:` id -- whose gates a report is running now, each with the task
    * reported on. A task's workspace may be resolved only here, so a claim whose
-   * workspace resolves to one of them is refused here, in the transaction.
+   * place resolves to one of them is refused here, in the transaction.
    */
   reportingIn?: ReadonlyMap<string, string>;
 }
@@ -575,6 +582,13 @@ export interface ClaimInput {
  * still null. An agent run is also refused in a workspace no longer configured,
  * and in one that already has an open agent run (spec §6.3). A person's run
  * holds no workspace.
+ *
+ * The task's first agent claim in an isolated workspace gives it a directory of
+ * its own (spec §18), fixed on the task as `worktree`: its runs, this one on,
+ * record that as theirs, and the one-agent limit of the workspace's shared
+ * directory does not apply to them. A task that has had an agent run in the
+ * shared directory keeps it, and so does a task whose workspace is no longer
+ * isolated.
  */
 export function claim(db: Db, input: ClaimInput, now: number): Result<{ run: RunRow; task: TaskRow }> {
   return tx(db, (d) => {
@@ -628,21 +642,29 @@ export function claim(db: Db, input: ClaimInput, now: number): Result<{ run: Run
         workspace = resolved.workspace;
       }
     }
-    const testing = workspace === null ? undefined : input.reportingIn?.get(workspace);
+    const runs = runsOf(d, task.taskId);
+    const worktree =
+      task.worktree ??
+      (agent && workspace !== null && input.isolated?.has(workspace) === true && !runs.some((r) => r.agentConfig !== null)
+        ? worktreeId(task.taskId)
+        : null);
+    // Where the run works, and the task's gates run: its own directory, else its workspace's.
+    const place = placeOf({ workspace, worktree });
+    const testing = place === null ? undefined : input.reportingIn?.get(place);
     if (testing !== undefined) {
-      return refuse('not_claimable', `workspace ${workspace ?? ''} is running the gates of a report on task ${testing}`);
+      return refuse('not_claimable', `workspace ${place ?? ''} is running the gates of a report on task ${testing}`);
     }
     if (agent) {
       if (workspace === null || !input.workspaces.has(workspace)) {
         return refuse('unassignable', `task ${task.taskId}'s workspace ${String(workspace)} is not configured`);
       }
-      const busy = openAgentRunIn(d, workspace);
+      // One agent at a time in a shared directory; a task's own holds only its own runs.
+      const busy = worktree === null ? openAgentRunIn(d, workspace) : undefined;
       if (busy !== undefined) {
         return refuse('workspace_busy', `workspace ${workspace} has an open agent run, ${busy.runId}`);
       }
     }
 
-    const runs = runsOf(d, task.taskId);
     const runId = newRunId();
     const attempt = (runs.at(-1)?.attempt ?? 0) + 1;
     const seededFromRun = kind === 'work' ? reworkSeed(d, runs, input.claimant.agentConfig) : null;
@@ -659,15 +681,16 @@ export function claim(db: Db, input: ClaimInput, now: number): Result<{ run: Run
       who.kind,
       who.name,
       input.claimant.agentConfig === null ? null : JSON.stringify(input.claimant.agentConfig),
-      workspace,
+      place,
       input.claimant.roleMdHash,
       seededFromRun,
       input.tokenHash ?? null,
       now,
     );
     // A claimed task is no longer stranded (spec §3.1).
-    d.prepare('UPDATE kanban_tasks SET workspace = ?, stranded_notified_at = NULL WHERE task_id = ?').run(
+    d.prepare('UPDATE kanban_tasks SET workspace = ?, worktree = ?, stranded_notified_at = NULL WHERE task_id = ?').run(
       workspace,
+      worktree,
       task.taskId,
     );
     record(
@@ -678,7 +701,15 @@ export function claim(db: Db, input: ClaimInput, now: number): Result<{ run: Run
         kind: 'claimed',
         actor: 'gateway',
         // The kind, so a person's claim can be told as one: the group's one line (spec §9.2).
-        payload: { kind, attempt, assignee: who.name, assigneeKind: who.kind, workspace, seededFromRun },
+        payload: {
+          kind,
+          attempt,
+          assignee: who.name,
+          assigneeKind: who.kind,
+          workspace,
+          seededFromRun,
+          ...(worktree === null ? {} : { worktree }),
+        },
       },
       now,
     );
@@ -1100,7 +1131,8 @@ export function reportCheck(
   // A person's run holds no workspace (spec §6.3), so another task's agent may be
   // changing the checkout the gates would test (spec §7.7). Asked here, before the
   // gates: once they start, no agent is claimed into the workspace until they end.
-  const workspace = r.task.workspace;
+  // Its own directory, if it has one (spec §18): no other task's agent works there.
+  const workspace = placeOf(r.task);
   if (by.kind === 'person' && workspace !== null && gatesOf(db, taskId).length > 0) {
     const busy = openAgentRunIn(db, workspace);
     // The reviewer run an operator's answer supersedes is not another agent's.
@@ -1521,6 +1553,12 @@ export interface RunEnding {
    * rather than being retried blind.
    */
   hadSideEffects?: boolean;
+  /**
+   * For a `failed` run that could not start for a reason only a person can put
+   * right -- its task's directory could not be made (spec §18): the run is not
+   * counted, and the task blocks as `needs_input` with this reason.
+   */
+  block?: string;
 }
 
 /** What happens to the task next: claimed again, claimed again after a cooldown, or blocked. */
@@ -1568,6 +1606,9 @@ export function endRun(
     if (!(ENDED_OUTCOMES as readonly unknown[]).includes(ending.outcome)) {
       return refuse('invalid', `${JSON.stringify(ending.outcome)} is not an outcome a run ends with unreported`);
     }
+    if (ending.block !== undefined && ending.outcome !== 'failed') {
+      return refuse('invalid', 'only a failed run blocks its task for a person');
+    }
     const before = mustGet(d, run.taskId);
     decide(d, run, ending.outcome, { error: ending.error ?? null, lastOutput: ending.lastOutput ?? null }, now);
 
@@ -1606,6 +1647,11 @@ export function endRun(
       case 'crashed':
       case 'timed_out':
       case 'protocol_violation': {
+        // Nothing ran: not the task's failure, and nothing a retry would change.
+        if (ending.block !== undefined) {
+          blockAs = { kind: 'needs_input', reason: ending.block };
+          break;
+        }
         const failures = before.consecutiveFailures + 1;
         d.prepare('UPDATE kanban_tasks SET consecutive_failures = ? WHERE task_id = ?').run(failures, run.taskId);
         if (failures >= (before.failureLimit ?? limits.failureLimit)) {

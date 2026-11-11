@@ -40,3 +40,12 @@ export function resolveTaskWorkspace(f: WorkspaceFacts): WorkspaceResolution {
   if (fixed.length > 1) return { conflict: fixed };
   return { workspace: f.boardWorkspace ?? DEFAULT_WORKSPACE };
 }
+
+/**
+ * Where a task's runs work and its gates run (spec §18): its own directory, by its
+ * `wt:` id, once its first agent claim in an isolated workspace has given it one;
+ * else its workspace's shared directory, by name; null while it has neither.
+ */
+export function placeOf(task: { workspace: string | null; worktree: string | null }): string | null {
+  return task.worktree ?? task.workspace;
+}
