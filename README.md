@@ -382,6 +382,46 @@ absolute path to an existing directory; may not be or contain `$MT_HOME` or the 
 inside `$MT_HOME` only `workspaces/<name>` may be one; and no two workspaces may share or
 nest in one directory. Everything here is checked at startup.
 
+A workspace runs one agent at a time, since two agents in one directory would overwrite each
+other. An **isolated** workspace gives each board task a directory of its own instead, so its
+tasks run side by side. A task need not be code, and a workspace need not be a repository:
+
+```yaml
+workspaces:
+  worker:
+    path: /home/me/.manus-team/workspaces/worker
+    isolated: true
+```
+
+Here `worker` is a plain folder. A research task fans out into three note-taking tasks, which
+run at once, each in an empty folder of its own under `$MT_HOME/worktrees/worker/`; the write-up
+task that waits for all three is told, in its prompt, the folders they left their notes in, and
+reads them there. Nothing is copied, and nothing is said to the agents about git.
+
+The same works for a git repository, and git is used only there:
+
+```yaml
+workspaces:
+  web:
+    path: /srv/repos/web
+    isolated: true
+    base: main        # optional
+```
+
+There a task's directory is a worktree under `$MT_HOME/worktrees/<workspace>/`, on its own
+branch, `mt/<task_id>`. A task with no parents starts from `base`, or, without one, from
+whatever the repository has checked out; a task with one parent starts from that parent's
+branch, and a task with several from a merge of their branches, in the order they were linked;
+an archived parent's work is not merged. Submodules are not initialised in a task's directory.
+A merge that conflicts blocks the task, naming the files: resolve it in the task's directory
+(`cd "$(mt kanban task worktree <task_id>)"`), commit, and unblock the task. The gateway never
+merges, pushes or rebases into your branches, and never deletes a branch or a worktree: merging
+the work is yours, or a final task's.
+
+Either way, every run of a task, its review and its rework included, works in its directory,
+and its gates run there. A task that had already run in the shared directory before the switch
+stays there.
+
 A workspace's name keeps the directory it was first used with: the gateway records it, and
 if the config later points that name somewhere else it will not start. Sessions opened in a
 directory belong to it, and moving them would orphan them. To use another directory, give
@@ -400,8 +440,8 @@ board run's agent reports. In a checkout, run it as `npm run -s mt -- …`.
 mt role create <name> [--clone-from <role>] [--description "..."] [--own-workspace]
 mt role list
 mt role check [<name>]
-mt workspace add <name> <absolute-path>
-mt workspace add <name> --clone <git-url>
+mt workspace add <name> <absolute-path> [--isolated]
+mt workspace add <name> --clone <git-url> [--isolated]
 mt workspace list
 mt service install
 mt service uninstall
@@ -424,6 +464,7 @@ mt kanban task unblock <task_id> [comment...] [--board <name>]
 mt kanban task stop <task_id> [--board <name>]
 mt kanban task archive <task_id> [--board <name>]
 mt kanban task comment <task_id> <text...> [--board <name>]
+mt kanban task worktree <task_id> [--board <name>] [--json]
 mt kanban gate add <task_id> [--timeout <s>] -- <command...>
 mt kanban gate list <task_id>
 mt kanban gate remove <task_id> <gate_id>
