@@ -2563,8 +2563,13 @@ workspaces:
 - **Made before the task's first run**, by the dispatcher, after the claim and before the
   session: git cannot run inside the claim's transaction. A run whose directory is being made
   holds its slot, as any open run does.
-- **Found again by every later run.** The dispatcher asks before each run; a recorded directory
-  that is still there is used as it is.
+- **Recorded the moment `git worktree add` succeeds**, before a fan-in's merges, so a merge that
+  conflicts leaves a directory that `task show` and `mt kanban task worktree` can name.
+- **Found again by every later run.** The dispatcher asks before each run. A recorded folder that
+  is still there is used as it is; a recorded worktree must still be on its branch, or the task
+  blocks, naming the branch it is on: its branch is what its children start from and what its
+  reported commit names. Until the task's first session starts, its fan-in's merges are taken up
+  again too (§18.5).
 - **Never removed by the board, and no branch is ever deleted.** A done task's branch is what its
   children start from, a folder task's children read its folder, and a person may still be
   looking at either; a worktree removed with uncommitted work in it loses that work. A person
@@ -2574,9 +2579,11 @@ workspaces:
 
 ### 18.5 Where a git task starts
 
-Its branch is `mt/<task_id>`, made with the worktree. It starts from its **upstream**: its
-parents, or with none the task that created it, as §2.3's rule 3 uses it: those of them that
-have a worktree in the same workspace, in their link order.
+Its branch is `mt/<task_id>`, made with the worktree, and always named `refs/heads/mt/<task_id>`
+to git, so a tag of the same name cannot stand in for it. It starts from its **upstream**: its
+parents that are `done`, or with none the task that created it, as §2.3's rule 3 uses it: those
+of them that have a worktree in the same workspace, in the order they were linked. An archived
+parent was abandoned: its branch is not merged, and the prompt lists its directory as abandoned.
 
 - **None:** the workspace's `base`, else whatever its directory has checked out (`HEAD`), at
   the moment the worktree is made. A detached `HEAD` is a commit like any other. Uncommitted
@@ -2584,11 +2591,12 @@ have a worktree in the same workspace, in their link order.
   and git does not need the base checkout clean to make one.
 - **One:** that parent's branch, as it is then.
 - **Several (fan-in):** the first's branch, then each other's merged in, one at a time, with `git
-  merge --no-edit`, in the new worktree. A merge that conflicts is left there, unconcluded, and
-  the task blocks as `needs_input`, naming up to ten of the conflicting files and the directory.
-  A person resolves it there (`cd "$(mt kanban task worktree <task_id>)"`), commits, and unblocks
-  the task; the next claim finds the worktree on its branch, merges any parent's branch not yet in
-  it, and records it. A merge still unconcluded blocks the task again.
+  merge --no-edit --ff`, in the new worktree. A merge that conflicts is left there, unconcluded,
+  and the task blocks as `needs_input`, naming up to ten of the conflicting files and the
+  directory. A person resolves it there (`cd "$(mt kanban task worktree <task_id>)"`), commits,
+  and unblocks the task; the next claim finds the worktree, merges any parent's branch not yet in
+  it, and goes on. A merge still unconcluded blocks the task again. Once the task's first session
+  has started, no more is merged.
 - A parent's uncommitted changes are not on its branch, so its children do not see them: a work
   run's prompt says to commit before reporting, and its reported commit says when it did not
   (§7.8).
@@ -2598,24 +2606,33 @@ have a worktree in the same workspace, in their link order.
 - It never merges, pushes, rebases or resets any branch but the task's own, and the task's own
   only by the fan-in's merges when its worktree is made. Landing the work is a person's, or a
   final task's.
-- It never forces anything, never deletes a branch, and never removes a worktree. Its one
-  clean-up is `git worktree prune` before it makes a worktree, which forgets only worktrees whose
-  directories are gone, so a path is never mistaken for a live one.
+- It never forces anything, never deletes a branch, never removes a worktree, and never runs `git
+  worktree prune`, which would take a person's worktree whose directory is missing for a moment
+  (an unmounted disk, a move): its admin entry, its staged index and its branch's protection.
 - Every git command runs with no fsmonitor (`-c core.fsmonitor=false`, as §7.8's reads) and no
   hook (`-c core.hooksPath=/dev/null`: `worktree add` would run `post-checkout`, and a merge its
-  own), with the agent allowlist of the gateway's environment (§7.8), and a 120 s timeout. A
-  merge's commit uses the repository's own `user.name` and `user.email`; with none, git refuses,
-  and the task blocks with its message.
+  own); a merge also with no signing, no remembered resolution and a fast-forward where one will
+  do (`-c commit.gpgSign=false -c rerere.enabled=false -c merge.ff=true`, `--no-gpg-sign --ff`),
+  and quietly (`--quiet --no-stat`, and `worktree add --quiet`), so a user's global
+  configuration does not change what the board does. Each runs with the agent allowlist of the
+  gateway's environment (§7.8), in a process group of its own, which is killed whole after
+  120 s, so a filter or merge driver it started is stopped with it. A merge's commit uses the
+  repository's own `user.name` and `user.email`; with none, git refuses, and the task blocks
+  with its message.
 - **What counts as a repository**: the workspace's directory at the top of a working tree, or a
   bare repository, asked with `GIT_CEILING_DIRECTORIES` at its parent, so a directory inside some
   other repository, such as a home under version control, counts as none, and its tasks get
-  folders. One with a `.git` while git is not installed blocks its tasks rather than give them
-  empty folders.
-- **A branch `mt/<task_id>` already there, with no worktree of it at the task's path**, is
-  refused, never taken over: it may be a person's. A directory at the path with no such branch
-  is refused too. A directory and a branch both there, the worktree on its branch, is one this
-  gateway made and did not record (a merge left for a person, or a stop between the two): it is
-  taken up.
+  folders. Only git saying "not a git repository", with no `.git` in the directory and nothing
+  that looks like a bare repository (`HEAD` and `objects/`), means a folder. Anything else git
+  refuses (an unknown repository format version, a `.git` file pointing nowhere, dubious
+  ownership), and a `.git` while git is not installed, blocks the task with the reason, rather
+  than give a code task an empty folder.
+- **A branch `mt/<task_id>` already there, with no worktree of it**, is taken up only when its tip
+  is the very commit the task would start from, which is what a failed `git worktree add` leaves
+  (git removes the directory and keeps the branch). At any other commit it is refused, never
+  taken over: it may be a person's.
+- **A directory at the task's path that the board has not recorded** is refused, saying what to
+  run: a `git worktree add` that was stopped leaves one, half made and locked as initializing.
 - **A shallow clone** makes worktrees as any repository does; a fan-in whose merge base is
   missing fails with git's message, and blocks.
 - **Two claims in one repository** make their worktrees one after the other: the dispatcher
@@ -2624,8 +2641,9 @@ have a worktree in the same workspace, in their link order.
 
 ### 18.7 A directory that cannot be made
 
-A conflict, a branch in the way, a parent's branch or the base that is not there, a symlink,
-git missing for a repository, a full disk: the run ends `failed`, with the reason as its error,
+A conflict, a branch in the way, a directory left in the way, a parent's branch or the base that
+is not there, a symlink, a repository git cannot read, git missing for a repository, git past
+its time, a worktree off its branch, a full disk: the run ends `failed`, with the reason as its error,
 **not counted** (§8.2), and the task blocks as `needs_input` with the reason, which its
 subscribers hear (§9.4). No session is created, and the pass goes on with the next task.
 Unblocking the task claims it again.
@@ -2640,19 +2658,23 @@ Unblocking the task claims it again.
   work run in a worktree, that its branch is where the work goes, to be committed before
   reporting, since the tasks after it start from the branch and nothing is merged for it; for a
   review run, that the work under review is there; for a folder, that it is the task's own. Then
-  the directories of the upstream tasks that have one, to read, at most twenty.
-- **Gates** run in the task's directory (§7.7). A task whose directory is not made yet, a
-  person's report before any agent run, refuses them `gates_cannot_run`, saying so.
+  the directories of the upstream tasks that have one, to read, at most twenty, an archived one
+  marked abandoned. A task in a shared directory whose parents have directories of their own is
+  told where they are too.
+- **Gates** run in the task's directory (§7.7). A task given a directory of its own at a claim
+  whose directory is not made yet, which a person's report could meet before its agent run
+  starts, refuses them `gates_cannot_run`, saying so. A task with no agent run yet has no
+  directory of its own, and runs its gates in the shared directory.
 - **The reported commit** (§7.8) is the worktree's `HEAD`: the task branch's.
 
 ### 18.9 Seeing it
 
 - `/kanban task show` and `mt kanban task show` add `directory: <path> · branch mt/<task_id>`, or
-  `directory: its own, made before its next agent run`; `--json` gives `worktree: {path,
+  `directory: its own, not made yet: it is made when an agent next takes the task up`; `--json` gives `worktree: {path,
   branch}`, or null for a task in a shared directory.
 - `mt kanban task worktree <task_id> [--board <name>] [--json]` prints the path alone, so a
-  person can `cd` to it; a task in a shared directory, or one whose directory is not made yet, is
-  refused `no_worktree`.
+  person can `cd` to it, during a conflict too; a task in a shared directory, or one whose
+  directory is not made yet, is refused `no_worktree`.
 - At startup, with the board on, the gateway says which workspaces are isolated.
 
 ### 18.10 Limits
@@ -2667,13 +2689,24 @@ Unblocking the task claims it again.
   finds the merge unconcluded, or git's lock, and blocks.
 - **A home inside a git repository**: an agent's own git commands in a folder task's directory
   find that repository, and so does the reported commit (§7.8).
+- **Submodules** are not initialised in a task's worktree.
+- **The repository's own configuration** still applies: its filters and `core.autocrlf` at
+  checkout, its merge drivers and `merge.*` settings in a fan-in, its identity for the merge
+  commit.
+- **A stopped `git worktree add`** leaves a half-made worktree for a person to remove.
 
 *Added on 2026-11-10.* The user chose: the switch per workspace, as a mapping beside the plain
 path; a git task's start from its parents, with a fan-in's merge made when its worktree is, and a
 conflict blocking it as `needs_input`; nothing landed automatically; and an empty folder per
 task, with its parents' folders in its prompt, in a workspace that is not a repository.
-Recommended, for the user to confirm: the directories under `$MT_HOME/worktrees`; a base that is
-`HEAD` unless `base:` names one; a directory made before the first run and never removed by the
-board; a follow-up with no parents starting from the task that created it; every failure to make
-a directory blocking for a person rather than counted as a retry; and `mt kanban task worktree`
-and `mt workspace add --isolated`.
+*Amended on 2026-11-11.* The user chose, after review: the directories under
+`$MT_HOME/worktrees`; a base that is `HEAD` unless `base:` names one; a follow-up with no parents
+starting from the task that created it; no worktree ever removed by the board; every failure to
+make a directory blocking for a person rather than counted as a retry; and both `mt kanban task
+worktree` and `mt workspace add --isolated`. A dry-run review then found that `git worktree
+prune` could take a person's worktree, so the board runs none; that a failed `worktree add` left
+a branch every later claim refused, so a branch at the very start commit is taken up; that a
+timeout stopped git but not what git started, so each command has its own process group; that a
+conflict left no directory to point at, so a worktree is recorded once added; that a repository
+git refused to read became a folder; and that archived parents were merged, which they no longer
+are. A recorded worktree off its branch blocks its task.
