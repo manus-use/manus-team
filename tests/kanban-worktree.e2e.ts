@@ -490,6 +490,76 @@ describe('what it takes care over', () => {
   });
 });
 
+describe('a worktree a git worktree add finished after the gateway stopped', () => {
+  /** What a git worktree add the gateway started, and did not see finish, leaves: a worktree of the task's branch, not recorded. */
+  function leftBy(task: TaskRow, branch: string, from = 'HEAD'): string {
+    const path = join(root, 'web', task.taskId);
+    mkdirSync(join(root, 'web'), { recursive: true });
+    git(repo, 'worktree', 'add', '-q', '-b', branch, path, from);
+    return path;
+  }
+
+  const refused = (task: TaskRow) => ({
+    ok: false,
+    reason: expect.stringContaining(`${join(root, 'web', task.taskId)} is there already, left by a git worktree add that did not finish`),
+  });
+
+  it('is taken up, on its branch at the commit it would start from, unlocked and clean', async () => {
+    const task = claimed();
+    const path = leftBy(task, `mt/${task.taskId}`);
+    expect(await made(directories(), task)).toBe(path);
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toMatchObject({ kind: 'git-worktree', rootPath: path, branch: `mt/${task.taskId}` });
+  });
+
+  it("is taken up for a fan-in at its first parent's branch, and the merge goes on", async () => {
+    const d = directories();
+    const [a, b] = [claimed(), claimed()];
+    const tipA = commit(await made(d, a), 'a.txt', 'a\n');
+    commit(await made(d, b), 'b.txt', 'b\n');
+    for (const p of [a, b]) finish(p);
+    const child = newTask(t.db, { workspace: 'web' });
+    for (const p of [a, b]) link(t.db, p.taskId, child.taskId, 'lark:on_alice', NOW);
+    const r = claim(t.db, { taskId: child.taskId, claimant: claimantFor(t.db, child.taskId), workspaces: new Set(['web']), isolated: new Set(['web']) }, NOW);
+    if (!r.ok) throw new Error(r.message);
+    const path = leftBy(r.task, `mt/${child.taskId}`, tipA);
+    expect(await made(d, r.task)).toBe(path);
+    expect(readFileSync(join(path, 'b.txt'), 'utf8')).toBe('b\n');
+    expect(git(path, 'log', '-1', '--format=%s')).toBe(`Merge mt/${b.taskId} into mt/${child.taskId}`);
+  });
+
+  it('is refused on another branch', async () => {
+    const task = claimed();
+    leftBy(task, 'someone-else');
+    expect(await directories().prepare(task)).toEqual(refused(task));
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
+  });
+
+  it('is refused when locked', async () => {
+    const task = claimed();
+    const path = leftBy(task, `mt/${task.taskId}`);
+    git(repo, 'worktree', 'lock', path);
+    expect(await directories().prepare(task)).toEqual(refused(task));
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
+  });
+
+  it('is refused at another commit than it would start from', async () => {
+    const task = claimed();
+    const path = leftBy(task, `mt/${task.taskId}`);
+    commit(path, 'other.txt', 'someone else\n');
+    expect(await directories().prepare(task)).toEqual(refused(task));
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
+  });
+
+  it('is refused with changes in it', async () => {
+    const task = claimed();
+    const path = leftBy(task, `mt/${task.taskId}`);
+    writeFileSync(join(path, 'README'), 'changed\n');
+    expect(await directories().prepare(task)).toEqual(refused(task));
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
+    expect(readFileSync(join(path, 'README'), 'utf8')).toBe('changed\n');
+  });
+});
+
 describe('git that leaves something behind', () => {
   /** A git alias that runs `sh` as the command: what a filter or a merge driver could leave running. */
   const alias = (script: string) => ['-c', `alias.leave=!${script}`, 'leave'];

@@ -288,12 +288,6 @@ export class TaskDirectories implements Workdirs {
   async #worktree(task: TaskRow, id: string, base: string, path: string): Promise<Prepared> {
     const branch = taskBranch(task.taskId);
     const starts = this.#upstream(task);
-    if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) {
-      // Not recorded, so not one this gateway finished: a git worktree add that was stopped, or someone else's.
-      return fail(
-        `${path} is there already, left by a git worktree add that did not finish, or put there by someone else. ${await this.#clearAway(base, path)}`,
-      );
-    }
     const configured = task.workspace === null ? undefined : this.#deps.isolated[task.workspace]?.base;
     const first = starts[0];
     const from = first !== undefined ? `refs/heads/${first.branch}` : configured === undefined ? 'HEAD' : await this.#baseRef(base, configured);
@@ -310,6 +304,18 @@ export class TaskDirectories implements Workdirs {
       );
     }
     const commit = start.stdout.trim();
+    if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) {
+      // Not recorded: a git worktree add this gateway started and did not see finish, which is taken up, or one
+      // that was stopped, or someone else's.
+      if (await this.#finished(base, path, branch, commit)) {
+        const dir: TaskDirectory = { id, kind: 'git-worktree', rootPath: path, repoRoot: base, branch };
+        const recorded = this.#record(dir);
+        return recorded.ok ? this.#merges(dir, starts) : recorded;
+      }
+      return fail(
+        `${path} is there already, left by a git worktree add that did not finish, or put there by someone else. ${await this.#clearAway(base, path)}`,
+      );
+    }
     const tip = await this.#run(base, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`]);
     let added: GitResult;
     if (tip.code === 0) {
@@ -400,6 +406,24 @@ export class TaskDirectories implements Workdirs {
         ? [{ taskId: p.taskId, branch: dir.branch, of: p === from ? `the task ${p.taskId} that created it` : `its parent ${p.taskId}` }]
         : [];
     });
+  }
+
+  /**
+   * Whether an unrecorded path is the worktree this prepare would have made, a
+   * git worktree add the gateway did not see finish (it was restarted, or
+   * stopped, meanwhile): a real directory git lists on the task's branch, not
+   * locked (as a stopped add leaves it), at the very commit it starts from, and
+   * with nothing changed in it. Anything else may be a person's.
+   */
+  async #finished(base: string, path: string, branch: string, commit: string): Promise<boolean> {
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (stat === undefined || stat.isSymbolicLink() || !stat.isDirectory()) return false;
+    const lines = await this.#listed(base, path);
+    if (lines === undefined) return false;
+    if (!lines.includes(`branch refs/heads/${branch}`) || !lines.includes(`HEAD ${commit}`)) return false;
+    if (lines.some((l) => l === 'locked' || l.startsWith('locked '))) return false;
+    const status = await this.#run(path, ['status', '--porcelain']);
+    return status.code === 0 && status.stdout.trim() === '';
   }
 
   /** A workspace's configured base: its branch of that name when there is one, as a tag of the same name would otherwise win; else as given. */
