@@ -585,6 +585,37 @@ describe('loadConfig: roles and workspaces', () => {
     expect(() => load({}, file)).toThrow(/workspaces\.default and workspace/);
   });
 
+  it('reads a workspace written as a mapping, isolated or not, beside the plain form', () => {
+    const cfg = load(
+      {},
+      yamlFile({
+        workspace: undefined,
+        workspaces: {
+          default: '/srv/a',
+          web: { path: '/srv/web', isolated: true },
+          api: { path: '/srv/api', isolated: true, base: 'main' },
+          docs: { path: '/srv/docs', isolated: false },
+        },
+      }),
+    );
+    expect(cfg.workspaces).toEqual({ default: '/srv/a', web: '/srv/web', api: '/srv/api', docs: '/srv/docs' });
+    expect(cfg.isolated).toEqual({ web: {}, api: { base: 'main' } });
+    // No isolated workspace, no setting: as before.
+    expect(load().isolated).toBeUndefined();
+  });
+
+  it('refuses a mapping without a path, with an unknown key, with base but not isolated, or with a base git would misread', () => {
+    const bad = (entry: unknown) => () => load({}, yamlFile({ workspace: undefined, workspaces: { default: '/srv/a', web: entry } }));
+    expect(bad({ isolated: true })).toThrow('workspaces.web.path is required when the workspace is a mapping');
+    expect(bad({ path: '/srv/web', shared: true })).toThrow(/unknown setting workspaces\.web\.shared/);
+    expect(bad({ path: '/srv/web', isolated: 'yes' })).toThrow('workspaces.web.isolated must be true or false');
+    expect(bad({ path: '/srv/web', base: 'main' })).toThrow('workspaces.web.base applies only to an isolated workspace');
+    expect(bad({ path: '/srv/web', isolated: true, base: '--upload-pack=x' })).toThrow(
+      'workspaces.web.base must be a branch, a tag or a commit',
+    );
+    expect(bad({ path: '/srv/web', isolated: true, base: 'two words' })).toThrow('workspaces.web.base must be');
+  });
+
   it('leaves the agent undefined when nothing configures one', () => {
     expect(loadEnvOnly({ ...ENV_ONLY, MT_AGENT_COMMAND: undefined }).agent).toBeUndefined();
   });
