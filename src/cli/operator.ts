@@ -496,8 +496,17 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
           assignee: task.assignee?.name ?? null,
           reviewer: task.reviewer?.name ?? null,
           workspace: task.workspace,
-          // Its own directory (spec §18), or null in the workspace's shared one; its path is null until made.
-          worktree: r.view.workdir === undefined ? null : { path: r.view.workdir.path, branch: r.view.workdir.branch },
+          // Its own directory (spec §18), or null in the workspace's shared one: its path and branch are null until
+          // made, and first says no agent has taken it up yet, so its first agent claim makes it, not its next.
+          worktree:
+            r.view.workdir === undefined
+              ? null
+              : {
+                  path: r.view.workdir.path,
+                  branch: r.view.workdir.branch,
+                  made: r.view.workdir.path !== null,
+                  first: r.view.workdir.first === true,
+                },
           phase: task.phase,
           status: r.view.status,
           board: task.board,

@@ -15,7 +15,7 @@ import { ALICE, NOW, VIA, WORKSPACES } from './helpers/kanban.js';
  * report there holds back no other task, and `show` says where the directory is.
  */
 
-const ROLES = new Map([role('default'), role('implementer')].map((r) => [r.name, r]));
+const ROLES = new Map([role('default'), role('implementer'), role('frontend', { workspace: 'web' })].map((r) => [r.name, r]));
 const DIRS = new Map([...WORKSPACES].map((w) => [w, `/ws/${w}`]));
 const SHA = '0123456789abcdef0123456789abcdef01234567';
 
@@ -160,6 +160,31 @@ describe('a task with a directory of its own', () => {
     // A task in a workspace that is not isolated says nothing of a directory.
     const shared = s.show(create('api').taskId);
     expect(shared.ok && shared.view.workdir).toBeUndefined();
+  });
+
+  it('says so too of a task with no workspace yet that its first claim puts in an isolated one', () => {
+    const shown = (taskId: string): string => {
+      const view = s.show(taskId);
+      if (!view.ok) throw new Error(view.message);
+      expect(view.view.workdir).toEqual({ path: null, branch: null, first: true });
+      return renderShow(view.view, []);
+    };
+    // Its role's workspace.
+    const r = s.create({ title: 'a task', assignee: 'frontend', createdBy: ALICE, createdVia: VIA });
+    if (!r.ok) throw new Error(r.message);
+    expect(r.task.workspace).toBeNull();
+    expect(shown(r.task.taskId).split('\n')).toContain('directory: its own, not made yet: it is made when an agent first takes the task up');
+    // Its parent's.
+    const parent = create();
+    const child = s.create({ title: 'after it', assignee: 'implementer', createdBy: ALICE, createdVia: VIA });
+    if (!child.ok) throw new Error(child.message);
+    const linked = s.link(parent.taskId, child.task.taskId, ALICE);
+    if (!linked.ok) throw new Error(linked.message);
+    expect(shown(child.task.taskId)).toContain('first takes the task up');
+    // Resolved to a shared workspace: nothing of a directory.
+    const shared = s.create({ title: 'a task', assignee: 'implementer', createdBy: ALICE, createdVia: VIA });
+    const view = shared.ok ? s.show(shared.task.taskId) : undefined;
+    expect(view?.ok === true && view.view.workdir).toBeUndefined();
   });
 
   it('says where its directory is, and its branch, once made', () => {
