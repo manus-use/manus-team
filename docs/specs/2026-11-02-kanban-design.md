@@ -51,7 +51,7 @@ whoever does a task, and review (§5.3) applies to any work.
 | A judge model ("is this really done?") | Completion contracts and gates (§4.3, §7.7) carry the acceptance criteria; a judge would read the same fields |
 | Tenants; projects with operators and roles of their own | Boards (§16) are queues, not permissions: each task records its board. Who may act on a board, and which roles it may use, would be checked per board in the service, beside the tiers (§16.9) |
 | A web board | Lark is the v1 interface. The board is a projection over `kanban_events`, so a web view is a second renderer |
-| **Parallel agent runs in one workspace** | One open agent run per workspace (§6.3). Worktrees (architecture milestone 9) give each task its own checkout inside its workspace |
+| **Parallel agent runs in one workspace** | One open agent run per workspace (§6.3). An isolated workspace gives each task a directory of its own, a git worktree on its own branch (§18) |
 | Tool restrictions on agents that cannot enforce them | Declared per role, refused at startup until the role's agent can enforce them (§2.2) |
 | Vendor-native skills (Claude Code skills, bytesec agent packages) | v1 skills are files listed in the prompt (§2.2), written in a format a native installer can consume later |
 | MCP delivery of the worker tools | The CLI and an MCP server would share one handler (§7.3) |
@@ -262,7 +262,8 @@ enforce them.
   every role's `.env`, or the database, inside an agent's checkout. It is a startup error, and
   `mt workspace add` refuses it. Inside `$MT_HOME`, only `$MT_HOME/workspaces/<name>` may be a
   workspace — where `--clone` puts them. Anything else there (`roles/`, a single role's directory)
-  would put `.env` files inside an agent's checkout, the thing this rule exists to prevent.
+  would put `.env` files inside an agent's checkout, the thing this rule exists to prevent. A
+  task's own directory, under `$MT_HOME/worktrees` (§18.3), is not a workspace, and holds none.
 - **One directory, one name, no nesting.** Two configured names whose directories resolve to the same
   realpath, or where one lies inside the other, are a startup error, and `mt workspace add` refuses
   them. The one-run-per-workspace limit (§6.3) is counted per name; two names for one checkout would
@@ -279,7 +280,7 @@ enforce them.
   different directory, **startup fails**: relocating a workspace orphans the provider sessions that
   were opened in it — some agents look sessions up by directory — and silently moves every task fixed
   to it. To use a new directory, give it a new name. This is architecture Appendix A's rule that a
-  `workspace_id` is never relocated, applied to names. Worktrees (milestone 9) will add rows to the
+  `workspace_id` is never relocated, applied to names. A task's own directory (§18) adds rows to the
   same table; their ids are kind-prefixed (`wt:…`) so they cannot collide with a configured name.
 - **A task's workspace is resolved at a claim, of any kind, while it is still null** — normally the
   first claim — as the first of:
@@ -698,6 +699,7 @@ with a join, not by correlating two files.
 | `created_by`, `created_via`, `created_at`, `closed_at` | `created_via` is the chat it was created in (§9.2), the run that created it, or `{kind: operator}` for a task an operator created at a terminal (§2.6), which no chat follows |
 | `created_from_task` | set when a worker creates the task: the creating run's task, used by §2.3 rule 3 when the task has no parents; not a link |
 | `board` | migration `006`: the board the task is on (§16), `default` for every task before it; set at creation, never changed |
+| `worktree` | migration `007`: `wt:<task_id>` for a task with a directory of its own (§18), fixed at its first agent claim in an isolated workspace; null for a task in its workspace's shared directory, every task before it included |
 
 - **`idempotency_key` is unique** because creation is retried by everything that can create: Lark
   redelivers a message, and an agent re-runs a command whose output it did not see. A repeated
@@ -735,7 +737,7 @@ with a join, not by correlating two files.
 | `run_id`, `task_id`, `attempt` | `attempt` counts from 1 per task, across kinds |
 | `kind` | `work` or `review` |
 | `assignee_kind`, `assignee` | the role or person, snapshot at claim — reassigning the task does not rewrite history |
-| `agent_config`, `workspace` | for an agent run: the role's effective `agent` block at claim — for a legacy `default`, after `MT_AGENT_*` overrides — with driver, command, args and the *names* of its environment variables, never their values; and the workspace. History shows what actually ran after the role's files change |
+| `agent_config`, `workspace` | for an agent run: the role's effective `agent` block at claim — for a legacy `default`, after `MT_AGENT_*` overrides — with driver, command, args and the *names* of its environment variables, never their values; and the workspace, or the task's own directory's `wt:` id for a run that works there (§18.2). History shows what actually ran after the role's files change |
 | `role_md_hash` | for an agent run: SHA-256 of the `role.md` it was given (§2.1) |
 | `session_id` | the gateway session for an agent run; null for a human run |
 | `seeded_from_run` | for rework (§5.3): the work run whose provider session this run resumes |
@@ -1146,12 +1148,13 @@ remove it:
 - the gates run at approval do see the current checkout. That is the one remaining exposure, and it
   is a reason to keep gates fast and to approve promptly, not a reason to lock the workspace.
 
-This is the main limitation of v1: two tasks in the same repository run one after the other. Worktrees
-(architecture milestone 9) give each task its own checkout inside its workspace and lift it, which is
-why they come directly after this work (§12).
+This is the main limitation of v1: two tasks in the same repository run one after the other. An
+isolated workspace lifts it (§18): each of its tasks works in a directory of its own, a git worktree
+on its own branch, and the limit binds only the workspace's shared directory.
 
 A chat session in the same directory can still collide with a kanban run, as two chat sessions can
-today. Worktrees fix both.
+today. A task with a directory of its own is out of their way; the chat sessions still share theirs
+(§18.10).
 
 ### 6.4 Supervision is the actor's, not the dispatcher's
 
@@ -2147,7 +2150,7 @@ board.
 ## 12. Plans
 
 Separate implementation plans. Each ends with everything built so far working and tested. Order: A, A2, B, F, C1,
-C2, R, C3, C4, then D1 and D2, then G, then H; E is independent once B is done. B is delivered as B1 (roles and workspaces in
+C2, R, C3, C4, then D1 and D2, then G, then H, then W; E is independent once B is done. B is delivered as B1 (roles and workspaces in
 configuration), B2 (the session layer) and B3 (the `mt` commands). C is delivered as C1 (the board),
 C2 (agent runs), C3 (the worker CLI) and C4 (review, rework and gates), in that order; R comes
 between C2 and C3, so the runs C3 makes reportable already get their role natively. **Before F**,
@@ -2169,6 +2172,7 @@ branch.
 | **R. Native rendering** | the spike, done on bytesec 0.7.4: `BYTESEC_LOCAL_APM_PATH=<one package dir>` with `bytesec run --agent <name>` loads that package's agent, whose body becomes the system prompt, and its skills; a directory of packages fails silently; a package's agent may use only the package's skills. Then (§2.7): the role grammar tightened so a name cannot end in `-`; `agent.native`; `agent.skills`, imported from where bytesec finds a user's skills, since a native agent sees only its package's; `StartOptions.args` and the registry's `argsFor`; a renderer interface with bytesec's renderer; content-addressed, atomic packages under `$MT_HOME/rendered`, swept; the dispatcher rendering just after the claim, recording on the run whether it is native and by which package, and falling back to prompt injection when a render fails; the prompt leaving `role.md` and the skills out of a native run; `mt role check` saying which roles run natively. Claude Code's renderer is later. Prompt injection (§7.1) stays the fallback | B2, C2 |
 | **G. Boards** | isolated task queues on one database (§16): migration `006`, with `kanban_boards`, `default` in it, `kanban_chat_boards` and `kanban_tasks.board`, every existing task on `default`; boards created, set and archived, and each chat moved onto one, from chat (`/kanban boards`, `/kanban board create\|use\|set\|archive`); `/kanban new`, `list` and `show` on the chat's board; follow-ups, parents, links and dependency blocks kept on a board; a board's `max_running`, inside the gateway's, and its workspace as §2.3's rule 4; the dispatcher taking boards in turn; `mt kanban show` giving the board. Plan: `docs/plans/2026-11-09-plan-g-boards.md` | D2 |
 | **H. The operator at a terminal** | `/kanban board list [all]` in place of `/kanban boards`; the operator's `mt kanban board list\|create\|set\|archive` and `new\|list\|show\|assign\|link\|unblock\|stop\|archive\|comment` beside the gateway, through `KanbanService`, as `operator:<login>`, plain text or `--json` (§2.6); the two grammars of `mt kanban` (§7.3); the token-less nudge; each pass cancelling the turns of runs a person's action decided (§6.2); `created_via` `{kind: operator}`; the default database `team.db`, moved by hand at deploy. Plan: `docs/plans/2026-11-09-plan-h-operator-cli.md` | G |
+| **W. A directory of its own for each task** | an isolated workspace, written `{ path, isolated: true, base? }` beside the plain path (§18.1); `kanban_tasks.worktree` (migration `007`), fixed at a task's first agent claim there, and the task's place, which its runs, sessions, gates and reported commit use, with the one-agent limit binding only the shared directory (§18.2); `$MT_HOME/worktrees/<workspace>/<task_id>`, recorded in `workspaces` as `wt:<task_id>` (§18.3); made before the first run, reused, never removed (§18.4); a worktree on `mt/<task_id>` from the base, a parent's branch or a fan-in's merge, a conflict blocking the task (§18.5); git with no hook and no fsmonitor, never forcing, merging into or deleting anything else (§18.6); a directory that cannot be made blocking the task, uncounted (§18.7); the prompt's directory lines (§18.8); `directory:` in `task show`, `mt kanban task worktree`, `mt workspace add --isolated` (§18.9). Plan: `docs/plans/2026-11-10-plan-w-worktrees.md` | H |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D2, nothing can deliver a card to a person, so **plans C and D1 refuse human assignees and
@@ -2189,8 +2193,8 @@ as an operator. C is therefore proven by its service API and its end-to-end test
 running a real task through the real socket — and the board becomes usable by people in D.
 
 Plan E makes nudges cheaper and lets rework resume the implementer's conversation; without it both
-still work (§5.3, §7.5). Worktrees are architecture milestone 9 and a separate project; they lift the
-per-workspace limit (§6.3) and should follow these plans directly.
+still work (§5.3, §7.5). Plan W gives each task in an isolated workspace a directory of its own (§18),
+which lifts the per-workspace limit (§6.3) for those tasks; it follows H.
 
 ---
 
@@ -2478,3 +2482,198 @@ with `--service` runs `mt service install`. The decisions, and what forces each:
   reads it, `%` and `$` included; a control character in either is refused.
 - **Not in a board run's shell.** `mt service` is refused there, as the operator's commands
   are: an agent restarting the gateway would end its own run and every other.
+
+## 18. A directory of its own for each task
+
+A workspace runs one agent at a time (§6.3), so the parallel tasks of a graph queue when they
+share one, as they do whenever their role names its own workspace. An **isolated** workspace
+gives each of its board tasks a directory of its own instead: a git worktree on the task's own
+branch in a repository, an empty folder elsewhere. Its tasks then run side by side, within the
+gateway's, the board's and the role's `max_running`. This is the worktree half of architecture
+milestone 9, done per task rather than per session; checkpoints are not part of it. Built by
+plan W (§12).
+
+### 18.1 The switch is per workspace
+
+```yaml
+workspaces:
+  default: /srv/repos/main      # as before: one directory, shared
+  web:
+    path: /srv/repos/web
+    isolated: true
+    base: main                  # optional
+```
+
+- **A workspace may be written as a mapping**, beside the plain path, which keeps its meaning.
+  `path` is required; `isolated` is `true` or `false`, and `false` is the plain path; `base`
+  is allowed only with `isolated: true`, and is a branch, a tag or a commit, with no leading
+  `-` (git would read it as an option) and no space or control character. Any other key is
+  refused, as everywhere in the file. The path is checked at startup by every rule of §2.3.
+- **Read at startup**, like the rest of the file: switching a workspace takes effect at the
+  next start, which ends every open run (§8.4).
+- `mt workspace add <name> <path> --isolated` (and with `--clone`) writes the mapping, and `mt
+  workspace list` marks an isolated workspace.
+- **Only board tasks** get directories of their own. A chat session still works in the
+  workspace's directory.
+
+### 18.2 Which tasks get one, and where their runs work
+
+- **Decided at a task's first agent claim.** A claim by a role, in an isolated workspace, of a
+  task that has had no agent run, fixes `kanban_tasks.worktree` (migration `007`) to
+  `wt:<task_id>`, the id of the task's directory. It is written once, while null, by the claim,
+  as `workspace` is.
+- **Kept.** Every later run of the task, whatever its kind or assignee (a retry, a review, a
+  rework, a person's), works in that directory, and its gates run there, even once the
+  workspace is no longer isolated: the directory, and the provider sessions opened in it, must
+  not move (§2.3).
+- **A task that has run in the shared directory stays there.** Its work is in that checkout,
+  and a retry or a rework moved elsewhere would lose it, and its provider session. So isolating
+  a workspace affects only tasks first claimed by an agent after the next start; the runs open
+  at the switch are ended by the restart, and their tasks keep sharing.
+- **A person's claim fixes none**: a person's run uses no directory. A person's task later
+  given to a role gets one at its first agent claim.
+- **A task's place** is where its runs work and its gates run: its own directory, by its `wt:`
+  id, else its workspace's, by name. A run records its place as its `workspace` (§3.3), and its
+  session as its `workspace_id` (§2.4), so the registry finds the same directory on every actor
+  build. The one-agent limit (§6.3) counts open agent runs per place: a task's own directory
+  only ever holds that task's own run (§3.3), so the limit binds the shared directory alone, and
+  only the tasks working there count against it. A report's gates holding back claims and other
+  reports (§7.7), and `workspace_busy` for a person's report, are per place too; and `task show`
+  does not say a task waits on the shared directory's agent (§6.3) when its claim would give it
+  a directory of its own.
+
+### 18.3 Where the directories live
+
+`$MT_HOME/worktrees/<workspace>/<task_id>`, each `<workspace>` directory made `0700`.
+
+- **Outside the repository**, so the base checkout's `git status` never lists a task's
+  directory, and no repository holds another's `.git` file.
+- **In the home, which §2.3 allows.** That rule is that no workspace may be or contain the home,
+  or the database: a task's directory contains neither, nor any role's `.env`. `$MT_HOME/
+  worktrees` and its `<workspace>` directories must be real directories, as `$MT_HOME/workspaces`
+  must (§2.6): a symlink would put a task's directory somewhere else, so it blocks the task.
+- **Recorded once made**, in the `workspaces` table (schema `001`), as architecture §9 planned:
+  id `wt:<task_id>`, kind `git-worktree` or `plain-dir`, `root_path` its real path, `repo_root`
+  the workspace's directory, and `branch` for a worktree. Written once, by `db/workspaces.ts`'s
+  `registerWorktree`, and never updated. A configured name has no `:`, so the two never meet;
+  `mt workspace list` and the moved-directory check at startup leave `wt:` rows out.
+
+### 18.4 Lifetime
+
+- **Made before the task's first run**, by the dispatcher, after the claim and before the
+  session: git cannot run inside the claim's transaction. A run whose directory is being made
+  holds its slot, as any open run does.
+- **Found again by every later run.** The dispatcher asks before each run; a recorded directory
+  that is still there is used as it is.
+- **Never removed by the board, and no branch is ever deleted.** A done task's branch is what its
+  children start from, a folder task's children read its folder, and a person may still be
+  looking at either; a worktree removed with uncommitted work in it loses that work. A person
+  removes one when done with it: `git worktree remove` refuses a worktree with changes, and `git
+  branch -d` a branch not merged. A directory removed while its task can still run blocks the
+  task at its next claim, saying how to make it again (`git worktree add <path> <branch>`).
+
+### 18.5 Where a git task starts
+
+Its branch is `mt/<task_id>`, made with the worktree. It starts from its **upstream**: its
+parents, or with none the task that created it, as §2.3's rule 3 uses it: those of them that
+have a worktree in the same workspace, in their link order.
+
+- **None:** the workspace's `base`, else whatever its directory has checked out (`HEAD`), at
+  the moment the worktree is made. A detached `HEAD` is a commit like any other. Uncommitted
+  changes in the workspace's directory are not in the worktree: a worktree starts from a commit,
+  and git does not need the base checkout clean to make one.
+- **One:** that parent's branch, as it is then.
+- **Several (fan-in):** the first's branch, then each other's merged in, one at a time, with `git
+  merge --no-edit`, in the new worktree. A merge that conflicts is left there, unconcluded, and
+  the task blocks as `needs_input`, naming up to ten of the conflicting files and the directory.
+  A person resolves it there (`cd "$(mt kanban task worktree <task_id>)"`), commits, and unblocks
+  the task; the next claim finds the worktree on its branch, merges any parent's branch not yet in
+  it, and records it. A merge still unconcluded blocks the task again.
+- A parent's uncommitted changes are not on its branch, so its children do not see them: a work
+  run's prompt says to commit before reporting, and its reported commit says when it did not
+  (§7.8).
+
+### 18.6 What the board never does to a repository
+
+- It never merges, pushes, rebases or resets any branch but the task's own, and the task's own
+  only by the fan-in's merges when its worktree is made. Landing the work is a person's, or a
+  final task's.
+- It never forces anything, never deletes a branch, and never removes a worktree. Its one
+  clean-up is `git worktree prune` before it makes a worktree, which forgets only worktrees whose
+  directories are gone, so a path is never mistaken for a live one.
+- Every git command runs with no fsmonitor (`-c core.fsmonitor=false`, as §7.8's reads) and no
+  hook (`-c core.hooksPath=/dev/null`: `worktree add` would run `post-checkout`, and a merge its
+  own), with the agent allowlist of the gateway's environment (§7.8), and a 120 s timeout. A
+  merge's commit uses the repository's own `user.name` and `user.email`; with none, git refuses,
+  and the task blocks with its message.
+- **What counts as a repository**: the workspace's directory at the top of a working tree, or a
+  bare repository, asked with `GIT_CEILING_DIRECTORIES` at its parent, so a directory inside some
+  other repository, such as a home under version control, counts as none, and its tasks get
+  folders. One with a `.git` while git is not installed blocks its tasks rather than give them
+  empty folders.
+- **A branch `mt/<task_id>` already there, with no worktree of it at the task's path**, is
+  refused, never taken over: it may be a person's. A directory at the path with no such branch
+  is refused too. A directory and a branch both there, the worktree on its branch, is one this
+  gateway made and did not record (a merge left for a person, or a stop between the two): it is
+  taken up.
+- **A shallow clone** makes worktrees as any repository does; a fan-in whose merge base is
+  missing fails with git's message, and blocks.
+- **Two claims in one repository** make their worktrees one after the other: the dispatcher
+  queues them by the repository's common directory. Git's own locks stand between the board and
+  everyone else, the agents included.
+
+### 18.7 A directory that cannot be made
+
+A conflict, a branch in the way, a parent's branch or the base that is not there, a symlink,
+git missing for a repository, a full disk: the run ends `failed`, with the reason as its error,
+**not counted** (§8.2), and the task blocks as `needs_input` with the reason, which its
+subscribers hear (§9.4). No session is created, and the pass goes on with the next task.
+Unblocking the task claims it again.
+
+### 18.8 The runs
+
+- **One directory for every run of a task**, which is what native resume needs: a rework
+  resumes the implementer's provider session (§5.3) in the directory it was opened in, and a
+  same-task reviewer reads exactly the worktree the implementer wrote. A downstream review task
+  is a task of its own, and starts from its parent's branch.
+- **The prompt** (§7.1, item 4) says, after the task's contract, where the directory is: for a
+  work run in a worktree, that its branch is where the work goes, to be committed before
+  reporting, since the tasks after it start from the branch and nothing is merged for it; for a
+  review run, that the work under review is there; for a folder, that it is the task's own. Then
+  the directories of the upstream tasks that have one, to read, at most twenty.
+- **Gates** run in the task's directory (§7.7). A task whose directory is not made yet, a
+  person's report before any agent run, refuses them `gates_cannot_run`, saying so.
+- **The reported commit** (§7.8) is the worktree's `HEAD`: the task branch's.
+
+### 18.9 Seeing it
+
+- `/kanban task show` and `mt kanban task show` add `directory: <path> · branch mt/<task_id>`, or
+  `directory: its own, made before its next agent run`; `--json` gives `worktree: {path,
+  branch}`, or null for a task in a shared directory.
+- `mt kanban task worktree <task_id> [--board <name>] [--json]` prints the path alone, so a
+  person can `cd` to it; a task in a shared directory, or one whose directory is not made yet, is
+  refused `no_worktree`.
+- At startup, with the board on, the gateway says which workspaces are isolated.
+
+### 18.10 Limits
+
+- **Disk.** Each worktree is a whole checkout, and each task installs its own dependencies.
+- **Nothing is cleaned up** (§18.4).
+- **Chat sessions** in an isolated workspace share its directory with each other, and with any
+  task still working there.
+- **An upstream task in another workspace** is not merged in: its branch is in another
+  repository. Its directory is listed in the prompt.
+- **A gateway stopped while it merges** leaves the worktree as git left it: the next claim
+  finds the merge unconcluded, or git's lock, and blocks.
+- **A home inside a git repository**: an agent's own git commands in a folder task's directory
+  find that repository, and so does the reported commit (§7.8).
+
+*Added on 2026-11-10.* The user chose: the switch per workspace, as a mapping beside the plain
+path; a git task's start from its parents, with a fan-in's merge made when its worktree is, and a
+conflict blocking it as `needs_input`; nothing landed automatically; and an empty folder per
+task, with its parents' folders in its prompt, in a workspace that is not a repository.
+Recommended, for the user to confirm: the directories under `$MT_HOME/worktrees`; a base that is
+`HEAD` unless `base:` names one; a directory made before the first run and never removed by the
+board; a follow-up with no parents starting from the task that created it; every failure to make
+a directory blocking for a person rather than counted as a retry; and `mt kanban task worktree`
+and `mt workspace add --isolated`.

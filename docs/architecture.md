@@ -1221,7 +1221,7 @@ Steps 1–4 are unglamorous and *are* the durability guarantee. Building channel
 | 6 | Approvals with policy engine + parking + cross-channel resolution | approve from web what Telegram asked | schema and card surface done; **no policy engine, no parking**, and unreachable on the CLI driver |
 | 7 | Second ACP agent | **audits your abstractions** — expect to find leaks here | not started |
 | 8 | Channel adapters (web SSE first, then Telegram) | cursor-based reconnect works | **done first**, and it is Lark rather than web or Telegram |
-| 9 | Workspaces: worktree + checkpoints | can diff what the agent did overnight | not started — `plain-dir` only, one shared directory for every session |
+| 9 | Workspaces: worktree + checkpoints | can diff what the agent did overnight | worktrees designed per board task, not per session, for isolated workspaces (kanban spec §18); checkpoints not started; chat sessions share one directory per workspace |
 | 10 | Container backend | isolation for untrusted work | not started |
 | 11 | Structured-CLI driver | for agents without ACP | **done second, and it is the only driver that runs** |
 | 12 | PTY driver + delivery fence | only if genuinely required | not started, and no longer expected to be |
