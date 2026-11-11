@@ -423,7 +423,7 @@ describe('the task commands', () => {
   });
 
   it('takes a task verb after task, and says which it takes', async () => {
-    const takes = 'mt: kanban task takes new, list, show, assign, link, unblock, stop, archive or comment';
+    const takes = 'mt: kanban task takes new, list, show, assign, link, unblock, stop, archive, comment or worktree';
     for (const argv of [['task'], ['task', 'finish'], ['task', 'board', 'list'], ['task', 'gate', 'list', 'k_1']]) {
       const r = await mt(argv);
       expect(r.code).toBe(2);

@@ -43,6 +43,21 @@ describe('mt workspace add', () => {
     expect(loadTeamSettings(fx.env).workspaces['docs']).toBe(docs);
   });
 
+  it('adds an isolated workspace as a mapping the gateway reads', async () => {
+    fx = mtFixture();
+    const docs = docsDir();
+    const r = await fx.run(['workspace', 'add', 'docs', docs, '--isolated']);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('the gateway uses it, each of its tasks in a directory of its own, from its next start');
+    const text = readFileSync(fx.configPath, 'utf8');
+    expect((parseYaml(text) as { workspaces: Record<string, unknown> }).workspaces['docs']).toEqual({ path: docs, isolated: true });
+    const settings = loadTeamSettings(fx.env);
+    expect(settings.workspaces['docs']).toBe(docs);
+    expect(settings.isolated).toEqual({ docs: {} });
+    const listed = await fx.run(['workspace', 'list']);
+    expect(listed.out).toMatch(new RegExp(`^docs\\s+${docs}\\s+not registered yet, isolated$`, 'm'));
+  });
+
   it('refuses when there is no config file', async () => {
     fx = mtFixture();
     rmSync(fx.configPath);

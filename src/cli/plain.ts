@@ -5,6 +5,7 @@ import type { Assignee, GateRow } from '../kanban/types.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { INVISIBLE, stripControl } from '../text.js';
 import { table } from './args.js';
+import { workdirLine } from '../kanban/chat-render.js';
 
 /**
  * What the operator's `mt kanban` prints (spec §2.6): the board as chat shows it
@@ -102,6 +103,7 @@ export function showText(view: TaskView, gates: readonly GateRow[]): string[] {
   }
   if (view.parents.length > 0) out.push(`parents: ${view.parents.map((p) => `${p.taskId} (${view.statuses.get(p.taskId) ?? p.phase})`).join(', ')}`);
   if (view.children.length > 0) out.push(`children: ${view.children.map((c) => `${c.taskId} (${view.statuses.get(c.taskId) ?? c.phase})`).join(', ')}`);
+  if (view.workdir !== undefined) out.push(workdirLine(view.workdir, (t) => line(t, 4096)));
   if (task.body.trim() !== '') out.push('', ...indented(task.body, 4000), '');
   const contract = Object.entries(task.contract).filter(([, v]) => v !== undefined && v.trim() !== '');
   if (contract.length > 0) {

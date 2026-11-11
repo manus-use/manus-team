@@ -63,8 +63,8 @@ const USAGE = [
   '  mt role create <name> [--clone-from <role>] [--description "..."] [--own-workspace]',
   '  mt role list',
   '  mt role check [<name>]',
-  '  mt workspace add <name> <absolute-path>',
-  '  mt workspace add <name> --clone <git-url>',
+  '  mt workspace add <name> <absolute-path> [--isolated]',
+  '  mt workspace add <name> --clone <git-url> [--isolated]',
   '  mt workspace list',
   SERVICE_USAGE,
   '  mt kanban board list [all] [--json]',
@@ -83,6 +83,7 @@ const USAGE = [
   '  mt kanban task stop <task_id> [--board <name>] [--json]',
   '  mt kanban task archive <task_id> [--board <name>] [--json]',
   '  mt kanban task comment <task_id> <text...> [--board <name>] [--json]',
+  '  mt kanban task worktree <task_id> [--board <name>] [--json]',
   '  mt kanban gate add <task_id> [--timeout <s>] -- <command...>',
   '  mt kanban gate list <task_id>',
   '  mt kanban gate remove <task_id> <gate_id>',
@@ -231,14 +232,19 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       return roleCheck(name, io);
     }
     if (group === 'workspace' && command === 'add') {
-      const { values, positionals } = parse(rest, { clone: { type: 'string' } });
+      const { values, positionals } = parse(rest, { clone: { type: 'string' }, isolated: { type: 'boolean' } });
       const [name, path, extra] = positionals;
       if (name === undefined || extra !== undefined || (path === undefined) === (values.clone === undefined)) {
         throw new UsageError('workspace add takes a name and either an absolute path or --clone <git-url>');
       }
       // `await`, so a ConfigError from the async command is caught below and
       // reported as `mt: …` rather than escaping as a stack trace.
-      return await workspaceAdd(name, path === undefined ? { cloneUrl: values.clone ?? '' } : { path }, withGatewayFile(io));
+      return await workspaceAdd(
+        name,
+        path === undefined ? { cloneUrl: values.clone ?? '' } : { path },
+        withGatewayFile(io),
+        { isolated: values.isolated === true },
+      );
     }
     if (group === 'kanban') return await kanban(command, rest, io);
     if (group === 'service') {

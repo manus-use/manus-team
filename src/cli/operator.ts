@@ -496,6 +496,8 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
           assignee: task.assignee?.name ?? null,
           reviewer: task.reviewer?.name ?? null,
           workspace: task.workspace,
+          // Its own directory (spec §18), or null in the workspace's shared one; its path is null until made.
+          worktree: r.view.workdir === undefined ? null : { path: r.view.workdir.path, branch: r.view.workdir.branch },
           phase: task.phase,
           status: r.view.status,
           board: task.board,
@@ -635,8 +637,38 @@ function comment(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** The verbs of `mt kanban task`: chat's task commands that a terminal has (spec §2.6). */
-export const TASK_COMMANDS: readonly string[] = ['new', 'list', 'show', 'assign', 'link', 'unblock', 'stop', 'archive', 'comment'];
+/**
+ * `mt kanban task worktree <task> [--board <name>]`: a task's own directory
+ * (spec §18), alone on its line, so a person can `cd "$(mt kanban task worktree k_…)"`
+ * to resolve a merge there. Refused for a task in a shared directory.
+ */
+function worktree(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
+  const taskId = oneTask(positionals, 'worktree');
+  const board = boardFlag(values.board);
+  return act(io, values.json === true, 'mt kanban task worktree', (service) => {
+    const guard = offBoard(service, board, taskId);
+    if (guard !== undefined) return guard;
+    const r = service.show(taskId);
+    if (!r.ok) return refused(r);
+    const { task, workdir } = r.view;
+    if (workdir === undefined) {
+      const where = task.workspace === null ? 'has no workspace yet' : `works in the shared directory of workspace ${task.workspace}`;
+      return refused({ code: 'no_worktree', message: `task ${taskId} ${where}, not a directory of its own` });
+    }
+    if (workdir.path === null) {
+      return refused({ code: 'no_worktree', message: `task ${taskId}'s own directory is not made yet: it is made when an agent next takes the task up` });
+    }
+    return {
+      ok: true,
+      lines: [line(workdir.path, 4096)],
+      json: { task_id: taskId, workspace: task.workspace, path: workdir.path, branch: workdir.branch },
+    };
+  });
+}
+
+/** The verbs of `mt kanban task`: chat's task commands that a terminal has (spec §2.6), and `worktree`. */
+export const TASK_COMMANDS: readonly string[] = ['new', 'list', 'show', 'assign', 'link', 'unblock', 'stop', 'archive', 'comment', 'worktree'];
 
 /** `mt kanban task <verb> …`. */
 function task(args: readonly string[], io: MtIo): Promise<number> {
@@ -658,6 +690,8 @@ function task(args: readonly string[], io: MtIo): Promise<number> {
       return decide(verb, rest, io);
     case 'comment':
       return comment(rest, io);
+    case 'worktree':
+      return worktree(rest, io);
     default:
       throw new UsageError(`kanban task takes ${TASK_COMMANDS.slice(0, -1).join(', ')} or ${TASK_COMMANDS.at(-1)}`);
   }

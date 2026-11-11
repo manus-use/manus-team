@@ -112,11 +112,12 @@ export function expectedWorkspacePath(home: string, name: string): string {
 }
 
 /**
- * Adds `name: path` under `workspaces:` and writes the config file in place,
- * keeping its comments and mode. Throws if the file cannot be written; the file
- * is then as it was.
+ * Adds `name: path` under `workspaces:` -- `name: { path, isolated: true }` for an
+ * isolated workspace (spec §18) -- and writes the config file in place, keeping
+ * its comments and mode. Throws if the file cannot be written; the file is then
+ * as it was.
  */
-export function addToConfig(ws: NewWorkspace, path: string): void {
+export function addToConfig(ws: NewWorkspace, path: string, opts: { isolated?: boolean } = {}): void {
   const { doc } = ws;
   // `workspaces:` with no value parses as null, and setIn cannot add to it. Any
   // other non-map was already refused by loadTeamSettings, so this replaces only
@@ -130,7 +131,7 @@ export function addToConfig(ws: NewWorkspace, path: string): void {
     if (notes.length > 0) map.commentBefore = notes.join('\n');
     doc.set('workspaces', map);
   }
-  doc.setIn(['workspaces', ws.name], path);
+  doc.setIn(['workspaces', ws.name], opts.isolated === true ? doc.createNode({ path, isolated: true }) : path);
   writeInPlace(ws.configPath, String(doc));
 }
 
@@ -139,8 +140,13 @@ export function restoreConfig(ws: NewWorkspace): void {
   writeInPlace(ws.configPath, ws.text);
 }
 
-/** `mt workspace add` (spec §2.6). Refuses anything the next start would refuse. */
-export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): Promise<number> {
+/** `mt workspace add` (spec §2.6). Refuses anything the next start would refuse. `isolated`: each task gets its own directory (spec §18). */
+export async function workspaceAdd(
+  name: string,
+  target: AddTarget,
+  io: MtIo,
+  opts: { isolated?: boolean } = {},
+): Promise<number> {
   // Names and paths only, so an unset agent.passEnv name is no reason to fail
   // (see LoadOptions.unsetPassEnv).
   const settings = loadTeamSettings(io.env, undefined, { unsetPassEnv: [] });
@@ -184,17 +190,18 @@ export async function workspaceAdd(name: string, target: AddTarget, io: MtIo): P
     return refuse(io, final.error);
   }
   try {
-    addToConfig(ws, path);
+    addToConfig(ws, path, opts);
   } catch (err) {
     undo();
     return refuse(io, `cannot write ${configPath}: ${(err as Error).message}`);
   }
-  io.out(addedMessage(name, final.real, configPath));
+  io.out(addedMessage(name, final.real, configPath, opts.isolated === true));
   return 0;
 }
 
-export function addedMessage(name: string, real: string, configPath: string): string {
-  return `added workspace ${name} (${real}) to ${configPath}; the gateway uses it from its next start`;
+export function addedMessage(name: string, real: string, configPath: string, isolated = false): string {
+  const own = isolated ? ', each of its tasks in a directory of its own,' : '';
+  return `added workspace ${name} (${real}) to ${configPath}; the gateway uses it${own} from its next start`;
 }
 
 /** `mt workspace list`: each workspace, and whether the gateway has registered it. */
@@ -219,7 +226,7 @@ export function workspaceList(io: MtIo): number {
         : was === real
           ? 'registered'
           : `registered at ${was}: the gateway will refuse to start`;
-    rows.push([name, declared, status]);
+    rows.push([name, declared, settings.isolated?.[name] === undefined ? status : `${status}, isolated`]);
   }
   for (const [name, path] of [...recorded].sort(([a], [b]) => a.localeCompare(b))) {
     if (settings.workspaces[name] === undefined) rows.push([name, path, 'registered, not in the config']);
