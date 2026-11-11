@@ -26,8 +26,8 @@ file is for.
 | `approvals` | `db/approvals.ts` | |
 | `channel_bindings` | `db/bindings.ts` | |
 | `seen_messages` | `db/dedup.ts` | |
-| `workspaces` | `db/workspaces.ts` | Rows are added, never updated: `root_path` is fixed the first time a name is seen (spec §2.3). `repo_root`, `branch` and `lock_holder` stay null until worktrees. |
-| `kanban_tasks` | `db/kanban.ts` | `phase` is written only by its named transitions, each of which checks the current phase (spec §4.1). `workspace` is written once, while null. `board` (migration 006) is set at the insert and never changed. |
+| `workspaces` | `db/workspaces.ts` | Rows are added, never updated: `root_path` is fixed the first time a name is seen (spec §2.3). A task's own directory (`wt:<task_id>`, spec §18) is added by `registerWorktree` once it is made, with `repo_root`, and `branch` for a worktree. `lock_holder` stays null. |
+| `kanban_tasks` | `db/kanban.ts` | `phase` is written only by its named transitions, each of which checks the current phase (spec §4.1). `workspace` is written once, while null. `board` (migration 006) is set at the insert and never changed. `worktree` (migration 007) is written once, by a claim, while null (spec §18). |
 | `kanban_links` | `db/kanban.ts` | Added in the transaction that checks for a cycle and for an open run on the child (spec §3.2). Never deleted. |
 | `kanban_runs` | `db/kanban.ts` | Inserted by a claim. `outcome` is written once, on an undecided run; `ended_at` once, on a decided one (spec §3.3). `agent_config` gains `native` and `packageHash` once, by `recordRendering` (plan R). |
 | `kanban_comments` | `db/kanban.ts` | Rows are added, never updated. `steers` (migration 004) is set at the insert: 0 for a talk-tier person's comment from chat, which is shown to people and given to no agent. |

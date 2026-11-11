@@ -124,6 +124,12 @@ export interface TaskRow {
   createdFromTask: string | null;
   /** The board the task is on (spec §16): fixed at creation, and its follow-ups' too. */
   board: string;
+  /**
+   * Its own directory's id, `wt:<task_id>`, for a task in an isolated workspace
+   * (spec §18): decided at its first agent claim and fixed; null, the workspace's
+   * shared directory.
+   */
+  worktree: string | null;
 }
 
 /** The board every task was on before there were others, and every chat starts on (spec §16). */

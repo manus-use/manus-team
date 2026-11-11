@@ -57,10 +57,12 @@ export function movedMessage(name: string, recorded: string, path: string): stri
   );
 }
 
-/** Each registered name → its recorded directory. Empty before the migrations create the table. */
+/** Each registered name → its recorded directory; not a task's own directory. Empty before the migrations create the table. */
 export function registeredWorkspaces(db: Db): Map<string, string> {
   try {
-    const rows = db.prepare<[], { id: string; root_path: string }>('SELECT id, root_path FROM workspaces').all();
+    const rows = db
+      .prepare<[], { id: string; root_path: string }>(`SELECT id, root_path FROM workspaces WHERE id NOT LIKE 'wt:%'`)
+      .all();
     return new Map(rows.map((r) => [r.id, r.root_path]));
   } catch (err) {
     if (err instanceof Error && /no such table/.test(err.message)) return new Map();
@@ -77,4 +79,73 @@ export function registrationsAt(dbPath: string): Map<string, string> {
   } finally {
     db.close();
   }
+}
+
+/**
+ * A task's own directory, in an isolated workspace (spec §18): a git worktree on
+ * its own branch, or a folder of its own. Its id is `wt:<task_id>`, which no
+ * configured name can be, since a name has no `:`.
+ */
+export interface TaskDirectory {
+  id: string;
+  kind: 'git-worktree' | 'plain-dir';
+  /** Absolute and real; it never moves (architecture Appendix A). */
+  rootPath: string;
+  /** The workspace's own directory: the repository a worktree belongs to, or the workspace a folder was made for. */
+  repoRoot: string;
+  /** The worktree's branch; null for a folder. */
+  branch: string | null;
+}
+
+/** A task's directory id: the task's own, kind-prefixed (spec §2.3). */
+export function worktreeId(taskId: string): string {
+  return `wt:${taskId}`;
+}
+
+export function isWorktreeId(id: string): boolean {
+  return id.startsWith('wt:');
+}
+
+/**
+ * Record a task's directory once it is made, before any session works in it.
+ * Written once: the same directory again changes nothing, and another for the
+ * same id is refused, as a configured name's is (spec §2.3).
+ */
+export function registerWorktree(db: Db, dir: TaskDirectory, now: number): RegisterResult {
+  if (!isWorktreeId(dir.id)) return { error: `${dir.id} is not a task's directory id` };
+  return txImmediate(db, (d) => {
+    const row = d.prepare<[string], { root_path: string }>('SELECT root_path FROM workspaces WHERE id = ?').get(dir.id);
+    if (row !== undefined) {
+      return row.root_path === dir.rootPath
+        ? { ok: true, added: [] }
+        : { error: `${dir.id} is ${row.root_path}, recorded when it was made, not ${dir.rootPath}` };
+    }
+    d.prepare('INSERT INTO workspaces (id, kind, root_path, repo_root, branch, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      dir.id,
+      dir.kind,
+      dir.rootPath,
+      dir.repoRoot,
+      dir.branch,
+      now,
+    );
+    return { ok: true, added: [dir.id] };
+  });
+}
+
+/** A task's directory as it was recorded when made; undefined before then. */
+export function worktreeOf(db: Db, id: string): TaskDirectory | undefined {
+  if (!isWorktreeId(id)) return undefined;
+  const row = db
+    .prepare<[string], { id: string; kind: string; root_path: string; repo_root: string | null; branch: string | null }>(
+      'SELECT id, kind, root_path, repo_root, branch FROM workspaces WHERE id = ?',
+    )
+    .get(id);
+  if (row === undefined) return undefined;
+  return {
+    id: row.id,
+    kind: row.kind === 'git-worktree' ? 'git-worktree' : 'plain-dir',
+    rootPath: row.root_path,
+    repoRoot: row.repo_root ?? '',
+    branch: row.branch,
+  };
 }

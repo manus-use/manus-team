@@ -104,7 +104,7 @@ describe('createGateway', () => {
     });
     const gateway = await createGateway(config, team);
     try {
-      expect(lines.some((l) => l.endsWith(` schema at version 6 (${config.dbPath})\n`))).toBe(true);
+      expect(lines.some((l) => l.endsWith(` schema at version 7 (${config.dbPath})\n`))).toBe(true);
     } finally {
       await gateway.stop();
     }
