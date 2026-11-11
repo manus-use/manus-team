@@ -1036,7 +1036,24 @@ export class KanbanService {
     const view = taskView(this.#db, taskId);
     if (view === undefined) return board.refuse('not_found', `no task ${taskId}`);
     const waiting = this.#waiting(view);
-    return { ok: true, view: waiting.length === 0 ? view : { ...view, waiting } };
+    const withWaiting = waiting.length === 0 ? view : { ...view, waiting };
+    return { ok: true, view: this.#unmade(view) ? { ...withWaiting, workdir: { path: null, branch: null, first: true } } : withWaiting };
+  }
+
+  /**
+   * A task that can still run, in an isolated workspace, that no agent has taken
+   * up: its first agent claim gives it a directory of its own (spec §18.2).
+   */
+  #unmade(view: TaskView): boolean {
+    const { task } = view;
+    return (
+      task.worktree === null &&
+      task.workspace !== null &&
+      this.#isolated.has(task.workspace) &&
+      task.phase !== 'done' &&
+      task.phase !== 'archived' &&
+      !view.runs.some((r) => r.agentConfig !== null)
+    );
   }
 
   /**

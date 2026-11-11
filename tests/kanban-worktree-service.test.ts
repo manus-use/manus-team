@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { registerWorktree } from '../src/db/workspaces.js';
 import type { CommitReader } from '../src/kanban/commit.js';
 import type { GateExit, GateRunOptions } from '../src/kanban/gates.js';
+import { renderShow } from '../src/kanban/chat-render.js';
 import { KanbanService } from '../src/kanban/service.js';
 import type { RunRow, TaskRow } from '../src/kanban/types.js';
 import { ManualClock, testDb, type TestDb } from './helpers/db.js';
@@ -147,6 +148,18 @@ describe('a task with a directory of its own', () => {
     expect(plain.claim(other.taskId)).toMatchObject({ ok: false, code: 'workspace_busy' });
     release?.();
     expect(await report).toMatchObject({ ok: true });
+  });
+
+  it('says, before any agent has taken it up, that its directory is made when one first does', () => {
+    const task = create();
+    const view = s.show(task.taskId);
+    if (!view.ok) throw new Error(view.message);
+    const shown = renderShow(view.view, []);
+    expect(shown.split('\n')).toContain('directory: its own, not made yet: it is made when an agent first takes the task up');
+    expect(shown).not.toMatch(/git/i);
+    // A task in a workspace that is not isolated says nothing of a directory.
+    const shared = s.show(create('api').taskId);
+    expect(shared.ok && shared.view.workdir).toBeUndefined();
   });
 
   it('says where its directory is, and its branch, once made', () => {

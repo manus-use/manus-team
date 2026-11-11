@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from 'node:fs';
-import { listed } from '../kanban/chat-render.js';
+import { listed, whenMade } from '../kanban/chat-render.js';
 import { boardSetting, isPerson, LIST_FILTERS, tooBig, type NewTaskCommand } from '../kanban/chat-parse.js';
 import type { KanbanService } from '../kanban/service.js';
 import { maskAll, workerSocketPath } from '../kanban/socket.js';
@@ -657,7 +657,7 @@ function worktree(rest: readonly string[], io: MtIo): Promise<number> {
       return refused({ code: 'no_worktree', message: `task ${taskId} ${where}, not a directory of its own` });
     }
     if (workdir.path === null) {
-      return refused({ code: 'no_worktree', message: `task ${taskId}'s own directory is not made yet: it is made when an agent next takes the task up` });
+      return refused({ code: 'no_worktree', message: `task ${taskId}'s own directory is not made yet: ${whenMade(workdir)}` });
     }
     return {
       ok: true,

@@ -1,4 +1,5 @@
-import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runMt } from '../src/cli/mt.js';
 import { claim } from '../src/db/kanban.js';
@@ -19,9 +20,18 @@ let gateway: Db;
 
 beforeEach(() => {
   clearSecrets();
-  f = mtFixture((workspace) =>
-    [`workspace: ${workspace}`, 'agent:', '  driver: structured-cli', '  command: bytesec', '  unsupervised: true', ''].join('\n'),
-  );
+  f = mtFixture((workspace) => {
+    // web is isolated, its tasks each in a directory of their own; default is shared.
+    const web = join(dirname(workspace), 'web');
+    mkdirSync(web);
+    return [
+      'workspaces:',
+      `  default: ${workspace}`,
+      '  web:',
+      `    path: ${web}`,
+      '    isolated: true',
+      'agent:', '  driver: structured-cli', '  command: bytesec', '  unsupervised: true', ''].join('\n');
+  });
   gateway = openDb(join(f.home, 'team.db'));
   migrate(gateway, SCHEMA_DIR);
 });
@@ -84,6 +94,15 @@ describe('mt kanban task worktree', () => {
     });
     expect((await mt(['task', 'worktree'])).code).toBe(2);
   });
+
+  it('says of a task in an isolated workspace that no agent has taken up yet that its directory is made when one first does', async () => {
+    const fresh = newTask(gateway, { assignee: { kind: 'role', name: 'default' }, workspace: 'web' });
+    expect(await mt(['task', 'worktree', fresh.taskId])).toEqual({
+      code: 1,
+      out: '',
+      err: `mt: task ${fresh.taskId}'s own directory is not made yet: it is made when an agent first takes the task up`,
+    });
+  });
 });
 
 describe('a task with a folder of its own', () => {
@@ -116,5 +135,13 @@ describe('mt kanban task show', () => {
     const shared = newTask(gateway, { workspace: 'default' });
     expect((await mt(['task', 'show', shared.taskId])).out).not.toContain('directory:');
     expect(JSON.parse((await mt(['task', 'show', shared.taskId, '--json'])).out).task.worktree).toBeNull();
+  });
+
+  it('says of a task in an isolated workspace that no agent has taken up yet that its directory is made when one first does', async () => {
+    const fresh = newTask(gateway, { assignee: { kind: 'role', name: 'default' }, workspace: 'web' });
+    const shown = (await mt(['task', 'show', fresh.taskId])).out;
+    expect(shown.split('\n')).toContain('directory: its own, not made yet: it is made when an agent first takes the task up');
+    expect(shown).not.toMatch(/git/i);
+    expect(JSON.parse((await mt(['task', 'show', fresh.taskId, '--json'])).out).task.worktree).toEqual({ path: null, branch: null });
   });
 });

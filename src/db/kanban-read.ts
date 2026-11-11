@@ -537,9 +537,11 @@ export interface TaskView {
   /**
    * For a task with a directory of its own (spec §18): where it is, and its
    * branch for a git worktree. `path` is null until the directory is made,
-   * before the task's next agent run.
+   * before the task's next agent run. `first`: no agent has taken up the task
+   * yet, in an isolated workspace, so its first agent claim gives it one; set by
+   * the service's `show`, which knows the isolated workspaces.
    */
-  workdir?: { path: string | null; branch: string | null };
+  workdir?: { path: string | null; branch: string | null; first?: true };
 }
 
 /** A task's display status (spec §4.1), derived from its parents and its runs. */

@@ -302,9 +302,17 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
  * Where a task with a directory of its own works (spec §18): `/kanban task show`
  * and `mt kanban task show` say so, in the same words.
  */
-export function workdirLine(w: { path: string | null; branch: string | null }, escape: (text: string) => string = (t) => t): string {
-  if (w.path === null) return 'directory: its own, not made yet: it is made when an agent next takes the task up';
+export function workdirLine(
+  w: { path: string | null; branch: string | null; first?: true },
+  escape: (text: string) => string = (t) => t,
+): string {
+  if (w.path === null) return `directory: its own, not made yet: ${whenMade(w)}`;
   return `directory: ${escape(w.path)}${w.branch === null ? '' : ` · branch ${escape(w.branch)}`}`;
+}
+
+/** When a task's own directory that is not made yet will be: at the agent claim that gives it one, or the next. */
+export function whenMade(w: { first?: true }): string {
+  return `it is made when an agent ${w.first === true ? 'first' : 'next'} takes the task up`;
 }
 
 /** `/kanban gate list` (spec §7.7): each gate's command masked, with its timeout and who defined it. */

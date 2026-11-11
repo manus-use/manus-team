@@ -39,8 +39,9 @@ workspace: /srv/repo
 #   docs: /srv/repos/docs
 #   # Isolated: each board task gets a directory of its own, so tasks run side by
 #   # side. In a plain folder, an empty folder each, whose prompt lists its
-#   # parents' folders. In a git repository, and only there, a worktree on the
-#   # branch mt/<task_id>, started from `base` (unset: whatever the directory has
+#   # parents' folders and names the workspace's own folder for shared inputs.
+#   # In a git repository, and only there, a worktree on the branch
+#   # mt/<task_id>, started from `base` (unset: whatever the directory has
 #   # checked out) or from the task's parents. Nothing is ever merged for you.
 #   notes:
 #     path: /srv/notes
