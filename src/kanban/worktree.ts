@@ -237,16 +237,28 @@ export class TaskDirectories implements Workdirs {
     return this.#serial(common, () => this.#worktree(task, worktree, base, path));
   }
 
-  /** `<root>/<workspace>`, made `0700` if it is not there, and refused unless a real directory. */
+  /**
+   * `<root>/<workspace>`, made `0700` if it is not there, and refused unless a
+   * real directory. Each is looked at before anything is made, so a symlinked
+   * root never has a directory made in its target, and a dangling one is named
+   * as a symlink.
+   */
   #parentFor(workspace: string): { dir: string } | { problem: string } {
     const root = this.#deps.root;
     const dir = join(root, workspace);
+    const refused = (d: string): string | undefined => {
+      const stat = lstatSync(d, { throwIfNoEntry: false });
+      if (stat === undefined || (stat.isDirectory() && !stat.isSymbolicLink())) return undefined;
+      return `${d} is ${stat.isSymbolicLink() ? 'a symlink' : 'not a directory'}; tasks' directories must be real directories under the gateway's home`;
+    };
+    for (const d of [root, dir]) {
+      const problem = refused(d);
+      if (problem !== undefined) return { problem };
+    }
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     for (const d of [root, dir]) {
-      const stat = lstatSync(d);
-      if (stat.isSymbolicLink() || !stat.isDirectory()) {
-        return { problem: `${d} is ${stat.isSymbolicLink() ? 'a symlink' : 'not a directory'}; tasks' directories must be real directories under the gateway's home` };
-      }
+      const problem = refused(d);
+      if (problem !== undefined) return { problem };
     }
     return { dir: realpathSync(dir) };
   }
@@ -271,11 +283,13 @@ export class TaskDirectories implements Workdirs {
     const starts = this.#upstream(task);
     if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) {
       // Not recorded, so not one this gateway finished: a git worktree add that was stopped, or someone else's.
-      return fail(`${path} is there already, left by a git worktree add that did not finish, or put there by someone else. ${clearAway(base, path)}`);
+      return fail(
+        `${path} is there already, left by a git worktree add that did not finish, or put there by someone else. ${await this.#clearAway(base, path)}`,
+      );
     }
     const configured = task.workspace === null ? undefined : this.#deps.isolated[task.workspace]?.base;
     const first = starts[0];
-    const from = first !== undefined ? `refs/heads/${first.branch}` : configured ?? 'HEAD';
+    const from = first !== undefined ? `refs/heads/${first.branch}` : configured === undefined ? 'HEAD' : await this.#baseRef(base, configured);
     const start = await this.#run(base, ['rev-parse', '--verify', '--quiet', `${from}^{commit}`]);
     if (start.code !== 0) {
       return fail(
@@ -302,7 +316,7 @@ export class TaskDirectories implements Workdirs {
       added = await this.#run(base, ['worktree', 'add', '--quiet', '--no-track', '-b', branch, path, commit]);
     }
     if (added.code !== 0) {
-      const left = lstatSync(path, { throwIfNoEntry: false }) === undefined ? '' : `. It left ${path}. ${clearAway(base, path)}`;
+      const left = lstatSync(path, { throwIfNoEntry: false }) === undefined ? '' : `. It left ${path}. ${await this.#clearAway(base, path)}`;
       return fail(`git worktree add failed: ${this.#said(added)}${left}`);
     }
     const dir: TaskDirectory = { id, kind: 'git-worktree', rootPath: path, repoRoot: base, branch };
@@ -314,10 +328,12 @@ export class TaskDirectories implements Workdirs {
   /** A recorded worktree, again: still on its branch, and its parents' branches merged until its first session starts. */
   async #again(task: TaskRow, dir: TaskDirectory): Promise<Prepared> {
     const branch = dir.branch ?? taskBranch(task.taskId);
-    const on = await this.#run(dir.rootPath, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-    if (on.code !== 0 || on.stdout.trim() !== branch) {
+    // The full ref, not --short: a tag of the branch's name makes git shorten it to heads/<branch>.
+    const on = await this.#run(dir.rootPath, ['symbolic-ref', '--quiet', 'HEAD']);
+    const ref = on.stdout.trim();
+    if (on.code !== 0 || ref !== `refs/heads/${branch}`) {
       // Its branch is what its children start from, and what its reported commit names: work on another would be lost to both.
-      const now = on.code === 0 ? `branch ${on.stdout.trim()}` : on.code === null ? this.#said(on) : 'no branch';
+      const now = on.code === 0 ? `branch ${ref.replace(/^refs\/heads\//, '')}` : on.code === null ? this.#said(on) : 'no branch';
       return fail(
         `${dir.rootPath} is on ${now}, not its branch ${branch}: finish or abort what is in progress there (a rebase, a merge), ` +
           `or switch it back to ${branch}; then unblock the task`,
@@ -374,6 +390,37 @@ export class TaskDirectories implements Workdirs {
     });
   }
 
+  /** A workspace's configured base: its branch of that name when there is one, as a tag of the same name would otherwise win; else as given. */
+  async #baseRef(repo: string, configured: string): Promise<string> {
+    const branch = `refs/heads/${configured}`;
+    const r = await this.#run(repo, ['rev-parse', '--verify', '--quiet', `${branch}^{commit}`]);
+    return r.code === 0 ? branch : configured;
+  }
+
+  /**
+   * What a person runs to clear a half-made or unrecorded worktree out of a
+   * task's way. A path git lists is a registered worktree, which moving aside
+   * would leave registered, so git is used to remove it; any other is moved aside.
+   */
+  async #clearAway(base: string, path: string): Promise<string> {
+    const listed = await this.#run(base, ['worktree', 'list', '--porcelain']);
+    const real = (p: string): string => {
+      try {
+        return realpathSync(p);
+      } catch {
+        return resolve(p);
+      }
+    };
+    const mine = real(path);
+    const registered =
+      listed.code === 0 &&
+      listed.stdout.split('\n').some((l) => l.startsWith('worktree ') && real(l.slice('worktree '.length)) === mine);
+    return registered
+      ? `In ${base}, move out anything you need, then run git worktree unlock ${path} if it is locked, ` +
+          `and git worktree remove --force ${path}; then unblock the task`
+      : `If it holds nothing you need, move it aside; then unblock the task`;
+  }
+
   #record(dir: TaskDirectory): Prepared {
     const r = registerWorktree(this.#deps.db, dir, this.#clock.now());
     return 'error' in r ? fail(r.error) : { ok: true, dir };
@@ -412,14 +459,6 @@ export class TaskDirectories implements Workdirs {
     const text = `${r.stderr}\n${r.stdout}`.trim();
     return text === '' ? 'git said nothing' : text.split('\n').slice(-3).join(' ').trim();
   }
-}
-
-/** What a person runs to clear a half-made or unrecorded worktree out of a task's way. */
-function clearAway(base: string, path: string): string {
-  return (
-    `If it holds nothing you need, in ${base} run git worktree unlock ${path} if git worktree list shows it locked, ` +
-    `then git worktree remove --force ${path}, or move it aside; then unblock the task`
-  );
 }
 
 function gone(dir: TaskDirectory): string {

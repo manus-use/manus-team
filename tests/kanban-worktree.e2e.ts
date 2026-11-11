@@ -132,6 +132,19 @@ describe('a task with no parents', () => {
     });
   });
 
+  it('takes a branch for its base over a tag of the same name, and a tag when there is no such branch', async () => {
+    git(repo, 'checkout', '-q', '-b', 'release');
+    const branchTip = commit(repo, 'CHANGES', 'branch\n');
+    git(repo, 'checkout', '-q', 'main');
+    const tagged = commit(repo, 'TAGGED', 'tag\n');
+    git(repo, 'tag', 'release', tagged);
+    git(repo, 'tag', 'v1', tagged);
+    const fromBranch = await made(directories({ web: repo }, { web: { base: 'release' } }), claimed());
+    expect(git(fromBranch, 'rev-parse', 'HEAD')).toBe(branchTip);
+    const fromTag = await made(directories({ web: repo }, { web: { base: 'v1' } }), claimed());
+    expect(git(fromTag, 'rev-parse', 'HEAD')).toBe(tagged);
+  });
+
   it('runs no hook of the repository', async () => {
     const marker = join(dir, 'hook-ran');
     mkdirSync(join(repo, '.git', 'hooks'), { recursive: true });
@@ -245,6 +258,49 @@ describe('what it refuses, changing nothing', () => {
     symlinkSync(elsewhere, root);
     const r = await directories().prepare(claimed());
     expect(r).toEqual({ ok: false, reason: `${root} is a symlink; tasks' directories must be real directories under the gateway's home` });
+    // Nothing was made inside the symlink's target.
+    expect(existsSync(join(elsewhere, 'web'))).toBe(false);
+  });
+
+  it('a dangling symlink for the worktrees', async () => {
+    symlinkSync(join(dir, 'nowhere'), root);
+    const r = await directories().prepare(claimed());
+    expect(r).toEqual({ ok: false, reason: `${root} is a symlink; tasks' directories must be real directories under the gateway's home` });
+    expect(existsSync(join(dir, 'nowhere'))).toBe(false);
+  });
+
+  it("a symlinked directory for the workspace's worktrees", async () => {
+    const elsewhere = join(dir, 'elsewhere');
+    mkdirSync(elsewhere);
+    mkdirSync(root);
+    symlinkSync(elsewhere, join(root, 'web'));
+    const task = claimed();
+    const r = await directories().prepare(task);
+    expect(r).toEqual({ ok: false, reason: `${join(root, 'web')} is a symlink; tasks' directories must be real directories under the gateway's home` });
+    expect(existsSync(join(elsewhere, task.taskId))).toBe(false);
+  });
+
+  it('a path git lists as a worktree, which it says to remove with git, not move aside', async () => {
+    const task = claimed();
+    const path = join(root, 'web', task.taskId);
+    mkdirSync(join(root, 'web'), { recursive: true });
+    git(repo, 'worktree', 'add', '-q', '--detach', path);
+    const r = await directories().prepare(task);
+    if (r.ok) throw new Error('prepared');
+    expect(r.reason).toContain(
+      `move out anything you need, then run git worktree unlock ${realpathSync(path)} if it is locked, and git worktree remove --force ${realpathSync(path)}`,
+    );
+    expect(r.reason).not.toContain('move it aside');
+  });
+
+  it('a path git does not list, which it says to move aside', async () => {
+    const task = claimed();
+    const path = join(root, 'web', task.taskId);
+    mkdirSync(path, { recursive: true });
+    const r = await directories().prepare(task);
+    if (r.ok) throw new Error('prepared');
+    expect(r.reason).toContain('move it aside');
+    expect(r.reason).not.toContain('git worktree remove');
   });
 });
 
@@ -346,6 +402,22 @@ describe('what it takes care over', () => {
         `${path} is on branch elsewhere, not its branch mt/${task.taskId}: finish or abort what is in progress there ` +
         `(a rebase, a merge), or switch it back to mt/${task.taskId}; then unblock the task`,
     });
+  });
+
+  it('goes on in a recorded worktree when a tag has its branch\'s name', async () => {
+    const d = directories();
+    const task = claimed();
+    const path = await made(d, task);
+    git(repo, 'tag', `mt/${task.taskId}`);
+    expect(await made(d, task)).toBe(path);
+  });
+
+  it('names a branch, not refs/heads/, when a recorded worktree is on another', async () => {
+    const d = directories();
+    const task = claimed();
+    const path = await made(d, task);
+    git(path, 'checkout', '-q', '--detach');
+    expect(await d.prepare(task)).toMatchObject({ ok: false, reason: expect.stringContaining(`${path} is on no branch, not its branch mt/${task.taskId}`) });
   });
 
   it('blocks a git workspace whose directory is gone, and records nothing, so it is a worktree once the repository is back', async () => {
