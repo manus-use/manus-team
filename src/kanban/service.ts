@@ -1041,19 +1041,35 @@ export class KanbanService {
   }
 
   /**
-   * A task that can still run, in an isolated workspace, that no agent has taken
-   * up: its first agent claim gives it a directory of its own (spec §18.2).
+   * A task that can still run, in an isolated workspace, fixed or as its next
+   * claim would resolve it, that no agent has taken up: its first agent claim
+   * gives it a directory of its own (spec §18.2).
    */
   #unmade(view: TaskView): boolean {
     const { task } = view;
-    return (
-      task.worktree === null &&
-      task.workspace !== null &&
-      this.#isolated.has(task.workspace) &&
-      task.phase !== 'done' &&
-      task.phase !== 'archived' &&
-      !view.runs.some((r) => r.agentConfig !== null)
-    );
+    if (task.worktree !== null || task.phase === 'done' || task.phase === 'archived') return false;
+    if (view.runs.some((r) => r.agentConfig !== null)) return false;
+    const who = task.phase === 'review' ? task.reviewer : task.assignee;
+    const workspace = this.#claimWorkspace(view, who?.kind === 'role' ? this.#roles.get(who.name) : undefined);
+    return workspace !== undefined && this.#isolated.has(workspace);
+  }
+
+  /**
+   * The workspace a claim of the task now would give it: its own, or, while it
+   * has none, as the claim resolves it (spec §2.3) for a run of `role`, or of a
+   * person when undefined; undefined when its parents' workspaces conflict.
+   */
+  #claimWorkspace(view: TaskView, role: Role | undefined): string | undefined {
+    const { task } = view;
+    if (task.workspace !== null) return task.workspace;
+    const from = task.createdFromTask === null ? undefined : getTask(this.#db, task.createdFromTask);
+    const resolved = resolveTaskWorkspace({
+      own: null,
+      roleWorkspace: role?.workspace,
+      upstream: view.parents.length > 0 ? view.parents.map((p) => p.workspace) : from === undefined ? [] : [from.workspace],
+      boardWorkspace: getBoard(this.#db, task.board)?.workspace ?? null,
+    });
+    return 'conflict' in resolved ? undefined : resolved.workspace;
   }
 
   /**
@@ -1079,19 +1095,8 @@ export class KanbanService {
     if (!claimant.ok) return [];
     const role = claimant.role;
     // The workspace the claim would give it, resolved as the claim resolves it.
-    let workspace = task.workspace;
-    if (workspace === null) {
-      const from = task.createdFromTask === null ? undefined : getTask(this.#db, task.createdFromTask);
-      const resolved = resolveTaskWorkspace({
-        own: null,
-        roleWorkspace: role?.workspace,
-        upstream: view.parents.length > 0 ? view.parents.map((p) => p.workspace) : from === undefined ? [] : [from.workspace],
-        boardWorkspace: getBoard(this.#db, task.board)?.workspace ?? null,
-      });
-      if ('conflict' in resolved) return [];
-      workspace = resolved.workspace;
-    }
-    if (!this.#workspaces.has(workspace)) return [];
+    const workspace = this.#claimWorkspace(view, role);
+    if (workspace === undefined || !this.#workspaces.has(workspace)) return [];
     const reached = limitsReached(this.#db, {
       maxRunning: this.#maxRunning,
       board: task.board,
