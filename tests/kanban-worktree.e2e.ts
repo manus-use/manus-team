@@ -426,7 +426,10 @@ describe('what it takes care over', () => {
     expect(existsSync(marker)).toBe(false);
     git(repo, 'config', '--unset', 'filter.slow.smudge');
     const path = join(realpathSync(root), 'web', task.taskId);
-    expect(await quick.prepare(task)).toMatchObject({ ok: false, reason: expect.stringContaining(`${path} is there already, left by a git worktree add that did not finish`) });
+    // A killed add leaves its worktree locked as initializing, as one still running does: wait, and if refused again, clear it.
+    const again = await quick.prepare(task);
+    expect(again).toMatchObject({ ok: false, reason: expect.stringContaining(`${path} is there already, and git may still be adding it as a worktree`) });
+    expect(again).toMatchObject({ reason: expect.stringContaining(`If it is refused again, the add was stopped: In ${repo}, move out anything you need`) });
     // The person does as the reason says.
     git(repo, 'worktree', 'unlock', path);
     git(repo, 'worktree', 'remove', '--force', path);
@@ -542,11 +545,133 @@ describe('a worktree a git worktree add finished after the gateway stopped', () 
     expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
   });
 
-  it('is refused at another commit than it would start from', async () => {
+  it('is refused at another commit than it would start from, saying where it is, with advice that clears it in one round', async () => {
     const task = claimed();
     const path = leftBy(task, `mt/${task.taskId}`);
-    commit(path, 'other.txt', 'someone else\n');
+    const start = git(repo, 'rev-parse', 'HEAD');
+    const other = commit(path, 'other.txt', 'someone else\n');
+    const r = await directories().prepare(task);
+    expect(r).toMatchObject({ ok: false, reason: expect.stringContaining(`it is at ${other.slice(0, 12)}; the task now starts from ${start.slice(0, 12)}`) });
+    expect(r).toMatchObject({ reason: expect.stringContaining(`git worktree remove --force ${path}, then git branch -D mt/${task.taskId}`) });
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
+    git(repo, 'worktree', 'remove', '--force', path);
+    git(repo, 'branch', '-D', `mt/${task.taskId}`);
+    expect(await made(directories(), task)).toBe(path);
+    expect(git(path, 'rev-parse', 'HEAD')).toBe(start);
+  });
+
+  it("is taken up when its parent committed again since, and brought to the parent's branch", async () => {
+    const d = directories();
+    const parent = claimed();
+    const parentDir = await made(d, parent);
+    commit(parentDir, 'a.txt', 'first\n');
+    finish(parent);
+    const child = newTask(t.db, { workspace: 'web' });
+    link(t.db, parent.taskId, child.taskId, 'lark:on_alice', NOW);
+    const r = claim(t.db, { taskId: child.taskId, claimant: claimantFor(t.db, child.taskId), workspaces: new Set(['web']), isolated: new Set(['web']) }, NOW);
+    if (!r.ok) throw new Error(r.message);
+    const path = leftBy(r.task, `mt/${child.taskId}`, `mt/${parent.taskId}`);
+    const again = commit(parentDir, 'a.txt', 'again\n');
+    expect(await made(d, r.task)).toBe(path);
+    expect(git(path, 'rev-parse', 'HEAD')).toBe(again);
+    expect(git(path, 'status', '--porcelain')).toBe('');
+  });
+
+  it("is taken up for a fan-in whose first parent committed again since, and the merges go on from its branch", async () => {
+    const d = directories();
+    const [a, b] = [claimed(), claimed()];
+    const aDir = await made(d, a);
+    const tipA = commit(aDir, 'a.txt', 'a\n');
+    commit(await made(d, b), 'b.txt', 'b\n');
+    for (const p of [a, b]) finish(p);
+    const child = newTask(t.db, { workspace: 'web' });
+    for (const p of [a, b]) link(t.db, p.taskId, child.taskId, 'lark:on_alice', NOW);
+    const r = claim(t.db, { taskId: child.taskId, claimant: claimantFor(t.db, child.taskId), workspaces: new Set(['web']), isolated: new Set(['web']) }, NOW);
+    if (!r.ok) throw new Error(r.message);
+    const path = leftBy(r.task, `mt/${child.taskId}`, tipA);
+    const again = commit(aDir, 'a.txt', 'a again\n');
+    expect(await made(d, r.task)).toBe(path);
+    expect(git(path, 'rev-parse', 'HEAD^1')).toBe(again);
+    expect(readFileSync(join(path, 'b.txt'), 'utf8')).toBe('b\n');
+    expect(git(path, 'log', '-1', '--format=%s')).toBe(`Merge mt/${b.taskId} into mt/${child.taskId}`);
+  });
+
+  it('is refused when git lists it as prunable, its .git gone, inside a clean repository above it', async () => {
+    const task = claimed();
+    const path = leftBy(task, `mt/${task.taskId}`);
+    rmSync(join(path, '.git'));
+    const above = join(dir, 'home');
+    git(above, 'init', '-q', '-b', 'main');
+    git(above, 'config', 'user.name', 't');
+    git(above, 'config', 'user.email', 't@example.com');
+    git(above, 'add', '-A');
+    git(above, 'commit', '-q', '-m', 'everything');
+    expect(git(repo, 'worktree', 'list', '--porcelain')).toContain('prunable');
     expect(await directories().prepare(task)).toEqual(refused(task));
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
+    expect(git(repo, 'worktree', 'list', '--porcelain')).toContain(path);
+  });
+
+  it('is refused when a separate clone stands at its path', async () => {
+    const task = claimed();
+    const path = leftBy(task, `mt/${task.taskId}`);
+    rmSync(path, { recursive: true, force: true });
+    git(dir, 'clone', '-q', repo, path);
+    expect(await directories().prepare(task)).toEqual(refused(task));
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
+  });
+
+  it('is refused with an untracked file in it, though the global configuration hides untracked files', async () => {
+    git(repo, 'config', '--global', 'status.showUntrackedFiles', 'no');
+    const task = claimed();
+    const path = leftBy(task, `mt/${task.taskId}`);
+    writeFileSync(join(path, 'new.txt'), 'new\n');
+    expect(git(path, 'status', '--porcelain')).toBe('');
+    expect(await directories().prepare(task)).toEqual(refused(task));
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
+  });
+
+  it('is refused with an ignored file in it, which a fresh git worktree add never makes', async () => {
+    commit(repo, '.gitignore', '*.log\n');
+    const task = claimed();
+    const path = leftBy(task, `mt/${task.taskId}`);
+    writeFileSync(join(path, 'build.log'), 'built\n');
+    expect(await directories().prepare(task)).toEqual(refused(task));
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
+  });
+
+  it('is refused when locked with a reason, saying to unlock and remove it', async () => {
+    const task = claimed();
+    const path = leftBy(task, `mt/${task.taskId}`);
+    git(repo, 'worktree', 'lock', '--reason', 'on a disk that comes and goes', path);
+    const r = await directories().prepare(task);
+    expect(r).toEqual(refused(task));
+    expect(r).toMatchObject({ reason: expect.stringContaining(`git worktree unlock ${path}`) });
+  });
+
+  it('is refused while locked as initializing, saying git may still be adding it', async () => {
+    const task = claimed();
+    const path = leftBy(task, `mt/${task.taskId}`);
+    git(repo, 'worktree', 'lock', '--reason', 'initializing', path);
+    const r = await directories().prepare(task);
+    expect(r).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining(`${path} is there already, and git may still be adding it as a worktree: wait a little, then unblock the task`),
+    });
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
+  });
+
+  it('is refused as a symlink to a worktree of its branch, saying to move the symlink aside, not to remove the worktree', async () => {
+    const task = claimed();
+    const elsewhere = join(dir, 'elsewhere');
+    git(repo, 'worktree', 'add', '-q', '-b', `mt/${task.taskId}`, elsewhere);
+    mkdirSync(join(root, 'web'), { recursive: true });
+    const path = join(root, 'web', task.taskId);
+    symlinkSync(elsewhere, path);
+    const r = await directories().prepare(task);
+    expect(r).toEqual(refused(task));
+    expect(r).toMatchObject({ reason: expect.stringContaining('move it aside') });
+    expect(r).toMatchObject({ reason: expect.not.stringContaining('git worktree remove') });
     expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
   });
 
@@ -557,6 +682,19 @@ describe('a worktree a git worktree add finished after the gateway stopped', () 
     expect(await directories().prepare(task)).toEqual(refused(task));
     expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
     expect(readFileSync(join(path, 'README'), 'utf8')).toBe('changed\n');
+  });
+
+  it('is refused with changes in it at another commit, with advice that removes its branch too, so one round clears it', async () => {
+    const task = claimed();
+    const path = leftBy(task, `mt/${task.taskId}`);
+    commit(path, 'other.txt', 'someone else\n');
+    writeFileSync(join(path, 'README'), 'changed\n');
+    const r = await directories().prepare(task);
+    expect(r).toEqual(refused(task));
+    expect(r).toMatchObject({ reason: expect.stringContaining(`git worktree remove --force ${path}, then git branch -D mt/${task.taskId}`) });
+    git(repo, 'worktree', 'remove', '--force', path);
+    git(repo, 'branch', '-D', `mt/${task.taskId}`);
+    expect(await made(directories(), task)).toBe(path);
   });
 });
 
