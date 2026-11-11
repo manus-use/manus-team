@@ -28,7 +28,7 @@ import { commitReader, type CommitReader } from './commit.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { limitsReached, workspaceBusy } from './waiting.js';
 import { isWorktreeId, worktreeId, worktreeOf } from '../db/workspaces.js';
-import { placeOf, resolveTaskWorkspace } from './workspace.js';
+import { placeName, placeOf, resolveTaskWorkspace } from './workspace.js';
 import {
   BLOCK_KINDS,
   CONTRACT_FIELDS,
@@ -506,7 +506,7 @@ export class KanbanService {
     if (testing !== undefined) {
       return board.refuse(
         'not_claimable',
-        `workspace ${place ?? ''} is running the gates of a report on task ${testing}`,
+        `${placeName(place ?? '')} is running the gates of a report on task ${testing}`,
       );
     }
     const resolved = this.#claimant(task);
@@ -793,7 +793,7 @@ export class KanbanService {
     if (other !== undefined) {
       return board.refuse(
         'report_in_progress',
-        `workspace ${place ?? ''} is running the gates of a report on another task, ${other}; ` +
+        `${placeName(place ?? '')} is running the gates of a report on another task, ${other}; ` +
           'wait for that answer, then report again',
       );
     }

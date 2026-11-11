@@ -614,6 +614,11 @@ describe('loadConfig: roles and workspaces', () => {
       'workspaces.web.base must be a branch, a tag or a commit',
     );
     expect(bad({ path: '/srv/web', isolated: true, base: 'two words' })).toThrow('workspaces.web.base must be');
+    // Nor one that shows other than it is: a bidi control, or a C1 control.
+    expect(bad({ path: '/srv/web', isolated: true, base: 'main\u202e' })).toThrow('workspaces.web.base must be');
+    expect(bad({ path: '/srv/web', isolated: true, base: 'ma\u2066in' })).toThrow('workspaces.web.base must be');
+    expect(bad({ path: '/srv/web', isolated: true, base: 'main\u0085' })).toThrow('workspaces.web.base must be');
+    expect(bad({ path: '/srv/web', isolated: true, base: 'ma\u009bin' })).toThrow('workspaces.web.base must be');
   });
 
   it('leaves the agent undefined when nothing configures one', () => {

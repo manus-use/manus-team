@@ -73,7 +73,10 @@ describe('a claim in an isolated workspace', () => {
     expect(again.task.worktree).toBeNull();
     // A second shared task waits for it; a new task, with a directory of its own, does not.
     const shared = newTask(t.db, { workspace: 'web' });
-    claim(t.db, { taskId: shared.taskId, claimant: claimantFor(t.db, shared.taskId), workspaces: WORKSPACES }, NOW);
+    expect(claim(t.db, { taskId: shared.taskId, claimant: claimantFor(t.db, shared.taskId), workspaces: WORKSPACES }, NOW)).toMatchObject({
+      ok: false,
+      code: 'workspace_busy',
+    });
     expect(getRun(t.db, again.run.runId)?.endedAt).toBeNull();
     const fresh = newTask(t.db, { workspace: 'web' });
     expect(claimIn(fresh.taskId)).toMatchObject({ ok: true, run: { workspace: `wt:${fresh.taskId}` } });
@@ -104,6 +107,19 @@ describe('a claim in an isolated workspace', () => {
     ]);
     expect(claimIn(shared.taskId, { reportingIn: reporting })).toMatchObject({ ok: false, code: 'not_claimable' });
     expect(claimIn(own.taskId, { reportingIn: reporting })).toMatchObject({ ok: true });
+  });
+
+  it("names a task's own directory as the task's, not by its internal id, when its gates hold a claim back", () => {
+    const own = newTask(t.db, { workspace: 'web' });
+    const first = claimIn(own.taskId);
+    if (!first.ok) throw new Error(first.message);
+    endRun(t.db, first.run.runId, { outcome: 'failed', error: 'x' }, DEFAULT_LIMITS, NOW);
+    closeRun(t.db, first.run.runId, NOW);
+    expect(claimIn(own.taskId, { reportingIn: new Map([[`wt:${own.taskId}`, own.taskId]]) })).toMatchObject({
+      ok: false,
+      code: 'not_claimable',
+      message: `task ${own.taskId}'s directory is running the gates of a report on task ${own.taskId}`,
+    });
   });
 
   it("does not refuse a person's review with gates for another task's agent run in the shared directory", () => {

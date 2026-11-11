@@ -5,7 +5,7 @@ import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import type { GateRun } from '../kanban/gates.js';
-import { placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
+import { placeName, placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
 import { worktreeId } from './workspaces.js';
 import { DEFAULT_BOARD, ENDED_OUTCOMES, GATE_LIMITS, REPORTED_OUTCOMES } from '../kanban/types.js';
 import type {
@@ -652,7 +652,7 @@ export function claim(db: Db, input: ClaimInput, now: number): Result<{ run: Run
     const place = placeOf({ workspace, worktree });
     const testing = place === null ? undefined : input.reportingIn?.get(place);
     if (testing !== undefined) {
-      return refuse('not_claimable', `workspace ${place ?? ''} is running the gates of a report on task ${testing}`);
+      return refuse('not_claimable', `${placeName(place ?? '')} is running the gates of a report on task ${testing}`);
     }
     if (agent) {
       if (workspace === null || !input.workspaces.has(workspace)) {

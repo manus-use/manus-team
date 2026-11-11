@@ -4,6 +4,7 @@ import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { KNOWN_DRIVERS, type KnownDriver } from './driver/registry.js';
+import { BIDI } from './text.js';
 
 /**
  * The migrations that ship with this build, found relative to this module rather
@@ -954,8 +955,12 @@ export function str(path: string, key: string, value: unknown): string | undefin
   return value.trim();
 }
 
-/** A base as git names one: no leading `-`, which git would read as an option, and no space or control character. */
-const BASE_REF = /^(?!-)[^\s\u0000-\u001f\u007f]+$/;
+/**
+ * A base as git names one: no leading `-`, which git would read as an option, and
+ * no space, no control character (C0 or C1) and no bidi control, which would make
+ * it read as other than it is.
+ */
+const BASE_REF = new RegExp(`^(?!-)(?:(?!${BIDI.source})[^\\s\\u0000-\\u001f\\u007f-\\u009f])+$`);
 
 /**
  * `workspaces:`, each a path, or a mapping `{ path, isolated, base }` (spec §18):

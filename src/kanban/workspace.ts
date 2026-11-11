@@ -1,4 +1,5 @@
 import { DEFAULT_WORKSPACE } from '../core/registry.js';
+import { isWorktreeId } from '../db/workspaces.js';
 
 /**
  * Which workspace a task works in, decided at a claim while it is still null
@@ -48,4 +49,9 @@ export function resolveTaskWorkspace(f: WorkspaceFacts): WorkspaceResolution {
  */
 export function placeOf(task: { workspace: string | null; worktree: string | null }): string | null {
   return task.worktree ?? task.workspace;
+}
+
+/** A place as a person reads it: a task's own directory by its task, never by its internal `wt:` id; else its workspace. */
+export function placeName(place: string): string {
+  return isWorktreeId(place) ? `task ${place.slice('wt:'.length)}'s directory` : `workspace ${place}`;
 }

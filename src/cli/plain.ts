@@ -1,11 +1,10 @@
 import type { BoardEntry, BoardSummary, TaskView } from '../db/kanban-read.js';
-import { counted, listed, runState, waitingLine } from '../kanban/chat-render.js';
+import { counted, listed, runState, waitingLine, workdirLine } from '../kanban/chat-render.js';
 import type { DisplayStatus } from '../kanban/status.js';
 import type { Assignee, GateRow } from '../kanban/types.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { INVISIBLE, stripControl } from '../text.js';
 import { table } from './args.js';
-import { workdirLine } from '../kanban/chat-render.js';
 
 /**
  * What the operator's `mt kanban` prints (spec §2.6): the board as chat shows it
