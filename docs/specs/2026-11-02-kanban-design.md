@@ -2667,16 +2667,31 @@ abandoned.
   taken over: it may be a person's.
 - **A directory at the task's path that the board has not recorded** is taken up when it is the
   worktree the board would have made, which a `git worktree add` the gateway started and did not
-  see finish leaves (the gateway restarted, or stopped, while git ran on): a real directory that
-  `git worktree list --porcelain` shows on `refs/heads/mt/<task_id>`, not locked, whose `HEAD` is
-  the very commit the task would start from (for a fan-in, its first parent's branch, before the
-  merges, which then go on as usual), and in which `git status --porcelain` shows nothing. Any
-  other is refused, saying what to
-  do: for a path `git worktree list` shows, a registered worktree, which moved aside would stay
-  registered, to move out anything needed, then run `git worktree unlock <path>` if it is locked,
-  and `git worktree remove --force <path>`; for any other path, to move it aside. A `git worktree
-  add` that was stopped leaves one, half made and locked as initializing, and that add's own
-  reason already gives the steps.
+  see finish leaves (the gateway restarted, or stopped, while git ran on): a real directory, not
+  a symlink, that `git worktree list --porcelain` shows on `refs/heads/mt/<task_id>`, neither
+  locked nor prunable (its `.git` gone, so git in it would find whatever repository is above
+  it); that is itself a worktree of the workspace's repository, `git rev-parse --show-toplevel`
+  in it giving the path and `--git-common-dir` the repository's common directory, so a separate
+  clone at the path, or a directory inside another repository, is refused; in which `git
+  --no-optional-locks status --porcelain --untracked-files=all --ignore-submodules=none
+  --ignored` shows nothing, whatever the configuration hides, so only a pristine checkout counts
+  (a fresh add makes no ignored file), and the index is never written; and whose `HEAD` is the
+  very commit the task would start from (for a fan-in, its first parent's branch), or one that
+  start has since moved on from (a parent, or a follow-up's creator, committed again while git
+  ran). Its parents' branches are then merged in as at any prepare before the first session
+  (§18.4), which brings one whose start moved on to it with a fast-forward; with no parents it
+  stays at the base it was made from, as a recorded worktree does when the base moves on. Nothing
+  is reset. Any other is refused, saying what to do: for a path `git worktree list` shows, a
+  registered worktree, which moved aside would stay registered, to move out anything needed, then
+  run `git worktree unlock <path>` if it is locked, and `git worktree remove --force <path>`,
+  and, when it is on the task's branch at another commit than the task starts from, `git branch
+  -D mt/<task_id>` too, as that branch would be refused next as a branch in the way (one at
+  another commit names both: "it is at X; the task now starts from Y"); for a symlink, or any
+  path git does not list, to move it aside. A worktree locked as initializing, as `git worktree
+  add` leaves it while it runs, and when it was killed, is refused saying git may still be adding
+  it: to wait a little, then unblock the task, and, if it is refused again, that the add was
+  stopped, with the steps above. A `git worktree add` the gateway saw fail or stopped itself
+  gives those steps in its own reason.
 - **A shallow clone** makes worktrees as any repository does; a fan-in whose merge base is
   missing fails with git's message, and blocks.
 - **Two claims in one repository** make their worktrees one after the other: the dispatcher
@@ -2726,8 +2741,13 @@ Unblocking the task claims it again.
   `directory: <path>` alone for a folder, or
   `directory: its own, not made yet: it is made when an agent next takes the task up`; for a task
   in an isolated workspace that no agent has taken up yet, and can still run, `directory: its
-  own, not made yet: it is made when an agent first takes the task up`. `--json` gives
-  `worktree: {path, branch}`, its path null until made, or null for a task in a shared directory.
+  own, not made yet: it is made when an agent first takes the task up`. The isolated workspace is
+  the task's own, or, while it has none, the one its next claim would resolve (§2.3), from its
+  role, its parents or its creator, or its board. `--json` gives `worktree: {path, branch, made,
+  first}`, or null for a task in a shared directory: `path` and `branch` are null and `made` is
+  false until the directory is made, and `first` is true while no agent has taken the task up, so
+  its first agent claim makes it, and false once one has (made, or given one at a claim and not
+  made yet).
 - `mt kanban task worktree <task_id> [--board <name>] [--json]` prints the path alone, so a
   person can `cd` to it, during a conflict too; a task in a shared directory, or one whose
   directory is not made yet, is refused `no_worktree`, the latter in the words `task show` uses.
@@ -2785,3 +2805,14 @@ directory removed with `rm -rf` was one git refuses, so `-f` is given while git 
 that a `git worktree add` finishing after a restart left a worktree that blocked its task, so one
 that is exactly what the board would have made is taken up; and that a task no agent had taken
 up in an isolated workspace was said to work in the shared directory.
+*Amended on 2026-11-11, a fourth time.* A focused review found that the take-up of such a
+worktree could take a prunable entry, git then running in a repository above it, a separate
+clone at the path, or untracked files a global `status.showUntrackedFiles=no` hid, so it now
+asks git that the path is the top of a worktree of the workspace's repository and looks at every
+untracked and ignored file; that a start that moved on meanwhile gave advice that led to a
+second refusal, so one the worktree's `HEAD` is behind is taken up and merged up to, as a
+recorded worktree's is, and any other refusal of a worktree on the task's branch names the
+branch to remove too; that a worktree locked as initializing was told to be unlocked while git
+might still be adding it; and that a task whose workspace was not fixed yet, but would resolve to
+an isolated one, was said to have no workspace, and `--json` could not tell a directory made at
+the first claim from one assigned and not made yet.

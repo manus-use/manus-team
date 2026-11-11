@@ -1033,7 +1033,11 @@ mt kanban task stop k_…
   (`kanban.enabled` unset, or false), `mt` says that instead: nothing runs the change until it
   is turned on.
 - `mt kanban task worktree <task_id>` prints the directory of a task in an isolated workspace,
-  alone, so you can `cd "$(mt kanban task worktree k_…)"` to resolve a merge there.
+  alone, so you can `cd "$(mt kanban task worktree k_…)"` to resolve a merge there. In `mt kanban
+  task show --json`, such a task's `worktree` is `{"path", "branch", "made", "first"}`, and null
+  for a task in a shared directory: `path` and `branch` are null and `made` false until the
+  directory is made; `first` is true while no agent has taken the task up, so its first agent
+  claim makes it, and false once one has.
 - A task command needs `task`: `mt kanban new`, without it, is an unknown command. `mt kanban
   show`, `comment` and `link` are the commands an agent runs inside a board run, which take JSON
   on stdin and work only there.
