@@ -2,10 +2,12 @@ import type { Channel } from '../../src/channel/types.js';
 import { SessionRegistry } from '../../src/core/registry.js';
 import { NamedWorkspaces } from '../../src/core/workspace.js';
 import { getRun } from '../../src/db/kanban-read.js';
+import { worktreeOf } from '../../src/db/workspaces.js';
 import { Dispatcher, type DispatcherSettings, type WorkerAccess } from '../../src/kanban/dispatcher.js';
 import { KanbanService, type CreateRequest, type People, type ReportChecks } from '../../src/kanban/service.js';
 import { KanbanSink } from '../../src/kanban/sink.js';
 import type { RunRow, TaskRow } from '../../src/kanban/types.js';
+import type { Workdirs } from '../../src/kanban/worktree.js';
 import type { Role } from '../../src/roles.js';
 import type { TurnTerminal } from '../../src/types.js';
 import { FakeChannel } from './channel.js';
@@ -80,6 +82,10 @@ export interface HarnessOptions {
   checks?: ReportChecks;
   /** Who the board may give work to; absent, no person. */
   people?: People;
+  /** The isolated workspaces (spec §18); absent, none. */
+  isolated?: ReadonlySet<string>;
+  /** What makes a task's own directory; absent, nothing does. */
+  workdirs?: Workdirs;
 }
 
 export const DEFAULT_ROLES: readonly Role[] = [
@@ -104,6 +110,7 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
     // The limits the dispatcher holds to, as src/index.ts gives them both: so show says what the pass skips for.
     maxRunning: opts.settings?.maxRunning ?? 8,
     ...(opts.settings?.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: opts.settings.maxRunningPerRole }),
+    ...(opts.isolated === undefined ? {} : { isolated: opts.isolated }),
   });
   const lark = new FakeChannel({ id: 'lark', clock });
   const notes: string[] = [];
@@ -119,7 +126,7 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
     envFor: (sessionId) => dispatcher?.envFor(sessionId),
     argsFor: (sessionId) => dispatcher?.argsFor(sessionId),
     pinned: (sessionId) => dispatcher?.pinned(sessionId) ?? false,
-    workspaces: new NamedWorkspaces(workspaces),
+    workspaces: new NamedWorkspaces(workspaces, (id) => worktreeOf(t.db, id)),
     appId: APP,
     clock,
     maxLive: opts.maxLive ?? 8,
@@ -144,6 +151,7 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
     note: (line) => notes.push(line),
     ...(opts.renderRoot === undefined ? {} : { renderRoot: opts.renderRoot }),
     ...(opts.worker === undefined ? {} : { worker: opts.worker }),
+    ...(opts.workdirs === undefined ? {} : { workdirs: opts.workdirs }),
   });
   return {
     t,

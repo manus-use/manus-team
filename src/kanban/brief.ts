@@ -1,16 +1,19 @@
 import type { Db } from '../db/open.js';
+import { worktreeOf } from '../db/workspaces.js';
 import {
   changesAsked,
   childrenOf,
   commentsOf,
   gatesOf,
+  getTask,
+  parentsInLinkOrder,
   lastGateRun,
   latestCompletion,
   latestReviewRequest,
   parentsOf,
   runsOf,
 } from '../db/kanban-read.js';
-import type { Attempt, ParentHandoff, RunBrief } from './prompt.js';
+import type { Attempt, OwnDirectory, ParentHandoff, RunBrief } from './prompt.js';
 import type { Claimed } from './service.js';
 import { toolCallsOf } from './session-log.js';
 import { ENDED_OUTCOMES, type RunRow } from './types.js';
@@ -57,6 +60,7 @@ export function briefFor(
   const changes = c.run.kind === 'work' ? changesAsked(db, taskId) : undefined;
   const reviewer = c.task.reviewer;
   const reviewerName = reviewer?.kind === 'human' ? opts.nameOf?.(reviewer.name) : undefined;
+  const workdir = ownDirectory(db, c.task);
   return {
     kind: c.run.kind,
     roleMd: c.roleMd,
@@ -73,5 +77,24 @@ export function briefFor(
     ...(review === undefined ? {} : { review }),
     ...(changes === undefined ? {} : { rework: { ...changes, handoff: latestReviewRequest(db, taskId) } }),
     ...(reviewerName === undefined ? {} : { reviewerName }),
+    ...(workdir === undefined ? {} : { workdir }),
   };
+}
+
+/**
+ * The task's own directory (spec §18), if it has one, and those of the tasks it
+ * follows -- its parents in link order, or with none the task that created it --
+ * that have one, an archived one marked as abandoned; undefined when there is
+ * neither. A task in a shared directory is still told where its parents' are.
+ */
+function ownDirectory(db: Db, task: Claimed['task']): OwnDirectory | undefined {
+  const own = task.worktree === null ? undefined : worktreeOf(db, task.worktree);
+  const parents = parentsInLinkOrder(db, task.taskId);
+  const from = parents.length === 0 && task.createdFromTask !== null ? getTask(db, task.createdFromTask) : undefined;
+  const upstream = (parents.length > 0 ? parents : from === undefined ? [] : [from]).flatMap((p) => {
+    const dir = p.worktree === null ? undefined : worktreeOf(db, p.worktree);
+    return dir === undefined ? [] : [{ taskId: p.taskId, path: dir.rootPath, branch: dir.branch, abandoned: p.phase === 'archived' }];
+  });
+  if (own === undefined && upstream.length === 0) return undefined;
+  return { path: own?.rootPath ?? null, branch: own?.branch ?? null, upstream };
 }

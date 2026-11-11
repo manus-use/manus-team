@@ -108,6 +108,16 @@ export interface Rework {
   handoff: ReviewRequest | undefined;
 }
 
+/** A run in its task's own directory (spec §18): where it is, and where the tasks it follows left their work. */
+export interface OwnDirectory {
+  /** Null for a task in its workspace's shared directory, which is told only where the tasks it follows are. */
+  path: string | null;
+  /** The worktree's branch; null for a folder. */
+  branch: string | null;
+  /** `abandoned`: an archived parent, whose work is not merged into the task's. */
+  upstream: ReadonlyArray<{ taskId: string; path: string; branch: string | null; abandoned: boolean }>;
+}
+
 /** Everything a run's prompt is composed from. */
 export interface RunBrief {
   kind: RunKind;
@@ -131,6 +141,8 @@ export interface RunBrief {
   rework?: Rework;
   /** A person reviewer's name, as the gateway last saw it; undefined for a role, or a person not known by name. */
   reviewerName?: string;
+  /** The task's own directory (spec §18); undefined in a workspace's shared one. */
+  workdir?: OwnDirectory;
 }
 
 /** An assignee or a reviewer, as KanbanService takes one: a role name, or a person's principal. */
@@ -253,7 +265,49 @@ function taskSection(b: RunBrief): string[] {
       lines.push(...labelled(`- ${CONTRACT_LABELS[field]}`, piece(task.contract[field] ?? '', PIECE_BYTES.contractField)));
     }
   }
-  return [...lines, ...reviewerLines(b), ...gateLines(b)];
+  return [...lines, ...directoryLines(b), ...reviewerLines(b), ...gateLines(b)];
+}
+
+/** At most this many of the directories of the tasks a run follows are listed. */
+const UPSTREAM_LISTED = 20;
+
+/**
+ * A run in its task's own directory (spec §18): where it is; for a worktree's
+ * work, that its branch is where the work goes, since the board merges nothing;
+ * and where the tasks it follows left their work, to read.
+ */
+function directoryLines(b: RunBrief): string[] {
+  const w = b.workdir;
+  if (w === undefined) return [];
+  if (w.path === null && w.upstream.length === 0) return [];
+  const where = `Your directory, the current one, is ${flat(w.path ?? '')}`;
+  const lines = [''];
+  if (w.path !== null) {
+    lines.push(
+      w.branch === null
+        ? b.kind === 'review'
+          ? `${where}: a folder of this task's own, where the work under review is.`
+          : `${where}: a folder of this task's own. Put the task's results there.`
+        : b.kind === 'review'
+          ? `${where}: the task's own git worktree, on its branch ${flat(w.branch)}, where the work under review is.`
+          : `${where}: a git worktree of this task's own, on its branch ${flat(w.branch)}. Commit your work on that branch ` +
+            'before you report: the tasks that follow this one start from it, and nothing is merged for you.',
+    );
+  }
+  if (w.upstream.length > 0) {
+    lines.push('The tasks this one follows left their work in their own directories, which you may read but not change:');
+    for (const u of w.upstream.slice(0, UPSTREAM_LISTED)) {
+      const branch = u.branch === null ? '' : ` (branch ${flat(u.branch)})`;
+      const abandoned = !u.abandoned
+        ? ''
+        : u.branch === null
+          ? ', archived: its work was abandoned'
+          : ', archived: its work was abandoned, and is not merged into this task';
+      lines.push(`- ${u.taskId}: ${flat(u.path)}${branch}${abandoned}`);
+    }
+    if (w.upstream.length > UPSTREAM_LISTED) lines.push(`- and ${w.upstream.length - UPSTREAM_LISTED} more`);
+  }
+  return lines;
 }
 
 /**
