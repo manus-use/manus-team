@@ -13,6 +13,7 @@ import {
   runBySession,
 } from '../db/kanban-read.js';
 import { getSession } from '../db/sessions.js';
+import { isWorktreeId } from '../db/workspaces.js';
 import { nativeFor, renderNative, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
 import { roleLimit, type Role } from '../roles.js';
 import { addSecrets, removeSecrets } from '../secrets.js';
@@ -28,6 +29,7 @@ import { KANBAN_CHANNEL } from './sink.js';
 import { hashToken, mintToken } from './token.js';
 import { SUPERSEDING_OUTCOMES, type CommentRow, type RunKind, type RunRow } from './types.js';
 import { limitsReached } from './waiting.js';
+import type { Prepared, Workdirs } from './worktree.js';
 
 /**
  * The dispatcher (spec §6): the one component that turns "a task became ready"
@@ -96,6 +98,11 @@ export interface DispatcherDeps {
   worker?: WorkerAccess;
   /** A person's name as the gateway last saw it, for the person reviewer a work prompt names; absent, by id. */
   nameOf?: (principal: string) => string | undefined;
+  /**
+   * Makes a task's own directory, in an isolated workspace (spec §18), before
+   * its first run. Absent, a run that needs one blocks its task.
+   */
+  workdirs?: Workdirs;
 }
 
 export interface WorkerAccess {
@@ -699,6 +706,12 @@ export class Dispatcher {
   async #drive(claimed: Claimed, handle: RunHandle, token: string): Promise<void> {
     const { run } = claimed;
     const key = handle.key;
+    // In its task's own directory, if it has one: made before the task's first run (spec §18).
+    if (run.workspace !== null && isWorktreeId(run.workspace)) {
+      if (!(await this.#prepare(claimed, handle))) return;
+      // Stopped while it was made: the next boot ends the run.
+      if (this.#stopped) return;
+    }
     // Before the session, and synchronously up to the run's entry in #open, so
     // the sweep of another run's render sees this one's package as in use.
     const rendered = this.#render(claimed);
@@ -780,6 +793,37 @@ export class Dispatcher {
       return;
     }
     await this.#turnEnded(sessionId, terminal, thrown);
+  }
+
+  /**
+   * The task's own directory (spec §18), made before its first run and found
+   * again by every later one. One that cannot be made -- a merge that conflicts,
+   * a branch of its name already there, a full disk -- blocks the task for a
+   * person, with the reason. The run started nothing, so it is not counted, and
+   * the pass goes on: the next claim may well be in another repository.
+   */
+  async #prepare(claimed: Claimed, handle: RunHandle): Promise<boolean> {
+    const { run } = claimed;
+    const workdirs = this.#deps.workdirs;
+    let prepared: Prepared;
+    try {
+      prepared =
+        workdirs === undefined
+          ? { ok: false, reason: 'this gateway makes no directories for tasks' }
+          : await workdirs.prepare(claimed.task);
+    } catch (err) {
+      prepared = { ok: false, reason: `its directory could not be made: ${message(err)}` };
+    }
+    if (prepared.ok || this.#stopped) return prepared.ok;
+    this.#end(run.runId, {
+      outcome: 'failed',
+      error: `the run could not start: ${prepared.reason}`,
+      hadSideEffects: false,
+      block: prepared.reason,
+    });
+    this.#note(`kanban: run ${run.runId} could not start: its task's directory could not be made`);
+    await this.#close(handle);
+    return false;
   }
 
   /**

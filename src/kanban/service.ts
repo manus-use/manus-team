@@ -27,7 +27,8 @@ import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { limitsReached, workspaceBusy } from './waiting.js';
-import { resolveTaskWorkspace } from './workspace.js';
+import { isWorktreeId, worktreeId, worktreeOf } from '../db/workspaces.js';
+import { placeName, placeOf, resolveTaskWorkspace } from './workspace.js';
 import {
   BLOCK_KINDS,
   CONTRACT_FIELDS,
@@ -107,6 +108,8 @@ export interface KanbanServiceDeps {
   roles: ReadonlyMap<string, Role>;
   /** The configured workspace names. */
   workspaces: ReadonlySet<string>;
+  /** The isolated ones (spec §18), whose tasks each get a directory of their own; absent, none. */
+  isolated?: ReadonlySet<string>;
   clock?: Clock;
   limits?: board.KanbanLimits;
   people?: People;
@@ -309,6 +312,7 @@ export class KanbanService {
   readonly #db: Db;
   readonly #roles: ReadonlyMap<string, Role>;
   readonly #workspaces: ReadonlySet<string>;
+  readonly #isolated: ReadonlySet<string>;
   readonly #clock: Clock;
   readonly #limits: board.KanbanLimits;
   readonly #people: People | undefined;
@@ -317,11 +321,12 @@ export class KanbanService {
   readonly #maxRunning: number;
   readonly #maxRunningPerRole: number | undefined;
   /**
-   * Tasks a report is running its checks for, with the task's workspace and the
-   * report's end. One at a time per task: a second report would run the same
-   * gates again, at once, in the same checkout. And no claim meanwhile, of the
-   * task or of another in that workspace, which would start an agent in a
-   * checkout being tested.
+   * Tasks a report is running its checks for, with where the gates run -- the
+   * task's own directory, by its `wt:` id, or its workspace's shared one (spec
+   * §18) -- and the report's end. One at a time per task: a second report would
+   * run the same gates again, at once, in the same checkout. And no claim
+   * meanwhile, of the task or of another working there, which would start an
+   * agent in a checkout being tested.
    */
   readonly #reporting = new Map<string, { workspace: string | null; done: Promise<unknown> }>();
 
@@ -329,6 +334,7 @@ export class KanbanService {
     this.#db = deps.db;
     this.#roles = deps.roles;
     this.#workspaces = deps.workspaces;
+    this.#isolated = deps.isolated ?? new Set();
     this.#clock = deps.clock ?? systemClock;
     this.#limits = deps.limits ?? board.DEFAULT_LIMITS;
     this.#people = deps.people;
@@ -495,11 +501,12 @@ export class KanbanService {
     if (this.#reporting.has(taskId)) {
       return board.refuse('not_claimable', `task ${taskId} is being reported on: its gates are running`);
     }
-    const testing = task.workspace === null ? undefined : this.#reportingIn(task.workspace);
+    const place = this.#placeFor(task);
+    const testing = place === null ? undefined : this.#reportingIn(place);
     if (testing !== undefined) {
       return board.refuse(
         'not_claimable',
-        `workspace ${task.workspace ?? ''} is running the gates of a report on task ${testing}`,
+        `${placeName(place ?? '')} is running the gates of a report on task ${testing}`,
       );
     }
     const resolved = this.#claimant(task);
@@ -511,6 +518,7 @@ export class KanbanService {
             claimant: resolved.claimant,
             tokenHash: opts.tokenHash ?? null,
             workspaces: this.#workspaces,
+            isolated: this.#isolated,
             reportingIn: this.#reportingWorkspaces(),
           },
           now,
@@ -779,12 +787,13 @@ export class KanbanService {
     if (!now.ok) return now;
     // A complete the board will take as a review request runs the gates as one.
     const checkedAs = kind === 'complete' && board.completeAsksReview(now.task) ? 'review' : kind;
-    // One report's checks in a workspace at a time: two reports' gates in one checkout would trip over each other.
-    const other = now.task.workspace === null ? undefined : this.#reportingIn(now.task.workspace);
+    // One report's checks in a checkout at a time: two reports' gates in one would trip over each other.
+    const place = placeOf(now.task);
+    const other = place === null ? undefined : this.#reportingIn(place);
     if (other !== undefined) {
       return board.refuse(
         'report_in_progress',
-        `workspace ${now.task.workspace ?? ''} is running the gates of a report on another task, ${other}; ` +
+        `${placeName(place ?? '')} is running the gates of a report on another task, ${other}; ` +
           'wait for that answer, then report again',
       );
     }
@@ -796,7 +805,7 @@ export class KanbanService {
       if (opts.signal?.aborted === true) return board.refuse('gates_cannot_run', STOPPING);
       return apply(seen);
     })();
-    this.#reporting.set(taskId, { workspace: now.task.workspace, done: checked });
+    this.#reporting.set(taskId, { workspace: place, done: checked });
     try {
       return await checked;
     } finally {
@@ -805,10 +814,11 @@ export class KanbanService {
   }
 
   /**
-   * The reported commit (spec §7.8): for an agent's report, its workspace's HEAD
-   * and whether the tree had uncommitted changes; neither when the workspace
-   * is not a git repository. A person's report records neither: there is no
-   * agent state to pin.
+   * The reported commit (spec §7.8): for an agent's report, the HEAD of the
+   * directory its run works in -- the task's own, or its workspace's (spec §18)
+   * -- and whether the tree had uncommitted changes; neither when that is not a
+   * git repository. A person's report records neither: there is no agent state
+   * to pin.
    */
   async #observe(
     run: RunRow | undefined,
@@ -816,7 +826,7 @@ export class KanbanService {
   ): Promise<{ reportedCommit?: string | null; reportedDirty?: boolean | null }> {
     const checks = this.#checks;
     if (checks === undefined || run === undefined || run.agentConfig === null || run.workspace === null) return {};
-    const dir = checks.workspaceDirs.get(run.workspace);
+    const dir = this.#dirOf(run.workspace);
     if (dir === undefined) return {};
     const read = checks.readCommit ?? commitReader();
     const state = await read(dir, { env: buildEnv(checks.env), ...(signal === undefined ? {} : { signal }) });
@@ -845,11 +855,18 @@ export class KanbanService {
     if (task.workspace === null) {
       return board.refuse('gates_cannot_run', `task ${id} has gates and no workspace to run them in; set its workspace first`);
     }
-    const cwd = checks.workspaceDirs.get(task.workspace);
-    if (cwd === undefined) {
+    if (!checks.workspaceDirs.has(task.workspace)) {
       return board.refuse(
         'gates_cannot_run',
         `task ${id}'s workspace ${JSON.stringify(task.workspace)} is no longer configured, so its gates cannot run`,
+      );
+    }
+    // In the task's own directory, if it has one (spec §18).
+    const cwd = this.#dirOf(placeOf(task) ?? task.workspace);
+    if (cwd === undefined) {
+      return board.refuse(
+        'gates_cannot_run',
+        `task ${id}'s own directory has not been made yet, so its gates cannot run; it is made before its next agent run`,
       );
     }
     const latest = runsOf(this.#db, id).findLast((r) => r.agentConfig !== null);
@@ -902,6 +919,28 @@ export class KanbanService {
         output: failed.output,
       },
     };
+  }
+
+  /**
+   * Where a claim of the task now would put its run (spec §18.2): its own
+   * directory, the one its first agent claim in an isolated workspace would give
+   * it, or its workspace's shared one; null while its workspace is not fixed,
+   * which the claim's own transaction checks once it is.
+   */
+  #placeFor(task: TaskRow): string | null {
+    if (task.worktree !== null || task.workspace === null) return placeOf(task);
+    const who = task.phase === 'review' ? task.reviewer : task.assignee;
+    const fresh =
+      who?.kind === 'role' &&
+      this.#isolated.has(task.workspace) &&
+      !runsOf(this.#db, task.taskId).some((r) => r.agentConfig !== null);
+    return fresh ? worktreeId(task.taskId) : task.workspace;
+  }
+
+  /** A place's directory: a task's own, as recorded once it was made (spec §18), or a configured workspace's. */
+  #dirOf(place: string): string | undefined {
+    if (isWorktreeId(place)) return worktreeOf(this.#db, place)?.rootPath;
+    return this.#checks?.workspaceDirs.get(place);
   }
 
   requestChanges(taskId: string, by: Reporter, reason: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
@@ -997,7 +1036,24 @@ export class KanbanService {
     const view = taskView(this.#db, taskId);
     if (view === undefined) return board.refuse('not_found', `no task ${taskId}`);
     const waiting = this.#waiting(view);
-    return { ok: true, view: waiting.length === 0 ? view : { ...view, waiting } };
+    const withWaiting = waiting.length === 0 ? view : { ...view, waiting };
+    return { ok: true, view: this.#unmade(view) ? { ...withWaiting, workdir: { path: null, branch: null, first: true } } : withWaiting };
+  }
+
+  /**
+   * A task that can still run, in an isolated workspace, that no agent has taken
+   * up: its first agent claim gives it a directory of its own (spec §18.2).
+   */
+  #unmade(view: TaskView): boolean {
+    const { task } = view;
+    return (
+      task.worktree === null &&
+      task.workspace !== null &&
+      this.#isolated.has(task.workspace) &&
+      task.phase !== 'done' &&
+      task.phase !== 'archived' &&
+      !view.runs.some((r) => r.agentConfig !== null)
+    );
   }
 
   /**
@@ -1043,7 +1099,10 @@ export class KanbanService {
       role: who.name,
       roleMaxRunning: role === undefined ? undefined : roleLimit(role, this.#maxRunningPerRole)?.limit,
     });
-    const busy = workspaceBusy(this.#db, workspace);
+    // A task with a directory of its own, or about to get one, holds no shared directory (spec §18).
+    const own =
+      task.worktree !== null || (this.#isolated.has(workspace) && !view.runs.some((r) => r.agentConfig !== null));
+    const busy = own ? undefined : workspaceBusy(this.#db, workspace);
     return busy === undefined ? reached : [...reached, busy];
   }
 

@@ -104,7 +104,21 @@ describe('createGateway', () => {
     });
     const gateway = await createGateway(config, team);
     try {
-      expect(lines.some((l) => l.endsWith(` schema at version 6 (${config.dbPath})\n`))).toBe(true);
+      expect(lines.some((l) => l.endsWith(` schema at version 7 (${config.dbPath})\n`))).toBe(true);
+    } finally {
+      await gateway.stop();
+    }
+  });
+
+  it('says, with the board on, which workspaces give each task a directory of its own', async () => {
+    const lines: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    const gateway = await createGateway({ ...config, isolated: { default: {} }, kanban: { ...config.kanban, enabled: true } }, team);
+    try {
+      expect(lines.some((l) => l.endsWith(' kanban: each task in default gets a directory of its own\n'))).toBe(true);
     } finally {
       await gateway.stop();
     }

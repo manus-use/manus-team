@@ -4,6 +4,7 @@ import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { KNOWN_DRIVERS, type KnownDriver } from './driver/registry.js';
+import { BIDI } from './text.js';
 
 /**
  * The migrations that ship with this build, found relative to this module rather
@@ -110,11 +111,26 @@ export interface GatewayConfig {
 
   /** Workspace name → declared absolute path; checked on disk by `workspaces.ts`. Always has `default`. */
   workspaces: Readonly<Record<string, string>>;
+  /** The workspaces whose tasks each get their own directory (spec §18), by name; absent, none. */
+  isolated?: Readonly<Record<string, IsolatedWorkspace>>;
 
   maxLiveSessions: number;
 
   /** The board's dispatcher and breaker (spec §6, §8). */
   kanban: KanbanSettings;
+}
+
+/**
+ * A workspace written as `{ path, isolated: true }` (spec §18): each of its tasks
+ * gets a directory of its own, so its tasks run side by side.
+ */
+export interface IsolatedWorkspace {
+  /**
+   * Where a task with no parents starts, in a git workspace: a branch, a tag or a
+   * commit. Unset, whatever the workspace's directory has checked out when the
+   * task's directory is made.
+   */
+  base?: string;
 }
 
 /**
@@ -245,6 +261,8 @@ export interface TeamSettings {
   kanbanEnabled?: boolean;
   /** Workspace name → declared absolute path. Always has `default`. */
   workspaces: Readonly<Record<string, string>>;
+  /** The isolated workspaces (spec §18), by name; absent when there are none. */
+  isolated?: Readonly<Record<string, IsolatedWorkspace>>;
   agent: AgentConfig | undefined;
   /**
    * The limits a role's own `max_running` is checked against, and the default it
@@ -357,6 +375,7 @@ export function loadConfig(
     agent: team.agent,
 
     workspaces: team.workspaces,
+    ...(team.isolated === undefined ? {} : { isolated: team.isolated }),
     maxLiveSessions,
     kanban: {
       enabled: file.kanban.enabled ?? KANBAN_DEFAULTS.enabled,
@@ -471,6 +490,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'team.db'),
     ...(file.kanban.enabled === undefined ? {} : { kanbanEnabled: file.kanban.enabled }),
     workspaces,
+    ...(Object.keys(file.isolated).length === 0 ? {} : { isolated: file.isolated }),
     agent,
     kanban: limits,
   };
@@ -715,6 +735,7 @@ function agentEnv(env: Env, passEnv: readonly string[]): Record<string, string> 
 interface FileConfig {
   workspace: string | undefined;
   workspaces: Record<string, string>;
+  isolated: Record<string, IsolatedWorkspace>;
   db: string | undefined;
   downloads: string | undefined;
   maxLiveSessions: number | undefined;
@@ -744,6 +765,7 @@ function emptyFile(): FileConfig {
   return {
     workspace: undefined,
     workspaces: {},
+    isolated: {},
     db: undefined,
     downloads: undefined,
     maxLiveSessions: undefined,
@@ -829,7 +851,9 @@ function parseFile(path: string, text: string): FileConfig {
   reject(path, 'kanban', kanbanRaw, ['enabled', ...Object.keys(KANBAN_NUMBERS)]);
 
   out.workspace = str(path, 'workspace', root['workspace']);
-  out.workspaces = stringMap(path, 'workspaces', root['workspaces']);
+  const workspaces = workspaceEntries(path, root['workspaces']);
+  out.workspaces = workspaces.paths;
+  out.isolated = workspaces.isolated;
   out.agentPresent = root['agent'] !== undefined && root['agent'] !== null;
   out.db = str(path, 'db', root['db']);
   out.downloads = str(path, 'downloads', root['downloads']);
@@ -931,14 +955,48 @@ export function str(path: string, key: string, value: unknown): string | undefin
   return value.trim();
 }
 
-function stringMap(path: string, key: string, value: unknown): Record<string, string> {
-  if (value === undefined || value === null) return {};
-  const out: Record<string, string> = {};
-  for (const [name, entry] of Object.entries(section(path, key, value))) {
-    const text = str(path, `${key}.${name}`, entry);
-    if (text !== undefined) out[name] = text;
+/**
+ * A base as git names one: no leading `-`, which git would read as an option, and
+ * no space, no control character (C0 or C1) and no bidi control, which would make
+ * it read as other than it is.
+ */
+const BASE_REF = new RegExp(`^(?!-)(?:(?!${BIDI.source})[^\\s\\u0000-\\u001f\\u007f-\\u009f])+$`);
+
+/**
+ * `workspaces:`, each a path, or a mapping `{ path, isolated, base }` (spec §18):
+ * the paths, and the workspaces whose tasks each get a directory of their own.
+ * `isolated: false` is the same as the plain path; `base` needs `isolated: true`.
+ */
+function workspaceEntries(
+  path: string,
+  value: unknown,
+): { paths: Record<string, string>; isolated: Record<string, IsolatedWorkspace> } {
+  const paths: Record<string, string> = {};
+  const isolated: Record<string, IsolatedWorkspace> = {};
+  if (value === undefined || value === null) return { paths, isolated };
+  for (const [name, entry] of Object.entries(section(path, 'workspaces', value))) {
+    const key = `workspaces.${name}`;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      const text = str(path, key, entry);
+      if (text !== undefined) paths[name] = text;
+      continue;
+    }
+    const fields = section(path, key, entry);
+    reject(path, key, fields, ['path', 'isolated', 'base']);
+    const dir = str(path, `${key}.path`, fields['path']);
+    if (dir === undefined) throw new ConfigError(`${path}: ${key}.path is required when the workspace is a mapping`);
+    paths[name] = dir;
+    const on = bool(path, `${key}.isolated`, fields['isolated']) ?? false;
+    const base = str(path, `${key}.base`, fields['base']);
+    if (base !== undefined && !on) {
+      throw new ConfigError(`${path}: ${key}.base applies only to an isolated workspace: set ${key}.isolated to true, or remove it`);
+    }
+    if (base !== undefined && !BASE_REF.test(base)) {
+      throw new ConfigError(`${path}: ${key}.base must be a branch, a tag or a commit, got ${JSON.stringify(base)}`);
+    }
+    if (on) isolated[name] = base === undefined ? {} : { base };
   }
-  return out;
+  return { paths, isolated };
 }
 
 export function strings(path: string, key: string, value: unknown): readonly string[] {

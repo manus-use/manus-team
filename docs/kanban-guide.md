@@ -524,6 +524,34 @@ mt workspace add vendor-c /srv/work/vendor-c
 
 A `workspace:` line on the task beats the role's own workspace.
 
+Or make `worker`'s workspace **isolated**, and give each task a directory of its own, with no
+new workspaces at all. In the gateway's config, write `worker` as a mapping, keeping its path,
+and add `isolated: true`:
+
+```yaml
+workspaces:
+  worker:
+    path: /home/me/.manus-team/workspaces/worker
+    isolated: true
+```
+
+Keep its path: a workspace keeps the directory it was first used with. Then the vendor tasks
+below drop their `workspace: vendor-x` lines, and the three run at once. Where `worker` is a
+plain folder, as research usually is, each task gets a folder of its own under
+`$MT_HOME/worktrees/worker/`, and the comparison's prompt lists the three folders their notes
+are in, to read. Nothing is copied, and nothing is said about git. `/kanban task show` says where
+a task's directory is.
+
+Each task's folder starts empty. Its prompt also names `worker`'s own folder, the path above, as
+the place to read shared inputs from, while the task's results go in its own folder. So put
+input files such as `vendors/candidates.md` in `worker`'s own folder, or have a parent task
+write them in its results.
+
+Where the workspace is a git repository, and only there, git is used: each task's directory is a
+worktree on its own branch, `mt/<task_id>`, and the write-up starts from a merge of the three
+branches. If that merge conflicts, the write-up blocks, naming the files, for you to resolve in
+its directory and unblock. Nothing is merged into your own branches.
+
 Running agents are also capped by `kanban.max_running` in the gateway's config: at most that many
 agent runs at once, across all workspaces. It defaults to `maxLiveSessions` (8 unless set), and
 cannot be above it. Set it lower to keep room for chat sessions. A person's task holds no
@@ -1004,6 +1032,8 @@ mt kanban task stop k_…
   again: a second `task new` makes a second task. If the board is off on the gateway
   (`kanban.enabled` unset, or false), `mt` says that instead: nothing runs the change until it
   is turned on.
+- `mt kanban task worktree <task_id>` prints the directory of a task in an isolated workspace,
+  alone, so you can `cd "$(mt kanban task worktree k_…)"` to resolve a merge there.
 - A task command needs `task`: `mt kanban new`, without it, is an unknown command. `mt kanban
   show`, `comment` and `link` are the commands an agent runs inside a board run, which take JSON
   on stdin and work only there.
@@ -1061,6 +1091,13 @@ mt service restart
 Each directory must exist first. The gateway reads its workspaces when it starts, so restart it
 (`mt service restart` for the service; stop and start it otherwise). A `workspace:` naming a
 workspace the gateway does not have yet is refused at once, and nothing is created.
+
+Simpler, once your gateway has isolated workspaces: mark `worker`'s own workspace `isolated: true`
+(section 6), keeping its path, and restart. Then the three prototypes need no `workspace:` line:
+each runs at once in a folder of its own under `$MT_HOME/worktrees/worker/`, and the
+recommendation's prompt lists their folders to read. Each folder starts empty, and each prompt
+names `worker`'s own folder for shared inputs: keep an input file, such as `docs/reports-api.md`
+below, there, or in a parent's results.
 
 **The tasks.** The brief:
 
@@ -1359,7 +1396,9 @@ The chat hears nothing as each task is created; the planner's summary is the lis
 - **They run in `worker`, unless the plan names a workspace.** `worker` has its own workspace, so
   without `"workspace"` every task runs there, one at a time, however wide the graph. Here the body
   asks for `api`, where the code is. To run branches in parallel, give each branch its own
-  workspace, in the body or in `role.md`.
+  workspace, in the body or in `role.md`, or make the workspace they share isolated (section 6):
+  with `api` marked `isolated: true`, the planner's parallel tasks each get a worktree of `api`
+  and run at once.
 
 **Checking the graph.** `/kanban task list`:
 
@@ -1755,8 +1794,10 @@ priority and then age decide. A board at its own `max_running` gives up its turn
 - **Set every link when you create the task**, with `parent:` lines, `--parent`, or `parents` in
   `mt kanban create`. A task with no parents is claimed within moments, and a link onto a task
   that has started is refused.
-- **One workspace per parallel branch.** Tasks that share a workspace run one after the other,
-  however wide the graph. Then check the role's `max_running`: it caps the width too.
+- **One workspace per parallel branch, or an isolated one.** Tasks that share a workspace run one
+  after the other, however wide the graph, unless the workspace is isolated (section 6), which
+  gives each task a directory of its own. Then check the role's `max_running`: it caps the width
+  too.
 - **Name a reviewer on the task, or use a separate review task, not both.** Both means two
   reviews.
 - **Keep tasks small and checkable.** Give each an `outcome:` and a `verify:`, and a gate where a
@@ -1782,7 +1823,7 @@ priority and then age decide. A board at its own `max_running` gives up its turn
 - Want the agent to see the gates? Create the task without an assignee, add the gates, then
   `/kanban task assign` it.
 - Want review? Name a `reviewer:` on the task, or make a separate review task under it, not both.
-- Want parallel work? Give each task its own workspace, or they queue.
+- Want parallel work? Make the workspace isolated, or give each task its own, or they queue.
 - Several projects? Give each a board, keep its group on it with `/kanban board use`, and give
   the board the project's workspace.
 - Order follow-ups with `parent:` lines, or `parents` from an agent, when you create them.

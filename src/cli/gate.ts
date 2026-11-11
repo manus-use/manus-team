@@ -119,6 +119,8 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     db,
     roles: team.roles,
     workspaces: new Set(team.workspaces.keys()),
+    // As the gateway's: so show says where a task in one will work, and what it waits on (spec §18).
+    isolated: new Set(Object.keys(settings.isolated ?? {})),
     supervisedRoles: true,
     // As the gateway's dispatcher holds to them: so mt kanban task show can say what a
     // task is waiting on (spec §6.3, §16), and a board's own max_running is held inside the gateway's.

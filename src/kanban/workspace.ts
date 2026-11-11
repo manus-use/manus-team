@@ -1,4 +1,5 @@
 import { DEFAULT_WORKSPACE } from '../core/registry.js';
+import { isWorktreeId } from '../db/workspaces.js';
 
 /**
  * Which workspace a task works in, decided at a claim while it is still null
@@ -39,4 +40,18 @@ export function resolveTaskWorkspace(f: WorkspaceFacts): WorkspaceResolution {
   if (fixed.length === 1 && only !== undefined) return { workspace: only };
   if (fixed.length > 1) return { conflict: fixed };
   return { workspace: f.boardWorkspace ?? DEFAULT_WORKSPACE };
+}
+
+/**
+ * Where a task's runs work and its gates run (spec §18): its own directory, by its
+ * `wt:` id, once its first agent claim in an isolated workspace has given it one;
+ * else its workspace's shared directory, by name; null while it has neither.
+ */
+export function placeOf(task: { workspace: string | null; worktree: string | null }): string | null {
+  return task.worktree ?? task.workspace;
+}
+
+/** A place as a person reads it: a task's own directory by its task, never by its internal `wt:` id; else its workspace. */
+export function placeName(place: string): string {
+  return isWorktreeId(place) ? `task ${place.slice('wt:'.length)}'s directory` : `workspace ${place}`;
 }

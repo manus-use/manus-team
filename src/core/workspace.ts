@@ -27,8 +27,15 @@ export interface WorkspaceProvider {
 }
 
 /**
+ * A task's own directory (spec §18), by its `wt:` id, as it was recorded when it
+ * was made; undefined for one not made.
+ */
+export type TaskDirLookup = (id: string) => { kind: Workspace['kind']; rootPath: string } | undefined;
+
+/**
  * Each session works in the named workspace it records, and a workspace is one
- * configured directory.
+ * configured directory -- or, for a kanban run's session, its task's own
+ * directory (spec §18), looked up by the `wt:` id the session records.
  *
  * Concurrent sessions in the same workspace therefore share a working tree, which
  * is a real limitation and stated here rather than discovered: two agents editing
@@ -39,24 +46,30 @@ export interface WorkspaceProvider {
 export class NamedWorkspaces implements WorkspaceProvider {
   readonly kind = 'plain-dir' as const;
   readonly #paths: ReadonlyMap<string, string>;
+  readonly #taskDirs: TaskDirLookup | undefined;
 
   /**
    * @param paths Workspace name → real path, as `loadTeam` resolved and checked
    *   them at startup. Resolved once, there: a symlink swapped in later cannot
    *   redirect an agent with write access to a different tree.
+   * @param taskDirs Tasks' own directories, as recorded when they were made, and
+   *   never moved after; absent, none.
    */
-  constructor(paths: ReadonlyMap<string, string>) {
+  constructor(paths: ReadonlyMap<string, string>, taskDirs?: TaskDirLookup) {
     this.#paths = paths;
+    this.#taskDirs = taskDirs;
   }
 
   has(workspaceId: string): boolean {
-    return this.#paths.has(workspaceId);
+    return this.#paths.has(workspaceId) || this.#taskDirs?.(workspaceId) !== undefined;
   }
 
   async acquire(_sessionId: string, workspaceId: string): Promise<Workspace> {
     const cwd = this.#paths.get(workspaceId);
-    if (cwd === undefined) throw new Error(`workspace ${workspaceId} is not configured`);
-    return { id: workspaceId, kind: this.kind, cwd };
+    if (cwd !== undefined) return { id: workspaceId, kind: this.kind, cwd };
+    const own = this.#taskDirs?.(workspaceId);
+    if (own === undefined) throw new Error(`workspace ${workspaceId} is not configured`);
+    return { id: workspaceId, kind: own.kind, cwd: own.rootPath };
   }
 
   async release(_sessionId: string): Promise<void> {

@@ -5,10 +5,11 @@ import { loadGatewayEnv, type GatewayEnvFile } from './gateway-env.js';
 import { loadTeam, teamSecrets, type Team } from './team.js';
 import { migrate, openDb, type Db } from './db/open.js';
 import { sweepSeen } from './db/dedup.js';
-import { registerWorkspaces } from './db/workspaces.js';
+import { registerWorkspaces, worktreeOf } from './db/workspaces.js';
 import { LarkAdapter } from './channel/lark/adapter.js';
 import { LarkInbound } from './channel/lark/inbound.js';
 import { buildRoleDrivers } from './driver/build.js';
+import { buildEnv } from './driver/env.js';
 import { Authorizer } from './policy/auth.js';
 import { Router } from './core/router.js';
 import { DEFAULT_ROLE, DEFAULT_WORKSPACE, SessionRegistry, type BootFinding } from './core/registry.js';
@@ -27,6 +28,7 @@ import { PeopleDirectory } from './kanban/people.js';
 import { KanbanSink } from './kanban/sink.js';
 import { claimSocketPath, listenWorker, lockGateway, workerSocketPath, type GatewayLock, type WorkerServer } from './kanban/socket.js';
 import { WorkerApi } from './kanban/worker.js';
+import { TaskDirectories } from './kanban/worktree.js';
 import type { Channel } from './channel/types.js';
 
 /**
@@ -208,7 +210,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     envFor: (sessionId) => dispatcher?.envFor(sessionId),
     argsFor: (sessionId) => dispatcher?.argsFor(sessionId),
     pinned: (sessionId) => dispatcher?.pinned(sessionId) ?? false,
-    workspaces: new NamedWorkspaces(team.workspaces),
+    // A kanban run in a task's own directory works there, as recorded when it was made (spec §18).
+    workspaces: new NamedWorkspaces(team.workspaces, (id) => worktreeOf(db, id)),
     appId: config.lark.appId,
     maxLive: config.maxLiveSessions,
     note,
@@ -234,6 +237,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       db,
       roles: team.roles,
       workspaces: new Set(team.workspaces.keys()),
+      // Each task in one of these gets a directory of its own (spec §18).
+      isolated: new Set(Object.keys(config.isolated ?? {})),
       limits: { failureLimit, transientLimit, transientCooldownS },
       // People are given work, and sent cards for it (spec §9.2); a supervised role's
       // approval cards go to the chat that follows its task (spec §7.1).
@@ -263,6 +268,14 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       // Written in start(), once the home is held: a refused second gateway must not rewrite the first one's.
       worker: { socket, mtDir: join(config.home, 'bin'), path: process.env['PATH'] },
       nameOf: (principal) => people.nameOf(principal),
+      // In the home too, outside every workspace's repository (spec §18). Git gets what an agent gets.
+      workdirs: new TaskDirectories({
+        db,
+        root: join(config.home, 'worktrees'),
+        workspaceDirs: team.workspaces,
+        isolated: config.isolated ?? {},
+        env: buildEnv(process.env),
+      }),
     });
     // A worker's create, link or report can make a task claimable.
     worker = { api: new WorkerApi({ db, service, changed: () => dispatcher?.pass(), nameOf: (principal) => people.nameOf(principal) }), socket };
@@ -300,6 +313,8 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       note,
     });
     note(`kanban: dispatching up to ${config.kanban.maxRunning} agent run(s) at once`);
+    const isolated = Object.keys(config.isolated ?? {}).sort();
+    if (isolated.length > 0) note(`kanban: each task in ${isolated.join(', ')} gets a directory of its own`);
   }
 
   const router = new Router({

@@ -1,5 +1,6 @@
 import type { Db } from './open.js';
 import { displayStatus, type DisplayStatus } from '../kanban/status.js';
+import { worktreeOf } from './workspaces.js';
 import type {
   ActivePhase,
   AgentSnapshot,
@@ -69,6 +70,7 @@ interface TaskRaw {
   closed_at: number | null;
   created_from_task: string | null;
   board: string;
+  worktree: string | null;
 }
 
 function decodeTask(r: TaskRaw): TaskRow {
@@ -100,6 +102,7 @@ function decodeTask(r: TaskRaw): TaskRow {
     closedAt: r.closed_at,
     createdFromTask: r.created_from_task,
     board: r.board,
+    worktree: r.worktree,
   };
 }
 
@@ -107,7 +110,7 @@ const TASK_COLS = `task_id, title, body, json(contract) AS contract, assignee_ki
   reviewer_kind, reviewer, workspace, phase, blocked_from, block_kind, block_reason, priority,
   idempotency_key, failure_limit, retry_on_crash, max_runtime_s, consecutive_failures,
   consecutive_transient, cooldown_until, block_recurrences, stranded_notified_at, created_by,
-  json(created_via) AS created_via, created_at, closed_at, created_from_task, board`;
+  json(created_via) AS created_via, created_at, closed_at, created_from_task, board, worktree`;
 
 interface RunRaw {
   run_id: string;
@@ -217,6 +220,18 @@ export function parentsOf(db: Db, taskId: string): TaskRow[] {
       `SELECT ${TASK_COLS} FROM kanban_tasks
         WHERE task_id IN (SELECT parent_id FROM kanban_links WHERE child_id = ?)
         ORDER BY created_at, rowid`,
+    )
+    .all(taskId)
+    .map(decodeTask);
+}
+
+/** The task's parents in the order they were linked: the order a fan-in merges their branches in (spec §18.5). */
+export function parentsInLinkOrder(db: Db, taskId: string): TaskRow[] {
+  return db
+    .prepare<[string], TaskRaw>(
+      `SELECT ${TASK_COLS} FROM kanban_tasks
+         JOIN (SELECT parent_id, rowid AS link FROM kanban_links WHERE child_id = ?) ON parent_id = task_id
+        ORDER BY link`,
     )
     .all(taskId)
     .map(decodeTask);
@@ -519,6 +534,14 @@ export interface TaskView {
    * knows the limits; never by `taskView`. Absent when it waits on none of them.
    */
   waiting?: readonly Waiting[];
+  /**
+   * For a task with a directory of its own (spec §18): where it is, and its
+   * branch for a git worktree. `path` is null until the directory is made,
+   * before the task's next agent run. `first`: no agent has taken up the task
+   * yet, in an isolated workspace, so its first agent claim gives it one; set by
+   * the service's `show`, which knows the isolated workspaces.
+   */
+  workdir?: { path: string | null; branch: string | null; first?: true };
 }
 
 /** A task's display status (spec §4.1), derived from its parents and its runs. */
@@ -549,7 +572,13 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
     statuses: new Map([...parents, ...children].map((t) => [t.taskId, statusOf(db, t)])),
     runs,
     comments: commentsOf(db, taskId),
+    ...(task.worktree === null ? {} : { workdir: workdirOf(db, task.worktree) }),
   };
+}
+
+function workdirOf(db: Db, worktree: string): { path: string | null; branch: string | null } {
+  const made = worktreeOf(db, worktree);
+  return { path: made?.rootPath ?? null, branch: made?.branch ?? null };
 }
 
 /** A task on the board, with what a person sees of it (spec §4.1). */

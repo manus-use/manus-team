@@ -36,6 +36,7 @@ function task(extra: Partial<TaskRow> = {}): TaskRow {
     closedAt: null,
     createdFromTask: null,
     board: 'default',
+    worktree: null,
     ...extra,
   };
 }
@@ -269,6 +270,41 @@ describe('composePrompt', () => {
         'Last output: Running the tests now.\nTool calls:\n- edit (completed)\n- bash (failed)',
     );
     expect(prompt).toContain('## Attempt 2 (work, implementer): interrupted\nTool calls: none');
+  });
+
+  it("summarises an attempt that never started, leaving out the person's how-to", () => {
+    const howTo = 'Resolve it in /w/k_task: fix those files and commit there, then unblock the task';
+    const prompt = composePrompt(
+      brief({
+        attempts: [
+          {
+            run: run({
+              outcome: 'failed',
+              sessionId: null,
+              lastOutput: null,
+              error: `the run could not start: merging the branch mt/k_a of its parent k_a conflicts in README. ${howTo}`,
+            }),
+            toolCalls: undefined,
+          },
+          {
+            run: run({
+              runId: 'r_2',
+              attempt: 2,
+              outcome: 'failed',
+              sessionId: null,
+              lastOutput: null,
+              error: 'the run could not start: a branch mt/k_task is there already, with no worktree of it at /w/k_task; rename or remove the branch, then unblock the task',
+            }),
+            toolCalls: undefined,
+          },
+        ],
+      }),
+    );
+    expect(prompt).toContain('## Attempt 1 (work, implementer): did not start: merging the branch mt/k_a of its parent k_a conflicts in README\n');
+    expect(prompt).toContain('## Attempt 2 (work, implementer): did not start: a branch mt/k_task is there already, with no worktree of it at /w/k_task');
+    expect(prompt).not.toContain(howTo);
+    expect(prompt).not.toContain('rename or remove');
+    expect(prompt).not.toContain('Error: the run could not start');
   });
 
   it('gives the comment thread and the children', () => {
@@ -614,6 +650,83 @@ describe('composePrompt: gates, review and rework', () => {
     // Neither section where it does not apply: a rework is a work run, a review a review run.
     expect(composePrompt(brief({ kind: 'review', rework: { reason: 'r', actor: 'a', handoff: undefined } }))).not.toContain(
       '## Changes requested',
+    );
+  });
+});
+
+describe('composePrompt: a task with a directory of its own', () => {
+  it("says where it is, that its branch is where a work run's work goes, and where the tasks it follows left theirs", () => {
+    const workdir = {
+      path: '/home/mt/worktrees/web/k_task',
+      branch: 'mt/k_task',
+      upstream: [
+        { taskId: 'k_parent', path: '/home/mt/worktrees/web/k_parent', branch: 'mt/k_parent', abandoned: false },
+        { taskId: 'k_dropped', path: '/home/mt/worktrees/web/k_dropped', branch: 'mt/k_dropped', abandoned: true },
+      ],
+    };
+    const work = composePrompt(brief({ workdir }));
+    expect(work).toContain(
+      [
+        'Your directory, the current one, is /home/mt/worktrees/web/k_task: a git worktree of this task\'s own, on its branch mt/k_task. ' +
+          'Commit your work on that branch before you report: the tasks that follow this one start from it, and nothing is merged for you.',
+        'The tasks this one follows left their work in their own directories, which you may read but not change:',
+        '- k_parent: /home/mt/worktrees/web/k_parent (branch mt/k_parent)',
+        '- k_dropped: /home/mt/worktrees/web/k_dropped (branch mt/k_dropped), archived: its work was abandoned, and is not merged into this task',
+      ].join('\n'),
+    );
+    expect(at(work, 'Your directory')).toBeGreaterThan(at(work, '# The task'));
+    expect(at(work, 'Your directory')).toBeLessThan(at(work, '# Context'));
+    // A reviewer is not told to commit: it does not change the work under review.
+    expect(composePrompt(brief({ kind: 'review', workdir }))).toContain(
+      "Your directory, the current one, is /home/mt/worktrees/web/k_task: the task's own git worktree, on its branch mt/k_task, where the work under review is.",
+    );
+    // A folder, and its parents' folders, in a workspace that is no repository.
+    const folder = composePrompt(
+      brief({ workdir: { path: '/w/notes/k_task', branch: null, upstream: [{ taskId: 'k_a', path: '/w/notes/k_a', branch: null, abandoned: false }] } }),
+    );
+    expect(folder).toContain("Your directory, the current one, is /w/notes/k_task: a folder of this task's own. Put the task's results there.");
+    expect(folder).toContain('- k_a: /w/notes/k_a\n');
+    // A task need not be code: in a folder, nothing is said of commits, branches or git, to the worker or the reviewer.
+    const reviewFolder = composePrompt(
+      brief({
+        kind: 'review',
+        workdir: {
+          path: '/w/notes/k_task',
+          branch: null,
+          upstream: [
+            { taskId: 'k_a', path: '/w/notes/k_a', branch: null, abandoned: false },
+            { taskId: 'k_b', path: '/w/notes/k_b', branch: null, abandoned: true },
+          ],
+        },
+      }),
+    );
+    expect(reviewFolder).toContain("Your directory, the current one, is /w/notes/k_task: a folder of this task's own, where the work under review is.");
+    expect(reviewFolder).toContain('- k_b: /w/notes/k_b, archived: its work was abandoned\n');
+    // A folder task also sees the workspace's own folder, for shared inputs; a worktree has the repository's files already.
+    const withShared = { path: '/w/notes/k_task', branch: null, workspacePath: '/home/me/.manus-team/workspaces/worker', upstream: [] };
+    const sharedWork = composePrompt(brief({ workdir: withShared }));
+    expect(sharedWork).toContain(
+      "Your directory, the current one, is /w/notes/k_task: a folder of this task's own. Put the task's results there.\n" +
+        "Shared inputs, if the task has any, are in the workspace's own folder, /home/me/.manus-team/workspaces/worker: read them there, but put the task's results in yours.",
+    );
+    const sharedReview = composePrompt(brief({ kind: 'review', workdir: withShared }));
+    expect(sharedReview).toContain(
+      "Shared inputs, if the task has any, are in the workspace's own folder, /home/me/.manus-team/workspaces/worker.",
+    );
+    expect(sharedReview).not.toContain('put the task');
+    expect(work).not.toContain("workspace's own folder");
+    for (const text of [folder, reviewFolder, sharedWork, sharedReview]) {
+      const lines = text.slice(text.indexOf('Your directory'), text.indexOf('# Context')).toLowerCase();
+      for (const word of ['commit', 'branch', 'git']) expect(lines).not.toContain(word);
+    }
+    // Nothing in a shared directory, but where the tasks it follows left their work, when they have directories of their own.
+    expect(composePrompt(brief())).not.toContain('Your directory');
+    const shared = composePrompt(
+      brief({ workdir: { path: null, branch: null, upstream: [{ taskId: 'k_a', path: '/w/web/k_a', branch: 'mt/k_a', abandoned: false }] } }),
+    );
+    expect(shared).not.toContain('Your directory');
+    expect(shared).toContain(
+      'The tasks this one follows left their work in their own directories, which you may read but not change:\n- k_a: /w/web/k_a (branch mt/k_a)',
     );
   });
 });
