@@ -795,7 +795,7 @@ export class KanbanChat {
       `Created ${id(task.taskId)}: **${label(task.title)}**, for ${whom}` +
       `${task.workspace === null ? '' : `, in ${label(task.workspace)}`}` +
       `${task.board === DEFAULT_BOARD ? '' : `, on board ${boardName(task.board)}`}.${card} ` +
-      'This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.'
+      'This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.'
     );
   }
 

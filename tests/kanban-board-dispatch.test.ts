@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { eventsOf, openAgentRunCount, runsOf } from '../src/db/kanban-read.js';
 import { fairOrder } from '../src/kanban/fair.js';
+import { KanbanService } from '../src/kanban/service.js';
 import { completes, dispatchHarness, holds, reportComplete, role, until, type DispatchHarness } from './helpers/dispatch.js';
 import { ALICE } from './helpers/kanban.js';
 
@@ -140,8 +141,9 @@ describe("Dispatcher: a board's max_running", () => {
   it("is held to the gateway's max_running whatever its own says", async () => {
     const h = harness({ settings: { maxRunning: 1 } });
     boards(h, 'alpha');
-    // The harness's service is not told the gateway's limit, so it lets this through.
-    expect(h.service.setBoard('alpha', { maxRunning: 3 }, ALICE).ok).toBe(true);
+    // A service not told the gateway's limit lets this through: the dispatcher still holds to it.
+    const unbounded = new KanbanService({ db: h.t.db, roles: new Map(), workspaces: new Set() });
+    expect(unbounded.setBoard('alpha', { maxRunning: 3 }, ALICE).ok).toBe(true);
     const one = h.create({ title: 'one', workspace: 'web', board: 'alpha' });
     const two = h.create({ title: 'two', workspace: 'api', board: 'alpha' });
     const held = holds(h.driver('implementer'));

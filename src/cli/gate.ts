@@ -120,7 +120,9 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     roles: team.roles,
     workspaces: new Set(team.workspaces.keys()),
     supervisedRoles: true,
-    // So mt kanban task show can say a task is waiting on its role's limit (spec §6.3).
+    // As the gateway's dispatcher holds to them: so mt kanban task show can say what a
+    // task is waiting on (spec §6.3, §16), and a board's own max_running is held inside the gateway's.
+    ...(settings.kanban === undefined ? {} : { maxRunning: settings.kanban.maxRunning }),
     ...(settings.kanban?.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: settings.kanban.maxRunningPerRole }),
   });
   return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, close: () => db.close() };

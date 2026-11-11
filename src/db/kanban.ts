@@ -1285,9 +1285,12 @@ export function requestChanges(
       else decide(d, r.run, 'changes_requested', { summary: reason }, now);
     }
     d.prepare("UPDATE kanban_tasks SET phase = 'open' WHERE task_id = ?").run(taskId);
+    // A run's actor is the run: its reviewer, as it was, is the notice's (spec §9.4).
+    const reviewer =
+      by.kind === 'run' && r.run !== undefined ? { reviewer: r.run.assignee.name, reviewerKind: r.run.assignee.kind } : {};
     record(
       d,
-      { taskId, runId: r.run?.runId ?? null, kind: 'changes_requested', actor: actorOf(by), payload: { reason } },
+      { taskId, runId: r.run?.runId ?? null, kind: 'changes_requested', actor: actorOf(by), payload: { reason, ...reviewer } },
       now,
     );
     return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };

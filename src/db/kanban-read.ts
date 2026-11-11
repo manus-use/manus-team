@@ -18,6 +18,7 @@ import type {
   RunRow,
   SubscriptionRow,
   TaskRow,
+  Waiting,
 } from '../kanban/types.js';
 
 /**
@@ -508,19 +509,32 @@ export interface TaskView {
   status: DisplayStatus;
   parents: TaskRow[];
   children: TaskRow[];
+  /** The parents' and the children's display statuses, by task id: what a person sees of them, as of this one. */
+  statuses: ReadonlyMap<string, DisplayStatus>;
   runs: RunRow[];
   comments: CommentRow[];
   /**
-   * The role whose max_running a claimable task is waiting on (spec §6.3). Set by
-   * the service's `show`, which knows the roles' limits; never by `taskView`.
+   * Why a claimable task is not claimed yet: the limits a pass skips it for, and
+   * a busy workspace (spec §6.2, §6.3, §16). Set by the service's `show`, which
+   * knows the limits; never by `taskView`. Absent when it waits on none of them.
    */
-  waitingOn?: { role: string; maxRunning: number };
+  waiting?: readonly Waiting[];
+}
+
+/** A task's display status (spec §4.1), derived from its parents and its runs. */
+export function statusOf(db: Db, task: TaskRow): DisplayStatus {
+  return displayStatus({
+    phase: task.phase,
+    parentsFinished: parentsOf(db, task.taskId).every((p) => isFinished(p.phase)),
+    undecidedRun: runsOf(db, task.taskId).find((r) => r.outcome === null)?.kind,
+  });
 }
 
 export function taskView(db: Db, taskId: string): TaskView | undefined {
   const task = getTask(db, taskId);
   if (task === undefined) return undefined;
   const parents = parentsOf(db, taskId);
+  const children = childrenOf(db, taskId);
   const runs = runsOf(db, taskId);
   const undecided = runs.find((r) => r.outcome === null);
   return {
@@ -531,7 +545,8 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
       undecidedRun: undecided?.kind,
     }),
     parents,
-    children: childrenOf(db, taskId),
+    children,
+    statuses: new Map([...parents, ...children].map((t) => [t.taskId, statusOf(db, t)])),
     runs,
     comments: commentsOf(db, taskId),
   };
@@ -555,14 +570,7 @@ export function boardList(db: Db, board?: string): BoardEntry[] {
     .prepare<string[], TaskRaw>(`SELECT ${TASK_COLS} FROM kanban_tasks ${where} ORDER BY priority DESC, created_at, rowid`)
     .all(...(board === undefined ? [] : [board]))
     .map(decodeTask)
-    .map((task) => ({
-      task,
-      status: displayStatus({
-        phase: task.phase,
-        parentsFinished: parentsOf(db, task.taskId).every((p) => isFinished(p.phase)),
-        undecidedRun: runsOf(db, task.taskId).find((r) => r.outcome === null)?.kind,
-      }),
-    }));
+    .map((task) => ({ task, status: statusOf(db, task) }));
 }
 
 // ---------------------------------------------------------------------------

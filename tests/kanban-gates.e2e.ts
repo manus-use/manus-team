@@ -151,7 +151,7 @@ describe('spawnGate', () => {
     }, 20);
     const started = Date.now();
     try {
-      const r = await spawnGate('echo begun; : > seen; sleep 30', { cwd: dir, env, timeoutMs: 20_000, signal: stop.signal });
+      const r = await spawnGate('echo begun; : > seen; exec sleep 30', { cwd: dir, env, timeoutMs: 20_000, signal: stop.signal });
       expect(stop.signal.aborted).toBe(true);
       expect(r.timedOut).toBe(false);
       expect(r.signal === 'SIGTERM' || r.exitCode === 143).toBe(true);

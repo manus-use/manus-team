@@ -7,7 +7,7 @@ import { stripControl } from '../text.js';
 import { LIST_FILTERS, USAGE } from './chat-parse.js';
 import { describeReported } from './commit.js';
 import type { DisplayStatus } from './status.js';
-import { DEFAULT_BOARD, type Assignee, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow } from './types.js';
+import { DEFAULT_BOARD, type Assignee, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow, type Waiting } from './types.js';
 
 /**
  * What `/kanban` says in chat (spec §9.3), and the notices a subscription hears
@@ -138,7 +138,7 @@ export function renderHelp(): string {
     ...lines.map(([usage, tier]) => `\`${usage}\` (${tier})`),
     'Name a person with an @-mention: they are sent the task as a card in a direct message, with Done and Block, or a review with Approve and Request changes. A person named may comment on, and report on, their own task.',
     "A task with a `reviewer:` is reviewed before it is done: its assignee's done, or its agent's, goes to the reviewer. An operator may answer any review, ending a reviewer role's run.",
-    'The chat a task is created in hears when it is done, needs review, blocks, is retried after a failure, gives up, or is stranded, and who a person was given it.',
+    'The chat a task is created in hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up, or is stranded, and who a person was given it.',
     "A board is a queue of tasks of its own. Each chat is on one, `default` until `/kanban board use` moves it, and its `/kanban task new` and `/kanban task list` act on that board; a task's follow-ups and parents are on its board.",
   ].join('\n');
 }
@@ -231,12 +231,23 @@ function runLine(run: RunRow): string {
 }
 
 /**
- * A task the dispatcher skips because its role is at its max_running (spec
- * §6.3): `/kanban task show` and `mt kanban task show` say so, in the same words.
+ * Why the dispatcher skips a claimable task (spec §6.2, §6.3, §16):
+ * `/kanban task show` and `mt kanban task show` say so, in the same words, one
+ * line for each reason. `escape` is a label's, and `taskId` a task id's, as the
+ * line is shown.
  */
-export function waitingLine(w: { role: string; maxRunning: number }, escape: (text: string) => string = (t) => t): string {
-  const runs = `${w.maxRunning} agent run${w.maxRunning === 1 ? '' : 's'}`;
-  return `waiting: role ${escape(w.role)} is at its ${escape('max_running')}, ${runs} at once; it is claimed when one of them ends`;
+export function waitingLine(
+  w: Waiting,
+  escape: (text: string) => string = (t) => t,
+  taskId: (id: string) => string = (t) => t,
+): string {
+  if (w.kind === 'workspace') {
+    return `waiting: workspace ${escape(w.workspace)} is busy with task ${taskId(w.taskId)}'s agent run; it is claimed when that run ends`;
+  }
+  const runs = `${w.maxRunning} agent run${w.maxRunning === 1 ? '' : 's'} at once; it is claimed when one of them ends`;
+  if (w.kind === 'gateway') return `waiting: the gateway is at its ${escape('kanban.max_running')}, ${runs}`;
+  const whose = w.kind === 'board' ? `board ${escape(w.board)}` : `role ${escape(w.role)}`;
+  return `waiting: ${whose} is at its ${escape('max_running')}, ${runs}`;
 }
 
 /**
@@ -251,15 +262,15 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
     `**${label(task.title)}** ${id(task.taskId)}: ${view.status}`,
     `assignee: ${who(task.assignee)} · reviewer: ${who(task.reviewer)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}${board}`,
   ];
-  if (view.waitingOn !== undefined) out.push(waitingLine(view.waitingOn, label));
+  for (const w of view.waiting ?? []) out.push(waitingLine(w, label, id));
   if (task.phase === 'blocked' && task.blockKind !== null) {
     out.push(`blocked (${forDisplay(task.blockKind)}): ${label(task.blockReason ?? '', 500)}`);
   }
   if (view.parents.length > 0) {
-    out.push(`parents: ${view.parents.map((p) => `${id(p.taskId)} (${p.phase})`).join(', ')}`);
+    out.push(`parents: ${view.parents.map((p) => `${id(p.taskId)} (${view.statuses.get(p.taskId) ?? p.phase})`).join(', ')}`);
   }
   if (view.children.length > 0) {
-    out.push(`children: ${view.children.map((c) => `${id(c.taskId)} (${c.phase})`).join(', ')}`);
+    out.push(`children: ${view.children.map((c) => `${id(c.taskId)} (${view.statuses.get(c.taskId) ?? c.phase})`).join(', ')}`);
   }
   if (task.body.trim() !== '') out.push(block(task.body, 1500));
   const contract = Object.entries(task.contract).filter(([, v]) => v !== undefined && v.trim() !== '');
@@ -366,8 +377,9 @@ export function blocksTask(event: KanbanEvent): boolean {
 
 /**
  * The notice a subscription hears of one event (spec §9.4), or undefined when
- * the event is none: completed, review requested, blocked with its kind and
- * reason, retrying after a failure, gave up, stranded. A dependency block is not
+ * the event is none: completed, review requested, changes requested with who
+ * asked and the reason, blocked with its kind and reason, retrying after a
+ * failure, gave up, stranded. A dependency block is not
  * one, since nobody needs to act; a throttled run's cooldown is not either, as it
  * clears by itself, and blocks as transient at its limit, which is one. For
  * people: the one line that says who a person's claim gave the task to (spec
@@ -376,7 +388,12 @@ export function blocksTask(event: KanbanEvent): boolean {
 export function renderNotice(
   event: KanbanEvent,
   task: TaskRow,
-  opts: { blockRecurrenceLimit: number; nameOf?: NameOf },
+  opts: {
+    blockRecurrenceLimit: number;
+    nameOf?: NameOf;
+    /** A run's assignee, for an event from before its reviewer was recorded in it; undefined once the run is gone. */
+    runAssignee?: (runId: string) => Assignee | undefined;
+  },
 ): string | undefined {
   const p = payloadOf(event);
   const name = `**${label(task.title)}** ${id(task.taskId)}`;
@@ -431,6 +448,18 @@ export function renderNotice(
         return `Gave up on ${name}: ${label(reason, 800)}\n\`/kanban task unblock ${task.taskId} [comment]\` gives it a fresh set of attempts.`;
       }
       return blockedLine(task, kind, reason, recurrences, opts.blockRecurrenceLimit);
+    }
+    case 'changes_requested': {
+      // A run's reviewer as the event recorded it; a person by the name Lark last gave; anyone else as recorded.
+      const reviewer = text(p, 'reviewer');
+      const run = reviewer === '' && event.actor.startsWith('run:') ? opts.runAssignee?.(event.actor.slice(4)) : undefined;
+      const by =
+        reviewer !== ''
+          ? whom({ kind: p['reviewerKind'] === 'human' ? 'human' : 'role', name: reviewer }, opts.nameOf)
+          : run !== undefined
+            ? whom(run, opts.nameOf)
+            : label(stopper(event.actor, opts.nameOf), 80);
+      return `Changes requested on ${name} by ${by}: ${label(text(p, 'reason'), 500)}`;
     }
     case 'stranded':
       return `Stranded: ${name}. Nobody can be given it: ${label(text(p, 'reason'), 500)}`;

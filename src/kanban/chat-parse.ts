@@ -447,8 +447,13 @@ function parseGate(text: string): ParsedKanban {
     timeoutS = Number(timed[1]);
     command = (timed[2] ?? '').replace(/^[ \t]+/, '');
   }
+  // `gate add k_1 -- npm test`, as the terminal's form is written: the `--` is
+  // no part of the command. Only the first one: a later `--` is the command's.
+  // It may stand on a line of its own, after the timeout's.
+  const separated = /^\s*--(?:\s+|$)([\s\S]*)$/.exec(command);
+  if (separated !== null) command = separated[1] ?? '';
   command = command.trim();
-  // A timeout that could not be read, or a second one, is not the start of a command.
+  // A timeout that could not be read, a second one, or one after the `--`, is not the start of a command.
   if (/^--timeout/i.test(command)) return usage('gate add');
   if (taskId === '' || command === '') return usage('gate add');
   return { ok: true, command: { verb: 'gate add', taskId, command, timeoutS } };

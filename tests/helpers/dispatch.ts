@@ -101,6 +101,9 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
     clock,
     ...(opts.checks === undefined ? {} : { checks: opts.checks }),
     ...(opts.people === undefined ? {} : { people: opts.people }),
+    // The limits the dispatcher holds to, as src/index.ts gives them both: so show says what the pass skips for.
+    maxRunning: opts.settings?.maxRunning ?? 8,
+    ...(opts.settings?.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: opts.settings.maxRunningPerRole }),
   });
   const lark = new FakeChannel({ id: 'lark', clock });
   const notes: string[] = [];

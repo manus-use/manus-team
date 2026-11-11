@@ -76,7 +76,7 @@ Read every PDF in contracts/2026 and write a one-page summary of renewal dates, 
 
 The chat replies:
 
-> Created `k_…`: **Summarise the vendor contracts**, for role worker. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Summarise the vendor contracts**, for role worker. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 The dispatcher looks for work as soon as the task is created, so the agent usually starts within
 moments. It runs in the role's workspace, `worker`; the paths in the body are relative to that
@@ -137,7 +137,7 @@ The logs are in logs/2026-11-03/. Use docs/incidents/template.md.
 
 The chat replies:
 
-> Created `k_…`: **Draft the incident review for the 3 November outage**, for role worker. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Draft the incident review for the 3 November outage**, for role worker. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 A vague definition of done is the most common reason delegated work stops early, or never stops.
 `stop when:` is how you tell the agent to block and ask rather than guess.
@@ -169,6 +169,10 @@ Give a timeout in seconds with `--timeout` (or `--timeout=60`) before the comman
 ```
 
 > Gate 2 added to `k_…` (60 s): grep -q "## Timeline" docs/incidents/2026-11-03.md
+
+A `--` before the command, as the terminal's `mt kanban gate add` takes one, is dropped:
+`/kanban gate add k_… -- npm test` and `/kanban gate add k_… --timeout 60 -- npm test` both
+store `npm test`. Only the first `--` is dropped; a later one is the command's.
 
 List them, which anyone at talk tier may do:
 
@@ -223,7 +227,7 @@ outcome: docs/oncall.md covers paging, escalation and handover
 verify: every escalation contact has a phone number
 ```
 
-> Created `k_…`: **Write the on-call handbook page**, for role worker. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Write the on-call handbook page**, for role worker. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 When the worker's work is done, the chat hears:
 
@@ -289,7 +293,12 @@ prompt carries the reviewer's reason and the previous handoff in full. On bytese
 continues the implementer's own session where it can, so the agent revises what it wrote knowing
 why; where it cannot, the prompt still has everything it needs. The rework goes back to the
 reviewer when it is done, whether the agent asks for review or reports done, and the chat hears
-"Review requested for …" again. A request for changes is not itself a notice.
+"Review requested for …" again.
+
+The chat the task came from hears each request for changes, with who asked and the reason on one
+line, whoever asked: a reviewer role's agent, a person by card or by command, or an operator:
+
+> Changes requested on **Write the on-call handbook page** `k_…` by Bob Li: Add the weekend escalation path, and a phone number for the database on-call.
 
 ### Approve
 
@@ -348,7 +357,7 @@ Ask facilities for the two rooms on the third floor first.
 
 The chat replies:
 
-> Created `k_…`: **Book the venue for the January offsite**, for Alice Chen (lark:on_…). They are sent it as a card, in a direct message, once it is ready. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Book the venue for the January offsite**, for Alice Chen (lark:on_…). They are sent it as a card, in a direct message, once it is ready. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 When the task is ready, Alice gets a card in a direct message from the bot:
 
@@ -440,7 +449,7 @@ assignee: worker
 Export every ticket tagged billing from tickets/2026-q3.csv into data/billing-q3.csv.
 ```
 
-> Created `k_…`: **Collect last quarter's support tickets**, for role worker. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Collect last quarter's support tickets**, for role worker. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 Create B, with A's id as its parent:
 
@@ -669,8 +678,19 @@ What the statuses mean:
 > **Runs**
 > #1 work · role worker · working
 
-It shows the task, its parents and children, its contract, gates, its last five runs, the last
-800 characters of the latest run's output, and its last five comments.
+It shows the task, its parents and children with the status of each, its contract, gates, its
+last five runs, the last 800 characters of the latest run's output, and its last five comments.
+
+A ready task, or one waiting for its reviewer, that the dispatcher is passing over says why, one
+line for each reason that holds:
+
+> waiting: the gateway is at its kanban.max\_running, 4 agent runs at once; it is claimed when one of them ends
+> waiting: board web-app is at its max\_running, 1 agent run at once; it is claimed when one of them ends
+> waiting: role worker is at its max\_running, 2 agent runs at once; it is claimed when one of them ends
+> waiting: workspace api is busy with task `k_…`'s agent run; it is claimed when that run ends
+
+Nothing is said of a task that cannot be claimed for another reason: a parent not done, nobody
+assigned, a role or workspace that is not configured (section 9, Stranded).
 
 ### Comments, and who can steer
 
@@ -700,14 +720,15 @@ It hears when a task:
 
 - is done, with the summary;
 - needs review, and from whom;
+- has changes requested, by whom, with the reason;
 - blocks, with the kind and the reason;
 - is retried after a failure;
 - gives up;
 - is stranded, with nobody able to take it.
 
 It also hears the one line saying a person was given a task or a review, and when a card could
-not reach its person. It does not hear claims by a role, comments, links, requests for changes,
-archives, or a run retried quietly after a gateway restart.
+not reach its person. It does not hear claims by a role, comments, links, archives, or a run
+retried quietly after a gateway restart.
 
 Notices are **batched**: each chat or thread gets at most one message every couple of seconds,
 listing what happened in order, at most 20 notices, then "… and N more, in the next message."
@@ -1052,7 +1073,7 @@ constraints: put the brief itself in your summary, not only in a file
 Read docs/reports-api.md and propose three ways to cache report results.
 ```
 
-> Created `k_…`: **Write the caching options brief**, for role worker. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Write the caching options brief**, for role worker. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 Each prototype, with the brief's id as parent, and its own workspace (change the letter for B and
 C):
@@ -1067,7 +1088,7 @@ constraints: put the numbers and how you got them in your summary
 Take option A from the parent's brief. Build the smallest prototype that can be measured.
 ```
 
-> Created `k_…`: **Prototype caching option A**, for role worker, in research-a. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Prototype caching option A**, for role worker, in research-a. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 The reply names the workspace when the task has its own. The write-up, with the three prototypes
 as parents, on one line:
@@ -1129,8 +1150,8 @@ verify: every number in the table comes from a parent's summary
 **Pitfalls:**
 
 - **No `workspace:` lines, no parallelism.** The three prototypes would all run in `worker`, one
-  at a time, whatever the role's limit. `/kanban task show` does not say a task waits on a busy
-  workspace: it just stays ready.
+  at a time, whatever the role's limit. `/kanban task show` on a waiting one says `waiting:
+  workspace worker is busy with task k_…'s agent run`.
 - **The role's limit, not the workspaces, sets the width.** With `max_running_per_role: 2`, three
   workspaces still run two prototypes at once. To run all three, set `max_running: 3` in
   `roles/worker/config.yaml` (at most `kanban.max_running`), and restart the gateway.
@@ -1165,7 +1186,7 @@ constraints: do not change the JSON route's output
 stop when: the report model has fields that cannot be flattened to columns
 ```
 
-> Created `k_…`: **Add CSV export to the reports API**, for nobody yet (`/kanban task assign k_… <role or @person>` gives it to someone), in api. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Add CSV export to the reports API**, for nobody yet (`/kanban task assign k_… <role or @person>` gives it to someone), in api. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 Add the gate. Everything after the task id is the command, as typed:
 
@@ -1197,7 +1218,7 @@ outcome: v2.4.0 tagged and deployed, and the changelog says CSV export is new
 Deploy with the usual checklist in docs/release.md.
 ```
 
-> Created `k_…`: **Release the CSV export**, for Dana Park (lark:on\_…). They are sent it as a card, in a direct message, once it is ready. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Release the CSV export**, for Dana Park (lark:on\_…). They are sent it as a card, in a direct message, once it is ready. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 **What happens:**
 
@@ -1213,8 +1234,11 @@ Deploy with the usual checklist in docs/release.md.
    implementer left. Its prompt holds the handoff, the reported commit when `api` is a git repository, the
    contract and the gate.
    It counts against `reviewer`'s limit of two, and holds `api` while it runs.
-4. **Request changes.** The reviewer asks for changes with a reason. The chat hears nothing of
-   it: a request for changes is not a notice. `/kanban task show k_…` shows it under the runs:
+4. **Request changes.** The reviewer asks for changes with a reason. The chat hears:
+
+   > Changes requested on **Add CSV export to the reports API** `k_…` by role reviewer: Values with commas are not quoted: a report titled "A, B" breaks the row. Quote fields per RFC 4180 and add a test.
+
+   `/kanban task show k_…` shows it under the runs too:
 
    > **Runs**
    > #1 work · role worker · review\_requested: Added GET /reports/:id.csv in src/routes/reports.ts, with test/export.test.ts. npm test passes.
@@ -1253,8 +1277,9 @@ Deploy with the usual checklist in docs/release.md.
 
 **Pitfalls:**
 
-- **No `--` in chat.** `/kanban gate add k_… -- npm test` stores `-- npm test` as the command,
-  which fails. `--` belongs to the terminal form, `mt kanban gate add k_… -- npm test`.
+- **`--` is optional in chat.** `/kanban gate add k_… -- npm test` stores `npm test`, as the
+  terminal's `mt kanban gate add k_… -- npm test` does. A `--timeout` goes before the `--`: after
+  it, `/kanban gate add k_… -- --timeout 60 npm test` is refused with the usage.
 - **A gate added after the agent starts** is not in its prompt, though it still runs on its
   report. Hence the order above: create, gate, assign.
 - **Choose one way to review.** Do not also put a review task under the implementation: it would
@@ -1294,7 +1319,7 @@ stop when: it is unclear which report types are in scope
 Goal: every report in the reports API can be downloaded as CSV. The code is in the api workspace: give every task "workspace": "api". Release is done by people, not by these tasks.
 ```
 
-> Created `k_…`: **Plan the reports CSV export**, for role planner. This chat hears when it is done, needs review, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Plan the reports CSV export**, for role planner. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 **What the planner does.** Its agent runs in `planner`, reads the goal, and sends one
 `mt kanban create` a task, each answered with the new id:
@@ -1347,12 +1372,11 @@ The chat hears nothing as each task is created; the planner's summary is the lis
 
 > **Add the CSV serializer** `k_…`: todo
 > assignee: role worker · reviewer: role reviewer · workspace: api
-> parents: `k_…` (open)
-> children: `k_…` (open)
+> parents: `k_…` (running)
+> children: `k_…` (todo)
 > > Implement src/csv.ts from the mapping in docs/csv-columns.md.
 
-The parents and children lines give each task's phase, not its status: `open` is a task that is
-todo, ready or running; the others are `review`, `blocked`, `done` and `archived`. Check that
+The parents and children lines give each task's status, as `/kanban task list` does. Check that
 every task but the first has a parent, that no task you expected in parallel has a sibling as
 parent, and that the reviewers are where checking is needed.
 
@@ -1391,7 +1415,7 @@ line of JSON:
 
 ```
 $ mt kanban task new "Write the caching options brief" --board web-app --assignee worker --json
-{"ok":true,"task_id":"k_…","board":"web-app","nudged":true}
+{"ok":true,"task_id":"k_…","board":"web-app","existing":false,"nudged":true}
 ```
 
 and a refusal, with exit status 1:
@@ -1403,19 +1427,30 @@ and a refusal, with exit status 1:
 `nudged` says whether the running gateway was told to look for work at once; when it is false,
 `mt` also says why on stderr, and the task waits for the gateway's next sweep, or its next start.
 
-The script reads each id with `node -e`, and passes it on as `--parent`. A terminal's `task new`
-takes no idempotency key, and running it twice makes two tasks, so the script records each id it
-gets in a file, and on a second run uses the ids recorded there instead of creating them again.
-After a failure halfway, run it again: it makes only what is missing.
+`--key <key>` makes a `task new` safe to run again. The first run with a key makes the task; a
+later one with the same key makes nothing and returns the task it made, with `"existing":true` in
+the JSON, and `"nudged":false`, since nothing changed for the gateway to act on; in plain text:
+
+```
+$ mt kanban task new "Write the caching options brief" --board web-app --key caching-dag:web-app:brief
+task k_… already exists with key caching-dag:web-app:brief: Write the caching options brief, on board web-app; nothing new was created
+```
+
+The key names the task, whatever the rest of the command says: a second run with another title
+still returns the first task, with "(archived)" after its title if it has been archived since. A
+key holding a control character or a bidi control is refused, as a title is. A key is the terminal's own, so it never returns a task made from
+chat or by an agent. A key already used on one board is refused on another, `other_board`, so
+the script puts the board in its keys.
+
+The script reads each id with `node -e`, and passes it on as `--parent`. After a failure halfway,
+run it again: it makes only what is missing.
 
 ```sh
 #!/bin/sh
 # A brief, three prototypes in parallel, and a recommendation that waits for all three.
-# Safe to run again: the tasks it has made are listed in $STATE, and not made twice.
+# Safe to run again: each task has a key, and a second run gets the same task back.
 set -eu
 BOARD=${BOARD:-web-app}
-STATE=${STATE:-./caching-dag.$BOARD.ids}
-touch "$STATE"
 
 # The task_id in mt's --json line; on a refusal, its message on stderr, and exit 1.
 task_id() {
@@ -1433,12 +1468,7 @@ task_id() {
 new() {
   name=$1 title=$2
   shift 2
-  id=$(sed -n "s/^$name //p" "$STATE")
-  if [ -z "$id" ]; then
-    id=$(mt kanban task new "$title" --board "$BOARD" --json "$@" | task_id)
-    echo "$name $id" >> "$STATE"
-  fi
-  echo "$id"
+  mt kanban task new "$title" --board "$BOARD" --key "caching-dag:$BOARD:$name" --json "$@" | task_id
 }
 
 brief=$(new brief "Write the caching options brief" --assignee worker \
@@ -1473,12 +1503,6 @@ $ sh caching-dag.sh
 brief:      k_…
 prototypes: k_… k_… k_…
 report:     k_…
-$ cat caching-dag.web-app.ids
-brief k_…
-proto-a k_…
-proto-b k_…
-proto-c k_…
-report k_…
 $ mt kanban task list --board web-app
 task  status  assignee     title
 k_…   ready   role worker  Write the caching options brief
@@ -1489,7 +1513,7 @@ k_…   todo    role worker  Write the caching recommendation
 ```
 
 A second `sh caching-dag.sh` prints the same ids and creates nothing. `BOARD=billing sh
-caching-dag.sh` makes the same graph on `billing`, with a state file of its own.
+caching-dag.sh` makes the same graph on `billing`, under keys of its own.
 
 Notes:
 
@@ -1499,9 +1523,8 @@ Notes:
 - **`sed` works too.** The JSON is one line, written by `JSON.stringify`, and ids are lowercase
   letters and digits, so `sed -n 's/.*"task_id":"\(k_[0-9a-z]*\)".*/\1/p'` finds the id. It
   prints nothing for a refusal, where `node -e` also prints the reason.
-- **The state file is the only guard against duplicates.** A run stopped between `mt` creating a
-  task and the script writing its id makes that task again on the next run. Delete the file to
-  start over: the tasks already made stay on the board, and archiving them is up to you.
+- **A key is kept for good.** Archiving the task does not free its key: a run after that returns
+  the archived task. To make the graph again, change the keys, say with a version in them.
 - **No chat follows these tasks**, so nobody is told when they are done or block. Watch with
   `mt kanban task list --board web-app`, or create the first task from chat.
 - **Gates** are `mt kanban gate add k_… -- npm test`, with `--` before the command, and take no
@@ -1545,7 +1568,7 @@ them until they move.
 > assignee: role worker · reviewer: nobody · workspace: worker
 > blocked (capability): The finance database refuses this role: permission denied for schema ledger.
 > parents: `k_…` (done)
-> children: `k_…` (open), `k_…` (open)
+> children: `k_…` (todo), `k_…` (todo)
 > > Compare data/invoices-q3.csv with the ledger in the finance database.
 > **Runs**
 > #1 work · role worker · blocked: The finance database refuses this role: permission denied for schema ledger.
@@ -1590,7 +1613,7 @@ Each child now waits for the replacement alone. `/kanban task show` on one:
 
 > **Write the reconciliation report** `k_…`: todo
 > assignee: role worker · reviewer: nobody · workspace: not yet fixed
-> parents: `k_…` (archived), `k_…` (open)
+> parents: `k_…` (archived), `k_…` (ready)
 
 When the replacement is done, the children start, and their prompts hold its handoff. Under the
 archived parent they read "No handoff: it was never completed."
@@ -1705,7 +1728,8 @@ priority and then age decide. A board at its own `max_running` gives up its turn
 - the gateway's `max_running: 4`, over both boards together;
 - each role's limit: `worker` has at most two agent runs open, on web-app and billing together. A
   `worker` task on billing waits while two web-app `worker` tasks run, and `/kanban task show`
-  says it is waiting on its role's `max_running`. Billing's turn goes on to its tasks for other
+  says it is waiting on its role's `max_running`, as it says a wait on the gateway's or a board's
+  limit, or on a busy workspace. Billing's turn goes on to its tasks for other
   roles;
 - one agent per workspace: two boards' tasks in one workspace take turns.
 

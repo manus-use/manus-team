@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { limitsReached } from '../src/kanban/waiting.js';
 import { eventsOf, openAgentRunCount, openAgentRunCountAs, runsOf } from '../src/db/kanban-read.js';
 import { completes, dispatchHarness, holds, reportComplete, role, until, type DispatchHarness } from './helpers/dispatch.js';
 import { ALICE } from './helpers/kanban.js';
@@ -256,21 +257,21 @@ describe("/kanban task show: a task waiting on its role's limit", () => {
     await until(() => held.started, 'the first run');
 
     const shown = h.service.show(waiting.taskId);
-    expect(shown.ok && shown.view.waitingOn).toEqual({ role: 'implementer', maxRunning: 1 });
+    expect(shown.ok && shown.view.waiting).toEqual([{ kind: 'role', role: 'implementer', maxRunning: 1 }]);
     if (!shown.ok) throw new Error(shown.message);
     const line = 'role implementer is at its max_running, 1 agent run at once; it is claimed when one of them ends';
     expect(showText(shown.view, [])).toContain(`waiting: ${line}`);
     expect(renderShow(shown.view, [])).toContain(`waiting: ${line.replace('max_running', 'max\\_running')}`);
     // The running task is not waiting on anything.
     const running = h.service.show(first.taskId);
-    expect(running.ok && running.view.waitingOn).toBeUndefined();
+    expect(running.ok && running.view.waiting).toBeUndefined();
     if (running.ok) expect(showText(running.view, []).join('\n')).not.toMatch(/waiting:/);
 
     completes(h, h.driver('implementer'));
     held.end('completed', () => reportComplete(h, runOf(h, first.taskId)));
     await h.dispatcher.idle();
     const after = h.service.show(waiting.taskId);
-    expect(after.ok && after.view.waitingOn).toBeUndefined();
+    expect(after.ok && after.view.waiting).toBeUndefined();
   });
 });
 
@@ -297,10 +298,10 @@ describe("the service's show: which tasks are waiting on their role's limit", ()
     await until(() => held.started, 'the first run');
 
     const withDefault = serviceOn(h, roles, { maxRunningPerRole: 1 }).show(waiting.taskId);
-    expect(withDefault.ok && withDefault.view.waitingOn).toEqual({ role: 'implementer', maxRunning: 1 });
+    expect(withDefault.ok && withDefault.view.waiting).toEqual([{ kind: 'role', role: 'implementer', maxRunning: 1 }]);
     // Without the default the role has no limit, so nothing is said.
     const without = serviceOn(h, roles).show(waiting.taskId);
-    expect(without.ok && without.view.waitingOn).toBeUndefined();
+    expect(without.ok && without.view.waiting).toBeUndefined();
 
     completes(h, h.driver('implementer'));
     held.end('completed', () => reportComplete(h, runOf(h, first.taskId)));
@@ -327,9 +328,9 @@ describe("the service's show: which tasks are waiting on their role's limit", ()
 
     const waiting = (s: KanbanService, taskId: string) => {
       const r = s.show(taskId);
-      return r.ok ? r.view.waitingOn : 'refused';
+      return r.ok ? r.view.waiting : 'refused';
     };
-    const capped = { role: 'implementer', maxRunning: 1 };
+    const capped = [{ kind: 'role', role: 'implementer', maxRunning: 1 }];
     expect(waiting(h.service, gone.taskId)).toEqual(capped);
     expect(waiting(serviceOn(h, roles, { workspaces: ['default', 'web', 'docs'] }), gone.taskId)).toBeUndefined();
     expect(waiting(h.service, single.taskId)).toEqual(capped);
@@ -340,5 +341,147 @@ describe("the service's show: which tasks are waiting on their role's limit", ()
     held.end('completed', () => reportComplete(h, runOf(h, holder.taskId)));
     await h.dispatcher.idle();
     expect([gone, single, split].map((t) => runsOf(h.t.db, t.taskId).map((r) => r.outcome))).toEqual([['completed'], ['completed'], []]);
+  });
+});
+
+describe('limitsReached', () => {
+  it('stops at the first limit reached for the pass, and gives every one for show', async () => {
+    const h = harness({ roles: [role('implementer', { maxRunning: 1 })], settings: { maxRunning: 1 } });
+    const first = h.create({ title: 'first', workspace: 'web' });
+    const held = holds(h.driver('implementer'));
+    h.dispatcher.pass();
+    await until(() => held.started, 'the first run');
+    const limits = { maxRunning: 1, board: 'default', boardMaxRunning: 1, role: 'implementer', roleMaxRunning: 1 };
+    const prepare = vi.spyOn(h.t.db, 'prepare');
+    expect(limitsReached(h.t.db, limits, { first: true })).toEqual([{ kind: 'gateway', maxRunning: 1 }]);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    prepare.mockClear();
+    expect(limitsReached(h.t.db, limits).map((w) => w.kind)).toEqual(['gateway', 'board', 'role']);
+    expect(prepare).toHaveBeenCalledTimes(3);
+    prepare.mockRestore();
+    completes(h, h.driver('implementer'));
+    held.end('completed', () => reportComplete(h, runOf(h, first.taskId)));
+    await h.dispatcher.idle();
+  });
+});
+
+describe('task show: every reason a pass skips a claimable task', () => {
+  const shown = (h: DispatchHarness, taskId: string) => {
+    const r = h.service.show(taskId);
+    if (!r.ok) throw new Error(r.message);
+    return r.view;
+  };
+  const lines = (h: DispatchHarness, taskId: string) => {
+    const view = shown(h, taskId);
+    return { plain: showText(view, []).filter((l) => l.startsWith('waiting:')), chat: renderShow(view, []).split('\n').filter((l) => l.startsWith('waiting:')) };
+  };
+
+  it("names the task whose agent run holds its workspace, and says nothing once it is free", async () => {
+    const h = harness({ roles: [role('implementer')] });
+    const first = h.create({ title: 'first', workspace: 'web' });
+    h.clock.advance(1);
+    const second = h.create({ title: 'second', workspace: 'web' });
+    const held = holds(h.driver('implementer'));
+    h.dispatcher.pass();
+    await until(() => held.started, 'the first run');
+    expect(runCount(h, second.taskId)).toBe(0);
+
+    expect(shown(h, second.taskId).waiting).toEqual([{ kind: 'workspace', workspace: 'web', taskId: first.taskId, runId: runOf(h, first.taskId) }]);
+    const said = `workspace web is busy with task ${first.taskId}'s agent run; it is claimed when that run ends`;
+    expect(lines(h, second.taskId)).toEqual({ plain: [`waiting: ${said}`], chat: [`waiting: ${said.replace(first.taskId, `\`${first.taskId}\``)}`] });
+    expect(shown(h, first.taskId).waiting).toBeUndefined();
+
+    completes(h, h.driver('implementer'));
+    held.end('completed', () => reportComplete(h, runOf(h, first.taskId)));
+    await h.dispatcher.idle();
+    expect(shown(h, second.taskId).waiting).toBeUndefined();
+  });
+
+  it("says when the gateway's kanban.max_running is reached", async () => {
+    const h = harness({ roles: [role('implementer'), role('reviewer')], settings: { maxRunning: 1 } });
+    const first = h.create({ title: 'first', workspace: 'web' });
+    h.clock.advance(1);
+    const second = h.create({ title: 'second', workspace: 'api', assignee: 'reviewer' });
+    const held = holds(h.driver('implementer'));
+    h.dispatcher.pass();
+    await until(() => held.started, 'the first run');
+    expect(runCount(h, second.taskId)).toBe(0);
+
+    expect(shown(h, second.taskId).waiting).toEqual([{ kind: 'gateway', maxRunning: 1 }]);
+    const said = 'the gateway is at its kanban.max_running, 1 agent run at once; it is claimed when one of them ends';
+    expect(lines(h, second.taskId)).toEqual({ plain: [`waiting: ${said}`], chat: [`waiting: ${said.replace('max_running', 'max\\_running')}`] });
+
+    completes(h, h.driver('reviewer'));
+    held.end('completed', () => reportComplete(h, runOf(h, first.taskId)));
+    await h.dispatcher.idle();
+    expect(shown(h, second.taskId).waiting).toBeUndefined();
+  });
+
+  it("says when its board's max_running is reached, and not of another board's task", async () => {
+    const h = harness({ roles: [role('implementer')] });
+    expect(h.service.createBoard('alpha', ALICE).ok).toBe(true);
+    expect(h.service.setBoard('alpha', { maxRunning: 1 }, ALICE).ok).toBe(true);
+    const first = h.create({ title: 'first', workspace: 'web', board: 'alpha' });
+    h.clock.advance(1);
+    const second = h.create({ title: 'second', workspace: 'api', board: 'alpha' });
+    const elsewhere = h.create({ title: 'elsewhere', workspace: 'docs' });
+    const held = holds(h.driver('implementer'));
+    const other = holds(h.driver('implementer'));
+    h.dispatcher.pass();
+    await until(() => held.started && other.started, 'two runs');
+    expect([second, elsewhere].map((t) => runCount(h, t.taskId))).toEqual([0, 1]);
+
+    expect(shown(h, second.taskId).waiting).toEqual([{ kind: 'board', board: 'alpha', maxRunning: 1 }]);
+    const said = 'board alpha is at its max_running, 1 agent run at once; it is claimed when one of them ends';
+    expect(lines(h, second.taskId)).toEqual({ plain: [`waiting: ${said}`], chat: [`waiting: ${said.replace('max_running', 'max\\_running')}`] });
+
+    completes(h, h.driver('implementer'));
+    held.end('completed', () => reportComplete(h, runOf(h, first.taskId)));
+    other.end('completed', () => reportComplete(h, runOf(h, elsewhere.taskId)));
+    await h.dispatcher.idle();
+    expect(shown(h, second.taskId).waiting).toBeUndefined();
+  });
+
+  it('gives every reason that holds, in the order the pass checks them', async () => {
+    const h = harness({ roles: [role('implementer', { maxRunning: 1 })], settings: { maxRunning: 1 } });
+    const first = h.create({ title: 'first', workspace: 'web' });
+    h.clock.advance(1);
+    const second = h.create({ title: 'second', workspace: 'web' });
+    const held = holds(h.driver('implementer'));
+    h.dispatcher.pass();
+    await until(() => held.started, 'the first run');
+    expect(shown(h, second.taskId).waiting).toEqual([
+      { kind: 'gateway', maxRunning: 1 },
+      { kind: 'role', role: 'implementer', maxRunning: 1 },
+      { kind: 'workspace', workspace: 'web', taskId: first.taskId, runId: runOf(h, first.taskId) },
+    ]);
+    expect(lines(h, second.taskId).plain).toHaveLength(3);
+    completes(h, h.driver('implementer'));
+    held.end('completed', () => reportComplete(h, runOf(h, first.taskId)));
+    await h.dispatcher.idle();
+  });
+
+  it("says nothing of a task that cannot be claimed for another reason: a parent not done, nobody to do it, its role not configured", async () => {
+    const h = harness({ roles: [role('implementer')], settings: { maxRunning: 1 } });
+    const first = h.create({ title: 'first', workspace: 'web' });
+    const held = holds(h.driver('implementer'));
+    h.dispatcher.pass();
+    await until(() => held.started, 'the first run');
+    const child = h.create({ title: 'child', workspace: 'api', parents: [first.taskId] });
+    const made = h.service.create({ title: 'nobody', workspace: 'api', createdBy: ALICE, createdVia: { kind: 'operator' } });
+    if (!made.ok) throw new Error(made.message);
+    const nobody = made.task;
+    const capped = h.create({ title: 'capped', workspace: 'api' });
+    for (const t of [child, nobody]) expect(shown(h, t.taskId).waiting).toBeUndefined();
+    expect(shown(h, capped.taskId).waiting).toEqual([{ kind: 'gateway', maxRunning: 1 }]);
+    // The same board, read by a gateway whose config no longer has the role: the claim would refuse it.
+    const without = new KanbanService({ db: h.t.db, roles: new Map(), workspaces: new Set(['default', 'web', 'api']), clock: h.clock, maxRunning: 1 });
+    const r = without.show(capped.taskId);
+    expect(r.ok && r.view.waiting).toBeUndefined();
+    completes(h, h.driver('implementer'));
+    completes(h, h.driver('implementer'));
+    completes(h, h.driver('implementer'));
+    held.end('completed', () => reportComplete(h, runOf(h, first.taskId)));
+    await h.dispatcher.idle();
   });
 });

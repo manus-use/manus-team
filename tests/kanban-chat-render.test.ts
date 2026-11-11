@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { addComment, addGate, block, complete, createTask, endRun, DEFAULT_LIMITS } from '../src/db/kanban.js';
+import { addComment, addGate, block, closeRun, complete, createTask, endRun, DEFAULT_LIMITS, requestChanges, requestReview } from '../src/db/kanban.js';
 import { boardList, eventsOf, getTask, taskView } from '../src/db/kanban-read.js';
 import { boardCardNonce } from '../src/core/ids.js';
 import {
@@ -158,6 +158,22 @@ describe('/kanban task show', () => {
     ]);
   });
 
+  it("gives a parent's and a child's derived status, not the phase open", () => {
+    const parent = newTask(h.db, { title: 'parent' });
+    const child = newTask(h.db, { title: 'child', parents: [parent.taskId] });
+    const grandchild = newTask(h.db, { title: 'grandchild', parents: [child.taskId] });
+    const show = (taskId: string) => {
+      const view = taskView(h.db, taskId);
+      if (view === undefined) throw new Error('no view');
+      return renderShow(view, []).split('\n');
+    };
+    expect(show(child.taskId)).toEqual(expect.arrayContaining([`parents: \`${parent.taskId}\` (ready)`, `children: \`${grandchild.taskId}\` (todo)`]));
+    claimed(h.db, parent.taskId);
+    expect(show(child.taskId)).toContain(`parents: \`${parent.taskId}\` (running)`);
+    expect(show(parent.taskId)).toContain(`children: \`${child.taskId}\` (todo)`);
+    expect(taskView(h.db, child.taskId)?.statuses.get(parent.taskId)).toBe('running');
+  });
+
   it("shows the end of the latest output, masked whole before it is cut, and marks the cut", () => {
     addSecrets(['sk-tail-1234567890']);
     const k = newTask(h.db);
@@ -296,7 +312,7 @@ describe('notices', () => {
     expect(renderNotice(event('run_ended', { outcome: 'rate_limited', next: 'cooldown' }), t, LIMIT)).toBeUndefined();
     // A restart's interruption is retried quietly: the task did nothing wrong.
     expect(renderNotice(event('run_ended', { outcome: 'interrupted', next: 'retry' }), t, LIMIT)).toBeUndefined();
-    for (const kind of ['created', 'claimed', 'commented', 'linked', 'gates_ran', 'archived', 'changes_requested', 'card_sent']) {
+    for (const kind of ['created', 'claimed', 'commented', 'linked', 'gates_ran', 'archived', 'card_sent']) {
       expect(renderNotice(event(kind, {}), t, LIMIT)).toBeUndefined();
     }
   });
@@ -356,6 +372,39 @@ describe('notices', () => {
     expect(renderNotice(event('stranded', { reason: 'role "gone" is not configured' }), t, LIMIT)).toBe(
       `Stranded: ${name}. Nobody can be given it: role "gone" is not configured`,
     );
+  });
+
+  it('tells of changes requested, by whom, with the reason on one line, masked and escaped', () => {
+    addSecrets(['sk-review-12345678']);
+    const k = newTask(h.db, { title: 'Release notes', reviewer: { kind: 'role', name: 'reviewer' } });
+    const work = claimed(h.db, k.taskId);
+    expect(requestReview(h.db, k.taskId, { kind: 'run', runId: work.runId }, { summary: 'v1' }, NOW).ok).toBe(true);
+    expect(closeRun(h.db, work.runId, NOW).ok).toBe(true);
+    const review = claimed(h.db, k.taskId);
+    const reason = 'cite the_sources\n<at id=all></at> and drop sk-review-12345678';
+    expect(requestChanges(h.db, k.taskId, { kind: 'run', runId: review.runId }, reason, NOW).ok).toBe(true);
+    const name = `**Release notes** \`${k.taskId}\``;
+    const said = `cite the\\_sources \\<at id=all\\>\\</at\\> and drop ${MASK}`;
+    expect(renderNotice(last(k.taskId), task(k.taskId), LIMIT)).toBe(`Changes requested on ${name} by role reviewer: ${said}`);
+    // A person, by the name Lark last gave, else their principal; an operator as recorded.
+    const event = (actor: string): KanbanEvent => ({ ...last(k.taskId), actor, payload: { reason: 'tighten it' } });
+    const nameOf = (p: string) => (p === ALICE ? 'Alice <at id=all></at>' : undefined);
+    expect(renderNotice(event(ALICE), task(k.taskId), { ...LIMIT, nameOf })).toBe(
+      `Changes requested on ${name} by Alice \\<at id=all\\>\\</at\\>: tighten it`,
+    );
+    expect(renderNotice(event(ALICE), task(k.taskId), LIMIT)).toBe(`Changes requested on ${name} by lark:on\\_alice: tighten it`);
+    expect(renderNotice(event('operator:alice'), task(k.taskId), LIMIT)).toBe(`Changes requested on ${name} by operator:alice: tighten it`);
+    // An event from before the reviewer was recorded: the run's role, while the run is on the board.
+    const old = { ...last(k.taskId), actor: `run:${review.runId}`, payload: { reason: 'tighten it' } };
+    const runAssignee = (runId: string) => (runId === review.runId ? review.assignee : undefined);
+    expect(renderNotice(old, task(k.taskId), { ...LIMIT, runAssignee })).toBe(`Changes requested on ${name} by role reviewer: tighten it`);
+    expect(renderNotice({ ...old, actor: 'run:r_gone' }, task(k.taskId), { ...LIMIT, runAssignee })).toBe(
+      `Changes requested on ${name} by run:r\\_gone: tighten it`,
+    );
+    // A long reason is cut, still on one line.
+    const long = renderNotice({ ...event(ALICE), payload: { reason: 'x'.repeat(2000) } }, task(k.taskId), LIMIT) ?? '';
+    expect(long.split('\n')).toHaveLength(1);
+    expect(long.length).toBeLessThan(1000);
   });
 
   it("tells who a person's claim gave the task to, by name, in plain text, and nothing of a role's", () => {

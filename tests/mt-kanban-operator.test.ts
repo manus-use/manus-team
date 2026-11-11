@@ -96,6 +96,15 @@ describe('mt kanban board', () => {
     expect((await mt(['board', 'list', 'ALL'])).out).toContain('web-app (archived): no tasks');
   });
 
+  it("caps a board's max_running at the gateway's kanban.max_running, as chat does", async () => {
+    expect((await mt(['board', 'create', 'web-app'])).code).toBe(0);
+    const over = await mt(['board', 'set', 'web-app', 'max_running', '9', '--json']);
+    expect(over.code).toBe(1);
+    expect(JSON.parse(over.out)).toMatchObject({ ok: false, code: 'invalid', message: expect.stringMatching(/kanban\.max_running, 8$/) });
+    expect(getBoard(gateway, 'web-app')?.maxRunning).toBeNull();
+    expect((await mt(['board', 'set', 'web-app', 'max_running', '8'])).code).toBe(0);
+  });
+
   it('prints one line of JSON with --json, a refusal too', async () => {
     const made = await mt(['board', 'create', 'web-app', '--json']);
     expect(made.code).toBe(0);
@@ -173,6 +182,18 @@ describe('the nudge after a change', () => {
     expect(getBoard(gateway, 'web-app')?.maxRunning).toBe(2);
     const quiet = await mt(['board', 'set', 'web-app', 'max_running', '1', '--json']);
     expect(JSON.parse(quiet.out)).toMatchObject({ ok: true, nudged: false });
+  });
+});
+
+describe('the nudge after a keyed task new', () => {
+  it('says, when no gateway answered, that running it again with its key returns the task', async () => {
+    const r = await mt(['task', 'new', 'Nightly', '--key', 'n1']);
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      `mt: no gateway answered at ${workerSocketPath(f.home)} (ENOENT; is the gateway running?); the change stands, ` +
+        'and running the command again with the same --key returns this task: a running gateway acts on it at its next sweep, ' +
+        'and a stopped one when it next starts',
+    );
   });
 });
 

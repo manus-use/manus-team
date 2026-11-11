@@ -9,9 +9,6 @@ import {
   commentsOf,
   getRun,
   getTask,
-  openAgentRunCount,
-  openAgentRunCountAs,
-  openAgentRunCountOn,
   openRuns,
   runBySession,
 } from '../db/kanban-read.js';
@@ -30,6 +27,7 @@ import { hadSideEffects, lastTurnOf, toolCallsOf } from './session-log.js';
 import { KANBAN_CHANNEL } from './sink.js';
 import { hashToken, mintToken } from './token.js';
 import { SUPERSEDING_OUTCOMES, type CommentRow, type RunKind, type RunRow } from './types.js';
+import { limitsReached } from './waiting.js';
 
 /**
  * The dispatcher (spec §6): the one component that turns "a task became ready"
@@ -412,17 +410,25 @@ export class Dispatcher {
   ): boolean {
     try {
       const who = task.phase === 'review' ? task.reviewer : task.assignee;
-      // Counted from the board, so a run opened earlier in this pass counts. A
-      // person's run holds no process, and is not limited (spec §6.3). A board
-      // at its own limit skips every agent task it has left, so it gives up its
-      // turn for the whole pass.
-      if (who?.kind === 'role' && openAgentRunCount(this.#deps.db) >= this.#deps.settings.maxRunning) return false;
-      const own = limits.get(task.board) ?? null;
-      if (who?.kind === 'role' && own !== null && openAgentRunCountOn(this.#deps.db, task.board) >= own) return false;
-      // A role's limit skips only its own tasks, so the board's next task, as
-      // another role, is still tried. A role that is not loaded has no limit
-      // here: the claim refuses it as unassignable, so it can be reported stranded.
-      if (who?.kind === 'role' && this.#atRoleLimit(who.name)) return false;
+      // The gateway's, the board's and the role's limits, as `task show` says them
+      // (waiting.ts). A person's run holds no process, and is not limited (spec
+      // §6.3). A board at its own limit skips every agent task it has left, so it
+      // gives up its turn for the whole pass. A role's limit skips only its own
+      // tasks, so the board's next task, as another role, is still tried. A role
+      // that is not loaded has no limit here: the claim refuses it as
+      // unassignable, so it can be reported stranded.
+      if (
+        who?.kind === 'role' &&
+        limitsReached(this.#deps.db, {
+          maxRunning: this.#deps.settings.maxRunning,
+          board: task.board,
+          boardMaxRunning: limits.get(task.board) ?? null,
+          role: who.name,
+          roleMaxRunning: this.#roleLimit(who.name),
+        }, { first: true }).length > 0
+      ) {
+        return false;
+      }
       // An agent run gets a token (spec §7.2); a person's run reports through chat.
       const token = who?.kind === 'role' ? mintToken() : undefined;
       const claimed = this.#claim(task.taskId, token);
@@ -442,11 +448,10 @@ export class Dispatcher {
     }
   }
 
-  /** The role has as many open agent runs as its max_running allows (spec §6.3). */
-  #atRoleLimit(name: string): boolean {
+  /** The role's max_running, its own or the gateway's default (spec §6.3); undefined for none. */
+  #roleLimit(name: string): number | undefined {
     const role = this.#deps.roles.get(name);
-    const limit = role === undefined ? undefined : roleLimit(role, this.#deps.settings.maxRunningPerRole);
-    return limit !== undefined && openAgentRunCountAs(this.#deps.db, name) >= limit.limit;
+    return role === undefined ? undefined : roleLimit(role, this.#deps.settings.maxRunningPerRole)?.limit;
   }
 
   /**
