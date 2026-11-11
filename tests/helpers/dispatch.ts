@@ -86,6 +86,8 @@ export interface HarnessOptions {
   isolated?: ReadonlySet<string>;
   /** What makes a task's own directory; absent, nothing does. */
   workdirs?: Workdirs;
+  /** A workspace's directory in place of its stand-in, `/tmp/ws-<name>`, by name. */
+  dirs?: Readonly<Record<string, string>>;
 }
 
 export const DEFAULT_ROLES: readonly Role[] = [
@@ -99,7 +101,7 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
   const clock = opts.clock ?? new ManualClock();
   const roles = new Map((opts.roles ?? DEFAULT_ROLES).map((r) => [r.name, r]));
   const drivers = new Map([...roles.keys(), 'default'].map((name) => [name, new FakeDriver(name)]));
-  const workspaces = new Map(['default', 'web', 'api', 'docs'].map((name) => [name, `/tmp/ws-${name}`]));
+  const workspaces = new Map(['default', 'web', 'api', 'docs'].map((name) => [name, opts.dirs?.[name] ?? `/tmp/ws-${name}`]));
   const service = new KanbanService({
     db: t.db,
     roles,
