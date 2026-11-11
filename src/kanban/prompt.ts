@@ -114,6 +114,11 @@ export interface OwnDirectory {
   path: string | null;
   /** The worktree's branch; null for a folder. */
   branch: string | null;
+  /**
+   * For a folder, the workspace's own directory, where inputs its tasks share
+   * are read from; a worktree has the repository's files already, and none.
+   */
+  workspacePath?: string | null;
   /** `abandoned`: an archived parent, whose work is not merged into the task's. */
   upstream: ReadonlyArray<{ taskId: string; path: string; branch: string | null; abandoned: boolean }>;
 }
@@ -293,6 +298,10 @@ function directoryLines(b: RunBrief): string[] {
           : `${where}: a git worktree of this task's own, on its branch ${flat(w.branch)}. Commit your work on that branch ` +
             'before you report: the tasks that follow this one start from it, and nothing is merged for you.',
     );
+    if (w.branch === null && w.workspacePath !== undefined && w.workspacePath !== null) {
+      const shared = `Shared inputs, if the task has any, are in the workspace's own folder, ${flat(w.workspacePath)}`;
+      lines.push(b.kind === 'review' ? `${shared}.` : `${shared}: read them there, but put the task's results in yours.`);
+    }
   }
   if (w.upstream.length > 0) {
     lines.push('The tasks this one follows left their work in their own directories, which you may read but not change:');
@@ -406,8 +415,26 @@ function handoffSection(b: RunBrief): string[] {
   return [];
 }
 
+/** What a run that could not start records as its error, before the reason (the dispatcher's words). */
+const NOT_STARTED = 'the run could not start: ';
+
+/**
+ * An attempt that never started -- its task's directory could not be made, or
+ * its session not opened -- in a few words: its reason up to the first clause,
+ * since what follows is a person's how-to, which an agent could take for its own
+ * instructions.
+ */
+function notStarted(run: RunRow): string | undefined {
+  if (run.sessionId !== null || run.error === null || !run.error.startsWith(NOT_STARTED)) return undefined;
+  const reason = run.error.slice(NOT_STARTED.length);
+  const cut = [...reason.matchAll(/[.;:](?=\s)/g)][0]?.index;
+  return flat(cut === undefined ? reason : reason.slice(0, cut));
+}
+
 function attemptLines(a: Attempt): string[] {
   const { run } = a;
+  const short = notStarted(run);
+  if (short !== undefined) return [`## Attempt ${run.attempt} (${run.kind}, ${flat(run.assignee.name)}): did not start: ${short}`];
   const lines = [`## Attempt ${run.attempt} (${run.kind}, ${flat(run.assignee.name)}): ${run.outcome ?? 'in progress'}`];
   if (run.summary !== null) lines.push(...labelled('Summary', piece(run.summary, PIECE_BYTES.summary)));
   if (run.metadata !== null) lines.push(...labelled('Metadata', json(run.metadata)));

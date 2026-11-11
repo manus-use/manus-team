@@ -23,6 +23,8 @@ afterEach(() => {
 class FakeWorkdirs implements Workdirs {
   readonly asked: string[] = [];
   readonly refuse = new Map<string, string>();
+  /** Tasks given a folder rather than a worktree, as a workspace that is no repository gives them. */
+  readonly folders = new Set<string>();
   h!: DispatchHarness;
 
   async prepare(task: TaskRow): Promise<Prepared> {
@@ -30,7 +32,9 @@ class FakeWorkdirs implements Workdirs {
     const reason = this.refuse.get(task.taskId);
     if (reason !== undefined) return { ok: false, reason };
     const id = task.worktree ?? '';
-    const dir = { id, kind: 'git-worktree' as const, rootPath: `/own/${task.taskId}`, repoRoot: '/tmp/ws-web', branch: `mt/${task.taskId}` };
+    const dir = this.folders.has(task.taskId)
+      ? { id, kind: 'plain-dir' as const, rootPath: `/own/${task.taskId}`, repoRoot: '/tmp/ws-web', branch: null }
+      : { id, kind: 'git-worktree' as const, rootPath: `/own/${task.taskId}`, repoRoot: '/tmp/ws-web', branch: `mt/${task.taskId}` };
     registerWorktree(this.h.t.db, dir, NOW);
     return { ok: true, dir: worktreeOf(this.h.t.db, id) ?? dir };
   }
@@ -64,6 +68,31 @@ describe('Dispatcher: tasks in an isolated workspace', () => {
     first.end();
     second.end();
     await h.dispatcher.idle();
+  });
+
+  it("tells a task in a folder of its own that the workspace's own folder holds shared inputs", async () => {
+    const { h, dirs } = harness();
+    const task = h.create({ title: 'notes', workspace: 'web' });
+    dirs.folders.add(task.taskId);
+    const implementer = h.driver('implementer');
+    completes(h, implementer);
+    h.dispatcher.pass();
+    await until(() => getTask(h.t.db, task.taskId)?.phase === 'done', 'the task to complete');
+    await h.dispatcher.idle();
+    const prompt = implementer.runtimes[0]?.prompts[0]?.text ?? '';
+    expect(prompt).toContain(`Your directory, the current one, is /own/${task.taskId}: a folder of this task's own. Put the task's results there.`);
+    expect(prompt).toContain("Shared inputs, if the task has any, are in the workspace's own folder, /tmp/ws-web: read them there");
+  });
+
+  it("names no shared folder to a task in a worktree, which has the repository's files", async () => {
+    const { h } = harness();
+    const task = h.create({ title: 'code', workspace: 'web' });
+    const implementer = h.driver('implementer');
+    completes(h, implementer);
+    h.dispatcher.pass();
+    await until(() => getTask(h.t.db, task.taskId)?.phase === 'done', 'the task to complete');
+    await h.dispatcher.idle();
+    expect(implementer.runtimes[0]?.prompts[0]?.text ?? '').not.toContain("workspace's own folder");
   });
 
   it('runs a retry in the same directory', async () => {

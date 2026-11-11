@@ -272,6 +272,41 @@ describe('composePrompt', () => {
     expect(prompt).toContain('## Attempt 2 (work, implementer): interrupted\nTool calls: none');
   });
 
+  it("summarises an attempt that never started, leaving out the person's how-to", () => {
+    const howTo = 'Resolve it in /w/k_task: fix those files and commit there, then unblock the task';
+    const prompt = composePrompt(
+      brief({
+        attempts: [
+          {
+            run: run({
+              outcome: 'failed',
+              sessionId: null,
+              lastOutput: null,
+              error: `the run could not start: merging the branch mt/k_a of its parent k_a conflicts in README. ${howTo}`,
+            }),
+            toolCalls: undefined,
+          },
+          {
+            run: run({
+              runId: 'r_2',
+              attempt: 2,
+              outcome: 'failed',
+              sessionId: null,
+              lastOutput: null,
+              error: 'the run could not start: a branch mt/k_task is there already, with no worktree of it at /w/k_task; rename or remove the branch, then unblock the task',
+            }),
+            toolCalls: undefined,
+          },
+        ],
+      }),
+    );
+    expect(prompt).toContain('## Attempt 1 (work, implementer): did not start: merging the branch mt/k_a of its parent k_a conflicts in README\n');
+    expect(prompt).toContain('## Attempt 2 (work, implementer): did not start: a branch mt/k_task is there already, with no worktree of it at /w/k_task');
+    expect(prompt).not.toContain(howTo);
+    expect(prompt).not.toContain('rename or remove');
+    expect(prompt).not.toContain('Error: the run could not start');
+  });
+
   it('gives the comment thread and the children', () => {
     const prompt = composePrompt(
       brief({
@@ -667,7 +702,20 @@ describe('composePrompt: a task with a directory of its own', () => {
     );
     expect(reviewFolder).toContain("Your directory, the current one, is /w/notes/k_task: a folder of this task's own, where the work under review is.");
     expect(reviewFolder).toContain('- k_b: /w/notes/k_b, archived: its work was abandoned\n');
-    for (const text of [folder, reviewFolder]) {
+    // A folder task also sees the workspace's own folder, for shared inputs; a worktree has the repository's files already.
+    const withShared = { path: '/w/notes/k_task', branch: null, workspacePath: '/home/me/.manus-team/workspaces/worker', upstream: [] };
+    const sharedWork = composePrompt(brief({ workdir: withShared }));
+    expect(sharedWork).toContain(
+      "Your directory, the current one, is /w/notes/k_task: a folder of this task's own. Put the task's results there.\n" +
+        "Shared inputs, if the task has any, are in the workspace's own folder, /home/me/.manus-team/workspaces/worker: read them there, but put the task's results in yours.",
+    );
+    const sharedReview = composePrompt(brief({ kind: 'review', workdir: withShared }));
+    expect(sharedReview).toContain(
+      "Shared inputs, if the task has any, are in the workspace's own folder, /home/me/.manus-team/workspaces/worker.",
+    );
+    expect(sharedReview).not.toContain('put the task');
+    expect(work).not.toContain("workspace's own folder");
+    for (const text of [folder, reviewFolder, sharedWork, sharedReview]) {
       const lines = text.slice(text.indexOf('Your directory'), text.indexOf('# Context')).toLowerCase();
       for (const word of ['commit', 'branch', 'git']) expect(lines).not.toContain(word);
     }

@@ -86,6 +86,7 @@ export function briefFor(
  * follows -- its parents in link order, or with none the task that created it --
  * that have one, an archived one marked as abandoned; undefined when there is
  * neither. A task in a shared directory is still told where its parents' are.
+ * A folder's task is told the workspace's own folder too, for shared inputs.
  */
 function ownDirectory(db: Db, task: Claimed['task']): OwnDirectory | undefined {
   const own = task.worktree === null ? undefined : worktreeOf(db, task.worktree);
@@ -96,5 +97,7 @@ function ownDirectory(db: Db, task: Claimed['task']): OwnDirectory | undefined {
     return dir === undefined ? [] : [{ taskId: p.taskId, path: dir.rootPath, branch: dir.branch, abandoned: p.phase === 'archived' }];
   });
   if (own === undefined && upstream.length === 0) return undefined;
-  return { path: own?.rootPath ?? null, branch: own?.branch ?? null, upstream };
+  // A folder's task also reads the workspace's own folder, for inputs its tasks share; a worktree has the repository's files.
+  const shared = own?.kind === 'plain-dir' ? { workspacePath: own.repoRoot } : {};
+  return { path: own?.rootPath ?? null, branch: own?.branch ?? null, ...shared, upstream };
 }
