@@ -413,7 +413,8 @@ There a task's directory is a worktree under `$MT_HOME/worktrees/<workspace>/`, 
 branch, `mt/<task_id>`. A task with no parents starts from `base`, or, without one, from
 whatever the repository has checked out; a task with one parent starts from that parent's
 branch, and a task with several from a merge of their branches, in the order they were linked;
-an archived parent's work is not merged. Submodules are not initialised in a task's directory.
+an archived parent's work is not merged. A follow-up an agent creates with no parents starts from
+the creating task's branch, as committed then, whether or not that task is done yet. Submodules are not initialised in a task's directory.
 A merge that conflicts blocks the task, naming the files: resolve it in the task's directory
 (`cd "$(mt kanban task worktree <task_id>)"`), commit, and unblock the task. The gateway never
 merges, pushes or rebases into your branches, and never deletes a branch or a worktree: merging
