@@ -55,15 +55,16 @@ Each has its reason. *The user's decision* marks those the user made before this
 11. **A workspace that is no repository.** *The user's decision*: each task gets an empty folder (`0700`), and its prompt lists its parents' folders, which it reads from; nothing is copied. What counts as a repository: the workspace's directory at the top of a working tree, or a bare repository, asked with `GIT_CEILING_DIRECTORIES` at its parent, so a directory inside some other repository (a home under version control, say) counts as none. One with a `.git` while git is missing blocks its tasks, rather than give a code task an empty folder.
 12. **Lifetime.** *The user's decision*: the board never removes a worktree. Made before the task's first run, by the dispatcher, after the claim and before the session (forced: git cannot run inside the claim's transaction); found again before every later run, so retries, nudges (the same session), review and rework all use it. A done task's branch is what its children start from, a folder task's children read its folder, and a worktree removed with uncommitted work loses it. A person removes one with `git worktree remove` (which refuses one with changes) and `git branch -d` (which refuses one not merged). A directory removed while its task can still run blocks it at its next claim, saying how to make it again.
 13. **Failure.** *The user's decision, as recommended*: any directory that cannot be made (a conflict, a branch of its name already there, a parent's branch or the base missing, a symlink, a repository git cannot read, git missing, a full disk, git past its time) ends the run `failed` with the reason as its error, **not counted**, and blocks the task as `needs_input` with the reason (`RunEnding.block`); no session is created, the dispatcher goes on with the pass, and the task's subscribers hear the block. Counting a git error as a failure to retry would retry a conflict for nothing and then give up with a worse message.
-14. **Git safety.** Every command runs with `-c core.fsmonitor=false`, `-c core.hooksPath=/dev/null` (`worktree add` runs `post-checkout`, a merge its own hooks), and for the merges `-c commit.gpgSign=false -c merge.ff=true -c rerere.enabled=false` with `merge --quiet --no-stat --no-edit --ff --no-gpg-sign`, so a user's global signing, fast-forward or remembered-resolution settings do not change what the board does; `worktree add` runs `--quiet`. All with the agent allowlist of the gateway's environment (`buildEnv`). **No `git worktree prune`, ever**: a person's worktree whose directory is missing for a moment (an unmounted disk, a move) would lose its admin entry, its staged index and its branch's protection; the cases prune was for are each refused with a reason instead (a directory gone, a branch in the way, a leftover). `worktree add --no-track -b mt/<task_id> <path> <commit>`, so a start is a commit, and a base checkout with uncommitted changes needs nothing (git does not ask it to be clean; the test makes one dirty). A branch `mt/<task_id>` already there with no worktree of it is **taken up only when its tip is the very commit the task would start from**, which is what a failed `worktree add` leaves (git removes the directory and keeps the branch; `worktree add <path> mt/<task_id>`, without `-b`); at any other commit it is refused, never taken over, as it may be a person's. A directory at the path that the board has not recorded is refused, with what to run: a `worktree add` that was stopped leaves one, locked as initializing. Bare repositories work; a shallow clone works until a fan-in's merge base is missing, which blocks with git's message. A merge commit uses the repository's own `user.name` and `user.email`. `--no-optional-locks` belongs to read-only commands that would otherwise take a lock (`status`); none of these is one.
+14. **Git safety.** Every command runs with `-c core.fsmonitor=false`, `-c core.hooksPath=/dev/null` (`worktree add` runs `post-checkout`, a merge its own hooks), no automatic gc or maintenance (`-c gc.auto=0 -c maintenance.auto=false`, which would detach processes of their own), and for the merges `-c commit.gpgSign=false -c merge.verifySignatures=false -c merge.ff=true -c rerere.enabled=false` with `merge --quiet --no-stat --no-edit --ff --no-gpg-sign --no-verify-signatures -m "Merge mt/<parent> into mt/<task_id>"`, so a user's global signing, signature-checking, fast-forward or remembered-resolution settings do not change what the board does; `worktree add` runs `--quiet`. All with the agent allowlist of the gateway's environment (`buildEnv`). **No `git worktree prune`, ever**: a person's worktree whose directory is missing for a moment (an unmounted disk, a move) would lose its admin entry, its staged index and its branch's protection; the cases prune was for are each refused with a reason instead (a directory gone, a branch in the way, a leftover). `worktree add --no-track -b mt/<task_id> <path> <commit>`, so a start is a commit, and a base checkout with uncommitted changes needs nothing (git does not ask it to be clean; the test makes one dirty). A branch `mt/<task_id>` already there with no worktree of it is **taken up only when its tip is the very commit the task would start from**, which is what a failed `worktree add` leaves (git removes the directory and keeps the branch; `worktree add <path> mt/<task_id>`, without `-b`); at any other commit it is refused, never taken over, as it may be a person's. A directory at the path that the board has not recorded is refused, with what to run (`git worktree unlock <path>` if `git worktree list` shows it locked, then `git worktree remove --force <path>`, or move it aside): a `worktree add` that was stopped leaves one, locked as initializing, and the failed add's own reason gives the same steps, so the person need not unblock twice to learn them. Bare repositories work; a shallow clone works until a fan-in's merge base is missing, which blocks with git's message. A merge commit uses the repository's own `user.name` and `user.email`. `--no-optional-locks` belongs to read-only commands that would otherwise take a lock (`status`); none of these is one.
 15. **Concurrency.** The dispatcher queues the git commands of one repository, keyed by its common directory, so two claims never make worktrees in it at once; git's own locks stand between the board and everyone else, the agents included.
 16. **The review run, the reported commit and gates.** A same-task review works in the task's worktree, so a reviewer reads exactly the implementer's; its prompt says the work under review is there, and does not tell it to commit. A downstream review task is a task of its own, with its own worktree from its parent's branch. The reported commit (§7.8) is the worktree's `HEAD`, the task branch's. Gates run in the task's directory; a task whose directory is not made yet refuses them `gates_cannot_run`, saying so.
 17. **The prompt.** After the task's contract: where the directory is; for a work run in a worktree, that its branch is where the work goes, to be committed before reporting, since the tasks after it start from the branch and nothing is merged for it; for a folder, that it is the task's own; then the upstream tasks' directories, to read but not change, at most twenty.
 18. **Seeing it.** `/kanban task show` and `mt kanban task show` add one line, `directory: <path> · branch mt/<task_id>`, or `directory: its own, not made yet: it is made when an agent next takes the task up`; `--json` adds `worktree: {path, branch}`, or null. *The user's decision*: both helpers. `mt kanban task worktree <task_id> [--board] [--json]` prints the path alone, so a person can `cd` there to resolve a conflict, and refuses `no_worktree` for a task in a shared directory or one not made yet. `mt workspace add <name> <path> --isolated` (and with `--clone`) writes the mapping, and `mt workspace list` adds `, isolated` to the status of an isolated workspace. The gateway says at startup which workspaces are isolated.
 19. **Archived parents are not merged.** *The coordinator's decision, in line with the user's*: only a parent in `done` is merged into a fan-in, or started from. A parent archived, which a claim counts as finished, was abandoned: its branch is not merged, and the prompt lists its directory as abandoned, so the agent can look if it must. A task in a shared directory is told where its parents' own directories are too.
-20. **A git command past its time.** Each runs in a process group of its own, which a timeout (two minutes) kills whole, so a filter or a merge driver stuck in a child process is stopped too, not left changing the checkout; the reason says `git did not finish in 120 s, and was stopped`. Chosen over no timeout for `worktree add` and `merge`, which would leave a claim's run open, holding its slots, until a person noticed: a large checkout needs the limit raised (`timeoutMs`), not removed. What a stopped `worktree add` leaves is named at the next claim (Decision 14).
-21. **A repository git will not read is no folder.** Only git saying "not a git repository", with no `.git` in the directory and nothing that looks like a bare repository (`HEAD` and `objects/`), makes a folder task. Anything else git refuses (an unknown `repositoryformatversion`, a `.git` file pointing nowhere, `safe.directory` and dubious ownership) blocks the task with git's own message: an empty folder would be a code task with no code.
-22. **A recorded worktree is checked again.** **[you decide]** Recommended: before every later run, `symbolic-ref HEAD` must still be `mt/<task_id>`; if an agent or a person switched branches, the task blocks, naming the branch it is on. Its branch is what its children start from and what its reported commit names, so work on another branch would be lost to both; a warning in the prompt would let the next run carry on there. The alternative is to warn and go on.
+20. **A git command past its time, and what it leaves behind.** Each runs in a process group of its own, which a timeout (two minutes) kills whole, so a filter or a merge driver stuck in a child process is stopped too, not left changing the checkout; the reason says `git did not finish in 120 s, and was stopped`. Its answer is its **exit**, not the close of its output, as `spawnGate`'s is (`src/kanban/gates.ts`): once git exits, what is left of its group is killed and its output let go after half a second; past its time, the group is killed and the answer comes half a second later whether or not the output closes. So a child left in the group cannot turn a successful add into a timeout, and one that left the group (`setsid`) and holds git's stderr cannot hold up the answer, or the repository's queue, for its lifetime. Chosen over no timeout for `worktree add` and `merge`, which would leave a claim's run open, holding its slots, until a person noticed: a large checkout needs the limit raised (`timeoutMs`), not removed. What a stopped `worktree add` leaves is named at the next claim (Decision 14).
+21. **A repository git will not read is no folder.** A workspace whose directory is not there blocks its task, recording nothing, so it gets a worktree once the repository is back (git would not even start in a missing directory, and a folder recorded then would stay one). Only git saying "not a git repository", with no `.git` in the directory and nothing that looks like a bare repository (`HEAD` and `objects/`), makes a folder task. Anything else git refuses (an unknown `repositoryformatversion`, a `.git` file pointing nowhere, `safe.directory` and dubious ownership) blocks the task with git's own message: an empty folder would be a code task with no code.
+22. **A recorded worktree is checked again.** *The user's decision*: before every later run, `symbolic-ref HEAD` must still be `mt/<task_id>`; if an agent or a person switched branches, the task blocks, naming the branch it is on. Its branch is what its children start from and what its reported commit names, so work on another branch would be lost to both; a warning in the prompt would let the next run carry on there. The reason says to finish or abort what is in progress there (a rebase, a merge), or switch it back.
+23. **Any work, not only code.** *The user's point*: a task is research, a document, data or an ops chore as often as code, and a workspace such as the user's `worker` is a plain folder. So isolation applies to any workspace, and git is used only in a repository. A task in a folder of its own is told its folder, that its results go there (a reviewer: that the work under review is there), and the folders its parents, archived ones marked, left their work in, with nothing of commits, branches or git; the tests check both prompts for those words. `task show` gives a folder as `directory: <path>`, with no branch, and `mt kanban task worktree --json` its `branch` as null. The README, the guide and spec §18 lead with a plain-folder example, a research task fanning out into three note-taking tasks that a write-up reads from, before the git case; the guide's recipes 1 and 3 say that marking `worker` isolated lets their parallel tasks run at once with no `workspace:` line each.
 
 ## Known limitations
 
@@ -115,7 +116,7 @@ Nothing in `chat-parse.ts`, `notices.ts` or `waiting.ts` changes.
 | `tests/helpers/dispatch.ts`, `tests/config.test.ts`, `tests/gateway-startup.test.ts`, `tests/kanban-boards-schema.test.ts`, `tests/kanban-schema.test.ts`, `tests/kanban-prompt.test.ts`, `tests/workspace.test.ts`, `tests/mt-kanban-operator-tasks.test.ts`, `tests/mt-workspace.test.ts` (modify) | |
 | `tests/kanban-worktree-schema.test.ts`, `tests/kanban-worktree-claim.test.ts`, `tests/kanban-worktree-service.test.ts`, `tests/kanban-worktree.e2e.ts`, `tests/kanban-dispatch-worktree.test.ts`, `tests/kanban-worktree-dispatch.e2e.ts`, `tests/kanban-worktree-chat.test.ts`, `tests/mt-kanban-worktree.test.ts` (create) | |
 
-Running counts, unit then end to end: Task 1 1685 / 101, Task 2 1690 / 101, Task 3 1699 / 101, Task 4 1706 / 101, Task 5 1706 / 120, Task 6 1707 / 120, Task 7 1713 / 120, Task 8 1714 / 121, Task 9 1719 / 121, Task 10 1719 / 121.
+Running counts, unit then end to end: Task 1 1685 / 101, Task 2 1690 / 101, Task 3 1699 / 101, Task 4 1706 / 101, Task 5 1706 / 125, Task 6 1707 / 125, Task 7 1713 / 125, Task 8 1714 / 126, Task 9 1720 / 126, Task 10 1720 / 126.
 
 ---
 
@@ -1719,7 +1720,7 @@ git commit -m "Tell the claim which workspaces are isolated, run a report's gate
 - Create: `src/kanban/worktree.ts`, `tests/kanban-worktree.e2e.ts`
 - Modify: `src/db/kanban-read.ts`
 
-`TaskDirectories.prepare` makes, or finds, a task's directory with real git (Decisions 4, 7 to 11, 14, 15, 19 and 20). It never rejects: a reason comes back for a person. Git runs in a process group of its own, killed whole past its time. A worktree is recorded the moment `git worktree add` succeeds, so a conflict's directory can be shown; the fan-in's merges go on at each later prepare until the task's first session starts. A recorded worktree that is no longer on its branch blocks. `parentsInLinkOrder` gives the parents in the order they were linked. The tests are end to end, with real git in temporary repositories under a made-up home.
+`TaskDirectories.prepare` makes, or finds, a task's directory with real git (Decisions 4, 7 to 11, 14, 15, 19 and 20). It never rejects: a reason comes back for a person. Git runs in a process group of its own, killed whole past its time, and its answer is its exit: what it leaves holding its output is not waited for. A worktree is recorded the moment `git worktree add` succeeds, so a conflict's directory can be shown; the fan-in's merges go on at each later prepare until the task's first session starts. A recorded worktree that is no longer on its branch blocks. `parentsInLinkOrder` gives the parents in the order they were linked. The tests are end to end, with real git in temporary repositories under a made-up home.
 
 - [ ] **Step 5.1: Write the tests.**
 
@@ -1727,14 +1728,14 @@ Create `tests/kanban-worktree.e2e.ts`:
 
 ```ts
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { archive, claim, closeRun, complete, link } from '../src/db/kanban.js';
 import { getTask } from '../src/db/kanban-read.js';
 import { worktreeOf } from '../src/db/workspaces.js';
-import { TaskDirectories } from '../src/kanban/worktree.js';
+import { runGit, TaskDirectories } from '../src/kanban/worktree.js';
 import type { TaskRow } from '../src/kanban/types.js';
 import { testDb, type TestDb } from './helpers/db.js';
 import { claimantFor, NOW, newTask } from './helpers/kanban.js';
@@ -1992,8 +1993,10 @@ describe('what it takes care over', () => {
     commit(await made(d, a), 'a.txt', 'a\n');
     const tipB = commit(await made(d, b), 'b.txt', 'b\n');
     for (const p of [a, b]) finish(p);
-    const path = await made(d, childOf([b, a]));
+    const child = childOf([b, a]);
+    const path = await made(d, child);
     expect(git(path, 'rev-parse', 'HEAD^1')).toBe(tipB);
+    expect(git(path, 'log', '-1', '--format=%s')).toBe(`Merge mt/${a.taskId} into mt/${child.taskId}`);
     expect(readFileSync(join(path, 'a.txt'), 'utf8')).toBe('a\n');
   });
 
@@ -2044,7 +2047,10 @@ describe('what it takes care over', () => {
     const task = claimed();
     const quick = new TaskDirectories({ db: t.db, root, workspaceDirs: new Map([['web', repo]]), isolated: { web: {} }, env, timeoutMs: 500 });
     const began = Date.now();
-    expect(await quick.prepare(task)).toMatchObject({ ok: false, reason: expect.stringContaining('git did not finish in 1 s, and was stopped') });
+    const first = await quick.prepare(task);
+    expect(first).toMatchObject({ ok: false, reason: expect.stringContaining('git did not finish in 1 s, and was stopped') });
+    // What to do is in the first reason already, so the person need not unblock twice to learn it.
+    expect(first).toMatchObject({ reason: expect.stringContaining(`git worktree remove --force ${join(realpathSync(root), 'web', task.taskId)}`) });
     expect(Date.now() - began).toBeLessThan(2500);
     await new Promise((resolve) => setTimeout(resolve, 3500));
     // The filter was in its process group, and was killed with it.
@@ -2065,8 +2071,21 @@ describe('what it takes care over', () => {
     git(path, 'checkout', '-q', '-b', 'elsewhere');
     expect(await d.prepare(task)).toEqual({
       ok: false,
-      reason: `${path} is on branch elsewhere, not its branch mt/${task.taskId}; switch it back there, then unblock the task`,
+      reason:
+        `${path} is on branch elsewhere, not its branch mt/${task.taskId}: finish or abort what is in progress there ` +
+        `(a rebase, a merge), or switch it back to mt/${task.taskId}; then unblock the task`,
     });
+  });
+
+  it('blocks a git workspace whose directory is gone, and records nothing, so it is a worktree once the repository is back', async () => {
+    const away = join(dir, 'away');
+    renameSync(repo, away);
+    const task = claimed();
+    expect(await directories().prepare(task)).toEqual({ ok: false, reason: `workspace web's directory ${repo} is not there` });
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toBeUndefined();
+    renameSync(away, repo);
+    const path = await made(directories(), task);
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)).toMatchObject({ kind: 'git-worktree', rootPath: path });
   });
 
   it('blocks a repository git refuses to read, rather than give its task an empty folder', async () => {
@@ -2083,6 +2102,45 @@ describe('what it takes care over', () => {
       ok: false,
       reason: expect.stringContaining("git cannot read workspace broken's repository"),
     });
+  });
+});
+
+describe('git that leaves something behind', () => {
+  /** A git alias that runs `sh` as the command: what a filter or a merge driver could leave running. */
+  const alias = (script: string) => ['-c', `alias.leave=!${script}`, 'leave'];
+  const setsid = (seconds: number) => `perl -MPOSIX -e 'if (fork() == 0) { POSIX::setsid(); sleep ${seconds}; exit 0 }'`;
+
+  it('answers when git exits, though a child it left in its group holds its output', async () => {
+    const began = Date.now();
+    const r = await runGit(alias('(sleep 5 >&2 &); exit 3'), { cwd: repo, env, timeoutMs: 10_000 });
+    expect(r).toMatchObject({ code: 3 });
+    expect(Date.now() - began).toBeLessThan(2000);
+  });
+
+  it('answers when git exits, though a child that left its group holds its output', async () => {
+    const began = Date.now();
+    const r = await runGit(alias(`${setsid(5)}; exit 4`), { cwd: repo, env, timeoutMs: 10_000 });
+    expect(r).toMatchObject({ code: 4 });
+    expect(Date.now() - began).toBeLessThan(2000);
+  });
+
+  it('answers past its time, though a child that left its group holds its output', async () => {
+    const began = Date.now();
+    const r = await runGit(alias(`${setsid(5)}; sleep 5`), { cwd: repo, env, timeoutMs: 300 });
+    expect(r).toMatchObject({ code: null, timedOut: true });
+    expect(Date.now() - began).toBeLessThan(1500);
+  });
+
+  it('records a worktree whose filter left a child holding its output', async () => {
+    writeFileSync(join(repo, '.gitattributes'), '* filter=lingers\n');
+    git(repo, 'add', '.gitattributes');
+    git(repo, 'commit', '-q', '-m', 'attributes');
+    git(repo, 'config', 'filter.lingers.smudge', '(sleep 5 >&2 &); cat');
+    const task = claimed();
+    const began = Date.now();
+    const path = await made(directories(), task);
+    expect(Date.now() - began).toBeLessThan(4000);
+    expect(worktreeOf(t.db, `wt:${task.taskId}`)?.rootPath).toBe(path);
   });
 });
 
@@ -2226,12 +2284,19 @@ const GIT_TIMEOUT_MS = 120_000;
 const OUTPUT_BYTES = 1024 * 1024;
 /** At most this many conflicting files are named. */
 const FILES_NAMED = 10;
+/**
+ * How long, once git has exited or been killed, its output may stay open: a
+ * process it started that left the group, or outlived the kill, can hold the
+ * pipes for as long as it lives, and is not waited for (as `spawnGate` does).
+ */
+const OUTPUT_GRACE_MS = 500;
 
 /**
  * The settings every command overrides: no hook (`worktree add` runs
- * `post-checkout`, a merge its own), no fsmonitor, and for the fan-in's merges
- * no signing, no remembered resolution and a fast-forward where one will do,
- * whatever the user's global configuration says.
+ * `post-checkout`, a merge its own), no fsmonitor, no automatic gc or
+ * maintenance, which detach processes of their own, and for the fan-in's merges
+ * no signing, no signature checks, no remembered resolution and a fast-forward
+ * where one will do, whatever the user's global configuration says.
  */
 const OVERRIDES = [
   '-c', 'core.fsmonitor=false',
@@ -2239,9 +2304,19 @@ const OVERRIDES = [
   '-c', 'commit.gpgSign=false',
   '-c', 'merge.ff=true',
   '-c', 'rerere.enabled=false',
+  '-c', 'merge.verifySignatures=false',
+  '-c', 'gc.auto=0',
+  '-c', 'maintenance.auto=false',
 ] as const;
 
-/** The real git, in a process group of its own, so a timeout kills what it started too: a filter, a merge driver. */
+/**
+ * The real git, in a process group of its own, so a timeout kills what it
+ * started too: a filter, a merge driver. Its answer is its exit, not the close of
+ * its output: once git has exited, or been killed past its time, what is left
+ * of its group is killed, and its output is let go after a short grace, so a
+ * process that left the group (`setsid`) and holds git's stderr can hold up
+ * neither the answer nor the repository's queue.
+ */
 export const runGit: GitRunner = (args, opts) =>
   new Promise((done) => {
     const child = spawn('git', [...OVERRIDES, ...args], {
@@ -2253,6 +2328,30 @@ export const runGit: GitRunner = (args, opts) =>
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let exitCode: number | null = null;
+    let settled = false;
+    let letGo: NodeJS.Timeout | undefined;
+    const group = (): void => {
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        // Gone already.
+      }
+    };
+    const finish = (error?: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(letGo);
+      group();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      if (error !== undefined) done({ code: null, stdout, stderr, error });
+      else done(timedOut ? { code: null, stdout, stderr, timedOut: true } : { code: exitCode, stdout, stderr });
+    };
+    const graceThenFinish = (): void => {
+      letGo ??= setTimeout(() => finish(), OUTPUT_GRACE_MS);
+    };
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
       if (stdout.length < OUTPUT_BYTES) stdout += chunk;
     });
@@ -2261,20 +2360,19 @@ export const runGit: GitRunner = (args, opts) =>
     });
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        // Gone already.
-      }
+      group();
+      graceThenFinish();
     }, opts.timeoutMs);
-    child.on('error', (err: NodeJS.ErrnoException) => {
+    child.once('error', (err: NodeJS.ErrnoException) => finish(err.code ?? err.message));
+    child.once('exit', (code) => {
+      exitCode = code;
+      // It ended in time: what follows is not its own running past the timeout.
       clearTimeout(timer);
-      done({ code: null, stdout, stderr, ...(err.code === undefined ? {} : { error: err.code }) });
+      // What git left behind in its group, holding its output open.
+      group();
+      graceThenFinish();
     });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      done(timedOut ? { code: null, stdout, stderr, timedOut: true } : { code, stdout, stderr });
-    });
+    child.once('close', () => finish());
   });
 
 /** The branch of a task's worktree. */
@@ -2325,6 +2423,8 @@ export class TaskDirectories implements Workdirs {
     }
     const base = this.#deps.workspaceDirs.get(workspace);
     if (base === undefined) return fail(`workspace ${workspace} is not configured`);
+    // A repository moved away is no folder: git would not even start there, and a folder recorded now would stay one.
+    if (!isDirectory(base)) return fail(`workspace ${workspace}'s directory ${base} is not there`);
     const parent = this.#parentFor(workspace);
     if ('problem' in parent) return fail(parent.problem);
     const path = join(parent.dir, taskId);
@@ -2378,11 +2478,7 @@ export class TaskDirectories implements Workdirs {
     const starts = this.#upstream(task);
     if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) {
       // Not recorded, so not one this gateway finished: a git worktree add that was stopped, or someone else's.
-      return fail(
-        `${path} is there already, left by a git worktree add that did not finish, or put there by someone else. ` +
-          `If it holds nothing you need, in ${base} run git worktree unlock ${path} and git worktree remove --force ${path}, ` +
-          'or move it aside; then unblock the task',
-      );
+      return fail(`${path} is there already, left by a git worktree add that did not finish, or put there by someone else. ${clearAway(base, path)}`);
     }
     const configured = task.workspace === null ? undefined : this.#deps.isolated[task.workspace]?.base;
     const first = starts[0];
@@ -2413,7 +2509,7 @@ export class TaskDirectories implements Workdirs {
       added = await this.#run(base, ['worktree', 'add', '--quiet', '--no-track', '-b', branch, path, commit]);
     }
     if (added.code !== 0) {
-      const left = lstatSync(path, { throwIfNoEntry: false }) === undefined ? '' : `; it left ${path}, which the next claim will name`;
+      const left = lstatSync(path, { throwIfNoEntry: false }) === undefined ? '' : `. It left ${path}. ${clearAway(base, path)}`;
       return fail(`git worktree add failed: ${this.#said(added)}${left}`);
     }
     const dir: TaskDirectory = { id, kind: 'git-worktree', rootPath: path, repoRoot: base, branch };
@@ -2429,7 +2525,10 @@ export class TaskDirectories implements Workdirs {
     if (on.code !== 0 || on.stdout.trim() !== branch) {
       // Its branch is what its children start from, and what its reported commit names: work on another would be lost to both.
       const now = on.code === 0 ? `branch ${on.stdout.trim()}` : on.code === null ? this.#said(on) : 'no branch';
-      return fail(`${dir.rootPath} is on ${now}, not its branch ${branch}; switch it back there, then unblock the task`);
+      return fail(
+        `${dir.rootPath} is on ${now}, not its branch ${branch}: finish or abort what is in progress there (a rebase, a merge), ` +
+          `or switch it back to ${branch}; then unblock the task`,
+      );
     }
     const started = runsOf(this.#deps.db, task.taskId).some((r) => r.sessionId !== null);
     return started ? { ok: true, dir } : this.#merges(dir, this.#upstream(task));
@@ -2447,7 +2546,10 @@ export class TaskDirectories implements Workdirs {
       const inside = await this.#run(path, ['merge-base', '--is-ancestor', ref, 'HEAD']);
       if (inside.code === 0) continue;
       if (inside.code !== 1) return fail(`the branch ${s.branch} of its parent ${s.taskId} cannot be read: ${this.#said(inside)}`);
-      const merged = await this.#run(path, ['merge', '--quiet', '--no-stat', '--no-edit', '--ff', '--no-gpg-sign', ref]);
+      const merged = await this.#run(path, [
+        'merge', '--quiet', '--no-stat', '--no-edit', '--ff', '--no-gpg-sign', '--no-verify-signatures',
+        '-m', `Merge ${s.branch} into ${dir.branch ?? ''}`, ref,
+      ]);
       if (merged.code === 0) continue;
       const conflicted = await this.#run(path, ['diff', '--name-only', '--diff-filter=U']);
       const files = conflicted.stdout.split('\n').filter((f) => f !== '');
@@ -2519,6 +2621,14 @@ export class TaskDirectories implements Workdirs {
   }
 }
 
+/** What a person runs to clear a half-made or unrecorded worktree out of a task's way. */
+function clearAway(base: string, path: string): string {
+  return (
+    `If it holds nothing you need, in ${base} run git worktree unlock ${path} if git worktree list shows it locked, ` +
+    `then git worktree remove --force ${path}, or move it aside; then unblock the task`
+  );
+}
+
 function gone(dir: TaskDirectory): string {
   return dir.kind === 'git-worktree' && dir.branch !== null
     ? `its directory ${dir.rootPath} is gone; make it again from its branch with git worktree add ${dir.rootPath} ${dir.branch}, in ${dir.repoRoot}, then unblock the task`
@@ -2534,7 +2644,7 @@ function isDirectory(path: string): boolean {
 }
 ```
 
-- [ ] **Step 5.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1706 passed (1706)`. Run `npx vitest run --project e2e`. Expected: `Tests  120 passed (120)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 5.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1706 passed (1706)`. Run `npx vitest run --project e2e`. Expected: `Tests  125 passed (125)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 5.5: Commit.**
 
@@ -2655,7 +2765,7 @@ with:
     return { id: workspaceId, kind: own.kind, cwd: own.rootPath };
 ```
 
-- [ ] **Step 6.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1707 passed (1707)`. Run `npx vitest run --project e2e`. Expected: `Tests  120 passed (120)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 6.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1707 passed (1707)`. Run `npx vitest run --project e2e`. Expected: `Tests  125 passed (125)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 6.5: Commit.**
 
@@ -2673,7 +2783,7 @@ git commit -m "Give a kanban run's session its task's own directory, as recorded
 - Create: `tests/kanban-dispatch-worktree.test.ts`
 - Modify: `src/kanban/brief.ts`, `src/kanban/dispatcher.ts`, `src/kanban/prompt.ts`, `tests/helpers/dispatch.ts`, `tests/kanban-prompt.test.ts`
 
-Before a run in a task's own directory, the dispatcher has it made; one that cannot be made ends the run and blocks the task, uncounted, and the pass goes on (Decisions 12 and 13). The prompt says where the directory is, and where the upstream tasks' are, an archived parent's marked as abandoned; a task in a shared directory is still told where its parents' own directories are (Decision 17). The harness takes `isolated` and `workdirs`, and resolves `wt:` ids from its database.
+Before a run in a task's own directory, the dispatcher has it made; one that cannot be made ends the run and blocks the task, uncounted, and the pass goes on (Decisions 12 and 13). The prompt says where the directory is, and where the upstream tasks' are, an archived parent's marked as abandoned; a task in a shared directory is still told where its parents' own directories are (Decision 17). The harness takes `isolated` and `workdirs`, and resolves `wt:` ids from its database. In a folder, the prompt says nothing of commits, branches or git, to the worker or the reviewer (Decision 23).
 
 - [ ] **Step 7.1: Write the tests.**
 
@@ -2939,8 +3049,28 @@ describe('composePrompt: a task with a directory of its own', () => {
     const folder = composePrompt(
       brief({ workdir: { path: '/w/notes/k_task', branch: null, upstream: [{ taskId: 'k_a', path: '/w/notes/k_a', branch: null, abandoned: false }] } }),
     );
-    expect(folder).toContain("Your directory, the current one, is /w/notes/k_task: a folder of this task's own. Leave the task's work there.");
+    expect(folder).toContain("Your directory, the current one, is /w/notes/k_task: a folder of this task's own. Put the task's results there.");
     expect(folder).toContain('- k_a: /w/notes/k_a\n');
+    // A task need not be code: in a folder, nothing is said of commits, branches or git, to the worker or the reviewer.
+    const reviewFolder = composePrompt(
+      brief({
+        kind: 'review',
+        workdir: {
+          path: '/w/notes/k_task',
+          branch: null,
+          upstream: [
+            { taskId: 'k_a', path: '/w/notes/k_a', branch: null, abandoned: false },
+            { taskId: 'k_b', path: '/w/notes/k_b', branch: null, abandoned: true },
+          ],
+        },
+      }),
+    );
+    expect(reviewFolder).toContain("Your directory, the current one, is /w/notes/k_task: a folder of this task's own, where the work under review is.");
+    expect(reviewFolder).toContain('- k_b: /w/notes/k_b, archived: its work was abandoned\n');
+    for (const text of [folder, reviewFolder]) {
+      const lines = text.slice(text.indexOf('Your directory'), text.indexOf('# Context')).toLowerCase();
+      for (const word of ['commit', 'branch', 'git']) expect(lines).not.toContain(word);
+    }
     // Nothing in a shared directory, but where the tasks it follows left their work, when they have directories of their own.
     expect(composePrompt(brief())).not.toContain('Your directory');
     const shared = composePrompt(
@@ -3218,7 +3348,9 @@ function directoryLines(b: RunBrief): string[] {
   if (w.path !== null) {
     lines.push(
       w.branch === null
-        ? `${where}: a folder of this task's own. Leave the task's work there.`
+        ? b.kind === 'review'
+          ? `${where}: a folder of this task's own, where the work under review is.`
+          : `${where}: a folder of this task's own. Put the task's results there.`
         : b.kind === 'review'
           ? `${where}: the task's own git worktree, on its branch ${flat(w.branch)}, where the work under review is.`
           : `${where}: a git worktree of this task's own, on its branch ${flat(w.branch)}. Commit your work on that branch ` +
@@ -3229,7 +3361,11 @@ function directoryLines(b: RunBrief): string[] {
     lines.push('The tasks this one follows left their work in their own directories, which you may read but not change:');
     for (const u of w.upstream.slice(0, UPSTREAM_LISTED)) {
       const branch = u.branch === null ? '' : ` (branch ${flat(u.branch)})`;
-      const abandoned = u.abandoned ? ', archived: its work was abandoned, and is not merged into this task' : '';
+      const abandoned = !u.abandoned
+        ? ''
+        : u.branch === null
+          ? ', archived: its work was abandoned'
+          : ', archived: its work was abandoned, and is not merged into this task';
       lines.push(`- ${u.taskId}: ${flat(u.path)}${branch}${abandoned}`);
     }
     if (w.upstream.length > UPSTREAM_LISTED) lines.push(`- and ${w.upstream.length - UPSTREAM_LISTED} more`);
@@ -3237,7 +3373,7 @@ function directoryLines(b: RunBrief): string[] {
   return lines;
 ```
 
-- [ ] **Step 7.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1713 passed (1713)`. Run `npx vitest run --project e2e`. Expected: `Tests  120 passed (120)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 7.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1713 passed (1713)`. Run `npx vitest run --project e2e`. Expected: `Tests  125 passed (125)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 7.5: Commit.**
 
@@ -3556,7 +3692,7 @@ with:
   }
 ```
 
-- [ ] **Step 8.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1714 passed (1714)`. Run `npx vitest run --project e2e`. Expected: `Tests  121 passed (121)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 8.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1714 passed (1714)`. Run `npx vitest run --project e2e`. Expected: `Tests  126 passed (126)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 8.5: Commit.**
 
@@ -3574,7 +3710,7 @@ git commit -m "Wire tasks' own directories into the gateway, under the home's wo
 - Create: `tests/kanban-worktree-chat.test.ts`, `tests/mt-kanban-worktree.test.ts`
 - Modify: `src/cli/mt.ts`, `src/cli/operator.ts`, `src/cli/plain.ts`, `src/cli/workspace.ts`, `src/kanban/chat-render.ts`, `tests/mt-kanban-operator-tasks.test.ts`, `tests/mt-workspace.test.ts`
 
-`/kanban task show` and `mt kanban task show` say where a task's directory is, or that it is not made yet; `mt kanban task worktree` prints it alone, during a conflict too, since the worktree is recorded once added; `mt workspace add --isolated` writes the mapping, and `mt workspace list` marks it (Decision 18). The list of task verbs gains `worktree`.
+`/kanban task show` and `mt kanban task show` say where a task's directory is, or that it is not made yet; `mt kanban task worktree` prints it alone, during a conflict too, since the worktree is recorded once added; `mt workspace add --isolated` writes the mapping, and `mt workspace list` marks it (Decision 18). The list of task verbs gains `worktree`. A folder shows as `directory: <path>`, with no branch.
 
 - [ ] **Step 9.1: Write the tests.**
 
@@ -3724,6 +3860,25 @@ describe('mt kanban task worktree', () => {
   });
 });
 
+describe('a task with a folder of its own', () => {
+  it('reads as a folder: no branch, in show or worktree', async () => {
+    const task = newTask(gateway, { assignee: { kind: 'role', name: 'default' }, workspace: 'default' });
+    const r = claim(
+      gateway,
+      { taskId: task.taskId, claimant: claimantFor(gateway, task.taskId), workspaces: new Set(['default']), isolated: new Set(['default']) },
+      NOW,
+    );
+    if (!r.ok) throw new Error(r.message);
+    const path = join(f.home, 'worktrees', 'default', task.taskId);
+    registerWorktree(gateway, { id: `wt:${task.taskId}`, kind: 'plain-dir', rootPath: path, repoRoot: f.workspace, branch: null }, NOW);
+    const shown = (await mt(['task', 'show', task.taskId])).out;
+    expect(shown.split('\n')).toContain(`directory: ${path}`);
+    expect(shown).not.toContain('branch');
+    expect(await mt(['task', 'worktree', task.taskId])).toEqual({ code: 0, out: path, err: '' });
+    expect(JSON.parse((await mt(['task', 'worktree', task.taskId, '--json'])).out)).toMatchObject({ path, branch: null });
+  });
+});
+
 describe('mt kanban task show', () => {
   it("says where a task's own directory is, and its branch", async () => {
     const { taskId, path } = isolatedTask(true);
@@ -3768,7 +3923,7 @@ with:
   });
 ```
 
-- [ ] **Step 9.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-worktree-chat.test.ts tests/mt-kanban-worktree.test.ts tests/mt-kanban-operator-tasks.test.ts tests/mt-workspace.test.ts`. Expected: `Test Files  4 failed (4)` and `Tests  6 failed | 43 passed (49)`.
+- [ ] **Step 9.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-worktree-chat.test.ts tests/mt-kanban-worktree.test.ts tests/mt-kanban-operator-tasks.test.ts tests/mt-workspace.test.ts`. Expected: `Test Files  4 failed (4)` and `Tests  7 failed | 43 passed (50)`.
 
 - [ ] **Step 9.3: Implement.**
 
@@ -4065,7 +4220,7 @@ export function workdirLine(w: { path: string | null; branch: string | null }, e
 }
 ```
 
-- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1719 passed (1719)`. Run `npx vitest run --project e2e`. Expected: `Tests  121 passed (121)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1720 passed (1720)`. Run `npx vitest run --project e2e`. Expected: `Tests  126 passed (126)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 9.5: Commit.**
 
@@ -4082,7 +4237,7 @@ git commit -m "Say in task show, in chat and at the terminal, where a task's own
 
 - Modify: `README.md`, `docs/kanban-guide.md`, `config.example.yaml`
 
-Isolated workspaces in the README's workspaces section and command list, in the guide's fan-out section, its terminal section and its rules of thumb, and in the example config.
+Isolated workspaces in the README's workspaces section and command list, in the guide's fan-out section, its recipes 1 and 3, its terminal section and its rules of thumb, and in the example config: each leads with a plain folder, research fanning out into note-taking tasks that a write-up reads, and shows the git case after (Decision 23).
 
 - [ ] **Step 10.1: Write it.**
 
@@ -4097,7 +4252,21 @@ with:
 ````markdown
 A workspace runs one agent at a time, since two agents in one directory would overwrite each
 other. An **isolated** workspace gives each board task a directory of its own instead, so its
-tasks run side by side:
+tasks run side by side. A task need not be code, and a workspace need not be a repository:
+
+```yaml
+workspaces:
+  worker:
+    path: /home/me/.manus-team/workspaces/worker
+    isolated: true
+```
+
+Here `worker` is a plain folder. A research task fans out into three note-taking tasks, which
+run at once, each in an empty folder of its own under `$MT_HOME/worktrees/worker/`; the write-up
+task that waits for all three is told, in its prompt, the folders they left their notes in, and
+reads them there. Nothing is copied, and nothing is said to the agents about git.
+
+The same works for a git repository, and git is used only there:
 
 ```yaml
 workspaces:
@@ -4107,18 +4276,19 @@ workspaces:
     base: main        # optional
 ```
 
-In a git repository, a task's directory is a worktree under `$MT_HOME/worktrees/<workspace>/`,
-on its own branch, `mt/<task_id>`. A task with no parents starts from `base`, or, without one,
-from whatever the repository has checked out; a task with one parent starts from that parent's
-branch, and a task with several from a merge of their branches, in the order they were linked; an
-archived parent's work is not merged. Submodules are not initialised in a task's directory. A merge that conflicts blocks
-the task, naming the files: resolve it in the task's directory (`cd "$(mt kanban task worktree
-<task_id>)"`), commit, and unblock the task. The gateway never merges, pushes or rebases into
-your branches, and never deletes a branch or a worktree: merging the work is yours, or a final
-task's. In a directory that is not a repository, each task gets an empty folder, and its prompt
-lists its parents' folders. Every run of a task, its review and its rework included, works in
-its directory, and its gates run there. A task that had already run in the shared directory
-before the switch stays there.
+There a task's directory is a worktree under `$MT_HOME/worktrees/<workspace>/`, on its own
+branch, `mt/<task_id>`. A task with no parents starts from `base`, or, without one, from
+whatever the repository has checked out; a task with one parent starts from that parent's
+branch, and a task with several from a merge of their branches, in the order they were linked;
+an archived parent's work is not merged. Submodules are not initialised in a task's directory.
+A merge that conflicts blocks the task, naming the files: resolve it in the task's directory
+(`cd "$(mt kanban task worktree <task_id>)"`), commit, and unblock the task. The gateway never
+merges, pushes or rebases into your branches, and never deletes a branch or a worktree: merging
+the work is yours, or a final task's.
+
+Either way, every run of a task, its review and its rework included, works in its directory,
+and its gates run there. A task that had already run in the shared directory before the switch
+stays there.
 
 A workspace's name keeps the directory it was first used with: the gateway records it, and
 ````
@@ -4162,9 +4332,13 @@ with:
 ```yaml
 #   docs: /srv/repos/docs
 #   # Isolated: each board task gets a directory of its own, so tasks run side by
-#   # side. In a git repository, a worktree on the branch mt/<task_id>, started
-#   # from `base` (unset: whatever the directory has checked out) or from the
-#   # task's parents; elsewhere, an empty folder. Nothing is ever merged for you.
+#   # side. In a plain folder, an empty folder each, whose prompt lists its
+#   # parents' folders. In a git repository, and only there, a worktree on the
+#   # branch mt/<task_id>, started from `base` (unset: whatever the directory has
+#   # checked out) or from the task's parents. Nothing is ever merged for you.
+#   notes:
+#     path: /srv/notes
+#     isolated: true
 #   web:
 #     path: /srv/repos/web
 #     isolated: true
@@ -4191,12 +4365,15 @@ workspaces:
     isolated: true
 ```
 
-Then the three vendor tasks run at once, each in its own directory. In a git repository, each
-is a worktree on its own branch, `mt/<task_id>`, and the write-up starts from a merge of the
-three branches; if that merge conflicts, the write-up blocks, naming the files, for you to
-resolve in its directory and unblock. In a plain directory, each task gets an empty folder, and
-the write-up's prompt lists its parents' folders to read. `/kanban task show` says where a
-task's directory is. Nothing is merged into your own branches.
+Then the three vendor tasks run at once. Where `worker` is a plain folder, as research usually
+is, each vendor task gets an empty folder of its own, and the comparison's prompt lists the three
+folders their notes are in, to read. Nothing is copied, and nothing is said about git.
+`/kanban task show` says where a task's directory is.
+
+Where the workspace is a git repository, and only there, git is used: each task's directory is a
+worktree on its own branch, `mt/<task_id>`, and the write-up starts from a merge of the three
+branches. If that merge conflicts, the write-up blocks, naming the files, for you to resolve in
+its directory and unblock. Nothing is merged into your own branches.
 
 Running agents are also capped by `kanban.max_running` in the gateway's config: at most that many
 ````
@@ -4218,6 +4395,38 @@ with:
 In `docs/kanban-guide.md`, replace:
 
 ```markdown
+workspace the gateway does not have yet is refused at once, and nothing is created.
+
+```
+
+with:
+
+```markdown
+workspace the gateway does not have yet is refused at once, and nothing is created.
+
+Simpler, once your gateway has isolated workspaces: mark `worker`'s own workspace `isolated: true`
+(section 6) and restart. Then the three prototypes need no `workspace:` line: each runs at once in
+a folder of its own in `worker`, and the recommendation's prompt lists their folders to read.
+
+```
+
+In `docs/kanban-guide.md`, replace:
+
+```markdown
+  workspace, in the body or in `role.md`.
+```
+
+with:
+
+```markdown
+  workspace, in the body or in `role.md`, or make the workspace they share isolated (section 6):
+  with `worker`'s marked `isolated: true`, the planner's parallel tasks run at once with no
+  `"workspace"` at all.
+```
+
+In `docs/kanban-guide.md`, replace:
+
+```markdown
 - **One workspace per parallel branch.** Tasks that share a workspace run one after the other,
   however wide the graph. Then check the role's `max_running`: it caps the width too.
 ```
@@ -4231,7 +4440,19 @@ with:
   too.
 ```
 
-- [ ] **Step 10.2: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1719 passed (1719)`. Run `npx vitest run --project e2e`. Expected: `Tests  121 passed (121)`. Run `npm run typecheck`. Expected: no errors. Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `git diff -U0 README.md docs/kanban-guide.md config.example.yaml | grep '^+' | grep -c "$(printf '\342\200\224')"`, which counts the long dashes added. Expected: `0`.
+In `docs/kanban-guide.md`, replace:
+
+```markdown
+- Want parallel work? Give each task its own workspace, or they queue.
+```
+
+with:
+
+```markdown
+- Want parallel work? Make the workspace isolated, or give each task its own, or they queue.
+```
+
+- [ ] **Step 10.2: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1720 passed (1720)`. Run `npx vitest run --project e2e`. Expected: `Tests  126 passed (126)`. Run `npm run typecheck`. Expected: no errors. Run `git grep -n -i "p[g]w" -- . ':!package-lock.json'`. Expected: no output. Run `git diff -U0 README.md docs/kanban-guide.md config.example.yaml | grep '^+' | grep -c "$(printf '\342\200\224')"`, which counts the long dashes added. Expected: `0`.
 
 - [ ] **Step 10.3: Commit.**
 
@@ -4244,11 +4465,11 @@ git commit -m "Describe isolated workspaces in the README, the usage guide and t
 
 ## Done when
 
-- `npx vitest run --project unit` gives `Tests  1719 passed (1719)`. `npx vitest run --project e2e` gives `Tests  121 passed (121)`. `npm run typecheck` reports no errors. All under Node 22, in the worktree.
+- `npx vitest run --project unit` gives `Tests  1720 passed (1720)`. `npx vitest run --project e2e` gives `Tests  126 passed (126)`. `npm run typecheck` reports no errors. All under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 - A workspace written `{ path, isolated: true }` loads, and a bad mapping is refused (`tests/config.test.ts`).
 - Two tasks of one role in an isolated workspace run at once, each in its own directory; a retry uses the same one; a directory that cannot be made blocks its task, uncounted (`tests/kanban-worktree-claim.test.ts`, `tests/kanban-dispatch-worktree.test.ts`).
-- Against real git: a worktree from `HEAD` or `base`, a parent's branch, a fan-in's merge in link order without archived parents, a branch never shadowed by a tag, a conflict recorded with its directory, left for a person and taken up once resolved, a failed add's branch taken up, a git past its time stopped with its filter and its leftover named, a worktree off its branch blocked, a repository git cannot read blocked, no hook run, a bare repository, a folder for a plain directory, and every refusal changing nothing (`tests/kanban-worktree.e2e.ts`); and a DAG whose two parallel tasks run at once and whose child starts from their merge, with its gate and its commit in its own worktree, and nothing on the base branch (`tests/kanban-worktree-dispatch.e2e.ts`).
+- Against real git: a worktree from `HEAD` or `base`, a parent's branch, a fan-in's merge in link order without archived parents, a branch never shadowed by a tag, a conflict recorded with its directory, left for a person and taken up once resolved, a failed add's branch taken up, a git past its time stopped with its filter and its leftover named, git's answer not held up by what it leaves holding its output, a moved-away repository blocked and recorded as nothing, a worktree off its branch blocked, a repository git cannot read blocked, no hook run, a bare repository, a folder for a plain directory, and every refusal changing nothing (`tests/kanban-worktree.e2e.ts`); and a DAG whose two parallel tasks run at once and whose child starts from their merge, with its gate and its commit in its own worktree, and nothing on the base branch (`tests/kanban-worktree-dispatch.e2e.ts`).
 - `task show` says where the directory is, `mt kanban task worktree` prints it, and `mt workspace add --isolated` writes the mapping (`tests/kanban-worktree-chat.test.ts`, `tests/mt-kanban-worktree.test.ts`, `tests/mt-workspace.test.ts`).
 
 ## Before using it: a smoke test against the live gateway
@@ -4269,5 +4490,5 @@ For the user, once the plan is built and merged. It uses a scratch repository an
    `mt kanban task list running` shows both running at the same time. `mt kanban task show <id>` says `directory: …/worktrees/scratch/<id> · branch mt/<id>`. `git -C ~/scratch-wt worktree list` lists both.
 4. A fan-in: `mt kanban task new "Smoke: check that alpha.txt and beta.txt are both here, then report complete" --assignee <role> --workspace scratch --parent <a> --parent <b>`. It reaches `done`; `ls "$(mt kanban task worktree <c>)"` shows both files; `git -C ~/scratch-wt log --oneline main` still shows only `first`.
 5. A conflict: two tasks that each write `same.txt` with different text and commit, then a child of both. The child blocks as `needs_input`, naming `same.txt`, in chat if it was created there, and in `mt kanban task show`, which gives its directory too. `cd "$(mt kanban task worktree <child>)"`, fix `same.txt`, `git add same.txt && git commit --no-edit`, then `mt kanban task unblock <child>`: it runs and reaches `done`.
-6. A folder: `mt kanban task new "Smoke: write notes.md saying hi" --assignee <role> --workspace notes`, then a child of it, "list your parents' folders and read notes.md there". The child's summary quotes `hi`; each task's directory is under `…/worktrees/notes/`.
+6. A folder, the case most of the board's work is: `mt kanban task new "Smoke: write notes.md saying hi" --assignee <role> --workspace notes`, then a child of it, "list your parents' folders and read notes.md there". The child's summary quotes `hi`; each task's directory is under `…/worktrees/notes/`.
 7. Clean up: `mt kanban task archive <id>` for each; then by hand, `git -C ~/scratch-wt worktree remove <path>` for each worktree and `git -C ~/scratch-wt branch -D mt/<id>` for each branch (the board never does either); remove `scratch` and `notes` from `workspaces:` in the config, and restart. Their names stay registered, as every removed workspace's does.

@@ -2487,21 +2487,33 @@ with `--service` runs `mt service install`. The decisions, and what forces each:
 
 A workspace runs one agent at a time (§6.3), so the parallel tasks of a graph queue when they
 share one, as they do whenever their role names its own workspace. An **isolated** workspace
-gives each of its board tasks a directory of its own instead: a git worktree on the task's own
-branch in a repository, an empty folder elsewhere. Its tasks then run side by side, within the
-gateway's, the board's and the role's `max_running`. This is the worktree half of architecture
-milestone 9, done per task rather than per session; checkpoints are not part of it. Built by
-plan W (§12).
+gives each of its board tasks a directory of its own instead, and its tasks then run side by
+side, within the gateway's, the board's and the role's `max_running`. **Isolation applies to any
+workspace**, as a task is any work (§1): in a plain folder each task gets an empty folder of its
+own, and **git is used only when the workspace is a repository**, where each task's directory is
+a git worktree on its own branch. This is the worktree half of architecture milestone 9, done
+per task rather than per session; checkpoints are not part of it. Built by plan W (§12).
+
+An example with no code in it: `worker`'s workspace is a plain folder, isolated. A research task
+fans out into three note-taking tasks, which run at once, each writing its notes in a folder of
+its own under `$MT_HOME/worktrees/worker/`; the write-up task that waits for all three is given,
+in its prompt, the three folders, and reads the notes there. Nothing is copied, no prompt says
+anything of git, and `task show` names each folder with no branch. In a repository the same graph
+gives each note-taker a worktree on `mt/<task_id>`, and the write-up starts from a merge of their
+branches (§18.5).
 
 ### 18.1 The switch is per workspace
 
 ```yaml
 workspaces:
   default: /srv/repos/main      # as before: one directory, shared
-  web:
-    path: /srv/repos/web
+  worker:
+    path: /home/me/.manus-team/workspaces/worker   # a plain folder
     isolated: true
-    base: main                  # optional
+  web:
+    path: /srv/repos/web        # a git repository
+    isolated: true
+    base: main                  # optional, for a repository only
 ```
 
 - **A workspace may be written as a mapping**, beside the plain path, which keeps its meaning.
@@ -2611,14 +2623,22 @@ parent was abandoned: its branch is not merged, and the prompt lists its directo
   (an unmounted disk, a move): its admin entry, its staged index and its branch's protection.
 - Every git command runs with no fsmonitor (`-c core.fsmonitor=false`, as §7.8's reads) and no
   hook (`-c core.hooksPath=/dev/null`: `worktree add` would run `post-checkout`, and a merge its
-  own); a merge also with no signing, no remembered resolution and a fast-forward where one will
-  do (`-c commit.gpgSign=false -c rerere.enabled=false -c merge.ff=true`, `--no-gpg-sign --ff`),
-  and quietly (`--quiet --no-stat`, and `worktree add --quiet`), so a user's global
-  configuration does not change what the board does. Each runs with the agent allowlist of the
-  gateway's environment (§7.8), in a process group of its own, which is killed whole after
-  120 s, so a filter or merge driver it started is stopped with it. A merge's commit uses the
+  own), and no automatic gc or maintenance (`-c gc.auto=0 -c maintenance.auto=false`), which
+  would detach processes of their own; a merge also with no signing, no signature checks, no
+  remembered resolution and a fast-forward where one will do (`-c commit.gpgSign=false -c
+  merge.verifySignatures=false -c rerere.enabled=false -c merge.ff=true`, `--no-gpg-sign
+  --no-verify-signatures --ff`), with the message `Merge mt/<parent> into mt/<task_id>`, and
+  quietly (`--quiet --no-stat`, and `worktree add --quiet`), so a user's global configuration
+  does not change what the board does. Each runs with the agent allowlist of the gateway's
+  environment (§7.8), in a process group of its own, which is killed whole after 120 s, so a
+  filter or merge driver it started is stopped with it. Its answer is its exit, as a gate's is
+  (§7.7): once git exits, or is killed past its time, what is left of its group is killed, and
+  its output is let go half a second later, so a process that left the group and holds git's
+  output holds up neither the answer nor the repository's queue. A merge's commit uses the
   repository's own `user.name` and `user.email`; with none, git refuses, and the task blocks
   with its message.
+- **A workspace whose directory is not there** blocks its tasks, recording nothing: git would
+  not start there, and a folder recorded then would stay one once the repository is back.
 - **What counts as a repository**: the workspace's directory at the top of a working tree, or a
   bare repository, asked with `GIT_CEILING_DIRECTORIES` at its parent, so a directory inside some
   other repository, such as a home under version control, counts as none, and its tasks get
@@ -2632,7 +2652,9 @@ parent was abandoned: its branch is not merged, and the prompt lists its directo
   (git removes the directory and keeps the branch). At any other commit it is refused, never
   taken over: it may be a person's.
 - **A directory at the task's path that the board has not recorded** is refused, saying what to
-  run: a `git worktree add` that was stopped leaves one, half made and locked as initializing.
+  run (`git worktree unlock <path>` if `git worktree list` shows it locked, then `git worktree
+  remove --force <path>`, or move it aside): a `git worktree add` that was stopped leaves one,
+  half made and locked as initializing, and that add's own reason already gives the steps.
 - **A shallow clone** makes worktrees as any repository does; a fan-in whose merge base is
   missing fails with git's message, and blocks.
 - **Two claims in one repository** make their worktrees one after the other: the dispatcher
@@ -2657,7 +2679,9 @@ Unblocking the task claims it again.
 - **The prompt** (§7.1, item 4) says, after the task's contract, where the directory is: for a
   work run in a worktree, that its branch is where the work goes, to be committed before
   reporting, since the tasks after it start from the branch and nothing is merged for it; for a
-  review run, that the work under review is there; for a folder, that it is the task's own. Then
+  review run, that the work under review is there; for a folder, that it is the task's own and
+  its results go there, or for a review that the work under review is there, with nothing of
+  commits, branches or git. Then
   the directories of the upstream tasks that have one, to read, at most twenty, an archived one
   marked abandoned. A task in a shared directory whose parents have directories of their own is
   told where they are too.
@@ -2669,7 +2693,8 @@ Unblocking the task claims it again.
 
 ### 18.9 Seeing it
 
-- `/kanban task show` and `mt kanban task show` add `directory: <path> · branch mt/<task_id>`, or
+- `/kanban task show` and `mt kanban task show` add `directory: <path> · branch mt/<task_id>`,
+  `directory: <path>` alone for a folder, or
   `directory: its own, not made yet: it is made when an agent next takes the task up`; `--json` gives `worktree: {path,
   branch}`, or null for a task in a shared directory.
 - `mt kanban task worktree <task_id> [--board <name>] [--json]` prints the path alone, so a
@@ -2709,4 +2734,6 @@ a branch every later claim refused, so a branch at the very start commit is take
 timeout stopped git but not what git started, so each command has its own process group; that a
 conflict left no directory to point at, so a worktree is recorded once added; that a repository
 git refused to read became a folder; and that archived parents were merged, which they no longer
-are. A recorded worktree off its branch blocks its task.
+are. A recorded worktree off its branch blocks its task, the user's decision. A second review
+found that a git workspace whose directory was gone became a folder for good, and that a process
+git left holding its output could hold up its answer; both are closed.
