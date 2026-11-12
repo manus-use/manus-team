@@ -180,6 +180,21 @@ describe('the notifier', () => {
     expect(lark.texts.map((m) => m.text)).toEqual([`📋 **Check the links** \`${r.task.taskId}\`, assigned to Alice`]);
   });
 
+  it("replies a thread's batch to its root when any of its subscriptions has one, and one with none as before (spec §19.7)", async () => {
+    // A task from before threads had roots, and one after, in the same thread.
+    const old = create('From before');
+    const rooted = create('From after', { ...VIA, rootId: 'om_root' });
+    await done(old, 'one');
+    await done(rooted, 'two');
+    expect(await notifier().deliver()).toBe(2);
+    expect(lark.texts.map((m) => m.target)).toEqual([{ chatId: 'oc_team', threadId: 'omt_topic', root: 'om_root' }]);
+    // A thread with no root among its subscriptions replies to the thread, as before.
+    await done(create('Alone'), 'three');
+    await notifier().deliver();
+    expect(lark.texts[1]?.target).toEqual({ chatId: 'oc_team', threadId: 'omt_topic' });
+    expect(lark.texts[1]?.target).not.toHaveProperty('root');
+  });
+
   it('sends at most a batch of notices a message, says more follow, and sends them in the next round', async () => {
     const tasks = Array.from({ length: BATCH_NOTICES + 3 }, (_, i) => create(`task ${i}`));
     for (const task of tasks) await done(task, 'ok');

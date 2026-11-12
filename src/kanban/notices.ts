@@ -226,6 +226,11 @@ export class Notifier {
         target: { chatId: sub.conversationId, threadId: sub.threadId },
         subs: [],
       };
+      // A thread has one root, so any of its subscriptions that knows it serves (spec §19.7):
+      // a task from before threads had roots can share a thread with one from after.
+      if (c.target.root === undefined && sub.threadId !== '' && sub.rootMessageId !== null) {
+        c.target = { ...c.target, root: sub.rootMessageId };
+      }
       c.subs.push(sub);
       byKey.set(key, c);
     }
