@@ -63,10 +63,12 @@ export type Contract = Partial<Record<(typeof CONTRACT_FIELDS)[number], string>>
 /**
  * Where a task came from (spec §3.1): the chat it was created in, the run that
  * created it, or an operator's `mt kanban task new` at a terminal, which no chat
- * follows.
+ * follows. A chat's `rootId`, for a command typed in a thread, is the thread's
+ * root message, which a send in the thread replies to (spec §19.4); never set at
+ * chat scope.
  */
 export type CreatedVia =
-  | { kind: 'chat'; channel: string; appId: string; conversationId: string; threadId: string }
+  | { kind: 'chat'; channel: string; appId: string; conversationId: string; threadId: string; rootId?: string }
   | { kind: 'run'; runId: string }
   | { kind: 'operator' };
 
@@ -274,6 +276,13 @@ export interface SubscriptionRow {
   appId: string;
   conversationId: string;
   threadId: string;
+  /**
+   * The thread's root message, which a send in the thread replies to (spec §19.4,
+   * migration 008); null at chat scope, in a direct message, and for a thread
+   * whose root was never recorded. Only a subscription with one is a thread a
+   * person's card can go to.
+   */
+  rootMessageId: string | null;
   cursor: number;
   createdAt: number;
 }

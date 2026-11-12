@@ -355,6 +355,7 @@ interface SubscriptionRaw {
   account_id: string;
   conversation_id: string;
   thread_id: string;
+  root_message_id: string | null;
   cursor: number;
   created_at: number;
 }
@@ -367,12 +368,13 @@ function decodeSubscription(r: SubscriptionRaw): SubscriptionRow {
     appId: r.account_id,
     conversationId: r.conversation_id,
     threadId: r.thread_id,
+    rootMessageId: r.root_message_id,
     cursor: r.cursor,
     createdAt: r.created_at,
   };
 }
 
-const SUBSCRIPTION_COLS = 'id, task_id, channel, account_id, conversation_id, thread_id, cursor, created_at';
+const SUBSCRIPTION_COLS = 'id, task_id, channel, account_id, conversation_id, thread_id, root_message_id, cursor, created_at';
 
 /** The chats following a task, in the order they were subscribed (spec §9.4). */
 export function subscriptionsOf(db: Db, taskId: string): SubscriptionRow[] {

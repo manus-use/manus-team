@@ -395,21 +395,24 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
 /**
  * The chats that follow a new task (spec §9.4, §7.3): the chat it was created
  * in; or, for a task a run created, every chat following the creating run's
- * task, so whoever follows that task hears about its follow-ups too. Each cursor
- * starts at 0: every event of the new task is newer than that.
+ * task, so whoever follows that task hears about its follow-ups too, in its
+ * thread, with its root (spec §19.4). Each cursor starts at 0: every event of the
+ * new task is newer than that. A root is written only with a thread: at chat
+ * scope it comes from `threadSubscription` alone.
  */
 function subscribe(d: Db, taskId: string, via: CreatedVia, createdFromTask: string | null, now: number): void {
   const insert = d.prepare(
-    `INSERT OR IGNORE INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, root_message_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
   if (via.kind === 'chat') {
-    insert.run(taskId, via.channel, via.appId, via.conversationId, via.threadId, now);
+    const root = via.threadId === '' || via.rootId === undefined || via.rootId === '' ? null : via.rootId;
+    insert.run(taskId, via.channel, via.appId, via.conversationId, via.threadId, root, now);
     return;
   }
   if (createdFromTask === null) return;
   for (const s of subscriptionsOf(d, createdFromTask)) {
-    insert.run(taskId, s.channel, s.appId, s.conversationId, s.threadId, now);
+    insert.run(taskId, s.channel, s.appId, s.conversationId, s.threadId, s.rootMessageId, now);
   }
 }
 

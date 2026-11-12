@@ -55,7 +55,7 @@ describe('migration 007', () => {
           `INSERT INTO kanban_tasks (task_id, title, contract, phase, created_by, created_via, created_at)
            VALUES ('k_old', 'from before', jsonb('{}'), 'open', 'lark:on_alice', jsonb('{}'), ?)`,
         ).run(NOW);
-        expect(migrate(d, SCHEMA_DIR)).toBe(7);
+        expect(migrate(d, SCHEMA_DIR)).toBe(8);
         expect(getTask(d, 'k_old')).toMatchObject({ taskId: 'k_old', workspace: null, worktree: null });
       } finally {
         d.close();
