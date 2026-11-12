@@ -39,14 +39,14 @@
 
 Each has its reason. Where the code and the spec disagree, the code is the fact, and the decision says which reading keeps the spec's intent; those are listed again under "Where the code forced a reading" below.
 
-1. **A root is written only with a thread.** `subscribe()` writes `createdVia.rootId` only when `threadId` is not `''`, so a chat-scope subscription always has a null root until `threadSubscription` moves it, and "still at chat scope with no root" (§19.4) is one test. `KanbanChat` passes `rootId` only for a command typed in a thread, and the inbound side gives `rootId` only to a message with a `thread_id`: a quoted reply at chat scope carries a `root_id` too, which is no thread's.
+1. **A root is written only with a thread.** `subscribe()` writes `createdVia.rootId` only when `threadId` is not `''`, so a chat-scope subscription always has a null root until `threadSubscription` moves it, and "still at chat scope with no root" (§19.4) is one test. `KanbanChat` passes `rootId` only for a command typed in a group's thread, never in a direct message (§19.1), and the inbound side gives `rootId` only to a message with a `thread_id`: a quoted reply at chat scope carries a `root_id` too, which is no thread's.
 2. **`threadSubscription` is `UPDATE OR IGNORE`.** The table's key is `(task_id, channel, account_id, conversation_id, thread_id)`; should the task somehow have a subscription in that thread already, the move changes nothing rather than throw. It returns `moved`, so a second call is visibly a no-op. It is called with `KanbanChat`'s `chatAt(key)`, the command's chat for this bot.
 3. **`KanbanCommands.threaded` is synchronous.** It is one SQLite write and a timer's release. The router calls it in a `finally`, on every path once `run` answered with a `thread`, and notes it if it throws; the hold then lapses by its timer.
 4. **The members lookup reads the whole group.** §19.3 says the pages are read "until the person is found or there are none left"; §19.7 gives the port no person to look for (`chatMembers(chatId)`) and says the cache is "of whole groups, so one lookup serves every person in the group". The second is the one the code can keep: `chatMembers` reads every page up to 20, and `complete` is false only when it stopped there. A person found on page 1 costs the same 20 pages at most once per group per five minutes.
 5. **The cache is `Membership`, in its own module, owned by the card poster.** It keeps two `BoundedMap`s, one of five minutes for answers and one of one minute for failures, as a `BoundedMap` has one time to live. Keyed on the bot and the chat, at most 256 groups each. A timeout (`CARD_SEND_MS`, the card poster's `sendTimeoutMs`) is a failure. Not retried inside a lookup: a failure is remembered for a minute, and meanwhile the cards go by direct message.
 6. **What the log says of a lookup.** Lark's 99991672 logs the exact line of §19.3 once per boot. Any other failure logs `kanban: the members of chat <chat> could not be read (<Lark's error, masked>); its cards go by direct message for a minute`, once each time a failure is remembered afresh, so at most once a minute per group. §19.3 asks for the code Lark answers to be found by the smoke checklist (item 7), and this line shows it if it is not 99991672.
-7. **The wording of a reply in an existing thread.** A task created inside a thread whose root is known (every message Lark sends from a thread has one) is answered in the thread's words, "Their card comes in this thread …, This thread hears …": its card can go there, and §19.5's quoted wording is for "every reply not in a thread of the task's own". A command in a thread with no root, which Lark does not send but a test can, is answered as today, as its card goes by direct message.
-8. **A card refused in both places.** §19.2 says what follows a thread's refusal (a direct message, then §9.2 as today), but not what follows rule 3's fallback being refused in the thread. The reading that keeps "never back to the place it was refused in": the card is recorded `card_failed`, with both reasons, `<the direct message's refusal>; and in the task's thread: <the thread's>`, which its subscribers hear with the commands to type. A failure there that may pass is held back as any.
+7. **The wording of a reply in an existing thread.** A task created inside a group's thread whose root is known (every message Lark sends from a thread has one) is answered in the thread's words, "Their card comes in this thread …, This thread hears …": its card can go there, and §19.5's quoted wording is for "every reply not in a thread of the task's own". A command in a thread with no root, which Lark does not send but a test can, and any command in a direct message, is answered as today, as its card goes by direct message.
+8. **A card refused in both places.** §19.2 says what follows a thread's refusal (a direct message, then §9.2 as today), but not what follows rule 3's fallback being refused in the thread. The reading that keeps "never back to the place it was refused in": the card is recorded `card_failed`, with both reasons, `<the direct message's refusal>; and in the task's thread: <the thread's>`, which its subscribers hear with the commands to type. A failure there that may pass is held back as any. The other way round, rule 4's direct message refused with 230013 after the thread refused the card, is recorded the same, `<the thread's refusal>; and by direct message: <the direct message's>`; any other refusal of it is held back, as §9.2 says.
 9. **The card poster's thread is this bot's subscription on its channel.** §19.7 says to filter `subscriptionsOf(taskId)` by `deps.appId`; the card poster also requires the subscription's `channel` to be its channel's `id` (`lark`), as it can post nowhere else. A task has at most one subscription per bot, so nothing chooses among several.
 10. **The mention.** By the open_id `people` holds for this bot's `app_id` and the person's union_id, read by the card poster with `personOf`; only an id shaped `ou_` and letters or digits (`/^ou_[0-9A-Za-z]+$/`, the adapter's own test for a person element) is put in; the mention precedes the card's first line, `<at id=ou_…></at> 📋 For you to do: …`. A direct message, a fallback included, and every redraw carry none.
 11. **`card_sent`'s `in` is required.** `CardOutcome` is `{ messageId, in }`; the card poster sets it from `SendResult.threadId`. A `card_sent` with no `in`, from before this plan, is no notice (§19.5).
@@ -68,7 +68,7 @@ Each has its reason. Where the code and the spec disagree, the code is the fact,
 ## Where the code forced a reading
 
 - **§19.3 and §19.7 on the lookup** (Decision 4): the whole group is read, up to 2,000 members, not only until the person is found.
-- **A card refused by direct message and then in the thread** (Decision 8): not covered by §19.2; recorded `card_failed` with both reasons.
+- **A card refused by direct message and then in the thread** (Decision 8): not covered by §19.2; recorded `card_failed` with both reasons, as is rule 4's direct message refused with 230013.
 - **The wording in an existing thread** (Decision 7): the thread's words when the root is known.
 - **The card poster's subscription** (Decision 9): filtered by its channel as well as its app.
 - **An approval card in the reply window** (Known limitations): goes to the group; §19 names only the notices there.
@@ -1515,7 +1515,7 @@ git commit -m "Read a group's members by union_id through Lark's chat members AP
 
 - Modify: `tests/lark-inbound.test.ts`, `tests/kanban-chat.test.ts`, `src/types.ts`, `src/channel/lark/inbound.ts`, `src/kanban/chat.ts`
 
-`InboundMessage` gains `rootId` (spec §19.4), from the SDK's normalized `rootId`, Lark's `root_id`, only for a message in a thread: a quoted reply at chat scope has a `root_id` too, which is no thread's. It is never a key: the binding stays on `thread_id`. `KanbanChat` passes it as `createdVia.rootId` for a command typed in a thread, so the task's subscription has its root from its creation (Task 1).
+`InboundMessage` gains `rootId` (spec §19.4), from the SDK's normalized `rootId`, Lark's `root_id`, only for a message in a thread: a quoted reply at chat scope has a `root_id` too, which is no thread's. It is never a key: the binding stays on `thread_id`. `KanbanChat` passes it as `createdVia.rootId` for a command typed in a group's thread, and never for a direct message, which §19.1 leaves unchanged, so the task's subscription has its root from its creation (Task 1).
 
 - [ ] **Step 5.1: Write the tests.**
 
@@ -1600,6 +1600,9 @@ with:
     const taskId = created(await chat.run('task new In the topic', { ...message(OWNER), rootId: 'om_root' }, KEY));
     expect(getTask(t.db, taskId)?.createdVia).toMatchObject({ threadId: 'omt_topic', rootId: 'om_root' });
     expect(subscriptionsOf(t.db, taskId).map((s) => [s.threadId, s.rootMessageId])).toEqual([['omt_topic', 'om_root']]);
+    // A direct message is unchanged (spec §19.1): no root, whatever the message carries.
+    const direct = created(await chat.run('task new In a direct message', { ...message(OWNER), chatType: 'p2p', rootId: 'om_root' }, KEY));
+    expect(subscriptionsOf(t.db, direct)[0]?.rootMessageId).toBeNull();
   });
 
   it('makes one task of one message, however often it arrives', async () => {
@@ -1662,8 +1665,8 @@ with:
 ```ts
         conversationId: key.conversationId,
         threadId: key.threadId,
-        // In a thread, its root: where a card and a notice in it reply to (spec §19.4).
-        ...(key.threadId === '' || message.rootId === undefined ? {} : { rootId: message.rootId }),
+        // In a group's thread, its root: where a card and a notice in it reply to (spec §19.4). A direct message has none (§19.1).
+        ...(message.chatType !== 'group' || key.threadId === '' || message.rootId === undefined ? {} : { rootId: message.rootId }),
       },
     });
 ```
@@ -1686,7 +1689,7 @@ git commit -m "Give a message in a thread the thread's root from Lark, and recor
 - Create: `tests/kanban-thread-chat.test.ts`
 - Modify: `tests/kanban-chat.test.ts`, `tests/kanban-board-chat.test.ts`, `tests/router.test.ts`, `src/core/router.ts`, `src/kanban/chat.ts`
 
-`KanbanCommands.run` answers `{ text, quoted?, thread? }` (spec §19.7). For a fresh task created in a group at chat scope, `KanbanChat` answers in the thread's words (§19.5), with today's words as `quoted` and the task as `thread`; for a task created in a thread whose root is known, in the thread's words, with no `thread`; anywhere else, and for an `existing` answer, as today. The task is held from the moment `service.create` returns, synchronously, before the dispatcher is told (`#changed`), until `threaded(taskId, key, messageId, threadId)` moves its subscription, or is told no thread came back, or `holdMs` (`CARD_SEND_MS`) lapses; a move after the lapse still applies. An error rendering the reply after the create releases the hold before it leaves `run`. `held(taskId)` is what the card poster asks (Task 10). The router, for now, reads the answer as before: it sends `quoted ?? text` as today's quoted reply and calls `threaded(…, undefined)`, which ends the hold; Task 7 sends the threaded reply. Every test that read `run`'s answer as text reads `.text`, and the board test whose command is at chat scope in a group expects "This thread hears".
+`KanbanCommands.run` answers `{ text, quoted?, thread? }` (spec §19.7). For a fresh task created in a group at chat scope, `KanbanChat` answers in the thread's words (§19.5), with today's words as `quoted` and the task as `thread`; for a task created in a group's thread whose root is known, in the thread's words, with no `thread`; anywhere else, and for an `existing` answer, as today. The task is held from the moment `service.create` returns, synchronously, before the dispatcher is told (`#changed`), until `threaded(taskId, key, messageId, threadId)` moves its subscription, or is told no thread came back, or `holdMs` (`CARD_SEND_MS`) lapses; a move after the lapse still applies. An error rendering the reply after the create releases the hold before it leaves `run`. `held(taskId)` is what the card poster asks (Task 10). The router, for now, reads the answer as before: it sends `quoted ?? text` as today's quoted reply and calls `threaded(…, undefined)`, which ends the hold; Task 7 sends the threaded reply. Every test that read `run`'s answer as text reads `.text`, and the board test whose command is at chat scope in a group expects "This thread hears".
 
 - [ ] **Step 6.1: Write the tests.**
 
@@ -1884,6 +1887,18 @@ with:
 
 ```ts
     const taskId = created((await chat.run('task new In the topic', { ...message(OWNER), rootId: 'om_root' }, KEY)).text);
+```
+
+In `tests/kanban-chat.test.ts`, replace:
+
+```ts
+    const direct = created(await chat.run('task new In a direct message', { ...message(OWNER), chatType: 'p2p', rootId: 'om_root' }, KEY));
+```
+
+with:
+
+```ts
+    const direct = created((await chat.run('task new In a direct message', { ...message(OWNER), chatType: 'p2p', rootId: 'om_root' }, KEY)).text);
 ```
 
 In `tests/kanban-chat.test.ts`, replace:
@@ -2303,7 +2318,7 @@ with:
       this.#changed();
       if (thread) return { text: this.#created(task, 'thread'), quoted: this.#created(task, 'chat'), thread: task.taskId };
       // In a thread whose root is known, its card can come there too.
-      return this.#created(task, key.threadId !== '' && message.rootId !== undefined ? 'thread' : 'chat');
+      return this.#created(task, message.chatType === 'group' && key.threadId !== '' && message.rootId !== undefined ? 'thread' : 'chat');
     } catch (err) {
       // The task stands, at chat scope, as one whose reply failed: no hold to wait out.
       if (thread) this.#release(task.taskId);
@@ -2917,7 +2932,7 @@ git commit -m "Know who is in a group from Lark, for five minutes, a failed look
 - Create: `tests/kanban-thread-cards.test.ts`
 - Modify: `tests/helpers/channel.ts`, `tests/kanban-people-reports.test.ts`, `src/db/kanban.ts`, `src/kanban/cards.ts`
 
-The card poster routes each run's card at each try (spec §19.2): it asks `held(taskId)` first, and passes over a held task's run silently; it finds the task's thread from `subscriptionsOf(taskId)`, this bot's subscription on its channel, when it is in a thread with a root; and it sends to the thread when `Membership` says the person is in the group (rule 1), with the mention by the open_id the `people` table holds for this bot's app, else by direct message, unmentioned (rule 2). A direct message refused with a code of `PERSON_UNREACHABLE_CODES` goes to the thread when there is one (rule 3); refused there too, it is recorded `card_failed` with both reasons, never sent back by direct message. A card refused in the thread with any nonzero, non-retryable code goes by direct message (rule 4); refused there too, it is as a direct message's refusal always was: 230013 records `card_failed`, anything else is held back. A failure that never reached Lark, one Lark marks retryable, and a timeout are held back, and the next try routes afresh (rule 5). One uuid per run, wherever it goes. `card_sent` records `in`, `thread` exactly when Lark's answer carries a thread, so `CardOutcome` gains `in`. The fake channel gains `answerNext`, for an answer Lark deduplicated.
+The card poster routes each run's card at each try (spec §19.2): it asks `held(taskId)` first, and passes over a held task's run silently; it finds the task's thread from `subscriptionsOf(taskId)`, this bot's subscription on its channel, when it is in a thread with a root; and it sends to the thread when `Membership` says the person is in the group (rule 1), with the mention by the open_id the `people` table holds for this bot's app, else by direct message, unmentioned (rule 2). A direct message refused with a code of `PERSON_UNREACHABLE_CODES` goes to the thread when there is one (rule 3); refused there too, it is recorded `card_failed` with both reasons, never sent back by direct message. A card refused in the thread with any nonzero, non-retryable code goes by direct message (rule 4); refused there too, never back to the thread: 230013 records `card_failed` with both reasons, `<the thread's>; and by direct message: <the direct message's>`, anything else is held back. A failure that never reached Lark, one Lark marks retryable, and a timeout are held back, and the next try routes afresh (rule 5). One uuid per run, wherever it goes. `card_sent` records `in`, `thread` exactly when Lark's answer carries a thread, so `CardOutcome` gains `in`. The fake channel gains `answerNext`, for an answer Lark deduplicated.
 
 - [ ] **Step 10.1: Write the tests.**
 
@@ -3088,7 +3103,10 @@ describe("a person's card, for a task with a thread", () => {
     lark.failNext('sendCard', new ChannelError(232009, 'chat dissolved', false));
     lark.failNext('sendCard', new ChannelError(230013, 'Bot has NO availability to this user', false));
     await poster().deliver();
-    expect(eventsOf(t.db, unreachable.task.taskId).at(-1)).toMatchObject({ kind: 'card_failed' });
+    expect(eventsOf(t.db, unreachable.task.taskId).at(-1)).toMatchObject({
+      kind: 'card_failed',
+      payload: { error: 'chat dissolved (code 232009); and by direct message: Bot has NO availability to this user (code 230013)' },
+    });
     const later = ready(ALICE, TOPIC, 'Later');
     lark.failNext('sendCard', new ChannelError(232009, 'chat dissolved', false));
     lark.failNext('sendCard', new ChannelError(400, 'Bad Request', false));
@@ -3489,8 +3507,13 @@ with:
       this.#note(`kanban: the card of run ${run.runId} was refused in its task's thread (${message(tried.err)}); sending it by direct message`);
       const again = await this.#send(run, reading, undefined, unionId);
       if (again.ok) return this.#sent(run, again.sent);
-      // Never back to the thread it was refused in: as a direct message's refusal always was.
-      return this.#notSent(run, again.err);
+      // Never back to the thread it was refused in: 230013 is recorded, with both reasons; anything else held back.
+      if (again.err instanceof ChannelError && PERSON_UNREACHABLE_CODES.has(again.err.code)) {
+        this.#refused(run, `${message(tried.err)}; and by direct message: ${message(again.err)}`);
+        return false;
+      }
+      this.#holdBack(run, message(again.err));
+      return false;
     }
     if (thread !== undefined && tried.err instanceof ChannelError && PERSON_UNREACHABLE_CODES.has(tried.err.code)) {
       // Rule 3: a person a direct message cannot reach gets it in the thread, member or not.
@@ -4200,11 +4223,18 @@ describe("a task's thread, end to end", () => {
     await s.dispatcher.idle();
     expect(subscriptionsOf(s.t.db, followUp).map((x) => [x.threadId, x.rootMessageId])).toEqual([[`omt_${command.messageId}`, command.messageId]]);
     expect(await s.cards.deliver()).toBe(1);
-    expect(s.lark.boardCards.map((c) => c.target)).toEqual([{ ...threadOn(command), stayInThread: true }]);
+    const [card] = s.lark.boardCards;
+    expect(card?.target).toEqual({ ...threadOn(command), stayInThread: true });
+    // Alice's Done on the follow-up's card: its notice comes in the parent's thread too.
+    await press(s, card?.view ?? { markdown: '', buttons: [] }, 'om_board_2', 'Done', ALICE, 'booked');
+    expect(getTask(s.t.db, followUp)?.phase).toBe('done');
     await s.notifier.deliver();
     const told = s.lark.texts.filter((m) => !m.text.startsWith('Created'));
     expect(told.map((m) => m.target)).toEqual([threadOn(command)]);
-    expect(told[0]?.text).toBe(`Done: **Plan the offsite** \`${taskId}\`\n> venue booked`);
+    expect(told[0]?.text.split('\n\n')).toEqual([
+      `Done: **Plan the offsite** \`${taskId}\`\n> venue booked`,
+      `Done: **Call the caterer** \`${followUp}\`\n> booked`,
+    ]);
     expect(nothingAtTheTop(s.lark)).toBe(true);
   });
 
@@ -4423,8 +4453,8 @@ with:
   supervised role's approval requests on it reach nobody, as for any task no chat follows.
 - A task's thread is not recovered after a restart in the moment between Lark accepting its
   "Created" reply and the task moving to it: the task stays at chat scope, its notices in the
-  group and its cards by direct message. A block, or an approval card, in that same moment goes
-  to the group too.
+  group and its cards by direct message.
+- A block, or an approval card, raised before the task's thread is known goes to the group.
 - A person who has left a group may get one more card in a task's thread there, within five
   minutes of leaving.
 ```
@@ -4608,7 +4638,7 @@ For the user, once the plan is built and merged, on the real tenant, before `kan
 0. **Deploy.** Deploy this build as usual (`npm run build && mt service restart`, or restart `npm run dev`), at first without `im:chat.members:read`, for the first half of item 7. The log says `schema at version 8`. Then, in the Lark developer console, add `im:chat.members:read` to the app's permissions, publish the version, restart, and go on with item 1.
 1. **The thread.** In the group, at chat scope, `@bot /kanban task new Smoke: book a room` with `assignee: @Alice`. The bot answers in a thread on that message, "Their card comes in this thread …"; the group's timeline shows only the command and its thread. `mt kanban task show <id>` gives the task; `sqlite3 ~/.manus-team/team.db "SELECT thread_id, root_message_id FROM kanban_subscriptions WHERE task_id='<id>'"` gives the thread's `omt_…` and the command's `om_…`.
 2. **The mention.** Alice gets the card in the thread, starting with a mention of her, and is notified, with the group muted too. She presses **Done** with a summary; the card is redrawn, and she is not notified again. "Done: …" comes in the thread.
-3. **A member outside the availability.** A task for `@Bob`: his direct message is refused (the log says `cannot reach its person by direct message (… 230013)`), and the card comes in the thread, mentioning him. He presses **Done**, and the task completes: only his own press can do that, as anyone else's is refused, so the callback carried his `union_id`.
+3. **A member outside the availability.** A task for `@Bob`, who is in the group: by membership his card comes in the thread, mentioning him, and no direct message is tried. He presses **Done**, and the task completes: only his own press can do that, as anyone else's is refused, so the callback carried his `union_id`. (The fallback of a 230013 direct message to the thread is item 4(b)'s, and the end-to-end tests'.)
 4. **The uuid across the two APIs.** From the checkout, with the app's id and secret in the environment, run a one-off script (not committed) on the SDK's client, `new Client({ appId, appSecret })`, with one fresh uuid `U`:
    (a) `im.v1.message.create({ params: { receive_id_type: 'union_id' }, data: { receive_id: <Alice's union_id>, msg_type: 'text', content: '{"text":"smoke a"}', uuid: U } })`, then `im.v1.message.reply({ path: { message_id: <item 1's command> }, data: { msg_type: 'text', content: '{"text":"smoke a"}', uuid: U, reply_in_thread: true } })`: is there one message or two, and what does the second answer, its `thread_id` included?
    (b) The same with a second uuid `V`, the create sent to Bob, refused with 230013: does the reply with `V` then appear in the thread?
