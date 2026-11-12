@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LarkChannel } from '@larksuiteoapi/node-sdk';
-import { LarkAdapter, sendError } from '../src/channel/lark/adapter.js';
+import { LarkAdapter, ONE_MESSAGE, sendError } from '../src/channel/lark/adapter.js';
 import { ChannelError } from '../src/channel/types.js';
 
 /**
@@ -186,6 +186,17 @@ describe('LarkAdapter in a thread (spec §19.4, §19.7)', () => {
       ['create', 'oc_team'],
     ]);
   });
+
+  it('sends a text that stays in its thread as one message, cut to ONE_MESSAGE, never split by the SDK', async () => {
+    const { a, calls } = adapter([{ thread_id: 'omt_new' }]);
+    const long = 'x'.repeat(ONE_MESSAGE + 500);
+    const target = { chatId: 'oc_team', threadId: '', replyTo: 'om_cmd', replyInThread: true, stayInThread: true };
+    expect((await a.sendText(target, long, 'u-7')).threadId).toBe('omt_new');
+    expect(where(calls)).toEqual([['reply', 'om_cmd']]);
+    expect(calls[0]?.payload.data.uuid).toBe('u-7');
+    const sent = JSON.parse(calls[0]?.payload.data.content ?? '{}') as { zh_cn: { content: Array<Array<{ text: string }>> } };
+    expect(sent.zh_cn.content[0]?.[0]?.text.length).toBeLessThanOrEqual(ONE_MESSAGE);
+  });
 });
 
 /** A stand-in for Lark's chat members API, answering with each page in turn. */
@@ -230,6 +241,16 @@ describe('LarkAdapter.chatMembers (spec §19.3)', () => {
     expect(large.calls).toHaveLength(20);
     expect(big).toMatchObject({ complete: false });
     expect(big.unionIds.size).toBe(20);
+  });
+
+  it('reads a group as incomplete when Lark says there is more but gives no page token', async () => {
+    for (const data of [{ has_more: true, page_token: '' }, { has_more: true }]) {
+      const cut = membersApi([{ data: { items: [{ member_id: 'on_alice' }], ...data } }]);
+      const read = await cut.a.chatMembers('oc_team');
+      expect(read).toMatchObject({ complete: false });
+      expect([...read.unionIds]).toEqual(['on_alice']);
+      expect(cut.calls).toHaveLength(1);
+    }
   });
 
   it("throws Lark's refusal, a missing permission among them, and a failure that never reached Lark, without retrying", async () => {

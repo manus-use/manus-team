@@ -10,6 +10,7 @@ import {
   type ChatMembers,
   type SendResult,
   type SendTarget,
+  ONE_MESSAGE,
 } from '../types.js';
 import { forPlainText, truncate } from '../escape.js';
 import { backoffMs, toChannelError } from './errors.js';
@@ -57,12 +58,8 @@ const MAX_SEND_ATTEMPTS = 4;
 const NOT_IN_CHAT = 230002;
 /** Feishu's text message ceiling, with headroom. */
 const TEXT_BUDGET = 12_000;
-/**
- * The longest text sent as one message, with its uuid. Every reply the router
- * sends (cut at 4,000) and every batch of notices (at most 3,800) fits; a longer
- * text is split by the SDK, at its own 3,500, without one.
- */
-export const ONE_MESSAGE = 4_000;
+/** The longest text sent as one message, with its uuid (see `ONE_MESSAGE` in `../types.ts`). */
+export { ONE_MESSAGE };
 /**
  * The codes on which a reply's message is taken as gone, so the reply goes to
  * its chat instead: Lark's documented code for a withdrawn message (230011),
@@ -162,13 +159,16 @@ export class LarkAdapter implements Channel {
         return this.sendText(target, text, uuid);
       }
     }
-    if (text.length <= ONE_MESSAGE) {
+    // A send that stays in its thread is always one message, cut to fit: the
+    // SDK's split send knows neither its thread nor that it must stay there.
+    if (text.length <= ONE_MESSAGE || target.stayInThread === true) {
+      const one = truncate(text, ONE_MESSAGE);
       return this.#withRetry(async () => {
         try {
-          return await this.#post(target, 'post', postContent(text), uuid);
+          return await this.#post(target, 'post', postContent(one), uuid);
         } catch (err) {
           if (!(err instanceof ChannelError) || err.code !== INVALID_CONTENT) throw err;
-          return this.#post(target, 'text', { text }, uuid);
+          return this.#post(target, 'text', { text: one }, uuid);
         }
       });
     }
@@ -399,7 +399,9 @@ export class LarkAdapter implements Channel {
       if (typeof r.code === 'number' && r.code !== 0) throw toChannelError(r);
       for (const m of r.data?.items ?? []) if (m.member_id !== undefined && m.member_id !== '') unionIds.add(m.member_id);
       const next = r.data?.page_token;
-      if (r.data?.has_more !== true || next === undefined || next === '') return { unionIds, complete: true };
+      if (r.data?.has_more !== true) return { unionIds, complete: true };
+      // More, by Lark's word, but no way to ask for it: what was read is not all.
+      if (next === undefined || next === '') return { unionIds, complete: false };
       pageToken = next;
     }
     return { unionIds, complete: false };

@@ -10,6 +10,14 @@ import type { PermissionOption } from '../types.js';
  * same answer twice.
  */
 
+/**
+ * The longest text a channel sends as one message, with its uuid. Every reply the
+ * router sends is cut to it, and every batch of notices (at most 3,800) fits; a
+ * send that stays in its thread is cut to it by the adapter, so it is never
+ * split. A longer text is split by the SDK, at its own 3,500, without one.
+ */
+export const ONE_MESSAGE = 4_000;
+
 export interface SendTarget {
   /** The chat; or, when `receiveIdType` is `union_id`, the person. */
   chatId: string;

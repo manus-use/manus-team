@@ -3,7 +3,7 @@ import { appendEvent, lastEventOfType } from '../db/events.js';
 import { claimMessage, recordOutcome } from '../db/dedup.js';
 import { getApproval } from '../db/approvals.js';
 import { bindingsInConversation, resolveBinding } from '../db/bindings.js';
-import { ChannelError, type Channel, type SendTarget } from '../channel/types.js';
+import { ChannelError, ONE_MESSAGE, type Channel, type SendTarget } from '../channel/types.js';
 import { forDisplay, truncate } from '../channel/escape.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { isResumableProviderId } from '../provider-id.js';
@@ -533,7 +533,7 @@ export class Router {
     try {
       const sent = await this.#deps.channel.sendText(
         { chatId: message.chatId, threadId: '', replyTo: message.messageId, replyInThread: true, stayInThread: true },
-        truncate(redactKnownSecrets(answer.text), 4000),
+        truncate(redactKnownSecrets(answer.text), ONE_MESSAGE),
         replyUuid(this.#deps.appId, message.messageId, 'kanban'),
       );
       threadId = sent.threadId;
@@ -727,7 +727,7 @@ export class Router {
     try {
       await this.#deps.channel.sendText(
         target,
-        truncate(text, 4000),
+        truncate(text, ONE_MESSAGE),
         replyUuid(this.#deps.appId, message.messageId, purpose),
       );
     } catch (err) {
