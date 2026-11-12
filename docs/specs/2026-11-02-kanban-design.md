@@ -2196,7 +2196,7 @@ branch.
 | **H. The operator at a terminal** | `/kanban board list [all]` in place of `/kanban boards`; the operator's `mt kanban board list\|create\|set\|archive` and `new\|list\|show\|assign\|link\|unblock\|stop\|archive\|comment` beside the gateway, through `KanbanService`, as `operator:<login>`, plain text or `--json` (§2.6); the two grammars of `mt kanban` (§7.3); the token-less nudge; each pass cancelling the turns of runs a person's action decided (§6.2); `created_via` `{kind: operator}`; the default database `team.db`, moved by hand at deploy. Plan: `docs/plans/2026-11-09-plan-h-operator-cli.md` | G |
 | **W. A directory of its own for each task** | an isolated workspace, written `{ path, isolated: true, base? }` beside the plain path (§18.1); `kanban_tasks.worktree` (migration `007`), fixed at a task's first agent claim there, and the task's place, which its runs, sessions, gates and reported commit use, with the one-agent limit binding only the shared directory (§18.2); `$MT_HOME/worktrees/<workspace>/<task_id>`, recorded in `workspaces` as `wt:<task_id>` (§18.3); made before the first run, reused, never removed (§18.4); a worktree on `mt/<task_id>` from the base, a parent's branch or a fan-in's merge, a conflict blocking the task (§18.5); git with no hook and no fsmonitor, never forcing, merging into or deleting anything else (§18.6); a directory that cannot be made blocking the task, uncounted (§18.7); the prompt's directory lines (§18.8); `directory:` in `task show`, `mt kanban task worktree`, `mt workspace add --isolated` (§18.9). Plan: `docs/plans/2026-11-10-plan-w-worktrees.md` | H |
 | **L. Cards and notices in a task's thread** | a task created by `/kanban task new` in a group at chat scope answered in a thread on its command, with `reply_in_thread` (`SendTarget.replyInThread`), in one of two wordings, the quoted one when Lark refuses the thread; `SendResult.threadId`; its subscription moved to the thread Lark answers with by `threadSubscription`, called through `KanbanCommands.threaded` with the command's message id as its root (`kanban_subscriptions.root_message_id`, migration `008`); `CreatedVia.rootId`, a task created in a thread recording its root (`InboundMessage.rootId`), and the root copied to follow-ups; the hold, a `held(taskId)` the card poster checks at each send, on a fresh task from a group at chat scope; board sends in a thread replying to the root (`SendTarget.root`), the notifier's, the cards' and the forwarded approval cards' (`KanbanSink`); a person's card in the thread, with an @-mention by `open_id`, when the channel's `chatMembers` port says they are a member, cached five minutes per chat and bounded by `CARD_SEND_MS`, by direct message otherwise; a 230013 direct message falling back to the thread, and any non-retryable refusal in the thread to a direct message, never to the main timeline (`SendTarget.stayInThread`, also on the threaded "Created" reply); `card_sent` recording `in`, read from Lark's answer; the one line as the notice of a `card_sent` by direct message, not of the claim; `im:chat.members:read`, and the one log line when it is missing; WRITERS.md's row for `kanban_subscriptions`; the README's and the guide's statements of where a card goes, the one line, and the "Created" reply, updated as built (§19) | D2 |
-| **U. Updating a deployed gateway** | `mt update`, `--check` and `--yes`, refused in a board run's shell (§20); the checkout `mt` runs from, which must be the one the service's unit records, readable, and the top of a git worktree, on a branch with an upstream, clean with no operation under way, an ancestor of its upstream after a `git fetch`, with no ignored file at a path the commits add; the service's state read at step 2; the commits, a new or changed migration, whether `npm ci` runs, the open agent runs counted read-only on the database the service would open, and whether the service is restarted, shown before a question asked only at a terminal; the service's pid and the database's `user_version` recorded at step 3 and checked before the backup and any going back; `git merge --ff-only`, `npm ci` only when `package.json` or `package-lock.json` changed, and `npm run build`, with the service's node and the npm beside it, named by path in every printed command; `mt service check`, install's check as a command with the unit's `PATH`, the gateway's module graph and `better-sqlite3`'s native module loaded, run by the new build as the preflight, `mt role check` and the same load without a service; going back by `git reset --keep`, `npm ci` if one ran and the build; the online backup in one step to `$MT_HOME/backups`, owner-only, `journal_mode` `delete`, checked, at step 3's version, the last five and the newest of each version kept; `migrate()` refusing a database newer than the build, as a configuration error with exit 78; the steps forward when the version moved, the steps back when only the pid did; `state()`'s unreadable result; a warning for `MT_SCHEMA_DIR`; the restart by `mt service restart`'s code, a stopped service left stopped, confirmed by `connected as` after the schema line within 60 seconds, else the log's tail and the steps back; a lock per checkout and per home, never cleared automatically; SIGINT, SIGHUP and SIGTERM, EPIPE and EIO; git and npm detached, in batch mode, with time limits; exit 3; §17's `check`, `install`'s closing line and the README's "Deploying" naming `mt update` | §17's `mt service`; independent of the board's plans |
+| **U. Updating a deployed gateway** | `mt update`, `--check` and `--yes`, refused in a board run's shell (§20); the checkout `mt` runs from, which must be the one the service's unit records, readable, and the top of a git worktree, on a branch with an upstream, clean with no operation under way, an ancestor of its upstream after a `git fetch`, with no ignored file at a path the commits add; the service's state read at step 2; the commits, a new or changed migration, whether `npm ci` runs, the open agent runs counted read-only on the database the service would open, and whether the service is restarted, shown before a question asked only at a terminal; the service's pid and the database's `user_version` recorded at step 3 and checked before the backup and any going back; `git merge --ff-only`, `npm ci` only when `package.json` or `package-lock.json` changed, and `npm run build`, with the service's node and the npm beside it, named by path in every printed command; `mt service check`, install's check as a command with the unit's `PATH`, the gateway's module graph and `better-sqlite3`'s native module loaded, run by the new build as the preflight, with no unit doing a hand-run gateway's check itself (`mt role check`'s loads and `loadStartup`, stand-ins only for names unset), and printing the database's version; going back by `git reset --keep`, `npm ci` if one ran and the build; the online backup in one step to `$MT_HOME/backups`, owner-only, `journal_mode` `delete`, checked, at step 3's version, the last five and the newest of each version kept; `migrate()` refusing a database newer than the build, as a configuration error with exit 78; the steps forward when the version moved, the steps back when only the pid did; `state()`'s unreadable result; a warning for `MT_SCHEMA_DIR`; the restart by `mt service restart`'s code, a stopped service left stopped, confirmed by `connected as` after the schema line within 60 seconds, else the log's tail and the steps back; a lock per checkout and per home, never cleared automatically; SIGINT, SIGHUP and SIGTERM, EPIPE and EIO; git and npm detached, in batch mode, with time limits; exit 3; §17's `check`, `install`'s closing line and the README's "Deploying" naming `mt update` | §17's `mt service`; independent of the board's plans |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D2, nothing can deliver a card to a person, so **plans C and D1 refuse human assignees and
@@ -3492,7 +3492,10 @@ update and restart the service? [y/N]
   fails it, exit 1. `PATH` is the one the unit records when a unit exists, the service's, and
   this shell's otherwise, the one `install` would record. `install` keeps calling the same
   function in process. On its own, `mt service check` is install's check without installing,
-  useful after editing `config.yaml`.
+  useful after editing `config.yaml`. It ends by printing the database's `user_version`, read
+  read-only (`openDbReadOnly`, none when there is no database), and the build's highest
+  migration: `database: <path> at version 8; this build: up to 9`. That line is what the printed
+  steps use to read the version again (§20.6), so no other command is needed for it.
 - **The module load**, part of `mt service check`: it imports `dist/index.js`, the gateway's
   whole module graph, which starts nothing (`src/main.ts` is the only file with effects at
   import, and the only one `dist/index.js` does not import), and
@@ -3500,18 +3503,22 @@ update and restart the service? [y/N]
   syntax the node cannot run, or a module built for another ABI fails here rather than at the
   restart. A native load that fails names the command to run by hand, with the real paths:
   `cd '<checkout>' && PATH='<node dir>':"$PATH" '<npm>' ci`.
-- **Without a service** the check is the new build's `mt role check`, which loads the team as
-  this shell sees it, which a gateway started by hand gets, plus the startup's own loading and
-  the same module and native load. The last two are run as `<node> --input-type=module -e`, in
-  the environment above, importing `<checkout>/dist/index.js` and `dist/db/open.js`, calling
-  `loadStartup(env)` from `dist/index.js` (`src/index.ts`), which is what `main` calls: the
-  gateway's `.env` read, `loadConfig` over this shell's environment and the file as
-  `loadGatewayEnv` merges them, and `loadTeam`; then opening `:memory:`. When the merged
-  environment has no `LARK_APP_SECRET`, it is given a stand-in, as a passEnv name is, and a note
-  says the gateway will need it from the shell that starts it: the check is of the build and the
-  configuration, not of a shell the update cannot see. `loadStartup` gains a comment in the
-  code that `mt update` relies on it, its name, its argument and its throwing a `ConfigError`,
-  so a change to it is made knowing that.
+- **With no unit installed**, the same `mt service check` does the check a gateway started by
+  hand needs, as no unit says what the service would have. In order: the loads of `mt role
+  check`, the team as this shell sees it over the `.env`, with `{ unsetPassEnv }`, which collects
+  each passEnv name this shell leaves unset; then `loadStartup(env)`, from `src/index.ts`, which
+  is what `main` calls (the `.env` read, `loadConfig` over the shell and the file as
+  `loadGatewayEnv` merges them, and `loadTeam`), on a copy of the environment; then the module
+  and native load above. In that copy a stand-in, `'(unset)'`, fills only the names that are
+  unset or empty in the merged environment, the shell over the `.env`: each unset passEnv name,
+  and `LARK_APP_SECRET`. It never hides a value the `.env` sets, so what is checked is what the
+  gateway would read, and `loadStartup`, which takes no `LoadOptions` of its own, sees every name
+  set. Each name filled gets the note "<name> is not set here: the gateway will need it from the
+  shell that starts it". The stand-in is registered as a secret, as every value the startup
+  loads is, so it is masked in the output like one. `loadStartup` gains a comment in the code
+  that `mt update` relies on it, its name, its argument and its throwing a `ConfigError`, so a
+  change to it is made knowing that. The update's own preflight, and every printed block, use
+  this one line, with or without a service: `'<node>' '<checkout>/dist/mt.js' service check`.
 - **The build writes `dist/` in place.** `npm run build` is `tsc -p tsconfig.build.json`, which
   overwrites each file and deletes none. The running gateway loaded every module at its start
   (it has no dynamic `import()`), so it runs the old code from memory until the restart, and a
@@ -3543,16 +3550,17 @@ update and restart the service? [y/N]
   "the database at <path> is at schema version 9, and this build knows only up to 8: it was
   migrated by a newer build. Run that build, or restore a backup of version 8 from
   <home>/backups (spec §20.8)". `createGateway` (`src/index.ts`), which calls `migrate`,
-  recognises the class, closes the database, and rethrows it with the directory added, as
-  `migrate` knows no home; every other error from `migrate` is rethrown as now, the database
-  closed too. A schema directory with no migration file has a highest of 0, so any migrated
-  database is refused by it, as it should be: such a build is broken.
-  It is reported the way a configuration error is, `configuration error: ...` and exit 78
-  (`src/main.ts`), so on Linux `RestartPreventExitStatus=78` keeps the service from a restart
-  loop (§17); launchd has no equivalent and tries again every 30 seconds, failing the same way,
-  touching nothing. It is what makes going back safe to get wrong: an old build put on a
-  migrated database by hand, or by a crash restart, stops rather than runs on it. A database at
-  or below the build's version is migrated as now.
+  recognises the class, closes the database, and throws a new `SchemaTooNewError` with the same
+  `dbVersion` and `buildVersion`, its message completed with the backups directory from
+  `config.home`, as `migrate` knows no home, and the original as its `cause`; every other error
+  from `migrate` is rethrown as now, the database closed too. A schema directory with no migration
+  file has a highest of 0, so any migrated database is refused by it, as it should be: such a
+  build is broken. It is reported the way a configuration error is, `configuration error: ...` and
+  exit 78 (`src/main.ts`), so on Linux `RestartPreventExitStatus=78` keeps the service from a
+  restart loop (§17); launchd has no equivalent and tries again every 30 seconds, failing the same
+  way, touching nothing. It is what makes going back safe to get wrong: an old build put on a
+  migrated database by hand, or by a crash restart, stops rather than runs on it. A database at or
+  below the build's version is migrated as now.
 - **What the update records.** At step 3 it records the service's pid (none when it is not
   running) and the database's `user_version`, on the read-only connection, and writes both into
   its lock (§20.10). **Before the backup, and before any going back**, it reads both again.
@@ -3560,10 +3568,12 @@ update and restart the service? [y/N]
   migrate. The update does no automatic going back, since the restarted gateway may be running
   the new tree, or a part of it, and migrates at its next start; it says what changed ("the
   service's pid was 4242 and is 4310; the database is still at version 8"), prints the steps
-  back (§20.9), and exits 3. The steps back hold only while the version is unchanged after their
-  first line, `service stop`: they say to read it then, with `<node> -e` printing the database's
-  `user_version` read-only, and, if it has moved, to follow the steps forward instead, printed
-  beside them.
+  back (§20.9) and the steps forward (below) beside them, and exits 3. The steps back hold only
+  while the version is unchanged after their `service stop`, so in this case they carry, after
+  `cd '<checkout>'`, the line `'<node>' '<checkout>/dist/mt.js' service check`, with a comment
+  saying it should print "at version 8", the version recorded at step 3: if it does, go on with
+  the steps back; if it prints another, follow the steps forward instead; if it fails to load,
+  the tree being half built, run the printed `npm ci` line first, then read again.
 - **The version moved:** a gateway, a crash restart on the new tree, has migrated the live
   database before any backup was taken. Going back is then impossible: no backup of the old
   schema exists, and the old build refuses the database (above). So the update takes no backup,
@@ -3577,9 +3587,9 @@ update and restart the service? [y/N]
   PATH='<node dir>':"$PATH" '<node>' '<checkout>/dist/mt.js' service check
   PATH='<node dir>':"$PATH" '<node>' '<checkout>/dist/mt.js' service restart
   ```
-  Exit 3. Without a service, the check line is the no-service check's commands (§20.5) and the
-  last line is "start the gateway", as it was started before. The rules for every printed block
-  are in §20.9.
+  Exit 3. Without a service, the check line is the same, with no unit it checks a gateway run by
+  hand (§20.5), and the last line is "restart the gateway (stop it if it runs, then start it)".
+  The rules for every printed block are in §20.9.
 - **The backup's own `user_version` must be step 3's**, checked on the copy itself, which closes
   the window between the second read and the copy.
 
@@ -3688,15 +3698,17 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   another shell may be another home's or another checkout's launcher, and starts with `export
   MT_HOME='<home>'` when the home is not the default (`t.mtHomeSet`), since the service, the
   home and the database are found from it; a bare `mt service stop` in a shell without it would
-  stop the default home's service. Without a service the `service stop` and `service start`
-  lines are "stop the gateway" and "start the gateway". The service is stopped first, as no file
-  may be replaced under a gateway that has it open, and KeepAlive or `Restart=on-failure` may be
-  starting it again; the `-wal` and `-shm` are removed because frames of the newer database
-  applied to the restored one would corrupt it. Restoring loses what the gateway wrote since the
-  backup. The `npm ci` line is printed whether or not the update ran one, since a person cannot
-  tell. **Never automatic**: the new gateway may have migrated and written, and only a person can
-  weigh that loss. The same steps are printed by §20.6 when only the pid moved, and by a failed
-  restart call; with no backup taken, the restore lines are left out and it says there is none.
+  stop the default home's service. Without a service the restart is "restart the gateway (stop
+  it if it runs, then start it)", in the steps back split around the restore: its stop half in
+  place of `service stop`, "then start it" in place of `service start`. The service is stopped
+  first, as no file may be replaced under a gateway that has it open, and KeepAlive or
+  `Restart=on-failure` may be starting it again; the `-wal` and `-shm` are removed because frames
+  of the newer database applied to the restored one would corrupt it. Restoring loses what the
+  gateway wrote since the backup. The `npm ci` line is printed whether or not the update ran one,
+  since a person cannot tell. **Never automatic**: the new gateway may have migrated and written,
+  and only a person can weigh that loss. The same steps are printed by §20.6 when only the pid
+  moved, and by a failed restart call; with no backup taken, the restore lines are left out and it
+  says there is none.
 
 ### 20.10 One update at a time
 
@@ -3824,8 +3836,11 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   `user_version` other than step 3's failing it; the five kept, the newest of each version kept
   besides, and nothing else removed.
 - **Unit, `mt service check`**: install's cases, now through the command; the unit's `PATH` when
-  a unit exists; a build whose `dist/index.js` fails to import, and a native module that fails to
-  load, failing it, the latter naming the `npm ci`.
+  a unit exists; with none, `mt role check`'s loads and `loadStartup`, a stand-in for each unset
+  passEnv name and an unset or empty `LARK_APP_SECRET` with its note, never for a value the
+  `.env` sets, and the stand-in masked; the version line, with and without a database; a build
+  whose `dist/index.js` fails to import, and a native module that fails to load, failing it, the
+  latter naming the `npm ci`.
 - **End to end, with real git against a temporary bare origin**: a clone with an upstream, a fake
   npm on `PATH` whose `ci` and `run build` write marker files, and a commit pushed to the origin;
   `--check` shows it and changes nothing; `--yes` fast-forwards it and restarts a fake service,
@@ -3914,3 +3929,9 @@ printed steps lost a home other than the default and named a bare `mt`, and said
 restart` with no service; that the steps back after a crash restart need the version read again
 after the stop; the error's class, the database closed and an empty schema directory; a signal
 during Linux's restart call; and the operator's commands on an unmigrated database.
+*Amended on 2026-11-12, a fourth time.* A fourth review simplified the check without a service
+into `mt service check` itself when no unit is installed, its stand-ins filling only names unset
+in the merged environment, so the update and every printed block use one line; had that check
+print the database's version, which the steps back after a crash restart use to read it again;
+worded the restart of a gateway run by hand; and had `createGateway` throw a new
+`SchemaTooNewError`, completed from `config.home`, with the original as its cause.
