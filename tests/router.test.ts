@@ -555,8 +555,9 @@ describe('Router: /kanban', () => {
       calls,
       run: async (arg, message, key) => {
         calls.push({ arg, messageId: message.messageId, key });
-        return answer(arg);
+        return { text: await answer(arg) };
       },
+      threaded: () => undefined,
       card: async () => answer('card'),
     };
   }
@@ -956,7 +957,8 @@ describe('Router: card actions', () => {
     const h = harness({
       auth: { allowTalk: [OWNER.openId, GUEST.openId], allowOperate: [OWNER.openId] },
       kanban: {
-        run: async () => 'unused',
+        run: async () => ({ text: 'unused' }),
+        threaded: () => undefined,
         card: async (action) => {
           pressed.push(action);
           return 'Done: `k_1` is complete, sk-card-12345678';
@@ -985,7 +987,8 @@ describe('Router: card actions', () => {
   it("notes a board card's button that throws, masked, and posts nothing", async () => {
     const h = harness({
       kanban: {
-        run: async () => 'unused',
+        run: async () => ({ text: 'unused' }),
+        threaded: () => undefined,
         card: async () => {
           throw new Error('database_locked\nsecond line');
         },
