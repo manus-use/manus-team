@@ -189,10 +189,30 @@ describe('the notifier', () => {
     expect(await notifier().deliver()).toBe(2);
     expect(lark.texts.map((m) => m.target)).toEqual([{ chatId: 'oc_team', threadId: 'omt_topic', root: 'om_root' }]);
     // A thread with no root among its subscriptions replies to the thread, as before.
-    await done(create('Alone'), 'three');
+    await done(create('Alone', { ...VIA, threadId: 'omt_other' }), 'three');
     await notifier().deliver();
-    expect(lark.texts[1]?.target).toEqual({ chatId: 'oc_team', threadId: 'omt_topic' });
+    expect(lark.texts[1]?.target).toEqual({ chatId: 'oc_team', threadId: 'omt_other' });
     expect(lark.texts[1]?.target).not.toHaveProperty('root');
+  });
+
+  it("replies a thread's batch to its root when only a task from before threads is due there (spec §19.7)", async () => {
+    const old = create('From before');
+    create('From after', { ...VIA, rootId: 'om_root' });
+    // Nothing of the rooted task's is due: its cursor is past all it has.
+    expect(await notifier().deliver()).toBe(0);
+    expect(dueSubscriptions(t.db, 'cli_app').map((s) => s.taskId)).toEqual([]);
+    await done(old, 'one');
+    expect(dueSubscriptions(t.db, 'cli_app').map((s) => s.taskId)).toEqual([old.taskId]);
+    expect(await notifier().deliver()).toBe(1);
+    expect(lark.texts.map((m) => m.target)).toEqual([{ chatId: 'oc_team', threadId: 'omt_topic', root: 'om_root' }]);
+    // Only this bot's, on this channel, in this chat and thread, count.
+    create('Elsewhere', { ...VIA, threadId: 'omt_third', appId: 'cli_other', rootId: 'om_not_ours' });
+    create('Another chat', { ...VIA, conversationId: 'oc_other', threadId: 'omt_third', rootId: 'om_not_here' });
+    const third = create('In the third', { ...VIA, threadId: 'omt_third' });
+    await notifier().deliver();
+    await done(third, 'two');
+    await notifier().deliver();
+    expect(lark.texts.at(-1)?.target).toEqual({ chatId: 'oc_team', threadId: 'omt_third' });
   });
 
   it('sends at most a batch of notices a message, says more follow, and sends them in the next round', async () => {

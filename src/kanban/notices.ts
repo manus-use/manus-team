@@ -1,6 +1,6 @@
 import { ChannelError, type CardButton, type Channel, type SendTarget } from '../channel/types.js';
 import { noticeBatchUuid } from '../core/ids.js';
-import { dueSubscriptions, eventsAfter, getRun, getTask, type DueSubscription } from '../db/kanban-read.js';
+import { dueSubscriptions, eventsAfter, getRun, getTask, threadRootOf, type DueSubscription } from '../db/kanban-read.js';
 import type { Db } from '../db/open.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
@@ -220,19 +220,20 @@ export class Notifier {
     const byKey = new Map<string, Conversation>();
     for (const sub of dueSubscriptions(this.#deps.db, this.#deps.appId)) {
       const key = conversationKey(sub);
-      const c = byKey.get(key) ?? {
-        key,
-        channel: sub.channel,
-        target: { chatId: sub.conversationId, threadId: sub.threadId },
-        subs: [],
-      };
-      // A thread has one root, so any of its subscriptions that knows it serves (spec §19.7):
-      // a task from before threads had roots can share a thread with one from after.
-      if (c.target.root === undefined && sub.threadId !== '' && sub.rootMessageId !== null) {
-        c.target = { ...c.target, root: sub.rootMessageId };
+      let c = byKey.get(key);
+      if (c === undefined) {
+        // A thread has one root, so any of its subscriptions that knows it serves, due or
+        // not (spec §19.7): a task from before threads had roots can share a thread with one from after.
+        const root = threadRootOf(this.#deps.db, sub);
+        c = {
+          key,
+          channel: sub.channel,
+          target: { chatId: sub.conversationId, threadId: sub.threadId, ...(root === undefined ? {} : { root }) },
+          subs: [],
+        };
+        byKey.set(key, c);
       }
       c.subs.push(sub);
-      byKey.set(key, c);
     }
     // The longest waiting first, so a busy conversation cannot keep a quiet one waiting.
     const conversations = [...byKey.values()].sort((a, b) => oldest(a) - oldest(b));

@@ -413,6 +413,32 @@ export function dueSubscriptions(db: Db, appId: string): DueSubscription[] {
     .map((r) => ({ ...decodeSubscription(r), oldestPending: r.oldest_pending ?? 0 }));
 }
 
+/** A thread a bot's subscriptions deliver to: its channel, the bot, the chat, and the thread. */
+export interface ThreadAt {
+  channel: string;
+  appId: string;
+  conversationId: string;
+  threadId: string;
+}
+
+/**
+ * The root of a thread, from the first of its subscriptions that knows one,
+ * whether or not that one has anything due (spec §19.7): a thread has one root,
+ * so a task from before threads had roots is replied to it as well. None at chat
+ * scope, or when no subscription in the thread knows it.
+ */
+export function threadRootOf(db: Db, at: ThreadAt): string | undefined {
+  if (at.threadId === '') return undefined;
+  const r = db
+    .prepare<[string, string, string, string], { root_message_id: string }>(
+      `SELECT root_message_id FROM kanban_subscriptions
+        WHERE channel = ? AND account_id = ? AND conversation_id = ? AND thread_id = ? AND root_message_id IS NOT NULL
+        ORDER BY id LIMIT 1`,
+    )
+    .get(at.channel, at.appId, at.conversationId, at.threadId);
+  return r?.root_message_id;
+}
+
 /** A report's run of the task's gates, as its `gates_ran` event recorded it (spec §7.7). */
 export interface LastGateRun {
   /** The run that reported; null for a person. */
