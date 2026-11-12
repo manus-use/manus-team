@@ -161,7 +161,7 @@ describe('the notifier', () => {
     expect(lark.texts[2]?.buttons?.map((x) => x.value['task'])).toEqual(many.slice(0, UNBLOCK_BUTTONS).map((x) => x.taskId));
   });
 
-  it("tells who a person's claim gave a task to, by the name Lark gave", async () => {
+  it("tells who a person's card by direct message went to, by the name Lark gave, and nothing of the claim before it", async () => {
     const people = new KanbanService({
       db: t.db,
       roles: new Map(DEFAULT_ROLES.map((r) => [r.name, r])),
@@ -171,8 +171,12 @@ describe('the notifier', () => {
     });
     const r = people.create({ title: 'Check the links', assignee: ALICE, createdBy: ALICE, createdVia: VIA });
     if (!r.ok) throw new Error(r.message);
-    expect(people.claim(r.task.taskId).ok).toBe(true);
-    await notifier({ nameOf: (p) => (p === ALICE ? 'Alice' : undefined) }).deliver();
+    const claimed = people.claim(r.task.taskId);
+    if (!claimed.ok) throw new Error(claimed.message);
+    const n = notifier({ nameOf: (p) => (p === ALICE ? 'Alice' : undefined) });
+    expect(await n.deliver()).toBe(0);
+    expect(people.recordCard(claimed.run.runId, { messageId: 'om_card', in: 'dm' }).ok).toBe(true);
+    await n.deliver();
     expect(lark.texts.map((m) => m.text)).toEqual([`📋 **Check the links** \`${r.task.taskId}\`, assigned to Alice`]);
   });
 

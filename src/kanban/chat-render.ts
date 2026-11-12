@@ -400,8 +400,10 @@ export function blocksTask(event: KanbanEvent): boolean {
  * failure, gave up, stranded. A dependency block is not
  * one, since nobody needs to act; a throttled run's cooldown is not either, as it
  * clears by itself, and blocks as transient at its limit, which is one. For
- * people: the one line that says who a person's claim gave the task to (spec
- * §9.2), named in plain text, never mentioned, and a card that could not be sent.
+ * people: the one line that says who a person's card went to, when it went by
+ * direct message (spec §19.5), named in plain text, never mentioned -- a card in
+ * the task's thread says it itself, and a claim is no notice, as only the send
+ * knows where the card went -- and a card that could not be sent.
  */
 export function renderNotice(
   event: KanbanEvent,
@@ -427,10 +429,10 @@ export function renderNotice(
       const kind = p['reviewerKind'] === 'human' ? 'human' : 'role';
       return `Review requested for ${name}, from ${whom(reviewer === '' ? null : { kind, name: reviewer }, opts.nameOf)}.`;
     }
-    case 'claimed': {
-      // A role's claim is no notice: its outcome is. A person's is the group's one line.
-      if (p['assigneeKind'] !== 'human') return undefined;
-      const person = whom({ kind: 'human', name: text(p, 'assignee') }, opts.nameOf);
+    case 'card_sent': {
+      // The group's one line, for a card it does not see. One with no `in`, from before threads, was told at its claim.
+      if (p['in'] !== 'dm') return undefined;
+      const person = whom({ kind: 'human', name: text(p, 'to') }, opts.nameOf);
       return `📋 ${name}, ${p['kind'] === 'review' ? 'review ' : ''}assigned to ${person}`;
     }
     case 'card_failed': {

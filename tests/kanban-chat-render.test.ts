@@ -407,17 +407,24 @@ describe('notices', () => {
     expect(long.length).toBeLessThan(1000);
   });
 
-  it("tells who a person's claim gave the task to, by name, in plain text, and nothing of a role's", () => {
+  it("tells who a person's card by direct message went to, by name, in plain text, and nothing of a claim or of a card in the thread", () => {
     const k = newTask(h.db, { title: `Check the links ${SPOOF}`, assignee: { kind: 'human', name: ALICE } });
     claimed(h.db, k.taskId);
+    // A claim is no notice now: only the card's send knows where it went (spec §19.5).
+    expect(renderNotice(last(k.taskId), task(k.taskId), LIMIT)).toBeUndefined();
+    const sent = (payload: unknown): KanbanEvent => ({ ...last(k.taskId), kind: 'card_sent', payload });
     const nameOf = (p: string) => (p === ALICE ? 'Alice <at id=all></at>' : undefined);
-    expect(renderNotice(last(k.taskId), task(k.taskId), { ...LIMIT, nameOf })).toBe(
+    expect(renderNotice(sent({ kind: 'work', to: ALICE, messageId: 'om_1', in: 'dm' }), task(k.taskId), { ...LIMIT, nameOf })).toBe(
       `📋 **Check the links hi \\<at id=all\\>\\</at\\> team** \`${k.taskId}\`, assigned to Alice \\<at id=all\\>\\</at\\>`,
     );
     // Without a name known, the principal.
-    expect(renderNotice(last(k.taskId), task(k.taskId), LIMIT)).toMatch(/, assigned to lark:on\\_alice$/);
-    const review = { ...last(k.taskId), payload: { kind: 'review', assignee: ALICE, assigneeKind: 'human' } };
-    expect(renderNotice(review, task(k.taskId), { ...LIMIT, nameOf })).toMatch(/, review assigned to Alice /);
+    expect(renderNotice(sent({ kind: 'work', to: ALICE, messageId: 'om_1', in: 'dm' }), task(k.taskId), LIMIT)).toMatch(/, assigned to lark:on\\_alice$/);
+    expect(renderNotice(sent({ kind: 'review', to: ALICE, messageId: 'om_1', in: 'dm' }), task(k.taskId), { ...LIMIT, nameOf })).toMatch(
+      /, review assigned to Alice /,
+    );
+    // The card itself in the thread says the same; one sent before threads, with no `in`, was told at its claim.
+    expect(renderNotice(sent({ kind: 'work', to: ALICE, messageId: 'om_1', in: 'thread' }), task(k.taskId), LIMIT)).toBeUndefined();
+    expect(renderNotice(sent({ kind: 'work', to: ALICE, messageId: 'om_1' }), task(k.taskId), LIMIT)).toBeUndefined();
     const role = newTask(h.db);
     claimed(h.db, role.taskId);
     expect(renderNotice(last(role.taskId), task(role.taskId), { ...LIMIT, nameOf })).toBeUndefined();
