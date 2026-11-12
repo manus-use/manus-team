@@ -26,6 +26,13 @@ gateway's next start.
 an @-mention of the bot, or the gateway does not read it. In a direct message with the bot, just
 type the command. The examples below leave the bot's mention out.
 
+**In a group, a task gets a thread.** A `/kanban task new` typed in a group, not inside a thread,
+is answered in a thread on your message, and everything about the task goes in that thread: its
+notices, its person's cards, and its follow-ups' notices and cards. The group's timeline shows
+only your command and its thread. A task created inside a thread uses that thread; one created
+in a direct message has none. The replies below are as a direct message shows them; in a group
+they say "This thread hears" where they say "This chat hears".
+
 **Commands.** Every command is a group, then a verb. A task's commands are under `/kanban task`
 (`/kanban task new`, `/kanban task show k_…`), a board's under `/kanban board`, a gate's under
 `/kanban gate`, and `/kanban help` stands alone. A task command typed without `task`, such as
@@ -269,9 +276,10 @@ they approve, by the review task.
   commit the implementer reported when the workspace is a git repository, the task, its contract
   and its gates. It is told not to change the work, and to approve or ask for changes with a
   specific reason.
-- **A person** gets a review card in a direct message: the handoff, what to review (the reported
-  commit, when one was recorded), the body and the contract, a box, and **Approve** and
-  **Request changes**. The chat the task came from hears one line:
+- **A person** gets a review card, in the task's thread when they are in its group, else in a
+  direct message: the handoff, what to review (the reported commit, when one was recorded), the
+  body and the contract, a box, and **Approve** and **Request changes**. When it goes by direct
+  message, the thread, or the chat the task came from, hears one line:
 
 > 📋 **Write the on-call handbook page** `k_…`, review assigned to Bob Li
 
@@ -355,11 +363,15 @@ outcome: a confirmed booking for 40 people, 14 to 16 January
 Ask facilities for the two rooms on the third floor first.
 ```
 
-The chat replies:
+Typed in a group, it is answered in a thread on your message:
 
-> Created `k_…`: **Book the venue for the January offsite**, for Alice Chen (lark:on_…). They are sent it as a card, in a direct message, once it is ready. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Book the venue for the January offsite**, for Alice Chen (lark:on_…). Their card comes in this thread when it is ready, or by direct message if they are not in this group. This thread hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
-When the task is ready, Alice gets a card in a direct message from the bot:
+In a direct message with the bot, the reply says instead "They are sent it as a card, in a direct
+message, once it is ready. This chat hears …".
+
+When the task is ready, Alice gets a card from the bot: in the task's thread, starting with an
+@-mention of her, when she is in the group; otherwise in a direct message. The card holds:
 
 - the title, the body, the contract, and up to five parents' summaries;
 - a box, with **Done** and **Block** under it.
@@ -368,7 +380,8 @@ She types a summary and presses **Done**, or types why she is stuck and presses 
 with an empty box is refused, and the card says to type why. The box holds up to 1,000
 characters; the typed commands take more.
 
-The chat the task came from hears one line, naming her in plain text, never as a mention:
+When the card goes by direct message, the thread, or the chat the task came from, hears one line,
+naming her in plain text, never as a mention. A card in the thread says the same itself.
 
 > 📋 **Book the venue for the January offsite** `k_…`, assigned to Alice Chen
 
@@ -376,6 +389,12 @@ Pressing a button is answered at once. The card shows "Working on it…", then t
 any gates have run. A press refused for what it carried, such as an empty box or a failing gate,
 redraws the card saying why, ready to press again. A card for a run that is over says it is out
 of date and does nothing. Only the person named can press Done and Block.
+
+A card in the thread is seen by everyone in the group, the task's body and contract included,
+and anyone may press it, though only Alice's press does anything. If Lark will not take her
+direct message because she is outside the app's availability, the card goes to the thread
+instead, mentioning her, so the group can bring her in. If the thread refuses the card, it goes
+to her by direct message, never to the top of the group.
 
 A person's task never times out: it waits for them, across gateway restarts.
 
@@ -643,7 +662,8 @@ What to know:
   task that created it, but it queues behind that task's run if they share a workspace.
 - **This chat hears about them.** A follow-up inherits the subscriptions of the task that created
   it, so the chat that created the parent hears when each follow-up is done, blocks or gives up,
-  and so on down the line.
+  and so on down the line. A follow-up of a task with a thread is in that thread, and so is its
+  person's card, when they are in the group.
 - A follow-up has the same limits as a task from chat, and can be given to a role or to a person
   the gateway knows, by `lark:<union_id>`.
 
@@ -743,8 +763,9 @@ From someone else:
 
 ### Notices
 
-The chat, or the thread, a task was created in follows it and every follow-up its runs create.
-It hears when a task:
+The chat, or the thread, a task was created in follows it and every follow-up its runs create;
+for a task created in a group at chat scope, the thread its "Created" reply opened. It hears
+when a task:
 
 - is done, with the summary;
 - needs review, and from whom;
@@ -754,9 +775,9 @@ It hears when a task:
 - gives up;
 - is stranded, with nobody able to take it.
 
-It also hears the one line saying a person was given a task or a review, and when a card could
-not reach its person. It does not hear claims by a role, comments, links, archives, or a run
-retried quietly after a gateway restart.
+It also hears the one line saying a person was given a task or a review, when their card went by
+direct message, and when a card could not reach its person. It does not hear claims by a role,
+comments, links, archives, or a run retried quietly after a gateway restart.
 
 Notices are **batched**: each chat or thread gets at most one message every couple of seconds,
 listing what happened in order, at most 20 notices, then "… and N more, in the next message."
@@ -865,8 +886,8 @@ parent, and put the new evidence in the body.
 ### Approval cards for a supervised role
 
 A role whose agent is supervised, such as `watched`, asks before it acts. Its approval cards go
-to the chat that follows the task, naming it ("Task k_…, Rotate the logs, asks: …"), and are
-answered there by an operator, as in a chat session. For example:
+to the chat, or the thread, that follows the task, naming it ("Task k_…, Rotate the logs, asks:
+…"), and are answered there by an operator, as in a chat session. For example:
 
 ```
 /kanban task new Rotate the logs

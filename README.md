@@ -156,7 +156,9 @@ Create a custom app, then:
 1. **Permissions:** the scopes the console lists for receiving and sending messages as the
    bot (`im/v1/messages`), downloading message resources for inbound attachments
    (`im/v1/messages/:message_id/resources`), and creating and updating cards
-   (`cardkit/v1/cards`).
+   (`cardkit/v1/cards`). With the board on, also `im:chat.members:read`, to read a group's
+   members, so that a person's card can go in a task's thread in their group: without it,
+   every card goes by direct message, and the log says so once.
 2. **Events:** subscribe to `im.message.receive_v1` and `card.action.trigger`, delivered over
    **long connection** — no public URL, no request signing to get wrong.
 3. Add the bot to a chat, or message it directly.
@@ -708,8 +710,9 @@ and how an agent's `mt kanban create` or `review` names one; the gateway learns 
 ids as they use `/kanban`, are mentioned in it, or press a card's button, and refuses a
 principal it has never seen.
 
-When a person's task is ready, they are sent it as a card in a direct message — the title, the
-body, the contract and the parents' summaries — with a box and **Done** and **Block**: type a
+When a person's task is ready, they are sent it as a card, in the task's thread or by direct
+message (see "A task's thread" below): the title, the body, the contract and the parents'
+summaries, with a box and **Done** and **Block**: type a
 summary, or why it is blocked, and press one. A review for a person comes the same way, with the
 handoff, the commit to review when one was recorded, and **Approve** and **Request changes**.
 Only the person named may press them (an operator may also answer a review, a role's included,
@@ -718,18 +721,34 @@ that is over says it is out of date and does nothing. A press is answered at onc
 shows the outcome once the report is made, gates and all; one refused for what it carried — an
 empty box, a failing gate — redraws the card, saying why, ready to be pressed again. `/kanban task done`, `block`, `review`,
 `approve` and `changes` do the same from any chat with the bot. A person's task never times out:
-it waits for them, across restarts. The chat the task came from hears one line — "📋 *title*,
-assigned to *name*", the name in plain text, never a mention — and its notices as usual; a
-notice of a block carries an **Unblock** button for an operator. Only a card that cannot reach
-its person — Lark answering that they are outside the app's availability (230013), or the person
-having lost talk tier — is reported to the chat instead, with the commands to use. Any other
+it waits for them, across restarts. The chat the task came from hears its notices as usual, and
+for a card sent by direct message, one line, "📋 *title*, assigned to *name*", the name in
+plain text, never a mention; a notice of a block carries an **Unblock** button for an operator.
+Only a card that cannot reach its person (Lark answering that they are outside the app's
+availability, 230013, for a task with no thread to send it to instead, or the person having lost
+talk tier) is reported to the chat instead, with the commands to use. Any other
 failure to send a card, a refusal of Lark's included, is taken for the gateway's: the card is
 tried again, after a pause that doubles to five minutes, and the log says why each time. A
 person's report is refused while another task's agent is working in the same workspace, if the
 task has gates to run there.
 
-A role whose agent is supervised may be given tasks too: its approval cards go to the chat that
-follows the task, naming it, and are answered there at operator tier, as in a chat session.
+**A task's thread.** A task created by `/kanban task new` in a group, at chat scope, is answered
+in a thread on the command message, and everything about it goes there: its person's cards, its
+notices, and its follow-ups' notices and cards. The group's timeline shows the command and its
+thread. A person's card goes in the thread, starting with an @-mention of them, when Lark's chat
+members API says they are in the group, asked at most once a group every five minutes;
+otherwise it goes by direct message, and the thread hears the one line. A direct message Lark
+refuses because the person is outside the app's availability goes to the thread instead; a card
+the thread refuses goes by direct message, never to the top of the chat. A card in the thread is
+seen by the whole group, the task's body and contract included. A task created inside a thread
+uses that thread; one created in a direct message, or at a terminal, has none, and its cards go
+by direct message. Tasks created before this build stay as they were. If Lark refuses to reply
+in a thread, in a group that does not allow it or to a command message since withdrawn, the
+reply is sent quoted instead, and the task stays at chat scope.
+
+A role whose agent is supervised may be given tasks too: its approval cards go to the chat, or
+the thread, that follows the task, naming it, and are answered there at operator tier, as in a
+chat session.
 
 **Known limitations.**
 
@@ -758,6 +777,12 @@ follows the task, naming it, and are answered there at operator tier, as in a ch
   report gates: that wait is the gateway's, in memory, and a terminal cannot see it.
 - A task created with `mt kanban task new` is followed by no chat: nobody hears its notices, and a
   supervised role's approval requests on it reach nobody, as for any task no chat follows.
+- A task's thread is not recovered after a restart in the moment between Lark accepting its
+  "Created" reply and the task moving to it: the task stays at chat scope, its notices in the
+  group and its cards by direct message.
+- A block, or an approval card, raised before the task's thread is known goes to the group.
+- A person who has left a group may get one more card in a task's thread there, within five
+  minutes of leaving.
 - `mt kanban` at a terminal cannot give a person work: assign people from chat.
 - `mt kanban` refuses to run in a board run's shell, but that is not a security boundary: an
   agent runs as your user, could unset `MT_KANBAN_RUN` and `MT_KANBAN_TOKEN`, and could write
