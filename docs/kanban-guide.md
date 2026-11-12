@@ -31,7 +31,9 @@ is answered in a thread on your message, and everything about the task goes in t
 notices, its person's cards, and its follow-ups' notices and cards. The group's timeline shows
 only your command and its thread. A task created inside a thread uses that thread; one created
 in a direct message has none. The replies below are as a direct message shows them; in a group
-they say "This thread hears" where they say "This chat hears".
+they say "This thread hears" where they say "This chat hears", and, for a person's task, "Their
+card comes in this thread when it is ready, or by direct message if they are not in this group"
+where they say "They are sent it as a card, in a direct message, once it is ready".
 
 **Commands.** Every command is a group, then a verb. A task's commands are under `/kanban task`
 (`/kanban task new`, `/kanban task show k_…`), a board's under `/kanban board`, a gate's under

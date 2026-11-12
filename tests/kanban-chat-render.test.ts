@@ -70,7 +70,10 @@ describe('/kanban help', () => {
     expect(help).toContain('(anyone allowed)');
     expect(help).toContain("`/kanban task done <task> [summary]` (the task's assignee)");
     expect(help).toContain('`/kanban task changes <task> <reason>` (its reviewer, or an operator)');
-    expect(help).toContain('Name a person with an @-mention');
+    expect(help).toContain(
+      "Name a person with an @-mention: they are sent the task as a card, in the task's thread when they are in its group, else by direct message, with Done and Block, or a review with Approve and Request changes.",
+    );
+    expect(help).not.toContain('as a card in a direct message');
     expect(help).not.toContain('later update');
     expect(help).not.toContain('D2');
   });

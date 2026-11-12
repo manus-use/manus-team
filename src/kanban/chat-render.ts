@@ -136,7 +136,7 @@ export function renderHelp(): string {
   return [
     '**The task board.** A task is any work -- research, a document, an operation in Lark, a chore, a change to code -- given to a role, whose agent runs it in a workspace, or to a person.',
     ...lines.map(([usage, tier]) => `\`${usage}\` (${tier})`),
-    'Name a person with an @-mention: they are sent the task as a card in a direct message, with Done and Block, or a review with Approve and Request changes. A person named may comment on, and report on, their own task.',
+    "Name a person with an @-mention: they are sent the task as a card, in the task's thread when they are in its group, else by direct message, with Done and Block, or a review with Approve and Request changes. A person named may comment on, and report on, their own task.",
     "A task with a `reviewer:` is reviewed before it is done: its assignee's done, or its agent's, goes to the reviewer. An operator may answer any review, ending a reviewer role's run.",
     'The chat a task is created in hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up, or is stranded, and who a person was given it.',
     "A board is a queue of tasks of its own. Each chat is on one, `default` until `/kanban board use` moves it, and its `/kanban task new` and `/kanban task list` act on that board; a task's follow-ups and parents are on its board.",
