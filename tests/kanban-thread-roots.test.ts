@@ -19,7 +19,7 @@ import { ALICE, NOW, VIA, WORKSPACES, claimed, newTask } from './helpers/kanban.
 
 /** The chat `VIA` creates its tasks from, as `KanbanChat` names it. */
 const CHAT = { channel: 'lark', appId: 'cli_app', conversationId: 'oc_chat' };
-const THREAD: CreatedVia ={ kind: 'chat', channel: 'lark', appId: 'cli_app', conversationId: 'oc_team', threadId: 'omt_topic', rootId: 'om_root' };
+const THREAD: CreatedVia = { kind: 'chat', channel: 'lark', appId: 'cli_app', conversationId: 'oc_team', threadId: 'omt_topic', rootId: 'om_root' };
 
 let h: TestDb;
 

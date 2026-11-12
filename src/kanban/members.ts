@@ -43,6 +43,10 @@ export interface MembershipDeps {
   note?: (line: string) => void;
 }
 
+/**
+ * Assumes one caller at a time, as the card poster posts one card at a time: two
+ * lookups of the same group at once would each ask Lark.
+ */
 export class Membership {
   readonly #deps: MembershipDeps;
   readonly #members: BoundedMap<string, ChatMembers>;

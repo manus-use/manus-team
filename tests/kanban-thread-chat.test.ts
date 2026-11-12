@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getTask, subscriptionsOf } from '../src/db/kanban-read.js';
 import { KanbanChat } from '../src/kanban/chat.js';
 import { PeopleDirectory } from '../src/kanban/people.js';
@@ -122,18 +122,25 @@ describe('the hold on a task whose thread is being made (spec §19.4)', () => {
   });
 
   it('ends the hold when no thread came back, leaving the task at chat scope; lapses by itself; and a move after it lapsed still applies', async () => {
-    const c = chat(20);
-    const failed = (await c.run(FOR_ALICE, message(TEAM), TEAM)).thread ?? '';
-    c.threaded(failed, TEAM, 'om_x', undefined);
-    expect(c.held(failed)).toBe(false);
-    expect(subscriptionsOf(t.db, failed).map((s) => [s.threadId, s.rootMessageId])).toEqual([['', null]]);
-    const msg = message(TEAM);
-    const late = (await c.run(FOR_ALICE, msg, TEAM)).thread ?? '';
-    expect(c.held(late)).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(c.held(late)).toBe(false);
-    c.threaded(late, TEAM, msg.messageId, 'omt_late');
-    expect(subscriptionsOf(t.db, late).map((s) => [s.threadId, s.rootMessageId])).toEqual([['omt_late', msg.messageId]]);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const c = chat(20);
+      const failed = (await c.run(FOR_ALICE, message(TEAM), TEAM)).thread ?? '';
+      c.threaded(failed, TEAM, 'om_x', undefined);
+      expect(c.held(failed)).toBe(false);
+      expect(subscriptionsOf(t.db, failed).map((s) => [s.threadId, s.rootMessageId])).toEqual([['', null]]);
+      const msg = message(TEAM);
+      const late = (await c.run(FOR_ALICE, msg, TEAM)).thread ?? '';
+      expect(c.held(late)).toBe(true);
+      vi.advanceTimersByTime(19);
+      expect(c.held(late)).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(c.held(late)).toBe(false);
+      c.threaded(late, TEAM, msg.messageId, 'omt_late');
+      expect(subscriptionsOf(t.db, late).map((s) => [s.threadId, s.rootMessageId])).toEqual([['omt_late', msg.messageId]]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('holds no task that gets no thread: one in a direct message, in a thread, or already created', async () => {
