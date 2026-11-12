@@ -4649,3 +4649,19 @@ For the user, once the plan is built and merged, on the real tenant, before `kan
 7. **The permission.** Before the permission is added (item 0), the first card in a thread logs `kanban: cards go by direct message: the app lacks im:chat.members:read, which Lark's chat members API needs` once, or, if Lark answers another code, `kanban: the members of chat … could not be read (…)` with it; the card goes by direct message. Once it is added, and the gateway restarted, a member's card goes in the thread, as item 2 shows.
 8. **A topic group.** In a topic group, a `/kanban task new` that opens a new topic is answered in that topic, and its card goes there; one typed inside a topic uses that topic.
 9. **Clean up.** `mt kanban task archive <id>` for each smoke task.
+
+## Review follow-ups
+
+After the fourteen tasks, a review's findings, each fixed test first where it changes behaviour:
+
+1. **`/kanban help`** said a person is sent the task as a card in a direct message. It now says they are sent it as a card, in the task's thread when they are in its group, else by direct message; the help test pins the whole sentence (`tests/kanban-chat-render.test.ts`).
+2. **One message for a send that stays in its thread.** `ONE_MESSAGE` (4,000) moved to the channel port (`src/channel/types.ts`), re-exported by the adapter, and the router cuts its replies, the threaded "Created" reply among them, to it rather than to a literal. The adapter's `sendText` sends a text with `stayInThread` as one message, cut to `ONE_MESSAGE`, whatever its length, so it never takes the SDK's split send, which ignores the thread. Tested in `tests/lark-adapter.test.ts`; spec §19.7 says so.
+3. **`chatMembers`** answered `complete: true` when Lark said `has_more` with an empty or missing `page_token`; it now answers `complete: false`. Tested in `tests/lark-adapter.test.ts`.
+4. **A thread's root for notices** was taken only from the subscriptions due that round, so a batch of only a task from before threads went to the thread without the root another task there knew. It now comes from `threadRootOf` (`src/db/kanban-read.ts`), the first of this bot's subscriptions on the same channel, chat and thread with a root, due or not. Tested in `tests/kanban-notices.test.ts` (the earlier root test's rootless case moved to a thread of its own); spec §19.7 says so.
+5. **Membership tests**: the 256-group limit, the oldest let go of first, and a second failure other than a missing permission said again for the same group after the minute and not within it, on the injectable clock (`tests/kanban-members.test.ts`). Both passed at once: the behaviour was already right. `Membership` now says it assumes one caller at a time. Concurrent lookups, and a timed-out lookup that keeps reading in the background, are left as reviewed.
+6. **The hold's "lapses by itself" test** runs on vitest's fake timers: held at 19 ms, lapsed at 20 (`tests/kanban-thread-chat.test.ts`).
+7. **README**: a card is also reported to the chat when the task's thread refuses it too, after a 230013 direct message.
+8. **The guide's summary** names the card sentence of the "Created" reply in a group beside "This thread hears", as its example further on shows.
+9. **Style**: a missing space in `tests/kanban-thread-roots.test.ts`.
+
+With these, `npx vitest run --project unit` gives `Tests  1779 passed (1779)`, `npx vitest run --project e2e` gives `Tests  157 passed (157)`, run twice; `npx tsc --noEmit` and `npm run build` report no errors, and the grep prints nothing.

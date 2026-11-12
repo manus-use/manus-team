@@ -3161,7 +3161,10 @@ be confirmed by the smoke checklist.
   `reply_in_thread: true`, at chat scope, which today's `messageRequest` cannot express (it
   threads only on a `threadId`); `root`, the message a send in a thread replies to; and
   `stayInThread`, which turns the adapter's withdrawn fallback off, used by a card's send in a
-  thread (§19.2) and by the threaded "Created" reply (§19.4). **`SendResult`** gains only
+  thread (§19.2) and by the threaded "Created" reply (§19.4). A text sent with `stayInThread` is
+  always one message, cut to `ONE_MESSAGE` (4,000 characters, the limit the router cuts its
+  replies to, shared from the channel port), never the SDK's split send, which knows neither the
+  thread nor that it must stay there. **`SendResult`** gains only
   `threadId`, read from Lark's answer, absent for a direct message, from which a card's `in` is
   read (§19.2).
 - **The router.** `KanbanCommands.run` answers `{ text, quoted?, thread? }`, where `thread` names
@@ -3181,9 +3184,11 @@ be confirmed by the smoke checklist.
   knows no app id and serves the redraw too, is unchanged. It decides per §19.2, and records
   where it sent. `CardPosterDeps` gains `held(taskId): boolean`, supplied by `KanbanChat`, which
   the card poster asks at each `#post` (§19.4). **The notifier** sends a
-  conversation's batch by replying to a root in the thread when any of its subscriptions has one:
-  a batch can mix subscriptions with and without a root in one thread (a task from before plan L
-  and one after, in the same existing thread), and a thread has one root, so any of them serves.
+  conversation's batch by replying to a root in the thread when any of its subscriptions has one,
+  whether or not that one has anything due this round (`threadRootOf`, over this bot's
+  subscriptions on the same channel, chat and thread): a thread can hold subscriptions with and
+  without a root (a task from before plan L and one after, in the same existing thread), and a
+  thread has one root, so any of them serves, even when only the one with none is due.
   A conversation with no root among its subscriptions is sent as today.
 - **Masking.** Everything sent is masked once more as a whole before it goes, as now (§9.3): the
   "Created" reply by the router, a card by the card poster, after the mention is put in, a notice
