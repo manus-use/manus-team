@@ -511,6 +511,25 @@ export interface CardFacts {
   attempt?: number;
   /** Why the last press did nothing, shown under the title, already escaped. */
   note?: string;
+  /**
+   * The person's open_id, for a card sent in a task's thread (spec §19.2): the
+   * card starts with an @-mention of them. Absent for a direct message, and for
+   * every redraw, which would notify them of their own press.
+   */
+  mention?: string;
+}
+
+/** An open_id, as Lark gives one: the only thing a card mentions anyone by. */
+const OPEN_ID = /^ou_[0-9A-Za-z]+$/;
+
+/**
+ * A card's first line, after an @-mention of its person when it has one (spec
+ * §19.2), as Lark's markdown writes one. Put in after the line was escaped and
+ * masked, so an `<at` in task text is still escaped, and only this one, made
+ * from an id the gateway holds, mentions anyone.
+ */
+function mentioning(f: CardFacts, line: string): string {
+  return f.mention !== undefined && OPEN_ID.test(f.mention) ? `<at id=${f.mention}></at> ${line}` : line;
 }
 
 /**
@@ -548,7 +567,7 @@ function taskText(task: TaskRow, bodyMax: number): string[] {
  */
 export function renderTaskCard(f: CardFacts, appId: string): CardView {
   const { task, run } = f;
-  const out = [`📋 For you to do: **${label(task.title)}** ${id(task.taskId)}`];
+  const out = [mentioning(f, `📋 For you to do: **${label(task.title)}** ${id(task.taskId)}`)];
   if (f.note !== undefined) out.push(f.note);
   if (f.changes !== undefined) {
     out.push(`**Changes asked** by ${label(f.nameOf?.(f.changes.actor) ?? f.changes.actor, 80)}:`, block(f.changes.reason, 1200));
@@ -585,7 +604,7 @@ export function renderTaskCard(f: CardFacts, appId: string): CardView {
  */
 export function renderReviewCard(f: CardFacts, appId: string): CardView {
   const { task, run } = f;
-  const out = [`🔎 For you to review: **${label(task.title)}** ${id(task.taskId)}`];
+  const out = [mentioning(f, `🔎 For you to review: **${label(task.title)}** ${id(task.taskId)}`)];
   if (f.note !== undefined) out.push(f.note);
   const h = f.handoff;
   if (h !== undefined) {

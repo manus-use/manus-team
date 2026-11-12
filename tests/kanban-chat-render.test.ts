@@ -517,6 +517,21 @@ describe("a person's cards", () => {
     expect(doc.markdown).toContain('from lark:on\\_bob');
   });
 
+  it('starts a card with a mention of its person by open_id, put in after the escaping, and none for anything that is not one', () => {
+    const k = newTask(h.db, { title: `Check the links ${SPOOF}`, assignee: { kind: 'human', name: ALICE }, reviewer: { kind: 'human', name: ALICE } });
+    const run = claimed(h.db, k.taskId);
+    const facts = { task: task(k.taskId), run, parents: [] };
+    const card = renderTaskCard({ ...facts, mention: 'ou_alice' }, 'cli_app');
+    expect(card.markdown.startsWith(`<at id=ou_alice></at> 📋 For you to do: **Check the links hi \\<at id=all\\>\\</at\\> team**`)).toBe(true);
+    expect(renderReviewCard({ ...facts, mention: 'ou_alice' }, 'cli_app').markdown.startsWith('<at id=ou_alice></at> 🔎 For you to review: ')).toBe(true);
+    // Only an open_id: anything else, an `<at` of its own included, mentions nobody.
+    for (const mention of ['on_alice', 'ou_x></at><at id=all', '']) {
+      expect(renderTaskCard({ ...facts, mention }, 'cli_app').markdown.startsWith('📋 For you to do: ')).toBe(true);
+    }
+    // No open_id given, as for a direct message and every redraw: no mention.
+    expect(renderTaskCard(facts, 'cli_app').markdown).not.toContain('<at id=ou_');
+  });
+
   it('redraws a card acted on with what happened, and no buttons', () => {
     expect(renderCardOutcome({ taskId: 'k_1', title: `x ${SPOOF}` }, 'Done by Alice.')).toEqual({
       markdown: '**x hi \\<at id=all\\>\\</at\\> team** `k_1`\nDone by Alice.',

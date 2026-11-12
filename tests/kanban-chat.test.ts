@@ -498,6 +498,8 @@ describe("a person's card", () => {
     expect(await press(run, 'block', ALICE, '  ')).toBe('Type why it is blocked in the box, then press Block.');
     const first = redrawn.at(-1)?.view;
     expect(first?.markdown).toContain('**Not done.** Type why it is blocked in the box, then press Block.');
+    // A redraw mentions nobody: the person was told when the card was sent (spec §19.2).
+    expect(first?.markdown).not.toContain('<at id=');
     // The value differs from the button pressed, first: the SDK drops a press it has seen, by the value's start.
     expect(first?.buttons.map((b) => Object.keys(b.value)[0])).toEqual(['try', 'try']);
     expect(first?.buttons.map((b) => b.value['try'])).toEqual(['1', '1']);
