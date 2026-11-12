@@ -3494,19 +3494,24 @@ update and restart the service? [y/N]
   function in process. On its own, `mt service check` is install's check without installing,
   useful after editing `config.yaml`.
 - **The module load**, part of `mt service check`: it imports `dist/index.js`, the gateway's
-  whole module graph, which starts nothing (`src/main.ts` is the only file with effects), and
+  whole module graph, which starts nothing (`src/main.ts` is the only file with effects at
+  import, and the only one `dist/index.js` does not import), and
   opens an in-memory database, which loads `better-sqlite3`'s native module. A missing file, a
   syntax the node cannot run, or a module built for another ABI fails here rather than at the
   restart. A native load that fails names the command to run by hand, with the real paths:
   `cd '<checkout>' && PATH='<node dir>':"$PATH" '<npm>' ci`.
 - **Without a service** the check is the new build's `mt role check`, which loads the team as
-  this shell sees it, which a gateway started by hand gets, plus `loadConfig` and the same module
-  and native load, so that with it the check is the startup validation `main` makes. The last
-  three are run as `<node> --input-type=module -e`, in the environment above, importing
-  `<checkout>/dist/index.js`, `dist/config.js`, `dist/gateway-env.js` and `dist/db/open.js`,
-  calling `loadConfig` over this shell's environment and the `.env` as `loadGatewayEnv` merges
-  them, and opening `:memory:`. A `.env` without the secret is not a problem there:
-  a gateway run by hand may take it from this shell.
+  this shell sees it, which a gateway started by hand gets, plus the startup's own loading and
+  the same module and native load. The last two are run as `<node> --input-type=module -e`, in
+  the environment above, importing `<checkout>/dist/index.js` and `dist/db/open.js`, calling
+  `loadStartup(env)` from `dist/index.js` (`src/index.ts`), which is what `main` calls: the
+  gateway's `.env` read, `loadConfig` over this shell's environment and the file as
+  `loadGatewayEnv` merges them, and `loadTeam`; then opening `:memory:`. When the merged
+  environment has no `LARK_APP_SECRET`, it is given a stand-in, as a passEnv name is, and a note
+  says the gateway will need it from the shell that starts it: the check is of the build and the
+  configuration, not of a shell the update cannot see. `loadStartup` gains a comment in the
+  code that `mt update` relies on it, its name, its argument and its throwing a `ConfigError`,
+  so a change to it is made knowing that.
 - **The build writes `dist/` in place.** `npm run build` is `tsc -p tsconfig.build.json`, which
   overwrites each file and deletes none. The running gateway loaded every module at its start
   (it has no dynamic `import()`), so it runs the old code from memory until the restart, and a
@@ -3533,10 +3538,15 @@ update and restart the service? [y/N]
 
 - **A build refuses a database newer than itself.** Plan U adds to `migrate()` a check before
   any migration: a `user_version` above the highest `NNN` among the build's migration files is
-  refused, as a `ConfigError` whose message names both versions and the backups directory:
+  refused, as a **`SchemaTooNewError extends ConfigError`**, carrying `dbVersion` and
+  `buildVersion`, whose message names both versions and the backups directory:
   "the database at <path> is at schema version 9, and this build knows only up to 8: it was
   migrated by a newer build. Run that build, or restore a backup of version 8 from
-  <home>/backups (spec §20.8)". `src/index.ts` adds the directory, as `migrate` knows no home.
+  <home>/backups (spec §20.8)". `createGateway` (`src/index.ts`), which calls `migrate`,
+  recognises the class, closes the database, and rethrows it with the directory added, as
+  `migrate` knows no home; every other error from `migrate` is rethrown as now, the database
+  closed too. A schema directory with no migration file has a highest of 0, so any migrated
+  database is refused by it, as it should be: such a build is broken.
   It is reported the way a configuration error is, `configuration error: ...` and exit 78
   (`src/main.ts`), so on Linux `RestartPreventExitStatus=78` keeps the service from a restart
   loop (§17); launchd has no equivalent and tries again every 30 seconds, failing the same way,
@@ -3548,9 +3558,12 @@ update and restart the service? [y/N]
   its lock (§20.10). **Before the backup, and before any going back**, it reads both again.
 - **Only the pid moved:** the gateway started again on its own, a crash restart, but did not
   migrate. The update does no automatic going back, since the restarted gateway may be running
-  the new tree and could migrate at any moment; it says what changed ("the service's pid was
-  4242 and is 4310; the database is still at version 8"), prints the steps back (§20.9), and
-  exits 3.
+  the new tree, or a part of it, and migrates at its next start; it says what changed ("the
+  service's pid was 4242 and is 4310; the database is still at version 8"), prints the steps
+  back (§20.9), and exits 3. The steps back hold only while the version is unchanged after their
+  first line, `service stop`: they say to read it then, with `<node> -e` printing the database's
+  `user_version` read-only, and, if it has moved, to follow the steps forward instead, printed
+  beside them.
 - **The version moved:** a gateway, a crash restart on the new tree, has migrated the live
   database before any backup was taken. Going back is then impossible: no backup of the old
   schema exists, and the old build refuses the database (above). So the update takes no backup,
@@ -3558,12 +3571,15 @@ update and restart the service? [y/N]
   no longer run on it, and there is no way back"), and prints **the steps forward**, which make
   the new tree whole and start it, whatever step the update stopped at:
   ```
+  export MT_HOME='<home>'
   cd '<checkout>'
   PATH='<node dir>':"$PATH" '<npm>' ci && PATH='<node dir>':"$PATH" '<npm>' run build
   PATH='<node dir>':"$PATH" '<node>' '<checkout>/dist/mt.js' service check
   PATH='<node dir>':"$PATH" '<node>' '<checkout>/dist/mt.js' service restart
   ```
-  Exit 3.
+  Exit 3. Without a service, the check line is the no-service check's commands (§20.5) and the
+  last line is "start the gateway", as it was started before. The rules for every printed block
+  are in §20.9.
 - **The backup's own `user_version` must be step 3's**, checked on the copy itself, which closes
   the window between the second read and the copy.
 
@@ -3658,22 +3674,29 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   the steps back, with the real paths and the old commit filled in, each quoted as `install.sh`
   quotes a path:
   ```
-  mt service stop
+  export MT_HOME='<home>'
+  PATH='<node dir>':"$PATH" '<node>' '<checkout>/dist/mt.js' service stop
   cd '<checkout>'
   git reset --keep <old>
   PATH='<node dir>':"$PATH" '<npm>' ci && PATH='<node dir>':"$PATH" '<npm>' run build
   rm -f '<db>-wal' '<db>-shm'
   cp '<backup>' '<db>'
-  mt service start
+  PATH='<node dir>':"$PATH" '<node>' '<checkout>/dist/mt.js' service start
   ```
-  Exit 3. The service is stopped first, as no file may be replaced under a gateway that has it
-  open, and KeepAlive or `Restart=on-failure` may be starting it again; the `-wal` and `-shm`
-  are removed because frames of the newer database applied to the restored one would corrupt it.
-  Restoring loses what the gateway wrote since the backup. The `npm ci` line is printed whether
-  or not the update ran one, since a person cannot tell. **Never automatic**: the new gateway
-  may have migrated and written, and only a person can weigh that loss. The same steps are
-  printed by §20.6 when only the pid moved, and by a failed restart call; with no backup taken,
-  the restore lines are left out and it says there is none.
+  Exit 3. **Every printed block**, these, the steps forward (§20.6) and the commands to finish
+  by hand (§20.7), names `mt` as `'<node>' '<checkout>/dist/mt.js'`, never a bare `mt`, which in
+  another shell may be another home's or another checkout's launcher, and starts with `export
+  MT_HOME='<home>'` when the home is not the default (`t.mtHomeSet`), since the service, the
+  home and the database are found from it; a bare `mt service stop` in a shell without it would
+  stop the default home's service. Without a service the `service stop` and `service start`
+  lines are "stop the gateway" and "start the gateway". The service is stopped first, as no file
+  may be replaced under a gateway that has it open, and KeepAlive or `Restart=on-failure` may be
+  starting it again; the `-wal` and `-shm` are removed because frames of the newer database
+  applied to the restored one would corrupt it. Restoring loses what the gateway wrote since the
+  backup. The `npm ci` line is printed whether or not the update ran one, since a person cannot
+  tell. **Never automatic**: the new gateway may have migrated and written, and only a person can
+  weigh that loss. The same steps are printed by §20.6 when only the pid moved, and by a failed
+  restart call; with no backup taken, the restore lines are left out and it says there is none.
 
 ### 20.10 One update at a time
 
@@ -3712,8 +3735,8 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   restart call is let finish too, on both systems: macOS's drain, since one left half way has
   sent the old gateway SIGTERM, whose clean exit KeepAlive does not restart, and so leaves no
   gateway; and Linux's `systemctl restart`, which a killed client may leave stopped or starting.
-  Then it is as during the wait.
-  During the wait of step 7 it stops waiting, prints the steps back, exit 3.
+  A signal during either call is then taken as one during the wait of step 7, which stops
+  waiting and prints the steps back, exit 3.
 - **Output that cannot be written is not a failure**: EPIPE and EIO on stdout or stderr, from a
   closed terminal or a pipe, are ignored, so a dropped ssh session never stops an update half
   way; it goes on, or goes back, as the signal says.
@@ -3740,7 +3763,8 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   were; a signal before step 4.
 - **2**: the command line was wrong.
 - **3**, new: a person is needed. The restart call failed or was not confirmed; a signal during
-  the wait of step 7, or during macOS's drain; going back failed; or §20.6 found the gateway had
+  the wait of step 7, or during the restart call, macOS's drain or Linux's `systemctl restart`;
+  going back failed; or §20.6 found the gateway had
   moved. 0, 1 and 2 are `runMt`'s; 3 lets a script running `--yes` tell "nothing changed" from
   "half way".
 
@@ -3760,7 +3784,8 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   becomes `mt update`, with `mt update --check` and the manual line kept for a gateway run by
   hand.
 - **`src/db/open.ts`**: `migrate()` refuses a database newer than its files (§20.6), as a
-  `ConfigError`, which `src/index.ts` gives the backups directory.
+  `SchemaTooNewError`, which `createGateway` recognises to add the backups directory, after
+  closing the database. **`src/index.ts`**: `loadStartup` marked as a contract of `mt update`.
 - **The locks** are written as `lockGateway` writes its file, with no removal of a stale one.
 - **`SERVICE_USAGE`** and `USAGE` gain `mt service check` and `mt update [--check | --yes]`.
 
@@ -3787,10 +3812,11 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   signal at each step, a second one while going back, the drain's and `systemctl restart`'s
   included; an unreadable state on each system; a warning for `MT_SCHEMA_DIR`; EPIPE on output;
   the time limits; the printed commands naming the node and npm by path, quoted.
-- **Unit, `migrate()`**: a database at a version above the highest file refused with both
-  versions named, nothing applied and `user_version` unchanged; one at the highest file, and one
-  below, migrated as before; and the gateway's start on a newer database ending with
-  `configuration error:` and exit 78.
+- **Unit, `migrate()`**: a database at a version above the highest file refused as a
+  `SchemaTooNewError` with both versions, nothing applied and `user_version` unchanged; an empty
+  schema directory's highest 0; one at the highest file, and one below, migrated as before;
+  `createGateway` closing the database and adding the backups directory; and the gateway's start
+  on a newer database ending with `configuration error:` and exit 78.
 - **Unit, the advice**: only the pid moved, the steps back; the version moved, the steps forward
   and no backup; a stale lock at each step, its version equal to the database's and not.
 - **Unit, the backup**: the name, `0700` and `0600`, the `.partial` renamed, and removed with its
@@ -3820,6 +3846,11 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
 - **The restart interrupts every agent run** (§8.4) and every chat turn under way; step 3 says
   how many runs, not how many turns.
 - **A run's `mt` is the new build's** between the build and the restart (§20.5).
+- **So is the operator's.** Between the build and the restart, `mt kanban task`, `board` and
+  `gate` are the new build's code on the database the old gateway has not migrated: they open it
+  with `openDb` (`src/cli/gate.ts`), which never migrates. Until the new gateway starts, a
+  command that needs a new column or table fails; each write is in one transaction
+  (`txImmediate`), so it fails whole rather than leave the database half written.
 - **A crash restart in steps 4 to 6** runs the new tree; the update notices (§20.6) but cannot
   prevent it.
 - **Two homes on one checkout**: the checkout's lock keeps their updates apart, but the update
@@ -3877,3 +3908,9 @@ before each step, for a stale lock's advice; that `state()` took an unreadable m
 stopped service; that the check without a service lacked `loadConfig`; the child check's
 environment; a second signal while going back, and Linux's restart call; `MT_SCHEMA_DIR`; and
 the README's line in the wiring.
+*Amended on 2026-11-12, a third time.* A third review found that the check without a service
+refused a shell holding the secret, and should call the startup's own `loadStartup`; that the
+printed steps lost a home other than the default and named a bare `mt`, and said `service
+restart` with no service; that the steps back after a crash restart need the version read again
+after the stop; the error's class, the database closed and an empty schema directory; a signal
+during Linux's restart call; and the operator's commands on an unmigrated database.
