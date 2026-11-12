@@ -435,6 +435,30 @@ export function advanceSubscription(db: Db, subscriptionId: number, cursor: numb
 }
 
 /**
+ * Move a task's subscription at a chat into the thread its "Created" reply
+ * opened (spec §19.4): its `thread_id` from '' to the thread's, and its root to
+ * the command message, in one transaction. Only a subscription of this task, at
+ * this chat, for this bot, still at chat scope with no root, moves, so a second
+ * call changes nothing. Its cursor moves with it: nothing already sent is sent
+ * again, and nothing pending is lost. It writes no event, as a cursor's move
+ * writes none.
+ */
+export function threadSubscription(db: Db, taskId: string, at: ChatAt, threadId: string, rootId: string): Result<{ moved: boolean }> {
+  return tx(db, (d) => {
+    if (threadId === '' || rootId === '') return refuse('invalid', 'a thread and its root are not empty');
+    // OR IGNORE: a subscription of the task already in that thread is left as it is.
+    const { changes } = d
+      .prepare(
+        `UPDATE OR IGNORE kanban_subscriptions SET thread_id = ?, root_message_id = ?
+          WHERE task_id = ? AND channel = ? AND account_id = ? AND conversation_id = ?
+            AND thread_id = '' AND root_message_id IS NULL`,
+      )
+      .run(threadId, rootId, taskId, at.channel, at.appId, at.conversationId);
+    return { ok: true, moved: changes === 1 };
+  });
+}
+
+/**
  * A comment, on a task in any phase. The dispatcher forwards a person's to an
  * undecided run (spec §7.5) -- if it `steers`: a talk-tier comment from chat is
  * stored for people to read, and never given to an agent (spec §9.1).
