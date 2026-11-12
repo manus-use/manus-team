@@ -2914,11 +2914,11 @@ When a person's run is due a card (§9.2), the card poster decides, for that run
    again as §9.2 says.
 5. **The route is decided afresh at each try.** A card held back after a retryable failure,
    whichever place it failed in, goes through rules 1 to 4 again at its next try, from the cache
-   and the lookup as they then are, and may go elsewhere than it was tried. That is harmless: it
-   carries the same uuid wherever it goes (below). It is the simpler of the two ways: the other,
-   remembering in memory the place a run was tried in until it is sent, is state the card poster
-   would keep beside its pauses, lost at a restart anyway, for a choice the next try makes as
-   well.
+   and the lookup as they then are, and may go elsewhere than it was tried. That is one card if
+   smoke item 4(a) holds: it carries the same uuid wherever it goes (below). It is the simpler of
+   the two ways: the other, remembering in memory the place a run was tried in until it is sent,
+   is state the card poster would keep beside its pauses, lost at a restart anyway, for a choice
+   the next try makes as well.
 
 Why each rule:
 
@@ -2950,8 +2950,8 @@ reply with the same uuid give one message, and that a send Lark refused, of eith
 hold its uuid, so that the fallbacks of rules 3 and 4 make a message. Both are smoke item 4
 (§19.10). **If the two APIs do not share their dedup**, the uuid gives nothing across places, and
 the plan keeps it anyway, since each place still deduplicates its own retries: what it costs is
-that a card sent in one place, unrecorded, and after a restart routed to the other within the
-hour, shows in both, the case §9.2 already narrows by not sending again until a restart. **If a
+that a card sent in one place and not known to have landed, unrecorded and restarted, or timed
+out and retried, then routed to the other place within the hour, shows in both. **If a
 refused send holds its uuid**, each fallback is given its own uuid, derived from the run's and
 the place's, so that it makes a message.
 
@@ -3161,9 +3161,9 @@ be confirmed by the smoke checklist.
   `reply_in_thread: true`, at chat scope, which today's `messageRequest` cannot express (it
   threads only on a `threadId`); `root`, the message a send in a thread replies to; and
   `stayInThread`, which turns the adapter's withdrawn fallback off, used by a card's send in a
-  thread (§19.2) and by the threaded "Created" reply (§19.4). **`SendResult`**
-  gains only `threadId`, read from Lark's answer, absent for a direct message, from which a card's
-  `in` is read (§19.2).
+  thread (§19.2) and by the threaded "Created" reply (§19.4). **`SendResult`** gains only
+  `threadId`, read from Lark's answer, absent for a direct message, from which a card's `in` is
+  read (§19.2).
 - **The router.** `KanbanCommands.run` answers `{ text, quoted?, thread? }`, where `thread` names
   a task just created and `quoted` is the reply's wording for a quoted reply (§19.5); the router,
   for a group message at chat scope, sends `text` in a thread on the message, `quoted` instead
@@ -3176,10 +3176,11 @@ be confirmed by the smoke checklist.
   pages of §19.3, `complete` false when it stopped there; the cache is the card poster's, of whole
   groups, so one lookup serves every person in the group.
   The fake channel of the tests gets one too, with a member list per chat and a way to fail.
-- **The card poster** reads the task's subscription with its root through `cardReading(runId)`,
-  which returns this bot's subscription, by `appId`, as `KanbanSink` filters, and decides
-  per §19.2, and records where it sent. `CardPosterDeps` gains `held(taskId): boolean`, supplied
-  by `KanbanChat`, which the card poster asks at each `#post` (§19.4). **The notifier** sends a
+- **The card poster** finds the task's thread by filtering `subscriptionsOf(taskId)` by its own
+  `deps.appId`, as `KanbanSink` does, and takes that subscription's root; `cardReading`, which
+  knows no app id and serves the redraw too, is unchanged. It decides per §19.2, and records
+  where it sent. `CardPosterDeps` gains `held(taskId): boolean`, supplied by `KanbanChat`, which
+  the card poster asks at each `#post` (§19.4). **The notifier** sends a
   conversation's batch by replying to a root in the thread when any of its subscriptions has one:
   a batch can mix subscriptions with and without a root in one thread (a task from before plan L
   and one after, in the same existing thread), and a thread has one root, so any of them serves.
