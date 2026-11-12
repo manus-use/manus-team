@@ -163,6 +163,15 @@ describe('/kanban task new', () => {
     expect(long).toContain(`(\`/kanban task assign ${nobody} <role or @person>\` gives it to someone)`);
   });
 
+  it("records the root of the thread a task is created in, from the message, as its subscription's", async () => {
+    const taskId = created(await chat.run('task new In the topic', { ...message(OWNER), rootId: 'om_root' }, KEY));
+    expect(getTask(t.db, taskId)?.createdVia).toMatchObject({ threadId: 'omt_topic', rootId: 'om_root' });
+    expect(subscriptionsOf(t.db, taskId).map((s) => [s.threadId, s.rootMessageId])).toEqual([['omt_topic', 'om_root']]);
+    // A direct message is unchanged (spec §19.1): no root, whatever the message carries.
+    const direct = created(await chat.run('task new In a direct message', { ...message(OWNER), chatType: 'p2p', rootId: 'om_root' }, KEY));
+    expect(subscriptionsOf(t.db, direct)[0]?.rootMessageId).toBeNull();
+  });
+
   it('makes one task of one message, however often it arrives', async () => {
     const first = created(await chat.run('task new Once', message(OWNER, 'om_same'), KEY));
     expect(await chat.run('task new Once', message(OWNER, 'om_same'), KEY)).toBe(`Already created, as \`${first}\`.`);

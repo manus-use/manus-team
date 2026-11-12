@@ -97,6 +97,9 @@ export class LarkInbound {
       // `root_id`, so keying a session on it forks one session per reply chain --
       // and a topic group's real thread would never be found.
       threadId: msg.threadId ?? '',
+      // In a thread, its root: where a reply in it is sent (spec §19.4). A quoted
+      // reply at chat scope has a root_id too, which is no thread's.
+      ...(msg.threadId === undefined || msg.threadId === '' || msg.rootId === undefined || msg.rootId === '' ? {} : { rootId: msg.rootId }),
       sender,
       senderIsBot: senderType === 'app' || senderType === 'bot',
       text: msg.content,
