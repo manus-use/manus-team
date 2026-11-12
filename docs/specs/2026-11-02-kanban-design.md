@@ -2883,10 +2883,14 @@ it the thread and its count of replies.
 - **Plain text typed in the thread** behaves as today: the router keys a binding on the thread's
   `thread_id` (channel spec §3.3), so it talks to an agent chat session bound to that thread, a
   new one the first time. Nothing of the board changes that.
-- **A topic group.** Every message there is in a topic, and a topic's seed message arrives with
-  no `thread_id` yet (channel spec §3.2), so a `/kanban task new` that opens a topic arrives at chat
+- **A topic group.** Every message there is in a topic. If a topic's seed message arrives with
+  no `thread_id` yet (channel spec §3.2), a `/kanban task new` that opens a topic arrives at chat
   scope and is answered in a thread on itself, which is its own topic: the same path, and the same
-  `thread_id` the topic's later messages carry. One typed inside a topic is in an existing thread.
+  `thread_id` the topic's later messages carry. If it arrives with its topic's `thread_id`, it
+  carries no `root_id`, as Lark gives `root_id` only to a reply; the inbound side then takes the
+  message's own id as its thread's root, so the task is created in an existing thread with that
+  root, answered in the thread's words, and its card can go there. Smoke item 8 confirms which
+  Lark sends. One typed inside a topic is in an existing thread.
 
 ### 19.2 Where a card goes
 
@@ -3208,6 +3212,10 @@ be confirmed by the smoke checklist.
 - **A person who left the group** may get one card in a thread they no longer see, within the
   cache's five minutes (§19.6).
 - **A card is visible to the group** (§19.6).
+- **A threaded "Created" reply never confirmed.** If every try of the reply timed out though one
+  landed, the router is told of no thread, so the task stays at chat scope (§19.4) while the reply
+  in its thread says "This thread hears": its notices go to the group, and its cards by direct
+  message.
 
 ### 19.9 Testing
 

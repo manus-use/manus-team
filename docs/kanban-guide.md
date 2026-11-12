@@ -30,7 +30,8 @@ type the command. The examples below leave the bot's mention out.
 is answered in a thread on your message, and everything about the task goes in that thread: its
 notices, its person's cards, and its follow-ups' notices and cards. The group's timeline shows
 only your command and its thread. A task created inside a thread uses that thread; one created
-in a direct message has none. The replies below are as a direct message shows them; in a group
+in a direct message has none. Plain text typed in a task's thread talks to an agent session, not
+to the task; to comment on the task, use `/kanban task comment`. The replies below are as a direct message shows them; in a group
 they say "This thread hears" where they say "This chat hears", and, for a person's task, "Their
 card comes in this thread when it is ready, or by direct message if they are not in this group"
 where they say "They are sent it as a card, in a direct message, once it is ready".

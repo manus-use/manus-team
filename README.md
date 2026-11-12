@@ -726,11 +726,11 @@ for a card sent by direct message, one line, "📋 *title*, assigned to *name*",
 plain text, never a mention; a notice of a block carries an **Unblock** button for an operator.
 Only a card that cannot reach its person (Lark answering that they are outside the app's
 availability, 230013, for a task with no thread to send it to instead, or when the task's thread
-refuses it too, or the person having lost talk tier) is reported to the chat instead, with the commands to use. Any other
-failure to send a card, a refusal of Lark's included, is taken for the gateway's: the card is
-tried again, after a pause that doubles to five minutes, and the log says why each time. A
-person's report is refused while another task's agent is working in the same workspace, if the
-task has gates to run there.
+refuses it too, or the person having lost talk tier) is reported to the chat instead, with the
+commands to use. Any other failure to send a card, a refusal of Lark's included, is taken for the
+gateway's: the card is tried again, after a pause that doubles to five minutes, and the log says
+why each time. A person's report is refused while another task's agent is working in the same
+workspace, if the task has gates to run there.
 
 **A task's thread.** A task created by `/kanban task new` in a group, at chat scope, is answered
 in a thread on the command message, and everything about it goes there: its person's cards, its
