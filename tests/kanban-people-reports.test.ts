@@ -162,11 +162,11 @@ describe("a person's claim, and their card", () => {
       assigneeKind: 'human',
     });
     expect(cardsDue(t.db).map((r) => r.runId)).toEqual([run.runId]);
-    expect(service.recordCard(run.runId, { messageId: 'om_card' })).toEqual({ ok: true, recorded: true });
+    expect(service.recordCard(run.runId, { messageId: 'om_card', in: 'dm' })).toEqual({ ok: true, recorded: true });
     expect(service.recordCard(run.runId, { error: 'later' })).toEqual({ ok: true, recorded: false });
     expect(cardsDue(t.db)).toEqual([]);
     expect(eventsOf(t.db, task.taskId).filter((e) => e.kind.startsWith('card_')).map((e) => [e.kind, e.payload])).toEqual([
-      ['card_sent', { kind: 'work', to: ALICE, messageId: 'om_card' }],
+      ['card_sent', { kind: 'work', to: ALICE, messageId: 'om_card', in: 'dm' }],
     ]);
   });
 
@@ -178,7 +178,7 @@ describe("a person's claim, and their card", () => {
     const agentTask = create({ assignee: 'implementer' });
     const agent = service.claim(agentTask.taskId);
     if (!agent.ok) throw new Error(agent.message);
-    expect(service.recordCard(agent.run.runId, { messageId: 'om_x' })).toMatchObject({ ok: false, code: 'invalid' });
+    expect(service.recordCard(agent.run.runId, { messageId: 'om_x', in: 'dm' })).toMatchObject({ ok: false, code: 'invalid' });
   });
 });
 

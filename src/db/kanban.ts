@@ -1913,8 +1913,12 @@ export function noteStranded(
   });
 }
 
-/** What became of a person's card (spec §9.2): sent, as this message, or refused for good by the channel. */
-export type CardOutcome = { messageId: string } | { error: string };
+/**
+ * What became of a person's card (spec §9.2): sent, as this message, in the
+ * task's thread or by direct message as Lark's answer said (spec §19.2), or
+ * refused for good by the channel.
+ */
+export type CardOutcome = { messageId: string; in: 'thread' | 'dm' } | { error: string };
 
 /**
  * Record that a person's run was sent its card, or that the channel refused it
@@ -1937,7 +1941,7 @@ export function recordCard(db: Db, runId: string, card: CardOutcome, now: number
     record(
       d,
       'messageId' in card
-        ? { taskId: run.taskId, runId, kind: 'card_sent', actor: 'gateway', payload: { ...base, messageId: card.messageId } }
+        ? { taskId: run.taskId, runId, kind: 'card_sent', actor: 'gateway', payload: { ...base, messageId: card.messageId, in: card.in } }
         : { taskId: run.taskId, runId, kind: 'card_failed', actor: 'gateway', payload: { ...base, error: card.error } },
       now,
     );

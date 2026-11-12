@@ -163,6 +163,7 @@ export class FakeChannel implements Channel {
 
   readonly #clock: Clock;
   readonly #failures = new Map<Method, unknown[]>();
+  readonly #answers = new Map<Method, SendResult[]>();
   #held: Promise<void> | undefined;
   #release: (() => void) | undefined;
   #seq = 0;
@@ -194,6 +195,16 @@ export class FakeChannel implements Channel {
     const queue = this.#failures.get(method) ?? [];
     queue.push(err);
     this.#failures.set(method, queue);
+  }
+
+  /**
+   * Make the next call to `method` that succeeds answer with `result`, as Lark
+   * answers a send it deduplicated against an earlier one: queued, as failures are.
+   */
+  answerNext(method: Method, result: SendResult): void {
+    const queue = this.#answers.get(method) ?? [];
+    queue.push(result);
+    this.#answers.set(method, queue);
   }
 
   /** Awaited by every call site, after it has been recorded and before it succeeds. */
@@ -265,7 +276,8 @@ export class FakeChannel implements Channel {
     this.calls.push('sendCard');
     await this.gate('sendCard');
     this.boardCards.push({ target, view, uuid });
-    return this.#result(`om_board_${++this.#seq}`, target);
+    const result = this.#result(`om_board_${++this.#seq}`, target);
+    return this.#answers.get('sendCard')?.shift() ?? result;
   }
 
   async updateCard(messageId: string, view: CardView): Promise<void> {

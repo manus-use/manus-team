@@ -1,10 +1,12 @@
-import { ChannelError, personTarget, type Channel } from '../channel/types.js';
+import { ChannelError, personTarget, type Channel, type SendResult, type SendTarget } from '../channel/types.js';
 import { boardCardUuid } from '../core/ids.js';
-import { cardsDue } from '../db/kanban-read.js';
+import { cardsDue, subscriptionsOf, type CardReading } from '../db/kanban-read.js';
 import type { Db } from '../db/open.js';
+import { personOf } from '../db/people.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
 import { renderReviewCard, renderTaskCard, type CardFacts, type NameOf } from './chat-render.js';
+import { Membership } from './members.js';
 import { unionIdOf } from './people.js';
 import type { KanbanService } from './service.js';
 import type { RunRow } from './types.js';
@@ -32,6 +34,15 @@ import type { RunRow } from './types.js';
  *
  * **A card sent and not recorded** is not sent again, in a loop that would
  * outlast the uuid's hour: the run is passed over until a restart, said once.
+ *
+ * **Where it goes** (spec §19.2), decided afresh at each try: in the task's
+ * thread, mentioning the person, when the task has a thread with a root and
+ * Lark's chat members API says they are in the group (`Membership`); by direct
+ * message otherwise. A direct message that cannot reach them goes to the thread;
+ * a card refused in the thread, whatever the code, goes by direct message, and
+ * never to the top of the chat. One uuid per run, wherever it goes. `card_sent`
+ * records where Lark's answer says it went. A task held while its "Created"
+ * reply is under way (spec §19.4) is passed over, at each send.
  */
 
 /** How often a round looks for cards to send. */
@@ -64,13 +75,23 @@ export interface CardPosterDeps {
   clock?: Clock;
   /** Metadata only: ids, never task text. */
   note?: (line: string) => void;
-  /** How long a send is waited for; `CARD_SEND_MS` unless a test says otherwise. */
+  /** How long a send, or a members lookup, is waited for; `CARD_SEND_MS` unless a test says otherwise. */
   sendTimeoutMs?: number;
+  /** Whether a task is held while its "Created" reply is under way (spec §19.4): `KanbanChat`'s. */
+  held?: (taskId: string) => boolean;
 }
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+/** Lark refused it, and will again: not a failure that never reached Lark, nor one it marks retryable, nor a timeout. */
+function refusal(err: unknown): err is ChannelError {
+  return err instanceof ChannelError && err.code !== 0 && !err.retryable;
+}
+
+/** Where a card was tried, and what came of it. */
+type Sent = { ok: true; sent: SendResult } | { ok: false; err: unknown };
 
 export class CardPoster {
   readonly #deps: CardPosterDeps;
@@ -80,6 +101,8 @@ export class CardPoster {
   readonly #backoff = new Map<string, { until: number; waitMs: number }>();
   /** Runs whose card was sent and could not be recorded: passed over until a restart. */
   readonly #unrecorded = new Set<string>();
+  /** Who is in each group, for a card in a task's thread (spec §19.3). */
+  readonly #members: Membership;
   #round: Promise<number> | undefined;
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
@@ -95,6 +118,13 @@ export class CardPoster {
         // Nowhere left to say it.
       }
     };
+    this.#members = new Membership({
+      channel: deps.channel,
+      appId: deps.appId,
+      timeoutMs: deps.sendTimeoutMs ?? CARD_SEND_MS,
+      clock: this.#clock,
+      note: this.#note,
+    });
   }
 
   /** Send every `CARD_POLL_MS`, starting now: the first round sends what a restart left unsent. */
@@ -159,8 +189,10 @@ export class CardPoster {
     return sent;
   }
 
-  /** Send one run its card, and record it; true once it was sent. */
+  /** Send one run its card, where spec §19.2 says, and record it; true once it was sent. */
   async #post(run: RunRow): Promise<boolean> {
+    // Its "Created" reply under way: passed over, as an unrecorded run is, until a later round.
+    if (this.#deps.held?.(run.taskId) === true) return false;
     const unionId = unionIdOf(run.assignee.name);
     if (unionId === undefined) {
       this.#refused(run, `${run.assignee.name} is not a person Lark can be asked to message`);
@@ -170,31 +202,95 @@ export class CardPoster {
       this.#refused(run, `${run.assignee.name} no longer has talk tier on this gateway`);
       return false;
     }
-    const view = this.#render(run);
-    if (view === undefined) return false;
-    let messageId: string;
+    const reading = this.#reading(run);
+    if (reading === undefined) return false;
+    const thread = this.#thread(run.taskId);
+    // Rules 1 and 2: the thread for a member, a direct message for anyone else, or when the lookup failed.
+    const first = thread !== undefined && (await this.#members.isMember(thread.chatId, unionId)) ? 'thread' : 'dm';
+    const tried = await this.#send(run, reading, first === 'thread' ? thread : undefined, unionId);
+    if (tried.ok) return this.#sent(run, tried.sent);
+    if (!refusal(tried.err)) {
+      // Rule 5: held back, and routed afresh at its next try.
+      this.#holdBack(run, message(tried.err));
+      return false;
+    }
+    if (first === 'thread') {
+      // Rule 4: refused in the thread, whatever the code, it goes by direct message.
+      this.#note(`kanban: the card of run ${run.runId} was refused in its task's thread (${message(tried.err)}); sending it by direct message`);
+      const again = await this.#send(run, reading, undefined, unionId);
+      if (again.ok) return this.#sent(run, again.sent);
+      // Never back to the thread it was refused in: 230013 is recorded, with both reasons; anything else held back.
+      if (again.err instanceof ChannelError && PERSON_UNREACHABLE_CODES.has(again.err.code)) {
+        this.#refused(run, `${message(tried.err)}; and by direct message: ${message(again.err)}`);
+        return false;
+      }
+      this.#holdBack(run, message(again.err));
+      return false;
+    }
+    if (thread !== undefined && tried.err instanceof ChannelError && PERSON_UNREACHABLE_CODES.has(tried.err.code)) {
+      // Rule 3: a person a direct message cannot reach gets it in the thread, member or not.
+      this.#note(`kanban: the card of run ${run.runId} cannot reach its person by direct message (${message(tried.err)}); sending it in its task's thread`);
+      const again = await this.#send(run, reading, thread, unionId);
+      if (again.ok) return this.#sent(run, again.sent);
+      if (!refusal(again.err)) {
+        this.#holdBack(run, message(again.err));
+        return false;
+      }
+      this.#refused(run, `${message(tried.err)}; and in the task's thread: ${message(again.err)}`);
+      return false;
+    }
+    return this.#notSent(run, tried.err);
+  }
+
+  /**
+   * The task's thread a card can go to (spec §19.4): this bot's subscription of
+   * it, on this channel, when it is in a thread whose root is known. A task has
+   * at most one per bot.
+   */
+  #thread(taskId: string): SendTarget | undefined {
+    const sub = subscriptionsOf(this.#deps.db, taskId).find((s) => s.appId === this.#deps.appId && s.channel === this.#deps.channel.id);
+    if (sub === undefined || sub.threadId === '' || sub.rootMessageId === null) return undefined;
+    // A card is never moved to the top of the chat (spec §19.2): a refusal comes back here.
+    return { chatId: sub.conversationId, threadId: sub.threadId, root: sub.rootMessageId, stayInThread: true };
+  }
+
+  /**
+   * The card sent to the thread, mentioning its person by the open_id this bot
+   * last noted for them, or else by direct message; with the run's one uuid
+   * either way.
+   */
+  async #send(run: RunRow, reading: CardReading, thread: SendTarget | undefined, unionId: string): Promise<Sent> {
+    const mention = thread === undefined ? undefined : personOf(this.#deps.db, this.#deps.appId, unionId)?.openId;
+    const view = this.#render(run, reading, mention);
     try {
       const sent = await this.#bounded(
         this.#deps.channel.sendCard(
-          personTarget(unionId),
-          // Masked once more as a whole, as every reply and notice is (spec §9.3).
+          thread ?? personTarget(unionId),
+          // Masked once more as a whole, the mention in it, as every reply and notice is (spec §9.3).
           { ...view, markdown: redactKnownSecrets(view.markdown) },
           boardCardUuid(this.#deps.appId, run.runId),
         ),
       );
-      messageId = sent.messageId;
+      return { ok: true, sent };
     } catch (err) {
-      if (err instanceof ChannelError && PERSON_UNREACHABLE_CODES.has(err.code)) {
-        this.#refused(run, message(err));
-      } else {
-        this.#holdBack(run, message(err));
-      }
-      return false;
+      return { ok: false, err };
     }
+  }
+
+  /** A direct message not sent, as before threads: one Lark says cannot reach the person is recorded, anything else held back. */
+  #notSent(run: RunRow, err: unknown): boolean {
+    if (err instanceof ChannelError && PERSON_UNREACHABLE_CODES.has(err.code)) this.#refused(run, message(err));
+    else this.#holdBack(run, message(err));
+    return false;
+  }
+
+  /** A card sent: recorded, where Lark's answer says it is -- a direct message never has a thread. */
+  #sent(run: RunRow, sent: SendResult): boolean {
+    const { messageId } = sent;
     this.#backoff.delete(run.runId);
     let why: string | undefined;
     try {
-      const recorded = this.#deps.service.recordCard(run.runId, { messageId });
+      const recorded = this.#deps.service.recordCard(run.runId, { messageId, in: sent.threadId === undefined ? 'dm' : 'thread' });
       if (!recorded.ok) why = recorded.code;
     } catch (err) {
       why = message(err);
@@ -207,14 +303,22 @@ export class CardPoster {
   }
 
   /**
-   * The run's card, from the board as it is now; undefined when its task is gone,
-   * or its run ended since the round read it: a card for it would be out of date
-   * on arrival.
+   * What the run's card shows, from the board as it is now; undefined when its
+   * task is gone, or its run ended since the round read it: a card for it would
+   * be out of date on arrival.
    */
-  #render(run: RunRow): ReturnType<typeof renderTaskCard> | undefined {
+  #reading(run: RunRow): CardReading | undefined {
     const reading = this.#deps.service.cardReading(run.runId);
-    if (reading === undefined || reading.run.endedAt !== null) return undefined;
-    const facts: CardFacts = { ...reading, ...(this.#deps.nameOf === undefined ? {} : { nameOf: this.#deps.nameOf }) };
+    return reading === undefined || reading.run.endedAt !== null ? undefined : reading;
+  }
+
+  /** The run's card, mentioning its person when it goes in a thread (spec §19.2). */
+  #render(run: RunRow, reading: CardReading, mention: string | undefined): ReturnType<typeof renderTaskCard> {
+    const facts: CardFacts = {
+      ...reading,
+      ...(this.#deps.nameOf === undefined ? {} : { nameOf: this.#deps.nameOf }),
+      ...(mention === undefined ? {} : { mention }),
+    };
     return run.kind === 'review' ? renderReviewCard(facts, this.#deps.appId) : renderTaskCard(facts, this.#deps.appId);
   }
 
