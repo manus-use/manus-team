@@ -146,6 +146,13 @@ export class FakeChannel implements Channel {
   readonly boardCards: BoardCardCall[] = [];
   readonly cardUpdates: CardUpdateCall[] = [];
 
+  /**
+   * Whether a reply that opens a thread is answered with that thread's id, as
+   * Lark answers one (spec §19.4): `omt_` and the message replied to. Off, it is
+   * answered with none, as a reply Lark did not thread.
+   */
+  replyThreads = true;
+
   readonly #clock: Clock;
   readonly #failures = new Map<Method, unknown[]>();
   #held: Promise<void> | undefined;
@@ -194,13 +201,26 @@ export class FakeChannel implements Channel {
     return this.cards.at(-1);
   }
 
+  /** The thread a send to `target` lands in, as Lark answers: none for a direct message, or a message in no thread. */
+  threadOf(target: SendTarget): string | undefined {
+    if (target.receiveIdType === 'union_id') return undefined;
+    if (target.threadId !== '') return target.threadId;
+    if (target.replyTo !== undefined && target.replyInThread === true && this.replyThreads) return `omt_${target.replyTo}`;
+    return undefined;
+  }
+
+  #result(messageId: string, target: SendTarget): SendResult {
+    const threadId = this.threadOf(target);
+    return { messageId, deduped: false, ...(threadId === undefined ? {} : { threadId }) };
+  }
+
   // -- Channel ---------------------------------------------------------------
 
   async sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[]): Promise<SendResult> {
     this.calls.push('sendText');
     await this.gate('sendText');
     this.texts.push({ target, text, uuid, ...(buttons === undefined ? {} : { buttons }) });
-    return { messageId: `om_text_${++this.#seq}`, deduped: false };
+    return this.#result(`om_text_${++this.#seq}`, target);
   }
 
   async openCard(target: SendTarget, initialText: string, uuid: string): Promise<CardSession> {
@@ -224,7 +244,7 @@ export class FakeChannel implements Channel {
     this.calls.push('sendApprovalCard');
     await this.gate('sendApprovalCard');
     this.approvalCards.push({ target, spec, uuid });
-    return { messageId: `om_approval_${++this.#seq}`, deduped: false };
+    return this.#result(`om_approval_${++this.#seq}`, target);
   }
 
   async updateApprovalCard(messageId: string, view: ApprovalOutcomeView): Promise<void> {
@@ -237,7 +257,7 @@ export class FakeChannel implements Channel {
     this.calls.push('sendCard');
     await this.gate('sendCard');
     this.boardCards.push({ target, view, uuid });
-    return { messageId: `om_board_${++this.#seq}`, deduped: false };
+    return this.#result(`om_board_${++this.#seq}`, target);
   }
 
   async updateCard(messageId: string, view: CardView): Promise<void> {

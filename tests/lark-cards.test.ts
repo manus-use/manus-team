@@ -145,6 +145,24 @@ describe('messageRequest', () => {
     });
   });
 
+  it("replies in a thread to its root when one is known, and opens a thread on a message when asked (spec §19.4)", () => {
+    expect(messageRequest({ chatId: 'oc_team', threadId: 'omt_topic', root: 'om_root' }, 'post', card, 'u-5')).toEqual({
+      kind: 'reply',
+      path: { message_id: 'om_root' },
+      data: { msg_type: 'post', content: JSON.stringify(card), uuid: 'u-5', reply_in_thread: true },
+    });
+    expect(messageRequest({ chatId: 'oc_team', threadId: '', replyTo: 'om_q', replyInThread: true }, 'post', card, 'u-6')).toEqual({
+      kind: 'reply',
+      path: { message_id: 'om_q' },
+      data: { msg_type: 'post', content: JSON.stringify(card), uuid: 'u-6', reply_in_thread: true },
+    });
+    // A direct message is never a reply, whatever the target carries.
+    expect(messageRequest({ ...personTarget('on_alice'), root: 'om_root', replyTo: 'om_q', replyInThread: true }, 'interactive', card, 'u-7')).toMatchObject({
+      kind: 'create',
+      params: { receive_id_type: 'union_id' },
+    });
+  });
+
   it('makes a text one post of one markdown element, as the SDK does', () => {
     expect(postContent('**Done** — x')).toEqual({ zh_cn: { title: '', content: [[{ tag: 'md', text: '**Done** — x' }]] } });
   });

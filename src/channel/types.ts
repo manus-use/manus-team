@@ -24,6 +24,24 @@ export interface SendTarget {
    */
   replyTo?: string;
   /**
+   * With `replyTo`, at chat scope: the reply opens a thread on that message, with
+   * Lark's `reply_in_thread`, rather than quoting it (spec §19.4: a task's
+   * "Created" reply).
+   */
+  replyInThread?: boolean;
+  /**
+   * In a thread: the thread's root message, which the send replies to, with
+   * `reply_in_thread` (spec §19.4). Absent, the send replies to `threadId` as a
+   * message id, as before.
+   */
+  root?: string;
+  /**
+   * A reply whose message is gone is not moved to its chat, and the refusal
+   * reaches the caller (spec §19.2, §19.4): a person's card in a thread, and the
+   * threaded "Created" reply.
+   */
+  stayInThread?: boolean;
+  /**
    * How `chatId` names who receives the message: absent, a chat; `union_id`, a
    * person, sent a direct message (spec §9.2). Lark takes the type per message,
    * so a person need not have opened a chat with the bot first.
@@ -72,6 +90,11 @@ export interface SendResult {
   messageId: string;
   /** True when the platform returned an existing message for a repeated uuid. */
   deduped: boolean;
+  /**
+   * The thread the message is in, as the platform answered: absent for a message
+   * in no thread, a direct message among them (spec §19.2, §19.7).
+   */
+  threadId?: string;
 }
 
 /**
