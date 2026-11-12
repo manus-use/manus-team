@@ -103,6 +103,35 @@ describe('LarkInbound, on a message', () => {
       ['', undefined],
     ]);
   });
+
+  it("gives the message that starts a topic, which Lark sends with a thread_id and no root_id, itself as its thread's root (spec §19.1)", async () => {
+    let handlers: { message?: (msg: NormalizedMessage) => Promise<void> } = {};
+    const routed: InboundMessage[] = [];
+    const adapter = { raw: { on: (h: typeof handlers) => ((handlers = h), () => undefined) }, botOpenId: BOT } as unknown as LarkAdapter;
+    const router = { onMessage: async (m: InboundMessage) => void routed.push(m) } as unknown as Router;
+    new LarkInbound({ adapter, router, config: { appId: 'cli_app', downloadDir: '/nonexistent' } }).start();
+    const starter = (over: Partial<NormalizedMessage>): NormalizedMessage =>
+      ({
+        messageId: 'om_starter',
+        chatId: 'oc_team',
+        chatType: 'group',
+        senderId: 'ou_owner',
+        content: '/kanban task new Check the links',
+        mentionedBot: true,
+        mentionAll: false,
+        resources: [],
+        createTime: 0,
+        raw: raw([]),
+        threadId: 'omt_topic',
+        ...over,
+      }) as unknown as NormalizedMessage;
+    await handlers.message?.(starter({}));
+    await handlers.message?.(starter({ rootId: '' }));
+    expect(routed.map((m) => [m.threadId, m.rootId])).toEqual([
+      ['omt_topic', 'om_starter'],
+      ['omt_topic', 'om_starter'],
+    ]);
+  });
 });
 
 describe('LarkInbound, on a button press', () => {

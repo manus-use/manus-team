@@ -108,6 +108,17 @@ describe("/kanban task new in a group, for a thread of its own", () => {
   });
 });
 
+describe("/kanban task new as the message that starts a topic (spec §19.1)", () => {
+  it("answers in the thread's words and subscribes the topic with the message itself as its root", async () => {
+    const starter = message(TOPIC, { messageId: 'om_starter', rootId: 'om_starter' });
+    const answer = await chat().run(FOR_ALICE, starter, TOPIC);
+    const taskId = idOf(answer.text);
+    expect(answer.text).toContain(`Their card comes in this thread when it is ready, or by direct message if they are not in this group. This thread ${HEARS}`);
+    expect(answer).not.toHaveProperty('thread');
+    expect(subscriptionsOf(t.db, taskId).map((s) => [s.threadId, s.rootMessageId])).toEqual([['omt_topic', 'om_starter']]);
+  });
+});
+
 describe('the hold on a task whose thread is being made (spec §19.4)', () => {
   it('holds a fresh task from a group at chat scope from before the dispatcher is told of it, until its subscription moves', async () => {
     const c = chat();
