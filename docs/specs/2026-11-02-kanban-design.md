@@ -3427,8 +3427,9 @@ update and restart the service? [y/N]
   `user_version` and the highest `NNN` in the new tree. A changed migration (`--diff-filter=M`)
   is a warning: the runner never runs again one the database has applied. When the service's
   environment, or without one this shell's over the `.env`, sets `MT_SCHEMA_DIR`, a warning says
-  that this report, the confirmation's version (§20.9) and the build's own refusal (§20.6)
-  assume the bundled `schema/`, and the gateway reads another.
+  that this report and the confirmation's version (§20.9) assume the bundled `schema/`, and the
+  gateway reads another; the build's own refusal (§20.6) and `mt service check`'s "this build: up
+  to N" (§20.5) read that other one, as `config.schemaDir` does.
 - **The database** is the one the gateway would open, found as it would find it. With a service,
   exactly as `mt service check` loads it (§20.5): `loadTeamSettings` over `HOME`, the unit's
   recorded `PATH`, `MT_HOME` and the gateway's `.env`, nothing of this shell, which may set an
@@ -3482,43 +3483,55 @@ update and restart the service? [y/N]
 
 - **The check is the new build's.** `mt update` runs in the old build, whose modules are loaded,
   so the check must be a command the new build answers: **`mt service check`**, new, run as
-  `<node> <checkout>/dist/mt.js service check` in a child process, with the node of §20.4, in
+  `'<node>' '<checkout>/dist/mt.js' service check` in a child process, with the node of §20.4, in
   this shell's environment with its `MT_HOME`, the node's directory first on `PATH`, and no
-  board-run variable (`MT_KANBAN_*`), though step 1 has refused a run's shell already. It
-  is `install`'s own check (`gatewayEnv` and `checkEnvironment` in `src/cli/service.ts`), made a
-  command: the gateway's `.env` must exist and set `LARK_APP_SECRET`; the configuration is
-  loaded with only `HOME`, `PATH`, `MT_HOME` and the `.env`, each passEnv name given a stand-in,
-  through `loadTeamSettings`, `loadTeam` and `loadConfig`; warnings are printed and a problem
-  fails it, exit 1. `PATH` is the one the unit records when a unit exists, the service's, and
-  this shell's otherwise, the one `install` would record. `install` keeps calling the same
-  function in process. On its own, `mt service check` is install's check without installing,
-  useful after editing `config.yaml`. It ends by printing the database's `user_version`, read
-  read-only (`openDbReadOnly`, none when there is no database), and the build's highest
-  migration: `database: <path> at version 8; this build: up to 9`. That line is what the printed
-  steps use to read the version again (§20.6), so no other command is needed for it.
-- **The module load**, part of `mt service check`: it imports `dist/index.js`, the gateway's
-  whole module graph, which starts nothing (`src/main.ts` is the only file with effects at
-  import, and the only one `dist/index.js` does not import), and
-  opens an in-memory database, which loads `better-sqlite3`'s native module. A missing file, a
+  board-run variable (`MT_KANBAN_*`), though step 1 has refused a run's shell already. The
+  update's own preflight, and every printed block, use this one line, with or without a service.
+  Warnings are printed, a problem fails it, exit 1. It does three things, in this order.
+- **First, the version line**, printed whatever the rest then finds:
+  `database: <path> at version 8; this build: up to 9`. It needs only `loadTeamSettings`, for the
+  database's path, over the environment of the check that follows (the service's with a unit,
+  this shell's over the `.env` without), `openDbReadOnly` for its `user_version` (`no database`
+  when there is none), and the highest `NNN` in the schema directory. That directory is the one
+  `loadConfig` gives as `config.schemaDir`: `MT_SCHEMA_DIR` when that environment sets it, else
+  the bundled `schema/`; the line names it when it is not the bundled one, as the warning of
+  §20.3 does. Settings that are refused print `database: unknown (<error>)`, masked, and the
+  check goes on, to fail at the same error. Printed first because it is what the steps back read
+  the version with (§20.6), and they need it most when the rest of the check fails.
+- **Then the configuration.** With a unit installed, `install`'s own check (`gatewayEnv` and
+  `checkEnvironment` in `src/cli/service.ts`), made a command: the gateway's `.env` must exist
+  and set `LARK_APP_SECRET`; the configuration is loaded with only `HOME`, `PATH`, `MT_HOME` and
+  the `.env`, each passEnv name given a stand-in, through `loadTeamSettings`, `loadTeam` and
+  `loadConfig`. `PATH` is the one the unit records, the service's. `install` keeps calling the
+  same function in process, with this shell's `PATH`, the one it will record.
+  **With no unit installed**, a gateway started by hand is checked instead, and `gatewayEnv`
+  and `checkEnvironment` are not run: no `.env` is required, as such a gateway may take its
+  secret from the shell. In order: `loadTeamSettings` and `loadTeam` with `{ unsetPassEnv }`, as
+  `mt role check`'s `attemptAll` (`src/cli/role.ts`) makes them, over this shell's environment
+  over the `.env`, collecting each passEnv name this shell leaves unset; a `ConfigError` from
+  either fails the check there, before `loadStartup` runs. Then `loadStartup(env)`, from
+  `src/index.ts`, which is what `main` calls (the `.env` read, `loadConfig` over the shell and the
+  file as `loadGatewayEnv` merges them, and `loadTeam`), on a copy of the environment. In that
+  copy a stand-in, `'(unset)'`, fills only the names that are unset or empty in the merged
+  environment, the shell over the `.env`: each unset passEnv name, and `LARK_APP_SECRET` when it
+  is unset, or empty after trimming. It never hides a value the `.env` sets, so what is checked is
+  what the gateway would read, and `loadStartup`, which takes no `LoadOptions` of its own, sees
+  every name set. Each name filled gets the note "<name> is not set here: the gateway will need
+  it from the shell that starts it". The stand-in is registered as a secret, as every value the
+  startup loads is, so it is masked in the output like one. `loadStartup` gains a comment in the
+  code that `mt update` relies on it, its name, its argument and its throwing a `ConfigError`, so
+  a change to it is made knowing that.
+- **Last, the module load**: a dynamic `import()` of `<checkout>/dist/index.js`, inside `check`,
+  the gateway's whole module graph, which starts nothing (`src/main.ts` is the only file with
+  effects at import, and the only one `dist/index.js` does not import); and an in-memory database
+  opened, which loads `better-sqlite3`'s native module. Dynamic, so a broken graph fails the
+  check, after its version line, and not `mt.js` itself. Without a unit, the `loadStartup` above
+  is taken from this same import, so it comes after the version line too. A missing file, a
   syntax the node cannot run, or a module built for another ABI fails here rather than at the
   restart. A native load that fails names the command to run by hand, with the real paths:
   `cd '<checkout>' && PATH='<node dir>':"$PATH" '<npm>' ci`.
-- **With no unit installed**, the same `mt service check` does the check a gateway started by
-  hand needs, as no unit says what the service would have. In order: the loads of `mt role
-  check`, the team as this shell sees it over the `.env`, with `{ unsetPassEnv }`, which collects
-  each passEnv name this shell leaves unset; then `loadStartup(env)`, from `src/index.ts`, which
-  is what `main` calls (the `.env` read, `loadConfig` over the shell and the file as
-  `loadGatewayEnv` merges them, and `loadTeam`), on a copy of the environment; then the module
-  and native load above. In that copy a stand-in, `'(unset)'`, fills only the names that are
-  unset or empty in the merged environment, the shell over the `.env`: each unset passEnv name,
-  and `LARK_APP_SECRET`. It never hides a value the `.env` sets, so what is checked is what the
-  gateway would read, and `loadStartup`, which takes no `LoadOptions` of its own, sees every name
-  set. Each name filled gets the note "<name> is not set here: the gateway will need it from the
-  shell that starts it". The stand-in is registered as a secret, as every value the startup
-  loads is, so it is masked in the output like one. `loadStartup` gains a comment in the code
-  that `mt update` relies on it, its name, its argument and its throwing a `ConfigError`, so a
-  change to it is made knowing that. The update's own preflight, and every printed block, use
-  this one line, with or without a service: `'<node>' '<checkout>/dist/mt.js' service check`.
+- **On its own**, `mt service check` is install's check without installing, or a hand-run
+  gateway's, useful after editing `config.yaml`.
 - **The build writes `dist/` in place.** `npm run build` is `tsc -p tsconfig.build.json`, which
   overwrites each file and deletes none. The running gateway loaded every module at its start
   (it has no dynamic `import()`), so it runs the old code from memory until the restart, and a
@@ -3546,13 +3559,14 @@ update and restart the service? [y/N]
 - **A build refuses a database newer than itself.** Plan U adds to `migrate()` a check before
   any migration: a `user_version` above the highest `NNN` among the build's migration files is
   refused, as a **`SchemaTooNewError extends ConfigError`**, carrying `dbVersion` and
-  `buildVersion`, whose message names both versions and the backups directory:
-  "the database at <path> is at schema version 9, and this build knows only up to 8: it was
-  migrated by a newer build. Run that build, or restore a backup of version 8 from
-  <home>/backups (spec §20.8)". `createGateway` (`src/index.ts`), which calls `migrate`,
-  recognises the class, closes the database, and throws a new `SchemaTooNewError` with the same
-  `dbVersion` and `buildVersion`, its message completed with the backups directory from
-  `config.home`, as `migrate` knows no home, and the original as its `cause`; every other error
+  `buildVersion`. `migrate`'s own message, which knows no home: "the database is at schema
+  version 9, and this build knows only up to 8: it was migrated by a newer build. Run that
+  build, or restore a backup of version 8 (spec §20.8)". `createGateway` (`src/index.ts`), which
+  calls `migrate`, recognises the class, closes the database, and throws a new
+  `SchemaTooNewError` with the same `dbVersion` and `buildVersion`, its message completed with
+  the database's path and the backups directory from `config.home`: "the database at <path> is
+  at schema version 9, ... restore a backup of version 8 from <home>/backups (spec §20.8)", and
+  the original as its `cause`; every other error
   from `migrate` is rethrown as now, the database closed too. A schema directory with no migration
   file has a highest of 0, so any migrated database is refused by it, as it should be: such a
   build is broken. It is reported the way a configuration error is, `configuration error: ...` and
@@ -3572,8 +3586,8 @@ update and restart the service? [y/N]
   while the version is unchanged after their `service stop`, so in this case they carry, after
   `cd '<checkout>'`, the line `'<node>' '<checkout>/dist/mt.js' service check`, with a comment
   saying it should print "at version 8", the version recorded at step 3: if it does, go on with
-  the steps back; if it prints another, follow the steps forward instead; if it fails to load,
-  the tree being half built, run the printed `npm ci` line first, then read again.
+  the steps back; if it prints another, follow the steps forward instead; if it prints no
+  version line, the new build cannot run at all: follow the steps back.
 - **The version moved:** a gateway, a crash restart on the new tree, has migrated the live
   database before any backup was taken. Going back is then impossible: no backup of the old
   schema exists, and the old build refuses the database (above). So the update takes no backup,
@@ -3836,7 +3850,11 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   `user_version` other than step 3's failing it; the five kept, the newest of each version kept
   besides, and nothing else removed.
 - **Unit, `mt service check`**: install's cases, now through the command; the unit's `PATH` when
-  a unit exists; with none, `mt role check`'s loads and `loadStartup`, a stand-in for each unset
+  a unit exists; the version line printed first, when the check then fails, when the module
+  import fails, and as `database: unknown (...)` when the settings are refused, with
+  `MT_SCHEMA_DIR`'s directory named; with no unit, no `.env` required, `gatewayEnv` and
+  `checkEnvironment` not run, a `ConfigError` from `loadTeamSettings` or `loadTeam` failing before
+  `loadStartup`, then `loadStartup`, a stand-in for each unset
   passEnv name and an unset or empty `LARK_APP_SECRET` with its note, never for a value the
   `.env` sets, and the stand-in masked; the version line, with and without a database; a build
   whose `dist/index.js` fails to import, and a native module that fails to load, failing it, the
@@ -3935,3 +3953,8 @@ in the merged environment, so the update and every printed block use one line; h
 print the database's version, which the steps back after a crash restart use to read it again;
 worded the restart of a gateway run by hand; and had `createGateway` throw a new
 `SchemaTooNewError`, completed from `config.home`, with the original as its cause.
+*Amended on 2026-11-12, a fifth time.* A fifth review found that the version line could be
+missing exactly when the steps back need it, so `mt service check` prints it first, from the
+settings alone, and imports the gateway's graph dynamically; that the check with no unit
+replaces install's rather than adding to it; the calls it makes; a secret empty after trimming;
+where "this build: up to N" comes from; and `migrate`'s own message.
