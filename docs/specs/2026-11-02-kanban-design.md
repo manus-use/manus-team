@@ -2195,7 +2195,7 @@ branch.
 | **G. Boards** | isolated task queues on one database (§16): migration `006`, with `kanban_boards`, `default` in it, `kanban_chat_boards` and `kanban_tasks.board`, every existing task on `default`; boards created, set and archived, and each chat moved onto one, from chat (`/kanban boards`, `/kanban board create\|use\|set\|archive`); `/kanban new`, `list` and `show` on the chat's board; follow-ups, parents, links and dependency blocks kept on a board; a board's `max_running`, inside the gateway's, and its workspace as §2.3's rule 4; the dispatcher taking boards in turn; `mt kanban show` giving the board. Plan: `docs/plans/2026-11-09-plan-g-boards.md` | D2 |
 | **H. The operator at a terminal** | `/kanban board list [all]` in place of `/kanban boards`; the operator's `mt kanban board list\|create\|set\|archive` and `new\|list\|show\|assign\|link\|unblock\|stop\|archive\|comment` beside the gateway, through `KanbanService`, as `operator:<login>`, plain text or `--json` (§2.6); the two grammars of `mt kanban` (§7.3); the token-less nudge; each pass cancelling the turns of runs a person's action decided (§6.2); `created_via` `{kind: operator}`; the default database `team.db`, moved by hand at deploy. Plan: `docs/plans/2026-11-09-plan-h-operator-cli.md` | G |
 | **W. A directory of its own for each task** | an isolated workspace, written `{ path, isolated: true, base? }` beside the plain path (§18.1); `kanban_tasks.worktree` (migration `007`), fixed at a task's first agent claim there, and the task's place, which its runs, sessions, gates and reported commit use, with the one-agent limit binding only the shared directory (§18.2); `$MT_HOME/worktrees/<workspace>/<task_id>`, recorded in `workspaces` as `wt:<task_id>` (§18.3); made before the first run, reused, never removed (§18.4); a worktree on `mt/<task_id>` from the base, a parent's branch or a fan-in's merge, a conflict blocking the task (§18.5); git with no hook and no fsmonitor, never forcing, merging into or deleting anything else (§18.6); a directory that cannot be made blocking the task, uncounted (§18.7); the prompt's directory lines (§18.8); `directory:` in `task show`, `mt kanban task worktree`, `mt workspace add --isolated` (§18.9). Plan: `docs/plans/2026-11-10-plan-w-worktrees.md` | H |
-| **L. Cards and notices in a task's thread** | a task created by `/kanban task new` in a group at chat scope answered in a thread on its command, with `reply_in_thread` (`SendTarget.replyInThread`), in one of two wordings, the quoted one when Lark refuses the thread; `SendResult.threadId`; its subscription moved to the thread Lark answers with by `threadSubscription`, called through `KanbanCommands.threaded` with the command's message id as its root (`kanban_subscriptions.root_message_id`, migration `008`); `CreatedVia.rootId`, a task created in a thread recording its root (`InboundMessage.rootId`), and the root copied to follow-ups; the hold, a `held(taskId)` the card poster checks at each send, on a fresh task from a group at chat scope; board sends in a thread replying to the root (`SendTarget.root`), the notifier's, the cards' and the forwarded approval cards' (`KanbanSink`); a person's card in the thread, with an @-mention by `open_id`, when the channel's `chatMembers` port says they are a member, cached five minutes per chat and bounded by `CARD_SEND_MS`, by direct message otherwise; a 230013 direct message falling back to the thread, and any non-retryable refusal in the thread to a direct message, never to the main timeline (`SendTarget.stayInThread`); `card_sent` recording `in`, read from Lark's answer; the one line as the notice of a `card_sent` by direct message, not of the claim; `im:chat.members:read`, and the one log line when it is missing; WRITERS.md's row for `kanban_subscriptions`; the README's and the guide's statements of where a card goes, the one line, and the "Created" reply, updated as built (§19) | D2 |
+| **L. Cards and notices in a task's thread** | a task created by `/kanban task new` in a group at chat scope answered in a thread on its command, with `reply_in_thread` (`SendTarget.replyInThread`), in one of two wordings, the quoted one when Lark refuses the thread; `SendResult.threadId`; its subscription moved to the thread Lark answers with by `threadSubscription`, called through `KanbanCommands.threaded` with the command's message id as its root (`kanban_subscriptions.root_message_id`, migration `008`); `CreatedVia.rootId`, a task created in a thread recording its root (`InboundMessage.rootId`), and the root copied to follow-ups; the hold, a `held(taskId)` the card poster checks at each send, on a fresh task from a group at chat scope; board sends in a thread replying to the root (`SendTarget.root`), the notifier's, the cards' and the forwarded approval cards' (`KanbanSink`); a person's card in the thread, with an @-mention by `open_id`, when the channel's `chatMembers` port says they are a member, cached five minutes per chat and bounded by `CARD_SEND_MS`, by direct message otherwise; a 230013 direct message falling back to the thread, and any non-retryable refusal in the thread to a direct message, never to the main timeline (`SendTarget.stayInThread`, also on the threaded "Created" reply); `card_sent` recording `in`, read from Lark's answer; the one line as the notice of a `card_sent` by direct message, not of the claim; `im:chat.members:read`, and the one log line when it is missing; WRITERS.md's row for `kanban_subscriptions`; the README's and the guide's statements of where a card goes, the one line, and the "Created" reply, updated as built (§19) | D2 |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D2, nothing can deliver a card to a person, so **plans C and D1 refuse human assignees and
@@ -2907,11 +2907,18 @@ When a person's run is due a card (§9.2), the card poster decides, for that run
    230019, the topic does not exist; 232009, the chat dissolved; 230018, the group's settings
    restrict who may post; 230035, the bot muted; 230099, which Lark documents as card content
    that failed to build; 100290, an invalid user in the card's `<at>`, documented for the create
-   API and not on the reply page, so to be confirmed for a reply; an HTTP 404; and any other. If the direct message is refused too, rule 3
-   applies, but never back to the thread it was refused in, or §9.2 as today: a 230013 records
-   `card_failed`, and any other refusal is held back. Only a failure that never reached Lark, or
-   one Lark marks retryable, keeps the card for the thread, held back and tried again as §9.2
-   says.
+   API and not on the reply page, so to be confirmed for a reply; an HTTP 404; and any other. If
+   the direct message is refused too, rule 3 applies, but never back to the thread it was
+   refused in, or §9.2 as today: a 230013 records `card_failed`, and any other refusal is held
+   back. A failure that never reached Lark, or one Lark marks retryable, is held back and tried
+   again as §9.2 says.
+5. **The route is decided afresh at each try.** A card held back after a retryable failure,
+   whichever place it failed in, goes through rules 1 to 4 again at its next try, from the cache
+   and the lookup as they then are, and may go elsewhere than it was tried. That is harmless: it
+   carries the same uuid wherever it goes (below). It is the simpler of the two ways: the other,
+   remembering in memory the place a run was tried in until it is sent, is state the card poster
+   would keep beside its pauses, lost at a restart anyway, for a choice the next try makes as
+   well.
 
 Why each rule:
 
@@ -2951,23 +2958,23 @@ the place's, so that it makes a message.
 **What `card_sent` records.** The message, as now, and where it went, `in: 'thread' | 'dm'`, read
 from Lark's answer, not from the route chosen: `in` is `thread` exactly when the answer carries a
 `thread_id`, since a direct message never has one, and `dm` otherwise. `SendResult` gains only
-`threadId` for it (§19.7). A send Lark deduplicated
-against an earlier one answers with the earlier message, wherever that went, and the one line
-(§19.5) is told by where the card is. A `card_sent` recorded before plan L has no `in`, and was a
-direct message.
+`threadId` for it (§19.7). A send Lark deduplicated against an earlier one answers with the
+earlier message, wherever that went, and the one line (§19.5) is told by where the card is. A
+`card_sent` recorded before plan L has no `in`, and was a direct message.
 
 **The mention.** A card in the thread starts with an @-mention of its person, as Lark's markdown
 writes one, `<at id=ou_…></at>`, so the person is notified in a group they may have muted. Lark
-mentions by `open_id`, not `union_id`, so it is the `open_id` the `people` table last noted for
-them (§4.2): a person named in a command was mentioned in it, so the gateway has noted it. A
-person with no `open_id` noted, or one that is not shaped `ou_…`, is named in plain text, with no
-mention. The mention is put in by the renderer after the card's text is escaped and masked, so an
-`<at` in task text is still escaped (§9.3), and only this one, made from an id the gateway
-holds, mentions anyone. A redraw after a press draws no mention: the person has been told, and a
-redraw that mentioned them again would notify them of their own press. This amends §9.3's rule
-that the board mentions nobody: a card is the one message meant for its person, and in a group
-it is the only way they hear of it; the notices still name people in plain text. Whether a
-mention in a thread notifies the person is to be confirmed by the smoke checklist.
+mentions by `open_id`, not `union_id`, and an `open_id` is the app's own, so it is the `open_id`
+the `people` table last noted for them for this bot's app, by `app_id` (§4.2): a person named in a
+command was mentioned in it, so the gateway has noted it. A person with no `open_id` noted, or one
+that is not shaped `ou_…`, is named in plain text, with no mention. The mention is put in by the
+renderer after the card's text is escaped and masked, so an `<at` in task text is still escaped
+(§9.3), and only this one, made from an id the gateway holds, mentions anyone. A redraw after a
+press draws no mention: the person has been told, and a redraw that mentioned them again would
+notify them of their own press. This amends §9.3's rule that the board mentions nobody: a card is
+the one message meant for its person, and in a group it is the only way they hear of it; the
+notices still name people in plain text. Whether a mention in a thread notifies the person is to
+be confirmed by the smoke checklist.
 
 ### 19.3 Who is a member
 
@@ -2993,9 +3000,9 @@ mention in a thread notifies the person is to be confirmed by the smoke checklis
   of Lark at every card round, and is said once.
 - **A large group** is read at most 20 pages, 2,000 members; a person not found by then is taken
   as not known, and sent a direct message. **The whole lookup**, every page, is bounded by
-  `CARD_SEND_MS`: one that runs out of time is a failed lookup, so the card goes by direct message,
-  and it is remembered for one minute as any failure is. Lark's rate for the API is 50 a second; a card round
-  reads at most one group's pages at a time.
+  `CARD_SEND_MS`: one that runs out of time is a failed lookup, so the card goes by direct
+  message, and it is remembered for one minute as any failure is. Lark's rate for the API is 50 a
+  second; a card round reads at most one group's pages at a time.
 - **Across a restart** the cache is empty: membership changes while the gateway is down, and a
   stale answer kept on disk would send a card into a thread its person has left. The first card
   after a start asks again.
@@ -3038,14 +3045,17 @@ mention in a thread notifies the person is to be confirmed by the smoke checklis
   works is to be confirmed by the smoke checklist.
 - **If the "Created" reply fails**, or Lark answers it with no `thread_id`, the subscription stays
   at chat scope, so the notices go to the group, and the cards by direct message, as today. A
-  threaded reply refused by Lark (230071, "the group does not support reply in thread", or 230072
-  and any other refusal) is sent again at once as today's quoted reply, with the same uuid, unless smoke item 4(b) finds
-  that a refused send holds its uuid, when the quoted reply gets its own, `replyUuid(appId,
-  messageId, 'kanban-quoted')`; one that
-  never reached Lark is retried by the adapter as any send is, and then given up, as the router
-  gives up a reply today. A reply whose command message was withdrawn is posted to the chat by the
-  adapter's withdrawn fallback, which answers with no `thread_id`, so that task too stays at chat
-  scope.
+  threaded reply refused by Lark (230071, "the group does not support reply in thread", 230072,
+  or any other refusal) is sent again at once as today's quoted reply, with the same uuid, unless
+  smoke item 4(b) finds that a refused send holds its uuid, when the quoted reply gets its own,
+  `replyUuid(appId, messageId, 'kanban-quoted')`; one that never reached Lark is retried by the
+  adapter as any send is, and then given up, as the router gives up a reply today.
+- **A withdrawn command message.** The threaded "Created" reply is sent with `stayInThread`, as a
+  card in a thread is (§19.2), so the adapter's withdrawn fallback does not move it, in its
+  thread wording, to the top of the chat: every refusal, 230011, 230017 and an HTTP 404 included,
+  reaches the router, which sends the quoted wording instead. That quoted reply is sent as any
+  reply is today, so it may itself take the withdrawn fallback and land at the top of the chat,
+  where its wording, "This chat hears …", is right. The task stays at chat scope.
 - **Held back while the reply is under way.** The dispatcher may claim a person's ready task, and
   the card poster send its card, in the moment between the task's creation and the move, which
   would send its card by direct message. So `KanbanChat` holds the task, in memory, set
@@ -3150,7 +3160,8 @@ mention in a thread notifies the person is to be confirmed by the smoke checklis
 - **`SendTarget`** gains `replyInThread`, for the "Created" reply: a reply to `replyTo` with
   `reply_in_thread: true`, at chat scope, which today's `messageRequest` cannot express (it
   threads only on a `threadId`); `root`, the message a send in a thread replies to; and
-  `stayInThread`, which turns the adapter's withdrawn fallback off for a card (§19.2). **`SendResult`**
+  `stayInThread`, which turns the adapter's withdrawn fallback off, used by a card's send in a
+  thread (§19.2) and by the threaded "Created" reply (§19.4). **`SendResult`**
   gains only `threadId`, read from Lark's answer, absent for a direct message, from which a card's
   `in` is read (§19.2).
 - **The router.** `KanbanCommands.run` answers `{ text, quoted?, thread? }`, where `thread` names
@@ -3165,7 +3176,8 @@ mention in a thread notifies the person is to be confirmed by the smoke checklis
   pages of §19.3, `complete` false when it stopped there; the cache is the card poster's, of whole
   groups, so one lookup serves every person in the group.
   The fake channel of the tests gets one too, with a member list per chat and a way to fail.
-- **The card poster** reads the task's subscription with its root through `cardReading`, decides
+- **The card poster** reads the task's subscription with its root through `cardReading(runId)`,
+  which returns this bot's subscription, by `appId`, as `KanbanSink` filters, and decides
   per §19.2, and records where it sent. `CardPosterDeps` gains `held(taskId): boolean`, supplied
   by `KanbanChat`, which the card poster asks at each `#post` (§19.4). **The notifier** sends a
   conversation's batch by replying to a root in the thread when any of its subscriptions has one:
@@ -3177,9 +3189,9 @@ mention in a thread notifies the person is to be confirmed by the smoke checklis
   by the notifier. A members lookup sends nothing of the task. The log lines name ids only, never
   task text, and an error from Lark is masked before it is logged, as every error is.
 - **Approval forwarding.** `KanbanSink.sendApprovalCard` (`src/kanban/sink.ts`) sends a supervised
-  agent's approval card to this bot's subscription of the task (§19.1), as `{chatId, threadId}`: after
-  the move that is the `thread_id`-as-message-id send. It replies to the subscription's root, in
-  the thread, when it has one, as the notifier does, and as today when not.
+  agent's approval card to this bot's subscription of the task (§19.1), as `{chatId, threadId}`:
+  after the move that is the `thread_id`-as-message-id send. It replies to the subscription's
+  root, in the thread, when it has one, as the notifier does, and as today when not.
 - **Cursors and batches don't change**: they are per conversation already (§9.4), and a thread is
   one.
 
@@ -3201,15 +3213,17 @@ mention in a thread notifies the person is to be confirmed by the smoke checklis
   changing nothing; a failed "Created" reply, a 230071 sent again as a quoted reply, and a reply
   with no `thread_id`, each leaving the subscription at chat scope; the hold, set before any
   await, checked at each send, which keeps a card back until the move, and lapses, and a move
-  landing after it lapsed still applying; the one line on a `card_sent` by direct message, none
-  on one in the thread, and none on a `claimed`; `in` read from Lark's answer,
-  a deduplicated answer from the other place included; any non-retryable refusal in the thread,
-  232009, 230018, 230035 and 100290 among them, sending a direct message; the root written at
-  creation in a thread, copied to a follow-up, and written by the move; a thread's batch replying
-  to a root when only some of its subscriptions have one; a lookup past `CARD_SEND_MS` sending a
-  direct message; the hold only on a fresh task from a group at chat scope, and ended on every
-  path, an error after the create included; the quoted "Created" reply's wording after a 230071; an approval
-  card forwarded to a subscription with a root replying to the root in the thread.
+  landing after it lapsed still applying; the one line on a `card_sent` by direct message, none on
+  one in the thread, and none on a `claimed`; `in` read from Lark's answer, a deduplicated answer
+  from the other place included; any non-retryable refusal in the thread, 232009, 230018, 230035
+  and 100290 among them, sending a direct message; the root written at creation in a thread,
+  copied to a follow-up, and written by the move; a thread's batch replying to a root when only
+  some of its subscriptions have one; a lookup past `CARD_SEND_MS` sending a direct message; the
+  hold only on a fresh task from a group at chat scope, and ended on every path, an error after
+  the create included; the quoted "Created" reply's wording after a 230071, and after a withdrawn
+  command message (230011, 230017, an HTTP 404), the quoted wording at chat scope, never the
+  thread's; a card retried after a retryable failure routed afresh; an approval card forwarded to
+  a subscription with a root replying to the root in the thread.
 - **End to end, with the fake Lark channel:** a member gets a thread card; a non-member a direct
   message; a 230013 direct message falls back to the thread; the task's notices land in its thread;
   a follow-up's notices, and its person's card, land in its parent's thread; a supervised role's
@@ -3268,3 +3282,9 @@ subscription per bot, so no rule chooses among several; that a batch can mix sub
 and without a root in one thread; that a follow-up made before the move stays at chat scope,
 which is accepted; that the quoted reply's uuid needed the same contingency as a card's; that the
 members lookup had no time bound; and how the card poster learns of the hold.
+*Amended on 2026-11-12, a third time.* A third review found that a withdrawn command message
+sent the threaded "Created" reply, in its thread wording, to the top of the chat, so that reply
+takes `stayInThread` too and the router sends the quoted wording; that a card held back after a
+retryable failure was said to stay with the thread, so its route is decided afresh at each try;
+and that the card poster's subscription and the mention's `open_id` were not said to be this
+bot's.
