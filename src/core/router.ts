@@ -3,7 +3,7 @@ import { appendEvent, lastEventOfType } from '../db/events.js';
 import { claimMessage, recordOutcome } from '../db/dedup.js';
 import { getApproval } from '../db/approvals.js';
 import { bindingsInConversation, resolveBinding } from '../db/bindings.js';
-import type { Channel, SendTarget } from '../channel/types.js';
+import { ChannelError, ONE_MESSAGE, type Channel, type SendTarget } from '../channel/types.js';
 import { forDisplay, truncate } from '../channel/escape.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { isResumableProviderId } from '../provider-id.js';
@@ -65,12 +65,31 @@ export interface InboundCardAction {
 }
 
 /**
+ * What `/kanban` answers (spec §19.7): the reply; for a task just created in a
+ * group at chat scope, the task, whose reply opens a thread on the command, and
+ * the reply's words for a quoted reply, which cannot say "this thread".
+ */
+export interface KanbanAnswer {
+  text: string;
+  quoted?: string;
+  thread?: string;
+}
+
+/**
  * The board's chat commands (spec §9.1): what follows `/kanban`, run for the
- * message that typed it, answered as the reply to send; and a press of a board
- * card's button (spec §9.2), answered the same way. `KanbanChat`.
+ * message that typed it, answered as the reply to send; where that reply went,
+ * for a task just created (spec §19.4); and a press of a board card's button
+ * (spec §9.2), answered the same way. `KanbanChat`.
  */
 export interface KanbanCommands {
-  run(arg: string, message: InboundMessage, key: BindingKey): Promise<string>;
+  run(arg: string, message: InboundMessage, key: BindingKey): Promise<KanbanAnswer>;
+  /**
+   * Task `taskId`'s "Created" reply was sent in thread `threadId` on the command
+   * message `messageId`, which becomes the thread's root; or, `threadId`
+   * undefined, it was not: sent quoted, or failed. Called whenever `run`
+   * answered with a `thread`, and it ends the task's hold.
+   */
+  threaded(taskId: string, key: BindingKey, messageId: string, threadId: string | undefined): void;
   card(action: InboundCardAction): Promise<string>;
 }
 
@@ -443,23 +462,28 @@ export class Router {
       }
 
       case 'kanban': {
-        let text: string;
+        let answer: KanbanAnswer;
         const kanban = this.#deps.kanban;
         if (kanban === undefined) {
-          text = KANBAN_OFF;
+          answer = { text: KANBAN_OFF };
         } else {
           try {
-            text = await kanban.run(arg, message, key);
+            answer = await kanban.run(arg, message, key);
           } catch (err) {
             const detail = err instanceof Error ? err.message : String(err);
             this.#note(`kanban command in ${message.messageId} failed: ${redactKnownSecrets(detail)}`);
             // One line, masked and cut, as a refusal is: an error can quote anything.
-            text = `The board could not do that: ${label(detail, 600)}`;
+            answer = { text: `The board could not do that: ${label(detail, 600)}` };
           }
+        }
+        if (answer.thread !== undefined && message.chatType === 'group' && message.threadId === '') {
+          await this.#createdInThread(answer, answer.thread, message, key, target);
+          return;
         }
         // Each piece was escaped, and masked, as it was put in; the whole reply is
         // masked once more, for what was not: ids, names, the board's own words.
-        await this.#reply(target, message, 'kanban', redactKnownSecrets(text));
+        await this.#reply(target, message, 'kanban', redactKnownSecrets(answer.quoted ?? answer.text));
+        if (answer.thread !== undefined) this.#threaded(answer.thread, key, message.messageId, undefined);
         return;
       }
 
@@ -485,6 +509,50 @@ export class Router {
           `\`/${spec.name}\` is declared but not implemented.`,
         );
         return;
+    }
+  }
+
+  /**
+   * A fresh task's "Created" reply, in a thread of its own on the command message
+   * (spec §19.4, §19.7): sent with `reply_in_thread`, and staying in its thread,
+   * so that a withdrawn command is not answered at the top of the chat in the
+   * thread's words. Refused by Lark -- 230071, a withdrawn command, any refusal --
+   * it is sent again at once as a quoted reply, in words true there, with the same
+   * uuid; one that never reached Lark, retried by the adapter, is given up, as any
+   * reply is. Whatever came of it, the board is told where it went, which ends
+   * the task's hold.
+   */
+  async #createdInThread(
+    answer: KanbanAnswer,
+    taskId: string,
+    message: InboundMessage,
+    key: BindingKey,
+    target: SendTarget,
+  ): Promise<void> {
+    let threadId: string | undefined;
+    try {
+      const sent = await this.#deps.channel.sendText(
+        { chatId: message.chatId, threadId: '', replyTo: message.messageId, replyInThread: true, stayInThread: true },
+        truncate(redactKnownSecrets(answer.text), ONE_MESSAGE),
+        replyUuid(this.#deps.appId, message.messageId, 'kanban'),
+      );
+      threadId = sent.threadId;
+      if (threadId === undefined) this.#note(`kanban: the reply to ${message.messageId} came back with no thread; task ${taskId} stays at chat scope`);
+    } catch (err) {
+      const refused = err instanceof ChannelError && err.code !== 0 && !err.retryable;
+      this.#note(`reply (kanban) failed: ${err instanceof Error ? err.message : String(err)}${refused ? '; sending it quoted' : ''}`);
+      if (refused) await this.#reply(target, message, 'kanban', redactKnownSecrets(answer.quoted ?? answer.text));
+    } finally {
+      this.#threaded(taskId, key, message.messageId, threadId);
+    }
+  }
+
+  /** The board told where a task's "Created" reply went (spec §19.4); its failure is noted, and the hold lapses. */
+  #threaded(taskId: string, key: BindingKey, messageId: string, threadId: string | undefined): void {
+    try {
+      this.#deps.kanban?.threaded(taskId, key, messageId, threadId);
+    } catch (err) {
+      this.#note(`kanban: where task ${taskId}'s reply went was not recorded: ${redactKnownSecrets(err instanceof Error ? err.message : String(err))}`);
     }
   }
 
@@ -659,7 +727,7 @@ export class Router {
     try {
       await this.#deps.channel.sendText(
         target,
-        truncate(text, 4000),
+        truncate(text, ONE_MESSAGE),
         replyUuid(this.#deps.appId, message.messageId, purpose),
       );
     } catch (err) {

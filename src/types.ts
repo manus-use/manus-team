@@ -247,6 +247,12 @@ export interface InboundMessage {
   chatType: 'p2p' | 'group';
   /** '' for chat scope. Derived from thread_id only. */
   threadId: string;
+  /**
+   * In a thread, the thread's root message, from Lark's `root_id`: only where a
+   * reply in the thread is sent (spec §19.4), never a key, which is `threadId`'s.
+   * Absent at chat scope.
+   */
+  rootId?: string;
   sender: Principal;
   senderIsBot: boolean;
   text: string;

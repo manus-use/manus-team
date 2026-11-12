@@ -38,6 +38,7 @@ describe('subscriptions', () => {
         appId: 'cli_app',
         conversationId: 'oc_team',
         threadId: 'omt_topic',
+        rootMessageId: null,
         cursor: 0,
         createdAt: NOW,
       },

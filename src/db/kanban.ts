@@ -395,21 +395,24 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
 /**
  * The chats that follow a new task (spec §9.4, §7.3): the chat it was created
  * in; or, for a task a run created, every chat following the creating run's
- * task, so whoever follows that task hears about its follow-ups too. Each cursor
- * starts at 0: every event of the new task is newer than that.
+ * task, so whoever follows that task hears about its follow-ups too, in its
+ * thread, with its root (spec §19.4). Each cursor starts at 0: every event of the
+ * new task is newer than that. A root is written only with a thread: at chat
+ * scope it comes from `threadSubscription` alone.
  */
 function subscribe(d: Db, taskId: string, via: CreatedVia, createdFromTask: string | null, now: number): void {
   const insert = d.prepare(
-    `INSERT OR IGNORE INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, root_message_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
   if (via.kind === 'chat') {
-    insert.run(taskId, via.channel, via.appId, via.conversationId, via.threadId, now);
+    const root = via.threadId === '' || via.rootId === undefined || via.rootId === '' ? null : via.rootId;
+    insert.run(taskId, via.channel, via.appId, via.conversationId, via.threadId, root, now);
     return;
   }
   if (createdFromTask === null) return;
   for (const s of subscriptionsOf(d, createdFromTask)) {
-    insert.run(taskId, s.channel, s.appId, s.conversationId, s.threadId, now);
+    insert.run(taskId, s.channel, s.appId, s.conversationId, s.threadId, s.rootMessageId, now);
   }
 }
 
@@ -428,6 +431,30 @@ export function advanceSubscription(db: Db, subscriptionId: number, cursor: numb
       .prepare('UPDATE kanban_subscriptions SET cursor = ? WHERE id = ? AND cursor < ?')
       .run(cursor, subscriptionId, cursor);
     return { ok: true, advanced: changes === 1 };
+  });
+}
+
+/**
+ * Move a task's subscription at a chat into the thread its "Created" reply
+ * opened (spec §19.4): its `thread_id` from '' to the thread's, and its root to
+ * the command message, in one transaction. Only a subscription of this task, at
+ * this chat, for this bot, still at chat scope with no root, moves, so a second
+ * call changes nothing. Its cursor moves with it: nothing already sent is sent
+ * again, and nothing pending is lost. It writes no event, as a cursor's move
+ * writes none.
+ */
+export function threadSubscription(db: Db, taskId: string, at: ChatAt, threadId: string, rootId: string): Result<{ moved: boolean }> {
+  return tx(db, (d) => {
+    if (threadId === '' || rootId === '') return refuse('invalid', 'a thread and its root are not empty');
+    // OR IGNORE: a subscription of the task already in that thread is left as it is.
+    const { changes } = d
+      .prepare(
+        `UPDATE OR IGNORE kanban_subscriptions SET thread_id = ?, root_message_id = ?
+          WHERE task_id = ? AND channel = ? AND account_id = ? AND conversation_id = ?
+            AND thread_id = '' AND root_message_id IS NULL`,
+      )
+      .run(threadId, rootId, taskId, at.channel, at.appId, at.conversationId);
+    return { ok: true, moved: changes === 1 };
   });
 }
 
@@ -1886,8 +1913,12 @@ export function noteStranded(
   });
 }
 
-/** What became of a person's card (spec §9.2): sent, as this message, or refused for good by the channel. */
-export type CardOutcome = { messageId: string } | { error: string };
+/**
+ * What became of a person's card (spec §9.2): sent, as this message, in the
+ * task's thread or by direct message as Lark's answer said (spec §19.2), or
+ * refused for good by the channel.
+ */
+export type CardOutcome = { messageId: string; in: 'thread' | 'dm' } | { error: string };
 
 /**
  * Record that a person's run was sent its card, or that the channel refused it
@@ -1910,7 +1941,7 @@ export function recordCard(db: Db, runId: string, card: CardOutcome, now: number
     record(
       d,
       'messageId' in card
-        ? { taskId: run.taskId, runId, kind: 'card_sent', actor: 'gateway', payload: { ...base, messageId: card.messageId } }
+        ? { taskId: run.taskId, runId, kind: 'card_sent', actor: 'gateway', payload: { ...base, messageId: card.messageId, in: card.in } }
         : { taskId: run.taskId, runId, kind: 'card_failed', actor: 'gateway', payload: { ...base, error: card.error } },
       now,
     );

@@ -7,8 +7,10 @@ import {
   type CardSession,
   type CardView,
   type Channel,
+  type ChatMembers,
   type SendResult,
   type SendTarget,
+  ONE_MESSAGE,
 } from '../types.js';
 import { forPlainText, truncate } from '../escape.js';
 import { backoffMs, toChannelError } from './errors.js';
@@ -56,12 +58,8 @@ const MAX_SEND_ATTEMPTS = 4;
 const NOT_IN_CHAT = 230002;
 /** Feishu's text message ceiling, with headroom. */
 const TEXT_BUDGET = 12_000;
-/**
- * The longest text sent as one message, with its uuid. Every reply the router
- * sends (cut at 4,000) and every batch of notices (at most 3,800) fits; a longer
- * text is split by the SDK, at its own 3,500, without one.
- */
-export const ONE_MESSAGE = 4_000;
+/** The longest text sent as one message, with its uuid (see `ONE_MESSAGE` in `../types.ts`). */
+export { ONE_MESSAGE };
 /**
  * The codes on which a reply's message is taken as gone, so the reply goes to
  * its chat instead: Lark's documented code for a withdrawn message (230011),
@@ -79,6 +77,10 @@ const WITHDRAWN_CODES: ReadonlySet<number> = new Set([230011, 230017]);
 const NOT_FOUND_STATUS = 404;
 /** Lark's code for content it will not take: a post refused so goes as plain text, as the SDK's own send does. */
 const INVALID_CONTENT = 230001;
+/** Members in one page of Lark's chat members API, its largest. */
+const MEMBER_PAGE_SIZE = 100;
+/** Pages of members read at most (spec §19.3): 2,000 members. */
+export const MEMBER_PAGES = 20;
 
 /**
  * What a test gives the adapter in place of Lark: the SDK's channel, and how a
@@ -157,13 +159,16 @@ export class LarkAdapter implements Channel {
         return this.sendText(target, text, uuid);
       }
     }
-    if (text.length <= ONE_MESSAGE) {
+    // A send that stays in its thread is always one message, cut to fit: the
+    // SDK's split send knows neither its thread nor that it must stay there.
+    if (text.length <= ONE_MESSAGE || target.stayInThread === true) {
+      const one = truncate(text, ONE_MESSAGE);
       return this.#withRetry(async () => {
         try {
-          return await this.#post(target, 'post', postContent(text), uuid);
+          return await this.#post(target, 'post', postContent(one), uuid);
         } catch (err) {
           if (!(err instanceof ChannelError) || err.code !== INVALID_CONTENT) throw err;
-          return this.#post(target, 'text', { text }, uuid);
+          return this.#post(target, 'text', { text: one }, uuid);
         }
       });
     }
@@ -190,17 +195,23 @@ export class LarkAdapter implements Channel {
   }
 
   /**
-   * One message, sent through the SDK's client with its uuid. A reply whose
-   * message is gone -- refused with one of `WITHDRAWN_CODES`, or with an HTTP
-   * 404 -- goes to the chat instead, with the same uuid: the fallback the SDK's
-   * own send makes, less 230020, which is retried as a rate limit instead.
+   * One message, sent through the SDK's client with its uuid, answered with the
+   * thread Lark says it is in, if any. A reply whose message is gone -- refused
+   * with one of `WITHDRAWN_CODES`, or with an HTTP 404 -- goes to the chat
+   * instead, with the same uuid: the fallback the SDK's own send makes, less
+   * 230020, which is retried as a rate limit instead. Not for a target that stays
+   * in its thread (spec §19.2): the refusal is thrown.
    */
   async #post(target: SendTarget, msgType: 'post' | 'text' | 'interactive', content: object, uuid: string): Promise<SendResult> {
     const im = this.#lark.rawClient.im.v1.message;
     // The errors Lark answered with an HTTP 404, whatever their body's code.
     const notFound = new WeakSet<ChannelError>();
     const send = async (req: MessageRequest): Promise<SendResult> => {
-      let r: { code?: number | undefined; msg?: string | undefined; data?: { message_id?: string | undefined } | undefined };
+      let r: {
+        code?: number | undefined;
+        msg?: string | undefined;
+        data?: { message_id?: string | undefined; thread_id?: string | undefined } | undefined;
+      };
       try {
         r = req.kind === 'create' ? await im.create({ params: req.params, data: req.data }) : await im.reply({ path: req.path, data: req.data });
       } catch (err) {
@@ -211,14 +222,16 @@ export class LarkAdapter implements Channel {
       if (typeof r.code === 'number' && r.code !== 0) throw toChannelError(r);
       const messageId = r.data?.message_id;
       if (messageId === undefined || messageId === '') throw new ChannelError(0, 'Lark answered the send with no message id', false);
-      return { messageId, deduped: false };
+      // Lark's reply answers with "the topic the message belongs to"; a direct message has none.
+      const threadId = r.data?.thread_id;
+      return { messageId, deduped: false, ...(threadId === undefined || threadId === '' ? {} : { threadId }) };
     };
     const req = messageRequest(target, msgType, content, uuid);
     try {
       return await send(req);
     } catch (err) {
       const gone = err instanceof ChannelError && !err.retryable && (WITHDRAWN_CODES.has(err.code) || notFound.has(err));
-      if (req.kind !== 'reply' || !gone) throw err;
+      if (req.kind !== 'reply' || !gone || target.stayInThread === true) throw err;
       return send(messageRequest({ chatId: target.chatId, threadId: '' }, msgType, content, uuid));
     }
   }
@@ -356,6 +369,44 @@ export class LarkAdapter implements Channel {
     }
   }
 
+  /**
+   * A group's members, by union_id (spec §19.3), from Lark's chat members API:
+   * its pages read in turn, at most `MEMBER_PAGES` of `MEMBER_PAGE_SIZE`, so
+   * 2,000 members, `complete` false when it stopped there. Lark lists no bots,
+   * and asks for the bot to be in the group. Not retried: the card poster
+   * remembers a failure, and sends a direct message meanwhile.
+   */
+  async chatMembers(chatId: string): Promise<ChatMembers> {
+    const api = this.#lark.rawClient.im.v1.chatMembers;
+    const unionIds = new Set<string>();
+    let pageToken: string | undefined;
+    for (let page = 0; page < MEMBER_PAGES; page += 1) {
+      let r: {
+        code?: number | undefined;
+        msg?: string | undefined;
+        data?:
+          | { items?: Array<{ member_id?: string | undefined }> | undefined; page_token?: string | undefined; has_more?: boolean | undefined }
+          | undefined;
+      };
+      try {
+        r = await api.get({
+          path: { chat_id: chatId },
+          params: { member_id_type: 'union_id', page_size: MEMBER_PAGE_SIZE, ...(pageToken === undefined ? {} : { page_token: pageToken }) },
+        });
+      } catch (err) {
+        throw sendError(err);
+      }
+      if (typeof r.code === 'number' && r.code !== 0) throw toChannelError(r);
+      for (const m of r.data?.items ?? []) if (m.member_id !== undefined && m.member_id !== '') unionIds.add(m.member_id);
+      const next = r.data?.page_token;
+      if (r.data?.has_more !== true) return { unionIds, complete: true };
+      // More, by Lark's word, but no way to ask for it: what was read is not all.
+      if (next === undefined || next === '') return { unionIds, complete: false };
+      pageToken = next;
+    }
+    return { unionIds, complete: false };
+  }
+
   async unreact(messageId: string, emoji: string): Promise<void> {
     try {
       // By emoji rather than by reaction id, so nothing has to remember the id
@@ -373,10 +424,11 @@ export class LarkAdapter implements Channel {
     // dropping the thread association is better than replying under an unrelated
     // message.
     if (target.threadId === '') {
-      // A quoted reply that stays in the main chat, not a new thread under it.
-      return target.replyTo === undefined ? {} : { replyTo: target.replyTo };
+      if (target.replyTo === undefined) return {};
+      // A quoted reply that stays in the main chat, unless asked to open a thread on it.
+      return target.replyInThread === true ? { replyTo: target.replyTo, replyInThread: true } : { replyTo: target.replyTo };
     }
-    return { replyTo: target.threadId, replyInThread: true };
+    return { replyTo: threadAnchor(target), replyInThread: true };
   }
 
   /**
@@ -532,15 +584,28 @@ export type MessageRequest =
     };
 
 /**
+ * The message a send in a thread replies to: the thread's root when it is known
+ * (spec §19.4), as Lark documents its reply API; else the thread's own id, as
+ * every thread reply was sent before.
+ */
+function threadAnchor(target: SendTarget): string {
+  return target.root === undefined || target.root === '' ? target.threadId : target.root;
+}
+
+/**
  * The request for one message to `target`, as `#sendOptions` places a message:
- * in its thread, as a quoted reply, or new in the chat -- or, for a person, as a
- * direct message by union_id. The uuid goes with it either way.
+ * in its thread, as a quoted reply or one that opens a thread on its message, or
+ * new in the chat -- or, for a person, as a direct message by union_id. The uuid
+ * goes with it either way.
  */
 export function messageRequest(target: SendTarget, msgType: string, content: object, uuid: string): MessageRequest {
   const body = { msg_type: msgType, content: JSON.stringify(content), uuid };
   if (target.receiveIdType !== 'union_id') {
-    if (target.threadId !== '') return { kind: 'reply', path: { message_id: target.threadId }, data: { ...body, reply_in_thread: true } };
-    if (target.replyTo !== undefined) return { kind: 'reply', path: { message_id: target.replyTo }, data: body };
+    if (target.threadId !== '') return { kind: 'reply', path: { message_id: threadAnchor(target) }, data: { ...body, reply_in_thread: true } };
+    if (target.replyTo !== undefined) {
+      const data = target.replyInThread === true ? { ...body, reply_in_thread: true } : body;
+      return { kind: 'reply', path: { message_id: target.replyTo }, data };
+    }
   }
   return {
     kind: 'create',

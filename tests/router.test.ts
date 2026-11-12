@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ACK_EMOJI, KANBAN_OFF, Router, continuityLine, type InboundCardAction, type KanbanCommands } from '../src/core/router.js';
 import { CARD_COALESCE_MS } from '../src/channel/card-writer.js';
+import { ChannelError } from '../src/channel/types.js';
 import { SessionRegistry } from '../src/core/registry.js';
 import { MAX_MAILBOX_DEPTH, type SessionActor } from '../src/core/session-actor.js';
 import { approvalNonce, replyUuid } from '../src/core/ids.js';
@@ -555,11 +556,86 @@ describe('Router: /kanban', () => {
       calls,
       run: async (arg, message, key) => {
         calls.push({ arg, messageId: message.messageId, key });
-        return answer(arg);
+        return { text: await answer(arg) };
       },
+      threaded: () => undefined,
       card: async () => answer('card'),
     };
   }
+
+  /** A board that creates task `k_1` for a thread of its own (spec §19.7), and records where the router says its reply went. */
+  function creating(): KanbanCommands & { threads: Array<[string, BindingKey, string, string | undefined]> } {
+    const threads: Array<[string, BindingKey, string, string | undefined]> = [];
+    return {
+      threads,
+      run: async () => ({ text: 'Created `k_1`. This thread hears sk-thread-12345678', quoted: 'Created `k_1`. This chat hears', thread: 'k_1' }),
+      threaded: (taskId, key, messageId, threadId) => void threads.push([taskId, key, messageId, threadId]),
+      card: async () => 'unused',
+    };
+  }
+  const inGroup = (): InboundMessage => msg({ chatType: 'group', mentionedBot: true, text: '/kanban task new Check the links' });
+  const KEY: BindingKey = { channel: CHANNEL, appId: APP, conversationId: CHAT, threadId: '' };
+
+  it("answers a fresh task from a group at chat scope in a thread on the command, staying there, and tells the board the thread", async () => {
+    addSecrets(['sk-thread-12345678']);
+    const kanban = creating();
+    const h = harness({ kanban });
+    const message = inGroup();
+    await h.router.onMessage(message);
+    expect(h.channel.texts).toEqual([
+      {
+        target: { chatId: CHAT, threadId: '', replyTo: message.messageId, replyInThread: true, stayInThread: true },
+        text: `Created \`k_1\`. This thread hears ${MASK}`,
+        uuid: replyUuid(APP, message.messageId, 'kanban'),
+      },
+    ]);
+    expect(kanban.threads).toEqual([['k_1', KEY, message.messageId, `omt_${message.messageId}`]]);
+  });
+
+  it('sends the quoted words, with the same uuid, when Lark refuses the thread: 230071, a withdrawn command, 230017 or an HTTP 404', async () => {
+    for (const code of [230071, 230011, 230017, 404]) {
+      const kanban = creating();
+      const h = harness({ kanban });
+      const message = inGroup();
+      h.channel.failNext('sendText', new ChannelError(code, `refused ${code}`, false));
+      await h.router.onMessage(message);
+      expect(h.channel.texts).toEqual([
+        { target: { chatId: CHAT, threadId: '', replyTo: message.messageId }, text: 'Created `k_1`. This chat hears', uuid: replyUuid(APP, message.messageId, 'kanban') },
+      ]);
+      expect(kanban.threads).toEqual([['k_1', KEY, message.messageId, undefined]]);
+    }
+  });
+
+  it('leaves the task at chat scope when the reply never reached Lark, or came back with no thread', async () => {
+    const lost = creating();
+    const h = harness({ kanban: lost });
+    h.channel.failNext('sendText', new ChannelError(0, 'socket hang up', true));
+    const first = inGroup();
+    await h.router.onMessage(first);
+    // Given up, as any reply is: nothing quoted after it.
+    expect(h.channel.texts).toEqual([]);
+    expect(lost.threads).toEqual([['k_1', KEY, first.messageId, undefined]]);
+    expect(h.notes.some((n) => n.startsWith('reply (kanban) failed'))).toBe(true);
+    const unthreaded = creating();
+    const g = harness({ kanban: unthreaded });
+    g.channel.replyThreads = false;
+    const second = inGroup();
+    await g.router.onMessage(second);
+    expect(g.channel.texts.map((m) => m.target.replyInThread)).toEqual([true]);
+    expect(unthreaded.threads).toEqual([['k_1', KEY, second.messageId, undefined]]);
+    expect(g.notes).toContain(`kanban: the reply to ${second.messageId} came back with no thread; task k_1 stays at chat scope`);
+  });
+
+  it('answers a fresh task anyway when the board cannot record where its reply went, and notes it', async () => {
+    const kanban = creating();
+    kanban.threaded = () => {
+      throw new Error('database_locked');
+    };
+    const h = harness({ kanban });
+    await h.router.onMessage(inGroup());
+    expect(h.channel.texts).toHaveLength(1);
+    expect(h.notes).toContain("kanban: where task k_1's reply went was not recorded: database_locked");
+  });
 
   it('says the board is off when kanban.enabled is not set, and opens no session', async () => {
     const h = harness();
@@ -956,7 +1032,8 @@ describe('Router: card actions', () => {
     const h = harness({
       auth: { allowTalk: [OWNER.openId, GUEST.openId], allowOperate: [OWNER.openId] },
       kanban: {
-        run: async () => 'unused',
+        run: async () => ({ text: 'unused' }),
+        threaded: () => undefined,
         card: async (action) => {
           pressed.push(action);
           return 'Done: `k_1` is complete, sk-card-12345678';
@@ -985,7 +1062,8 @@ describe('Router: card actions', () => {
   it("notes a board card's button that throws, masked, and posts nothing", async () => {
     const h = harness({
       kanban: {
-        run: async () => 'unused',
+        run: async () => ({ text: 'unused' }),
+        threaded: () => undefined,
         card: async () => {
           throw new Error('database_locked\nsecond line');
         },

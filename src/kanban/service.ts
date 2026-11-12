@@ -264,7 +264,8 @@ function createdViaRefused(via: unknown): Refusal | undefined {
           isText(via.channel) &&
           isText(via.appId) &&
           isText(via.conversationId) &&
-          isText(via.threadId));
+          isText(via.threadId) &&
+          (via.rootId === undefined || isText(via.rootId)));
   return fine ? undefined : board.refuse('invalid', 'created_via is a chat, with text fields, a run id, or the operator');
 }
 
@@ -1125,6 +1126,20 @@ export class KanbanService {
       return board.refuse('invalid', 'a subscription and its cursor are whole numbers');
     }
     return board.advanceSubscription(this.#db, subscriptionId, cursor);
+  }
+
+  /**
+   * A task's subscription at this chat moved into the thread its "Created" reply
+   * opened, with the command message as its root (spec §19.4): `KanbanChat`'s,
+   * once Lark answered the reply with its thread.
+   */
+  threadSubscription(taskId: string, at: ChatAt, threadId: string, rootId: string): Result<{ moved: boolean }> {
+    const ids = idsRefused(taskId, threadId, rootId);
+    if (ids !== undefined) return ids;
+    if (!isRecord(at) || !isText(at.channel) || !isText(at.appId) || !isText(at.conversationId)) {
+      return board.refuse('invalid', 'a chat is its channel, bot and conversation, as text');
+    }
+    return board.threadSubscription(this.#db, taskId, at, threadId, rootId);
   }
 
   /** Who the next claim is for, resolved against the team as it is now. */

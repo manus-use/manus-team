@@ -9,7 +9,7 @@ import type { BindingKey } from '../src/types.js';
 import { FakeChannel } from './helpers/channel.js';
 import { FakeDriver } from './helpers/driver.js';
 import { ManualClock, testDb, type TestDb } from './helpers/db.js';
-import { newTask } from './helpers/kanban.js';
+import { VIA, newTask } from './helpers/kanban.js';
 
 const NOW = 1_760_000_000_000;
 const open: TestDb[] = [];
@@ -33,6 +33,8 @@ describe('KanbanSink', () => {
     await sink.react('m', 'OK');
     await sink.unreact('m', 'OK');
     await sink.updateApprovalCard('m', { action: 'a', choice: 'b', answeredBy: 'c' });
+    // A run's session is in no group.
+    await expect(sink.chatMembers('k_1')).rejects.toThrow('has no members to read');
   });
 
   it("lets a run's turn complete with every event in the session log", async () => {
@@ -157,6 +159,25 @@ describe('KanbanSink forwarding approvals (spec §7.1)', () => {
     await sink.updateApprovalCard('om_approval_1', { action: 'a', choice: 'b', answeredBy: 'c' });
     expect(lark.approvalUpdates).toHaveLength(1);
     expect(getApproval(h.db, card.spec.approvalId)?.cardMessageId).toBe('om_approval_1');
+  });
+
+  it("replies to the root of the task's thread, in the thread, when its subscription has one (spec §19.7)", async () => {
+    const h = testDb();
+    open.push(h);
+    const clock = new ManualClock(NOW);
+    const rooted = newTask(h.db, { title: 'Rotate the logs', createdVia: { kind: 'chat', channel: 'lark', appId: 'cli_app', conversationId: 'oc_team', threadId: 'omt_topic', rootId: 'om_root' } });
+    const rootless = newTask(h.db, { title: 'Rotate the logs', createdVia: { kind: 'chat', channel: 'lark', appId: 'cli_app', conversationId: 'oc_team', threadId: 'omt_topic' } });
+    const atChat = newTask(h.db, { title: 'Rotate the logs', createdVia: VIA });
+    const lark = new FakeChannel({ id: 'lark', clock });
+    const sink = new KanbanSink(() => clock.now(), { db: h.db, channels: new Map([['lark', lark]]), appId: 'cli_app' });
+    const spec = { approvalId: 'a_1', action: 'delete old.log', options: [{ optionId: 'allow', name: 'Allow' }], nonce: 'n' };
+    for (const task of [rooted, rootless, atChat]) await sink.sendApprovalCard({ chatId: task.taskId, threadId: 'r_1' }, spec, `u_${task.taskId}`);
+    expect(lark.approvalCards.map((c) => c.target)).toEqual([
+      { chatId: 'oc_team', threadId: 'omt_topic', root: 'om_root' },
+      { chatId: 'oc_team', threadId: 'omt_topic' },
+      { chatId: 'oc_chat', threadId: '' },
+    ]);
+    expect(lark.approvalCards[1]?.target).not.toHaveProperty('root');
   });
 
   it('remembers at most FORWARDED_MAX forwarded cards for their redraw, forgetting the oldest', async () => {

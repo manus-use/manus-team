@@ -10,6 +10,14 @@ import type { PermissionOption } from '../types.js';
  * same answer twice.
  */
 
+/**
+ * The longest text a channel sends as one message, with its uuid. Every reply the
+ * router sends is cut to it, and every batch of notices (at most 3,800) fits; a
+ * send that stays in its thread is cut to it by the adapter, so it is never
+ * split. A longer text is split by the SDK, at its own 3,500, without one.
+ */
+export const ONE_MESSAGE = 4_000;
+
 export interface SendTarget {
   /** The chat; or, when `receiveIdType` is `union_id`, the person. */
   chatId: string;
@@ -23,6 +31,24 @@ export interface SendTarget {
    * already groups the conversation.
    */
   replyTo?: string;
+  /**
+   * With `replyTo`, at chat scope: the reply opens a thread on that message, with
+   * Lark's `reply_in_thread`, rather than quoting it (spec §19.4: a task's
+   * "Created" reply).
+   */
+  replyInThread?: boolean;
+  /**
+   * In a thread: the thread's root message, which the send replies to, with
+   * `reply_in_thread` (spec §19.4). Absent, the send replies to `threadId` as a
+   * message id, as before.
+   */
+  root?: string;
+  /**
+   * A reply whose message is gone is not moved to its chat, and the refusal
+   * reaches the caller (spec §19.2, §19.4): a person's card in a thread, and the
+   * threaded "Created" reply.
+   */
+  stayInThread?: boolean;
   /**
    * How `chatId` names who receives the message: absent, a chat; `union_id`, a
    * person, sent a direct message (spec §9.2). Lark takes the type per message,
@@ -72,6 +98,11 @@ export interface SendResult {
   messageId: string;
   /** True when the platform returned an existing message for a repeated uuid. */
   deduped: boolean;
+  /**
+   * The thread the message is in, as the platform answered: absent for a message
+   * in no thread, a direct message among them (spec §19.2, §19.7).
+   */
+  threadId?: string;
 }
 
 /**
@@ -178,6 +209,21 @@ export interface Channel {
 
   /** Remove the bot's own reaction. A reaction that is not there is not an error. */
   unreact(messageId: string, emoji: string): Promise<void>;
+
+  /**
+   * A group's members, by union_id (spec §19.3): whether a person's card can go
+   * in a task's thread there. Throws when they cannot be read.
+   */
+  chatMembers(chatId: string): Promise<ChatMembers>;
+}
+
+/**
+ * A group's members, by union_id (spec §19.3), as far as they were read:
+ * `complete` false when the lookup stopped before the last of them.
+ */
+export interface ChatMembers {
+  unionIds: ReadonlySet<string>;
+  complete: boolean;
 }
 
 /**

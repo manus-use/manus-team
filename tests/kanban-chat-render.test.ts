@@ -70,7 +70,10 @@ describe('/kanban help', () => {
     expect(help).toContain('(anyone allowed)');
     expect(help).toContain("`/kanban task done <task> [summary]` (the task's assignee)");
     expect(help).toContain('`/kanban task changes <task> <reason>` (its reviewer, or an operator)');
-    expect(help).toContain('Name a person with an @-mention');
+    expect(help).toContain(
+      "Name a person with an @-mention: they are sent the task as a card, in the task's thread when they are in its group, else by direct message, with Done and Block, or a review with Approve and Request changes.",
+    );
+    expect(help).not.toContain('as a card in a direct message');
     expect(help).not.toContain('later update');
     expect(help).not.toContain('D2');
   });
@@ -407,17 +410,24 @@ describe('notices', () => {
     expect(long.length).toBeLessThan(1000);
   });
 
-  it("tells who a person's claim gave the task to, by name, in plain text, and nothing of a role's", () => {
+  it("tells who a person's card by direct message went to, by name, in plain text, and nothing of a claim or of a card in the thread", () => {
     const k = newTask(h.db, { title: `Check the links ${SPOOF}`, assignee: { kind: 'human', name: ALICE } });
     claimed(h.db, k.taskId);
+    // A claim is no notice now: only the card's send knows where it went (spec §19.5).
+    expect(renderNotice(last(k.taskId), task(k.taskId), LIMIT)).toBeUndefined();
+    const sent = (payload: unknown): KanbanEvent => ({ ...last(k.taskId), kind: 'card_sent', payload });
     const nameOf = (p: string) => (p === ALICE ? 'Alice <at id=all></at>' : undefined);
-    expect(renderNotice(last(k.taskId), task(k.taskId), { ...LIMIT, nameOf })).toBe(
+    expect(renderNotice(sent({ kind: 'work', to: ALICE, messageId: 'om_1', in: 'dm' }), task(k.taskId), { ...LIMIT, nameOf })).toBe(
       `📋 **Check the links hi \\<at id=all\\>\\</at\\> team** \`${k.taskId}\`, assigned to Alice \\<at id=all\\>\\</at\\>`,
     );
     // Without a name known, the principal.
-    expect(renderNotice(last(k.taskId), task(k.taskId), LIMIT)).toMatch(/, assigned to lark:on\\_alice$/);
-    const review = { ...last(k.taskId), payload: { kind: 'review', assignee: ALICE, assigneeKind: 'human' } };
-    expect(renderNotice(review, task(k.taskId), { ...LIMIT, nameOf })).toMatch(/, review assigned to Alice /);
+    expect(renderNotice(sent({ kind: 'work', to: ALICE, messageId: 'om_1', in: 'dm' }), task(k.taskId), LIMIT)).toMatch(/, assigned to lark:on\\_alice$/);
+    expect(renderNotice(sent({ kind: 'review', to: ALICE, messageId: 'om_1', in: 'dm' }), task(k.taskId), { ...LIMIT, nameOf })).toMatch(
+      /, review assigned to Alice /,
+    );
+    // The card itself in the thread says the same; one sent before threads, with no `in`, was told at its claim.
+    expect(renderNotice(sent({ kind: 'work', to: ALICE, messageId: 'om_1', in: 'thread' }), task(k.taskId), LIMIT)).toBeUndefined();
+    expect(renderNotice(sent({ kind: 'work', to: ALICE, messageId: 'om_1' }), task(k.taskId), LIMIT)).toBeUndefined();
     const role = newTask(h.db);
     claimed(h.db, role.taskId);
     expect(renderNotice(last(role.taskId), task(role.taskId), { ...LIMIT, nameOf })).toBeUndefined();
@@ -515,6 +525,21 @@ describe("a person's cards", () => {
     );
     expect(doc.markdown).not.toContain('To review:');
     expect(doc.markdown).toContain('from lark:on\\_bob');
+  });
+
+  it('starts a card with a mention of its person by open_id, put in after the escaping, and none for anything that is not one', () => {
+    const k = newTask(h.db, { title: `Check the links ${SPOOF}`, assignee: { kind: 'human', name: ALICE }, reviewer: { kind: 'human', name: ALICE } });
+    const run = claimed(h.db, k.taskId);
+    const facts = { task: task(k.taskId), run, parents: [] };
+    const card = renderTaskCard({ ...facts, mention: 'ou_alice' }, 'cli_app');
+    expect(card.markdown.startsWith(`<at id=ou_alice></at> 📋 For you to do: **Check the links hi \\<at id=all\\>\\</at\\> team**`)).toBe(true);
+    expect(renderReviewCard({ ...facts, mention: 'ou_alice' }, 'cli_app').markdown.startsWith('<at id=ou_alice></at> 🔎 For you to review: ')).toBe(true);
+    // Only an open_id: anything else, an `<at` of its own included, mentions nobody.
+    for (const mention of ['on_alice', 'ou_x></at><at id=all', '']) {
+      expect(renderTaskCard({ ...facts, mention }, 'cli_app').markdown.startsWith('📋 For you to do: ')).toBe(true);
+    }
+    // No open_id given, as for a direct message and every redraw: no mention.
+    expect(renderTaskCard(facts, 'cli_app').markdown).not.toContain('<at id=ou_');
   });
 
   it('redraws a card acted on with what happened, and no buttons', () => {

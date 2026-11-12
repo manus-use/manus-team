@@ -73,8 +73,8 @@ function message(sender: Principal, key: BindingKey): InboundMessage {
   };
 }
 
-function say(arg: string, key: BindingKey = TEAM, sender: Principal = OWNER): Promise<string> {
-  return chat.run(arg, message(sender, key), key);
+async function say(arg: string, key: BindingKey = TEAM, sender: Principal = OWNER): Promise<string> {
+  return (await chat.run(arg, message(sender, key), key)).text;
 }
 
 function created(reply: string): string {
@@ -118,7 +118,8 @@ describe('/kanban board use', () => {
     await say('board use web-app');
     const reply = await say('task new On the web app\nassignee: implementer\nworkspace: web');
     const taskId = created(reply);
-    expect(reply).toContain(', in web, on board **web-app**. This chat hears');
+    // At chat scope in a group: in the words of the thread its reply opens (spec §19.5).
+    expect(reply).toContain(', in web, on board **web-app**. This thread hears');
     expect(getTask(t.db, taskId)?.board).toBe('web-app');
     expect(passes).toBe(2);
 

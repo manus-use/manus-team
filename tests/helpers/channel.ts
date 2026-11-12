@@ -5,6 +5,7 @@ import type {
   CardSession,
   CardView,
   Channel,
+  ChatMembers,
   SendResult,
   SendTarget,
 } from '../../src/channel/types.js';
@@ -34,6 +35,7 @@ type Method =
   | 'updateCard'
   | 'react'
   | 'unreact'
+  | 'chatMembers'
   | 'set'
   | 'finish';
 
@@ -145,9 +147,23 @@ export class FakeChannel implements Channel {
   /** Board cards posted (spec §9.2), and their redraws. */
   readonly boardCards: BoardCardCall[] = [];
   readonly cardUpdates: CardUpdateCall[] = [];
+  /** Each group's members, by union_id, as Lark's chat members API answers (spec §19.3); a group not here has none. */
+  readonly members = new Map<string, readonly string[]>();
+  /** Groups whose lookup stops before its last page, as one past 2,000 members does. */
+  readonly incomplete = new Set<string>();
+  /** The groups whose members were asked for, in order. */
+  readonly memberLookups: string[] = [];
+
+  /**
+   * Whether a reply that opens a thread is answered with that thread's id, as
+   * Lark answers one (spec §19.4): `omt_` and the message replied to. Off, it is
+   * answered with none, as a reply Lark did not thread.
+   */
+  replyThreads = true;
 
   readonly #clock: Clock;
   readonly #failures = new Map<Method, unknown[]>();
+  readonly #answers = new Map<Method, SendResult[]>();
   #held: Promise<void> | undefined;
   #release: (() => void) | undefined;
   #seq = 0;
@@ -181,6 +197,16 @@ export class FakeChannel implements Channel {
     this.#failures.set(method, queue);
   }
 
+  /**
+   * Make the next call to `method` that succeeds answer with `result`, as Lark
+   * answers a send it deduplicated against an earlier one: queued, as failures are.
+   */
+  answerNext(method: Method, result: SendResult): void {
+    const queue = this.#answers.get(method) ?? [];
+    queue.push(result);
+    this.#answers.set(method, queue);
+  }
+
   /** Awaited by every call site, after it has been recorded and before it succeeds. */
   async gate(method: Method): Promise<void> {
     const held = this.#held;
@@ -194,13 +220,26 @@ export class FakeChannel implements Channel {
     return this.cards.at(-1);
   }
 
+  /** The thread a send to `target` lands in, as Lark answers: none for a direct message, or a message in no thread. */
+  threadOf(target: SendTarget): string | undefined {
+    if (target.receiveIdType === 'union_id') return undefined;
+    if (target.threadId !== '') return target.threadId;
+    if (target.replyTo !== undefined && target.replyInThread === true && this.replyThreads) return `omt_${target.replyTo}`;
+    return undefined;
+  }
+
+  #result(messageId: string, target: SendTarget): SendResult {
+    const threadId = this.threadOf(target);
+    return { messageId, deduped: false, ...(threadId === undefined ? {} : { threadId }) };
+  }
+
   // -- Channel ---------------------------------------------------------------
 
   async sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[]): Promise<SendResult> {
     this.calls.push('sendText');
     await this.gate('sendText');
     this.texts.push({ target, text, uuid, ...(buttons === undefined ? {} : { buttons }) });
-    return { messageId: `om_text_${++this.#seq}`, deduped: false };
+    return this.#result(`om_text_${++this.#seq}`, target);
   }
 
   async openCard(target: SendTarget, initialText: string, uuid: string): Promise<CardSession> {
@@ -224,7 +263,7 @@ export class FakeChannel implements Channel {
     this.calls.push('sendApprovalCard');
     await this.gate('sendApprovalCard');
     this.approvalCards.push({ target, spec, uuid });
-    return { messageId: `om_approval_${++this.#seq}`, deduped: false };
+    return this.#result(`om_approval_${++this.#seq}`, target);
   }
 
   async updateApprovalCard(messageId: string, view: ApprovalOutcomeView): Promise<void> {
@@ -237,7 +276,8 @@ export class FakeChannel implements Channel {
     this.calls.push('sendCard');
     await this.gate('sendCard');
     this.boardCards.push({ target, view, uuid });
-    return { messageId: `om_board_${++this.#seq}`, deduped: false };
+    const result = this.#result(`om_board_${++this.#seq}`, target);
+    return this.#answers.get('sendCard')?.shift() ?? result;
   }
 
   async updateCard(messageId: string, view: CardView): Promise<void> {
@@ -256,5 +296,12 @@ export class FakeChannel implements Channel {
     this.calls.push('unreact');
     await this.gate('unreact');
     this.reactions.push({ op: 'remove', messageId, emoji });
+  }
+
+  async chatMembers(chatId: string): Promise<ChatMembers> {
+    this.calls.push('chatMembers');
+    this.memberLookups.push(chatId);
+    await this.gate('chatMembers');
+    return { unionIds: new Set(this.members.get(chatId) ?? []), complete: !this.incomplete.has(chatId) };
   }
 }

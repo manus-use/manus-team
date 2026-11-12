@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { forDisplay } from '../channel/escape.js';
 import type { CardView } from '../channel/types.js';
 import { boardCardNonce } from '../core/ids.js';
-import type { InboundCardAction } from '../core/router.js';
+import type { InboundCardAction, KanbanAnswer } from '../core/router.js';
 import type { BindingKey, InboundMention, InboundMessage, Principal, Tier } from '../types.js';
 import {
   isPerson,
@@ -29,6 +29,7 @@ import {
   type CardFacts,
 } from './chat-render.js';
 import { redactKnownSecrets } from '../secrets.js';
+import { CARD_SEND_MS } from './cards.js';
 import { personPrincipal, type PeopleDirectory } from './people.js';
 import type { KanbanService } from './service.js';
 import {
@@ -86,6 +87,8 @@ export interface KanbanChatDeps {
   changed?: () => void;
   /** After a change that decided an agent run: the dispatcher cancels its turn and closes it. */
   cancel?: (runId: string) => void;
+  /** How long a task is held while its "Created" reply is under way (spec §19.4); `CARD_SEND_MS` unless a test says otherwise. */
+  holdMs?: number;
 }
 
 /** Who may run each command (spec §9.1, §10); a person's own reports check who is named, below. */
@@ -203,6 +206,8 @@ export class KanbanChat {
   readonly #busy = new Set<string>();
   /** Aborted when the gateway stops: a report's gates are killed, and nothing is applied (spec §7.7). */
   readonly #stopping = new AbortController();
+  /** Tasks whose "Created" reply is under way, each until its timer lapses (spec §19.4). Memory only. */
+  readonly #holds = new Map<string, NodeJS.Timeout>();
 
   constructor(deps: KanbanChatDeps) {
     this.#deps = deps;
@@ -216,8 +221,51 @@ export class KanbanChat {
     }
   }
 
-  /** Run `/kanban <arg>` from this message, bound at `key`; the reply to send. */
-  async run(arg: string, message: InboundMessage, key: BindingKey): Promise<string> {
+  /** Run `/kanban <arg>` from this message, bound at `key`; the reply to send, and for a task given a thread, the task. */
+  async run(arg: string, message: InboundMessage, key: BindingKey): Promise<KanbanAnswer> {
+    const answer = await this.#run(arg, message, key);
+    return typeof answer === 'string' ? { text: answer } : answer;
+  }
+
+  /**
+   * Whether a task is held while its "Created" reply is under way (spec §19.4):
+   * the card poster passes over its runs, so its card does not go by direct
+   * message in the moment before its subscription moves to its thread.
+   */
+  held(taskId: string): boolean {
+    return this.#holds.has(taskId);
+  }
+
+  /**
+   * Where a fresh task's "Created" reply went (spec §19.4, §19.7): in thread
+   * `threadId`, its subscription moves there, with the command message as its
+   * root; with none -- the reply failed, or was sent quoted -- it stays at chat
+   * scope. A move that comes after the hold lapsed still applies. The hold ends
+   * either way, once the move is written.
+   */
+  threaded(taskId: string, key: BindingKey, messageId: string, threadId: string | undefined): void {
+    try {
+      if (threadId === undefined || threadId === '') return;
+      const r = this.#deps.service.threadSubscription(taskId, chatAt(key), threadId, messageId);
+      if (!r.ok) this.#note(`kanban: task ${taskId} stays at chat scope: its subscription was not moved to thread ${threadId} (${r.code})`);
+    } finally {
+      this.#release(taskId);
+    }
+  }
+
+  /** A task held until `threaded`, or `holdMs` at most. */
+  #hold(taskId: string): void {
+    const timer = setTimeout(() => this.#holds.delete(taskId), this.#deps.holdMs ?? CARD_SEND_MS);
+    timer.unref();
+    this.#holds.set(taskId, timer);
+  }
+
+  #release(taskId: string): void {
+    clearTimeout(this.#holds.get(taskId));
+    this.#holds.delete(taskId);
+  }
+
+  async #run(arg: string, message: InboundMessage, key: BindingKey): Promise<string | KanbanAnswer> {
     const parsed = parseKanban(arg);
     if (!parsed.ok) return parsed.usage;
     const command = parsed.command;
@@ -264,7 +312,7 @@ export class KanbanChat {
     return this.#change(command, by, message, key);
   }
 
-  async #change(command: KanbanCommand, by: string, message: InboundMessage, key: BindingKey): Promise<string> {
+  async #change(command: KanbanCommand, by: string, message: InboundMessage, key: BindingKey): Promise<string | KanbanAnswer> {
     const service = this.#deps.service;
     switch (command.verb) {
       case 'new':
@@ -745,9 +793,11 @@ export class KanbanChat {
   /**
    * `/kanban task new` (spec §9.1): created from this chat, which is subscribed to it.
    * The message id is the idempotency key, so a redelivery that got past the
-   * router's own dedup still makes one task.
+   * router's own dedup still makes one task. A fresh task from a group at chat
+   * scope gets a thread of its own, on the command (spec §19.1): it is answered in
+   * both wordings, naming it, and held until the router says where its reply went.
    */
-  #create(command: NewTaskCommand, by: string, message: InboundMessage, key: BindingKey): string {
+  #create(command: NewTaskCommand, by: string, message: InboundMessage, key: BindingKey): string | KanbanAnswer {
     const named: { assignee?: string; reviewer?: string } = {};
     for (const role of ['assignee', 'reviewer'] as const) {
       const name = command[role];
@@ -779,23 +829,50 @@ export class KanbanChat {
         appId: key.appId,
         conversationId: key.conversationId,
         threadId: key.threadId,
+        // In a group's thread, its root: where a card and a notice in it reply to (spec §19.4). A direct message has none (§19.1).
+        ...(message.chatType !== 'group' || key.threadId === '' || message.rootId === undefined ? {} : { rootId: message.rootId }),
       },
     });
     if (!r.ok) return refused(r);
     const { task } = r;
     if (r.existing) return `Already created, as ${id(task.taskId)}.`;
-    this.#changed();
+    // Held from here, with no await before it, so the dispatcher's pass below, and
+    // the card poster, find it held (spec §19.4).
+    const thread = message.chatType === 'group' && key.threadId === '';
+    if (thread) this.#hold(task.taskId);
+    try {
+      this.#changed();
+      if (thread) return { text: this.#created(task, 'thread'), quoted: this.#created(task, 'chat'), thread: task.taskId };
+      // In a thread whose root is known, its card can come there too.
+      return this.#created(task, message.chatType === 'group' && key.threadId !== '' && message.rootId !== undefined ? 'thread' : 'chat');
+    } catch (err) {
+      // The task stands, at chat scope, as one whose reply failed: no hold to wait out.
+      if (thread) this.#release(task.taskId);
+      throw err;
+    }
+  }
+
+  /**
+   * The "Created" reply (spec §19.5): in the words of a thread the task's card can
+   * come to, or in words true anywhere: a direct message, a quoted reply, or a
+   * thread with no root.
+   */
+  #created(task: TaskRow, where: 'thread' | 'chat'): string {
     const whom =
       task.assignee === null
         ? 'nobody yet (`/kanban task assign ' + task.taskId + ' <role or @person>` gives it to someone)'
         : this.#whom(task.assignee);
     const card =
-      task.assignee?.kind === 'human' ? ' They are sent it as a card, in a direct message, once it is ready.' : '';
+      task.assignee?.kind !== 'human'
+        ? ''
+        : where === 'thread'
+          ? ' Their card comes in this thread when it is ready, or by direct message if they are not in this group.'
+          : ' They are sent it as a card, in a direct message, once it is ready.';
     return (
       `Created ${id(task.taskId)}: **${label(task.title)}**, for ${whom}` +
       `${task.workspace === null ? '' : `, in ${label(task.workspace)}`}` +
       `${task.board === DEFAULT_BOARD ? '' : `, on board ${boardName(task.board)}`}.${card} ` +
-      'This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.'
+      `${where === 'thread' ? 'This thread' : 'This chat'} hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.`
     );
   }
 

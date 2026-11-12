@@ -161,7 +161,7 @@ describe('the notifier', () => {
     expect(lark.texts[2]?.buttons?.map((x) => x.value['task'])).toEqual(many.slice(0, UNBLOCK_BUTTONS).map((x) => x.taskId));
   });
 
-  it("tells who a person's claim gave a task to, by the name Lark gave", async () => {
+  it("tells who a person's card by direct message went to, by the name Lark gave, and nothing of the claim before it", async () => {
     const people = new KanbanService({
       db: t.db,
       roles: new Map(DEFAULT_ROLES.map((r) => [r.name, r])),
@@ -171,9 +171,48 @@ describe('the notifier', () => {
     });
     const r = people.create({ title: 'Check the links', assignee: ALICE, createdBy: ALICE, createdVia: VIA });
     if (!r.ok) throw new Error(r.message);
-    expect(people.claim(r.task.taskId).ok).toBe(true);
-    await notifier({ nameOf: (p) => (p === ALICE ? 'Alice' : undefined) }).deliver();
+    const claimed = people.claim(r.task.taskId);
+    if (!claimed.ok) throw new Error(claimed.message);
+    const n = notifier({ nameOf: (p) => (p === ALICE ? 'Alice' : undefined) });
+    expect(await n.deliver()).toBe(0);
+    expect(people.recordCard(claimed.run.runId, { messageId: 'om_card', in: 'dm' }).ok).toBe(true);
+    await n.deliver();
     expect(lark.texts.map((m) => m.text)).toEqual([`📋 **Check the links** \`${r.task.taskId}\`, assigned to Alice`]);
+  });
+
+  it("replies a thread's batch to its root when any of its subscriptions has one, and one with none as before (spec §19.7)", async () => {
+    // A task from before threads had roots, and one after, in the same thread.
+    const old = create('From before');
+    const rooted = create('From after', { ...VIA, rootId: 'om_root' });
+    await done(old, 'one');
+    await done(rooted, 'two');
+    expect(await notifier().deliver()).toBe(2);
+    expect(lark.texts.map((m) => m.target)).toEqual([{ chatId: 'oc_team', threadId: 'omt_topic', root: 'om_root' }]);
+    // A thread with no root among its subscriptions replies to the thread, as before.
+    await done(create('Alone', { ...VIA, threadId: 'omt_other' }), 'three');
+    await notifier().deliver();
+    expect(lark.texts[1]?.target).toEqual({ chatId: 'oc_team', threadId: 'omt_other' });
+    expect(lark.texts[1]?.target).not.toHaveProperty('root');
+  });
+
+  it("replies a thread's batch to its root when only a task from before threads is due there (spec §19.7)", async () => {
+    const old = create('From before');
+    create('From after', { ...VIA, rootId: 'om_root' });
+    // Nothing of the rooted task's is due: its cursor is past all it has.
+    expect(await notifier().deliver()).toBe(0);
+    expect(dueSubscriptions(t.db, 'cli_app').map((s) => s.taskId)).toEqual([]);
+    await done(old, 'one');
+    expect(dueSubscriptions(t.db, 'cli_app').map((s) => s.taskId)).toEqual([old.taskId]);
+    expect(await notifier().deliver()).toBe(1);
+    expect(lark.texts.map((m) => m.target)).toEqual([{ chatId: 'oc_team', threadId: 'omt_topic', root: 'om_root' }]);
+    // Only this bot's, on this channel, in this chat and thread, count.
+    create('Elsewhere', { ...VIA, threadId: 'omt_third', appId: 'cli_other', rootId: 'om_not_ours' });
+    create('Another chat', { ...VIA, conversationId: 'oc_other', threadId: 'omt_third', rootId: 'om_not_here' });
+    const third = create('In the third', { ...VIA, threadId: 'omt_third' });
+    await notifier().deliver();
+    await done(third, 'two');
+    await notifier().deliver();
+    expect(lark.texts.at(-1)?.target).toEqual({ chatId: 'oc_team', threadId: 'omt_third' });
   });
 
   it('sends at most a batch of notices a message, says more follow, and sends them in the next round', async () => {

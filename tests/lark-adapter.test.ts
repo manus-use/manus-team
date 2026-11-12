@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LarkChannel } from '@larksuiteoapi/node-sdk';
-import { LarkAdapter, sendError } from '../src/channel/lark/adapter.js';
+import { LarkAdapter, ONE_MESSAGE, sendError } from '../src/channel/lark/adapter.js';
 import { ChannelError } from '../src/channel/types.js';
 
 /**
@@ -22,15 +22,18 @@ function refused(code: number, status = 400): Error {
   });
 }
 
-function adapter(answers: Array<Error | undefined>): { a: LarkAdapter; calls: Call[]; waits: number[] } {
+/** What Lark answers a send with: a failure, or more of a success's data, such as its thread_id. */
+type Answer = Error | { thread_id: string } | undefined;
+
+function adapter(answers: Answer[]): { a: LarkAdapter; calls: Call[]; waits: number[] } {
   const calls: Call[] = [];
   const waits: number[] = [];
   let seq = 0;
   const answer = async (kind: Call['kind'], payload: Call['payload']) => {
     calls.push({ kind, payload });
     const next = answers.shift();
-    if (next !== undefined) throw next;
-    return { code: 0, msg: 'ok', data: { message_id: `om_${++seq}` } };
+    if (next instanceof Error) throw next;
+    return { code: 0, msg: 'ok', data: { message_id: `om_${++seq}`, ...next } };
   };
   const lark = {
     rawClient: {
@@ -137,6 +140,125 @@ describe('LarkAdapter.sendText', () => {
     const outside = adapter([refused(230002)]);
     await expect(outside.a.sendText(CHAT, 'Blocked', 'u-7', [button])).rejects.toMatchObject({ code: 230002 });
     expect(outside.calls).toHaveLength(1);
+  });
+});
+
+describe('LarkAdapter in a thread (spec §19.4, §19.7)', () => {
+  const where = (calls: Call[]) => calls.map((c) => [c.kind, c.payload.path?.message_id ?? c.payload.data.receive_id]);
+
+  it("reads the thread a send landed in from Lark's answer, and none when it has none", async () => {
+    const threaded = adapter([{ thread_id: 'omt_new' }]);
+    expect(await threaded.a.sendText({ chatId: 'oc_team', threadId: '', replyTo: 'om_cmd', replyInThread: true }, 'Created', 'u-1')).toEqual({
+      messageId: 'om_1',
+      deduped: false,
+      threadId: 'omt_new',
+    });
+    expect(where(threaded.calls)).toEqual([['reply', 'om_cmd']]);
+    const card = adapter([{ thread_id: 'omt_topic' }]);
+    expect((await card.a.sendCard({ chatId: 'oc_team', threadId: 'omt_topic', root: 'om_root' }, { markdown: 'x', buttons: [] }, 'u-2')).threadId).toBe(
+      'omt_topic',
+    );
+    expect(where(card.calls)).toEqual([['reply', 'om_root']]);
+    const dm = adapter([{ thread_id: '' }]);
+    expect(await dm.a.sendCard({ chatId: 'on_alice', threadId: '', receiveIdType: 'union_id' }, { markdown: 'x', buttons: [] }, 'u-3')).toEqual({
+      messageId: 'om_1',
+      deduped: false,
+    });
+  });
+
+  it('keeps a send that stays in its thread out of the chat: a withdrawn root, 230017 or an HTTP 404 reaches the caller', async () => {
+    const target = { chatId: 'oc_team', threadId: 'omt_topic', root: 'om_root', stayInThread: true };
+    for (const err of [refused(230011), refused(230017), refused(230099, 404)]) {
+      const gone = adapter([err]);
+      await expect(gone.a.sendCard(target, { markdown: 'x', buttons: [] }, 'u-4')).rejects.toBeInstanceOf(ChannelError);
+      expect(where(gone.calls)).toEqual([['reply', 'om_root']]);
+    }
+    const created = adapter([refused(230011)]);
+    await expect(
+      created.a.sendText({ chatId: 'oc_team', threadId: '', replyTo: 'om_cmd', replyInThread: true, stayInThread: true }, 'Created', 'u-5'),
+    ).rejects.toMatchObject({ code: 230011, retryable: false });
+    expect(where(created.calls)).toEqual([['reply', 'om_cmd']]);
+    // Without it, a notice's reply to a gone root goes to the chat, as before.
+    const notice = adapter([refused(230011)]);
+    await notice.a.sendText({ chatId: 'oc_team', threadId: 'omt_topic', root: 'om_root' }, 'Done', 'u-6');
+    expect(where(notice.calls)).toEqual([
+      ['reply', 'om_root'],
+      ['create', 'oc_team'],
+    ]);
+  });
+
+  it('sends a text that stays in its thread as one message, cut to ONE_MESSAGE, never split by the SDK', async () => {
+    const { a, calls } = adapter([{ thread_id: 'omt_new' }]);
+    const long = 'x'.repeat(ONE_MESSAGE + 500);
+    const target = { chatId: 'oc_team', threadId: '', replyTo: 'om_cmd', replyInThread: true, stayInThread: true };
+    expect((await a.sendText(target, long, 'u-7')).threadId).toBe('omt_new');
+    expect(where(calls)).toEqual([['reply', 'om_cmd']]);
+    expect(calls[0]?.payload.data.uuid).toBe('u-7');
+    const sent = JSON.parse(calls[0]?.payload.data.content ?? '{}') as { zh_cn: { content: Array<Array<{ text: string }>> } };
+    expect(sent.zh_cn.content[0]?.[0]?.text.length).toBeLessThanOrEqual(ONE_MESSAGE);
+  });
+});
+
+/** A stand-in for Lark's chat members API, answering with each page in turn. */
+function membersApi(pages: Array<Error | { code?: number; msg?: string; data?: object }>): { a: LarkAdapter; calls: unknown[] } {
+  const calls: unknown[] = [];
+  const lark = {
+    rawClient: {
+      im: {
+        v1: {
+          chatMembers: {
+            get: async (payload: unknown) => {
+              calls.push(payload);
+              const next = pages.shift() ?? { code: 0, data: { items: [], has_more: false } };
+              if (next instanceof Error) throw next;
+              return { code: 0, msg: 'ok', ...next };
+            },
+          },
+        },
+      },
+    },
+  } as unknown as LarkChannel;
+  return { a: new LarkAdapter({ appId: 'cli_app', appSecret: 'not-a-secret' }, undefined, { lark, sleep: async () => undefined }), calls };
+}
+
+describe('LarkAdapter.chatMembers (spec §19.3)', () => {
+  it("reads a group's members by union_id, page by page, and at most 20 pages of 100", async () => {
+    const two = membersApi([
+      { data: { items: [{ member_id: 'on_alice' }, { member_id: 'on_bob' }], has_more: true, page_token: 'p2' } },
+      { data: { items: [{ member_id: 'on_carol' }, { member_id: '' }], has_more: false } },
+    ]);
+    const read = await two.a.chatMembers('oc_team');
+    expect([...read.unionIds]).toEqual(['on_alice', 'on_bob', 'on_carol']);
+    expect(read.complete).toBe(true);
+    expect(two.calls).toEqual([
+      { path: { chat_id: 'oc_team' }, params: { member_id_type: 'union_id', page_size: 100 } },
+      { path: { chat_id: 'oc_team' }, params: { member_id_type: 'union_id', page_size: 100, page_token: 'p2' } },
+    ]);
+    const large = membersApi(
+      Array.from({ length: 25 }, (_, i) => ({ data: { items: [{ member_id: `on_${i}` }], has_more: true, page_token: `p${i + 1}` } })),
+    );
+    const big = await large.a.chatMembers('oc_big');
+    expect(large.calls).toHaveLength(20);
+    expect(big).toMatchObject({ complete: false });
+    expect(big.unionIds.size).toBe(20);
+  });
+
+  it('reads a group as incomplete when Lark says there is more but gives no page token', async () => {
+    for (const data of [{ has_more: true, page_token: '' }, { has_more: true }]) {
+      const cut = membersApi([{ data: { items: [{ member_id: 'on_alice' }], ...data } }]);
+      const read = await cut.a.chatMembers('oc_team');
+      expect(read).toMatchObject({ complete: false });
+      expect([...read.unionIds]).toEqual(['on_alice']);
+      expect(cut.calls).toHaveLength(1);
+    }
+  });
+
+  it("throws Lark's refusal, a missing permission among them, and a failure that never reached Lark, without retrying", async () => {
+    const scope = membersApi([{ code: 99991672, msg: 'Access denied' }]);
+    await expect(scope.a.chatMembers('oc_team')).rejects.toMatchObject({ code: 99991672, retryable: false });
+    const down = membersApi([new Error('socket hang up')]);
+    await expect(down.a.chatMembers('oc_team')).rejects.toMatchObject({ code: 0, retryable: true });
+    expect(down.calls).toHaveLength(1);
   });
 });
 

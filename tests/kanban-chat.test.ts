@@ -122,8 +122,8 @@ function message(sender: Principal = OWNER, messageId = `om_${++seq}`, mentions:
   };
 }
 
-function say(arg: string, sender: Principal = OWNER, mentions: InboundMention[] = []): Promise<string> {
-  return chat.run(arg, message(sender, undefined, mentions), KEY);
+async function say(arg: string, sender: Principal = OWNER, mentions: InboundMention[] = []): Promise<string> {
+  return (await chat.run(arg, message(sender, undefined, mentions), KEY)).text;
 }
 
 /** The id of the task a `Created` reply names. */
@@ -163,9 +163,18 @@ describe('/kanban task new', () => {
     expect(long).toContain(`(\`/kanban task assign ${nobody} <role or @person>\` gives it to someone)`);
   });
 
+  it("records the root of the thread a task is created in, from the message, as its subscription's", async () => {
+    const taskId = created((await chat.run('task new In the topic', { ...message(OWNER), rootId: 'om_root' }, KEY)).text);
+    expect(getTask(t.db, taskId)?.createdVia).toMatchObject({ threadId: 'omt_topic', rootId: 'om_root' });
+    expect(subscriptionsOf(t.db, taskId).map((s) => [s.threadId, s.rootMessageId])).toEqual([['omt_topic', 'om_root']]);
+    // A direct message is unchanged (spec §19.1): no root, whatever the message carries.
+    const direct = created((await chat.run('task new In a direct message', { ...message(OWNER), chatType: 'p2p', rootId: 'om_root' }, KEY)).text);
+    expect(subscriptionsOf(t.db, direct)[0]?.rootMessageId).toBeNull();
+  });
+
   it('makes one task of one message, however often it arrives', async () => {
-    const first = created(await chat.run('task new Once', message(OWNER, 'om_same'), KEY));
-    expect(await chat.run('task new Once', message(OWNER, 'om_same'), KEY)).toBe(`Already created, as \`${first}\`.`);
+    const first = created((await chat.run('task new Once', message(OWNER, 'om_same'), KEY)).text);
+    expect((await chat.run('task new Once', message(OWNER, 'om_same'), KEY)).text).toBe(`Already created, as \`${first}\`.`);
     expect(taskCount()).toBe(1);
   });
 
@@ -489,6 +498,8 @@ describe("a person's card", () => {
     expect(await press(run, 'block', ALICE, '  ')).toBe('Type why it is blocked in the box, then press Block.');
     const first = redrawn.at(-1)?.view;
     expect(first?.markdown).toContain('**Not done.** Type why it is blocked in the box, then press Block.');
+    // A redraw mentions nobody: the person was told when the card was sent (spec §19.2).
+    expect(first?.markdown).not.toContain('<at id=');
     // The value differs from the button pressed, first: the SDK drops a press it has seen, by the value's start.
     expect(first?.buttons.map((b) => Object.keys(b.value)[0])).toEqual(['try', 'try']);
     expect(first?.buttons.map((b) => b.value['try'])).toEqual(['1', '1']);

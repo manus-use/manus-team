@@ -136,7 +136,7 @@ export function renderHelp(): string {
   return [
     '**The task board.** A task is any work -- research, a document, an operation in Lark, a chore, a change to code -- given to a role, whose agent runs it in a workspace, or to a person.',
     ...lines.map(([usage, tier]) => `\`${usage}\` (${tier})`),
-    'Name a person with an @-mention: they are sent the task as a card in a direct message, with Done and Block, or a review with Approve and Request changes. A person named may comment on, and report on, their own task.',
+    "Name a person with an @-mention: they are sent the task as a card, in the task's thread when they are in its group, else by direct message, with Done and Block, or a review with Approve and Request changes. A person named may comment on, and report on, their own task.",
     "A task with a `reviewer:` is reviewed before it is done: its assignee's done, or its agent's, goes to the reviewer. An operator may answer any review, ending a reviewer role's run.",
     'The chat a task is created in hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up, or is stranded, and who a person was given it.',
     "A board is a queue of tasks of its own. Each chat is on one, `default` until `/kanban board use` moves it, and its `/kanban task new` and `/kanban task list` act on that board; a task's follow-ups and parents are on its board.",
@@ -400,8 +400,10 @@ export function blocksTask(event: KanbanEvent): boolean {
  * failure, gave up, stranded. A dependency block is not
  * one, since nobody needs to act; a throttled run's cooldown is not either, as it
  * clears by itself, and blocks as transient at its limit, which is one. For
- * people: the one line that says who a person's claim gave the task to (spec
- * §9.2), named in plain text, never mentioned, and a card that could not be sent.
+ * people: the one line that says who a person's card went to, when it went by
+ * direct message (spec §19.5), named in plain text, never mentioned -- a card in
+ * the task's thread says it itself, and a claim is no notice, as only the send
+ * knows where the card went -- and a card that could not be sent.
  */
 export function renderNotice(
   event: KanbanEvent,
@@ -427,10 +429,10 @@ export function renderNotice(
       const kind = p['reviewerKind'] === 'human' ? 'human' : 'role';
       return `Review requested for ${name}, from ${whom(reviewer === '' ? null : { kind, name: reviewer }, opts.nameOf)}.`;
     }
-    case 'claimed': {
-      // A role's claim is no notice: its outcome is. A person's is the group's one line.
-      if (p['assigneeKind'] !== 'human') return undefined;
-      const person = whom({ kind: 'human', name: text(p, 'assignee') }, opts.nameOf);
+    case 'card_sent': {
+      // The group's one line, for a card it does not see. One with no `in`, from before threads, was told at its claim.
+      if (p['in'] !== 'dm') return undefined;
+      const person = whom({ kind: 'human', name: text(p, 'to') }, opts.nameOf);
       return `📋 ${name}, ${p['kind'] === 'review' ? 'review ' : ''}assigned to ${person}`;
     }
     case 'card_failed': {
@@ -511,6 +513,25 @@ export interface CardFacts {
   attempt?: number;
   /** Why the last press did nothing, shown under the title, already escaped. */
   note?: string;
+  /**
+   * The person's open_id, for a card sent in a task's thread (spec §19.2): the
+   * card starts with an @-mention of them. Absent for a direct message, and for
+   * every redraw, which would notify them of their own press.
+   */
+  mention?: string;
+}
+
+/** An open_id, as Lark gives one: the only thing a card mentions anyone by. */
+const OPEN_ID = /^ou_[0-9A-Za-z]+$/;
+
+/**
+ * A card's first line, after an @-mention of its person when it has one (spec
+ * §19.2), as Lark's markdown writes one. Put in after the line was escaped and
+ * masked, so an `<at` in task text is still escaped, and only this one, made
+ * from an id the gateway holds, mentions anyone.
+ */
+function mentioning(f: CardFacts, line: string): string {
+  return f.mention !== undefined && OPEN_ID.test(f.mention) ? `<at id=${f.mention}></at> ${line}` : line;
 }
 
 /**
@@ -548,7 +569,7 @@ function taskText(task: TaskRow, bodyMax: number): string[] {
  */
 export function renderTaskCard(f: CardFacts, appId: string): CardView {
   const { task, run } = f;
-  const out = [`📋 For you to do: **${label(task.title)}** ${id(task.taskId)}`];
+  const out = [mentioning(f, `📋 For you to do: **${label(task.title)}** ${id(task.taskId)}`)];
   if (f.note !== undefined) out.push(f.note);
   if (f.changes !== undefined) {
     out.push(`**Changes asked** by ${label(f.nameOf?.(f.changes.actor) ?? f.changes.actor, 80)}:`, block(f.changes.reason, 1200));
@@ -585,7 +606,7 @@ export function renderTaskCard(f: CardFacts, appId: string): CardView {
  */
 export function renderReviewCard(f: CardFacts, appId: string): CardView {
   const { task, run } = f;
-  const out = [`🔎 For you to review: **${label(task.title)}** ${id(task.taskId)}`];
+  const out = [mentioning(f, `🔎 For you to review: **${label(task.title)}** ${id(task.taskId)}`)];
   if (f.note !== undefined) out.push(f.note);
   const h = f.handoff;
   if (h !== undefined) {

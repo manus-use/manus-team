@@ -6,6 +6,7 @@ import type {
   CardSession,
   CardView,
   Channel,
+  ChatMembers,
   SendResult,
   SendTarget,
 } from '../channel/types.js';
@@ -19,8 +20,9 @@ import type {
  *
  * An approval card, for a supervised agent, is forwarded to the task's first
  * subscription (spec §7.1): the chat, or thread, the task was created in, where
- * someone follows it. It names the task, and is answered as any approval card
- * is -- at operator tier, resolved through the approval's session, which the
+ * someone follows it; in a thread whose root is known, as a reply to it (spec
+ * §19.7). It names the task, and is answered as any approval card is -- at
+ * operator tier, resolved through the approval's session, which the
  * router looks up by `approvalId`. A task nobody follows, or one followed on a
  * channel this gateway has not got, cannot have anyone asked: sending fails, and
  * the actor releases the request as cancelled, the honest outcome. Without
@@ -98,8 +100,10 @@ export class KanbanSink implements Channel {
     // Named, so the chat knows which task's agent is asking: the card is rendered as plain text, masked.
     const title = oneLine(getTask(forward.db, taskId)?.title ?? '');
     const named = title === '' ? `Task ${taskId}` : `Task ${taskId}, ${title}`;
+    // In a thread with a root, a reply to it, as the notifier's (spec §19.7).
+    const root = sub.threadId === '' || sub.rootMessageId === null ? {} : { root: sub.rootMessageId };
     const sent = await channel.sendApprovalCard(
-      { chatId: sub.conversationId, threadId: sub.threadId },
+      { chatId: sub.conversationId, threadId: sub.threadId, ...root },
       { ...spec, action: `${named}, asks: ${spec.action}` },
       uuid,
     );
@@ -132,4 +136,9 @@ export class KanbanSink implements Channel {
   async react(_messageId: string, _emoji: string): Promise<void> {}
 
   async unreact(_messageId: string, _emoji: string): Promise<void> {}
+
+  /** A run's session is in no group, so it has no members: never asked, as it posts no board card. */
+  async chatMembers(_chatId: string): Promise<ChatMembers> {
+    throw new Error("a run's session is in no chat, and has no members to read");
+  }
 }

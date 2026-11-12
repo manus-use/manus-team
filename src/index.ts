@@ -302,7 +302,9 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       nameOf: (principal) => people.nameOf(principal),
       note,
     });
-    // A person's run is sent its card, as a direct message (spec §9.2).
+    // A person's run is sent its card: in its task's thread when they are in the group, else as a
+    // direct message (spec §9.2, §19.2), never while the task's "Created" reply is under way (§19.4).
+    const chat = kanbanChat;
     cards = new CardPoster({
       db,
       service,
@@ -310,6 +312,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
       appId: config.lark.appId,
       nameOf: (principal) => people.nameOf(principal),
       canTalk: (principal) => people.canTalk(principal),
+      held: (taskId) => chat.held(taskId),
       note,
     });
     note(`kanban: dispatching up to ${config.kanban.maxRunning} agent run(s) at once`);

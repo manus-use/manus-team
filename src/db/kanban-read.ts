@@ -355,6 +355,7 @@ interface SubscriptionRaw {
   account_id: string;
   conversation_id: string;
   thread_id: string;
+  root_message_id: string | null;
   cursor: number;
   created_at: number;
 }
@@ -367,12 +368,13 @@ function decodeSubscription(r: SubscriptionRaw): SubscriptionRow {
     appId: r.account_id,
     conversationId: r.conversation_id,
     threadId: r.thread_id,
+    rootMessageId: r.root_message_id,
     cursor: r.cursor,
     createdAt: r.created_at,
   };
 }
 
-const SUBSCRIPTION_COLS = 'id, task_id, channel, account_id, conversation_id, thread_id, cursor, created_at';
+const SUBSCRIPTION_COLS = 'id, task_id, channel, account_id, conversation_id, thread_id, root_message_id, cursor, created_at';
 
 /** The chats following a task, in the order they were subscribed (spec §9.4). */
 export function subscriptionsOf(db: Db, taskId: string): SubscriptionRow[] {
@@ -409,6 +411,32 @@ export function dueSubscriptions(db: Db, appId: string): DueSubscription[] {
     )
     .all(appId)
     .map((r) => ({ ...decodeSubscription(r), oldestPending: r.oldest_pending ?? 0 }));
+}
+
+/** A thread a bot's subscriptions deliver to: its channel, the bot, the chat, and the thread. */
+export interface ThreadAt {
+  channel: string;
+  appId: string;
+  conversationId: string;
+  threadId: string;
+}
+
+/**
+ * The root of a thread, from the first of its subscriptions that knows one,
+ * whether or not that one has anything due (spec §19.7): a thread has one root,
+ * so a task from before threads had roots is replied to it as well. None at chat
+ * scope, or when no subscription in the thread knows it.
+ */
+export function threadRootOf(db: Db, at: ThreadAt): string | undefined {
+  if (at.threadId === '') return undefined;
+  const r = db
+    .prepare<[string, string, string, string], { root_message_id: string }>(
+      `SELECT root_message_id FROM kanban_subscriptions
+        WHERE channel = ? AND account_id = ? AND conversation_id = ? AND thread_id = ? AND root_message_id IS NOT NULL
+        ORDER BY id LIMIT 1`,
+    )
+    .get(at.channel, at.appId, at.conversationId, at.threadId);
+  return r?.root_message_id;
 }
 
 /** A report's run of the task's gates, as its `gates_ran` event recorded it (spec §7.7). */
