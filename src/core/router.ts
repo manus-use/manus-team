@@ -3,7 +3,7 @@ import { appendEvent, lastEventOfType } from '../db/events.js';
 import { claimMessage, recordOutcome } from '../db/dedup.js';
 import { getApproval } from '../db/approvals.js';
 import { bindingsInConversation, resolveBinding } from '../db/bindings.js';
-import type { Channel, SendTarget } from '../channel/types.js';
+import { ChannelError, type Channel, type SendTarget } from '../channel/types.js';
 import { forDisplay, truncate } from '../channel/escape.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { isResumableProviderId } from '../provider-id.js';
@@ -476,6 +476,10 @@ export class Router {
             answer = { text: `The board could not do that: ${label(detail, 600)}` };
           }
         }
+        if (answer.thread !== undefined && message.chatType === 'group' && message.threadId === '') {
+          await this.#createdInThread(answer, answer.thread, message, key, target);
+          return;
+        }
         // Each piece was escaped, and masked, as it was put in; the whole reply is
         // masked once more, for what was not: ids, names, the board's own words.
         await this.#reply(target, message, 'kanban', redactKnownSecrets(answer.quoted ?? answer.text));
@@ -505,6 +509,41 @@ export class Router {
           `\`/${spec.name}\` is declared but not implemented.`,
         );
         return;
+    }
+  }
+
+  /**
+   * A fresh task's "Created" reply, in a thread of its own on the command message
+   * (spec §19.4, §19.7): sent with `reply_in_thread`, and staying in its thread,
+   * so that a withdrawn command is not answered at the top of the chat in the
+   * thread's words. Refused by Lark -- 230071, a withdrawn command, any refusal --
+   * it is sent again at once as a quoted reply, in words true there, with the same
+   * uuid; one that never reached Lark, retried by the adapter, is given up, as any
+   * reply is. Whatever came of it, the board is told where it went, which ends
+   * the task's hold.
+   */
+  async #createdInThread(
+    answer: KanbanAnswer,
+    taskId: string,
+    message: InboundMessage,
+    key: BindingKey,
+    target: SendTarget,
+  ): Promise<void> {
+    let threadId: string | undefined;
+    try {
+      const sent = await this.#deps.channel.sendText(
+        { chatId: message.chatId, threadId: '', replyTo: message.messageId, replyInThread: true, stayInThread: true },
+        truncate(redactKnownSecrets(answer.text), 4000),
+        replyUuid(this.#deps.appId, message.messageId, 'kanban'),
+      );
+      threadId = sent.threadId;
+      if (threadId === undefined) this.#note(`kanban: the reply to ${message.messageId} came back with no thread; task ${taskId} stays at chat scope`);
+    } catch (err) {
+      const refused = err instanceof ChannelError && err.code !== 0 && !err.retryable;
+      this.#note(`reply (kanban) failed: ${err instanceof Error ? err.message : String(err)}${refused ? '; sending it quoted' : ''}`);
+      if (refused) await this.#reply(target, message, 'kanban', redactKnownSecrets(answer.quoted ?? answer.text));
+    } finally {
+      this.#threaded(taskId, key, message.messageId, threadId);
     }
   }
 
