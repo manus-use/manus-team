@@ -201,6 +201,21 @@ export interface Channel {
 
   /** Remove the bot's own reaction. A reaction that is not there is not an error. */
   unreact(messageId: string, emoji: string): Promise<void>;
+
+  /**
+   * A group's members, by union_id (spec §19.3): whether a person's card can go
+   * in a task's thread there. Throws when they cannot be read.
+   */
+  chatMembers(chatId: string): Promise<ChatMembers>;
+}
+
+/**
+ * A group's members, by union_id (spec §19.3), as far as they were read:
+ * `complete` false when the lookup stopped before the last of them.
+ */
+export interface ChatMembers {
+  unionIds: ReadonlySet<string>;
+  complete: boolean;
 }
 
 /**

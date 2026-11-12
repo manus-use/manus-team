@@ -33,6 +33,8 @@ describe('KanbanSink', () => {
     await sink.react('m', 'OK');
     await sink.unreact('m', 'OK');
     await sink.updateApprovalCard('m', { action: 'a', choice: 'b', answeredBy: 'c' });
+    // A run's session is in no group.
+    await expect(sink.chatMembers('k_1')).rejects.toThrow('has no members to read');
   });
 
   it("lets a run's turn complete with every event in the session log", async () => {

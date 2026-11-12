@@ -7,6 +7,7 @@ import {
   type CardSession,
   type CardView,
   type Channel,
+  type ChatMembers,
   type SendResult,
   type SendTarget,
 } from '../types.js';
@@ -79,6 +80,10 @@ const WITHDRAWN_CODES: ReadonlySet<number> = new Set([230011, 230017]);
 const NOT_FOUND_STATUS = 404;
 /** Lark's code for content it will not take: a post refused so goes as plain text, as the SDK's own send does. */
 const INVALID_CONTENT = 230001;
+/** Members in one page of Lark's chat members API, its largest. */
+const MEMBER_PAGE_SIZE = 100;
+/** Pages of members read at most (spec §19.3): 2,000 members. */
+export const MEMBER_PAGES = 20;
 
 /**
  * What a test gives the adapter in place of Lark: the SDK's channel, and how a
@@ -362,6 +367,42 @@ export class LarkAdapter implements Channel {
     } catch (err) {
       throw toChannelError(err);
     }
+  }
+
+  /**
+   * A group's members, by union_id (spec §19.3), from Lark's chat members API:
+   * its pages read in turn, at most `MEMBER_PAGES` of `MEMBER_PAGE_SIZE`, so
+   * 2,000 members, `complete` false when it stopped there. Lark lists no bots,
+   * and asks for the bot to be in the group. Not retried: the card poster
+   * remembers a failure, and sends a direct message meanwhile.
+   */
+  async chatMembers(chatId: string): Promise<ChatMembers> {
+    const api = this.#lark.rawClient.im.v1.chatMembers;
+    const unionIds = new Set<string>();
+    let pageToken: string | undefined;
+    for (let page = 0; page < MEMBER_PAGES; page += 1) {
+      let r: {
+        code?: number | undefined;
+        msg?: string | undefined;
+        data?:
+          | { items?: Array<{ member_id?: string | undefined }> | undefined; page_token?: string | undefined; has_more?: boolean | undefined }
+          | undefined;
+      };
+      try {
+        r = await api.get({
+          path: { chat_id: chatId },
+          params: { member_id_type: 'union_id', page_size: MEMBER_PAGE_SIZE, ...(pageToken === undefined ? {} : { page_token: pageToken }) },
+        });
+      } catch (err) {
+        throw sendError(err);
+      }
+      if (typeof r.code === 'number' && r.code !== 0) throw toChannelError(r);
+      for (const m of r.data?.items ?? []) if (m.member_id !== undefined && m.member_id !== '') unionIds.add(m.member_id);
+      const next = r.data?.page_token;
+      if (r.data?.has_more !== true || next === undefined || next === '') return { unionIds, complete: true };
+      pageToken = next;
+    }
+    return { unionIds, complete: false };
   }
 
   async unreact(messageId: string, emoji: string): Promise<void> {

@@ -5,6 +5,7 @@ import type {
   CardSession,
   CardView,
   Channel,
+  ChatMembers,
   SendResult,
   SendTarget,
 } from '../../src/channel/types.js';
@@ -34,6 +35,7 @@ type Method =
   | 'updateCard'
   | 'react'
   | 'unreact'
+  | 'chatMembers'
   | 'set'
   | 'finish';
 
@@ -145,6 +147,12 @@ export class FakeChannel implements Channel {
   /** Board cards posted (spec §9.2), and their redraws. */
   readonly boardCards: BoardCardCall[] = [];
   readonly cardUpdates: CardUpdateCall[] = [];
+  /** Each group's members, by union_id, as Lark's chat members API answers (spec §19.3); a group not here has none. */
+  readonly members = new Map<string, readonly string[]>();
+  /** Groups whose lookup stops before its last page, as one past 2,000 members does. */
+  readonly incomplete = new Set<string>();
+  /** The groups whose members were asked for, in order. */
+  readonly memberLookups: string[] = [];
 
   /**
    * Whether a reply that opens a thread is answered with that thread's id, as
@@ -276,5 +284,12 @@ export class FakeChannel implements Channel {
     this.calls.push('unreact');
     await this.gate('unreact');
     this.reactions.push({ op: 'remove', messageId, emoji });
+  }
+
+  async chatMembers(chatId: string): Promise<ChatMembers> {
+    this.calls.push('chatMembers');
+    this.memberLookups.push(chatId);
+    await this.gate('chatMembers');
+    return { unionIds: new Set(this.members.get(chatId) ?? []), complete: !this.incomplete.has(chatId) };
   }
 }

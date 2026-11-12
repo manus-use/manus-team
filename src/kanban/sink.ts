@@ -6,6 +6,7 @@ import type {
   CardSession,
   CardView,
   Channel,
+  ChatMembers,
   SendResult,
   SendTarget,
 } from '../channel/types.js';
@@ -132,4 +133,9 @@ export class KanbanSink implements Channel {
   async react(_messageId: string, _emoji: string): Promise<void> {}
 
   async unreact(_messageId: string, _emoji: string): Promise<void> {}
+
+  /** A run's session is in no group, so it has no members: never asked, as it posts no board card. */
+  async chatMembers(_chatId: string): Promise<ChatMembers> {
+    throw new Error("a run's session is in no chat, and has no members to read");
+  }
 }

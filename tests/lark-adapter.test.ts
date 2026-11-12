@@ -188,6 +188,59 @@ describe('LarkAdapter in a thread (spec §19.4, §19.7)', () => {
   });
 });
 
+/** A stand-in for Lark's chat members API, answering with each page in turn. */
+function membersApi(pages: Array<Error | { code?: number; msg?: string; data?: object }>): { a: LarkAdapter; calls: unknown[] } {
+  const calls: unknown[] = [];
+  const lark = {
+    rawClient: {
+      im: {
+        v1: {
+          chatMembers: {
+            get: async (payload: unknown) => {
+              calls.push(payload);
+              const next = pages.shift() ?? { code: 0, data: { items: [], has_more: false } };
+              if (next instanceof Error) throw next;
+              return { code: 0, msg: 'ok', ...next };
+            },
+          },
+        },
+      },
+    },
+  } as unknown as LarkChannel;
+  return { a: new LarkAdapter({ appId: 'cli_app', appSecret: 'not-a-secret' }, undefined, { lark, sleep: async () => undefined }), calls };
+}
+
+describe('LarkAdapter.chatMembers (spec §19.3)', () => {
+  it("reads a group's members by union_id, page by page, and at most 20 pages of 100", async () => {
+    const two = membersApi([
+      { data: { items: [{ member_id: 'on_alice' }, { member_id: 'on_bob' }], has_more: true, page_token: 'p2' } },
+      { data: { items: [{ member_id: 'on_carol' }, { member_id: '' }], has_more: false } },
+    ]);
+    const read = await two.a.chatMembers('oc_team');
+    expect([...read.unionIds]).toEqual(['on_alice', 'on_bob', 'on_carol']);
+    expect(read.complete).toBe(true);
+    expect(two.calls).toEqual([
+      { path: { chat_id: 'oc_team' }, params: { member_id_type: 'union_id', page_size: 100 } },
+      { path: { chat_id: 'oc_team' }, params: { member_id_type: 'union_id', page_size: 100, page_token: 'p2' } },
+    ]);
+    const large = membersApi(
+      Array.from({ length: 25 }, (_, i) => ({ data: { items: [{ member_id: `on_${i}` }], has_more: true, page_token: `p${i + 1}` } })),
+    );
+    const big = await large.a.chatMembers('oc_big');
+    expect(large.calls).toHaveLength(20);
+    expect(big).toMatchObject({ complete: false });
+    expect(big.unionIds.size).toBe(20);
+  });
+
+  it("throws Lark's refusal, a missing permission among them, and a failure that never reached Lark, without retrying", async () => {
+    const scope = membersApi([{ code: 99991672, msg: 'Access denied' }]);
+    await expect(scope.a.chatMembers('oc_team')).rejects.toMatchObject({ code: 99991672, retryable: false });
+    const down = membersApi([new Error('socket hang up')]);
+    await expect(down.a.chatMembers('oc_team')).rejects.toMatchObject({ code: 0, retryable: true });
+    expect(down.calls).toHaveLength(1);
+  });
+});
+
 describe('LarkAdapter.sendApprovalCard', () => {
   it('posts the card with its uuid', async () => {
     const { a, calls } = adapter([]);
