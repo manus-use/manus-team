@@ -44,28 +44,31 @@ Each has its reason. Where the code and the spec disagree, the code is the fact,
 5. **The module load imports two files**: `dist/index.js`, the gateway's graph, and `dist/db/open.js`, already in that graph, for `openDb(':memory:')`, which loads the native module. `ServiceDeps.importModule` is optional, `import()` by default, so the existing `mt service` tests and their `ServiceDeps` literals are unchanged.
 6. **`ServiceView`** is what `update.ts` takes of `mt service`: `installed`, `recorded`, `state`, `lockPid`, `env` and `restart`, over the same `Service` class, whose `installed`, `recorded` and `lockPid` become public. `restart` calls `start(true)`, the code of `mt service restart`, and answers why it did not restart, or undefined.
 7. **Every update call has a time limit.** `LIMITS`: `git fetch` 120 s, a call that runs a hook (`merge --ff-only`, `reset --keep`) 120 s, `npm ci` 20 min, `npm run build` 10 min, the new build's `mt service check` 120 s, and every other git call, local plumbing, 30 s.
-8. **`runDetached`** spawns with `detached: true` and `stdio: ['ignore', 'pipe', 'pipe']`, kills the process group (`process.kill(-pid)`) with SIGTERM at the limit or an abort, then SIGKILL 5 s later, and keeps the last 256 KiB of each stream. A signal's exit is `128 + n`.
+8. **`runDetached`** spawns with `detached: true` and `stdio: ['ignore', 'pipe', 'pipe']`, kills the process group (`process.kill(-pid)`) with SIGTERM at the limit or an abort, then SIGKILL 5 s later, and keeps the last 256 KiB of each stream. A signal's exit is `128 + n`. A second after the SIGKILL it destroys the child's stdout and stderr and answers with what was captured, exit 137, so a process that left the group and holds the pipes open cannot hang the update.
 9. **`git` runs with `GIT_TERMINAL_PROMPT=0`**, and from the fetch on with `GIT_SSH_COMMAND='ssh -o BatchMode=yes'` unless this shell sets `GIT_SSH_COMMAND` or `git config --get core.sshCommand` answers. npm and the check run with the same environment and the node's directory first on `PATH`. `MT_KANBAN_*` are dropped from every child's environment.
 10. **`--check` and `--yes` together** are a usage error, exit 2, as are any argument and any other option.
 11. **The question** is `update and restart the service? [y/N] `, or `update, and back up the database? [y/N] ` when no restart follows. `y` or `yes`, any case, trimmed, goes on.
 12. **What step 3 says.** The header, the commits (50, then `and N more`), the new migrations in one line, a `warning:` for each changed one, the `MT_SCHEMA_DIR` warning, `the dependencies changed: npm ci runs` or `node_modules/.package-lock.json is missing: npm ci runs` (nothing when it does not run), `N agent runs are open: ...` when the service will be restarted and some are, and the service's line; with no service and `kanban.enabled` not set, a line that no lock shows a gateway run by hand.
 13. **The database at step 3** is found with `loadTeamSettings(env, undefined, { unsetPassEnv: [] })`, so a `passEnv` name the service lacks is not a refusal, as `mt service check`'s version line finds it: with a unit, over `ServiceView.env`; without, this shell over the `.env`, with `MT_HOME` as `mt service` finds it.
 14. **The lock's JSON** holds `pid`, `home`, `checkout`, `step`, `old`, `new`, `servicePid` and `userVersion` (`null` for none), `db` and `backup`, both locks the same line. The steps are `check`, `show`, `merge`, `npm ci`, `build`, `preflight`, `backup`, `restart`, `confirm` and `going back`; `check` and `show` changed nothing (`UNCHANGED_STEPS`).
-15. **A merge that fails goes back, timed out or not.** `reset --keep` to the commit `HEAD` is still on changes nothing, and the build runs again; a timed-out one whose `HEAD` is the new commit says the merge landed and its hook hung.
-16. **`npm ci` runs again going back when the update started one**, failed or not: one that failed half way leaves `node_modules` only another can mend.
-17. **Going back's failure** prints what failed, the call that failed going back with its last 20 lines, `git status`, and the commands to finish by hand, with `git reset --keep <old>` among them when it is the reset that failed.
-18. **The confirmation's wait** is 240 polls of the injected `sleep(250)` after the restart call returns, as `restartJob`'s drain is, reading the log from the size it had before the call, from its start when it is now shorter. A line that starts `configuration error:` or `failed to start:` fails at once; `connected as` counts only after a `schema at version N (` line.
-19. **Output is masked and never fails.** Every line the update prints goes through `redactKnownSecrets`; the update wraps `io.out` and `io.err`, the service's own lines included, so EPIPE and EIO thrown by a write are ignored, and `realUpdateDeps().guardOutput` ignores them on `process.stdout` and `process.stderr`'s `error` events.
-20. **The service's calls during an update run detached too.** `realUpdateDeps()` gives the service `runSyncDetached` for `ServiceDeps.run`: each `launchctl` or `systemctl` call runs through a small node wrapper that ignores the terminal's signals and runs the command in a session of its own, so a Ctrl-C in the terminal reaches `mt` alone and the restart call is let finish, as §20.11 asks. `mt service` itself is unchanged.
-21. **Tasks 9 to 12 build `src/cli/update.ts` in four steps**: `--check` alone first (steps 1 to 3, a usage error without `--check`), then `--yes` and the question with steps 4 to 7, then a dead update's lock, then the signals. Each leaves the suite green.
+15. **A dead update's locks are named together, once.** A stale lock found at either place makes the update read the other place too, and the advice ends with one `rm` of every lock naming the dead pid, so it is followed once and a backup is never restored twice. A checkout's lock left by an update of another home gives no steps, as its database and service are that home's: `an update of <home> died at its step <step>; run MT_HOME='<home>' mt update for what to do`, exit 1. A lock's database that cannot be read is an unknown version: both ways are printed, with `mt service check` to read it.
+16. **A signal after step 3's last call** stops the update at the start of `apply()`, and before `--check` returns, `interrupted by <signal>: nothing changed`, exit 1: the calls of step 3 check after each, but a signal can arrive between the last of them and the merge.
+17. **The lock's staging file is synced** (`fsyncSync`) before it is linked or renamed into place, so a power cut never leaves a lock half written.
+18. **A merge that fails goes back, timed out or not.** `reset --keep` to the commit `HEAD` is still on changes nothing, and the build runs again; a timed-out one whose `HEAD` is the new commit says the merge landed and its hook hung.
+19. **`npm ci` runs again going back when the update started one**, failed or not: one that failed half way leaves `node_modules` only another can mend.
+20. **Going back's failure** prints what failed, the call that failed going back with its last 20 lines, `git status`, and the commands to finish by hand, with `git reset --keep <old>` among them when it is the reset that failed. Going back ends with `git status --porcelain --untracked-files=normal`: "back at <old>" is said only of a clean tree, and a tree a hook or the build wrote into is stuck the same way, exit 3.
+21. **The confirmation's wait** is 240 polls of the injected `sleep(250)` after the restart call returns, as `restartJob`'s drain is, reading the log from the size it had before the call, from its start when it is now shorter. A line that starts `configuration error:` or `failed to start:` fails at once; `connected as` counts only after a `schema at version N (` line.
+22. **Output is masked and never fails.** Every line the update prints goes through `redactKnownSecrets`; the update wraps `io.out` and `io.err`, the service's own lines included, so EPIPE and EIO thrown by a write are ignored, and `realUpdateDeps().guardOutput` ignores them on `process.stdout` and `process.stderr`'s `error` events.
+23. **The service's calls during an update run detached too.** `realUpdateDeps()` gives the service `runSyncDetached` for `ServiceDeps.run`: each `launchctl` or `systemctl` call runs through a small node wrapper that ignores the terminal's signals and runs the command in a session of its own, so a Ctrl-C in the terminal reaches `mt` alone and the restart call is let finish, as §20.11 asks. `mt service` itself is unchanged.
+24. **Tasks 9 to 12 build `src/cli/update.ts` in four steps**: `--check` alone first (steps 1 to 3, a usage error without `--check`), then `--yes` and the question with steps 4 to 7, then a dead update's lock, then the signals. Each leaves the suite green.
 
 ## Known limitations
 
 From spec §20.15, kept as it says: no `--to <ref>`, no installing node, no schedule; builds from before this plan do not refuse a newer database; no trial of the new migrations; the restart interrupts every agent run and chat turn; a board run's `mt`, and the operator's `mt kanban`, are the new build's between the build and the restart, on a database the old gateway has not migrated; a crash restart in steps 4 to 6 runs the new tree, noticed, not prevented; two homes on one checkout, only this home's service restarted; a changed unit not rewritten; `mt service install` and the like not locked against an update; a stale lock needs a person; the backup misses the writes between it and the stop. Besides:
 
-- **An update that throws unexpectedly** (not a refusal, a failure or a signal: a bug) releases its locks as every path does, so it leaves no lock to say where it stopped. A lock is left only by a process that never ran its `finally`: a `kill -9`, a power cut.
+- **An error nothing foresaw** (a bug: not a refusal, a failure or a signal) keeps the locks once the update is past step 3: `run()` prints `mt: unexpected error at its step <step>: <message, masked>`, names both locks, says to run `mt update` again for what to do, and exits 3, and the next run gives a dead update's advice for that step. Before step 4 nothing changed, so the locks are released and it exits 1. A process that never runs its `finally` (a `kill -9`, a power cut) leaves its locks too.
 - **SIGQUIT and SIGKILL** are not handled: the second cannot be, and the first is not a terminal's usual way to stop.
-- **The version line needs the native module.** With better-sqlite3's module built for another node, `openDbReadOnly` fails too, so `mt service check` prints `database: unknown (...)` before failing at the module load. The printed steps back treat a line with no version as "go on", as §20.6 says for no version line at all.
+- **The version line needs the native module.** With better-sqlite3's module built for another node, `openDbReadOnly` fails too, so `mt service check` prints `database: unknown (...)` before failing at the module load. The printed steps back's check line says to go on when it prints `at version N`, `database: unknown (...)`, or nothing.
 - **The steps forward** build the tree as it is; they do not fast-forward it, as §20.6 gives them. They follow a database that moved, which needs a crash restart on the new tree, so after the merge.
 - **The end-to-end test runs macOS's fake launchd only**; systemd's restart call is covered by the unit tests' fake.
 
@@ -104,7 +107,7 @@ From spec §20.15, kept as it says: no `--to <ref>`, no installing node, no sche
 | `tests/schema-too-new.test.ts`, `tests/mt-service-check.test.ts`, `tests/update-backup.test.ts`, `tests/update-lock.test.ts`, `tests/update-advice.test.ts`, `tests/update-run.test.ts`, `tests/mt-update-check.test.ts`, `tests/mt-update-show.test.ts`, `tests/mt-update-apply.test.ts`, `tests/mt-update-restart.test.ts`, `tests/mt-update-locks.test.ts`, `tests/mt-update-signals.test.ts`, `tests/mt-update.e2e.ts` (create) | |
 | `tests/mt-service.test.ts` (modify) | the domain's call, the usage, install's closing line |
 
-Running counts, unit then end to end: Task 1 1785 / 157, Task 2 1788 / 157, Task 3 1791 / 157, Task 4 1802 / 157, Task 5 1808 / 157, Task 6 1816 / 157, Task 7 1822 / 157, Task 8 1831 / 157, Task 9 1883 / 157, Task 10 1917 / 157, Task 11 1937 / 157, Task 12 1950 / 157, Task 13 1950 / 157, Task 14 1950 / 164.
+Running counts, unit then end to end: Task 1 1785 / 157, Task 2 1788 / 157, Task 3 1791 / 157, Task 4 1802 / 157, Task 5 1808 / 157, Task 6 1816 / 157, Task 7 1822 / 157, Task 8 1831 / 157, Task 9 1884 / 157, Task 10 1919 / 157, Task 11 1944 / 157, Task 12 1959 / 157, Task 13 1959 / 157, Task 14 1959 / 164.
 
 How §20.14's tests map to the tasks: `migrate()`'s refusal, its highest of 0, at and below migrated (Task 1); `createGateway` closing and completing it, and the start ending with `configuration error:` and exit 78 (Task 2); an unreadable state on each system (Task 3); `mt service check` with a unit, install's cases through it, the unit's `PATH`, the version line first and as `database: unknown`, `MT_SCHEMA_DIR`'s directory, a failed import and a failed native load naming the `npm ci` (Task 4); with no unit, no `.env` required, install's checks not run, a `ConfigError` before `loadStartup`, the stand-ins and their notes, masked, never for a value the `.env` sets (Task 5); the backup's name, modes, `.partial`, journal mode, `quick_check`, version and retention (Task 6); the locks (Task 7); the printed commands naming node and npm by path, quoted (Task 8); each refusal of step 2, a configuration the old build rejects, the database from the service's environment, nothing new, the commits and their cap, a new and a changed migration, `npm ci` and the service's line said or not, `--check` running no merge, the open runs, the `MT_SCHEMA_DIR` warning, the time limits and batch mode (Task 9); no terminal without `--yes`, a "no", `npm ci` skipped or run, npm beside the node and its directory first on `PATH`, each failure of steps 4 to 6 going back, a changed pid and a changed version at the backup and at going back, going back failing, a stopped service, a failed restart call, the confirmation and its failures (Task 10); a stale lock at each step, its version equal to the database's and not (Task 11); each signal at each step, a second one while going back, the drain's and `systemctl restart`'s, and EPIPE (Task 12); and the end-to-end list (Task 14).
 
@@ -2238,7 +2241,7 @@ git commit -m "Back the database up by SQLite's online backup in one step, owner
 
 - Create: `src/cli/update-lock.ts`, `tests/update-lock.test.ts`
 
-Spec §20.10. `UpdateLock.take` writes the state to a staging file and links it into place, as `lockGateway` does, and answers what a lock already there holds instead, never removing it; `write` rewrites it by staging and rename; `release` removes it while it names this process. `readUpdateLock` refuses a symlink and answers undefined for a file that holds no update's state.
+Spec §20.10. `UpdateLock.take` writes the state to a staging file, synced, and links it into place, as `lockGateway` does, and answers what a lock already there holds instead, never removing it; `write` rewrites it by staging and rename; `release` removes it while it names this process. `readUpdateLock` refuses a symlink and answers undefined for a file that holds no update's state.
 
 - [ ] **Step 7.1: Write the tests.**
 
@@ -2328,7 +2331,7 @@ Create `src/cli/update-lock.ts`:
 
 ```ts
 import { randomUUID } from 'node:crypto';
-import { closeSync, constants, fstatSync, linkSync, openSync, readSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, fsyncSync, linkSync, openSync, readSync, renameSync, rmSync, unlinkSync, writeSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 /**
@@ -2406,9 +2409,16 @@ export function readUpdateLock(path: string): UpdateLockState | undefined {
   }
 }
 
+/** The state written whole to a new staging file beside `path`, and synced, so the link or rename puts a whole file in place. */
 function staged(path: string, state: UpdateLockState): string {
   const staging = join(dirname(path), `.${basename(path)}-${randomUUID()}`);
-  writeFileSync(staging, `${JSON.stringify(state)}\n`, { mode: 0o600, flag: 'wx' });
+  const fd = openSync(staging, 'wx', 0o600);
+  try {
+    writeSync(fd, `${JSON.stringify(state)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   return staging;
 }
 
@@ -2479,7 +2489,7 @@ git commit -m "Add the update's locks, taken by link, rewritten whole by their h
 
 - Create: `src/cli/update-advice.ts`, `tests/update-advice.test.ts`
 
-Spec §20.6, §20.7 and §20.9. `stepsBack`, `stepsForward` and `finishByHand`, as lists of command lines: mt as `PATH='<node dir>':"$PATH" '<node>' '<checkout>/dist/mt.js'`, npm by its path with the same `PATH`, every path quoted as `install.sh` quotes one, `export MT_HOME='<home>'` first when the home is not the default, and, with no service, the restart of a gateway run by hand split around the restore. With `checkVersion`, the steps back read the version again after the stop. The tests also cover `shQuote` and `findNpm` (Task 4).
+Spec §20.6, §20.7 and §20.9. `stepsBack`, `stepsForward` and `finishByHand`, as lists of command lines: mt as `PATH='<node dir>':"$PATH" '<node>' '<checkout>/dist/mt.js'`, npm by its path with the same `PATH`, every path quoted as `install.sh` quotes one, `export MT_HOME='<home>'` first when the home is not the default, and, with no service, the restart of a gateway run by hand split around the restore. With `checkVersion`, the steps back read the version again after the stop, and go on when the check prints `at version N`, `database: unknown (...)`, or nothing. The tests also cover `shQuote` and `findNpm` (Task 4).
 
 - [ ] **Step 8.1: Write the tests.**
 
@@ -2565,7 +2575,7 @@ describe('the steps back', () => {
   it('read the version again after the stop, when the service started again on its own', () => {
     const lines = stepsBack(P, { old: '8b64aa1', backup: undefined, checkVersion: 8 });
     expect(lines[3]).toBe(
-      `${MT} service check  # it should print "at version 8": if it does, or prints no version line, go on; ` +
+      `${MT} service check  # it should print "at version 8": if it does, or prints "database: unknown (...)", or nothing, go on; ` +
         'if it prints another version, follow the steps forward instead',
     );
     expect(lines[2]).toBe(`cd '/src/it'\\''s here'`);
@@ -2664,7 +2674,7 @@ export function stepsBack(p: AdvicePaths, opts: { old: string; backup: string | 
       ? []
       : [
           `${mt} service check  # it should print ${opts.checkVersion === null ? '"no database"' : `"at version ${opts.checkVersion}"`}: ` +
-            'if it does, or prints no version line, go on; if it prints another version, follow the steps forward instead',
+            'if it does, or prints "database: unknown (...)", or nothing, go on; if it prints another version, follow the steps forward instead',
         ];
   const restore = opts.backup === undefined ? [] : [`rm -f ${shQuote(`${p.db}-wal`)} ${shQuote(`${p.db}-shm`)}`, `cp ${shQuote(opts.backup)} ${shQuote(p.db)}`];
   return [
@@ -2718,7 +2728,7 @@ git commit -m "Write the steps back, the steps forward and the commands to finis
 - Create: `src/cli/update.ts`, `tests/helpers/update.ts`, `tests/mt-update-check.test.ts`, `tests/mt-update-show.test.ts`, `tests/update-run.test.ts`
 - Modify: `src/cli/mt.ts`, `src/cli/service.ts`, `src/db/kanban-read.ts`
 
-Spec §20.1 to §20.3, §20.10 and §20.11's runner. `src/cli/update.ts`: `UpdateDeps`, `LIMITS`, `runDetached` (a session of its own, no stdin, the group killed at its limit or an abort), `runSyncDetached` and `realUpdateDeps`, and the `Update` class's first two steps. `inspect` (step 2): the checkout is the top of its worktree; the two locks, the checkout's first; the unit, its checkout (by `realpath`), its node, its state, another gateway on the home; a branch with an upstream; clean, with no operation under way; the fetch, in batch mode; an ancestor of the upstream; up to date; no ignored file at an added path. `show` (step 3): the commits, the migrations, the database found as the gateway would find it, the `MT_SCHEMA_DIR` warning, `npm ci`, the open runs and the service's line, recorded in the locks. `mt.ts` reaches it as `mt update`, refused in a board run's shell, and `service.ts` exports `serviceView`. This task's command takes only `--check`; Task 10 adds `--yes` and the question. `tests/helpers/update.ts` is the fake git and npm, over Task 4's fake service.
+Spec §20.1 to §20.3, §20.10 and §20.11's runner. `src/cli/update.ts`: `UpdateDeps`, `LIMITS`, `runDetached` (a session of its own, no stdin, the group killed at its limit or an abort, and its pipes let go a second after the SIGKILL), `runSyncDetached` and `realUpdateDeps`, and the `Update` class's first two steps. `inspect` (step 2): the checkout is the top of its worktree; the two locks, the checkout's first; the unit, its checkout (by `realpath`), its node, its state, another gateway on the home; a branch with an upstream; clean, with no operation under way; the fetch, in batch mode; an ancestor of the upstream; up to date; no ignored file at an added path. `show` (step 3): the commits, the migrations, the database found as the gateway would find it, the `MT_SCHEMA_DIR` warning, `npm ci`, the open runs and the service's line, recorded in the locks. `mt.ts` reaches it as `mt update`, refused in a board run's shell, and `service.ts` exports `serviceView`. This task's command takes only `--check`; Task 10 adds `--yes` and the question. `tests/helpers/update.ts` is the fake git and npm, over Task 4's fake service.
 
 - [ ] **Step 9.1: Write the tests.**
 
@@ -3426,7 +3436,21 @@ describe('runDetached', () => {
     const r = await sh('trap "" TERM; sleep 30', 1_500);
     expect(r.timedOut).toBe(true);
     expect(r.code).toBe(137);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(6_500);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(6_400);
+  }, 20_000);
+
+  it('answers a second after the SIGKILL when a process that left the group holds its output', async () => {
+    // A grandchild in a session of its own keeps stdout open; it prints its pid first, so the test can end it.
+    const leave = `node -e "const c = require('node:child_process').spawn('sleep', ['30'], { detached: true, stdio: 'inherit' }); console.log(c.pid); c.unref();"`;
+    const started = Date.now();
+    const r = await sh(`${leave}; trap "" TERM; sleep 30`, 1_500);
+    try {
+      expect(r).toMatchObject({ code: 137, timedOut: true });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(7_400);
+      expect(Date.now() - started).toBeLessThan(15_000);
+    } finally {
+      process.kill(Number(r.stdout.trim()), 'SIGKILL');
+    }
   }, 20_000);
 
   it('kills the group when aborted', async () => {
@@ -3760,8 +3784,9 @@ export const LIMITS = {
   check: 120_000,
 } as const;
 
-/** How long a killed group has between SIGTERM and SIGKILL. */
+/** How long a killed group has between SIGTERM and SIGKILL, and after it, before its output is let go. */
 const KILL_AFTER_MS = 5_000;
+const GONE_AFTER_MS = 1_000;
 
 const COMMITS_SHOWN = 50;
 
@@ -3870,7 +3895,15 @@ export function runDetached(cmd: string, args: readonly string[], opts: UpdateRu
     const kill = (): void => {
       if (killer !== undefined) return;
       group('SIGTERM');
-      killer = setTimeout(() => group('SIGKILL'), KILL_AFTER_MS);
+      killer = setTimeout(() => {
+        group('SIGKILL');
+        // A process that left the group may hold the pipes open: let them go, and answer with what was said.
+        setTimeout(() => {
+          child.stdout.destroy();
+          child.stderr.destroy();
+          finish({ code: 137, stdout, stderr, timedOut });
+        }, GONE_AFTER_MS).unref();
+      }, KILL_AFTER_MS);
       killer.unref();
     };
     const timer = setTimeout(() => {
@@ -4294,7 +4327,7 @@ export function hasBoard(db: Db): boolean {
 }
 ```
 
-- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1883 passed (1883)`. Run `npx vitest run --project e2e`. Expected: `Tests  157 passed (157)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1884 passed (1884)`. Run `npx vitest run --project e2e`. Expected: `Tests  157 passed (157)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 9.5: Commit.**
 
@@ -4312,7 +4345,7 @@ git commit -m "Add mt update --check, which checks the checkout, the branch, the
 - Create: `tests/mt-update-apply.test.ts`, `tests/mt-update-restart.test.ts`
 - Modify: `src/cli/mt.ts`, `src/cli/update.ts`, `tests/mt-update-show.test.ts`
 
-Spec §20.3's question, §20.4 to §20.9. `confirm` asks at a terminal unless `--yes`, and refuses with none. `apply`: `git merge --ff-only`, `npm ci` when the dependencies changed, `npm run build`, the new build's `mt service check` as the preflight, each a `step` that writes the lock first; then `unmoved`, which reads the pid and the version again and stops with exit 3 and the steps back or forward when either moved; then the backup into `privateDir(backups)`. A failure goes back (`goBack`): `unmoved` again, `git reset --keep <old>`, `npm ci` if one ran, the build, and exit 1; going back that fails is `stuck`, exit 3. `restart`: a stopped service or none is not started, exit 0; else `ServiceView.restart`, then the log read past where it was for `connected as` after the schema line, 240 polls of 250 ms; a failure there, or none, prints the log's tail and the steps back, exit 3.
+Spec §20.3's question, §20.4 to §20.9. `confirm` asks at a terminal unless `--yes`, and refuses with none. `apply`: `git merge --ff-only`, `npm ci` when the dependencies changed, `npm run build`, the new build's `mt service check` as the preflight, each a `step` that writes the lock first; then `unmoved`, which reads the pid and the version again and stops with exit 3 and the steps back or forward when either moved; then the backup into `privateDir(backups)`. A failure goes back (`goBack`): `unmoved` again, `git reset --keep <old>`, `npm ci` if one ran, the build, `git status --porcelain`, and exit 1; going back that fails, or leaves the tree not clean, is `stuck`, exit 3. `restart`: a stopped service or none is not started, exit 0; else `ServiceView.restart`, then the log read past where it was for `connected as` after the schema line, 240 polls of 250 ms; a failure there, or none, prints the log's tail and the steps back, exit 3.
 
 - [ ] **Step 10.1: Write the tests.**
 
@@ -4344,6 +4377,8 @@ afterEach(() => {
 
 const NPM = (): string => `PATH='${join(fx.root, 'node bin')}':"$PATH" '${fx.npm}'`;
 const MT = (): string => `PATH='${join(fx.root, 'node bin')}':"$PATH" '${fx.node}' '${join(fx.checkout, 'dist', 'mt.js')}'`;
+/** The check that the tree is clean once gone back. */
+const STATUS = 'git status --porcelain --untracked-files=normal';
 const restarted = (): boolean => fx.words().some((w) => / kill SIGTERM | kickstart /.test(` ${w} `));
 /** The calls after the fetch's checks: what the update did. */
 const did = (): string[] => {
@@ -4413,7 +4448,7 @@ describe('a failure in steps 4 to 6 goes back', () => {
     fx.answer = (run) => (run.cmd === fx.npm && run.args[1] === 'build' && builds++ === 0 ? { code: 2, stdout: 'src/x.ts(1,1): error TS1005\n' } : undefined);
     const r = await fx.update(['--yes']);
     expect(r.code).toBe(1);
-    expect(did()).toEqual(['git merge --ff-only origin/main', 'npm run build', `git reset --keep ${OLD}`, 'npm run build']);
+    expect(did()).toEqual(['git merge --ff-only origin/main', 'npm run build', `git reset --keep ${OLD}`, 'npm run build', STATUS]);
     expect(fx.repo.head).toBe(OLD);
     expect(r.err).toBe('mt: npm run build failed (exit 2)\n  src/x.ts(1,1): error TS1005');
     expect(r.out).toContain('the checkout is back at 8b64aa1, and the gateway as it was');
@@ -4428,7 +4463,7 @@ describe('a failure in steps 4 to 6 goes back', () => {
     fx.answer = (run) => (run.cmd === fx.npm && run.args[0] === 'ci' && cis++ === 0 ? { code: 1, stderr: 'npm ERR! network' } : undefined);
     const r = await fx.update(['--yes']);
     expect(r.code).toBe(1);
-    expect(did()).toEqual(['git merge --ff-only origin/main', 'npm ci', `git reset --keep ${OLD}`, 'npm ci', 'npm run build']);
+    expect(did()).toEqual(['git merge --ff-only origin/main', 'npm ci', `git reset --keep ${OLD}`, 'npm ci', 'npm run build', STATUS]);
   });
 
   it('a failed check of the new build, with its last lines, masked', async () => {
@@ -4437,7 +4472,7 @@ describe('a failure in steps 4 to 6 goes back', () => {
     const r = await fx.update(['--yes']);
     expect(r.code).toBe(1);
     expect(r.err).toMatch(/^mt: mt service check failed \(exit 1\)\n {2}mt: the gateway would not start as the service: ••••$/);
-    expect(did()).toEqual(['git merge --ff-only origin/main', 'npm run build', 'node service check', `git reset --keep ${OLD}`, 'npm run build']);
+    expect(did()).toEqual(['git merge --ff-only origin/main', 'npm run build', 'node service check', `git reset --keep ${OLD}`, 'npm run build', STATUS]);
   });
 
   it('a merge that failed, and one that timed out with HEAD at the new commit, both go back', async () => {
@@ -4488,6 +4523,21 @@ describe('a failure in steps 4 to 6 goes back', () => {
     expect(r.out).toContain('git status says:\n  On branch main');
     expect(r.out).toContain(`to finish going back by hand:\n  cd '${fx.checkout}' && ${NPM()} ci && ${NPM()} run build`);
     expect(r.out).toContain('a crash restart would run whatever dist/ and node_modules now hold');
+  });
+
+  it('a tree not clean after going back: stuck, with what git status says, exit 3', async () => {
+    fx = await updateFake();
+    let builds = 0;
+    fx.answer = (run) => {
+      if (run.cmd === fx.npm && run.args[1] === 'build' && builds++ === 0) return { code: 2 };
+      if (run.args[0] === 'status' && run.args[1] === '--porcelain' && builds > 0) return { stdout: '?? dist-leftover.txt\n' };
+      return undefined;
+    };
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(3);
+    expect(r.err).toBe('mt: npm run build failed (exit 2); and going back, the checkout is not clean:\n  ?? dist-leftover.txt');
+    expect(r.out).not.toContain('the checkout is back at');
+    expect(r.out).toContain(`to finish going back by hand:\n  cd '${fx.checkout}' && ${NPM()} ci && ${NPM()} run build`);
   });
 
   it('a reset that fails going back names it in the commands to finish', async () => {
@@ -4773,7 +4823,7 @@ describe("mt update's question", () => {
 });
 ```
 
-- [ ] **Step 10.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-update-apply.test.ts tests/mt-update-restart.test.ts tests/mt-update-show.test.ts`. Expected: `Tests  34 failed | 13 passed (47)`: `--yes` is an unknown option, exit 2, and with neither flag the command line is wrong too.
+- [ ] **Step 10.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-update-apply.test.ts tests/mt-update-restart.test.ts tests/mt-update-show.test.ts`. Expected: `Tests  35 failed | 13 passed (48)`: `--yes` is an unknown option, exit 2, and with neither flag the command line is wrong too.
 
 - [ ] **Step 10.3: Implement.**
 
@@ -4844,7 +4894,7 @@ import { finishByHand, stepsBack, stepsForward, type AdvicePaths } from './updat
 In `src/cli/update.ts`, replace:
 
 ```ts
-/** How long a killed group has between SIGTERM and SIGKILL. */
+/** How long a killed group has between SIGTERM and SIGKILL, and after it, before its output is let go. */
 ```
 
 with:
@@ -4853,7 +4903,7 @@ with:
 /** How long the restarted gateway has to say it connected, and how often its log is read. */
 export const CONFIRM_MS = 60_000;
 const POLL_MS = 250;
-/** How long a killed group has between SIGTERM and SIGKILL. */
+/** How long a killed group has between SIGTERM and SIGKILL, and after it, before its output is let go. */
 ```
 
 In `src/cli/update.ts`, replace:
@@ -5252,13 +5302,20 @@ with:
     const run = (cmd: string, args: readonly string[], timeoutMs: number, env: Env): Promise<UpdateRunResult> =>
       this.deps.run(cmd, args, { cwd: this.checkout, env, timeoutMs });
     const reset = await run('git', ['reset', '--keep', this.old], LIMITS.hook, this.gitEnv);
-    if (reset.code !== 0 || reset.timedOut) return await this.stuck(failure, `git reset --keep ${short(this.old)}`, reset, this.old);
+    const failed = (what: string, r: UpdateRunResult): string => `${what} ${r.timedOut ? 'did not finish' : `failed (exit ${r.code})`}`;
+    const output = (r: UpdateRunResult): string => `${r.stdout}\n${r.stderr}`;
+    if (reset.code !== 0 || reset.timedOut) return await this.stuck(failure, failed(`git reset --keep ${short(this.old)}`, reset), output(reset), this.old);
     if (this.ranCi) {
       const ci = await run(this.npm, ['ci'], LIMITS.npmCi, this.npmEnv);
-      if (ci.code !== 0 || ci.timedOut) return await this.stuck(failure, 'npm ci', ci, undefined);
+      if (ci.code !== 0 || ci.timedOut) return await this.stuck(failure, failed('npm ci', ci), output(ci), undefined);
     }
     const build = await run(this.npm, ['run', 'build'], LIMITS.build, this.npmEnv);
-    if (build.code !== 0 || build.timedOut) return await this.stuck(failure, 'npm run build', build, undefined);
+    if (build.code !== 0 || build.timedOut) return await this.stuck(failure, failed('npm run build', build), output(build), undefined);
+    // Back at the old commit is said only of a clean tree: a hook or a build that wrote into it leaves it for a person.
+    const status = await run('git', ['status', '--porcelain', '--untracked-files=normal'], LIMITS.local, this.gitEnv);
+    if (status.code !== 0 || status.stdout.trim() !== '') {
+      return await this.stuck(failure, status.code !== 0 ? failed('git status', status) : 'the checkout is not clean', output(status), undefined);
+    }
     this.sayErr(`mt: ${failure.what}`);
     for (const line of lines(failure.output).slice(-FAILED_TAIL)) this.sayErr(`  ${line}`);
     this.say(`the checkout is back at ${short(this.old)}, and the gateway as it was`);
@@ -5266,9 +5323,9 @@ with:
   }
 
   /** Going back failed too: what is left, and how to finish by hand. Exit 3. */
-  private async stuck(failure: Failure, what: string, r: UpdateRunResult, reset: string | undefined): Promise<never> {
-    this.sayErr(`mt: ${failure.what}; and going back, ${what} ${r.timedOut ? 'did not finish' : `failed (exit ${r.code})`}:`);
-    for (const line of lines(`${r.stdout}\n${r.stderr}`).slice(-FAILED_TAIL)) this.sayErr(`  ${line}`);
+  private async stuck(failure: Failure, what: string, output: string, reset: string | undefined): Promise<never> {
+    this.sayErr(`mt: ${failure.what}; and going back, ${what}:`);
+    for (const line of lines(output).slice(-FAILED_TAIL)) this.sayErr(`  ${line}`);
     const status = await this.deps.run('git', ['status'], { cwd: this.checkout, env: this.gitEnv, timeoutMs: LIMITS.local });
     this.block('git status says:', lines(status.stdout));
     this.block('to finish going back by hand:', finishByHand(this.paths, { reset }));
@@ -5360,7 +5417,7 @@ with:
       return await this.restart();
 ```
 
-- [ ] **Step 10.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1917 passed (1917)`. Run `npx vitest run --project e2e`. Expected: `Tests  157 passed (157)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 10.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1919 passed (1919)`. Run `npx vitest run --project e2e`. Expected: `Tests  157 passed (157)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 10.5: Commit.**
 
@@ -5378,7 +5435,7 @@ git commit -m "Have mt update fast-forward, run npm ci only when the dependencie
 - Create: `tests/mt-update-locks.test.ts`
 - Modify: `src/cli/update.ts`
 
-Spec §20.10. A held lock whose pid is dead is refused, as before, and now with what to do, and the lock is never removed: at `check` or `show`, that it changed nothing and the `rm`; later, the database's `user_version` read again, read-only, from the lock's `db`: unchanged, the steps back, with the restore only when the lock names a backup; moved, the steps forward, and at `restart` or `confirm` with a backup, the steps back with its restore besides. Then the `rm`.
+Spec §20.10. A held lock whose pid is dead is refused, as before, and now with what to do, and the lock is never removed: at `check` or `show`, that it changed nothing and the `rm`; later, the database's `user_version` read again, read-only, from the lock's `db`: unchanged, the steps back, with the restore only when the lock names a backup; moved, the steps forward, and at `restart` or `confirm` with a backup, the steps back with its restore besides. Then one `rm` of every lock naming the dead pid, the checkout's and the home's, read both. A checkout's lock of another home gives no steps, only `run MT_HOME=<home> mt update`; a database that cannot be read gives both ways. An error nothing foresaw after step 3 keeps the locks for that advice, exit 3; before step 4 it releases them, exit 1.
 
 - [ ] **Step 11.1: Write the tests.**
 
@@ -5391,6 +5448,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { UpdateLockState, UpdateStep } from '../src/cli/update-lock.js';
 import { openDb } from '../src/db/open.js';
 import { clearSecrets } from '../src/secrets.js';
+import { SECRET } from './helpers/service.js';
 import { NEW, OLD, TOP, updateFake, type UpdateFake } from './helpers/update.js';
 
 /**
@@ -5430,6 +5488,38 @@ function migrateTo(version: number): void {
   db.pragma(`user_version = ${version}`);
   db.close();
 }
+
+describe('an error nothing foresaw', () => {
+  it('after the merge: the locks are kept, saying the step, exit 3; the next run gives the advice', async () => {
+    fx = await updateFake();
+    fx.onStart = () => {};
+    fx.whileSleeping = () => {
+      throw new Error(`disk on fire ${SECRET}`);
+    };
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(3);
+    expect(r.err).toBe('mt: unexpected error at its step confirm: disk on fire ••••');
+    expect(r.out).toContain(`its locks are kept, saying where it stopped: ${join(fx.repo.gitDir, 'mt-update.lock')}, ${homeLock()}; run mt update again for what to do`);
+    expect(existsSync(homeLock())).toBe(true);
+    fx.whileSleeping = () => {};
+    const again = await fx.update(['--yes']);
+    expect(again.code).toBe(1);
+    expect(again.err).toContain('died at its step confirm');
+    expect(again.out).toContain('the steps back:');
+  });
+
+  it('before the merge: nothing changed, the locks go, exit 1, masked', async () => {
+    fx = await updateFake();
+    fx.whileAsking = () => {
+      throw new Error(`no tty ${SECRET}`);
+    };
+    const r = await fx.update([], { tty: true });
+    expect(r.code).toBe(1);
+    expect(r.err).toBe('mt: unexpected error: no tty ••••');
+    expect(existsSync(homeLock())).toBe(false);
+    expect(existsSync(join(fx.repo.gitDir, 'mt-update.lock'))).toBe(false);
+  });
+});
 
 describe('a lock left by an update that died', () => {
   for (const step of ['check', 'show'] as const) {
@@ -5488,6 +5578,38 @@ describe('a lock left by an update that died', () => {
     });
   }
 
+  it('left in both places: one message, and an rm of both', async () => {
+    fx = await updateFake();
+    const home = died('build');
+    const checkout = died('build', {}, 'checkout');
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain(`its locks are never cleared by itself: ${checkout}, ${home}`);
+    expect(r.out.split('\n').slice(-1)).toEqual([`then remove its locks: rm '${checkout}' '${home}'`]);
+    expect(r.out.match(/the steps back:/g)).toHaveLength(1);
+  });
+
+  it("in the checkout's lock, of another home: no steps, but how to ask that home", async () => {
+    fx = await updateFake();
+    died('backup', { home: '/srv/other home' }, 'checkout');
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(1);
+    expect(r.err).toBe("mt: an update of /srv/other home died at its step backup; run MT_HOME='/srv/other home' mt update for what to do");
+    expect(r.out).toBe('');
+  });
+
+  it("whose database cannot be read: both ways, and how to read the version", async () => {
+    fx = await updateFake();
+    const garbage = join(fx.root, 'not a database.db');
+    writeFileSync(garbage, 'not sqlite at all, but long enough to be read as a header '.repeat(10));
+    died('build', { db: garbage });
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^the database's version cannot be read here \(.*\): read it with .* service check$/m);
+    expect(r.out).toContain(`at version ${TOP}, the steps back:`);
+    expect(r.out).toContain('at another, the steps forward:');
+  });
+
   it("in the checkout's lock too", async () => {
     fx = await updateFake();
     const path = died('build', {}, 'checkout');
@@ -5507,7 +5629,7 @@ describe('a lock left by an update that died', () => {
 });
 ```
 
-- [ ] **Step 11.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-update-locks.test.ts`. Expected: `Tests  19 failed | 1 passed (20)`: a dead update's lock is refused with no advice.
+- [ ] **Step 11.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-update-locks.test.ts`. Expected: `Tests  24 failed | 1 passed (25)`: a dead update's lock is refused with no advice, and an error nothing foresaw escapes `mt update` with its locks released.
 
 - [ ] **Step 11.3: Implement.**
 
@@ -5520,7 +5642,25 @@ import { UpdateLock, type UpdateLockState, type UpdateStep } from './update-lock
 with:
 
 ```ts
-import { UNCHANGED_STEPS, UpdateLock, type UpdateLockState, type UpdateStep } from './update-lock.js';
+import { UNCHANGED_STEPS, UpdateLock, readUpdateLock, type UpdateLockState, type UpdateStep } from './update-lock.js';
+```
+
+In `src/cli/update.ts`, replace:
+
+```ts
+  private readonly locks: UpdateLock[] = [];
+  private lock: UpdateLockState;
+```
+
+with:
+
+```ts
+  private readonly locks: UpdateLock[] = [];
+  /** The checkout's lock and the home's, once known. */
+  private lockPaths: string[] = [];
+  /** Set when an unexpected error after step 3 leaves the locks for a person. */
+  private keepLocks = false;
+  private lock: UpdateLockState;
 ```
 
 In `src/cli/update.ts`, replace:
@@ -5544,18 +5684,41 @@ In `src/cli/update.ts`, replace:
 with:
 
 ```ts
-    // Died: a kill -9 or a power cut. Never cleared here; what to do depends on how far it got.
+    // Died: a kill -9, a power cut, or an error it did not foresee. Never cleared here; what to do depends on how far it got.
+    if (held.home !== this.view.mtHome) {
+      // The checkout's lock, left by an update of another home: that home's database and service are the ones to look at.
+      return new Stop(1, `an update of ${held.home} died at its step ${held.step}; run MT_HOME=${shQuote(held.home)} mt update for what to do`);
+    }
     const commits = held.old === undefined ? '' : `, updating ${short(held.old)}..${short(held.new)}`;
-    this.sayErr(`mt: an update (pid ${held.pid}) died at its step ${held.step}${commits}; its lock is never cleared by itself: ${path}`);
-    const rm = `then remove its lock: rm ${shQuote(path)}`;
+    // Both locks it left, named together, so the advice is followed once.
+    const left = this.lockPaths.filter((p) => {
+      try {
+        return readUpdateLock(p)?.pid === held.pid;
+      } catch {
+        return false;
+      }
+    });
+    if (!left.includes(path)) left.push(path);
+    const locks = left.length === 1 ? 'its lock' : 'its locks';
+    this.sayErr(`mt: an update (pid ${held.pid}) died at its step ${held.step}${commits}; ${locks} ${left.length === 1 ? 'is' : 'are'} never cleared by itself: ${left.join(', ')}`);
+    const rm = `then remove ${locks}: rm ${left.map(shQuote).join(' ')}`;
     if (UNCHANGED_STEPS.includes(held.step)) {
-      this.say(`it changed nothing; remove its lock: rm ${shQuote(path)}`);
+      this.say(`it changed nothing; remove ${locks}: rm ${left.map(shQuote).join(' ')}`);
       return new Stop(1, undefined);
     }
     const paths = { ...this.paths, db: held.db ?? this.dbPath };
     const was = held.userVersion ?? null;
-    const now = held.db === undefined ? null : versionOf(held.db);
     const back = { old: held.old ?? 'HEAD', backup: held.backup };
+    let now: number | null;
+    try {
+      now = held.db === undefined ? null : versionOf(held.db);
+    } catch (err) {
+      this.say(`the database's version cannot be read here (${err instanceof Error ? err.message : String(err)}): read it with ${mtCommand(this.node, this.checkout)} service check`);
+      this.block(`at ${versionText(was)}, the steps back:`, stepsBack(paths, back));
+      this.block('at another, the steps forward:', stepsForward(paths));
+      this.say(rm);
+      return new Stop(1, undefined);
+    }
     if (now === was) {
       this.say(`the database is still at ${versionText(was)}`);
       this.block('the steps back:', stepsBack(paths, back));
@@ -5570,7 +5733,73 @@ with:
     return new Stop(1, undefined);
 ```
 
-- [ ] **Step 11.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1937 passed (1937)`. Run `npx vitest run --project e2e`. Expected: `Tests  157 passed (157)`. Run `npm run typecheck`. Expected: no errors.
+In `src/cli/update.ts`, replace:
+
+```ts
+    this.takeLock(join(gitDir, 'mt-update.lock'));
+```
+
+with:
+
+```ts
+    this.lockPaths = [join(gitDir, 'mt-update.lock'), join(view.mtHome, 'run', 'update.pid')];
+    this.takeLock(join(gitDir, 'mt-update.lock'));
+```
+
+In `src/cli/update.ts`, replace:
+
+```ts
+  async run(): Promise<number> {
+```
+
+with:
+
+```ts
+  /**
+   * An error nothing foresaw. Up to step 3 nothing changed: the locks go, exit 1.
+   * After it the update may be half way, so the locks stay, saying where it
+   * stopped, for the next run's advice: exit 3.
+   */
+  private unexpected(err: unknown): number {
+    const message = err instanceof Error ? err.message : String(err);
+    if (UNCHANGED_STEPS.includes(this.lock.step)) {
+      this.sayErr(`mt: unexpected error: ${message}`);
+      return 1;
+    }
+    this.keepLocks = true;
+    this.sayErr(`mt: unexpected error at its step ${this.lock.step}: ${message}`);
+    this.say(`its locks are kept, saying where it stopped: ${this.locks.map((l) => l.path).join(', ')}; run mt update again for what to do`);
+    return 3;
+  }
+
+  async run(): Promise<number> {
+```
+
+In `src/cli/update.ts`, replace:
+
+```ts
+      if (!(err instanceof Stop)) throw err;
+```
+
+with:
+
+```ts
+      if (!(err instanceof Stop)) return this.unexpected(err);
+```
+
+In `src/cli/update.ts`, replace:
+
+```ts
+      for (const lock of [...this.locks].reverse()) lock.release();
+```
+
+with:
+
+```ts
+      if (!this.keepLocks) for (const lock of [...this.locks].reverse()) lock.release();
+```
+
+- [ ] **Step 11.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1944 passed (1944)`. Run `npx vitest run --project e2e`. Expected: `Tests  157 passed (157)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 11.5: Commit.**
 
@@ -5588,7 +5817,7 @@ git commit -m "Say what to do when an update's lock was left by one that died: t
 - Create: `tests/mt-update-signals.test.ts`
 - Modify: `src/cli/update.ts`
 
-Spec §20.11. SIGINT, SIGHUP and SIGTERM, through `UpdateDeps.onSignal`, are one. Before the merge (`phase` `before`) the running call's group is killed through its `AbortSignal`, the question too, and the update ends, nothing changed, exit 1. From the merge to the backup (`changing`) the running command is let finish and `goBackIf` goes back. Going back ignores a second one. The restart call is let finish, and the wait then stops: exit 3 with the steps back. The update wraps `io.out` and `io.err` so EPIPE and EIO are no failure, and calls `guardOutput` first.
+Spec §20.11. SIGINT, SIGHUP and SIGTERM, through `UpdateDeps.onSignal`, are one. Before the merge (`phase` `before`) the running call's group is killed through its `AbortSignal`, the question too, and the update ends, nothing changed, exit 1. From the merge to the backup (`changing`) the running command is let finish and `goBackIf` goes back. Going back ignores a second one. The restart call is let finish, and the wait then stops: exit 3 with the steps back. A signal after step 3's last call stops at the start of `apply()`, and before `--check` returns. The update wraps `io.out` and `io.err` so EPIPE and EIO are no failure, and calls `guardOutput` first.
 
 - [ ] **Step 12.1: Write the tests.**
 
@@ -5650,6 +5879,22 @@ describe('a signal before the merge', () => {
   });
 });
 
+describe('a signal after the last call of step 3', () => {
+  for (const argv of [['--yes'], ['--check']]) {
+    it(`stops ${argv[0]} with nothing changed, exit 1`, async () => {
+      fx = await updateFake();
+      const r = await fx.update(argv, {
+        out: (line) => {
+          if (line.startsWith('the service is running')) fx.signal?.('SIGTERM');
+        },
+      });
+      expect(r.code).toBe(1);
+      expect(r.err).toBe('mt: interrupted by SIGTERM: nothing changed');
+      expect(fx.ran().some((w) => w.startsWith('git merge --ff-only'))).toBe(false);
+    });
+  }
+});
+
 describe('a signal from the merge to the backup', () => {
   for (const [word, step] of [
     ['git merge --ff-only', 'the merge'],
@@ -5695,7 +5940,7 @@ describe('a signal from the merge to the backup', () => {
     const r = await fx.update(['--yes']);
     expect(r.code).toBe(1);
     expect(r.out).toContain('SIGINT: ignored, as stopping now would leave the state being undone');
-    expect(fx.ran().slice(-2)).toEqual([`git reset --keep ${OLD}`, 'npm run build']);
+    expect(fx.ran().slice(-3)).toEqual([`git reset --keep ${OLD}`, 'npm run build', 'git status --porcelain --untracked-files=normal']);
   });
 });
 
@@ -5756,7 +6001,7 @@ describe('output that cannot be written', () => {
 });
 ```
 
-- [ ] **Step 12.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-update-signals.test.ts`. Expected: `Tests  13 failed (13)`: no handler is given to `onSignal`, so a signal changes nothing, and a write that throws EPIPE ends the update.
+- [ ] **Step 12.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-update-signals.test.ts`. Expected: `Tests  15 failed (15)`: no handler is given to `onSignal`, so a signal changes nothing, and a write that throws EPIPE ends the update.
 
 - [ ] **Step 12.3: Implement.**
 
@@ -5862,6 +6107,7 @@ with:
 
 ```ts
   private async apply(): Promise<void> {
+    if (this.signalled !== undefined) throw new Stop(1, `interrupted by ${this.signalled}: nothing changed`);
     this.phase = 'changing';
     const merge = await this.step('merge', `merging ${this.upstream}, fast-forward only`, 'git', ['merge', '--ff-only', this.upstream], LIMITS.hook, this.gitEnv);
 ```
@@ -5970,12 +6216,17 @@ with:
 In `src/cli/update.ts`, replace:
 
 ```ts
-  async run(): Promise<number> {
+  // -------------------------------------------------------------------------
+
+  /**
+   * An error nothing foresaw. Up to step 3 nothing changed: the locks go, exit 1.
 ```
 
 with:
 
 ```ts
+  // -------------------------------------------------------------------------
+
   private onSignal(signal: NodeJS.Signals): void {
     if (this.phase === 'going back') {
       this.say(`${signal}: ignored, as stopping now would leave the state being undone`);
@@ -5988,23 +6239,39 @@ with:
     else if (this.phase === 'restart') this.say(`${signal}: the restart call is let finish`);
   }
 
-  async run(): Promise<number> {
+  /**
+   * An error nothing foresaw. Up to step 3 nothing changed: the locks go, exit 1.
 ```
 
 In `src/cli/update.ts`, replace:
 
 ```ts
+  async run(): Promise<number> {
     try {
-      await this.inspect();
 ```
 
 with:
 
 ```ts
+  async run(): Promise<number> {
     this.deps.guardOutput();
     const off = this.deps.onSignal((signal) => this.onSignal(signal));
     try {
-      await this.inspect();
+```
+
+In `src/cli/update.ts`, replace:
+
+```ts
+      if (this.opts.check) return 0;
+```
+
+with:
+
+```ts
+      if (this.opts.check) {
+        if (this.signalled !== undefined) throw new Stop(1, `interrupted by ${this.signalled}: nothing changed`);
+        return 0;
+      }
 ```
 
 In `src/cli/update.ts`, replace:
@@ -6022,7 +6289,7 @@ with:
       this.db?.close();
 ```
 
-- [ ] **Step 12.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1950 passed (1950)`. Run `npx vitest run --project e2e`. Expected: `Tests  157 passed (157)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 12.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1959 passed (1959)`. Run `npx vitest run --project e2e`. Expected: `Tests  157 passed (157)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 12.5: Commit.**
 
@@ -6155,7 +6422,7 @@ with:
     io.out('to deploy a change: mt update');
 ```
 
-- [ ] **Step 13.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1950 passed (1950)`. Run `npx vitest run --project e2e`. Expected: `Tests  157 passed (157)`. Run `npm run typecheck`. Expected: no errors. Run `git diff -- README.md | grep "^+" | grep -c "—"`. Expected: `0`.
+- [ ] **Step 13.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1959 passed (1959)`. Run `npx vitest run --project e2e`. Expected: `Tests  157 passed (157)`. Run `npm run typecheck`. Expected: no errors. Run `git diff -- README.md | grep "^+" | grep -c "—"`. Expected: `0`.
 
 - [ ] **Step 13.5: Commit.**
 
@@ -6462,7 +6729,7 @@ describe('the backup of a real WAL database, written to meanwhile', () => {
 
 - [ ] **Step 14.2: Run it.** Run `npx vitest run --project e2e tests/mt-update.e2e.ts`. Expected: `Tests  7 passed (7)`.
 
-- [ ] **Step 14.3: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1950 passed (1950)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 14.3: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1959 passed (1959)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 14.4: Commit.**
 
@@ -6473,12 +6740,13 @@ git commit -m "Test mt update end to end against a real bare origin, and the bac
 
 ## Done when
 
-- `npx vitest run --project unit` gives `Tests  1950 passed (1950)`. `npx vitest run --project e2e` gives `Tests  164 passed (164)`, run twice. `npm run typecheck` and `npm run build` report no errors. All under Node 22, in the worktree.
+- `npx vitest run --project unit` gives `Tests  1959 passed (1959)`. `npx vitest run --project e2e` gives `Tests  164 passed (164)`, run twice. `npm run typecheck` and `npm run build` report no errors. All under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing, and `git diff 31313b2 -- src README.md | grep "^+" | grep -c "—"` prints `0`.
 - A build refuses a database newer than its migrations, before running any, and the gateway stops with `configuration error:` and exit 78, its database closed (`tests/schema-too-new.test.ts`).
 - `mt service status` says `loaded: unknown (...)` when launchd's domain or systemd's user bus cannot be asked (`tests/mt-service.test.ts`).
 - `mt service check` prints the database's version first, then install's check with the unit's `PATH`, or a hand-run gateway's with no unit, then loads the new build's modules and native module (`tests/mt-service-check.test.ts`).
 - `mt update --check` changes nothing; every refusal of step 2 is exit 1 with nothing changed; `mt update --yes` fast-forwards, builds, checks, backs up and restarts, confirmed by `connected as`, goes back on each failure before the restart, and stops with exit 3 and the steps back or forward when a person is needed (`tests/mt-update-*.test.ts`).
+- A dead update's locks are named together with one `rm`, another home's checkout lock sends to that home, and an error nothing foresaw after step 3 keeps the locks, exit 3 (`tests/mt-update-locks.test.ts`); a signal after step 3's last call changes nothing (`tests/mt-update-signals.test.ts`); a tree not clean after going back is stuck, exit 3 (`tests/mt-update-apply.test.ts`).
 - End to end, with real git: `--check` changes nothing, `--yes` updates and restarts, a failing build leaves the old commit, a local commit and a force-push are refused, and a WAL database's backup taken while another process writes is restored at the version it had (`tests/mt-update.e2e.ts`).
 
 ## Before relying on it: the smoke checklist
@@ -6487,16 +6755,16 @@ For the user, once the plan is built and merged, on the real host, before a depl
 
 **macOS (launchd).**
 
-1. **The first run, from the old build.** The `mt` on `PATH` is the build from before this plan, which has no `mt update`: deploy this build once by hand, `git pull && npm ci && npm run build && mt service restart`. `mt service logs -n 20` says `schema at version 8` and `connected as`. From now on `mt update` is there.
+1. **The first run, from the old build.** The `mt` on `PATH` is the build from before this plan, which has no `mt update`: deploy this build once by hand, with the node the service runs, the `node:` line of `mt service status`, first on `PATH`, never the shell's default node (23 here, for which a build of `better-sqlite3` would not load in the service): `git -C <checkout> pull && cd <checkout> && PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH npm run build && mt service restart`, with that node's directory in place of `~/.nvm/versions/node/v22.15.0/bin` if it is another. No `npm ci`: this plan adds no dependency. `mt service logs -n 20` says `schema at version 8` and `connected as`. From now on `mt update` is there.
 2. **The check, alone.** `mt service check` prints `database: ~/.manus-team/team.db at version 8; this build: up to 8` (the path in full), `checking as team.manus.gateway starts it: with PATH ...`, and `ok: this build would start as team.manus.gateway`, exit 0 (`echo $?`).
 3. **Nothing new.** `mt update --check` prints `fetching origin` and `... up to date at <sha>`, exit 0. `ls ~/.manus-team/run` shows no `update.pid`, and `ls <checkout>/.git/mt-update.lock` says no such file.
 4. **A real update.** Push a harmless commit to `origin/main` (a line in a doc). `mt update --check` shows it, and `the service is running (pid N) and is restarted`; `git -C <checkout> log -1 --oneline` is unchanged. Then `mt update`, answer `y`: it says `merging origin/main, fast-forward only`, `running npm run build`, the check's lines, `backed up the database to ~/.manus-team/backups/team-v8-<sha>-<time>.db`, `restarting team.manus.gateway`, and `updated main from <old> to <new>; the gateway is connected, at schema version 8`, exit 0. `ls -l ~/.manus-team/backups` shows the file `-rw-------` in a `drwx------` directory; `sqlite3 -readonly <backup> "pragma journal_mode; pragma user_version"` prints `delete` and `8`. The gateway answers in Lark.
 5. **A "no".** Push another harmless commit. `mt update`, answer `n`: `nothing changed`, exit 1, and `git -C <checkout> log -1` is unchanged. `mt update --yes </dev/null` with the question skipped updates it, exit 0.
 6. **A failing build goes back.** On a scratch branch with an upstream: `git -C <checkout> switch -c smoke-update && git -C <checkout> push -u origin smoke-update`. In a scratch clone, `git clone "$(git -C <checkout> remote get-url origin)" /tmp/smoke-clone && cd /tmp/smoke-clone && git switch smoke-update`, add `src/smoke.ts` holding `const x: number = 'a';`, commit and push. Back in any shell, `mt update --yes`: it fails at `npm run build`, goes back, and prints `npm run build failed (exit 2)` with tsc's lines and `the checkout is back at <old>, and the gateway as it was`, exit 1. `git -C <checkout> status` is clean, on `smoke-update` at the old commit, with no `src/smoke.ts`; `mt service status` shows the same pid as before; `ls ~/.manus-team/backups` has no new file. Then `git -C <checkout> switch main`: the service runs `<checkout>` whichever branch is checked out.
-7. **Refusals.** `touch <checkout>/smoke.txt && mt update --check`: refused as not clean, naming `?? smoke.txt`, exit 1; `rm <checkout>/smoke.txt`. A local commit, `git -C <checkout> commit --allow-empty -m smoke`, then `mt update --check` after a push to `origin/main` from the scratch clone: refused as `main has commits origin/main does not`; `git -C <checkout> reset --keep HEAD~1` drops it. `git -C <checkout> switch smoke-update && git -C <checkout> branch --unset-upstream && mt update --check`: refused naming `git branch --set-upstream-to=origin/smoke-update`; then `git -C <checkout> switch main`.
+7. **Refusals.** `touch <checkout>/smoke.txt && mt update --check`: refused as not clean, naming `?? smoke.txt`, exit 1; `rm <checkout>/smoke.txt`. A local commit, `git -C <checkout> commit --allow-empty -m smoke`, then, in the scratch clone, `cd /tmp/smoke-clone && git switch main && git pull`, commit and push a harmless change to `origin/main`, and `mt update --check`: refused as `main has commits origin/main does not`; `git -C <checkout> reset --keep HEAD~1` drops it. `git -C <checkout> switch smoke-update && git -C <checkout> branch --unset-upstream && mt update --check`: refused naming `git branch --set-upstream-to=origin/smoke-update`; then `git -C <checkout> switch main`.
 8. **Ctrl-C.** Push a harmless commit, run `mt update`, and press Ctrl-C at the question: `interrupted by SIGINT: nothing changed`, exit 1. Run `mt update --yes` and press Ctrl-C while it says `running npm run build`: the build finishes, then `SIGINT: going back once the running command ends`, and it goes back, exit 1, the pid unchanged.
 9. **A closed ssh session.** Over ssh, push a harmless commit, run `mt update --yes` and close the terminal window while it says `running npm run build`. The hangup is a signal: the build finishes, the update goes back, and nothing is left half way. Log in again: `git -C <checkout> log -1` is the old commit, `mt service status` the same pid, and `ls ~/.manus-team/run` shows no `update.pid`. To update over a link that may drop, run it in `tmux` or under `nohup`. Over ssh with no console login, `mt update --check` is refused with `the service's state cannot be read`, naming the console login.
-10. **A database too new.** With `git -C <checkout> log` at a commit of this plan, make a copy of the database, `cp ~/.manus-team/team.db /tmp/smoke.db && sqlite3 /tmp/smoke.db "pragma user_version = 99"`, and run the gateway on the copy by hand with the service stopped: `mt service stop`, then `cd <checkout> && MT_DB=/tmp/smoke.db node dist/main.js`. It prints `configuration error: the database at /tmp/smoke.db is at schema version 99, and this build knows only up to 8: ... from ~/.manus-team/backups (spec §20.8)` and exits 78 (`echo $?`). Then `mt service start`, and `rm /tmp/smoke.db`.
+10. **A database too new.** With `git -C <checkout> log` at a commit of this plan, make a copy of the database, `cp ~/.manus-team/team.db /tmp/smoke.db && sqlite3 /tmp/smoke.db "pragma user_version = 99"`, and run the gateway on the copy by hand with the service stopped: `mt service stop`, then `cd <checkout> && MT_DB=/tmp/smoke.db '<node>' dist/main.js`, `<node>` the path on the `node:` line of `mt service status`, never a bare `node`. It prints `configuration error: the database at /tmp/smoke.db is at schema version 99, and this build knows only up to 8: ... from ~/.manus-team/backups (spec §20.8)` and exits 78 (`echo $?`). Then `mt service start`, and `rm /tmp/smoke.db`.
 
 **Linux (systemd), if there is one.** Items 2 to 8 again, where `team.manus.gateway` is `manus-team.service`: the restart is `systemctl --user restart`, item 4's `mt service status` shows a new `MainPID`, and item 8's Ctrl-C during `restarting manus-team.service` lets the call finish and prints the steps back, exit 3 (then `mt service status` and `mt service logs` say whether it came back). In a shell with no user bus (`env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS mt update --check`), it is refused with `the service's state cannot be read`, naming `loginctl enable-linger`. A database too new (item 10) stops the service as `failed` with exit 78, which `RestartPreventExitStatus=78` keeps from restarting: `systemctl --user status manus-team.service` says so.
 
