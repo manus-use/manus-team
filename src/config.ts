@@ -13,7 +13,12 @@ import { BIDI } from './text.js';
  *
  * One level up holds for both layouts -- `src/config.ts` and `dist/config.js`.
  */
-const BUNDLED_SCHEMA_DIR = fileURLToPath(new URL('../schema', import.meta.url));
+export const BUNDLED_SCHEMA_DIR = fileURLToPath(new URL('../schema', import.meta.url));
+
+/** Where the gateway reads its migrations: `MT_SCHEMA_DIR` when `env` sets it, else this build's own. What `loadConfig` gives as `schemaDir`. */
+export function schemaDirOf(env: Env): string {
+  return envString(env, 'MT_SCHEMA_DIR') ?? BUNDLED_SCHEMA_DIR;
+}
 
 /**
  * Configuration: a YAML file for settings, the environment for secrets.
@@ -341,7 +346,7 @@ export function loadConfig(
     dbPath: team.dbPath,
     // Not settable from the file: it locates the migrations that belong to this
     // build, which is a packaging concern rather than an operational one.
-    schemaDir: envString(env, 'MT_SCHEMA_DIR') ?? BUNDLED_SCHEMA_DIR,
+    schemaDir: schemaDirOf(env),
     downloadDir: envString(env, 'MT_DOWNLOAD_DIR') ?? file.downloads ?? join(located.home, 'downloads'),
     configPath: team.configPath,
     home: team.home,

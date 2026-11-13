@@ -4,14 +4,27 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { AGENT_ENV_PREFIX, ConfigError, GATEWAY_ENV_NAMES, loadConfig, loadTeamSettings, type Env } from '../config.js';
+import { pathToFileURL } from 'node:url';
+import {
+  AGENT_ENV_PREFIX,
+  BUNDLED_SCHEMA_DIR,
+  ConfigError,
+  GATEWAY_ENV_NAMES,
+  loadConfig,
+  loadTeamSettings,
+  schemaDirOf,
+  type Env,
+} from '../config.js';
+import { highestMigration, openDbReadOnly } from '../db/open.js';
 import { readGatewayEnv, type GatewayEnvFile } from '../gateway-env.js';
 import { lockHolder, privateDir } from '../kanban/socket.js';
+import { redactKnownSecrets } from '../secrets.js';
 import { loadTeam } from '../team.js';
 import { serviceLogPath } from '../service/log.js';
 import { launchdPlist, readPlist, readUnit, serviceNames, systemdUnit, type Recorded, type ServiceSpec } from '../service/unit.js';
 import { parse, refuse, UsageError } from './args.js';
 import type { MtIo } from './mt.js';
+import { findNpm, npmCommand, shQuote } from './shell.js';
 
 /**
  * `mt service`: the gateway as a persistent service, a LaunchAgent on macOS and
@@ -46,6 +59,17 @@ export interface ServiceDeps {
   /** Whether a process has this pid. */
   alive: (pid: number) => boolean;
   sleep: (ms: number) => Promise<void>;
+  /**
+   * Imports a module of the build by its path: `mt service check` loads the
+   * gateway's graph this way (spec §20.5). Injectable so a test gives modules
+   * of its own; the real one is `import()`.
+   */
+  importModule?: (file: string) => Promise<Record<string, unknown>>;
+}
+
+/** `import()` of a file by its path. */
+export async function importFile(file: string): Promise<Record<string, unknown>> {
+  return (await import(pathToFileURL(file).href)) as Record<string, unknown>;
 }
 
 /** The real ones: this node, this checkout, this user. */
@@ -78,6 +102,7 @@ export function realServiceDeps(): ServiceDeps {
       }
     },
     sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
+    importModule: importFile,
   };
 }
 
@@ -87,9 +112,10 @@ export const SERVICE_USAGE = [
   '  mt service start|stop|restart',
   '  mt service status',
   '  mt service logs [-f] [-n <lines>]',
+  '  mt service check',
 ].join('\n');
 
-const SUBCOMMANDS = ['install', 'uninstall', 'start', 'stop', 'restart', 'status', 'logs'] as const;
+const SUBCOMMANDS = ['install', 'uninstall', 'start', 'stop', 'restart', 'status', 'logs', 'check'] as const;
 
 /** The default home's own name: `~/.manus-team`. */
 const DEFAULT_HOME_DIR = '.manus-team';
@@ -166,6 +192,8 @@ export async function serviceCommand(argv: readonly string[], io: MtIo): Promise
         return await svc.start(true);
       case 'stop':
         return await svc.stop();
+      case 'check':
+        return await svc.check();
       default:
         return svc.status();
     }
@@ -176,6 +204,37 @@ export async function serviceCommand(argv: readonly string[], io: MtIo): Promise
 }
 
 class CommandFailed extends Error {}
+
+/** An error's message, or the value as text. */
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * `database: <path> at version 8; this build: up to 9` (spec §20.5): the
+ * database the gateway would open, found from `env` by the settings alone, its
+ * `user_version` read read-only, and the highest migration of the directory the
+ * gateway reads them from, named when it is not this build's own. Never throws:
+ * settings that are refused, or an environment that could not be read, given as
+ * the error, give `database: unknown (<error>)`.
+ */
+export function versionLine(env: Env | Error): string {
+  try {
+    if (env instanceof Error) throw env;
+    const settings = loadTeamSettings(env, undefined, { unsetPassEnv: [] });
+    const dir = schemaDirOf(env);
+    const build = `this build: up to ${highestMigration(dir)}${dir === BUNDLED_SCHEMA_DIR ? '' : ` (migrations from ${dir}, MT_SCHEMA_DIR)`}`;
+    const db = openDbReadOnly(settings.dbPath);
+    if (db === undefined) return `database: ${settings.dbPath}: no database; ${build}`;
+    try {
+      return `database: ${settings.dbPath} at version ${Number(db.pragma('user_version', { simple: true }))}; ${build}`;
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    return `database: unknown (${errorText(err)})`;
+  }
+}
 
 /** How long restart waits for the gateway to drain and exit after SIGTERM, and how often it looks. */
 const RESTART_WAIT_MS = 60_000;
@@ -489,6 +548,74 @@ class Service {
       problems.push(err.message);
     }
     return { warnings: out, problem: problems[0] };
+  }
+
+  /**
+   * `mt service check` (spec §20.5): whether this build would start as the
+   * service, without installing; what `mt update` runs, in the new build, as
+   * its preflight. First the database's version line, whatever the rest finds;
+   * then install's check of the configuration, with the PATH the unit records;
+   * last, the gateway's modules and better-sqlite3's native one, loaded.
+   */
+  async check(): Promise<number> {
+    const { t, io, deps } = this;
+    const recorded = this.recorded();
+    if (!this.installed()) throw new CommandFailed(`not installed: ${t.file} does not exist`);
+    const path = recorded?.path ?? io.env['PATH'] ?? '';
+    let env: Env | Error;
+    try {
+      env = { HOME: deps.home, PATH: path, MT_HOME: t.mtHome, ...readGatewayEnv({ MT_HOME: t.mtHome }).values };
+    } catch (err) {
+      if (!(err instanceof ConfigError)) throw err;
+      env = err;
+    }
+    io.out(redactKnownSecrets(versionLine(env)));
+    if (recorded === undefined) {
+      throw new CommandFailed(`${t.file} was not written by mt service install; run mt service install to write it again`);
+    }
+    io.out(`checking as ${t.name} starts it: with PATH ${recorded.path}, MT_HOME ${t.mtHome} and ${join(t.mtHome, '.env')}`);
+    const file = this.gatewayEnv();
+    const checked = this.checkEnvironment(file, recorded.path);
+    for (const warning of checked.warnings) io.out(`warning: ${warning}`);
+    if (checked.problem !== undefined) {
+      throw new CommandFailed(
+        `the gateway would not start as the service, which has only PATH, MT_HOME and ${file.path}: ${checked.problem}`,
+      );
+    }
+    await this.loadModules();
+    io.out(`ok: this build would start as ${t.name}`);
+    return 0;
+  }
+
+  /**
+   * The gateway's whole module graph, imported from this build's dist/index.js,
+   * which starts nothing; and an in-memory database, which loads better-sqlite3's
+   * native module. Dynamic, so a broken graph fails the check, not mt itself.
+   * Answers the imported index, for its loadStartup.
+   */
+  private async loadModules(): Promise<Record<string, unknown>> {
+    const { deps } = this;
+    const importModule = deps.importModule ?? importFile;
+    const index = join(deps.checkout, 'dist', 'index.js');
+    let gateway: Record<string, unknown>;
+    try {
+      gateway = await importModule(index);
+    } catch (err) {
+      throw new CommandFailed(`the gateway's modules do not load from ${index}: ${errorText(err)}`);
+    }
+    try {
+      const open = await importModule(join(deps.checkout, 'dist', 'db', 'open.js'));
+      const openDb = open['openDb'];
+      if (typeof openDb !== 'function') throw new Error('dist/db/open.js has no openDb');
+      (openDb(':memory:') as { close(): void }).close();
+    } catch (err) {
+      const npm = findNpm(deps.node, this.io.env['PATH']) ?? 'npm';
+      throw new CommandFailed(
+        `better-sqlite3's native module does not load under ${deps.node}: ${errorText(err)}. ` +
+          `Build it for this node by hand: cd ${shQuote(deps.checkout)} && ${npmCommand(deps.node, npm, 'ci')}`,
+      );
+    }
+    return gateway;
   }
 
   async uninstall(): Promise<number> {

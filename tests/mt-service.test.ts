@@ -713,6 +713,6 @@ describe('mt service', () => {
     fx = fixture();
     const r = await fx.run(['service', 'frobnicate']);
     expect(r.code).toBe(2);
-    expect(r.err).toMatch(/mt service <install\|uninstall\|start\|stop\|restart\|status\|logs>/);
+    expect(r.err).toMatch(/mt service <install\|uninstall\|start\|stop\|restart\|status\|logs\|check>/);
   });
 });
