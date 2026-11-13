@@ -87,7 +87,7 @@ export function migrate(db: Db, schemaDir: string): number {
   if (current > highest) {
     throw new SchemaTooNewError(
       `the database is at schema version ${current}, and this build knows only up to ${highest}: it was migrated by a newer build. ` +
-        `Run that build, or restore a backup of version ${highest} (spec §20.8)`,
+        `Run that build, or restore a backup of version ${highest}`,
       current,
       highest,
     );

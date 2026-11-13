@@ -73,7 +73,7 @@ describe('migrate on a database newer than the build', () => {
       buildVersion: 3,
       message:
         'the database is at schema version 5, and this build knows only up to 3: it was migrated by a newer build. ' +
-        'Run that build, or restore a backup of version 3 (spec §20.8)',
+        'Run that build, or restore a backup of version 3',
     });
     expect(Number(db.pragma('user_version', { simple: true }))).toBe(5);
     expect(tables()).toEqual([]);
@@ -143,7 +143,7 @@ describe('createGateway on a database newer than the build', () => {
       buildVersion: top,
       message:
         `the database at ${dbPath} is at schema version ${version}, and this build knows only up to ${top}: it was migrated by a newer build. ` +
-        `Run that build, or restore a backup of version ${top} from ${join(home, 'backups')} (spec §20.8)`,
+        `Run that build, or restore a backup of version ${top} from ${join(home, 'backups')}`,
     });
     expect((thrown as Error).cause).toBeInstanceOf(SchemaTooNewError);
     expect((thrown as Error).cause).not.toBe(thrown);

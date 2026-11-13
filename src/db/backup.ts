@@ -13,10 +13,11 @@ import type { Db } from './open.js';
  * restart and never wait on. Written owner-only through a `.partial`, created
  * 0600 before the backup opens it, then checked (`quick_check`, and the version
  * the update recorded) and renamed into place. The copy is one whole file, its
- * journal mode DELETE, so opening it later gives it no `-wal` or `-shm`.
+ * journal mode DELETE, checked too, so opening it later gives it no `-wal` or
+ * `-shm`.
  *
- * The source is only read. The copy is the only file written, and nothing in
- * the gateway's database changes.
+ * The source is only read, by a connection that must be read-only. The copy is
+ * the only file written, and nothing in the gateway's database changes.
  */
 
 /** The UTC time with no colon, which some file systems and scp refuse: `20261112T153000Z`. */
@@ -37,7 +38,7 @@ export function backupName(dbPath: string, version: number, sha: string, at: Dat
 /** How many of a database's backups are kept, newest first, besides the newest of each version. */
 export const BACKUPS_KEPT = 5;
 
-/** A backup that was taken but is not good: its check failed. */
+/** A backup that was refused, or taken but is not good: its check failed. */
 export class BackupError extends Error {}
 
 export interface BackupOptions {
@@ -52,6 +53,8 @@ export interface BackupOptions {
   at: Date;
   /** The copy's integrity check; `PRAGMA quick_check` unless a test says otherwise. */
   quickCheck?: (copy: Db) => string;
+  /** The copy's journal mode set to DELETE, answering the mode it is now; `PRAGMA journal_mode = DELETE` unless a test says otherwise. */
+  journalMode?: (copy: Db) => string;
 }
 
 /**
@@ -60,6 +63,8 @@ export interface BackupOptions {
  * `.partial` or journal of its own, when the copy fails or its check does.
  */
 export async function backupDatabase(source: Db, opts: BackupOptions): Promise<{ path: string; removed: string[] }> {
+  // Read-only, so nothing of the backup's can ever write to the gateway's database.
+  if (!source.readonly) throw new BackupError('the backup is taken from a read-only connection, and this one can write');
   const name = backupName(opts.dbPath, opts.version, opts.sha, opts.at);
   const path = join(opts.dir, name);
   const partial = join(opts.dir, `.${name}.partial`);
@@ -71,7 +76,9 @@ export async function backupDatabase(source: Db, opts: BackupOptions): Promise<{
     await source.backup(partial, { progress: () => 0x7fffffff });
     const copy = new Database(partial);
     try {
-      copy.pragma('journal_mode = DELETE');
+      const mode = (opts.journalMode ?? ((db: Db) => String(db.pragma('journal_mode = DELETE', { simple: true }))))(copy);
+      // Anything else leaves the copy needing a -wal of its own, which a restore by cp would not take.
+      if (mode !== 'delete') throw new BackupError(`the copy's journal mode is ${mode}, not delete`);
       const checked = (opts.quickCheck ?? ((db: Db) => String(db.pragma('quick_check', { simple: true }))))(copy);
       if (checked !== 'ok') throw new BackupError(`the copy's quick_check says: ${checked}`);
       const version = Number(copy.pragma('user_version', { simple: true }));

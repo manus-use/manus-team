@@ -99,6 +99,59 @@ describe('backupDatabase', () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
+  it("fails on a copy whose journal mode does not become DELETE, and leaves nothing", async () => {
+    const failing = backupDatabase(reader, { dir, dbPath, version: version(), sha: SHA, at: AT, journalMode: () => 'wal' });
+    await expect(failing).rejects.toThrow(BackupError);
+    await expect(failing).rejects.toThrow("the copy's journal mode is wal, not delete");
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it('refuses a source connection that can write, before it writes anything', async () => {
+    await expect(backupDatabase(writer, { dir, dbPath, version: version(), sha: SHA, at: AT })).rejects.toThrow(
+      'the backup is taken from a read-only connection, and this one can write',
+    );
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it('is a consistent copy while another connection writes', async () => {
+    // Each write puts one row in each of two tables, in one transaction: a copy of a committed state has as many of each.
+    writer.exec('CREATE TABLE pair_a (n INTEGER); CREATE TABLE pair_b (n INTEGER)');
+    const pair = writer.transaction((n: number) => {
+      writer.prepare('INSERT INTO pair_a VALUES (?)').run(n);
+      writer.prepare('INSERT INTO pair_b VALUES (?)').run(n);
+    });
+    let n = 0;
+    let writing = true;
+    const writes = (async () => {
+      while (writing) {
+        pair(++n);
+        await new Promise((next) => setImmediate(next));
+      }
+    })();
+    await new Promise((wait) => setTimeout(wait, 50));
+    const before = n;
+    let path: string;
+    try {
+      ({ path } = await backupDatabase(reader, { dir, dbPath, version: version(), sha: SHA, at: AT }));
+    } finally {
+      await new Promise((wait) => setTimeout(wait, 20));
+      writing = false;
+      await writes;
+    }
+    const copy = new Database(path, { readonly: true });
+    try {
+      expect(copy.pragma('quick_check', { simple: true })).toBe('ok');
+      const a = (copy.prepare('SELECT count(*) AS n FROM pair_a').get() as { n: number }).n;
+      const b = (copy.prepare('SELECT count(*) AS n FROM pair_b').get() as { n: number }).n;
+      expect(a).toBe(b);
+      expect(a).toBeGreaterThanOrEqual(before);
+      expect(a).toBeLessThanOrEqual(n);
+      expect(n).toBeGreaterThan(before);
+    } finally {
+      copy.close();
+    }
+  });
+
   it("never takes another's .partial", async () => {
     const theirs = join(dir, `.${backupName(dbPath, version(), SHA, AT)}.partial`);
     writeFileSync(theirs, 'not ours');

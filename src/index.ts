@@ -171,7 +171,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     throw new SchemaTooNewError(
       `the database at ${config.dbPath} is at schema version ${err.dbVersion}, and this build knows only up to ${err.buildVersion}: ` +
         `it was migrated by a newer build. Run that build, or restore a backup of version ${err.buildVersion} ` +
-        `from ${join(config.home, 'backups')} (spec §20.8)`,
+        `from ${join(config.home, 'backups')}`,
       err.dbVersion,
       err.buildVersion,
       err,
