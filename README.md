@@ -132,7 +132,9 @@ running gateway never notices. Then it restarts the service, and waits up to 60 
 log to say the gateway connected. If it does not, it prints the log's last lines and the steps
 back, to take by hand: it never goes back by itself once the new gateway has the database. A
 stopped service is left stopped. It exits 0 when done or up to date, 1 when it refused or went
-back and nothing changed, and 3 when a person is needed, saying what to do. A build refuses a
+back and nothing changed, and 3 when a person is needed, saying what to do; then its locks are
+kept, so `mt update` run again gives that advice, never "up to date", until they are removed with
+the `rm` it prints last. A build refuses a
 database that a newer build migrated, with `configuration error:` and exit 78, so an old build
 put back by hand stops rather than run on it: restore the backup of its version first.
 

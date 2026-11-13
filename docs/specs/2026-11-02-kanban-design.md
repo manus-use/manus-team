@@ -3434,7 +3434,16 @@ update and restart the service? [y/N]
   environment, or without one this shell's over the `.env`, sets `MT_SCHEMA_DIR`, a warning says
   that this report and the confirmation's version (§20.9) assume the bundled `schema/`, and the
   gateway reads another; the build's own refusal (§20.6) and `mt service check`'s "this build: up
-  to N" (§20.5) read that other one, as `config.schemaDir` does.
+  to N" (§20.5) read that other one, as `config.schemaDir` does. A new migration with the new
+  tree's highest at or below the database's version says so ("the database is at version 8
+  already, at or above the new tree's 8") rather than a move down.
+- **An upstream that removed a migration** is refused, exit 1, nothing changed: when the new
+  tree's highest `NNN` is below the database's `user_version` and `MT_SCHEMA_DIR` is not set,
+  the new build would refuse the database at its start (§20.6). "the incoming commits remove
+  migrations: origin/main's schema/ goes up to 7, and the database is at version 8, so the new
+  build would refuse it. Nothing changed; see git log HEAD..origin/main -- schema/, and tell the
+  commit's author". With `MT_SCHEMA_DIR` set, the gateway reads another directory, and only the
+  warning below is said.
 - **The database** is the one the gateway would open, found as it would find it. With a service,
   exactly as `mt service check` loads it (§20.5): `loadTeamSettings` over `HOME`, the unit's
   recorded `PATH`, `MT_HOME` and the gateway's `.env`, nothing of this shell, which may set an
@@ -3505,7 +3514,10 @@ update and restart the service? [y/N]
   database's path and version and says "this build's highest is unknown (...)". Settings that
   are refused print `database: unknown (<error>)`, masked, and the check goes on, to fail at the
   same error. Printed first because it is what the steps back read the version with (§20.6), and
-  they need it most when the rest of the check fails.
+  they need it most when the rest of the check fails. **A database above the build's highest**
+  fails the check right after the line, exit 1, with `migrate`'s own refusal ("the database is at
+  schema version 9, and this build knows only up to 8: ..."), as the gateway would not start on
+  it; nothing further is checked or imported.
 - **Then the configuration.** With a unit installed, `install`'s own check (`gatewayEnv` and
   `checkEnvironment` in `src/cli/service.ts`), made a command: the gateway's `.env` must exist
   and set `LARK_APP_SECRET`; the configuration is loaded with only `HOME`, `PATH`, `MT_HOME` and
@@ -3704,6 +3716,10 @@ hold; with the service stopped or not installed, its next start would. Exit 3.
   schema version" is so refined: the version from the one, the confirmation from the other. `N`
   must be the new tree's highest migration; a lower one is said, as a warning. A
   `configuration error:` or `failed to start:` line anywhere in the new bytes fails at once.
+  **A signal during the wait**, or during the restart call, stops the waiting, but the log is
+  read once more first: when it shows `connected as` after the schema line, the update says "it
+  connected; check '<node>' '<checkout>/dist/mt.js' service status" and prints no steps back, so no
+  restore; exit 3 still, as no one saw it through.
 - **When it does not come:** the log's last 30 lines, as `mt service logs -n 30` shows them, and
   the steps back, with the real paths and the old commit filled in, each quoted as `install.sh`
   quotes a path:
@@ -3736,7 +3752,7 @@ hold; with the service stopped or not installed, its next start would. Exit 3.
 
 ### 20.10 One update at a time
 
-- **Two locks, both taken at step 2 and held to the end**, released on every path: one per
+- **Two locks, both taken at step 2 and held to the end**, released on every path but an exit 3: one per
   checkout, `$(git rev-parse --git-dir)/mt-update.lock`, since the checkout, `node_modules` and
   `dist/` are what two updates would fight over, and two homes can share a checkout; and one per
   home, `$MT_HOME/run/update.pid`, since the service, its database and its backups are a home's.
@@ -3765,11 +3781,21 @@ hold; with the service stopped or not installed, its next start would. Exit 3.
   the `rm`. Never "up to date": an update that died after the merge leaves the branch at the new
   commit, with nothing left to fetch, though it was never built, checked or restarted. A live
   pid is refused as an update under way, naming it.
+- **Every exit 3 keeps both locks** (§20.12): a restart not confirmed, a failed or timed-out
+  restart call, a signal during the wait, the pid or the version moved (§20.6), going back failed
+  (§20.7), and an error nothing foresaw after step 3. Each lock keeps the step it stopped at, and
+  the update ends with "its locks are kept, saying where it stopped: <locks>; run '<node>'
+  '<checkout>/dist/mt.js' update again for what to do" and "then remove its locks: rm '<lock>'
+  '<lock>'", as a dead lock's advice ends. Its pid is gone once it exits, so a run again is
+  refused with the dead lock's advice for that step, never "up to date": the merge has landed, and
+  nothing is left to fetch.
 - **A dead update of another home, or from another checkout, gets no steps.** The checkout's
   lock left by an update of another home says "an update of <home> died at its step X; run
-  MT_HOME='<home>' mt update for what to do"; the home's lock left by an update from another
-  checkout says "an update from <checkout> died at its step X; run mt update from <checkout> for
-  what to do", exit 1: its tree, its build and its node are the ones the steps would name.
+  MT_HOME='<home>' '<node>' '<checkout>/dist/mt.js' update for what to do"; the home's lock left by
+  an update from another checkout says "an update from <checkout> died at its step X; run
+  '<node>' '<checkout>/dist/mt.js' update for what to do", exit 1: its tree, its build and its node
+  are the ones the steps would name. Each names `mt` as every printed block does (§20.9), with the
+  checkout the lock holds and this update's node, never a bare `mt`.
 
 ### 20.11 Signals, hangs and the terminal
 
@@ -3785,7 +3811,9 @@ hold; with the service stopped or not installed, its next start would. Exit 3.
   wrapper, both spawned with `detached: true`, so a terminal's Ctrl-C is sent to neither; the
   wrapper ignores SIGINT, SIGHUP and SIGTERM besides, for one sent to it by name. A signal during
   either call is then taken as one during the wait of step 7, which stops waiting and prints the
-  steps back, exit 3.
+  steps back, exit 3. Each such call has 180 seconds: past them the wrapper is killed with
+  SIGKILL, as it ignores SIGTERM, the command left to end on its own, and the call answers 124,
+  "did not finish in 180 seconds", a failed restart call (§20.9), exit 3.
 - **Output that cannot be written is not a failure**: EPIPE and EIO on stdout or stderr, from a
   closed terminal or a pipe, are ignored, so a dropped ssh session never stops an update half
   way; it goes on, or goes back, as the signal says.
@@ -3808,6 +3836,9 @@ hold; with the service stopped or not installed, its next start would. Exit 3.
 
 - **Plain text**, as `mt service`'s, on stdout, a refusal as `mt: ...` on stderr. Each step says
   one line as it starts; npm's and git's output is kept and shown, masked, only when they fail.
+  Masked with this shell's secrets too: each value of this shell's environment whose name the
+  gateway's `.env` takes as a secret (`isSecretName`: `LARK_APP_SECRET`, `MT_AGENT_ENV_*`) is
+  registered with the masker at the start, so an exported `LARK_APP_SECRET` never shows.
   No `--json`: `mt service` has none, and the user did not ask for one.
 - **0**: updated and confirmed; already up to date; `--check` done; or stopped after the backup
   with the service stopped or not installed, saying to start it.
@@ -3818,7 +3849,8 @@ hold; with the service stopped or not installed, its next start would. Exit 3.
   the wait of step 7, or during the restart call, macOS's drain or Linux's `systemctl restart`;
   going back failed; or §20.6 found the gateway had
   moved. 0, 1 and 2 are `runMt`'s; 3 lets a script running `--yes` tell "nothing changed" from
-  "half way".
+  "half way". Every exit 3 keeps both locks and ends with their `rm` (§20.10), so a run again
+  gives the advice for the step it stopped at, never "up to date".
 
 ### 20.13 Wiring
 
