@@ -4044,8 +4044,8 @@ evaluates.
 **Nothing in the kernel knows about workflows** (§1). An instance and its members are two tables
 of their own (§21.6); `kanban_tasks`, the dispatcher, the claim, the prompt and the notices read
 neither. A workflow's tasks are ordinary tasks once made: claimed, reported, blocked, reassigned
-and archived as any other. This section amends §7.3 (a ninth worker command), §9.1 (a fourth
-group of commands) and §2.6 (`mt workflow check`).
+and archived as any other. This section amends §7.3 (a ninth worker command), §7.1 (one line
+of the work protocol), §9.1 (a fourth group of commands) and §2.6 (`mt workflow check`).
 
 ### 21.1 The file
 
@@ -4235,18 +4235,20 @@ workflow onboarding is not usable: steps.welcome.gates[0].command holds {{, and 
 workflows: release, vendor-eval; not usable: onboarding
 ```
 
-with `workflows: none` when the directory is missing or empty. `mt service check` (§20.5) prints
-the same lines as warnings and does not fail on them, as the gateway would start.
+with `workflows: none` when the directory is missing or empty. **`loadStartup`** (`src/index.ts`)
+runs the check, after `loadTeam`, and returns its lines with the config and the team, so
+`createGateway` notes them and `mt service check` (§20.5), which calls the `loadStartup` of the
+build it checks, prints them as `warning:` lines (`src/cli/service.ts`) and does not fail on them,
+as the gateway would start. So the check under `mt update` is the new build's.
 
 **`mt workflow check [<name>]`** is beside `mt role check` (§2.6): it reads files only, and finds
-the home, the config and the roles as the gateway does: this shell's environment over the
-gateway's `.env` (`withGatewayFile`, as `roleCheck` is called), then `loadTeamSettings` and
-`loadTeam` with `unsetPassEnv`, so a role whose passEnv this shell lacks is still checked as a
+the home, the config and the roles as the gateway does: this shell's environment over the gateway's
+`.env`, as `roleCheck` reads it (`readGatewayEnv`, then `withGatewayEnv`), then `loadTeamSettings`
+and `loadTeam` with `unsetPassEnv`, so a role whose passEnv this shell lacks is still checked as a
 role. It registers the team's secrets, and the Lark app secret when set, as `openBoard` does
 (`src/cli/gate.ts`), so a gate holding one is refused here as at a start; the names this shell
 leaves unset are said on stderr, as `openBoard` says them, since a gate holding those values cannot
-be refused here. It prints a
-line a workflow:
+be refused here. It prints a line a workflow:
 
 ```
 vendor-eval: ok, 3 steps; params: topic (required), vendors (list, required), reviewer (default reviewer)
@@ -4332,14 +4334,16 @@ shell, `mt kanban workflow start` is refused as `operator_command`, its message 
  "tasks": [{"task_id": "k_…", "step": "shortlist", "item": null}, {"task_id": "k_…", "step": "evaluate", "item": "acme"}, …]}
 ```
 
-`badInput` (`src/kanban/worker.ts`) gains a field kind for `params`: an object whose values are
-text or lists of text, within §21.2's sizes, its depth bounded as metadata's is. A refusal is the
-worker's usual JSON; an unknown workflow is `unknown_workflow`, a new code, whose message names
-the workflows that are usable and their params, so an agent that guessed a name learns the right
-one from the refusal itself. The message is cut at 4 KiB, the size of a gate refusal's output
-(§7.7), the names first and the params after, with how many were left out: the worker CLI has no
-message limit of its own, and an agent's context should not take a directory's worth. The work protocol (§7.1) gains one line beside `mt kanban create`'s,
-naming the command and its JSON.
+`params` is optional, and absent means `{}`, for a workflow whose params all have defaults or that
+has none; `workflow` is required. `badInput` (`src/kanban/worker.ts`) gains a field kind for
+`params`: an object whose values are text or lists of text, within §21.2's sizes, its depth bounded
+as metadata's is. A refusal is the worker's usual JSON; an unknown workflow is `unknown_workflow`, a
+new code, whose message names the workflows that are usable and their params, so an agent that
+guessed a name learns the right one from the refusal itself. The message is cut at 4 KiB, the size
+of a gate refusal's output (§7.7), the names first and the params after, with how many were left
+out: the worker CLI has no message limit of its own, and an agent's context should not take a
+directory's worth. The work protocol (§7.1) gains one line beside `mt kanban create`'s, naming the
+command and its JSON.
 
 **The steps of a start**, in `KanbanService.startWorkflow`:
 
@@ -4379,7 +4383,7 @@ API's own):
 | Code | When |
 |---|---|
 | `unknown_workflow` | no usable file of that name; the message names the usable ones (above) |
-| `invalid` | the file is broken (§21.4), a param unknown, missing, of the wrong type, given twice, or with a character a title refuses, an item empty, repeated or holding a secret, a name holding a secret, a key reused for another workflow or in another's namespace, 101 tasks |
+| `invalid` | from a run, a field `start-workflow` does not take, as `badInput` refuses one for every worker command; the file is broken (§21.4), a param unknown, missing, of the wrong type, given twice, or with a character a title refuses, an item empty, repeated or holding a secret, a name holding a secret, a key reused for another workflow or in another's namespace, 101 tasks |
 | `too_large` | the params past 64 KiB, a value or an item past 8 KiB, a list past 100 items, a task's field past `task new`'s limits after substitution |
 | `unknown_role`, `supervised_role`, `unknown_workspace` | a name, in the file or from a param, as `create` refuses it, naming the step and item |
 | `person_not_assignable` | a person without talk tier, or any person at the terminal (§2.6) |
@@ -4388,7 +4392,7 @@ API's own):
 | `no_board` | at the terminal, no database, or one not yet migrated (§21.6) |
 | `run_superseded`, `unauthorized` | from a run: the run is over or decided by another, or the token is not a run's (§7.2) |
 | `operator_command` | `mt kanban workflow …` in a run's shell (§21.5) |
-| `bad_request` | from a run: not a JSON object, or a field the command does not take |
+| `bad_request` | from a run: the request is not JSON, or not an object |
 
 In chat each is said as any refusal is, "Not done: …", on one line (§9.1).
 
@@ -4463,20 +4467,20 @@ the instance's key covers them, and a key of their own would only be a second th
   substituted tasks in position order, each with its member fields, its parents as positions of
   earlier tasks, and its gates. In one `tx`: the board is worked out (the run's task's for a run),
   the key looked up again, as the race guard behind step 0 (a repeat returns the instance and its
-  members, `existing: true`; another board's is `other_board`; another workflow's name `invalid`), the board checked live (§16.8); then the instance row; then each task
+  members, `existing: true`; another board's is `other_board`; another workflow's name
+  `invalid`), the board checked live (§16.8); then the instance row; then each task
   through the same insert `createTask` uses, which plan T moves into a helper of both, so a
   workflow's task is made exactly as any task is, with its subscription (§21.8) and its `created`
   event; then its links, its gates through the insert `addGate` uses, again a shared helper, which
   checks the 20 and the 600 s again inside the transaction; then its member row. A refusal rolls
   back everything (`tx`), so a start makes all of it or none.
-- **Each task still writes its own `created` event**, with the instance, step and item added to
-  the payload: `workflow`, the instance's id `w_…`, `workflowName`, its name, `step` and `item`;
-  and each gate its `gate_added`. Every change to a task
-  writes one (§3.4): a subscription's cursor, `show`'s history and a worker's prior context all
-  read a task's own events, and a task with no `created` would be the one task whose history
-  starts in the middle. `workflow`, `workflowName` and `step` join `BOARD_KEYS`, as they identify; `item` is a
-  param's text, and is masked. `created` is no notice (§9.4), so a start of 100 tasks sends no
-  notices, only its reply.
+- **Each task still writes its own `created` event**, with the instance, step and item added to the
+  payload: `workflow`, the instance's id `w_…`, `workflowName`, its name, `step` and `item`; and
+  each gate its `gate_added`. Every change to a task writes one (§3.4): a subscription's cursor,
+  `show`'s history and a worker's prior context all read a task's own events, and a task with no
+  `created` would be the one task whose history starts in the middle. `workflow`, `workflowName` and
+  `step` join `BOARD_KEYS`, as they identify; `item` is a param's text, and is masked. `created` is
+  no notice (§9.4), so a start of 100 tasks sends no notices, only its reply.
 - **A gate's `created_by`** is who started the instance, as recorded on it, and its `gate_added`
   event carries `workflow`. The command came from the operator's file, but the start is what put
   it on the task. Its payload's `workflow` is the instance's id, as in `created`.
@@ -4696,29 +4700,32 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   parse and checks (`checkWorkflow(text, facts)`, the facts being the roles, workspaces and whether
   supervised roles are accepted), `expand(workflow, params)` to the tasks to create with their
   members' fields, and the status function. The service, `mt workflow check` and the startup check
-  all call it.
+  all call it. Its gate check uses `holdsSecret`, today a private function of `service.ts`, which
+  plan T moves to a shared module both import, so the pure module does not import the service.
 - **`src/kanban/service.ts`**: `KanbanServiceDeps.workflowsDir`, `$MT_HOME/workflows`, given by the
   gateway and by `openBoard` (`src/cli/gate.ts`); `startWorkflow`, `workflows()` (for `list`),
   `instances(board, all)`, `instance(id)` (for `show`) and `archiveWorkflow`, each checking its
   input as the others do.
 - **`src/db/kanban.ts`**: `startWorkflow`, `archiveWorkflow`, `threadSubscriptions`, with
   `createTask`'s insert, `addGate`'s and `archive`'s moved into helpers they share; `BOARD_KEYS`
-  gains `workflow` and `step`. **`src/db/kanban-read.ts`**: the instance, its members, the related
-  tasks, and the instances of a board. **`src/db/WRITERS.md`**: the two tables' rows, and
-  `kanban_subscriptions`' row naming `threadSubscriptions`.
+  gains `workflow`, `workflowName` and `step`. **`src/db/kanban-read.ts`**: the instance, its
+  members, the related tasks, and the instances of a board. **`src/db/WRITERS.md`**: the two tables'
+  rows, and `kanban_subscriptions`' row naming `threadSubscriptions`.
 - **`src/kanban/chat-parse.ts`**: the `workflow` group and its verbs, and the pairs of `start`.
   **`src/kanban/chat.ts`**: their tiers, the @-mentions resolved, the holds and `threaded` for an
   instance; its id rendering takes `w_…` as the board's own ids. **`src/kanban/chat-render.ts`**:
   the reply, `list`, `instances` and `show`, cut to fit.
 - **`src/kanban/worker.ts`**: `start-workflow` in `WORKER_COMMANDS`, its schema and the `params`
-  field kind; `unknown_workflow` in `RefusalCode`. **`src/kanban/prompt.ts`**: its line in the work
-  protocol. **`src/cli/kanban.ts`**'s usage gains it.
+  field kind; `unknown_workflow` and `too_large` in `RefusalCode`, as `KanbanService.startWorkflow`
+  refuses sizes itself, on every path, and not only the worker API. **`src/kanban/prompt.ts`**: its
+  line in the work protocol. **`src/cli/kanban.ts`**'s usage gains it.
 - **`src/cli/mt.ts`**: `workflow` in `OPERATOR_GROUPS` and `SUBCOMMANDS`, the refusal in a run's
   shell naming `start-workflow`, `mt workflow check`, and `USAGE`. **`src/cli/operator.ts`**: the
   `workflow` group, with a nudge after `start` and `archive`. **`src/cli/plain.ts`**: their plain
   text.
-- **`src/index.ts`**: the startup check's lines after the roles' line. **`src/cli/service.ts`**:
-  `check` prints them as warnings.
+- **`src/index.ts`**: `loadStartup` runs the workflow check and returns its lines, which
+  `createGateway` notes after the roles' line. **`src/cli/service.ts`**: `check` prints them as
+  `warning:` lines, from the `loadStartup` of the build it checks.
 - **`schema/009_workflows.sql`**.
 
 ### 21.15 Testing
@@ -4732,28 +4739,28 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   too slow, twenty-one gates, and 601 s together; a literal role or workspace not configured, a
   supervised role; a foreseeable workspace conflict refused and an unforeseeable one not; step
   order kept as written.
-- **Unit, a start**: a repeated key answered before the file is read, with the file since removed
-  or broken, and a key reused for another workflow refused; the params past 64 KiB in each path; a
-  pair split at its first `=`; `vendors=acme, globex` refused with the hint; an @-mention whose
-  name holds a space matched whole, longest first, resolved only for a person field and kept as
-  text elsewhere; a line break, control or bidi character in a value landing in a title refused; an
-  item holding a known secret refused; a gate with no `timeout_s` counted as 300 s; the terminal's
-  plain and `--json` answers, with the board off; the workflow commands refused `no_board` on an
+- **Unit, a start**: a repeated key answered before the file is read, with the file since removed or
+  broken, and a key reused for another workflow refused; the params past 64 KiB in each path; a pair
+  split at its first `=`; `vendors=acme, globex` refused with the hint; an @-mention whose name
+  holds a space matched whole, longest first, resolved only for a person field and kept as text
+  elsewhere; a line break, control or bidi character in a value landing in a title refused; an item
+  holding a known secret refused; a gate with no `timeout_s` counted as 300 s; the terminal's plain
+  and `--json` answers, with the board off; the workflow commands refused `no_board` on an
   unmigrated database, and `task show` working there; `show` of another board's instance by
-  `--board`; `unknown_workflow`'s message cut at 4 KiB; a missing required param, an unknown one, a default filled in; chat's pairs,
-  quoted and curly-quoted values, a list by commas and by repeating, a quoted item with a comma, a
-  text param twice, an @-mention with a space in its name, a stray word; the terminal's split at
-  commas; a run's JSON with the wrong type; substitution in every text field and a value holding
-  `{{` left as written; a name-valued param invalid, unknown, a person without talk tier, holding a
-  known secret; an empty list, a duplicate item, 101 tasks; a title past 512 bytes after
-  substitution; one failure refusing the whole start, naming the step and item, with nothing
-  written; all to all links between two for_each steps, and a fan-in on every task of a for_each
-  step; every task, link, gate and member row in one transaction, and a refusal inside it rolling
-  all of them back; each task's `created` event with `workflow`, `step` and `item`, and no notice;
-  the gate's `created_by`; the key in each namespace, a repeat `existing: true` with nothing made,
-  another board's key `other_board`, an archived instance's key still used; the board in each
-  path, an archived board refused; a run's start on its task's board whatever else, its tasks
-  created from its task, and linkable by the run; the dispatcher told once.
+  `--board`; `unknown_workflow`'s message cut at 4 KiB; a missing required param, an unknown one, a
+  default filled in; chat's pairs, quoted and curly-quoted values, a list by commas and by
+  repeating, a quoted item with a comma, a text param twice, an @-mention with a space in its name,
+  a stray word; the terminal's split at commas; a run's JSON with the wrong type; substitution in
+  every text field and a value holding `{{` left as written; a name-valued param invalid, unknown, a
+  person without talk tier, holding a known secret; an empty list, a duplicate item, 101 tasks; a
+  title past 512 bytes after substitution; one failure refusing the whole start, naming the step and
+  item, with nothing written; all to all links between two for_each steps, and a fan-in on every
+  task of a for_each step; every task, link, gate and member row in one transaction, and a refusal
+  inside it rolling all of them back; each task's `created` event with `workflow`, `step` and
+  `item`, and no notice; the gate's `created_by`; the key in each namespace, a repeat `existing:
+  true` with nothing made, another board's key `other_board`, an archived instance's key still used;
+  the board in each path, an archived board refused; a run's start on its task's board whatever
+  else, its tasks created from its task, and linkable by the run; the dispatcher told once.
 - **Unit, seeing and managing**: the status table, a hand-archived member among done ones; `list`
   with a broken file; `instances` by default and with `all`; `show`'s steps in order, items,
   blocked reasons, related tasks apart and another instance as one line, `--file`; `archive` of
