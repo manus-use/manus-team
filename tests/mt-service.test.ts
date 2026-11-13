@@ -113,9 +113,10 @@ function loaded(f: Fx, pid?: number): void {
     result: { stdout: `gui/${UID}/team.manus.gateway = {\n\tstate = ${pid === undefined ? 'not running' : 'running'}\n${pid === undefined ? '\tlast exit code = 78\n' : `\tpid = ${pid}\n`}}\n` },
   });
 }
+/** launchctl print answers that the job is not loaded; its domain, `gui/<uid>`, answers by default. */
 function notLoaded(f: Fx): void {
   f.answers.push({
-    match: (c) => c.cmd === 'launchctl' && c.args[0] === 'print',
+    match: (c) => c.cmd === 'launchctl' && c.args[0] === 'print' && c.args[1] !== `gui/${UID}`,
     result: { code: 113, stderr: 'Could not find service "team.manus.gateway" in domain for user gui: 501\n' },
   });
 }
@@ -138,6 +139,7 @@ describe('mt service install on macOS', () => {
     });
     expect(words(fx)).toEqual([
       `launchctl print gui/${UID}/team.manus.gateway`,
+      `launchctl print gui/${UID}`,
       `launchctl enable gui/${UID}/team.manus.gateway`,
       `launchctl bootstrap gui/${UID} ${plistPath(fx)}`,
     ]);
@@ -504,6 +506,7 @@ describe('mt service start, stop and restart on macOS', () => {
       expect((await fx.run(['service', verb])).code).toBe(0);
       expect(words(fx)).toEqual([
         `launchctl print gui/${UID}/team.manus.gateway`,
+        `launchctl print gui/${UID}`,
         `launchctl enable gui/${UID}/team.manus.gateway`,
         `launchctl bootstrap gui/${UID} ${plistPath(fx)}`,
       ]);
@@ -625,6 +628,39 @@ describe('mt service status on macOS', () => {
     const r = await fx.run(['service', 'status']);
     expect(r.code).toBe(1);
     expect(r.out).toMatch(/^installed: no/m);
+  });
+});
+
+describe('a state the manager cannot give', () => {
+  it('is unknown on macOS when the gui domain cannot be printed, never "not loaded"', async () => {
+    fx = fixture();
+    fx.answers.push({
+      match: (c) => c.cmd === 'launchctl' && c.args[0] === 'print' && c.args[1] === `gui/${UID}`,
+      result: { code: 125, stderr: 'Bad request.\nCould not find domain for user gui: 501\n' },
+    });
+    notLoaded(fx);
+    const r = await fx.run(['service', 'status']);
+    expect(r.out).toMatch(/^loaded: unknown \(launchctl print gui\/501 failed \(exit 125\): Bad request\. Could not find domain for user gui: 501\)$/m);
+    expect(words(fx)).toEqual([`launchctl print gui/${UID}/team.manus.gateway`, `launchctl print gui/${UID}`]);
+  });
+
+  it('is "not loaded" on macOS when the domain answers and the job does not', async () => {
+    fx = fixture();
+    notLoaded(fx);
+    const r = await fx.run(['service', 'status']);
+    expect(r.out).toMatch(/^loaded: no$/m);
+    expect(words(fx)).toEqual([`launchctl print gui/${UID}/team.manus.gateway`, `launchctl print gui/${UID}`]);
+  });
+
+  it('is unknown on Linux when systemctl --user show fails, as with no user bus', async () => {
+    fx = fixture();
+    fx.answers.push({
+      match: (c) => c.cmd === 'systemctl' && c.args[1] === 'show',
+      result: { code: 1, stderr: 'Failed to connect to bus: No medium found\n' },
+    });
+    const r = await fx.run(['service', 'status'], { platform: 'linux' });
+    expect(r.out).toMatch(/^loaded: unknown \(systemctl --user show manus-team\.service --property=\S+ failed \(exit 1\): Failed to connect to bus: No medium found\)$/m);
+    expect(r.out).toMatch(/^running: no$/m);
   });
 });
 

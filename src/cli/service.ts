@@ -181,12 +181,24 @@ class CommandFailed extends Error {}
 const RESTART_WAIT_MS = 60_000;
 const POLL_MS = 250;
 
-interface State {
+export interface State {
   loaded: boolean;
   running: boolean;
   pid: number | undefined;
   /** Why it is not running, when the manager says. */
   lastExit: string | undefined;
+  /**
+   * Why the manager could not be asked, when it could not: no gui domain on
+   * macOS, no user bus on Linux. Then `loaded` and `running` are false and mean
+   * nothing; `mt update` refuses rather than take it as stopped (spec §20.2).
+   */
+  unreadable: string | undefined;
+}
+
+/** A failed command's first lines, for a message: `cmd args failed (exit N): what it said`. */
+function failure(cmd: string, args: readonly string[], r: RunResult): string {
+  const said = (r.stderr.trim() || r.stdout.trim()).split('\n').slice(0, 3).join(' ');
+  return `${[cmd, ...args].join(' ')} failed (exit ${r.code})${said === '' ? '' : `: ${said}`}`;
 }
 
 class Service {
@@ -203,10 +215,7 @@ class Service {
   /** Run it, and throw CommandFailed with its stderr when it fails. */
   private must(cmd: string, args: readonly string[]): RunResult {
     const r = this.run(cmd, args);
-    if (r.code !== 0) {
-      const said = (r.stderr.trim() || r.stdout.trim()).split('\n').slice(0, 3).join(' ');
-      throw new CommandFailed(`${[cmd, ...args].join(' ')} failed (exit ${r.code})${said === '' ? '' : `: ${said}`}`);
-    }
+    if (r.code !== 0) throw new CommandFailed(failure(cmd, args, r));
     return r;
   }
 
@@ -218,29 +227,39 @@ class Service {
     return `${this.t.domain}/${this.t.name}`;
   }
 
-  private state(): State {
+  /**
+   * What the manager says of the job. A failure to ask is `unreadable`, never
+   * "not loaded": on macOS a job that cannot be printed is not loaded only when
+   * its domain can be, as `gui/<uid>` is missing without a console login; on
+   * Linux `systemctl --user show` answers for any unit, so its failure is the
+   * user bus's.
+   */
+  state(): State {
+    const none = { loaded: false, running: false, pid: undefined, lastExit: undefined, unreadable: undefined };
     if (this.t.kind === 'launchd') {
       const r = this.run('launchctl', ['print', this.job]);
-      if (r.code !== 0) return { loaded: false, running: false, pid: undefined, lastExit: undefined };
+      if (r.code !== 0) {
+        // Only when the job's print fails: a job that prints has a domain.
+        const domain = this.run('launchctl', ['print', this.t.domain]);
+        return domain.code === 0 ? none : { ...none, unreadable: failure('launchctl', ['print', this.t.domain], domain) };
+      }
       const pid = /^\s*pid = ([0-9]+)$/m.exec(r.stdout)?.[1];
       const running = /^\s*state = running$/m.test(r.stdout);
       const exit = /^\s*last exit code = (.+)$/m.exec(r.stdout)?.[1];
-      return { loaded: true, running, pid: pid === undefined ? undefined : Number(pid), lastExit: exit };
+      return { loaded: true, running, pid: pid === undefined ? undefined : Number(pid), lastExit: exit, unreadable: undefined };
     }
-    const r = this.run('systemctl', [
-      '--user',
-      'show',
-      this.t.name,
-      '--property=LoadState,ActiveState,SubState,MainPID,ExecMainStatus',
-    ]);
+    const args = ['--user', 'show', this.t.name, '--property=LoadState,ActiveState,SubState,MainPID,ExecMainStatus'];
+    const r = this.run('systemctl', args);
+    if (r.code !== 0) return { ...none, unreadable: failure('systemctl', args, r) };
     const prop = (name: string): string | undefined => new RegExp(`^${name}=(.*)$`, 'm').exec(r.stdout)?.[1];
     const pid = Number(prop('MainPID') ?? '0');
     const active = prop('ActiveState');
     return {
-      loaded: r.code === 0 && prop('LoadState') === 'loaded',
+      loaded: prop('LoadState') === 'loaded',
       running: active === 'active' || active === 'reloading',
       pid: pid > 0 ? pid : undefined,
       lastExit: active === 'failed' ? (prop('ExecMainStatus') ?? undefined) : undefined,
+      unreadable: undefined,
     };
   }
 
@@ -537,7 +556,7 @@ class Service {
     io.out(`service: ${t.name} (${t.kind}${t.kind === 'launchd' ? `, ${t.domain}` : ''})`);
     io.out(`unit: ${t.file}`);
     if (!this.installed()) io.out('installed: no; run mt service install');
-    io.out(`loaded: ${state.loaded ? 'yes' : 'no'}`);
+    io.out(`loaded: ${state.unreadable !== undefined ? `unknown (${state.unreadable})` : state.loaded ? 'yes' : 'no'}`);
     io.out(
       state.running
         ? `running: yes${state.pid === undefined ? '' : `, pid ${state.pid}`}`
