@@ -37,7 +37,8 @@ file is for.
 | `kanban_boards` | `db/kanban.ts` | Added by `createBoard` (migration 006 adds `default`); `max_running` and `workspace` set by `setBoard`, `archived_at` once by `archiveBoard`. Never deleted, never renamed: a task keeps the name of its board (spec §16). |
 | `kanban_chat_boards` | `db/kanban.ts` | One row per conversation and bot, written by `useBoard`; a chat with none is on `default`. |
 | `people` | `db/people.ts` | One row per person per bot (migration 005): the open_id and name Lark last gave with a union_id, noted when a person sends a `/kanban` command, is mentioned in one, or presses a board card's button. How a person named by `lark:<union_id>` alone is checked for talk tier (spec §4.2). |
-| `schema_version`, `user_version` | `db/open.ts` (`migrate`) | Migration files own the `schema_version` row contents; the runner owns `user_version`. |
+| `schema_version`, `user_version` | `db/open.ts` (`migrate`) | Migration files own the `schema_version` row contents; the runner owns `user_version`, and refuses a database above its highest file (spec §20.6). |
+| a backup, `$MT_HOME/backups/<db>-v<N>-<sha>-<time>.db` | `db/backup.ts` | Written whole by `backupDatabase`, SQLite's online backup from `mt update`'s read-only connection to the gateway's database, which it never writes; then only its own copy's journal mode is set (spec §20.8). `pruneBackups` removes the older ones. |
 
 ## Rules that hold across all of them
 
