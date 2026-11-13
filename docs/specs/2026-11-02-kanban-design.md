@@ -447,7 +447,8 @@ usage error it prints.
   value, is the environment's. So an emergency override never needs a file edit, as for the config
   file.
 - **Who reads it.** The gateway at startup, and the `mt` commands that load its settings (`mt
-  role`, `mt workspace`, and the operator's `mt kanban task`, `board` and `gate`), under their
+  role`, `mt workspace`, `mt workflow check`, and the operator's `mt kanban task`, `board`, `gate`
+  and `workflow` (§21)), under their
   shell's environment, so `mt role check` and the operator's commands see what the gateway sees.
   `mt role check` reports whether it exists and the names it sets, never their values. No `mt`
   command reads it in a board run's shell, where `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` is set: the
@@ -565,6 +566,8 @@ fresh install) has no registrations. A deployment with no config file (environme
   mt kanban task list [<status>|all] [--board <name>]
   mt kanban task show|stop|archive <task> · assign <task> <role> · link <parent> <child>   [--board <name>]
   mt kanban task unblock <task> [comment…] · comment <task> <text…>                       [--board <name>]
+  mt kanban workflow list · instances [all] · show <w_…> [--file] · archive <w_…>          [--board <name>]   # §21.9
+  mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]… [--key <k>]                         # §21.5
   ```
 
   A task command typed without `task`, `mt kanban new`, is an unknown command (§9.1's note on the
@@ -1209,7 +1212,7 @@ The task prompt is composed, in this order, of:
      task is done, the summary says what was done and where its results are, such as files,
      documents or links; block only on genuine ambiguity, and say why; if the task names no
      reviewer and a downstream review task exists, `complete` rather than `review`; if you find follow-up work, create a task for it rather than
-     doing it; never put secrets in a summary, metadata or comment; stop once you have reported.
+     doing it, or, from plan T, start a workflow for it with `mt kanban start-workflow` (§21.5); never put secrets in a summary, metadata or comment; stop once you have reported.
    - *review*: review the handoff, given in its own section of the context ("The handoff, from
      …"), and the work it describes, against the task and its contract; that work is in the
      workspace (the current directory) and in anything the handoff points to, such as documents,
@@ -1303,6 +1306,7 @@ mt kanban block      < block.json   # {kind, reason, parents} — parents for ki
 mt kanban comment    < comment.json # {body, task_id?}
 mt kanban create     < task.json    # {title, body, contract?, assignee, reviewer?, workspace?, parents?, idempotency_key?}
 mt kanban link       < link.json    # {parent_id, child_id}
+mt kanban start-workflow < start.json # {workflow, params, idempotency_key?} (§21.5, plan T)
 ```
 
 - **JSON in on stdin, JSON out, always.** A summary is free text; passing it through shell arguments
@@ -1313,7 +1317,7 @@ mt kanban link       < link.json    # {parent_id, child_id}
 - **Two grammars under one name, told apart by name alone.** `mt kanban` is also the operator's
   (§2.6), whose commands are all in a group: `mt kanban task …`, `board …` and `gate …` are always
   the operator's, and are refused in a board run's shell (`MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` set).
-  The eight commands above keep their names, with no group, and are always the worker's, in any
+  The nine commands above (eight until plan T added `start-workflow`, §21.5) keep their names, with no group, and are always the worker's, in any
   shell: outside a run they say they need one. So an agent's `mt kanban show`, `comment` and `link`
   are the worker's whatever the shell, and the prompt (§7.1) names them as it always has. A name that
   is neither, such as the old `mt kanban new`, is answered with the worker's JSON (`unknown_command`)
@@ -4147,9 +4151,17 @@ the commands' subset.
   param in a command would let anyone who may start a workflow, an agent included, write shell.
   A gate that needs a value names it as an environment variable, `$NAME`, which comes from the
   role's environment (§7.7), never from a param.
+- **A value that lands in a title** may hold no line break, no control character and no bidi
+  control: a title is one line (§7.1 flattens it, and the terminal's `task new` refuses the same,
+  §2.6), and a bidi control in it could make one task's line in a reply read as another's. Refused
+  `invalid`, naming the param. A body or contract field takes them, as `task new`'s body does.
 - **Substitution is text, once.** A value is put in as written, and not read again for braces,
   so a param holding `{{topic}}` puts those characters in the title and nothing more.
-- **Sizes.** A text value is at most 8 KiB, a list at most 100 items, each at most 8 KiB; the
+- **Sizes.** A text value is at most 8 KiB, a list at most 100 items, each at most 8 KiB, and
+  **all the params together at most 64 KiB, serialized as JSON**, on every path: the worker
+  socket refuses a request over 256 KiB (`DEFAULT_MAX_REQUEST_BYTES`, `src/kanban/socket.ts`)
+  before it is read, and 100 items of 8 KiB would pass that, so the bound is the start's own,
+  well inside the socket's, and the same from chat and the terminal; over it, `too_large`. The
   fields they land in are then held to `task new`'s limits (§9.1: a title of 512 bytes, a body of
   64 KiB, each contract field 8 KiB), checked on every task after substitution, from every way of
   starting.
@@ -4159,7 +4171,9 @@ the commands' subset.
 - **`for_each: <list param>`** makes one task per item, in the list's order, each with `{{item}}`
   set to its item. An item is a list's text value, trimmed; an empty item, and an item given
   twice, are refused, as the item labels its task in `show` and two tasks with one label could not
-  be told apart.
+  be told apart. **An item holding a known secret is refused** too: an item is stored masked
+  (§21.6), and two items differing only in a secret would be stored as one label. Items are
+  compared for uniqueness as given, after trimming.
 - **A step naming a for_each step in `parents` waits for all of its tasks**: each task of the
   child step is linked to every task of the parent step. `recommend` above has every `evaluate`
   task as a parent, so it is claimed once all of them are done (§4.1).
@@ -4172,7 +4186,8 @@ the commands' subset.
   means.
 - **At most 100 tasks** after expansion, for the whole instance. The bound is on what one start
   makes in one transaction (§21.7) and lists in one reply (§21.8). Links are not bounded
-  separately: all to all over the 100 tasks makes at most 2,500, written in the same transaction.
+  separately: the graph is acyclic, so 100 tasks have at most C(100, 2) = 4,950 links, each a row
+  of two ids written in the same transaction, a write SQLite makes in milliseconds.
   A task with more parents than a worker's `create` may name (`WORKER_LIMITS.parents`, 50) is
   allowed here: that limit is on a request's size, and the writer has none.
 
@@ -4198,7 +4213,9 @@ The same checks run in three places, from one module, `src/kanban/workflow.ts`:
   (`#assignable`: configured; for a role, unsupervised unless supervised roles are accepted); a
   person written literally is checked at a start, as only the gateway knows who has talk tier;
 - gates: no `{{`, a command of at most 4 KiB with no NUL and holding no known secret (`holdsSecret`,
-  §7.7), a timeout from 1 to 600 s, at most 20 on a step, at most 600 s together;
+  §7.7), a timeout from 1 to 600 s, at most 20 on a step, at most 600 s together, a gate with no
+  `timeout_s` counted as 300 s (`GATE_LIMITS.defaultTimeoutS`), as `addGate` stores it, so three
+  such gates on one step fail the check;
 - a step whose parents certainly work in different workspaces, because each parent step names
   its workspace or its role names one, and the step names none and its role names none: its tasks
   would be unresolvable at their claim (§2.3 rule 3), so it is refused, saying to set the step's
@@ -4222,8 +4239,13 @@ with `workflows: none` when the directory is missing or empty. `mt service check
 the same lines as warnings and does not fail on them, as the gateway would start.
 
 **`mt workflow check [<name>]`** is beside `mt role check` (§2.6): it reads files only, and finds
-the home, the config and the roles as the gateway does (`loadTeamSettings`, `loadTeam`, with
-`unsetPassEnv`), so a role whose passEnv this shell lacks is still checked as a role. It prints a
+the home, the config and the roles as the gateway does: this shell's environment over the
+gateway's `.env` (`withGatewayFile`, as `roleCheck` is called), then `loadTeamSettings` and
+`loadTeam` with `unsetPassEnv`, so a role whose passEnv this shell lacks is still checked as a
+role. It registers the team's secrets, and the Lark app secret when set, as `openBoard` does
+(`src/cli/gate.ts`), so a gate holding one is refused here as at a start; the names this shell
+leaves unset are said on stderr, as `openBoard` says them, since a gate holding those values cannot
+be refused here. It prints a
 line a workflow:
 
 ```
@@ -4234,7 +4256,9 @@ onboarding: not usable: steps.welcome.gates[0].command holds {{, and a gate is a
 then the entries it ignored. Exit 0 when every workflow it checked is usable, 1 otherwise, 2 for a
 wrong command line; with a name, that workflow only, and a name with no file is 1. It works in any
 shell, a board run's included, as it changes nothing and needs no authority; it does not open the
-database.
+database. In a board run's shell it reads neither the gateway's `.env` nor any secret but that
+shell's (`withGatewayFile` returns the shell as it is there), so its secret check is weaker there,
+and it says so in one line.
 
 **The files are read at each start**, not held from startup. An edit, a new file or a removed
 one takes effect at the next start, with no restart and nothing to reload; the startup check is
@@ -4251,17 +4275,28 @@ mt kanban start-workflow < start.json        # from inside an agent's run: {"wor
 ```
 
 **Params from chat.** The rest of the message after the name, on any lines, is `key=value` pairs,
-separated by spaces, tabs or line breaks. A value is either up to the next space, or quoted with
-`"…"`; Lark's clients may turn a typed `"` into `“` and `”`, so that pair is taken as quotes too.
-There is no escape inside quotes, so a value cannot hold a `"` (§21.16). A **list** is
-comma-separated, each item trimmed, or the key repeated, each occurrence adding its items; a
-quoted value is one item, not split, so `vendors="Acme, Inc"` is one vendor. A text param given
-twice is refused. **A person** is given by @-mention, `owner=@Alice`, read as `/kanban task new`'s
-`assignee:` line reads one (§9.1, D2): matched against the message's mentions, the longest
-mention's name first, since a name may hold spaces, and turned into its `lark:<union_id>` before
-the start. Anything that is not a pair is refused with the usage line. Parsing is in
-`chat-parse.ts`, which knows no workflow and returns the pairs as typed; the service reads them
-against the file, so the parser stays pure.
+separated by spaces, tabs or line breaks. **A pair splits at its first `=`**: the key before it,
+in the param grammar, and the value after, which may hold more `=`. A value is either up to the
+next space, or quoted with `"…"`; a typed `"` may arrive as `“` and `”`, as phone and macOS
+keyboards substitute them, so that pair is taken as quotes too. There is no escape inside quotes,
+so a value cannot hold a `"` (§21.16). A **list** is comma-separated, each item trimmed, or the
+key repeated, each occurrence adding its items; **a quoted value is one item**, not split, so
+`vendors="Acme, Inc"` is one vendor. A text param given twice is refused. **A word that is not a
+pair** is refused with the usage line; when it follows a value ending in `,`, as in `vendors=acme,
+globex`, the refusal says to quote a value with spaces, or to leave none after the commas.
+
+**A person** is given by @-mention, `owner=@Alice Smith`. Lark's text shows a mention as `@Name`,
+and a name may hold spaces, so the parser cannot find where such a value ends by itself:
+`KanbanChat` passes **the message's mention names** (`InboundMessage.mentions`) into the parser,
+which is pure all the same, and an unquoted value starting with `@` is matched against them, the
+longest name first, so `@Alice Smith` is taken whole where `@Alice` is a mention too. The parser
+returns each pair as `{ key, value, quoted }`, knowing no workflow. The service reads the pairs
+against the file, and **`@` is resolved only for a param that lands in a person field**, an
+`assignee` or `reviewer` the file writes as `"{{owner}}"` or `{ person: "{{owner}}" }`: there
+`KanbanChat` turns it into its `lark:<union_id>`, as `/kanban task new`'s `assignee:` line is
+read (§9.1, D2), and a name no mention has, or two share, is refused as there. For any other
+param `@Alice` is text, put in as typed. A param used both in a person field and in text gets the
+principal in both (§21.16).
 
 **Params at the terminal.** `--param key=value`, repeated; the shell has already removed the
 quotes, so a list param's value is split at every comma, and repeating the key adds items. An item
@@ -4301,11 +4336,22 @@ shell, `mt kanban workflow start` is refused as `operator_command`, its message 
 text or lists of text, within §21.2's sizes, its depth bounded as metadata's is. A refusal is the
 worker's usual JSON; an unknown workflow is `unknown_workflow`, a new code, whose message names
 the workflows that are usable and their params, so an agent that guessed a name learns the right
-one from the refusal itself. The work protocol (§7.1) gains one line beside `mt kanban create`'s,
+one from the refusal itself. The message is cut at 4 KiB, the size of a gate refusal's output
+(§7.7), the names first and the params after, with how many were left out: the worker CLI has no
+message limit of its own, and an agent's context should not take a directory's worth. The work protocol (§7.1) gains one line beside `mt kanban create`'s,
 naming the command and its JSON.
 
 **The steps of a start**, in `KanbanService.startWorkflow`:
 
+0. **look the key up first**, read-only, when the start has one: an instance with that key on this
+   board is answered at once, `existing: true`, before the file is read or a param checked. A
+   repeat is a redelivery, or an agent re-running a command whose answer it did not see; the file
+   may have been edited or removed since, or a person's tier changed, and answering a repeat with a
+   refusal would tell the caller the start failed when it was made. A key on another board is
+   `other_board`, and **a key used for another workflow's name is refused `invalid`**, naming the
+   instance and its workflow: a key reused by mistake must not return an instance of something
+   else. The writer looks the key up again in its transaction (§21.7), the guard against two starts
+   racing;
 1. read the file (§21.4), check the params against it, substitute, and expand each for_each;
 2. check every task as `create` would (`#assignable`, the workspace, the contract, the numbers,
    the crash rule), and every gate as `addGate` would, plus the 100 and every name. **One failure
@@ -4316,6 +4362,35 @@ naming the command and its JSON.
    link, every gate and every member row;
 4. tell the dispatcher once: chat's `changed()`, the terminal's one nudge (§2.6), the worker
    socket's `changed()` after the answer. One pass finds every root task ready.
+
+**The terminal's answer.** Plain text, as the other operator commands' (§2.6): `started
+vendor-eval as w_…, on board research, 5 tasks`, then a line a task, `k_… shortlist  Shortlist
+vendors for log storage  role worker`, every task, uncut, masked and stripped of control
+characters; a repeat says `already started, as w_…`, with its tasks. With `--json`, one line in the
+worker's answer shape: `{"ok": true, "instance_id", "existing", "board", "tasks": [{"task_id",
+"step", "item"}]}`, or the refusal. Then the nudge, as after `task new`: when the config leaves
+`kanban.enabled` unset or false, no gateway is asked, and it says the board is off and nothing runs
+the tasks until it is turned on; a gateway that does not answer loses nothing, and it says why
+without saying to try again: a second start without `--key` makes a second instance.
+
+**The refusals of a start**, on every path, in the worker's codes (`RefusalCode`, and the worker
+API's own):
+
+| Code | When |
+|---|---|
+| `unknown_workflow` | no usable file of that name; the message names the usable ones (above) |
+| `invalid` | the file is broken (§21.4), a param unknown, missing, of the wrong type, given twice, or with a character a title refuses, an item empty, repeated or holding a secret, a name holding a secret, a key reused for another workflow or in another's namespace, 101 tasks |
+| `too_large` | the params past 64 KiB, a value or an item past 8 KiB, a list past 100 items, a task's field past `task new`'s limits after substitution |
+| `unknown_role`, `supervised_role`, `unknown_workspace` | a name, in the file or from a param, as `create` refuses it, naming the step and item |
+| `person_not_assignable` | a person without talk tier, or any person at the terminal (§2.6) |
+| `unknown_board`, `board_archived` | the board, as for `task new` (§16.4) |
+| `other_board` | the key's instance is on another board (§16.5) |
+| `no_board` | at the terminal, no database, or one not yet migrated (§21.6) |
+| `run_superseded`, `unauthorized` | from a run: the run is over or decided by another, or the token is not a run's (§7.2) |
+| `operator_command` | `mt kanban workflow …` in a run's shell (§21.5) |
+| `bad_request` | from a run: not a JSON object, or a field the command does not take |
+
+In chat each is said as any refusal is, "Not done: …", on one line (§9.1).
 
 **The board**: in chat, the chat's board (§16.4), refused when it is archived, as `task new` is;
 at the terminal, `--board`, else `default`; from a run, its task's board, whatever else (§16.5),
@@ -4352,14 +4427,26 @@ the instance's key covers them, and a key of their own would only be a second th
 - **A task records its instance, step and item in the members table, not in `kanban_tasks`.**
   §1's seam promised that nothing in the kernel knows about workflows, and a column on the
   kernel's table would be read, or carried, by everything that reads a task. In a table of its
-  own, a member row is found by its task's key, `show` joins it, and nothing else ever reads it.
+  own, a member row is found by its task's key; besides the workflow commands, its one reader is
+  `task show` (§21.9), which joins it for its one line, and nothing else ever reads it: not the
+  dispatcher, the claim, the prompt or the notices.
   `task_id` as the key makes a task a member of at most one instance.
 - **Members are exactly what the start made.** Rows are written in the start's transaction and
   never added, changed or removed: a follow-up, a task linked in later or a task made by a deciding
   step is related to the instance (§21.9), never a member.
 - **Foreign keys** are allowed here, unlike on `kanban_tasks.board` (§16.2): both tables are new,
   not columns added to a live table.
-- **An index on `(board, created_at)`** for `/kanban workflow instances`, which lists one board's.
+- **An index on `(board, created_at)`** for `/kanban workflow instances`, which reads at most the
+  board's 200 most recent instances, newest first, so a board with years of them lists as fast as a
+  new one; older ones are reached by id, with `show`.
+- **An index on `kanban_tasks(created_from_task)`**, added by `009`: `show`'s related tasks
+  (§21.9) are found by it, and nothing indexes that column today. A new index on a live table
+  writes no row of it, and is built in `009`'s transaction.
+- **An unmigrated database.** Between a build with plan T and the start that migrates (§20.15), the
+  tables are not there. The workflow commands at the terminal look for them as `openBoard` looks
+  for `kanban_gates`, and refuse `no_board` with "start the gateway once, so it is migrated",
+  changing nothing; `task show`'s one line (§21.9) reads the members table only when it exists, so
+  `mt kanban task show` keeps working on such a database.
 - **The copy is stored as written**, never masked: it holds gates, which run as written (§10.1),
   and a gate holding a known secret is refused at the start (§21.4) so none is stored. Its other
   text is the operator's, as `role.md` is, which is not masked either (§10); wherever the copy is
@@ -4375,23 +4462,24 @@ the instance's key covers them, and a key of their own would only be a second th
   WRITERS.md gains their rows. **`startWorkflow(db, instance, tasks, now)`** takes the checked,
   substituted tasks in position order, each with its member fields, its parents as positions of
   earlier tasks, and its gates. In one `tx`: the board is worked out (the run's task's for a run),
-  the key looked up (a repeat returns the instance and its members, `existing: true`; another
-  board's is `other_board`), the board checked live (§16.8); then the instance row; then each task
+  the key looked up again, as the race guard behind step 0 (a repeat returns the instance and its
+  members, `existing: true`; another board's is `other_board`; another workflow's name `invalid`), the board checked live (§16.8); then the instance row; then each task
   through the same insert `createTask` uses, which plan T moves into a helper of both, so a
   workflow's task is made exactly as any task is, with its subscription (§21.8) and its `created`
   event; then its links, its gates through the insert `addGate` uses, again a shared helper, which
   checks the 20 and the 600 s again inside the transaction; then its member row. A refusal rolls
   back everything (`tx`), so a start makes all of it or none.
 - **Each task still writes its own `created` event**, with the instance, step and item added to
-  the payload (`workflow`, `step`, `item`), and each gate its `gate_added`. Every change to a task
+  the payload: `workflow`, the instance's id `w_…`, `workflowName`, its name, `step` and `item`;
+  and each gate its `gate_added`. Every change to a task
   writes one (§3.4): a subscription's cursor, `show`'s history and a worker's prior context all
   read a task's own events, and a task with no `created` would be the one task whose history
-  starts in the middle. `workflow` and `step` join `BOARD_KEYS`, as they identify; `item` is a
+  starts in the middle. `workflow`, `workflowName` and `step` join `BOARD_KEYS`, as they identify; `item` is a
   param's text, and is masked. `created` is no notice (§9.4), so a start of 100 tasks sends no
   notices, only its reply.
 - **A gate's `created_by`** is who started the instance, as recorded on it, and its `gate_added`
   event carries `workflow`. The command came from the operator's file, but the start is what put
-  it on the task.
+  it on the task. Its payload's `workflow` is the instance's id, as in `created`.
 - **`archiveWorkflow(db, instanceId, by, now)`** archives, in one `tx`, every member not already
   archived, through the same body `archive` runs, which plan T moves into a helper: an undecided
   run ends `superseded`, a decided one is closed, a done task keeps the time it was done. Each
@@ -4425,7 +4513,14 @@ Started vendor-eval as `w_…`, 5 tasks:
 This thread hears when each task is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 ```
 
-with the board named when it is not `default`, as `task new`'s reply does. **It fits Lark's
+with the board named when it is not `default`, as `task new`'s reply does. **Two wordings**, as
+`#created` renders for `task new` (§19.5): the thread's, "This thread hears …", with a person's
+card said to come in this thread, or by direct message if they are not in this group; and the
+chat's, "This chat hears …", with a person's card said to come by direct message. A start in a
+group at chat scope answers `{ text, quoted, thread }`: `text` in the thread's words, and
+`quoted`, the chat's words, which the router sends instead when Lark refuses the threaded reply
+(§19.4). A start in a direct message, or in a thread with no root known, is answered in the chat's
+words alone; in a group's thread whose root is known, in the thread's. **It fits Lark's
 limits** as every reply does: a text sent as one message is at most 4,000 characters
 (`ONE_MESSAGE`), and the router cuts a reply to it. A cut reply would lose its last line, which
 says who hears, and part of a task's line. So the reply lists at most 30 tasks, as `/kanban task
@@ -4485,9 +4580,13 @@ checked before running, as a blocked task is what a person must act on.
 
 **`instances`** lists the board's instances, newest first: id, name, status, members done of
 total, who started it and when. By default only running and blocked; `all` adds done and
-archived. At most 30 lines, as `task list`.
+archived. It reads at most the 200 most recent (§21.6), and shows at most 30 lines, as `task
+list`, then how many more; past 200 it says that older instances are shown by id.
 
-**`show`**:
+**`show`** names an instance by id, on any board, as `task show` names a task (§16.4): in chat it
+names the instance's board when that is not the chat's; at the terminal with `--board` it refuses
+`other_board` an instance on another board, and `unknown_board` a board that does not exist, as the
+task commands do (§16.5). An id that is no instance's is `not_found`.
 
 - the name, the description from the copy, who started it (a person by the name Lark last gave,
   as `show` names people), when, how (chat, terminal, or a run, by its task), the board, and the
@@ -4633,7 +4732,15 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   too slow, twenty-one gates, and 601 s together; a literal role or workspace not configured, a
   supervised role; a foreseeable workspace conflict refused and an unforeseeable one not; step
   order kept as written.
-- **Unit, a start**: a missing required param, an unknown one, a default filled in; chat's pairs,
+- **Unit, a start**: a repeated key answered before the file is read, with the file since removed
+  or broken, and a key reused for another workflow refused; the params past 64 KiB in each path; a
+  pair split at its first `=`; `vendors=acme, globex` refused with the hint; an @-mention whose
+  name holds a space matched whole, longest first, resolved only for a person field and kept as
+  text elsewhere; a line break, control or bidi character in a value landing in a title refused; an
+  item holding a known secret refused; a gate with no `timeout_s` counted as 300 s; the terminal's
+  plain and `--json` answers, with the board off; the workflow commands refused `no_board` on an
+  unmigrated database, and `task show` working there; `show` of another board's instance by
+  `--board`; `unknown_workflow`'s message cut at 4 KiB; a missing required param, an unknown one, a default filled in; chat's pairs,
   quoted and curly-quoted values, a list by commas and by repeating, a quoted item with a comma, a
   text param twice, an @-mention with a space in its name, a stray word; the terminal's split at
   commas; a run's JSON with the wrong type; substitution in every text field and a value holding
@@ -4680,7 +4787,9 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
 - **No bound on agents starting workflows from workflows**: a deciding step can start its own
   workflow again, as an agent can create tasks that create tasks today. Each start is a task's
   work, which a person can stop.
-- **A person's name in a text field is their principal**, as substituted, not the name Lark gives.
+- **A person's name in a text field is their principal**, as substituted, not the name Lark gives,
+  when the same param also names a person field; a param that lands only in text keeps `@Name` as
+  typed.
 - **The terminal checks against its own shell's configuration**, as `mt kanban task new` does: a
   role added to the files but not yet loaded by the gateway is accepted there, and runs once the
   gateway has it.
@@ -4714,3 +4823,16 @@ a step whose parents certainly disagree; params masked on write, names refused i
 secret, the copy stored unmasked and shown masked; the `yaml` parser and `section`/`reject`
 helpers the role files use; the file read at each start, the startup check only reporting, and
 `mt service check` warning; and done counting an archived member as finished.
+*Amended on 2026-11-13.* A first review kept the worker's `start-workflow` and the step's fields
+as `create`'s with `addGate`'s gates, which the user approved, and found: that a repeat could be
+refused by a file changed since, so the key is looked up first, read-only, the writer's lookup
+kept as the race guard, and a key reused for another workflow refused; that an @-mention with a
+space could not be parsed, so the parser is given the message's mention names and returns `{ key,
+value, quoted }`, and `@` is resolved only for a person field; that the params had no total bound
+against the socket's 256 KiB, so 64 KiB; that §7.1, §7.3, §2.6's operator block and its "Who reads
+it" did not name the new commands; an unmigrated database; the reply's two wordings; the link
+bound, 4,950; a gate's default timeout in the 600 s; `mt workflow check`'s `.env` and secrets;
+the characters a title refuses; the payload's `workflow` as the instance's id, the name apart; items
+holding a secret; `task show` as the members table's other reader; an index on `created_from_task`
+and the 200 instances `instances` reads; `unknown_workflow`'s size; the terminal's answer, `show`
+on another board, the pair's first `=`, a stray word's hint; and a table of a start's refusals.
