@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runMt } from '../src/cli/mt.js';
 import { highestMigration, migrate, openDb } from '../src/db/open.js';
-import { clearSecrets } from '../src/secrets.js';
+import { MASK, clearSecrets, redactKnownSecrets } from '../src/secrets.js';
 import { SCHEMA_DIR } from './helpers/db.js';
 import { SECRET, serviceConfig, serviceFake, type ServiceFake } from './helpers/service.js';
 
@@ -165,5 +165,88 @@ describe("mt service check's version line", () => {
       `mt: better-sqlite3's native module does not load under ${fx.node}: was compiled against a different Node.js version using NODE_MODULE_VERSION 131. ` +
         `Build it for this node by hand: cd '${fx.checkout}' && PATH='${join(fx.root, 'node bin')}':"$PATH" '${join(fx.root, 'node bin', 'npm')}' ci`,
     );
+  });
+});
+
+describe('mt service check with no unit installed: a gateway started by hand', () => {
+  it('needs no .env, and runs neither of install\'s checks of it', async () => {
+    fx = await serviceFake({ env: false });
+    const r = await check({ LARK_APP_SECRET: SECRET, LARK_APP_ID: 'cli_shell', MT_ALLOW_TALK: 'ou_a' });
+    expect(r.err).toBe('');
+    expect(r.code).toBe(0);
+    expect(r.out).toEqual([
+      `database: ${join(fx.mtHome, 'team.db')}: no database; this build: up to ${TOP}`,
+      `checking as a gateway started by hand from this shell, over ${join(fx.mtHome, '.env')}: no service is installed`,
+      'ok: this build would start as a gateway started by hand from this shell',
+    ]);
+    expect(fx.imports).toEqual([join(fx.checkout, 'dist', 'index.js'), join(fx.checkout, 'dist', 'db', 'open.js')]);
+  });
+
+  it('fails at a ConfigError from the settings or the team, before loadStartup and before any import', async () => {
+    fx = await serviceFake();
+    const role = join(fx.mtHome, 'roles', 'broken');
+    mkdirSync(role, { recursive: true });
+    writeFileSync(join(role, 'config.yaml'), 'agent:\n  driver: nonsense\n');
+    const r = await check();
+    expect(r.code).toBe(1);
+    expect(r.out[0]).toMatch(/^database: /);
+    expect(r.err).toMatch(/^mt: the gateway would not start: .*agent\.driver must be one of/);
+    expect(fx.imports).toEqual([]);
+  });
+
+  it("fails at loadStartup's ConfigError, from the build's own dist/index.js", async () => {
+    fx = await serviceFake({ config: `workspace: /tmp\nagent:\n  driver: acp\n  command: claude-agent-acp\n` });
+    const r = await check();
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/^mt: the gateway would not start: an owner is required/);
+    expect(fx.imports).toEqual([join(fx.checkout, 'dist', 'index.js'), join(fx.checkout, 'dist', 'db', 'open.js')]);
+  });
+
+  it('fills a stand-in, with its note, for each unset passEnv name and an unset or empty secret, masked', async () => {
+    fx = await serviceFake({ env: 'LARK_APP_ID=cli_test\n' });
+    writeFileSync(join(fx.mtHome, 'config.yaml'), serviceConfig(join(fx.root, 'repo'), '  passEnv: [GH_TOKEN, SET_HERE]\n'));
+    let seen: Record<string, string | undefined> | undefined;
+    const real = await import('../src/index.js');
+    fx.modules[join(fx.checkout, 'dist', 'index.js')] = {
+      loadStartup: (env: Record<string, string | undefined>) => {
+        seen = env;
+        return real.loadStartup(env);
+      },
+    };
+    const r = await check({ SET_HERE: 'from the shell', LARK_APP_SECRET: '   ' });
+    expect(r.err).toBe('');
+    expect(r.code).toBe(0);
+    expect(r.out.filter((l) => l.startsWith('note: '))).toEqual([
+      'note: GH_TOKEN is not set here: the gateway will need it from the shell that starts it',
+      'note: LARK_APP_SECRET is not set here: the gateway will need it from the shell that starts it',
+    ]);
+    expect(seen?.['GH_TOKEN']).toBe('(unset here)');
+    expect(seen?.['LARK_APP_SECRET']).toBe('(unset here)');
+    expect(seen?.['SET_HERE']).toBe('from the shell');
+    expect(redactKnownSecrets('a (unset here) b')).toBe(`a ${MASK} b`);
+  });
+
+  it('never fills a value the .env sets', async () => {
+    fx = await serviceFake();
+    let seen: Record<string, string | undefined> | undefined;
+    const real = await import('../src/index.js');
+    fx.modules[join(fx.checkout, 'dist', 'index.js')] = {
+      loadStartup: (env: Record<string, string | undefined>) => {
+        seen = env;
+        return real.loadStartup(env);
+      },
+    };
+    const r = await check();
+    expect(r.code).toBe(0);
+    expect(r.out.filter((l) => l.startsWith('note: '))).toEqual([]);
+    // The copy is this shell's; loadStartup reads the .env itself.
+    expect(seen?.['LARK_APP_SECRET']).toBeUndefined();
+  });
+
+  it('prints the version line from this shell over the .env, with a database', async () => {
+    fx = await serviceFake();
+    const db = database(4);
+    const r = await check();
+    expect(r.out[0]).toBe(`database: ${db} at version 4; this build: up to ${TOP}`);
   });
 });

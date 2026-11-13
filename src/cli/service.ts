@@ -16,9 +16,9 @@ import {
   type Env,
 } from '../config.js';
 import { highestMigration, openDbReadOnly } from '../db/open.js';
-import { readGatewayEnv, type GatewayEnvFile } from '../gateway-env.js';
+import { gatewayEnvPath, loadGatewayEnv, readGatewayEnv, type GatewayEnvFile } from '../gateway-env.js';
 import { lockHolder, privateDir } from '../kanban/socket.js';
-import { redactKnownSecrets } from '../secrets.js';
+import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { loadTeam } from '../team.js';
 import { serviceLogPath } from '../service/log.js';
 import { launchdPlist, readPlist, readUnit, serviceNames, systemdUnit, type Recorded, type ServiceSpec } from '../service/unit.js';
@@ -204,6 +204,13 @@ export async function serviceCommand(argv: readonly string[], io: MtIo): Promise
 }
 
 class CommandFailed extends Error {}
+
+/**
+ * What a name left unset is given for `loadStartup`, when a gateway started by
+ * hand is checked. Registered as a secret, so it is masked like one; at least
+ * MIN_SECRET_LENGTH long, as a shorter value is never masked.
+ */
+const STAND_IN = '(unset here)';
 
 /** An error's message, or the value as text. */
 function errorText(err: unknown): string {
@@ -559,8 +566,8 @@ class Service {
    */
   async check(): Promise<number> {
     const { t, io, deps } = this;
+    if (!this.installed()) return await this.checkByHand();
     const recorded = this.recorded();
-    if (!this.installed()) throw new CommandFailed(`not installed: ${t.file} does not exist`);
     const path = recorded?.path ?? io.env['PATH'] ?? '';
     let env: Env | Error;
     try {
@@ -584,6 +591,59 @@ class Service {
     }
     await this.loadModules();
     io.out(`ok: this build would start as ${t.name}`);
+    return 0;
+  }
+
+  /**
+   * With no unit installed, a gateway started by hand from this shell is
+   * checked (spec §20.5): no .env is required, as such a gateway may take its
+   * secret from the shell. `mt role check`'s loads, over this shell's
+   * environment over the .env, collecting the passEnv names left unset; then
+   * the startup's own `loadStartup`, from the build's dist/index.js, on a copy
+   * of this shell's environment in which a stand-in fills only what is unset
+   * or empty in the merged one: each such passEnv name, and the Lark secret.
+   */
+  private async checkByHand(): Promise<number> {
+    const { io, t } = this;
+    // The home as this command found it, which is where such a gateway would look.
+    const shell: Env = { ...io.env, MT_HOME: t.mtHome };
+    let merged: Env | Error;
+    try {
+      merged = loadGatewayEnv(shell).env;
+    } catch (err) {
+      if (!(err instanceof ConfigError)) throw err;
+      merged = err;
+    }
+    io.out(redactKnownSecrets(versionLine(merged)));
+    if (merged instanceof Error) throw new CommandFailed(merged.message);
+    io.out(`checking as a gateway started by hand from this shell, over ${gatewayEnvPath(shell)}: no service is installed`);
+    const unset: string[] = [];
+    try {
+      const settings = loadTeamSettings(merged, undefined, { unsetPassEnv: unset });
+      loadTeam(settings, merged, { unsetPassEnv: unset });
+    } catch (err) {
+      if (!(err instanceof ConfigError)) throw err;
+      throw new CommandFailed(`the gateway would not start: ${err.message}`);
+    }
+    const gateway = await this.loadModules();
+    const loadStartup = gateway['loadStartup'];
+    if (typeof loadStartup !== 'function') throw new CommandFailed("the build's dist/index.js has no loadStartup");
+
+    const copy: Record<string, string | undefined> = { ...shell };
+    const blank = (name: string): boolean => (merged[name] ?? '').trim() === '';
+    const filled = [...new Set(unset.map((entry) => entry.split(': ')[1] ?? ''))].filter(blank);
+    if (blank('LARK_APP_SECRET')) filled.push('LARK_APP_SECRET');
+    addSecrets([STAND_IN]);
+    for (const name of filled) {
+      copy[name] = STAND_IN;
+      io.out(`note: ${name} is not set here: the gateway will need it from the shell that starts it`);
+    }
+    try {
+      loadStartup(copy);
+    } catch (err) {
+      throw new CommandFailed(`the gateway would not start: ${errorText(err)}`);
+    }
+    io.out('ok: this build would start as a gateway started by hand from this shell');
     return 0;
   }
 
