@@ -187,6 +187,35 @@ describe('mt update refuses before anything changes', () => {
     expect(r.err).toMatch(/the incoming commits add config\.yaml, \.env, already in .* and ignored by git, which would overwrite them in the fast-forward without a word\. Move them aside/);
   });
 
+  it('an ignored file at a path the incoming commits rename onto, which rename detection would hide', async () => {
+    fx = await updateFake();
+    fx.repo.renamed = [{ from: 'config.example.yaml', to: 'config.yaml' }];
+    writeFileSync(join(fx.checkout, 'config.yaml'), 'mine');
+    const r = await fx.update(['--check']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/the incoming commits add config\.yaml, already in .* and ignored by git, which would overwrite it/);
+    expect(fx.ran()).toContain('git diff --name-only -z --no-renames --diff-filter=A HEAD origin/main');
+  });
+
+  it('an ignored file at an added path past ASCII, which git would otherwise quote', async () => {
+    fx = await updateFake();
+    fx.repo.added = ['notes/café.md'];
+    mkdirSync(join(fx.checkout, 'notes'));
+    writeFileSync(join(fx.checkout, 'notes', 'café.md'), 'mine');
+    const r = await fx.update(['--check']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/the incoming commits add notes\/café\.md, already in .* and ignored by git/);
+  });
+
+  it('an ignored file where the incoming commits add a directory, named as the one in the way', async () => {
+    fx = await updateFake();
+    fx.repo.added = ['data/seed/rows.json', 'docs/x.md'];
+    writeFileSync(join(fx.checkout, 'data'), 'mine');
+    const r = await fx.update(['--check']);
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/the incoming commits add data \(where they add data\/seed\/rows\.json\), already in .* and ignored by git, which would overwrite it/);
+  });
+
   it("a home whose run directory is not its own", async () => {
     fx = await updateFake();
     mkdirSync(join(fx.root, 'elsewhere'));

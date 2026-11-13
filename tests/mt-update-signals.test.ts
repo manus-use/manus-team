@@ -91,6 +91,21 @@ describe('a signal from the merge to the backup', () => {
     });
   }
 
+  it('during the backup: let finish, then going back, exit 1, the restart never called', async () => {
+    fx = await updateFake();
+    // Sent once the backup has begun, while it is awaited.
+    fx.whileBackingUp = () => setImmediate(() => fx.signal?.('SIGINT'));
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('SIGINT: going back once the running command ends');
+    expect(r.out).toMatch(/^backed up the database to /m);
+    expect(r.out.indexOf('SIGINT: going back')).toBeLessThan(r.out.indexOf('backed up the database'));
+    expect(r.err).toBe('mt: interrupted by SIGINT');
+    expect(fx.ran()).toContain(`git reset --keep ${OLD}`);
+    expect(restarted()).toBe(false);
+    expect(r.out).toContain('the checkout is back at 8b64aa1, and the gateway as it was');
+  });
+
   it('during npm ci: let finish, then going back with npm ci again', async () => {
     fx = await updateFake();
     fx.repo.depsChanged = true;

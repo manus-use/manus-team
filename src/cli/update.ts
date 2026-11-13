@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import { closeSync, existsSync, lstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import { constants as osConstants } from 'node:os';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
@@ -12,7 +12,7 @@ import { privateDir } from '../kanban/socket.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { parse, UsageError } from './args.js';
 import type { MtIo } from './mt.js';
-import { realServiceDeps, serviceView, type RunResult, type ServiceDeps, type ServiceView } from './service.js';
+import { realServiceDeps, serviceView, unreadableHint, type RunResult, type ServiceDeps, type ServiceView } from './service.js';
 import { findNpm, mtCommand, shQuote } from './shell.js';
 import { finishByHand, stepsBack, stepsForward, type AdvicePaths } from './update-advice.js';
 import { UNCHANGED_STEPS, UpdateLock, readUpdateLock, type UpdateLockState, type UpdateStep } from './update-lock.js';
@@ -94,6 +94,8 @@ const POLL_MS = 250;
 /** How long a killed group has between SIGTERM and SIGKILL, and after it, before its output is let go. */
 const KILL_AFTER_MS = 5_000;
 const GONE_AFTER_MS = 1_000;
+/** How long a command that has exited has for its output to close: a process it left behind may hold the pipes. */
+const EXIT_GRACE_MS = 2_000;
 
 const COMMITS_SHOWN = 50;
 const FAILED_TAIL = 20;
@@ -115,16 +117,7 @@ export function realUpdateDeps(given?: ServiceDeps): UpdateDeps {
   const service = given ?? { ...realServiceDeps(), run: runSyncDetached };
   return {
     run: runDetached,
-    ask: async (question, signal) => {
-      const rl = createInterface({ input: process.stdin, output: process.stdout });
-      // A Ctrl-C at the prompt reaches readline, not the process: send it on, as any other would arrive.
-      rl.on('SIGINT', () => process.kill(process.pid, 'SIGINT'));
-      try {
-        return await rl.question(question, { signal });
-      } finally {
-        rl.close();
-      }
-    },
+    ask: askAt(process.stdin, process.stdout),
     now: () => new Date(),
     sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
     onSignal: (handler) => {
@@ -149,6 +142,27 @@ export function realUpdateDeps(given?: ServiceDeps): UpdateDeps {
 }
 
 /**
+ * `UpdateDeps.ask` at a terminal's input and output. The end of the input, a
+ * Ctrl-D, answers '', which is no: readline's question never settles there, and
+ * the update would end with its locks held.
+ */
+export function askAt(input: NodeJS.ReadableStream, output: NodeJS.WritableStream): UpdateDeps['ask'] {
+  return async (question, signal) => {
+    const rl = createInterface({ input, output });
+    // A Ctrl-C at the prompt reaches readline, not the process: send it on, as any other would arrive.
+    rl.on('SIGINT', () => process.kill(process.pid, 'SIGINT'));
+    try {
+      return await new Promise<string>((done, fail) => {
+        rl.once('close', () => done(''));
+        rl.question(question, { signal }).then(done, fail);
+      });
+    } finally {
+      rl.close();
+    }
+  };
+}
+
+/**
  * The wrapper `runSyncDetached` runs: the command in a session of its own, its
  * output and exit code passed on, and the terminal's signals ignored, so the
  * wrapper stays to the end too.
@@ -163,7 +177,10 @@ const DETACHED_WRAPPER = [
 
 /** `ServiceDeps.run`, synchronous as `mt service`'s, with the command detached from this terminal. */
 export function runSyncDetached(cmd: string, args: readonly string[]): RunResult {
-  const r = spawnSync(process.execPath, ['-e', DETACHED_WRAPPER, cmd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  // The wrapper detached too, so no terminal's signal is sent to it at all; its handlers stay for one sent to it by name.
+  // spawnSync takes `detached` as spawn does, though Node's types leave it out.
+  const opts = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], detached: true } as SpawnSyncOptionsWithStringEncoding;
+  const r = spawnSync(process.execPath, ['-e', DETACHED_WRAPPER, cmd, ...args], opts);
   if (r.error !== undefined) return { code: 127, stdout: '', stderr: r.error.message };
   return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
 }
@@ -181,7 +198,8 @@ const OUTPUT_KEPT = 256 * 1024;
  * Run `cmd` detached, a session of its own with no controlling terminal and no
  * stdin, so a terminal's Ctrl-C reaches mt alone and nothing it starts can
  * prompt on /dev/tty. At its time limit, or when aborted, its whole process
- * group is sent SIGTERM, and SIGKILL 5 seconds later.
+ * group is sent SIGTERM, and SIGKILL 5 seconds later. Once it exits, its
+ * output has 2 seconds to close before it is let go.
  */
 export function runDetached(cmd: string, args: readonly string[], opts: UpdateRunOptions): Promise<UpdateRunResult> {
   return new Promise((done) => {
@@ -190,6 +208,7 @@ export function runDetached(cmd: string, args: readonly string[], opts: UpdateRu
     let timedOut = false;
     let settled = false;
     let killer: NodeJS.Timeout | undefined;
+    let grace: NodeJS.Timeout | undefined;
     const child = spawn(cmd, [...args], { cwd: opts.cwd, env: { ...opts.env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const keep = (kept: string, more: string): string => (kept + more).slice(-OUTPUT_KEPT);
     child.stdout.setEncoding('utf8').on('data', (d: string) => (stdout = keep(stdout, d)));
@@ -226,14 +245,22 @@ export function runDetached(cmd: string, args: readonly string[], opts: UpdateRu
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(grace);
       opts.signal?.removeEventListener('abort', kill);
       done(r);
     };
     child.once('error', (err) => finish({ code: 127, stdout, stderr: `${stderr}${err.message}`, timedOut }));
-    child.once('close', (code, signal) => {
-      const number = signal === null ? 1 : 128 + (osConstants.signals[signal] ?? 0);
-      finish({ code: code ?? number, stdout, stderr, timedOut });
+    const exitCode = (code: number | null, signal: NodeJS.Signals | null): number =>
+      code ?? (signal === null ? 1 : 128 + (osConstants.signals[signal] ?? 0));
+    // Exited, with its output still open: a process it started holds the pipes. Let them go, and answer with its own code.
+    child.once('exit', (code, signal) => {
+      grace = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish({ code: exitCode(code, signal), stdout, stderr, timedOut });
+      }, EXIT_GRACE_MS);
     });
+    child.once('close', (code, signal) => finish({ code: exitCode(code, signal), stdout, stderr, timedOut }));
   });
 }
 
@@ -255,8 +282,12 @@ interface Failure {
 
 const short = (sha: string | undefined): string => (sha ?? '').slice(0, 7);
 const lines = (text: string): string[] => text.split('\n').filter((l) => l.trim() !== '');
+/** Paths as git prints them with -z: NUL-ended and never quoted, so core.quotePath cannot hide a name past ASCII. */
+const paths = (text: string): string[] => text.split('\0').filter((p) => p !== '');
 const plural = (n: number, one: string, many: string = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 const versionText = (v: number | null): string => (v === null ? 'no database' : `version ${v}`);
+/** The steps back once the new gateway has started: what a person weighs before taking them. */
+const AFTER_RESTART = 'never taken by themselves: the new gateway may have migrated and written, and a restore loses what it wrote since the backup';
 
 function realpathOr(path: string): string {
   try {
@@ -465,6 +496,10 @@ class Update {
       // The checkout's lock, left by an update of another home: that home's database and service are the ones to look at.
       return new Stop(1, `an update of ${held.home} died at its step ${held.step}; run MT_HOME=${shQuote(held.home)} mt update for what to do`);
     }
+    if (realpathOr(held.checkout) !== this.checkout) {
+      // The home's lock, left by an update from another checkout: its tree and its build are the ones the steps would name.
+      return new Stop(1, `an update from ${held.checkout} died at its step ${held.step}; run mt update from ${held.checkout} for what to do`);
+    }
     const commits = held.old === undefined ? '' : `, updating ${short(held.old)}..${short(held.new)}`;
     // Both locks it left, named together, so the advice is followed once.
     const left = this.lockPaths.filter((p) => {
@@ -476,7 +511,8 @@ class Update {
     });
     if (!left.includes(path)) left.push(path);
     const locks = left.length === 1 ? 'its lock' : 'its locks';
-    this.sayErr(`mt: an update (pid ${held.pid}) died at its step ${held.step}${commits}; ${locks} ${left.length === 1 ? 'is' : 'are'} never cleared by itself: ${left.join(', ')}`);
+    const never = left.length === 1 ? 'is never cleared by itself' : 'are never cleared by themselves';
+    this.sayErr(`mt: an update (pid ${held.pid}) died at its step ${held.step}${commits}; ${locks} ${never}: ${left.join(', ')}`);
     const rm = `then remove ${locks}: rm ${left.map(shQuote).join(' ')}`;
     if (UNCHANGED_STEPS.includes(held.step)) {
       this.say(`it changed nothing; remove ${locks}: rm ${left.map(shQuote).join(' ')}`);
@@ -484,26 +520,28 @@ class Update {
     }
     const paths = { ...this.paths, db: held.db ?? this.dbPath };
     const was = held.userVersion ?? null;
-    const back = { old: held.old ?? 'HEAD', backup: held.backup };
+    // Only a new gateway, started at the restart, can have written to the database since the backup: before it, nothing is restored.
+    const restarted = held.step === 'restart' || held.step === 'confirm';
+    const back = { old: held.old ?? 'HEAD', backup: restarted ? held.backup : undefined };
+    const steps = restarted ? `the steps back, ${AFTER_RESTART}` : 'the steps back';
+    if (held.step === 'confirm') this.say('if mt service status and mt service logs show it connected, only the rm is needed');
     let now: number | null;
     try {
       now = held.db === undefined ? null : versionOf(held.db);
     } catch (err) {
       this.say(`the database's version cannot be read here (${err instanceof Error ? err.message : String(err)}): read it with ${mtCommand(this.node, this.checkout)} service check`);
-      this.block(`at ${versionText(was)}, the steps back:`, stepsBack(paths, back));
+      this.block(`at ${versionText(was)}, ${steps}:`, stepsBack(paths, back));
       this.block('at another, the steps forward:', stepsForward(paths));
       this.say(rm);
       return new Stop(1, undefined);
     }
     if (now === was) {
       this.say(`the database is still at ${versionText(was)}`);
-      this.block('the steps back:', stepsBack(paths, back));
+      this.block(`${steps}:`, stepsBack(paths, back));
     } else {
       this.say(`the database moved from ${versionText(was)} to ${versionText(now)}: the old build can no longer run on it`);
       this.block('the steps forward:', stepsForward(paths));
-      if ((held.step === 'restart' || held.step === 'confirm') && held.backup !== undefined) {
-        this.block('or the steps back, with its backup, which remain possible:', stepsBack(paths, back));
-      }
+      if (back.backup !== undefined) this.block(`or the steps back, with its backup, ${AFTER_RESTART}:`, stepsBack(paths, back));
     }
     this.say(rm);
     return new Stop(1, undefined);
@@ -551,11 +589,7 @@ class Update {
       }
       const state = view.state();
       if (state.unreadable !== undefined) {
-        const hint =
-          view.kind === 'launchd'
-            ? 'a LaunchAgent needs someone logged in at the Mac\'s console: log in there, then run this again'
-            : "run it where the user's systemd answers: a login session, or with loginctl enable-linger";
-        throw new Stop(1, `the service's state cannot be read, and is not taken as stopped: ${state.unreadable}. ${hint}`);
+        throw new Stop(1, `the service's state cannot be read, and is not taken as stopped: ${state.unreadable}. ${unreadableHint(view.kind)}`);
       }
       const holder = view.lockPid();
       if (holder !== undefined && holder !== state.pid) {
@@ -638,8 +672,12 @@ class Update {
       this.upToDate = true;
       return;
     }
-    this.added = lines(await this.mustGit(['diff', '--name-only', '--diff-filter=A', 'HEAD', this.upstream]));
-    const inTheWay = this.added.filter((path) => lstatSync(join(this.checkout, path), { throwIfNoEntry: false }) !== undefined);
+    // Renames as a delete and an add: detected, a file renamed onto an ignored path would drop out of the adds.
+    this.added = paths(await this.mustGit(['diff', '--name-only', '-z', '--no-renames', '--diff-filter=A', 'HEAD', this.upstream]));
+    const inTheWay = this.added.flatMap((path) => {
+      const found = this.inTheWay(path);
+      return found === undefined ? [] : [found === path ? path : `${found} (where they add ${path})`];
+    });
     if (inTheWay.length > 0) {
       throw new Stop(
         1,
@@ -647,6 +685,23 @@ class Update {
           `${inTheWay.length === 1 ? 'it' : 'them'} in the fast-forward without a word. Move ${inTheWay.length === 1 ? 'it' : 'them'} aside, or tell the commit's author`,
       );
     }
+  }
+
+  /**
+   * What is in the checkout where the incoming commits add `path`: the path
+   * itself, or a file where it needs a directory, the nearest of its parents
+   * that exists; undefined when nothing is.
+   */
+  private inTheWay(path: string): string | undefined {
+    for (let at = path; at !== '.' && at !== ''; at = dirname(at)) {
+      try {
+        if (lstatSync(join(this.checkout, at), { throwIfNoEntry: false }) !== undefined) return at;
+        if (at === path) return undefined;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOTDIR') throw err;
+      }
+    }
+    return undefined;
   }
 
   // -------------------------------------------------------------------------
@@ -686,7 +741,7 @@ class Update {
     this.db = openDbReadOnly(settings.dbPath);
     this.version = this.db === undefined ? null : Number(this.db.pragma('user_version', { simple: true }));
 
-    const tree = lines(await this.mustGit(['ls-tree', '--name-only', this.upstream, 'schema/']));
+    const tree = paths(await this.mustGit(['ls-tree', '--name-only', '-z', this.upstream, 'schema/']));
     this.newest = tree.reduce((top, path) => Math.max(top, Number(MIGRATION.exec(path)?.[1] ?? 0)), 0);
     const fresh = this.added.filter((path) => MIGRATION.test(path)).map((path) => basename(path)).sort();
     if (fresh.length > 0) {
@@ -697,7 +752,7 @@ class Update {
           : `${which}: the restart moves the database from version ${this.version} to ${this.newest}, and a backup is taken first; going back after it needs the backup`,
       );
     }
-    const changed = lines(await this.mustGit(['diff', '--name-only', '--diff-filter=M', 'HEAD', this.upstream, '--', 'schema/']));
+    const changed = paths(await this.mustGit(['diff', '--name-only', '-z', '--no-renames', '--diff-filter=M', 'HEAD', this.upstream, '--', 'schema/']));
     for (const path of changed.filter((p) => MIGRATION.test(p))) {
       this.warn(`migration ${basename(path)} was changed: the runner never runs again one the database has applied`);
     }
@@ -894,7 +949,11 @@ class Update {
     const status = await this.deps.run('git', ['status'], { cwd: this.checkout, env: this.gitEnv, timeoutMs: LIMITS.local });
     this.block('git status says:', lines(status.stdout));
     this.block('to finish going back by hand:', finishByHand(this.paths, { reset }));
-    this.say('the gateway still runs from memory, but a crash restart would run whatever dist/ and node_modules now hold');
+    this.say(
+      this.willRestart
+        ? 'the gateway still runs from memory, but a crash restart would run whatever dist/ and node_modules now hold'
+        : "the gateway's next start would run whatever dist/ and node_modules now hold",
+    );
     throw new Stop(3, undefined);
   }
 
@@ -961,10 +1020,7 @@ class Update {
 
   private stepsBackAfterRestart(): void {
     if (this.backup === undefined) this.say('no backup was taken, as there was no database: the steps back leave out the restore');
-    this.block(
-      'the steps back, never taken by themselves: the new gateway may have migrated and written, and a restore loses what it wrote since the backup:',
-      stepsBack(this.paths, { old: this.old, backup: this.backup }),
-    );
+    this.block(`the steps back, ${AFTER_RESTART}:`, stepsBack(this.paths, { old: this.old, backup: this.backup }));
   }
 
   // -------------------------------------------------------------------------

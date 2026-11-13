@@ -168,8 +168,19 @@ describe('a failure in steps 4 to 6 goes back', () => {
     expect(r.err).toContain('mt: npm run build failed (exit 2); and going back, npm run build failed (exit 2):');
     expect(r.out).toContain('git status says:\n  On branch main');
     expect(r.out).toContain(`to finish going back by hand:\n  cd '${fx.checkout}' && ${NPM()} ci && ${NPM()} run build`);
-    expect(r.out).toContain('a crash restart would run whatever dist/ and node_modules now hold');
+    expect(r.out).toContain('the gateway still runs from memory, but a crash restart would run whatever dist/ and node_modules now hold');
   });
+
+  for (const service of ['stopped', 'none'] as const) {
+    it(`going back that fails too, with the service ${service === 'none' ? 'not installed' : 'stopped'}: no running gateway is claimed`, async () => {
+      fx = await updateFake({ service });
+      fx.answer = (run) => (run.cmd === fx.npm && run.args[1] === 'build' ? { code: 2 } : undefined);
+      const r = await fx.update(['--yes']);
+      expect(r.code).toBe(3);
+      expect(r.out).not.toContain('still runs from memory');
+      expect(r.out).toContain("the gateway's next start would run whatever dist/ and node_modules now hold");
+    });
+  }
 
   it('a tree not clean after going back: stuck, with what git status says, exit 3', async () => {
     fx = await updateFake();

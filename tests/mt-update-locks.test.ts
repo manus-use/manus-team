@@ -61,7 +61,7 @@ describe('an error nothing foresaw', () => {
     const again = await fx.update(['--yes']);
     expect(again.code).toBe(1);
     expect(again.err).toContain('died at its step confirm');
-    expect(again.out).toContain('the steps back:');
+    expect(again.out).toContain('the steps back, never taken by themselves:');
   });
 
   it('before the merge: nothing changed, the locks go, exit 1, masked', async () => {
@@ -115,21 +115,40 @@ describe('a lock left by an update that died', () => {
     });
   }
 
+  it('at backup with a backup named: the steps back with no restore, as no new build has run on the database', async () => {
+    fx = await updateFake();
+    died('backup', { backup: '/b/team-v8.db' });
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('the steps back:\n');
+    expect(r.out).not.toContain('cp ');
+    expect(r.out).not.toContain('rm -f ');
+    expect(r.out).not.toContain('never taken by themselves');
+  });
+
   for (const step of ['restart', 'confirm'] as const) {
-    it(`at ${step} with a backup named, unchanged: the steps back with its restore`, async () => {
+    it(`at ${step} with a backup named, unchanged: the steps back with its restore, under the restart's warning`, async () => {
       fx = await updateFake();
       died(step, { backup: '/b/team-v8.db' });
       const r = await fx.update(['--yes']);
+      expect(r.out).toContain(
+        'the steps back, never taken by themselves: the new gateway may have migrated and written, and a restore loses what it wrote since the backup:',
+      );
       expect(r.out).toContain(`  cp '/b/team-v8.db' '${fx.dbPath}'`);
+      const connected = 'if mt service status and mt service logs show it connected, only the rm is needed';
+      if (step === 'confirm') expect(r.out).toContain(connected);
+      else expect(r.out).not.toContain(connected);
     });
 
-    it(`at ${step} with a backup named, moved: the steps forward, and the steps back with its restore remain possible`, async () => {
+    it(`at ${step} with a backup named, moved: the steps forward, and the steps back with its restore, under the restart's warning`, async () => {
       fx = await updateFake();
       died(step, { backup: '/b/team-v8.db' });
       migrateTo(TOP + 1);
       const r = await fx.update(['--yes']);
       expect(r.out).toContain('the steps forward:');
-      expect(r.out).toContain('or the steps back, with its backup, which remain possible:');
+      expect(r.out).toContain(
+        'or the steps back, with its backup, never taken by themselves: the new gateway may have migrated and written, and a restore loses what it wrote since the backup:',
+      );
       expect(r.out).toContain(`  cp '/b/team-v8.db' '${fx.dbPath}'`);
     });
   }
@@ -140,7 +159,7 @@ describe('a lock left by an update that died', () => {
     const checkout = died('build', {}, 'checkout');
     const r = await fx.update(['--yes']);
     expect(r.code).toBe(1);
-    expect(r.err).toContain(`its locks are never cleared by itself: ${checkout}, ${home}`);
+    expect(r.err).toContain(`its locks are never cleared by themselves: ${checkout}, ${home}`);
     expect(r.out.split('\n').slice(-1)).toEqual([`then remove its locks: rm '${checkout}' '${home}'`]);
     expect(r.out.match(/the steps back:/g)).toHaveLength(1);
   });
@@ -152,6 +171,16 @@ describe('a lock left by an update that died', () => {
     expect(r.code).toBe(1);
     expect(r.err).toBe("mt: an update of /srv/other home died at its step backup; run MT_HOME='/srv/other home' mt update for what to do");
     expect(r.out).toBe('');
+  });
+
+  it("in the home's lock, from another checkout: no steps, but where to run mt update from", async () => {
+    fx = await updateFake();
+    const path = died('build', { checkout: '/srv/other checkout' });
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(1);
+    expect(r.err).toBe('mt: an update from /srv/other checkout died at its step build; run mt update from /srv/other checkout for what to do');
+    expect(r.out).toBe('');
+    expect(existsSync(path)).toBe(true);
   });
 
   it("whose database cannot be read: both ways, and how to read the version", async () => {

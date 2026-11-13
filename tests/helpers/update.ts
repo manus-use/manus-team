@@ -39,6 +39,8 @@ export interface Repo {
   /** The paths the incoming commits add, and those under schema/ they change. */
   added: string[];
   modified: string[];
+  /** The paths the incoming commits rename, which git's rename detection takes out of `--diff-filter=A`. */
+  renamed: { from: string; to: string }[];
   /** `git ls-tree --name-only <upstream> schema/`. */
   tree: string[];
   depsChanged: boolean;
@@ -65,6 +67,8 @@ export interface UpdateFake extends ServiceFake {
   /** Called while the question is asked, and at each sleep of the wait for the gateway. */
   whileAsking: () => void;
   whileSleeping: () => void;
+  /** Called as the backup begins: its time is asked for its name. */
+  whileBackingUp: () => void;
   /** The handler mt update gave onSignal, while it is set. */
   signal: ((signal: NodeJS.Signals) => void) | undefined;
   slept: number;
@@ -118,6 +122,7 @@ export async function updateFake(opts: { env?: string | false; config?: string; 
     commits: ['4f0c2de Add the third thing', '91aa310 Say the second thing', '2c7d001 Take the first thing'],
     added: [],
     modified: [],
+    renamed: [],
     tree: SCHEMA_FILES.map((name) => `schema/${name}`),
     depsChanged: false,
     sshCommand: false,
@@ -131,6 +136,7 @@ export async function updateFake(opts: { env?: string | false; config?: string; 
   f.signal = undefined;
   f.whileAsking = () => {};
   f.whileSleeping = () => {};
+  f.whileBackingUp = () => {};
   f.slept = 0;
   f.onStart = () => appendFileSync(join(svc.mtHome, 'logs', 'gateway.log'), startupLines(TOP, dbPath));
   f.ran = () =>
@@ -141,6 +147,14 @@ export async function updateFake(opts: { env?: string | false; config?: string; 
     });
 
   const ok = (stdout = ''): UpdateRunResult => ({ code: 0, stdout, stderr: '', timedOut: false });
+  /** Paths as git prints them: NUL-ended with -z, else a line each, a name with a byte past ASCII quoted in octal. */
+  const names = (paths: string[], z: boolean): string =>
+    z
+      ? paths.map((p) => `${p}\0`).join('')
+      : paths
+          .map((p) => (/[^\x20-\x7e]/.test(p) ? `"${[...Buffer.from(p)].map((b) => (b < 0x80 ? String.fromCharCode(b) : `\\${b.toString(8)}`)).join('')}"` : p))
+          .map((p) => `${p}\n`)
+          .join('');
   const fail = (code: number, stderr: string): UpdateRunResult => ({ code, stdout: '', stderr, timedOut: false });
   const git = (args: string[]): UpdateRunResult => {
     const { repo } = f;
@@ -161,10 +175,18 @@ export async function updateFake(opts: { env?: string | false; config?: string; 
     if (words === `rev-parse HEAD ${repo.upstream}`) return ok(`${repo.head}\n${repo.upstreamSha}\n`);
     if (words === 'rev-parse HEAD') return ok(`${repo.head}\n`);
     if (args[0] === 'merge-base') return repo.ancestor ? ok() : fail(1, '');
-    if (words === `diff --name-only --diff-filter=A HEAD ${repo.upstream}`) return ok(repo.added.map((p) => `${p}\n`).join(''));
-    if (words === `diff --name-only --diff-filter=M HEAD ${repo.upstream} -- schema/`) return ok(repo.modified.map((p) => `${p}\n`).join(''));
+    if (args[0] === 'diff' && args.includes('--name-only')) {
+      // As git answers: renames detected unless --no-renames, and names quoted as core.quotePath does unless -z.
+      const flags = args.slice(0, args.indexOf('HEAD'));
+      const filter = flags.find((a) => a.startsWith('--diff-filter='))?.slice('--diff-filter='.length);
+      const under = args.includes('--') ? args.slice(args.indexOf('--') + 1) : [];
+      const noRenames = flags.includes('--no-renames');
+      const named =
+        filter === 'A' ? [...repo.added, ...(noRenames ? repo.renamed.map((r) => r.to) : [])] : filter === 'M' ? repo.modified : [];
+      return ok(names(named.filter((p) => under.length === 0 || under.some((u) => p.startsWith(u))), flags.includes('-z')));
+    }
     if (args[0] === 'log') return ok(repo.commits.map((c) => `${c}\n`).join(''));
-    if (args[0] === 'ls-tree') return ok(repo.tree.map((p) => `${p}\n`).join(''));
+    if (args[0] === 'ls-tree') return ok(names(repo.tree, args.includes('-z')));
     if (args[0] === 'diff' && args[1] === '--quiet') return repo.depsChanged ? fail(1, '') : ok();
     if (args[0] === 'merge') {
       repo.head = repo.upstreamSha;
@@ -199,7 +221,10 @@ export async function updateFake(opts: { env?: string | false; config?: string; 
       if (signal.aborted) throw new Error('The operation was aborted');
       return f.replies.shift() ?? '';
     },
-    now: () => new Date('2026-11-12T15:30:00.000Z'),
+    now: () => {
+      f.whileBackingUp();
+      return new Date('2026-11-12T15:30:00.000Z');
+    },
     sleep: async (ms) => {
       f.slept += ms;
       f.whileSleeping();

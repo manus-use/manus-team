@@ -238,7 +238,11 @@ describe('the backup of a real WAL database, written to meanwhile', () => {
       { stdio: ['ignore', 'pipe', 'inherit'] },
     );
     try {
-      await new Promise<void>((ready) => writer.stdout.once('data', () => ready()));
+      // Its first line, or its exit: a writer that dies at its start fails the test rather than hang it.
+      await new Promise<void>((ready, failed) => {
+        writer.stdout.once('data', () => ready());
+        writer.once('exit', (code, signal) => failed(new Error(`the writer exited (${code ?? signal}) before it was ready`)));
+      });
       await new Promise((wait) => setTimeout(wait, 200));
       const reader = openDbReadOnly(dbPath) as Db;
       const dir = join(fx.svc.mtHome, 'backups');
@@ -250,8 +254,9 @@ describe('the backup of a real WAL database, written to meanwhile', () => {
         reader.close();
       }
       await new Promise((wait) => setTimeout(wait, 100));
+      const gone = new Promise((exited) => (writer.exitCode !== null || writer.signalCode !== null ? exited(undefined) : writer.once('exit', exited)));
       writer.kill('SIGKILL');
-      await new Promise((gone) => writer.once('exit', gone));
+      await gone;
       const copied = new Database(path, { readonly: true });
       const rows = (copied.prepare('SELECT count(*) AS n FROM probe').get() as { n: number }).n;
       copied.close();

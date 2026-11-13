@@ -10,9 +10,10 @@ import { basename, dirname, join } from 'node:path';
  * staging file beside it and linked into place, which fails if one is there.
  * It holds one JSON line, what the update has recorded, rewritten by staging
  * and rename before each step begins, so it never names a step older than what
- * was done. Removed by its holder only. A lock left by an update that died is
- * never cleared automatically: two processes clearing one at once could each
- * remove the other's fresh lock, and an update that died needs a person anyway.
+ * was done; its directory is synced after each link and rename. Removed by its
+ * holder only. A lock left by an update that died is never cleared
+ * automatically: two processes clearing one at once could each remove the
+ * other's fresh lock, and an update that died needs a person anyway.
  */
 
 /** The step an update is at, as its lock names it. Up to `show`, it has changed nothing. */
@@ -90,6 +91,16 @@ function staged(path: string, state: UpdateLockState): string {
   return staging;
 }
 
+/** Sync the directory itself, so the link or rename that put the lock there survives a power cut. */
+function syncDir(dir: string): void {
+  const fd = openSync(dir, constants.O_RDONLY);
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export class UpdateLock {
   private released = false;
 
@@ -107,6 +118,7 @@ export class UpdateLock {
     const staging = staged(path, state);
     try {
       linkSync(staging, path);
+      syncDir(dirname(path));
       return new UpdateLock(path, state.pid);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
@@ -122,6 +134,7 @@ export class UpdateLock {
     const staging = staged(this.path, state);
     try {
       renameSync(staging, this.path);
+      syncDir(dirname(this.path));
     } finally {
       rmSync(staging, { force: true });
     }

@@ -1,5 +1,11 @@
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { PassThrough } from 'node:stream';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { realUpdateDeps, runDetached, runSyncDetached } from '../src/cli/update.js';
+import { askAt, realUpdateDeps, runDetached, runSyncDetached } from '../src/cli/update.js';
 
 /**
  * How mt update runs git and npm (spec §20.11), for real, with sh: in a
@@ -54,6 +60,19 @@ describe('runDetached', () => {
     }
   }, 20_000);
 
+  it('answers with the real exit code 2 seconds after the command exits, when a process that left the group holds its output', async () => {
+    const leave = `node -e "const c = require('node:child_process').spawn('sleep', ['30'], { detached: true, stdio: 'inherit' }); console.log(c.pid); c.unref();"`;
+    const started = Date.now();
+    const r = await sh(`${leave}; exit 4`, 15_000);
+    try {
+      expect(r).toMatchObject({ code: 4, timedOut: false });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1_900);
+      expect(Date.now() - started).toBeLessThan(6_000);
+    } finally {
+      process.kill(Number(r.stdout.trim()), 'SIGKILL');
+    }
+  }, 20_000);
+
   it('kills the group when aborted', async () => {
     const abort = new AbortController();
     setTimeout(() => abort.abort(), 1_000);
@@ -76,8 +95,38 @@ describe('runSyncDetached', () => {
     expect(r.stderr).toBe('err\n');
   });
 
+  it("runs its wrapper in a session of its own too, so a terminal's signal reaches neither", () => {
+    // The command's parent is the wrapper: its group is its own, not this process's.
+    const r = runSyncDetached('sh', ['-c', 'echo "$PPID $(ps -o pgid= -p $PPID)"']);
+    const [wrapper, group] = r.stdout.trim().split(/\s+/);
+    expect(group).toBe(wrapper);
+    expect(Number(group)).not.toBe(process.pid);
+  });
+
   it('answers 127 for a command that is not there', () => {
     expect(runSyncDetached('/nonexistent/launchctl', []).code).toBe(127);
+  });
+});
+
+describe('the question', () => {
+  it('answers what is typed', async () => {
+    const input = new PassThrough();
+    const asked = askAt(input, new PassThrough())('go on? ', new AbortController().signal);
+    input.write('y\n');
+    expect(await asked).toBe('y');
+  });
+
+  it("answers '' at the end of its input, a Ctrl-D, which reads as no", async () => {
+    const input = new PassThrough();
+    input.end();
+    expect(await askAt(input, new PassThrough())('go on? ', new AbortController().signal)).toBe('');
+  });
+
+  it('rejects when aborted', async () => {
+    const abort = new AbortController();
+    const asked = askAt(new PassThrough(), new PassThrough())('go on? ', abort.signal);
+    abort.abort();
+    await expect(asked).rejects.toThrow();
   });
 });
 
@@ -93,6 +142,36 @@ describe('the real deps', () => {
     off();
     expect(['SIGINT', 'SIGHUP', 'SIGTERM'].map((s) => process.listenerCount(s))).toEqual(before);
   });
+
+  it('take a real EPIPE, from a stdout whose reader has gone, as no failure, where without them the process dies', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mt-guard-output-'));
+    try {
+      const script = join(dir, 'writer.mjs');
+      writeFileSync(
+        script,
+        [
+          `import { realUpdateDeps } from ${JSON.stringify(pathToFileURL(resolve('src/cli/update.ts')).href)};`,
+          "if (process.argv[2] === 'guarded') realUpdateDeps().guardOutput();",
+          "for (let i = 0; i < 64; i += 1) process.stdout.write('x'.repeat(65536));",
+          "setTimeout(() => { process.stderr.write('still here\\n'); process.exit(0); }, 500);",
+        ].join('\n'),
+      );
+      const run = (how: string): Promise<{ code: number | null; stderr: string }> =>
+        new Promise((done) => {
+          const child = spawn(process.execPath, ['--import', 'tsx', script, how], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+          child.stdout.destroy();
+          let stderr = '';
+          child.stderr.setEncoding('utf8').on('data', (d: string) => (stderr += d));
+          child.on('close', (code) => done({ code, stderr }));
+        });
+      expect(await run('guarded')).toEqual({ code: 0, stderr: 'still here\n' });
+      const bare = await run('bare');
+      expect(bare.code).not.toBe(0);
+      expect(bare.stderr).toContain('EPIPE');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it('take EPIPE and EIO on stdout as no failure', () => {
     const deps = realUpdateDeps();

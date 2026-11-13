@@ -67,6 +67,24 @@ describe('mt update --check', () => {
     );
   });
 
+  it('says a migration renamed into place is new, as git shows a rename only with its detection off', async () => {
+    fx = await updateFake();
+    const name = `${String(TOP + 1).padStart(3, '0')}_renamed.sql`;
+    fx.repo.renamed = [{ from: 'docs/draft.sql', to: `schema/${name}` }];
+    fx.repo.tree.push(`schema/${name}`);
+    const r = await fx.update(['--check']);
+    expect(r.out).toContain(`migration ${name} is new: the restart moves the database from version ${TOP} to ${TOP + 1}`);
+  });
+
+  it('reads a migration whose name is past ASCII, which git would otherwise quote', async () => {
+    fx = await updateFake();
+    const name = `${String(TOP + 1).padStart(3, '0')}_café.sql`;
+    fx.repo.added = [`schema/${name}`];
+    fx.repo.tree.push(`schema/${name}`);
+    const r = await fx.update(['--check']);
+    expect(r.out).toContain(`migration ${name} is new: the restart moves the database from version ${TOP} to ${TOP + 1}`);
+  });
+
   it('warns of a changed migration, which the runner never runs again', async () => {
     fx = await updateFake();
     fx.repo.modified = ['schema/003_kanban.sql'];
