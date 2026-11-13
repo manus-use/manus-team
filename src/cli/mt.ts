@@ -10,6 +10,7 @@ import { kanbanCommand, NOT_IN_A_RUN } from './kanban.js';
 import { operatorCommand, TASK_COMMANDS } from './operator.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
 import { SERVICE_USAGE, serviceCommand, type ServiceDeps } from './service.js';
+import { updateCommand, type UpdateDeps } from './update.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
 
 /**
@@ -56,6 +57,8 @@ export interface MtIo {
   agentVersion?: (command: string) => string | undefined;
   /** launchctl, systemctl and the user's home for `mt service`; injectable so no test runs either or writes under the real home. */
   service?: ServiceDeps;
+  /** git, npm, the terminal and the signals for `mt update`; injectable so no test runs either, or reaches the network or the real service. */
+  update?: UpdateDeps;
 }
 
 const USAGE = [
@@ -67,6 +70,7 @@ const USAGE = [
   '  mt workspace add <name> --clone <git-url> [--isolated]',
   '  mt workspace list',
   SERVICE_USAGE,
+  '  mt update --check',
   '  mt kanban board list [all] [--json]',
   '  mt kanban board create <name> [--json]',
   '  mt kanban board set <name> max_running <number|none> [--json]',
@@ -195,7 +199,7 @@ export function withGatewayFile(io: MtIo): MtIo {
   return { ...io, env: loaded.env, shellEnv: io.env, gatewayEnv: loaded.file };
 }
 
-/** Exit codes: 0 done, 1 refused or a check failed, 2 the command line was wrong. */
+/** Exit codes: 0 done, 1 refused or a check failed, 2 the command line was wrong; `mt update` adds 3, a person is needed. */
 export async function runMt(argv: readonly string[], io: MtIo): Promise<number> {
   const [group, command] = argv;
   const rest = argv.slice(2);
@@ -251,6 +255,11 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       // An agent restarting or removing the gateway would end its own run, and every other.
       if (inBoardRun(io.env)) return refuse(io, runShellRefusal('mt service'));
       return await serviceCommand(argv.slice(1), io);
+    }
+    if (group === 'update') {
+      // As mt service: an agent updating the gateway would end its own run, and every other.
+      if (inBoardRun(io.env)) return refuse(io, runShellRefusal('mt update'));
+      return await updateCommand(argv.slice(1), io);
     }
     if (group === 'workspace' && command === 'list') {
       expectNothing(parse(rest, {}).positionals, 'workspace list');

@@ -160,6 +160,58 @@ function target(io: MtIo, deps: ServiceDeps): Target {
   return { kind: 'systemd', name: names.unit, file: join(deps.home, '.config', 'systemd', 'user', names.unit), ...common };
 }
 
+/** What `mt update` needs of the service (spec §20.13): its unit, its state, the home's lock, its environment, its log, and its restart. */
+export interface ServiceView {
+  readonly kind: 'launchd' | 'systemd';
+  readonly name: string;
+  /** The plist or the unit file. */
+  readonly file: string;
+  readonly mtHome: string;
+  /** MT_HOME as this shell sets it, or undefined for the default home. */
+  readonly mtHomeSet: string | undefined;
+  readonly log: string;
+  installed(): boolean;
+  /** What the unit records, or undefined for a unit `mt service install` did not write, or none. */
+  recorded(): Recorded | undefined;
+  state(): State;
+  /** The pid the gateway lock names, when that process is alive. */
+  lockPid(): number | undefined;
+  /**
+   * The service's environment, as its settings are loaded: HOME, the PATH the
+   * unit records, MT_HOME and the gateway's .env. A .env the gateway would
+   * refuse is a ConfigError.
+   */
+  env(recorded: Recorded): Env;
+  /** `mt service restart`'s own code: undefined when it restarted, else why not. */
+  restart(): Promise<string | undefined>;
+}
+
+export function serviceView(io: MtIo, deps: ServiceDeps): ServiceView {
+  const t = target(io, deps);
+  const svc = new Service(t, deps, io);
+  return {
+    kind: t.kind,
+    name: t.name,
+    file: t.file,
+    mtHome: t.mtHome,
+    mtHomeSet: t.mtHomeSet,
+    log: t.log,
+    installed: () => svc.installed(),
+    recorded: () => svc.recorded(),
+    state: () => svc.state(),
+    lockPid: () => svc.lockPid(),
+    env: (recorded) => ({ HOME: deps.home, PATH: recorded.path, MT_HOME: t.mtHome, ...readGatewayEnv({ MT_HOME: t.mtHome }).values }),
+    restart: async () => {
+      try {
+        return (await svc.start(true)) === 0 ? undefined : 'mt service restart refused, as said above';
+      } catch (err) {
+        if (err instanceof CommandFailed) return err.message;
+        throw err;
+      }
+    },
+  };
+}
+
 /** `mt service <command>`. */
 export async function serviceCommand(argv: readonly string[], io: MtIo): Promise<number> {
   const [sub, ...rest] = argv;
@@ -329,11 +381,11 @@ class Service {
     };
   }
 
-  private installed(): boolean {
+  installed(): boolean {
     return existsSync(this.t.file);
   }
 
-  private recorded(): Recorded | undefined {
+  recorded(): Recorded | undefined {
     if (!this.installed()) return undefined;
     const text = readFileSync(this.t.file, 'utf8');
     return this.t.kind === 'launchd' ? readPlist(text) : readUnit(text);
@@ -345,7 +397,7 @@ class Service {
   }
 
   /** The pid the gateway lock names, when that process is alive. */
-  private lockPid(): number | undefined {
+  lockPid(): number | undefined {
     try {
       const pid = lockHolder(join(this.t.mtHome, 'run', 'gateway.pid'));
       return pid !== undefined && this.deps.alive(pid) ? pid : undefined;

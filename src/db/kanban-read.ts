@@ -890,3 +890,8 @@ export function chatBoardOf(db: Db, at: ChatAt): string | undefined {
     )
     .get(at.channel, at.appId, at.conversationId)?.board;
 }
+
+/** Whether the database has the board's tables: one migrated before the board has none (spec §20.3). */
+export function hasBoard(db: Db): boolean {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kanban_runs'").get() !== undefined;
+}
