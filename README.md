@@ -119,24 +119,27 @@ mt update --yes      # no question, for scripts
 ```
 
 `mt update` updates the checkout this `mt` runs from, which must be the one the service runs, on
-the branch checked out, from the upstream that branch tracks (`git branch
---set-upstream-to=origin/main` names one). It refuses a checkout that is not clean, or that has
-commits its upstream lacks. Before it changes anything it shows the commits, any new migration,
-whether `npm ci` runs, how many agent runs a restart interrupts, and whether the service is
-restarted. Then it fast-forwards, runs `npm ci` only when `package.json` or `package-lock.json`
-changed, builds, and has the new build check itself (`mt service check`); a failure there goes
-back to the old commit and its build, and the running gateway never notices. It backs the
-database up to `$MT_HOME/backups`, owner-only (the five newest are kept, and the newest of each
-schema version), restarts the service, and waits up to 60 seconds for the log to say the gateway
-connected. If it does not, it prints the log's last lines and the steps back, to take by hand: it
-never goes back by itself once the new gateway has the database. A stopped service is left
-stopped. It exits 0 when done or up to date, 1 when it refused or went back and nothing changed,
-and 3 when a person is needed, saying what to do. A build refuses a database that a newer build
-migrated, with `configuration error:` and exit 78, so an old build put back by hand stops rather
-than run on it: restore the backup of its version first.
+the branch checked out, from the upstream that branch tracks
+(`git branch --set-upstream-to=origin/main` names one). It refuses a checkout that is not clean,
+or that has commits its upstream lacks. Before it changes anything it shows the commits, any new
+migration, whether `npm ci` runs, how many agent runs a restart interrupts, and whether the
+service is restarted. Then it fast-forwards, runs `npm ci` only when `package.json` or
+`package-lock.json` changed or `node_modules/.package-lock.json` is missing, builds, and has the
+new build check itself (`mt service check`). It backs the database up to `$MT_HOME/backups`,
+owner-only (the five newest are kept, and the newest of each schema version). A failure of
+`npm ci`, the build, the check or the backup goes back to the old commit and its build, and the
+running gateway never notices. Then it restarts the service, and waits up to 60 seconds for the
+log to say the gateway connected. If it does not, it prints the log's last lines and the steps
+back, to take by hand: it never goes back by itself once the new gateway has the database. A
+stopped service is left stopped. It exits 0 when done or up to date, 1 when it refused or went
+back and nothing changed, and 3 when a person is needed, saying what to do. A build refuses a
+database that a newer build migrated, with `configuration error:` and exit 78, so an old build
+put back by hand stops rather than run on it: restore the backup of its version first.
 
 A gateway run by hand (`npm run dev`, `npm start`) is not restarted, and `mt update` refuses while
-one holds the home: stop it, run `mt update`, then start it again. The deploy by hand is still:
+one holds the home: stop it, run `mt update`, then start it again. With `kanban.enabled` off and no
+service installed, such a gateway holds no lock for `mt update` to find, so stop it first yourself.
+The deploy by hand is still:
 
 ```bash
 git pull && npm ci && npm run build   # then restart the gateway

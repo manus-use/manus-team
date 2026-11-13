@@ -3369,7 +3369,9 @@ gateway.
   then the job, a failure of which is "not loaded"; on Linux a non-zero `systemctl --user show`
   (no user bus, say) is unreadable, where today it is "not loaded". An unreadable state is
   refused at this step, never taken as "stopped", rather than found at the restart, after the
-  backup, with no restart possible. A gateway that is
+  backup, with no restart possible. `mt service status` says it as `loaded: unknown (...)` and
+  `running: unknown`, never `running: no`, and `mt service stop` on macOS refuses it, naming the
+  console login, rather than say the job is not running. A gateway that is
   not the service holding the home's lock (`warnOtherGateway`'s case) is refused too: the
   restarted service could not take the home.
 - **It must be the top of a git worktree**: `git rev-parse --show-toplevel` is the checkout. A
@@ -3396,10 +3398,13 @@ gateway.
   them is for a person: see git log origin/main..main and git log main..origin/main". One test
   covers both, as both mean a fast-forward is impossible.
 - **An ignored file in the way is refused.** Every path the incoming commits add (`git diff
-  --name-only --diff-filter=A HEAD <upstream>`) that already exists in the checkout is named:
-  git treats an ignored file as expendable and overwrites it in a fast-forward without a word,
-  and the ignored files of this checkout are `config.yaml`, `.env` and the databases, a person's.
-  Move them aside, or tell the commit's author.
+  --name-only -z --no-renames --diff-filter=A HEAD <upstream>`) that already exists in the
+  checkout is named, and so is a file where an added path needs a directory, the nearest of its
+  parents that exists: git treats an ignored file as expendable and overwrites it in a
+  fast-forward without a word, and the ignored files of this checkout are `config.yaml`, `.env`
+  and the databases, a person's. Move them aside, or tell the commit's author. With rename
+  detection on, a file renamed onto an ignored path would be a rename, not an add, and drop out;
+  `-z` gives every name unquoted, which `core.quotePath` would otherwise quote past ASCII.
 - **Git runs as the user's own**, hooks included: it is their checkout, and these are the
   commands they would type. Unlike the board's git (§18.6), which works in repositories on an
   agent's behalf. How git and npm are kept from waiting on a prompt is §20.11.
@@ -3422,9 +3427,9 @@ update and restart the service? [y/N]
 
 - **The commits** are `git log --oneline --no-decorate HEAD..<upstream>`, at most 50, then
   "and N more".
-- **A new migration** is a file `git diff --name-only --diff-filter=A HEAD <upstream> --
-  schema/` names that matches the runner's `NNN_*.sql`. The versions are the database's
-  `user_version` and the highest `NNN` in the new tree. A changed migration (`--diff-filter=M`)
+- **A new migration** is a file `git diff --name-only -z --no-renames --diff-filter=A HEAD
+  <upstream> -- schema/` names, a renamed one included, that matches the runner's `NNN_*.sql`.
+  The versions are the database's `user_version` and the highest `NNN` in the new tree. A changed migration (`--diff-filter=M`)
   is a warning: the runner never runs again one the database has applied. When the service's
   environment, or without one this shell's over the `.env`, sets `MT_SCHEMA_DIR`, a warning says
   that this report and the confirmation's version (§20.9) assume the bundled `schema/`, and the
@@ -3451,7 +3456,8 @@ update and restart the service? [y/N]
   knows the update stops after the backup.
 - **The question** is asked only at a terminal (`stdinIsTTY`). Without one and without `--yes`,
   it is refused: "no terminal to ask at; run mt update --yes, or --check". Anything but `y` or
-  `yes` is no, which changes nothing and is exit 1.
+  `yes` is no, which changes nothing and is exit 1; so is the end of the input, a Ctrl-D, which
+  answers nothing and releases the locks.
 
 ### 20.4 node and npm
 
@@ -3495,9 +3501,11 @@ update and restart the service? [y/N]
   when there is none), and the highest `NNN` in the schema directory. That directory is the one
   `loadConfig` gives as `config.schemaDir`: `MT_SCHEMA_DIR` when that environment sets it, else
   the bundled `schema/`; the line names it when it is not the bundled one, as the warning of
-  §20.3 does. Settings that are refused print `database: unknown (<error>)`, masked, and the
-  check goes on, to fail at the same error. Printed first because it is what the steps back read
-  the version with (§20.6), and they need it most when the rest of the check fails.
+  §20.3 does; a directory that cannot be read, as an `MT_SCHEMA_DIR` that names none, keeps the
+  database's path and version and says "this build's highest is unknown (...)". Settings that
+  are refused print `database: unknown (<error>)`, masked, and the check goes on, to fail at the
+  same error. Printed first because it is what the steps back read the version with (§20.6), and
+  they need it most when the rest of the check fails.
 - **Then the configuration.** With a unit installed, `install`'s own check (`gatewayEnv` and
   `checkEnvironment` in `src/cli/service.ts`), made a command: the gateway's `.env` must exist
   and set `LARK_APP_SECRET`; the configuration is loaded with only `HOME`, `PATH`, `MT_HOME` and
@@ -3529,7 +3537,8 @@ update and restart the service? [y/N]
   is taken from this same import, so it comes after the version line too. A missing file, a
   syntax the node cannot run, or a module built for another ABI fails here rather than at the
   restart. A native load that fails names the command to run by hand, with the real paths:
-  `cd '<checkout>' && PATH='<node dir>':"$PATH" '<npm>' ci`.
+  `cd '<checkout>' && PATH='<node dir>':"$PATH" '<npm>' ci`, the npm beside the node, else the
+  one on the unit's recorded `PATH` with a unit and this shell's without.
 - **On its own**, `mt service check` is install's check without installing, or a hand-run
   gateway's, useful after editing `config.yaml`.
 - **The build writes `dist/` in place.** `npm run build` is `tsc -p tsconfig.build.json`, which
@@ -3561,11 +3570,11 @@ update and restart the service? [y/N]
   refused, as a **`SchemaTooNewError extends ConfigError`**, carrying `dbVersion` and
   `buildVersion`. `migrate`'s own message, which knows no home: "the database is at schema
   version 9, and this build knows only up to 8: it was migrated by a newer build. Run that
-  build, or restore a backup of version 8 (spec §20.8)". `createGateway` (`src/index.ts`), which
+  build, or restore a backup of version 8". `createGateway` (`src/index.ts`), which
   calls `migrate`, recognises the class, closes the database, and throws a new
   `SchemaTooNewError` with the same `dbVersion` and `buildVersion`, its message completed with
   the database's path and the backups directory from `config.home`: "the database at <path> is
-  at schema version 9, ... restore a backup of version 8 from <home>/backups (spec §20.8)", and
+  at schema version 9, ... restore a backup of version 8 from <home>/backups", and
   the original as its `cause`; every other error
   from `migrate` is rethrown as now, the database closed too. A schema directory with no migration
   file has a highest of 0, so any migrated database is refused by it, as it should be: such a
@@ -3629,8 +3638,9 @@ A failed `npm ci`, `npm run build`, preflight or backup, or a signal (§20.11), 
 If going back fails too, it stops there and says what is left, `git status` and the commands to
 finish by hand, with the paths of §20.4: `cd '<checkout>' && PATH='<node dir>':"$PATH" '<npm>'
 ci && PATH='<node dir>':"$PATH" '<npm>' run build` (the assignment before a command applies to
-that command alone, so it is on both). The gateway still runs from memory, but a crash restart
-would run whatever `dist/` and `node_modules` now hold. Exit 3.
+that command alone, so it is on both). When the update would have restarted it, the gateway
+still runs from memory, but a crash restart would run whatever `dist/` and `node_modules` now
+hold; with the service stopped or not installed, its next start would. Exit 3.
 
 ### 20.8 The backup
 
@@ -3640,16 +3650,16 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   colon, which some file systems and `scp` refuse. No database, a home whose gateway never
   started, is no backup and is said.
 - **How:** better-sqlite3's `backup()`, SQLite's online backup, from the read-only connection of
-  step 3, while the gateway runs. Its progress callback returns `0x7fffffff`, every remaining
+  step 3, while the gateway runs; a connection that can write is refused. Its progress callback returns `0x7fffffff`, every remaining
   page in one step (better-sqlite3 starts with a step of none and then takes the callback's
   number of pages per step), so the copy is one read transaction: in WAL mode that is a
   consistent snapshot of every committed transaction, the WAL's included, which the gateway's
   writes never restart (the backup API restarts a copy taken in steps when another connection
   writes between them) and never wait on. The gateway's checkpoints skip the pages the snapshot
   still reads (`PASSIVE`, `src/db/open.ts`) for the second it takes.
-- **Then, on the copy:** `PRAGMA journal_mode = DELETE`, so it is one whole file, which opening
-  it later to check or restore never gives a `-wal` and `-shm` of its own (the gateway sets WAL
-  again when it opens a restored copy); `PRAGMA quick_check` must say `ok`; and its
+- **Then, on the copy:** `PRAGMA journal_mode = DELETE`, which must answer `delete`, so it is
+  one whole file, which opening it later to check or restore never gives a `-wal` and `-shm` of
+  its own (the gateway sets WAL again when it opens a restored copy); `PRAGMA quick_check` must say `ok`; and its
   `user_version` must be step 3's (§20.6).
 - **When:** after the preflight, so a failed update leaves no backup to tidy, and before the
   restart, the last moment the old gateway, whose schema it is, still writes. What the gateway
@@ -3736,20 +3746,30 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   holder's pid, the home or the checkout, the old and new commit, step 3's service pid and
   `user_version` (§20.6), the current step, and the backup once taken. It is rewritten by
   staging and `rename`, which only the holder does, **before each step begins**, so a lock
-  never names a step older than what was done.
+  never names a step older than what was done. After each `link` and `rename` the lock's
+  directory is synced, so a power cut keeps the lock and its step.
 - **A lock is never cleared automatically.** `lockGateway` removes a lock whose pid is dead
   before linking its own; two processes doing that at once can each remove the other's fresh
   lock, and rename-then-check narrows the race but does not close it. A stale update lock is
   rare (a `kill -9`, a power cut) and means an update died, which needs a person anyway, so a
   later run refuses with what the lock says: the step it died at, the commits, and either "it
   changed nothing; remove <lock>" (step 3 or before), or advice that reads the database's
-  `user_version` again, read-only: equal to the lock's, the steps back (§20.9: the restore lines
-  only when the lock names a backup); different, the steps forward (§20.6), and, when it died in
-  step 7 with a backup named, that the steps back with its restore remain possible. Then the
-  `rm`. Never "up to date":
-  an update that died after the merge leaves the branch at the new commit, with nothing left to
-  fetch, though it was never built, checked or restarted. A live pid is refused as an update
-  under way, naming it.
+  `user_version` again, read-only: equal to the lock's, the steps back; different, the steps
+  forward (§20.6), and, when it died in step 7 with a backup named, the steps back with its
+  restore beside them. The restore lines are in the steps back only when the lock died at
+  `restart` or `confirm` with a backup named: before the restart no new gateway has run on the
+  database, and the old build's own schema is still the one it holds. Those steps back are
+  titled with the restart's warning (§20.9), that they are never taken by themselves and that a
+  restore loses what the new gateway wrote since the backup; at `confirm` a line first says that
+  if `mt service status` and `mt service logs` show it connected, only the `rm` is needed. Then
+  the `rm`. Never "up to date": an update that died after the merge leaves the branch at the new
+  commit, with nothing left to fetch, though it was never built, checked or restarted. A live
+  pid is refused as an update under way, naming it.
+- **A dead update of another home, or from another checkout, gets no steps.** The checkout's
+  lock left by an update of another home says "an update of <home> died at its step X; run
+  MT_HOME='<home>' mt update for what to do"; the home's lock left by an update from another
+  checkout says "an update from <checkout> died at its step X; run mt update from <checkout> for
+  what to do", exit 1: its tree, its build and its node are the ones the steps would name.
 
 ### 20.11 Signals, hangs and the terminal
 
@@ -3761,8 +3781,11 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   restart call is let finish too, on both systems: macOS's drain, since one left half way has
   sent the old gateway SIGTERM, whose clean exit KeepAlive does not restart, and so leaves no
   gateway; and Linux's `systemctl restart`, which a killed client may leave stopped or starting.
-  A signal during either call is then taken as one during the wait of step 7, which stops
-  waiting and prints the steps back, exit 3.
+  Each `launchctl` and `systemctl` call of the restart runs, synchronously, under a small node
+  wrapper, both spawned with `detached: true`, so a terminal's Ctrl-C is sent to neither; the
+  wrapper ignores SIGINT, SIGHUP and SIGTERM besides, for one sent to it by name. A signal during
+  either call is then taken as one during the wait of step 7, which stops waiting and prints the
+  steps back, exit 3.
 - **Output that cannot be written is not a failure**: EPIPE and EIO on stdout or stderr, from a
   closed terminal or a pipe, are ignored, so a dropped ssh session never stops an update half
   way; it goes on, or goes back, as the signal says.
@@ -3776,7 +3799,10 @@ would run whatever `dist/` and `node_modules` now hold. Exit 3.
   --ff-only` (`post-merge`) and `git reset --keep`, 120 seconds; `npm ci` 20 minutes, `npm run
   build` 10. Past its limit a call's group is killed as above, and it is a failure: before the
   merge, nothing changed; a merge that timed out is looked at, `HEAD` at the new commit being a
-  merge that landed and a hook that hung, and goes back either way.
+  merge that landed and a hook that hung, and goes back either way. A command that has exited
+  has 2 seconds for its output to close, then its pipes are let go and its own exit code
+  answers: a process it left behind, a daemon a hook started, may hold them open, and is no
+  time-out.
 
 ### 20.12 Exit codes and output
 
