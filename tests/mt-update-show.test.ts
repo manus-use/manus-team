@@ -1,4 +1,4 @@
-import { chmodSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { readUpdateLock } from '../src/cli/update-lock.js';
@@ -83,6 +83,31 @@ describe('mt update --check', () => {
     fx.repo.tree.push(`schema/${name}`);
     const r = await fx.update(['--check']);
     expect(r.out).toContain(`migration ${name} is new: the restart moves the database from version ${TOP} to ${TOP + 1}`);
+  });
+
+  it("refuses an incoming tree whose highest migration is below the database's version: the new build would refuse the database", async () => {
+    fx = await updateFake();
+    fx.repo.tree = fx.repo.tree.slice(0, -1);
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(1);
+    expect(r.err).toBe(
+      `mt: the incoming commits remove migrations: origin/main's schema/ goes up to ${TOP - 1}, and the database is at version ${TOP}, ` +
+        'so the new build would refuse it. Nothing changed; see git log HEAD..origin/main -- schema/, and tell the commit\'s author',
+    );
+    expect(r.out).not.toContain(`to ${TOP - 1}`);
+    expect(merged()).toBe(false);
+    expect(existsSync(join(fx.mtHome, 'run', 'update.pid'))).toBe(false);
+  });
+
+  it('with MT_SCHEMA_DIR set, does not refuse it, and says no new migration moves the database down', async () => {
+    fx = await updateFake({ env: `LARK_APP_SECRET=${SECRET}\nLARK_APP_ID=cli_test\nMT_SCHEMA_DIR=/opt/schema\n` });
+    chmodSync(join(fx.mtHome, '.env'), 0o600);
+    fx.repo.tree = ['schema/001_only.sql'];
+    fx.repo.added = ['schema/001_only.sql'];
+    const r = await fx.update(['--check']);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(`migration 001_only.sql is new; the database is at version ${TOP} already, at or above the new tree's 1`);
+    expect(r.out).not.toContain('moves the database');
   });
 
   it('warns of a changed migration, which the runner never runs again', async () => {

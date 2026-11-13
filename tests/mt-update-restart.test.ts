@@ -101,6 +101,15 @@ describe('the restart call', () => {
     expect(r.out).toContain(stepsBack());
   });
 
+  it('that timed out is a failed call too, exit 3, saying so', async () => {
+    fx = await updateFake();
+    fx.override = (c) => (c.args[0] === 'kill' ? { code: 124, stderr: 'did not finish in 180 seconds' } : undefined);
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(3);
+    expect(r.err).toBe('mt: the restart failed: launchctl kill SIGTERM gui/501/team.manus.gateway failed (exit 124): did not finish in 180 seconds');
+    expect(r.out).toContain(stepsBack());
+  });
+
   it("is systemctl restart on Linux", async () => {
     fx = await updateFake();
     fx.install({ platform: 'linux' });

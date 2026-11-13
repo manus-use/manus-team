@@ -121,6 +121,18 @@ describe('a failure in steps 4 to 6 goes back', () => {
     expect(did()).toEqual(['git merge --ff-only origin/main', 'npm run build', 'node service check', `git reset --keep ${OLD}`, 'npm run build', STATUS]);
   });
 
+  it("masks this shell's secrets too, an exported LARK_APP_SECRET and an agent's variable, in what a failure shows", async () => {
+    fx = await updateFake();
+    const shellSecret = 'exported-in-the-shell-0000';
+    const agentSecret = 'agent-token-from-the-shell-0000';
+    fx.answer = failing('node', { code: 1, stderr: `error: ${shellSecret} ${agentSecret} LARK_APP_ID_VALUE_IS_SHOWN` });
+    const r = await fx.update(['--yes'], { env: { LARK_APP_SECRET: shellSecret, MT_AGENT_ENV_GH_TOKEN: agentSecret, LARK_APP_ID: 'LARK_APP_ID_VALUE_IS_SHOWN' } });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('  error: •••• •••• LARK_APP_ID_VALUE_IS_SHOWN');
+    expect(`${r.out}\n${r.err}`).not.toContain(shellSecret);
+    expect(`${r.out}\n${r.err}`).not.toContain(agentSecret);
+  });
+
   it('a merge that failed, and one that timed out with HEAD at the new commit, both go back', async () => {
     fx = await updateFake();
     fx.answer = failing('git merge --ff-only', { code: 1, stderr: 'fatal: Not possible to fast-forward' });

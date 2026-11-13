@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { askAt, realUpdateDeps, runDetached, runSyncDetached } from '../src/cli/update.js';
+import { RESTART_CALL_MS, askAt, realUpdateDeps, runDetached, runSyncDetached } from '../src/cli/update.js';
 
 /**
  * How mt update runs git and npm (spec §20.11), for real, with sh: in a
@@ -101,6 +101,16 @@ describe('runSyncDetached', () => {
     const [wrapper, group] = r.stdout.trim().split(/\s+/);
     expect(group).toBe(wrapper);
     expect(Number(group)).not.toBe(process.pid);
+  });
+
+  it('gives up at its time limit, 180 seconds unless told, killing the wrapper, as a call that failed and says so', () => {
+    expect(RESTART_CALL_MS).toBe(180_000);
+    const started = Date.now();
+    const r = runSyncDetached('sh', ['-c', 'echo started; sleep 5'], 300);
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(r.code).toBe(124);
+    expect(r.stdout).toBe('started\n');
+    expect(r.stderr).toBe('did not finish in 0.3 seconds');
   });
 
   it('answers 127 for a command that is not there', () => {

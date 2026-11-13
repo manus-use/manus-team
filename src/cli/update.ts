@@ -7,9 +7,9 @@ import { ConfigError, loadTeamSettings, type Env, type TeamSettings } from '../c
 import { backupDatabase } from '../db/backup.js';
 import { hasBoard, openAgentRunCount } from '../db/kanban-read.js';
 import { openDbReadOnly, type Db } from '../db/open.js';
-import { loadGatewayEnv } from '../gateway-env.js';
+import { isSecretName, loadGatewayEnv } from '../gateway-env.js';
 import { privateDir } from '../kanban/socket.js';
-import { redactKnownSecrets } from '../secrets.js';
+import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { parse, UsageError } from './args.js';
 import type { MtIo } from './mt.js';
 import { realServiceDeps, serviceView, unreadableHint, type RunResult, type ServiceDeps, type ServiceView } from './service.js';
@@ -175,12 +175,28 @@ const DETACHED_WRAPPER = [
   'child.on(\'exit\', (code) => process.exit(code ?? 1));',
 ].join('\n');
 
-/** `ServiceDeps.run`, synchronous as `mt service`'s, with the command detached from this terminal. */
-export function runSyncDetached(cmd: string, args: readonly string[]): RunResult {
+/** How long each launchctl or systemctl call of the restart may take: past it, the call has failed (spec §20.11). */
+export const RESTART_CALL_MS = 180_000;
+
+/**
+ * `ServiceDeps.run`, synchronous as `mt service`'s, with the command detached
+ * from this terminal. Past `timeoutMs` the wrapper is killed, the command left
+ * to finish on its own, and the call answers 124, a failure that says so.
+ */
+export function runSyncDetached(cmd: string, args: readonly string[], timeoutMs: number = RESTART_CALL_MS): RunResult {
   // The wrapper detached too, so no terminal's signal is sent to it at all; its handlers stay for one sent to it by name.
-  // spawnSync takes `detached` as spawn does, though Node's types leave it out.
-  const opts = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], detached: true } as SpawnSyncOptionsWithStringEncoding;
+  // spawnSync takes `detached` as spawn does, though Node's types leave it out. SIGKILL, as the wrapper ignores SIGTERM.
+  const opts = {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
+  } as SpawnSyncOptionsWithStringEncoding;
   const r = spawnSync(process.execPath, ['-e', DETACHED_WRAPPER, cmd, ...args], opts);
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') {
+    return { code: 124, stdout: r.stdout ?? '', stderr: `did not finish in ${timeoutMs / 1000} seconds` };
+  }
   if (r.error !== undefined) return { code: 127, stdout: '', stderr: r.error.message };
   return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
 }
@@ -369,7 +385,7 @@ class Update {
   private readonly locks: UpdateLock[] = [];
   /** The checkout's lock and the home's, once known. */
   private lockPaths: string[] = [];
-  /** Set when an unexpected error after step 3 leaves the locks for a person. */
+  /** Set at an exit 3, which leaves the locks for a person. */
   private keepLocks = false;
   private lock: UpdateLockState;
   private phase: Phase = 'before';
@@ -401,6 +417,8 @@ class Update {
     const env: Record<string, string | undefined> = {};
     for (const [name, value] of Object.entries(io.env)) if (!name.startsWith('MT_KANBAN_')) env[name] = value;
     this.shellEnv = { ...env, GIT_TERMINAL_PROMPT: '0' };
+    // This shell's secrets, as the .env's are once read: an exported LARK_APP_SECRET is masked in what a failure shows.
+    addSecrets(Object.entries(this.shellEnv).flatMap(([name, value]) => (isSecretName(name) && value !== undefined && value !== '' ? [value] : [])));
     this.gitEnv = this.shellEnv;
     this.lock = { pid: deps.pid, home: this.view.mtHome, checkout: this.checkout, step: 'check' };
   }
@@ -494,11 +512,14 @@ class Update {
     // Died: a kill -9, a power cut, or an error it did not foresee. Never cleared here; what to do depends on how far it got.
     if (held.home !== this.view.mtHome) {
       // The checkout's lock, left by an update of another home: that home's database and service are the ones to look at.
-      return new Stop(1, `an update of ${held.home} died at its step ${held.step}; run MT_HOME=${shQuote(held.home)} mt update for what to do`);
+      return new Stop(
+        1,
+        `an update of ${held.home} died at its step ${held.step}; run MT_HOME=${shQuote(held.home)} ${mtCommand(this.node, held.checkout)} update for what to do`,
+      );
     }
     if (realpathOr(held.checkout) !== this.checkout) {
       // The home's lock, left by an update from another checkout: its tree and its build are the ones the steps would name.
-      return new Stop(1, `an update from ${held.checkout} died at its step ${held.step}; run mt update from ${held.checkout} for what to do`);
+      return new Stop(1, `an update from ${held.checkout} died at its step ${held.step}; run ${mtCommand(this.node, held.checkout)} update for what to do`);
     }
     const commits = held.old === undefined ? '' : `, updating ${short(held.old)}..${short(held.new)}`;
     // Both locks it left, named together, so the advice is followed once.
@@ -743,21 +764,32 @@ class Update {
 
     const tree = paths(await this.mustGit(['ls-tree', '--name-only', '-z', this.upstream, 'schema/']));
     this.newest = tree.reduce((top, path) => Math.max(top, Number(MIGRATION.exec(path)?.[1] ?? 0)), 0);
+    const schemaDir = env['MT_SCHEMA_DIR']?.trim();
+    const bundled = schemaDir === undefined || schemaDir === '';
+    if (bundled && this.version !== null && this.newest < this.version) {
+      // An upstream that removed a migration: the new build, reading the bundled schema/, would refuse the database at its start.
+      throw new Stop(
+        1,
+        `the incoming commits remove migrations: ${this.upstream}'s schema/ goes up to ${this.newest}, and the database is at version ${this.version}, ` +
+          `so the new build would refuse it. Nothing changed; see git log HEAD..${this.upstream} -- schema/, and tell the commit's author`,
+      );
+    }
     const fresh = this.added.filter((path) => MIGRATION.test(path)).map((path) => basename(path)).sort();
     if (fresh.length > 0) {
       const which = `${fresh.length === 1 ? 'migration' : 'migrations'} ${fresh.join(', ')} ${fresh.length === 1 ? 'is' : 'are'} new`;
       this.say(
         this.version === null
           ? `${which}; there is no database yet, so nothing to back up`
-          : `${which}: the restart moves the database from version ${this.version} to ${this.newest}, and a backup is taken first; going back after it needs the backup`,
+          : this.newest > this.version
+            ? `${which}: the restart moves the database from version ${this.version} to ${this.newest}, and a backup is taken first; going back after it needs the backup`
+            : `${which}; the database is at version ${this.version} already, at or above the new tree's ${this.newest}`,
       );
     }
     const changed = paths(await this.mustGit(['diff', '--name-only', '-z', '--no-renames', '--diff-filter=M', 'HEAD', this.upstream, '--', 'schema/']));
     for (const path of changed.filter((p) => MIGRATION.test(p))) {
       this.warn(`migration ${basename(path)} was changed: the runner never runs again one the database has applied`);
     }
-    const schemaDir = env['MT_SCHEMA_DIR']?.trim();
-    if (schemaDir !== undefined && schemaDir !== '') {
+    if (!bundled) {
       this.warn(
         `MT_SCHEMA_DIR is set, to ${schemaDir}: this report and the restart's confirmation assume the bundled schema/, and the gateway reads ${schemaDir}. ` +
           'The new build refuses a database newer than that directory, and its mt service check reads it',
@@ -985,31 +1017,46 @@ class Update {
     this.phase = 'waiting';
     this.writeLock('confirm');
     for (let waited = 0; this.signalled === undefined; waited += POLL_MS) {
-      const seen = lines(readFrom(view.log, from));
-      const failure = seen.find((l) => l.startsWith('configuration error:') || l.startsWith('failed to start:'));
-      if (failure !== undefined) {
-        this.sayErr(`mt: the new gateway did not start: ${failure}`);
+      const seen = this.startup(from);
+      if (seen.failure !== undefined) {
+        this.sayErr(`mt: the new gateway did not start: ${seen.failure}`);
         return this.notConfirmed();
       }
-      const schema = seen.findIndex((l) => / schema at version [0-9]+ \(/.test(l));
-      const connected = schema === -1 ? -1 : seen.findIndex((l, i) => i > schema && / connected as /.test(l));
-      if (connected !== -1) {
-        const version = Number(/ schema at version ([0-9]+) \(/.exec(seen[schema] ?? '')?.[1]);
-        if (version < this.newest) {
-          this.warn(`the gateway is at schema version ${version}, below the new tree's ${this.newest}: it reads its migrations from elsewhere (MT_SCHEMA_DIR)`);
+      if (seen.version !== undefined) {
+        if (seen.version < this.newest) {
+          this.warn(`the gateway is at schema version ${seen.version}, below the new tree's ${this.newest}: it reads its migrations from elsewhere (MT_SCHEMA_DIR)`);
         }
-        this.say(`updated ${this.branch} from ${short(this.old)} to ${short(this.new)}; the gateway is connected, at schema version ${version}`);
+        this.say(`updated ${this.branch} from ${short(this.old)} to ${short(this.new)}; the gateway is connected, at schema version ${seen.version}`);
         return 0;
       }
       if (waited >= CONFIRM_MS) break;
       await this.deps.sleep(POLL_MS);
     }
-    this.sayErr(
-      this.signalled !== undefined
-        ? `mt: interrupted by ${this.signalled} while waiting for the new gateway to connect`
-        : `mt: the new gateway did not say it connected within ${CONFIRM_MS / 1000} seconds`,
-    );
+    if (this.signalled !== undefined) {
+      this.sayErr(`mt: interrupted by ${this.signalled} while waiting for the new gateway to connect`);
+      // The log read once more: a drain let finish may have left a gateway that connected meanwhile, and no restore is wanted then.
+      const seen = this.startup(from);
+      if (seen.failure === undefined && seen.version !== undefined) {
+        this.say(`it connected; check ${mt} service status`);
+        return 3;
+      }
+      return this.notConfirmed();
+    }
+    this.sayErr(`mt: the new gateway did not say it connected within ${CONFIRM_MS / 1000} seconds`);
     return this.notConfirmed();
+  }
+
+  /**
+   * The service log past `from`: the start's failure line, if any, and the
+   * schema version of a gateway that said `connected as` after its schema line.
+   */
+  private startup(from: number): { failure: string | undefined; version: number | undefined } {
+    const seen = lines(readFrom(this.view.log, from));
+    const failure = seen.find((l) => l.startsWith('configuration error:') || l.startsWith('failed to start:'));
+    const schema = seen.findIndex((l) => / schema at version [0-9]+ \(/.test(l));
+    const connected = schema === -1 ? -1 : seen.findIndex((l, i) => i > schema && / connected as /.test(l));
+    const version = connected === -1 ? undefined : Number(/ schema at version ([0-9]+) \(/.exec(seen[schema] ?? '')?.[1]);
+    return { failure, version };
   }
 
   private notConfirmed(): number {
@@ -1039,8 +1086,7 @@ class Update {
 
   /**
    * An error nothing foresaw. Up to step 3 nothing changed: the locks go, exit 1.
-   * After it the update may be half way, so the locks stay, saying where it
-   * stopped, for the next run's advice: exit 3.
+   * After it the update may be half way: exit 3, whose locks stay.
    */
   private unexpected(err: unknown): number {
     const message = err instanceof Error ? err.message : String(err);
@@ -1048,15 +1094,38 @@ class Update {
       this.sayErr(`mt: unexpected error: ${message}`);
       return 1;
     }
-    this.keepLocks = true;
     this.sayErr(`mt: unexpected error at its step ${this.lock.step}: ${message}`);
-    this.say(`its locks are kept, saying where it stopped: ${this.locks.map((l) => l.path).join(', ')}; run mt update again for what to do`);
     return 3;
+  }
+
+  /**
+   * Exit 3, every one: the locks stay, saying where it stopped, so a run again
+   * gives the dead lock's advice for that step, never "up to date" (spec
+   * §20.10). The advice ends with their rm, as a dead lock's does.
+   */
+  private keepForAPerson(): void {
+    this.keepLocks = true;
+    const paths = this.locks.map((l) => l.path);
+    const mt = mtCommand(this.node, this.checkout);
+    this.say(`its locks are kept, saying where it stopped: ${paths.join(', ')}; run ${mt} update again for what to do`);
+    this.say(`then remove its locks: rm ${paths.map(shQuote).join(' ')}`);
   }
 
   async run(): Promise<number> {
     this.deps.guardOutput();
     const off = this.deps.onSignal((signal) => this.onSignal(signal));
+    try {
+      const code = await this.steps();
+      if (code === 3) this.keepForAPerson();
+      return code;
+    } finally {
+      off();
+      this.db?.close();
+      if (!this.keepLocks) for (const lock of [...this.locks].reverse()) lock.release();
+    }
+  }
+
+  private async steps(): Promise<number> {
     try {
       await this.inspect();
       if (!(await this.show())) return 0;
@@ -1071,10 +1140,6 @@ class Update {
       if (!(err instanceof Stop)) return this.unexpected(err);
       if (err.refusal !== undefined) this.sayErr(`mt: ${err.refusal}`);
       return err.code;
-    } finally {
-      off();
-      this.db?.close();
-      if (!this.keepLocks) for (const lock of [...this.locks].reverse()) lock.release();
     }
   }
 }

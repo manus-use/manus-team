@@ -93,7 +93,8 @@ async function fixture(): Promise<Fx> {
     'package.json': '{"name":"e2e"}\n',
     'package-lock.json': '{"lockfileVersion":3}\n',
     '.gitignore': 'dist/\nnode_modules/\n',
-    'schema/001_first.sql': 'SELECT 1;\n',
+    // The migrations the database is at: an incoming tree with fewer would be refused.
+    ...Object.fromEntries(readdirSync(SCHEMA_DIR).filter((f) => f.endsWith('.sql')).map((f) => [`schema/${f}`, readFileSync(join(SCHEMA_DIR, f), 'utf8')])),
   });
   rmSync(checkout, { recursive: true, force: true });
   git(root, 'clone', '--quiet', origin, checkout);

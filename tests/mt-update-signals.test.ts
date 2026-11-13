@@ -1,8 +1,8 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { clearSecrets } from '../src/secrets.js';
-import { OLD, updateFake, type UpdateFake, type Run } from './helpers/update.js';
+import { OLD, TOP, startupLines, updateFake, type UpdateFake, type Run } from './helpers/update.js';
 
 /**
  * Signals and a closed terminal (spec §20.11): SIGINT, SIGHUP and SIGTERM are
@@ -21,6 +21,7 @@ afterEach(() => {
 
 const words = (run: Run): string =>
   run.cmd === fx.node ? `node ${run.args.slice(1).join(' ')}` : [run.cmd === fx.npm ? 'npm' : run.cmd, ...run.args].join(' ');
+const MT = (): string => `PATH='${join(fx.root, 'node bin')}':"$PATH" '${fx.node}' '${join(fx.checkout, 'dist', 'mt.js')}'`;
 const restarted = (): boolean => fx.words().some((w) => / kill SIGTERM | kickstart /.test(` ${w} `));
 
 describe('a signal before the merge', () => {
@@ -136,6 +137,7 @@ describe('a signal from the merge to the backup', () => {
 describe('a signal at the restart', () => {
   it("during macOS's drain: the call is let finish, then the steps back, exit 3", async () => {
     fx = await updateFake();
+    fx.onStart = () => {};
     fx.override = (c) => {
       if (c.args[0] === 'kill') fx.signal?.('SIGINT');
       return undefined;
@@ -160,6 +162,33 @@ describe('a signal at the restart', () => {
     const r = await fx.update(['--yes'], { platform: 'linux' });
     expect(r.code).toBe(3);
     expect(fx.words()).toContain('systemctl --user restart manus-team.service');
+  });
+
+  it("during macOS's drain, the new gateway connected by then: says so, and prints no steps back, exit 3", async () => {
+    fx = await updateFake();
+    fx.override = (c) => {
+      if (c.args[0] === 'kill') fx.signal?.('SIGINT');
+      return undefined;
+    };
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(3);
+    expect(r.err).toBe('mt: interrupted by SIGINT while waiting for the new gateway to connect');
+    expect(r.out).toContain(`it connected; check ${MT()} service status`);
+    expect(r.out).not.toContain('the steps back');
+    expect(r.out).not.toContain('cp ');
+  });
+
+  it('during the wait, the log saying connected as it came: says so, and prints no restore, exit 3', async () => {
+    fx = await updateFake();
+    fx.onStart = () => {};
+    fx.whileSleeping = () => {
+      appendFileSync(join(fx.mtHome, 'logs', 'gateway.log'), startupLines(TOP, fx.dbPath));
+      fx.signal?.('SIGINT');
+    };
+    const r = await fx.update(['--yes']);
+    expect(r.code).toBe(3);
+    expect(r.out).toContain(`it connected; check ${MT()} service status`);
+    expect(r.out).not.toContain('cp ');
   });
 
   it('during the wait: it stops waiting, exit 3', async () => {

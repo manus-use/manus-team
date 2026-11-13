@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { UpdateLockState, UpdateStep } from '../src/cli/update-lock.js';
@@ -22,6 +22,8 @@ afterEach(() => {
 
 const DEAD = 424_242;
 const homeLock = (): string => join(fx.mtHome, 'run', 'update.pid');
+const checkoutLock = (): string => join(fx.repo.gitDir, 'mt-update.lock');
+const MT = (checkout = fx.checkout): string => `PATH='${join(fx.root, 'node bin')}':"$PATH" '${fx.node}' '${join(checkout, 'dist', 'mt.js')}'`;
 
 function died(step: UpdateStep, extra: Partial<UpdateLockState> = {}, where: 'home' | 'checkout' = 'home'): string {
   const state: UpdateLockState = {
@@ -55,7 +57,8 @@ describe('an error nothing foresaw', () => {
     const r = await fx.update(['--yes']);
     expect(r.code).toBe(3);
     expect(r.err).toBe('mt: unexpected error at its step confirm: disk on fire ••••');
-    expect(r.out).toContain(`its locks are kept, saying where it stopped: ${join(fx.repo.gitDir, 'mt-update.lock')}, ${homeLock()}; run mt update again for what to do`);
+    expect(r.out).toContain(`its locks are kept, saying where it stopped: ${checkoutLock()}, ${homeLock()}; run ${MT()} update again for what to do`);
+    expect(r.out.split('\n').slice(-1)).toEqual([`then remove its locks: rm '${checkoutLock()}' '${homeLock()}'`]);
     expect(existsSync(homeLock())).toBe(true);
     fx.whileSleeping = () => {};
     const again = await fx.update(['--yes']);
@@ -169,7 +172,7 @@ describe('a lock left by an update that died', () => {
     died('backup', { home: '/srv/other home' }, 'checkout');
     const r = await fx.update(['--yes']);
     expect(r.code).toBe(1);
-    expect(r.err).toBe("mt: an update of /srv/other home died at its step backup; run MT_HOME='/srv/other home' mt update for what to do");
+    expect(r.err).toBe(`mt: an update of /srv/other home died at its step backup; run MT_HOME='/srv/other home' ${MT()} update for what to do`);
     expect(r.out).toBe('');
   });
 
@@ -178,7 +181,7 @@ describe('a lock left by an update that died', () => {
     const path = died('build', { checkout: '/srv/other checkout' });
     const r = await fx.update(['--yes']);
     expect(r.code).toBe(1);
-    expect(r.err).toBe('mt: an update from /srv/other checkout died at its step build; run mt update from /srv/other checkout for what to do');
+    expect(r.err).toBe(`mt: an update from /srv/other checkout died at its step build; run ${MT('/srv/other checkout')} update for what to do`);
     expect(r.out).toBe('');
     expect(existsSync(path)).toBe(true);
   });
@@ -211,4 +214,44 @@ describe('a lock left by an update that died', () => {
     expect(r.code).toBe(1);
     expect(r.err).toBe(`mt: ${homeLock()} holds no update's state; if no mt update runs, remove it: rm '${homeLock()}'`);
   });
+});
+
+describe('an exit 3', () => {
+  const kinds: [string, () => void][] = [
+    ['a restart not confirmed', () => (fx.onStart = () => {})],
+    ['a configuration error at the start', () => (fx.onStart = () => appendFileSync(join(fx.mtHome, 'logs', 'gateway.log'), 'configuration error: boom\n'))],
+    ['a failed restart call', () => (fx.override = (c) => (c.args[0] === 'kill' ? { code: 3, stderr: 'Boot-out failed' } : undefined))],
+    ['a signal during the wait', () => {
+      fx.onStart = () => {};
+      fx.whileSleeping = () => fx.signal?.('SIGHUP');
+    }],
+    ['the pid moved', () => (fx.answer = (run) => {
+      if (run.cmd === fx.node) fx.job.pid = 4310;
+      return undefined;
+    })],
+    ['the version moved', () => (fx.answer = (run) => {
+      if (run.cmd === fx.node) migrateTo(TOP + 1);
+      return undefined;
+    })],
+    ['going back failed', () => (fx.answer = (run) => (run.cmd === fx.npm && run.args[1] === 'build' ? { code: 2 } : undefined))],
+  ];
+  for (const [kind, arrange] of kinds) {
+    it(`after ${kind}: keeps both locks, ends with their rm, and a run again gives the dead lock's advice, never up to date`, async () => {
+      fx = await updateFake();
+      arrange();
+      const r = await fx.update(['--yes']);
+      expect(r.code).toBe(3);
+      expect(existsSync(homeLock())).toBe(true);
+      expect(existsSync(checkoutLock())).toBe(true);
+      expect(r.out.split('\n').slice(-1)).toEqual([`then remove its locks: rm '${checkoutLock()}' '${homeLock()}'`]);
+      fx.answer = () => undefined;
+      fx.override = () => undefined;
+      fx.whileSleeping = () => {};
+      const again = await fx.update(['--yes']);
+      expect(again.code).toBe(1);
+      expect(again.err).toContain('died at its step');
+      expect(`${again.out}\n${again.err}`).not.toMatch(/up to date/);
+      expect(again.out.split('\n').slice(-1)).toEqual([`then remove its locks: rm '${checkoutLock()}' '${homeLock()}'`]);
+    });
+  }
 });

@@ -276,30 +276,40 @@ function errorText(err: unknown): string {
  * gateway reads them from, named when it is not this build's own, or unknown
  * when that directory cannot be read. Never throws: settings that are refused,
  * or an environment that could not be read, given as the error, give
- * `database: unknown (<error>)`.
+ * `database: unknown (<error>)`. With it, when the database is above the
+ * build's highest, the refusal `migrate` would give: the check fails on it,
+ * after the line, as the gateway would not start (spec §20.6).
  */
-export function versionLine(env: Env | Error): string {
+function versionCheck(env: Env | Error): { line: string; tooNew: string | undefined } {
   try {
     if (env instanceof Error) throw env;
     const settings = loadTeamSettings(env, undefined, { unsetPassEnv: [] });
     const dir = schemaDirOf(env);
     const from = dir === BUNDLED_SCHEMA_DIR ? '' : `migrations from ${dir}, MT_SCHEMA_DIR`;
     let build: string;
+    let highest: number | undefined;
     try {
-      build = `this build: up to ${highestMigration(dir)}${from === '' ? '' : ` (${from})`}`;
+      highest = highestMigration(dir);
+      build = `this build: up to ${highest}${from === '' ? '' : ` (${from})`}`;
     } catch (err) {
       // A directory that cannot be read leaves the database's own version worth saying.
       build = `this build's highest is unknown (${from === '' ? '' : `${from}: `}${errorText(err)})`;
     }
     const db = openDbReadOnly(settings.dbPath);
-    if (db === undefined) return `database: ${settings.dbPath}: no database; ${build}`;
+    if (db === undefined) return { line: `database: ${settings.dbPath}: no database; ${build}`, tooNew: undefined };
     try {
-      return `database: ${settings.dbPath} at version ${Number(db.pragma('user_version', { simple: true }))}; ${build}`;
+      const version = Number(db.pragma('user_version', { simple: true }));
+      const tooNew =
+        highest !== undefined && version > highest
+          ? `the database is at schema version ${version}, and this build knows only up to ${highest}: it was migrated by a newer build. ` +
+            `Run that build, or restore a backup of version ${highest}`
+          : undefined;
+      return { line: `database: ${settings.dbPath} at version ${version}; ${build}`, tooNew };
     } finally {
       db.close();
     }
   } catch (err) {
-    return `database: unknown (${errorText(err)})`;
+    return { line: `database: unknown (${errorText(err)})`, tooNew: undefined };
   }
 }
 
@@ -643,7 +653,9 @@ class Service {
       if (!(err instanceof ConfigError)) throw err;
       env = err;
     }
-    io.out(redactKnownSecrets(versionLine(env)));
+    const version = versionCheck(env);
+    io.out(redactKnownSecrets(version.line));
+    if (version.tooNew !== undefined) throw new CommandFailed(version.tooNew);
     if (recorded === undefined) {
       throw new CommandFailed(`${t.file} was not written by mt service install; run mt service install to write it again`);
     }
@@ -682,7 +694,9 @@ class Service {
       if (!(err instanceof ConfigError)) throw err;
       merged = err;
     }
-    io.out(redactKnownSecrets(versionLine(merged)));
+    const version = versionCheck(merged);
+    io.out(redactKnownSecrets(version.line));
+    if (version.tooNew !== undefined) throw new CommandFailed(version.tooNew);
     if (merged instanceof Error) throw new CommandFailed(merged.message);
     io.out(`checking as a gateway started by hand from this shell, over ${gatewayEnvPath(shell)}: no service is installed`);
     const unset: string[] = [];

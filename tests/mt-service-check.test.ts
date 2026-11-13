@@ -283,3 +283,36 @@ describe('mt service check with no unit installed: a gateway started by hand', (
     expect(r.out[0]).toBe(`database: ${db} at version 4; this build: up to ${TOP}`);
   });
 });
+
+describe('mt service check on a database newer than the build', () => {
+  it('with a unit: fails after the version line, before the configuration and the import', async () => {
+    fx = await serviceFake();
+    fx.install();
+    const db = database(TOP + 1);
+    const r = await check();
+    expect(r.code).toBe(1);
+    expect(r.out).toEqual([`database: ${db} at version ${TOP + 1}; this build: up to ${TOP}`]);
+    expect(r.err).toBe(
+      `mt: the database is at schema version ${TOP + 1}, and this build knows only up to ${TOP}: it was migrated by a newer build. ` +
+        `Run that build, or restore a backup of version ${TOP}`,
+    );
+    expect(fx.imports).toEqual([]);
+  });
+
+  it('with no unit: fails after the version line too', async () => {
+    fx = await serviceFake();
+    const db = database(TOP + 1);
+    const r = await check();
+    expect(r.code).toBe(1);
+    expect(r.out).toEqual([`database: ${db} at version ${TOP + 1}; this build: up to ${TOP}`]);
+    expect(r.err).toMatch(/^mt: the database is at schema version \d+, and this build knows only up to \d+/);
+    expect(fx.imports).toEqual([]);
+  });
+
+  it('passes at the build\'s own highest', async () => {
+    fx = await serviceFake();
+    fx.install();
+    database(TOP);
+    expect((await check()).code).toBe(0);
+  });
+});
