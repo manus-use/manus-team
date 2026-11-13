@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { ConfigError } from '../config.js';
 
 export type Db = Database.Database;
 
@@ -33,6 +34,36 @@ export function openDbReadOnly(path: string): Db | undefined {
   return new Database(path, { readonly: true, fileMustExist: true });
 }
 
+/** The migration files in `schemaDir`, `NNN_name.sql`, with their numbers. */
+function migrationFiles(schemaDir: string): { file: string; version: number }[] {
+  return readdirSync(schemaDir)
+    .filter((f) => /^\d+_.*\.sql$/.test(f))
+    .map((f) => ({ file: f, version: Number(f.slice(0, f.indexOf('_'))) }));
+}
+
+/** The highest `NNN` among the migration files in `schemaDir`: the newest schema this build knows. 0 when there are none. */
+export function highestMigration(schemaDir: string): number {
+  return migrationFiles(schemaDir).reduce((top, m) => Math.max(top, m.version), 0);
+}
+
+/**
+ * A database whose `user_version` is above every migration this build has: a
+ * newer build migrated it (spec §20.6). A configuration error, so the gateway
+ * says it in one line and exits 78, which keeps systemd from a restart loop.
+ */
+export class SchemaTooNewError extends ConfigError {
+  readonly dbVersion: number;
+  readonly buildVersion: number;
+
+  constructor(message: string, dbVersion: number, buildVersion: number, cause?: unknown) {
+    super(message);
+    this.name = 'SchemaTooNewError';
+    this.dbVersion = dbVersion;
+    this.buildVersion = buildVersion;
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
 /**
  * Apply any migration in `schemaDir` newer than the recorded version.
  *
@@ -43,13 +74,26 @@ export function openDbReadOnly(path: string): Db | undefined {
  * that creates its own version table cannot coexist with a migration file that
  * also creates one, and `user_version` is a header field reserved for exactly
  * this. The `schema_version` table remains the migrations' own business.
+ *
+ * A database above the highest file is refused before anything runs, as a
+ * `SchemaTooNewError`: an older build put back on a migrated database, by hand
+ * or by a crash restart, stops rather than run on a schema it does not know. A
+ * directory with no file has a highest of 0, so it refuses any migrated database.
  */
 export function migrate(db: Db, schemaDir: string): number {
   const current = Number(db.pragma('user_version', { simple: true }));
+  const files = migrationFiles(schemaDir);
+  const highest = files.reduce((top, m) => Math.max(top, m.version), 0);
+  if (current > highest) {
+    throw new SchemaTooNewError(
+      `the database is at schema version ${current}, and this build knows only up to ${highest}: it was migrated by a newer build. ` +
+        `Run that build, or restore a backup of version ${highest} (spec §20.8)`,
+      current,
+      highest,
+    );
+  }
 
-  const pending = readdirSync(schemaDir)
-    .filter((f) => /^\d+_.*\.sql$/.test(f))
-    .map((f) => ({ file: f, version: Number(f.slice(0, f.indexOf('_'))) }))
+  const pending = files
     .filter((m) => m.version > current)
     .sort((a, b) => a.version - b.version);
 
