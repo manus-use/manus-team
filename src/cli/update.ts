@@ -308,6 +308,9 @@ export async function updateCommand(argv: readonly string[], io: MtIo): Promise<
   return await new Update(io, deps, { check: values.check === true, yes: values.yes === true }).run();
 }
 
+/** Where the update is, for what a signal does (spec §20.11). */
+type Phase = 'before' | 'changing' | 'going back' | 'restart' | 'waiting';
+
 class Update {
   private readonly view: ServiceView;
   private readonly checkout: string;
@@ -338,6 +341,8 @@ class Update {
   /** Set when an unexpected error after step 3 leaves the locks for a person. */
   private keepLocks = false;
   private lock: UpdateLockState;
+  private phase: Phase = 'before';
+  private signalled: NodeJS.Signals | undefined;
   private readonly abort = new AbortController();
 
   private readonly io: MtIo;
@@ -347,7 +352,17 @@ class Update {
     private readonly deps: UpdateDeps,
     private readonly opts: { check: boolean; yes: boolean },
   ) {
-    this.io = io;
+    // Output that cannot be written is no failure, the service's own lines included.
+    const safe =
+      (write: (line: string) => void) =>
+      (line: string): void => {
+        try {
+          write(line);
+        } catch (err) {
+          if (!isClosedOutput(err)) throw err;
+        }
+      };
+    this.io = { ...io, out: safe(io.out), err: safe(io.err) };
     this.view = serviceView(this.io, deps.service);
     this.checkout = realpathOr(deps.service.checkout);
     this.node = deps.service.node;
@@ -399,7 +414,9 @@ class Update {
   // The calls.
 
   private async call(cmd: string, args: readonly string[], timeoutMs: number, env: Env): Promise<{ r: UpdateRunResult; said: string }> {
-    const r = await this.deps.run(cmd, args, { cwd: this.checkout, env, timeoutMs });
+    const before = this.phase === 'before';
+    const r = await this.deps.run(cmd, args, { cwd: this.checkout, env, timeoutMs, signal: before ? this.abort.signal : undefined });
+    if (before && this.signalled !== undefined) throw new Stop(1, `interrupted by ${this.signalled}: nothing changed`);
     return { r, said: (r.stderr.trim() || r.stdout.trim()).split('\n').slice(-3).join(' ').replace(/\.$/, '') };
   }
 
@@ -722,8 +739,14 @@ class Update {
   private async confirm(): Promise<void> {
     if (this.opts.yes) return;
     if (this.io.stdinIsTTY !== true) throw new Stop(1, 'no terminal to ask at; run mt update --yes, or --check');
-    const question = this.willRestart ? 'update and restart the service? [y/N] ' : 'update, and back up the database? [y/N] ';
-    const answer = await this.deps.ask(question, this.abort.signal);
+    let answer: string;
+    try {
+      answer = await this.deps.ask(this.willRestart ? 'update and restart the service? [y/N] ' : 'update, and back up the database? [y/N] ', this.abort.signal);
+    } catch (err) {
+      if (this.signalled !== undefined) throw new Stop(1, `interrupted by ${this.signalled}: nothing changed`);
+      throw err;
+    }
+    if (this.signalled !== undefined) throw new Stop(1, `interrupted by ${this.signalled}: nothing changed`);
     if (!['y', 'yes'].includes(answer.trim().toLowerCase())) {
       this.say('nothing changed');
       throw new Stop(1, undefined);
@@ -734,6 +757,8 @@ class Update {
   // Steps 4 to 6: update, preflight, backup. A failure goes back.
 
   private async apply(): Promise<void> {
+    if (this.signalled !== undefined) throw new Stop(1, `interrupted by ${this.signalled}: nothing changed`);
+    this.phase = 'changing';
     const merge = await this.step('merge', `merging ${this.upstream}, fast-forward only`, 'git', ['merge', '--ff-only', this.upstream], LIMITS.hook, this.gitEnv);
     if (merge !== undefined) {
       // Timed out or not, it goes back; HEAD at the new commit is a merge that landed and a hook that hung.
@@ -786,8 +811,10 @@ class Update {
     return { what: r.timedOut ? `${name} did not finish in ${limit}` : `${name} failed (exit ${r.code})`, output };
   }
 
+  /** Go back after a failure, or after a signal once the command running at it has ended (spec §20.11). */
   private async goBackIf(failure: Failure | undefined): Promise<void> {
     if (failure !== undefined) await this.goBack(failure);
+    if (this.signalled !== undefined) await this.goBack({ what: `interrupted by ${this.signalled}`, output: '' });
   }
 
   /** The service's pid now: null when it is not running. */
@@ -834,6 +861,7 @@ class Update {
   /** Spec §20.7: back to the old commit, its tree and its build; the running gateway untouched. */
   private async goBack(failure: Failure): Promise<never> {
     this.unmoved();
+    this.phase = 'going back';
     this.writeLock('going back');
     this.say(`${failure.what}: going back to ${short(this.old)}`);
     const run = (cmd: string, args: readonly string[], timeoutMs: number, env: Env): Promise<UpdateRunResult> =>
@@ -885,6 +913,7 @@ class Update {
       return 0;
     }
     this.writeLock('restart');
+    this.phase = 'restart';
     const from = statSync(view.log, { throwIfNoEntry: false })?.size ?? 0;
     this.say(`restarting ${view.name}`);
     const failed = await view.restart();
@@ -894,8 +923,9 @@ class Update {
       this.stepsBackAfterRestart();
       return 3;
     }
+    this.phase = 'waiting';
     this.writeLock('confirm');
-    for (let waited = 0; ; waited += POLL_MS) {
+    for (let waited = 0; this.signalled === undefined; waited += POLL_MS) {
       const seen = lines(readFrom(view.log, from));
       const failure = seen.find((l) => l.startsWith('configuration error:') || l.startsWith('failed to start:'));
       if (failure !== undefined) {
@@ -915,7 +945,11 @@ class Update {
       if (waited >= CONFIRM_MS) break;
       await this.deps.sleep(POLL_MS);
     }
-    this.sayErr(`mt: the new gateway did not say it connected within ${CONFIRM_MS / 1000} seconds`);
+    this.sayErr(
+      this.signalled !== undefined
+        ? `mt: interrupted by ${this.signalled} while waiting for the new gateway to connect`
+        : `mt: the new gateway did not say it connected within ${CONFIRM_MS / 1000} seconds`,
+    );
     return this.notConfirmed();
   }
 
@@ -935,6 +969,18 @@ class Update {
 
   // -------------------------------------------------------------------------
 
+  private onSignal(signal: NodeJS.Signals): void {
+    if (this.phase === 'going back') {
+      this.say(`${signal}: ignored, as stopping now would leave the state being undone`);
+      return;
+    }
+    if (this.signalled !== undefined) return;
+    this.signalled = signal;
+    if (this.phase === 'before') this.abort.abort();
+    else if (this.phase === 'changing') this.say(`${signal}: going back once the running command ends`);
+    else if (this.phase === 'restart') this.say(`${signal}: the restart call is let finish`);
+  }
+
   /**
    * An error nothing foresaw. Up to step 3 nothing changed: the locks go, exit 1.
    * After it the update may be half way, so the locks stay, saying where it
@@ -953,10 +999,15 @@ class Update {
   }
 
   async run(): Promise<number> {
+    this.deps.guardOutput();
+    const off = this.deps.onSignal((signal) => this.onSignal(signal));
     try {
       await this.inspect();
       if (!(await this.show())) return 0;
-      if (this.opts.check) return 0;
+      if (this.opts.check) {
+        if (this.signalled !== undefined) throw new Stop(1, `interrupted by ${this.signalled}: nothing changed`);
+        return 0;
+      }
       await this.confirm();
       await this.apply();
       return await this.restart();
@@ -965,6 +1016,7 @@ class Update {
       if (err.refusal !== undefined) this.sayErr(`mt: ${err.refusal}`);
       return err.code;
     } finally {
+      off();
       this.db?.close();
       if (!this.keepLocks) for (const lock of [...this.locks].reverse()) lock.release();
     }
