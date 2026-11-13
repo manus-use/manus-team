@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { ConfigError, loadConfig, type Env, type GatewayConfig } from './config.js';
 import { loadGatewayEnv, type GatewayEnvFile } from './gateway-env.js';
 import { loadTeam, teamSecrets, type Team } from './team.js';
-import { migrate, openDb, type Db } from './db/open.js';
+import { SchemaTooNewError, migrate, openDb, type Db } from './db/open.js';
 import { sweepSeen } from './db/dedup.js';
 import { registerWorkspaces, worktreeOf } from './db/workspaces.js';
 import { LarkAdapter } from './channel/lark/adapter.js';
@@ -100,6 +100,12 @@ export function registerConfiguredSecrets(config: GatewayConfig, team: Team): vo
  * the file's secrets as it is read -- so an error raised on the way is masked.
  * `env` itself is left as it was: an agent's environment is built from the
  * process environment, which the file never enters.
+ *
+ * `mt service check` relies on it, with no unit installed (spec §20.5): it imports
+ * this module from the build it checks and calls `loadStartup(env)` by this name,
+ * with one argument, the environment, and takes a `ConfigError` thrown as the
+ * reason the gateway would not start. Change its name, its argument or what it
+ * throws knowing that `mt update`'s preflight runs that check.
  */
 export function loadStartup(env: Env = process.env): { config: GatewayConfig; team: Team; gatewayEnv: GatewayEnvFile } {
   const loaded = loadGatewayEnv(env);
@@ -155,7 +161,22 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
   await mkdir(config.downloadDir, { recursive: true, mode: 0o700 });
 
   const db = openDb(config.dbPath);
-  const version = migrate(db, config.schemaDir);
+  let version: number;
+  try {
+    version = migrate(db, config.schemaDir);
+  } catch (err) {
+    db.close();
+    if (!(err instanceof SchemaTooNewError)) throw err;
+    // migrate knows no home: the message is completed here, with where the backups are (spec §20.6).
+    throw new SchemaTooNewError(
+      `the database at ${config.dbPath} is at schema version ${err.dbVersion}, and this build knows only up to ${err.buildVersion}: ` +
+        `it was migrated by a newer build. Run that build, or restore a backup of version ${err.buildVersion} ` +
+        `from ${join(config.home, 'backups')} (spec §20.8)`,
+      err.dbVersion,
+      err.buildVersion,
+      err,
+    );
+  }
   note(`schema at version ${version} (${config.dbPath})`);
 
   // Before anything can open a session in one. A name whose directory moved would
