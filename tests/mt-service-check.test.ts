@@ -168,6 +168,39 @@ describe("mt service check's version line", () => {
   });
 });
 
+describe("mt service check's version line and native load, further", () => {
+  it('names the npm on the unit\'s PATH when the native module fails to load, not the shell\'s', async () => {
+    fx = await serviceFake();
+    const unitBin = join(fx.root, 'unit bin');
+    mkdirSync(unitBin);
+    writeFileSync(join(unitBin, 'npm'), '#!/bin/sh\n', { mode: 0o755 });
+    const shellBin = join(fx.root, 'shell bin');
+    mkdirSync(shellBin);
+    writeFileSync(join(shellBin, 'npm'), '#!/bin/sh\n', { mode: 0o755 });
+    fx.install({ path: `${unitBin}:/usr/bin` });
+    fx.modules[join(fx.checkout, 'dist', 'db', 'open.js')] = {
+      openDb: () => {
+        throw new Error('was compiled against a different Node.js version');
+      },
+    };
+    const r = await check({ PATH: `${shellBin}:/usr/bin:/bin` });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain(`'${join(unitBin, 'npm')}' ci`);
+  });
+
+  it("still names the database and its version when MT_SCHEMA_DIR's directory is missing, the build's highest unknown", async () => {
+    fx = await serviceFake();
+    const db = database(3);
+    const dir = join(fx.root, 'no such schema');
+    writeFileSync(join(fx.mtHome, '.env'), `LARK_APP_SECRET=${SECRET}\nLARK_APP_ID=cli_test\nMT_SCHEMA_DIR=${dir}\n`);
+    chmodSync(join(fx.mtHome, '.env'), 0o600);
+    fx.install();
+    const r = await check();
+    expect(r.out[0]).toMatch(new RegExp(`^database: ${db.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} at version 3; this build's highest is unknown \\(.*ENOENT.*\\)$`));
+    expect(r.out[0]).toContain(`migrations from ${dir}, MT_SCHEMA_DIR`);
+  });
+});
+
 describe('mt service check with no unit installed: a gateway started by hand', () => {
   it('needs no .env, and runs neither of install\'s checks of it', async () => {
     fx = await serviceFake({ env: false });

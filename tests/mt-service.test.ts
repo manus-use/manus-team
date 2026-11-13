@@ -642,7 +642,22 @@ describe('a state the manager cannot give', () => {
     notLoaded(fx);
     const r = await fx.run(['service', 'status']);
     expect(r.out).toMatch(/^loaded: unknown \(launchctl print gui\/501 failed \(exit 125\): Bad request\. Could not find domain for user gui: 501\)$/m);
+    expect(r.out).toMatch(/^running: unknown$/m);
     expect(words(fx)).toEqual([`launchctl print gui/${UID}/team.manus.gateway`, `launchctl print gui/${UID}`]);
+  });
+
+  it('is refused by stop on macOS, never said to be not running', async () => {
+    fx = fixture();
+    fx.answers.push({
+      match: (c) => c.cmd === 'launchctl' && c.args[0] === 'print' && c.args[1] === `gui/${UID}`,
+      result: { code: 125, stderr: 'Bad request.\nCould not find domain for user gui: 501\n' },
+    });
+    notLoaded(fx);
+    const r = await fx.run(['service', 'stop']);
+    expect(r.code).toBe(1);
+    expect(r.out).not.toMatch(/not running/);
+    expect(r.err).toMatch(/^mt: the service's state cannot be read, so whether it runs is unknown: launchctl print gui\/501 failed \(exit 125\).*console/);
+    expect(words(fx)).not.toContain(`launchctl bootout gui/${UID}/team.manus.gateway`);
   });
 
   it('is "not loaded" on macOS when the domain answers and the job does not', async () => {
@@ -661,7 +676,7 @@ describe('a state the manager cannot give', () => {
     });
     const r = await fx.run(['service', 'status'], { platform: 'linux' });
     expect(r.out).toMatch(/^loaded: unknown \(systemctl --user show manus-team\.service --property=\S+ failed \(exit 1\): Failed to connect to bus: No medium found\)$/m);
-    expect(r.out).toMatch(/^running: no$/m);
+    expect(r.out).toMatch(/^running: unknown$/m);
   });
 });
 

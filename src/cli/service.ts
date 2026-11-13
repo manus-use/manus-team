@@ -273,16 +273,24 @@ function errorText(err: unknown): string {
  * `database: <path> at version 8; this build: up to 9` (spec §20.5): the
  * database the gateway would open, found from `env` by the settings alone, its
  * `user_version` read read-only, and the highest migration of the directory the
- * gateway reads them from, named when it is not this build's own. Never throws:
- * settings that are refused, or an environment that could not be read, given as
- * the error, give `database: unknown (<error>)`.
+ * gateway reads them from, named when it is not this build's own, or unknown
+ * when that directory cannot be read. Never throws: settings that are refused,
+ * or an environment that could not be read, given as the error, give
+ * `database: unknown (<error>)`.
  */
 export function versionLine(env: Env | Error): string {
   try {
     if (env instanceof Error) throw env;
     const settings = loadTeamSettings(env, undefined, { unsetPassEnv: [] });
     const dir = schemaDirOf(env);
-    const build = `this build: up to ${highestMigration(dir)}${dir === BUNDLED_SCHEMA_DIR ? '' : ` (migrations from ${dir}, MT_SCHEMA_DIR)`}`;
+    const from = dir === BUNDLED_SCHEMA_DIR ? '' : `migrations from ${dir}, MT_SCHEMA_DIR`;
+    let build: string;
+    try {
+      build = `this build: up to ${highestMigration(dir)}${from === '' ? '' : ` (${from})`}`;
+    } catch (err) {
+      // A directory that cannot be read leaves the database's own version worth saying.
+      build = `this build's highest is unknown (${from === '' ? '' : `${from}: `}${errorText(err)})`;
+    }
     const db = openDbReadOnly(settings.dbPath);
     if (db === undefined) return `database: ${settings.dbPath}: no database; ${build}`;
     try {
@@ -311,6 +319,13 @@ export interface State {
    * nothing; `mt update` refuses rather than take it as stopped (spec §20.2).
    */
   unreadable: string | undefined;
+}
+
+/** What to do when the service's state cannot be read: where launchd or the user's systemd answers. */
+export function unreadableHint(kind: 'launchd' | 'systemd'): string {
+  return kind === 'launchd'
+    ? "a LaunchAgent needs someone logged in at the Mac's console: log in there, then run this again"
+    : "run it where the user's systemd answers: a login session, or with loginctl enable-linger";
 }
 
 /** A failed command's first lines, for a message: `cmd args failed (exit N): what it said`. */
@@ -641,7 +656,8 @@ class Service {
         `the gateway would not start as the service, which has only PATH, MT_HOME and ${file.path}: ${checked.problem}`,
       );
     }
-    await this.loadModules();
+    // The npm the native load's advice names is found as the service's PATH finds it.
+    await this.loadModules(recorded.path);
     io.out(`ok: this build would start as ${t.name}`);
     return 0;
   }
@@ -703,9 +719,10 @@ class Service {
    * The gateway's whole module graph, imported from this build's dist/index.js,
    * which starts nothing; and an in-memory database, which loads better-sqlite3's
    * native module. Dynamic, so a broken graph fails the check, not mt itself.
-   * Answers the imported index, for its loadStartup.
+   * Answers the imported index, for its loadStartup. The npm named when the
+   * native module fails is found beside the node, else on `path`.
    */
-  private async loadModules(): Promise<Record<string, unknown>> {
+  private async loadModules(path: string | undefined = this.io.env['PATH']): Promise<Record<string, unknown>> {
     const { deps } = this;
     const importModule = deps.importModule ?? importFile;
     const index = join(deps.checkout, 'dist', 'index.js');
@@ -721,7 +738,7 @@ class Service {
       if (typeof openDb !== 'function') throw new Error('dist/db/open.js has no openDb');
       (openDb(':memory:') as { close(): void }).close();
     } catch (err) {
-      const npm = findNpm(deps.node, this.io.env['PATH']) ?? 'npm';
+      const npm = findNpm(deps.node, path) ?? 'npm';
       throw new CommandFailed(
         `better-sqlite3's native module does not load under ${deps.node}: ${errorText(err)}. ` +
           `Build it for this node by hand: cd ${shQuote(deps.checkout)} && ${npmCommand(deps.node, npm, 'ci')}`,
@@ -777,7 +794,11 @@ class Service {
     const { t, io } = this;
     if (t.kind === 'launchd') {
       // Booted out, not killed: KeepAlive would start a killed one again. It loads again at the next login, or mt service start.
-      if (!this.state().loaded) {
+      const state = this.state();
+      if (state.unreadable !== undefined) {
+        throw new CommandFailed(`the service's state cannot be read, so whether it runs is unknown: ${state.unreadable}. ${unreadableHint(t.kind)}`);
+      }
+      if (!state.loaded) {
         io.out(`${t.name} is not running`);
         return 0;
       }
@@ -797,9 +818,11 @@ class Service {
     if (!this.installed()) io.out('installed: no; run mt service install');
     io.out(`loaded: ${state.unreadable !== undefined ? `unknown (${state.unreadable})` : state.loaded ? 'yes' : 'no'}`);
     io.out(
-      state.running
-        ? `running: yes${state.pid === undefined ? '' : `, pid ${state.pid}`}`
-        : `running: no${state.lastExit === undefined ? '' : ` (last exit code ${state.lastExit})`}`,
+      state.unreadable !== undefined
+        ? 'running: unknown'
+        : state.running
+          ? `running: yes${state.pid === undefined ? '' : `, pid ${state.pid}`}`
+          : `running: no${state.lastExit === undefined ? '' : ` (last exit code ${state.lastExit})`}`,
     );
     const recorded = this.recorded();
     if (recorded !== undefined) {
