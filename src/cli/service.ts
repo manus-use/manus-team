@@ -30,7 +30,7 @@ import { findNpm, npmCommand, shQuote } from './shell.js';
  * `mt service`: the gateway as a persistent service, a LaunchAgent on macOS and
  * a systemd user unit on Linux, behind the same commands. It runs the built
  * gateway, `node dist/main.js`, so a merge no longer restarts it: a deploy is
- * `npm run build && mt service restart`.
+ * `mt update` (`cli/update.ts`), which ends with `mt service restart`'s code.
  *
  * Every launchctl, systemctl and tail call goes through `ServiceDeps.run` or
  * `follow`, and every file is under `ServiceDeps.home` or the gateway's home,
@@ -527,7 +527,7 @@ class Service {
     }
     io.out(`log: ${t.log}`);
     io.out('check it with: mt service status, and mt service logs -f');
-    io.out('to deploy a change: npm run build && mt service restart');
+    io.out('to deploy a change: mt update');
     return 0;
   }
 

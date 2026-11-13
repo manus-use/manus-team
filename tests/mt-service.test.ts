@@ -145,6 +145,7 @@ describe('mt service install on macOS', () => {
     ]);
     expect(r.out).toContain(`wrote ${plistPath(fx)}`);
     expect(r.out).toContain('mt service status');
+    expect(r.out.split('\n').slice(-1)).toEqual(['to deploy a change: mt update']);
     expect(r.out).not.toMatch(/warning/);
     expect(statSync(plistPath(fx)).mode & 0o777).toBe(0o644);
   });
