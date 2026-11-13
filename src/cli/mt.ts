@@ -70,7 +70,7 @@ const USAGE = [
   '  mt workspace add <name> --clone <git-url> [--isolated]',
   '  mt workspace list',
   SERVICE_USAGE,
-  '  mt update --check',
+  '  mt update [--check | --yes]',
   '  mt kanban board list [all] [--json]',
   '  mt kanban board create <name> [--json]',
   '  mt kanban board set <name> max_running <number|none> [--json]',

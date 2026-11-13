@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import { constants as osConstants } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { ConfigError, loadTeamSettings, type Env, type TeamSettings } from '../config.js';
+import { backupDatabase } from '../db/backup.js';
 import { hasBoard, openAgentRunCount } from '../db/kanban-read.js';
 import { openDbReadOnly, type Db } from '../db/open.js';
 import { loadGatewayEnv } from '../gateway-env.js';
@@ -12,7 +13,8 @@ import { redactKnownSecrets } from '../secrets.js';
 import { parse, UsageError } from './args.js';
 import type { MtIo } from './mt.js';
 import { realServiceDeps, serviceView, type RunResult, type ServiceDeps, type ServiceView } from './service.js';
-import { findNpm, shQuote } from './shell.js';
+import { findNpm, mtCommand, shQuote } from './shell.js';
+import { finishByHand, stepsBack, stepsForward, type AdvicePaths } from './update-advice.js';
 import { UpdateLock, type UpdateLockState, type UpdateStep } from './update-lock.js';
 
 /**
@@ -86,11 +88,16 @@ export const LIMITS = {
   check: 120_000,
 } as const;
 
+/** How long the restarted gateway has to say it connected, and how often its log is read. */
+export const CONFIRM_MS = 60_000;
+const POLL_MS = 250;
 /** How long a killed group has between SIGTERM and SIGKILL, and after it, before its output is let go. */
 const KILL_AFTER_MS = 5_000;
 const GONE_AFTER_MS = 1_000;
 
 const COMMITS_SHOWN = 50;
+const FAILED_TAIL = 20;
+const LOG_TAIL = 30;
 
 /** The operations under way that `git status` may not show (spec §20.2). */
 const OPERATIONS = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply'] as const;
@@ -240,9 +247,16 @@ class Stop extends Error {
   }
 }
 
+/** What failed in steps 4 to 6, to say when the update has gone back. */
+interface Failure {
+  what: string;
+  output: string;
+}
+
 const short = (sha: string | undefined): string => (sha ?? '').slice(0, 7);
 const lines = (text: string): string[] => text.split('\n').filter((l) => l.trim() !== '');
 const plural = (n: number, one: string, many: string = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+const versionText = (v: number | null): string => (v === null ? 'no database' : `version ${v}`);
 
 function realpathOr(path: string): string {
   try {
@@ -252,13 +266,46 @@ function realpathOr(path: string): string {
   }
 }
 
-/** `mt update --check`. */
+/** The `user_version` of the database at `path`, read-only; null when there is none. */
+function versionOf(path: string): number | null {
+  const db = openDbReadOnly(path);
+  if (db === undefined) return null;
+  try {
+    return Number(db.pragma('user_version', { simple: true }));
+  } finally {
+    db.close();
+  }
+}
+
+/** A file's last `n` lines, or none when it is missing. */
+function tailOf(path: string, n: number): string[] {
+  const text = readFrom(path, 0);
+  const all = text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n');
+  return text === '' ? [] : all.slice(-n);
+}
+
+/** The bytes of `path` from `offset`, or from its start when it is shorter, as after a rotation. */
+function readFrom(path: string, offset: number): string {
+  const st = statSync(path, { throwIfNoEntry: false });
+  if (st === undefined) return '';
+  const start = st.size < offset ? 0 : offset;
+  const fd = openSync(path, 'r');
+  try {
+    const buf = Buffer.alloc(st.size - start);
+    const read = readSync(fd, buf, 0, buf.length, start);
+    return buf.subarray(0, read).toString('utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** `mt update [--check | --yes]`. */
 export async function updateCommand(argv: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(argv, { check: { type: 'boolean' } });
+  const { values, positionals } = parse(argv, { check: { type: 'boolean' }, yes: { type: 'boolean' } });
   if (positionals.length > 0) throw new UsageError('update takes no arguments');
-  if (values.check !== true) throw new UsageError('update takes --check, which shows what is new and changes nothing');
+  if (values.check === true && values.yes === true) throw new UsageError('update takes --check or --yes, not both');
   const deps = io.update ?? realUpdateDeps(io.service);
-  return await new Update(io, deps).run();
+  return await new Update(io, deps, { check: values.check === true, yes: values.yes === true }).run();
 }
 
 class Update {
@@ -267,6 +314,7 @@ class Update {
   private readonly shellEnv: Env;
   private gitEnv: Env;
   private node: string;
+  private npm = 'npm';
   private branch = '';
   private upstream = '';
   private remote = '';
@@ -280,15 +328,20 @@ class Update {
   private db: Db | undefined;
   private version: number | null = null;
   private newest = 0;
+  private needCi = false;
+  private ranCi = false;
+  private backup: string | undefined;
   private added: string[] = [];
   private readonly locks: UpdateLock[] = [];
   private lock: UpdateLockState;
+  private readonly abort = new AbortController();
 
   private readonly io: MtIo;
 
   constructor(
     io: MtIo,
     private readonly deps: UpdateDeps,
+    private readonly opts: { check: boolean; yes: boolean },
   ) {
     this.io = io;
     this.view = serviceView(this.io, deps.service);
@@ -315,6 +368,27 @@ class Update {
 
   private warn(line: string): void {
     this.say(`warning: ${line}`);
+  }
+
+  private block(title: string, commands: readonly string[]): void {
+    this.say(title);
+    for (const command of commands) this.say(`  ${command}`);
+  }
+
+  private get paths(): AdvicePaths {
+    return {
+      node: this.node,
+      npm: this.npm,
+      checkout: this.checkout,
+      home: this.view.mtHome,
+      homeSet: this.view.mtHomeSet !== undefined,
+      db: this.dbPath,
+      service: this.installed,
+    };
+  }
+
+  private get npmEnv(): Env {
+    return { ...this.gitEnv, PATH: [dirname(this.node), this.shellEnv['PATH'] ?? ''].filter((p) => p !== '').join(delimiter) };
   }
 
   // -------------------------------------------------------------------------
@@ -384,10 +458,11 @@ class Update {
     }
     const gitDir = (await this.mustGit(['rev-parse', '--absolute-git-dir'])).trim();
 
-    // The unit, and the node the update uses.
+    // The unit, and the node and npm the update and its printed steps use.
     this.installed = view.installed();
     const recorded = view.recorded();
     if (recorded !== undefined) this.node = recorded.node;
+    this.npm = findNpm(this.node, this.shellEnv['PATH']) ?? 'npm';
 
     this.takeLock(join(gitDir, 'mt-update.lock'));
     this.takeLock(join(view.mtHome, 'run', 'update.pid'), () => privateDir(join(view.mtHome, 'run'), 'the update lock'));
@@ -568,6 +643,7 @@ class Update {
 
     const dependencies = await this.git(['diff', '--quiet', 'HEAD', this.upstream, '--', 'package.json', 'package-lock.json']);
     const installedTree = existsSync(join(this.checkout, 'node_modules', '.package-lock.json'));
+    this.needCi = dependencies.code !== 0 || !installedTree;
     if (dependencies.code !== 0) this.say('the dependencies changed: npm ci runs');
     else if (!installedTree) this.say('node_modules/.package-lock.json is missing: npm ci runs');
 
@@ -591,13 +667,231 @@ class Update {
     return true;
   }
 
+  /** The question, at a terminal, unless `--yes`. */
+  private async confirm(): Promise<void> {
+    if (this.opts.yes) return;
+    if (this.io.stdinIsTTY !== true) throw new Stop(1, 'no terminal to ask at; run mt update --yes, or --check');
+    const question = this.willRestart ? 'update and restart the service? [y/N] ' : 'update, and back up the database? [y/N] ';
+    const answer = await this.deps.ask(question, this.abort.signal);
+    if (!['y', 'yes'].includes(answer.trim().toLowerCase())) {
+      this.say('nothing changed');
+      throw new Stop(1, undefined);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Steps 4 to 6: update, preflight, backup. A failure goes back.
+
+  private async apply(): Promise<void> {
+    const merge = await this.step('merge', `merging ${this.upstream}, fast-forward only`, 'git', ['merge', '--ff-only', this.upstream], LIMITS.hook, this.gitEnv);
+    if (merge !== undefined) {
+      // Timed out or not, it goes back; HEAD at the new commit is a merge that landed and a hook that hung.
+      const head = await this.deps.run('git', ['rev-parse', 'HEAD'], { cwd: this.checkout, env: this.gitEnv, timeoutMs: LIMITS.local });
+      if (head.stdout.trim() === this.new) merge.what += ` (HEAD is at ${short(this.new)}: the merge landed, and its post-merge hook did not end)`;
+    }
+    await this.goBackIf(merge);
+    if (this.needCi) {
+      this.ranCi = true;
+      await this.goBackIf(await this.step('npm ci', 'running npm ci', this.npm, ['ci'], LIMITS.npmCi, this.npmEnv));
+    }
+    await this.goBackIf(await this.step('build', 'running npm run build', this.npm, ['run', 'build'], LIMITS.build, this.npmEnv));
+    const check = [join(this.checkout, 'dist', 'mt.js'), 'service', 'check'];
+    await this.goBackIf(await this.step('preflight', 'checking the new build: mt service check', this.node, check, LIMITS.check, this.npmEnv));
+
+    this.unmoved();
+    this.writeLock('backup');
+    let failed: Failure | undefined;
+    if (this.db === undefined) {
+      this.say('there is no database, so no backup: the gateway has not started on this home');
+    } else {
+      const dir = join(this.view.mtHome, 'backups');
+      try {
+        privateDir(dir, 'the backups');
+        const at = this.deps.now();
+        const { path, removed } = await backupDatabase(this.db, { dir, dbPath: this.dbPath, version: this.version ?? 0, sha: this.old, at });
+        this.backup = path;
+        this.lock = { ...this.lock, backup: path };
+        this.writeLock('backup');
+        this.say(`backed up the database to ${path}${removed.length === 0 ? '' : `; removed ${plural(removed.length, 'older backup')}`}`);
+      } catch (err) {
+        failed = { what: `the backup failed: ${err instanceof Error ? err.message : String(err)}`, output: '' };
+      }
+    }
+    await this.goBackIf(failed);
+  }
+
+  /** Run one of steps 4 to 6 to its end; its failure, or undefined. */
+  private async step(step: UpdateStep, line: string, cmd: string, args: readonly string[], timeoutMs: number, env: Env): Promise<Failure | undefined> {
+    this.writeLock(step);
+    this.say(line);
+    const r = await this.deps.run(cmd, args, { cwd: this.checkout, env, timeoutMs });
+    const output = `${r.stdout}${r.stdout.endsWith('\n') || r.stdout === '' ? '' : '\n'}${r.stderr}`;
+    if (r.code === 0 && !r.timedOut) {
+      if (step === 'preflight') for (const said of lines(r.stdout)) this.say(`  ${said}`);
+      return undefined;
+    }
+    const name = step === 'merge' ? `git merge --ff-only ${this.upstream}` : step === 'preflight' ? 'mt service check' : step === 'npm ci' ? 'npm ci' : 'npm run build';
+    const limit = timeoutMs >= 600_000 ? `${timeoutMs / 60_000} minutes` : `${timeoutMs / 1000} seconds`;
+    return { what: r.timedOut ? `${name} did not finish in ${limit}` : `${name} failed (exit ${r.code})`, output };
+  }
+
+  private async goBackIf(failure: Failure | undefined): Promise<void> {
+    if (failure !== undefined) await this.goBack(failure);
+  }
+
+  /** The service's pid now: null when it is not running. */
+  private pidNow(): number | null | 'unreadable' {
+    if (!this.installed) return null;
+    const state = this.view.state();
+    if (state.unreadable !== undefined) return 'unreadable';
+    return state.running ? (state.pid ?? null) : null;
+  }
+
+  /** The database's `user_version` now, on the read-only connection; null with no database. */
+  private versionNow(): number | null {
+    return this.db === undefined ? versionOf(this.dbPath) : Number(this.db.pragma('user_version', { simple: true }));
+  }
+
+  /**
+   * Before the backup and before any going back (spec §20.6): did a gateway
+   * start again meanwhile, a crash restart on the new tree, or migrate the
+   * database? Either stops the update, exit 3, with what to do.
+   */
+  private unmoved(): void {
+    const version = this.versionNow();
+    if (version !== this.version) {
+      this.sayErr(
+        `mt: the database moved from ${versionText(this.version)} to ${versionText(version)} before a backup was taken: ` +
+          'the old build can no longer run on it, and there is no way back',
+      );
+      this.block('the steps forward, which make the new tree whole and start it:', stepsForward(this.paths));
+      throw new Stop(3, undefined);
+    }
+    const pid = this.pidNow();
+    if (pid === this.servicePid) return;
+    const was = this.servicePid === null ? 'the service was not running' : `the service's pid was ${this.servicePid}`;
+    const is = pid === 'unreadable' ? 'its state cannot be read now' : pid === null ? 'it is not running now' : `is ${pid}`;
+    this.sayErr(`mt: ${was} and ${is}; the database is still at ${versionText(this.version)}`);
+    this.block(
+      'the steps back, which hold while the version is unchanged after the stop:',
+      stepsBack(this.paths, { old: this.old, backup: undefined, checkVersion: this.version }),
+    );
+    this.block('the steps forward, if the check prints another version:', stepsForward(this.paths));
+    throw new Stop(3, undefined);
+  }
+
+  /** Spec §20.7: back to the old commit, its tree and its build; the running gateway untouched. */
+  private async goBack(failure: Failure): Promise<never> {
+    this.unmoved();
+    this.writeLock('going back');
+    this.say(`${failure.what}: going back to ${short(this.old)}`);
+    const run = (cmd: string, args: readonly string[], timeoutMs: number, env: Env): Promise<UpdateRunResult> =>
+      this.deps.run(cmd, args, { cwd: this.checkout, env, timeoutMs });
+    const reset = await run('git', ['reset', '--keep', this.old], LIMITS.hook, this.gitEnv);
+    const failed = (what: string, r: UpdateRunResult): string => `${what} ${r.timedOut ? 'did not finish' : `failed (exit ${r.code})`}`;
+    const output = (r: UpdateRunResult): string => `${r.stdout}\n${r.stderr}`;
+    if (reset.code !== 0 || reset.timedOut) return await this.stuck(failure, failed(`git reset --keep ${short(this.old)}`, reset), output(reset), this.old);
+    if (this.ranCi) {
+      const ci = await run(this.npm, ['ci'], LIMITS.npmCi, this.npmEnv);
+      if (ci.code !== 0 || ci.timedOut) return await this.stuck(failure, failed('npm ci', ci), output(ci), undefined);
+    }
+    const build = await run(this.npm, ['run', 'build'], LIMITS.build, this.npmEnv);
+    if (build.code !== 0 || build.timedOut) return await this.stuck(failure, failed('npm run build', build), output(build), undefined);
+    // Back at the old commit is said only of a clean tree: a hook or a build that wrote into it leaves it for a person.
+    const status = await run('git', ['status', '--porcelain', '--untracked-files=normal'], LIMITS.local, this.gitEnv);
+    if (status.code !== 0 || status.stdout.trim() !== '') {
+      return await this.stuck(failure, status.code !== 0 ? failed('git status', status) : 'the checkout is not clean', output(status), undefined);
+    }
+    this.sayErr(`mt: ${failure.what}`);
+    for (const line of lines(failure.output).slice(-FAILED_TAIL)) this.sayErr(`  ${line}`);
+    this.say(`the checkout is back at ${short(this.old)}, and the gateway as it was`);
+    throw new Stop(1, undefined);
+  }
+
+  /** Going back failed too: what is left, and how to finish by hand. Exit 3. */
+  private async stuck(failure: Failure, what: string, output: string, reset: string | undefined): Promise<never> {
+    this.sayErr(`mt: ${failure.what}; and going back, ${what}:`);
+    for (const line of lines(output).slice(-FAILED_TAIL)) this.sayErr(`  ${line}`);
+    const status = await this.deps.run('git', ['status'], { cwd: this.checkout, env: this.gitEnv, timeoutMs: LIMITS.local });
+    this.block('git status says:', lines(status.stdout));
+    this.block('to finish going back by hand:', finishByHand(this.paths, { reset }));
+    this.say('the gateway still runs from memory, but a crash restart would run whatever dist/ and node_modules now hold');
+    throw new Stop(3, undefined);
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 7: restart and confirm.
+
+  private async restart(): Promise<number> {
+    const { view } = this;
+    const mt = mtCommand(this.node, this.checkout);
+    if (!this.willRestart) {
+      this.say(
+        this.installed
+          ? `the service is stopped, so it is not started: start it with ${mt} service start`
+          : 'no service is installed: restart the gateway (stop it if it runs, then start it)',
+      );
+      return 0;
+    }
+    this.writeLock('restart');
+    const from = statSync(view.log, { throwIfNoEntry: false })?.size ?? 0;
+    this.say(`restarting ${view.name}`);
+    const failed = await view.restart();
+    if (failed !== undefined) {
+      this.sayErr(`mt: the restart failed: ${failed}`);
+      this.say(`the old gateway may have been sent SIGTERM already; whether one runs, and which, is for ${mt} service status`);
+      this.stepsBackAfterRestart();
+      return 3;
+    }
+    this.writeLock('confirm');
+    for (let waited = 0; ; waited += POLL_MS) {
+      const seen = lines(readFrom(view.log, from));
+      const failure = seen.find((l) => l.startsWith('configuration error:') || l.startsWith('failed to start:'));
+      if (failure !== undefined) {
+        this.sayErr(`mt: the new gateway did not start: ${failure}`);
+        return this.notConfirmed();
+      }
+      const schema = seen.findIndex((l) => / schema at version [0-9]+ \(/.test(l));
+      const connected = schema === -1 ? -1 : seen.findIndex((l, i) => i > schema && / connected as /.test(l));
+      if (connected !== -1) {
+        const version = Number(/ schema at version ([0-9]+) \(/.exec(seen[schema] ?? '')?.[1]);
+        if (version < this.newest) {
+          this.warn(`the gateway is at schema version ${version}, below the new tree's ${this.newest}: it reads its migrations from elsewhere (MT_SCHEMA_DIR)`);
+        }
+        this.say(`updated ${this.branch} from ${short(this.old)} to ${short(this.new)}; the gateway is connected, at schema version ${version}`);
+        return 0;
+      }
+      if (waited >= CONFIRM_MS) break;
+      await this.deps.sleep(POLL_MS);
+    }
+    this.sayErr(`mt: the new gateway did not say it connected within ${CONFIRM_MS / 1000} seconds`);
+    return this.notConfirmed();
+  }
+
+  private notConfirmed(): number {
+    this.block(`the service log's last ${LOG_TAIL} lines:`, tailOf(this.view.log, LOG_TAIL));
+    this.stepsBackAfterRestart();
+    return 3;
+  }
+
+  private stepsBackAfterRestart(): void {
+    if (this.backup === undefined) this.say('no backup was taken, as there was no database: the steps back leave out the restore');
+    this.block(
+      'the steps back, never taken by themselves: the new gateway may have migrated and written, and a restore loses what it wrote since the backup:',
+      stepsBack(this.paths, { old: this.old, backup: this.backup }),
+    );
+  }
+
   // -------------------------------------------------------------------------
 
   async run(): Promise<number> {
     try {
       await this.inspect();
-      await this.show();
-      return 0;
+      if (!(await this.show())) return 0;
+      if (this.opts.check) return 0;
+      await this.confirm();
+      await this.apply();
+      return await this.restart();
     } catch (err) {
       if (!(err instanceof Stop)) throw err;
       if (err.refusal !== undefined) this.sayErr(`mt: ${err.refusal}`);

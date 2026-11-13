@@ -162,3 +162,39 @@ describe('mt update --check', () => {
     expect(r.out).toContain('migration 099_x.sql is new; there is no database yet, so nothing to back up');
   });
 });
+
+describe("mt update's question", () => {
+  it('is refused with no terminal and no --yes', async () => {
+    fx = await updateFake();
+    const r = await fx.update([]);
+    expect(r.code).toBe(1);
+    expect(r.err).toBe('mt: no terminal to ask at; run mt update --yes, or --check');
+    expect(merged()).toBe(false);
+  });
+
+  it('is asked at a terminal, and anything but y or yes changes nothing, exit 1', async () => {
+    fx = await updateFake();
+    for (const reply of ['', 'n', 'no', 'yes please']) {
+      fx.replies = [reply];
+      const r = await fx.update([], { tty: true });
+      expect(r.code).toBe(1);
+      expect(r.out.split('\n').slice(-1)).toEqual(['nothing changed']);
+    }
+    expect(fx.asked).toEqual(Array(4).fill('update and restart the service? [y/N] '));
+    expect(merged()).toBe(false);
+  });
+
+  it('goes on at y or yes', async () => {
+    fx = await updateFake();
+    fx.replies = [' YES '];
+    expect((await fx.update([], { tty: true })).code).toBe(0);
+    expect(merged()).toBe(true);
+  });
+
+  it("is asked with no restart in its words when there is none to make", async () => {
+    fx = await updateFake({ service: 'stopped' });
+    fx.replies = ['n'];
+    await fx.update([], { tty: true });
+    expect(fx.asked).toEqual(['update, and back up the database? [y/N] ']);
+  });
+});
