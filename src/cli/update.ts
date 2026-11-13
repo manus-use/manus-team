@@ -15,7 +15,7 @@ import type { MtIo } from './mt.js';
 import { realServiceDeps, serviceView, type RunResult, type ServiceDeps, type ServiceView } from './service.js';
 import { findNpm, mtCommand, shQuote } from './shell.js';
 import { finishByHand, stepsBack, stepsForward, type AdvicePaths } from './update-advice.js';
-import { UpdateLock, type UpdateLockState, type UpdateStep } from './update-lock.js';
+import { UNCHANGED_STEPS, UpdateLock, readUpdateLock, type UpdateLockState, type UpdateStep } from './update-lock.js';
 
 /**
  * `mt update` (spec §20): a deploy in one command. It checks before it
@@ -333,6 +333,10 @@ class Update {
   private backup: string | undefined;
   private added: string[] = [];
   private readonly locks: UpdateLock[] = [];
+  /** The checkout's lock and the home's, once known. */
+  private lockPaths: string[] = [];
+  /** Set when an unexpected error after step 3 leaves the locks for a person. */
+  private keepLocks = false;
   private lock: UpdateLockState;
   private readonly abort = new AbortController();
 
@@ -431,7 +435,7 @@ class Update {
     throw this.heldLock(path, taken.held);
   }
 
-  /** A lock found held: an update under way, or one that died. */
+  /** A lock found held: an update under way, or one that died, with what to do. */
   private heldLock(path: string, held: UpdateLockState | undefined): Stop {
     if (held === undefined) {
       return new Stop(1, `${path} holds no update's state; if no mt update runs, remove it: rm ${shQuote(path)}`);
@@ -439,7 +443,53 @@ class Update {
     if (this.deps.alive(held.pid)) {
       return new Stop(1, `an update (pid ${held.pid}) is under way on ${held.home}, from ${held.checkout}, at its step ${held.step} (${path})`);
     }
-    return new Stop(1, `an update (pid ${held.pid}) died at its step ${held.step}; its lock is never cleared by itself: ${path}`);
+    // Died: a kill -9, a power cut, or an error it did not foresee. Never cleared here; what to do depends on how far it got.
+    if (held.home !== this.view.mtHome) {
+      // The checkout's lock, left by an update of another home: that home's database and service are the ones to look at.
+      return new Stop(1, `an update of ${held.home} died at its step ${held.step}; run MT_HOME=${shQuote(held.home)} mt update for what to do`);
+    }
+    const commits = held.old === undefined ? '' : `, updating ${short(held.old)}..${short(held.new)}`;
+    // Both locks it left, named together, so the advice is followed once.
+    const left = this.lockPaths.filter((p) => {
+      try {
+        return readUpdateLock(p)?.pid === held.pid;
+      } catch {
+        return false;
+      }
+    });
+    if (!left.includes(path)) left.push(path);
+    const locks = left.length === 1 ? 'its lock' : 'its locks';
+    this.sayErr(`mt: an update (pid ${held.pid}) died at its step ${held.step}${commits}; ${locks} ${left.length === 1 ? 'is' : 'are'} never cleared by itself: ${left.join(', ')}`);
+    const rm = `then remove ${locks}: rm ${left.map(shQuote).join(' ')}`;
+    if (UNCHANGED_STEPS.includes(held.step)) {
+      this.say(`it changed nothing; remove ${locks}: rm ${left.map(shQuote).join(' ')}`);
+      return new Stop(1, undefined);
+    }
+    const paths = { ...this.paths, db: held.db ?? this.dbPath };
+    const was = held.userVersion ?? null;
+    const back = { old: held.old ?? 'HEAD', backup: held.backup };
+    let now: number | null;
+    try {
+      now = held.db === undefined ? null : versionOf(held.db);
+    } catch (err) {
+      this.say(`the database's version cannot be read here (${err instanceof Error ? err.message : String(err)}): read it with ${mtCommand(this.node, this.checkout)} service check`);
+      this.block(`at ${versionText(was)}, the steps back:`, stepsBack(paths, back));
+      this.block('at another, the steps forward:', stepsForward(paths));
+      this.say(rm);
+      return new Stop(1, undefined);
+    }
+    if (now === was) {
+      this.say(`the database is still at ${versionText(was)}`);
+      this.block('the steps back:', stepsBack(paths, back));
+    } else {
+      this.say(`the database moved from ${versionText(was)} to ${versionText(now)}: the old build can no longer run on it`);
+      this.block('the steps forward:', stepsForward(paths));
+      if ((held.step === 'restart' || held.step === 'confirm') && held.backup !== undefined) {
+        this.block('or the steps back, with its backup, which remain possible:', stepsBack(paths, back));
+      }
+    }
+    this.say(rm);
+    return new Stop(1, undefined);
   }
 
   // -------------------------------------------------------------------------
@@ -464,6 +514,7 @@ class Update {
     if (recorded !== undefined) this.node = recorded.node;
     this.npm = findNpm(this.node, this.shellEnv['PATH']) ?? 'npm';
 
+    this.lockPaths = [join(gitDir, 'mt-update.lock'), join(view.mtHome, 'run', 'update.pid')];
     this.takeLock(join(gitDir, 'mt-update.lock'));
     this.takeLock(join(view.mtHome, 'run', 'update.pid'), () => privateDir(join(view.mtHome, 'run'), 'the update lock'));
 
@@ -884,6 +935,23 @@ class Update {
 
   // -------------------------------------------------------------------------
 
+  /**
+   * An error nothing foresaw. Up to step 3 nothing changed: the locks go, exit 1.
+   * After it the update may be half way, so the locks stay, saying where it
+   * stopped, for the next run's advice: exit 3.
+   */
+  private unexpected(err: unknown): number {
+    const message = err instanceof Error ? err.message : String(err);
+    if (UNCHANGED_STEPS.includes(this.lock.step)) {
+      this.sayErr(`mt: unexpected error: ${message}`);
+      return 1;
+    }
+    this.keepLocks = true;
+    this.sayErr(`mt: unexpected error at its step ${this.lock.step}: ${message}`);
+    this.say(`its locks are kept, saying where it stopped: ${this.locks.map((l) => l.path).join(', ')}; run mt update again for what to do`);
+    return 3;
+  }
+
   async run(): Promise<number> {
     try {
       await this.inspect();
@@ -893,12 +961,12 @@ class Update {
       await this.apply();
       return await this.restart();
     } catch (err) {
-      if (!(err instanceof Stop)) throw err;
+      if (!(err instanceof Stop)) return this.unexpected(err);
       if (err.refusal !== undefined) this.sayErr(`mt: ${err.refusal}`);
       return err.code;
     } finally {
       this.db?.close();
-      for (const lock of [...this.locks].reverse()) lock.release();
+      if (!this.keepLocks) for (const lock of [...this.locks].reverse()) lock.release();
     }
   }
 }
