@@ -1728,11 +1728,11 @@ is now, and lists every task and every gate command, and makes nothing:
 ```
 $ mt kanban workflow apply caching.json --dry-run
 would make 5 tasks, 6 links, 0 gates, on board web-app; nothing was made
-  brief  Write the caching options brief  role worker
-  proto:1  Prototype caching option a  role worker, after brief
-  proto:2  Prototype caching option b  role worker, after brief
-  proto:3  Prototype caching option c  role worker, after brief
-  report  Write the caching recommendation  role worker, after proto:1, proto:2, proto:3
+  brief    Write the caching options brief   role worker
+  proto:1  Prototype caching option a        role worker  after brief
+  proto:2  Prototype caching option b        role worker  after brief
+  proto:3  Prototype caching option c        role worker  after brief
+  report   Write the caching recommendation  role worker  after proto:1, proto:2, proto:3
 $ mt kanban workflow apply caching.json --key caching:web-app --json
 {"ok":true,"instance_id":"w_…","existing":false,"board":"web-app","tasks":[{"task_id":"k_…","ref":"brief","step":"brief","item":null},…],"nudged":true}
 ```

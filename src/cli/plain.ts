@@ -177,7 +177,7 @@ export function madeText(
   return [head, ...table(rows).map((r) => `  ${r}`)];
 }
 
-/** `apply --dry-run`'s answer (spec §21.6): what the apply would make, each task followed by its gates' commands, masked; or the instance its key made. */
+/** `apply --dry-run`'s answer (spec §21.6): what the apply would make, a line a task in preview's columns, each followed by its gates' commands, masked; or the instance its key made. */
 export function dryRunText(
   dry: { existing: boolean; instanceId: string | null; board: string; tasks: readonly { ref: string; title: string; assignee: string | null; parents: readonly string[]; gates: readonly { command: string; timeout_s: number }[] }[] },
 ): string[] {
@@ -187,9 +187,18 @@ export function dryRunText(
   const gates = dry.tasks.reduce((sum, t) => sum + t.gates.length, 0);
   const s = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
   const out = [`would make ${s(tasks, 'task')}, ${s(links, 'link')}, ${s(gates, 'gate')}, on board ${line(dry.board, 80)}; nothing was made`];
-  for (const t of dry.tasks) {
-    const after = t.parents.length === 0 ? '' : `, after ${t.parents.map((p) => line(p, 64)).join(', ')}`;
-    out.push(`  ${line(t.ref, 64)}  ${line(t.title, 200)}  ${named(t.assignee)}${after}`);
+  // The columns are preview's, aligned over every task, each task's gates' commands below it.
+  const rows = table(
+    dry.tasks.map((t) => [
+      line(t.ref, 64),
+      line(t.title, 200),
+      named(t.assignee),
+      t.parents.length === 0 ? '' : `after ${t.parents.map((p) => line(p, 64)).join(', ')}`,
+      t.gates.length === 0 ? '' : s(t.gates.length, 'gate'),
+    ]),
+  );
+  for (const [i, t] of dry.tasks.entries()) {
+    out.push(`  ${rows[i] ?? ''}`);
     for (const g of t.gates) out.push(`    gate: ${line(g.command, 4096)} (up to ${g.timeout_s} s)`);
   }
   return out;

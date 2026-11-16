@@ -190,12 +190,12 @@ describe('mt kanban workflow apply', () => {
       code: 0,
       out: [
         'would make 4 tasks, 4 links, 2 gates, on board default; nothing was made',
-        '  shortlist  Shortlist vendors for log storage  role worker',
-        '  evaluate:1  Evaluate acme for log storage  role worker, after shortlist',
+        '  shortlist   Shortlist vendors for log storage   role worker',
+        '  evaluate:1  Evaluate acme for log storage       role worker  after shortlist               1 gate',
         '    gate: test -s evaluation.md (up to 30 s)',
-        '  evaluate:2  Evaluate globex for log storage  role worker, after shortlist',
+        '  evaluate:2  Evaluate globex for log storage     role worker  after shortlist               1 gate',
         '    gate: test -s evaluation.md (up to 30 s)',
-        '  recommend  Recommend a vendor for log storage  role worker, after evaluate:1, evaluate:2',
+        '  recommend   Recommend a vendor for log storage  role worker  after evaluate:1, evaluate:2',
       ].join('\n'),
       err: '',
     });
