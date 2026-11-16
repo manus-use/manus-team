@@ -1,5 +1,5 @@
 import type { BoardEntry, BoardSummary, TaskView } from '../db/kanban-read.js';
-import { counted, listed, runState, waitingLine, workdirLine } from '../kanban/chat-render.js';
+import { counted, listed, runState, waitingLine, workdirLine, type PreviewLine } from '../kanban/chat-render.js';
 import type { DisplayStatus } from '../kanban/status.js';
 import type { Assignee, GateRow } from '../kanban/types.js';
 import { redactKnownSecrets } from '../secrets.js';
@@ -127,6 +127,151 @@ export function showText(view: TaskView, gates: readonly GateRow[]): string[] {
     const shown = view.comments.slice(-5);
     out.push(`comments (${shown.length} of ${view.comments.length}):`);
     for (const c of shown) out.push(`  ${line(c.author, 80)}:`, ...indented(c.body, 1000));
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Workflows (spec §21.6, §21.10)
+// ---------------------------------------------------------------------------
+
+/** A role or a person, as a DAG names them. */
+function named(name: string | null): string {
+  if (name === null) return 'nobody';
+  return name.includes(':') ? line(name, 80) : `role ${line(name, 80)}`;
+}
+
+/**
+ * `mt kanban workflow preview` (spec §21.6): what a start would make, as chat's
+ * preview says it, a line a task with its ref, its title, its assignee, its
+ * parents' refs and how many gates it has, and that nothing was made.
+ */
+export function previewText(name: string, board: string, lines: readonly PreviewLine[]): string[] {
+  const n = lines.length;
+  const rows = lines.map((t) => [
+    line(t.ref, 64),
+    line(t.title, 120),
+    named(t.assignee),
+    t.parents.length === 0 ? '' : `after ${t.parents.map((p) => line(p, 64)).join(', ')}`,
+    t.gates === 0 ? '' : `${t.gates} gate${t.gates === 1 ? '' : 's'}`,
+  ]);
+  return [
+    `${line(name, 80)} would make ${n} task${n === 1 ? '' : 's'}, on board ${line(board, 80)}:`,
+    ...table(rows).map((r) => `  ${r}`),
+    `nothing was made: mt kanban workflow start ${line(name, 80)}, with these params, makes it`,
+  ];
+}
+
+/** A start's or an apply's answer (spec §21.6): the instance, then every task, uncut, with its ref, title and assignee. */
+export function madeText(
+  made: { instance: { instanceId: string; name: string | null; board: string; source: string }; tasks: readonly { taskId: string; ref: string; task: { title: string; assignee: Assignee | null } }[]; existing: boolean },
+): string[] {
+  const { instance } = made;
+  const n = made.tasks.length;
+  const what = instance.source === 'start' ? `started ${line(instance.name ?? '', 80)}` : instance.name === null ? 'applied a DAG with no workflow' : `applied ${line(instance.name, 80)}`;
+  const head = made.existing
+    ? `already made, as ${instance.instanceId}, on board ${line(instance.board, 80)}, ${n} task${n === 1 ? '' : 's'}; nothing new was made`
+    : `${what} as ${instance.instanceId}, on board ${line(instance.board, 80)}, ${n} task${n === 1 ? '' : 's'}`;
+  const rows = made.tasks.map((t) => [t.taskId, line(t.ref, 64), line(t.task.title, 200), who(t.task.assignee)]);
+  return [head, ...table(rows).map((r) => `  ${r}`)];
+}
+
+/** `apply --dry-run`'s answer (spec §21.6): what the apply would make, each task followed by its gates' commands, masked; or the instance its key made. */
+export function dryRunText(
+  dry: { existing: boolean; instanceId: string | null; board: string; tasks: readonly { ref: string; title: string; assignee: string | null; parents: readonly string[]; gates: readonly { command: string; timeout_s: number }[] }[] },
+): string[] {
+  if (dry.existing) return [`already made, as ${dry.instanceId ?? ''}: the apply would make nothing new`];
+  const tasks = dry.tasks.length;
+  const links = dry.tasks.reduce((sum, t) => sum + t.parents.length, 0);
+  const gates = dry.tasks.reduce((sum, t) => sum + t.gates.length, 0);
+  const s = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const out = [`would make ${s(tasks, 'task')}, ${s(links, 'link')}, ${s(gates, 'gate')}, on board ${line(dry.board, 80)}; nothing was made`];
+  for (const t of dry.tasks) {
+    const after = t.parents.length === 0 ? '' : `, after ${t.parents.map((p) => line(p, 64)).join(', ')}`;
+    out.push(`  ${line(t.ref, 64)}  ${line(t.title, 200)}  ${named(t.assignee)}${after}`);
+    for (const g of t.gates) out.push(`    gate: ${line(g.command, 4096)} (up to ${g.timeout_s} s)`);
+  }
+  return out;
+}
+
+/** `mt kanban workflow list` (spec §21.10): every usable workflow with its params and description, and each broken one with why. */
+export function workflowsText(
+  list: { usable: readonly { name: string; description: string | undefined }[]; broken: readonly { name: string; problem: string }[] },
+  params: (name: string) => string,
+): string[] {
+  const rows = [
+    ...list.usable.map((w) => ({ name: w.name, text: `${line(w.name, 80)}: params ${line(params(w.name), 400)}${w.description === undefined ? '' : ` · ${line(w.description, 200)}`}` })),
+    ...list.broken.map((b) => ({ name: b.name, text: `${line(b.name, 80)}: not usable: ${line(b.problem, 600)}` })),
+  ].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return rows.length === 0 ? ['no workflows: a workflow is a file, $MT_HOME/workflows/<name>.yaml'] : rows.map((r) => r.text);
+}
+
+/** A time as a terminal line says it, to the minute, in UTC. */
+function when(ms: number): string {
+  return `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+/** `mt kanban workflow instances [all]` (spec §21.10): a board's instances, newest first, every one rather than 30. */
+export function instancesText(
+  summaries: readonly { instance: { instanceId: string; name: string | null; createdBy: string; createdAt: number }; status: string; done: number; total: number; blocked: number }[],
+  opts: { board: string; all: boolean; total: number; read: number },
+): string[] {
+  const on = `on board ${line(opts.board, 80)}`;
+  const past = opts.total > opts.read ? [`only the ${opts.read} newest are read; an older instance is shown by its id, with mt kanban workflow show`] : [];
+  if (summaries.length === 0) {
+    return [opts.all ? `no workflow instances ${on}` : `no running or blocked workflow instances ${on}; mt kanban workflow instances all shows done and archived ones too`, ...past];
+  }
+  const rows = summaries.map((s) => [
+    s.instance.instanceId,
+    line(s.instance.name ?? '(no workflow)', 80),
+    s.status === 'blocked' ? `blocked (${s.blocked})` : s.status,
+    `${s.done} of ${s.total} done`,
+    line(s.instance.createdBy, 80),
+    when(s.instance.createdAt),
+  ]);
+  return [...table([['instance', 'workflow', 'status', 'members', 'by', 'when'], ...rows]), ...past];
+}
+
+/** `mt kanban workflow show` (spec §21.10): the instance, every member by step, and its related tasks apart, uncut. */
+export function instanceText(view: {
+  instance: { instanceId: string; name: string | null; board: string; createdBy: string; createdVia: { kind: string }; createdAt: number; dag: { params: Readonly<Record<string, string | readonly string[]>> } };
+  description: string | undefined;
+  members: readonly { step: string; item: string | null; task: { taskId: string; phase: string; blockKind: string | null; blockReason: string | null; assignee: Assignee | null; createdFromTask: string | null }; status: string }[];
+  related: readonly { task: { taskId: string; title: string }; status: string }[];
+  relatedInstances: readonly { instanceId: string; name: string | null; tasks: number }[];
+  status: string;
+  done: number;
+  total: number;
+  blocked: number;
+}): string[] {
+  const { instance } = view;
+  const how =
+    instance.createdVia.kind === 'chat'
+      ? 'in chat'
+      : instance.createdVia.kind === 'operator'
+        ? 'at the terminal'
+        : `by a run of ${view.members[0]?.task.createdFromTask ?? 'a task'}`;
+  const out = [
+    `${line(instance.name ?? '(no workflow)', 80)} (${instance.instanceId}): ${view.status === 'blocked' ? `blocked (${view.blocked})` : view.status}, ${view.done} of ${view.total} done, on board ${line(instance.board, 80)}`,
+    ...(view.description === undefined ? [] : [line(view.description, 400)]),
+    `started by ${line(instance.createdBy, 80)}, ${how}, ${when(instance.createdAt)}`,
+  ];
+  const params = Object.entries(instance.dag.params);
+  if (params.length > 0) out.push(`params: ${params.map(([k, v]) => `${line(k, 40)}: ${line(typeof v === 'string' ? v : v.join(', '), 400)}`).join(' · ')}`);
+  let step: string | undefined;
+  for (const m of view.members) {
+    if (m.step !== step) {
+      step = m.step;
+      out.push(`${line(m.step, 64)}:`);
+    }
+    const item = m.item === null ? '' : ` ${line(m.item, 200)}:`;
+    const why = m.task.phase === 'blocked' && m.task.blockKind !== null ? ` (${m.task.blockKind}): ${line(m.task.blockReason ?? '', 500)}` : '';
+    out.push(`  ${m.task.taskId}${item} ${m.status}${why} · ${who(m.task.assignee)}`);
+  }
+  if (view.related.length > 0 || view.relatedInstances.length > 0) {
+    out.push('related, not members:');
+    for (const r of view.related) out.push(`  ${r.task.taskId} ${line(r.task.title, 200)}: ${r.status}`);
+    for (const o of view.relatedInstances) out.push(`  ${o.instanceId} ${line(o.name ?? '(no workflow)', 80)}, ${o.tasks} task${o.tasks === 1 ? '' : 's'}`);
   }
   return out;
 }

@@ -43,8 +43,8 @@ import {
   expand,
   instanceStatus,
   listWorkflows,
-  paramsLine,
   readWorkflow,
+  usableMessage,
   type GivenParams,
   type InstanceState,
   type PersonOf,
@@ -1189,32 +1189,10 @@ export class KanbanService {
     return board.refuse('unknown_workflow', this.#usable(read.message));
   }
 
-  /** `message`, then the usable workflows and their params, at most 4 KiB: the names first, then the params, saying how many were left out. */
+  /** `message`, then the usable workflows and their params, at most 4 KiB. */
   #usable(message: string): string {
     const usable = this.#workflowsDir === undefined ? [] : listWorkflows(this.#workflowsDir, this.#workflowFacts()).usable;
-    if (usable.length === 0) return `${message}; there are no usable workflows`;
-    const max = WORKFLOW_MESSAGE_BYTES;
-    // Room kept at each step for what may still be said after it.
-    const room = 64;
-    const fits = (text: string): boolean => Buffer.byteLength(text, 'utf8') + room <= max;
-    let text = `${message}; the usable ones are`;
-    let names = 0;
-    for (const w of usable) {
-      const next = `${text}${names === 0 ? ' ' : ', '}${w.name}`;
-      if (!fits(next)) break;
-      text = next;
-      names += 1;
-    }
-    if (names < usable.length) text += ` and ${usable.length - names} more`;
-    let params = 0;
-    for (const w of usable.slice(0, names)) {
-      const next = `${text}${params === 0 ? '; their params: ' : '; '}${w.name} takes ${paramsLine(w)}`;
-      if (!fits(next)) break;
-      text = next;
-      params += 1;
-    }
-    if (params < names) text += `; the params of ${names - params} more left out`;
-    return text;
+    return usableMessage(message, usable, WORKFLOW_MESSAGE_BYTES);
   }
 
   /** The board a start or an apply goes on (spec §21.6): a run's task's, whatever else; otherwise the one asked for, else `default`. */

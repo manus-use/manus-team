@@ -532,6 +532,36 @@ export function readWorkflow(dir: string, name: string, facts: WorkflowFacts): R
   return { ok: true, workflow: checked.workflow };
 }
 
+/**
+ * `unknown_workflow`'s message (spec §21.6): `message`, then the usable
+ * workflows and their params, at most `max` bytes, the names first, then the
+ * params, saying how many were left out.
+ */
+export function usableMessage(message: string, usable: readonly Workflow[], max: number): string {
+  if (usable.length === 0) return `${message}; there are no usable workflows`;
+  // Room kept at each step for what may still be said after it.
+  const room = 64;
+  const fits = (text: string): boolean => Buffer.byteLength(text, 'utf8') + room <= max;
+  let text = `${message}; the usable ones are`;
+  let names = 0;
+  for (const w of usable) {
+    const next = `${text}${names === 0 ? ' ' : ', '}${w.name}`;
+    if (!fits(next)) break;
+    text = next;
+    names += 1;
+  }
+  if (names < usable.length) text += ` and ${usable.length - names} more`;
+  let params = 0;
+  for (const w of usable.slice(0, names)) {
+    const next = `${text}${params === 0 ? '; their params: ' : '; '}${w.name} takes ${paramsLine(w)}`;
+    if (!fits(next)) break;
+    text = next;
+    params += 1;
+  }
+  if (params < names) text += `; the params of ${names - params} more left out`;
+  return text;
+}
+
 /** A workflow's params, as `list` and `mt workflow check` say them: `topic (required), vendors (list, required), reviewer (default reviewer)`. */
 export function paramsLine(w: Workflow): string {
   if (w.params.length === 0) return 'none';

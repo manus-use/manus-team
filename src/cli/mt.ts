@@ -93,6 +93,13 @@ const USAGE = [
   '  mt kanban gate add <task_id> [--timeout <s>] -- <command...>',
   '  mt kanban gate list <task_id>',
   '  mt kanban gate remove <task_id> <gate_id>',
+  '  mt kanban workflow list [--json]',
+  '  mt kanban workflow instances [all] [--board <name>] [--json]',
+  '  mt kanban workflow show <instance> [--board <name>] [--dag | --json]',
+  '  mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]... [--json]',
+  '  mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>] [--json]',
+  '  mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--json]',
+  '  mt kanban workflow archive <instance> [--board <name>] [--json]',
   "the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
   `  mt kanban <${WORKER_COMMANDS.join('|')}> < input.json`,
 ].join('\n');
