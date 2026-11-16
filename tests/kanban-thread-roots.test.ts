@@ -47,7 +47,7 @@ describe('migration 008', () => {
           `INSERT INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, created_at)
            VALUES ('k_old', 'lark', 'cli_app', 'oc_team', 'omt_topic', ?)`,
         ).run(NOW);
-        expect(migrate(d, SCHEMA_DIR)).toBe(8);
+        expect(migrate(d, SCHEMA_DIR)).toBe(9);
         expect(subscriptionsOf(d, 'k_old')).toMatchObject([{ threadId: 'omt_topic', rootMessageId: null }]);
       } finally {
         d.close();

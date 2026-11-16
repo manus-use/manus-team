@@ -49,7 +49,7 @@ describe('migration 006', () => {
        VALUES ('r_old', 'k_old', 1, 'work', 'role', 'implementer', jsonb('{}'), ?)`,
     ).run(NOW);
 
-    expect(migrate(db, SCHEMA_DIR)).toBe(8);
+    expect(migrate(db, SCHEMA_DIR)).toBe(9);
 
     expect(getTask(db, 'k_old')).toMatchObject({ taskId: 'k_old', title: 'from before boards', phase: 'open', board: 'default' });
     expect(db.prepare('SELECT run_id, task_id FROM kanban_runs').all()).toEqual([{ run_id: 'r_old', task_id: 'k_old' }]);
@@ -57,7 +57,7 @@ describe('migration 006', () => {
     expect(boards.map((b) => [b.name, b.created_by])).toEqual([['default', 'gateway']]);
     // Stamped with the moment it ran, in milliseconds, as every other time is.
     expect(boards[0]?.created_at).toBeGreaterThan(NOW);
-    expect(db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 8 });
+    expect(db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 9 });
   });
 
   it('puts a task created afterwards on default unless it says otherwise', () => {

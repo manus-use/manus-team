@@ -60,6 +60,11 @@ export function newRunId(): string {
   return `r_${randomToken(12)}`;
 }
 
+/** One start of a workflow, or one apply of a DAG: an instance (spec §21.7). Opaque, as a task's id is. */
+export function newWorkflowId(): string {
+  return `w_${randomToken(12)}`;
+}
+
 /**
  * A per-process boot id, minted once at import time.
  *
