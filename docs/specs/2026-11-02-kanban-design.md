@@ -4089,10 +4089,11 @@ steps:
 
 - **The name is the file's, in the role grammar** (§2.1), checked as `nameProblem` checks a
   role's: it is typed in chat (`/kanban workflow start vendor-eval`), and it becomes a path, so
-  `../roles` must be impossible. A file whose name is not in the grammar, a dot-entry, or an entry
-  that is not a regular `.yaml` file is not a workflow: reported once by the check and ignored, as
-  `discoverRoles` ignores a badly named entry. A symlink is not followed, as a role's files are not
-  (§2.1): a workflow is the operator's, kept in the home.
+  `../roles` must be impossible. A file whose name is not in the grammar, or an entry that is not
+  a regular `.yaml` file, is not a workflow: reported once by the check and ignored, as
+  `discoverRoles` ignores a badly named entry. A dot-entry is skipped silently, as `discoverRoles`
+  skips one, so the directory can be under version control. A symlink is not followed, as a role's
+  files are not (§2.1), and is reported: a workflow is the operator's, kept in the home.
 - **At most 64 KiB.** A workflow is a few dozen lines, and what it expands to is stored with every
   instance (§21.7).
 - **Parsed as a role's `config.yaml` is**: the `yaml` package's `parse` (`src/roles.ts`), YAML
@@ -4216,6 +4217,9 @@ The same checks run in three places, from one module, `src/kanban/workflow.ts`:
 - the names: the workflow's, each step's and each param's;
 - each step's `parents` naming steps of the file, never itself, and no cycle among the steps,
   found by a walk of the parents with the cycle named (`shortlist -> evaluate -> shortlist`);
+- each step written below its parents: a parent written after its child is refused, naming
+  both, so the file's order is the one the tasks are made in and a parent always comes earlier in
+  the DAG (§21.5);
 - `for_each` naming a declared list param, and `{{item}}` only in a for_each step;
 - every `{{…}}` a declared param, and no list param in a name field;
 - roles and workspaces written literally existing and usable, as `create` asks of them
@@ -5280,3 +5284,8 @@ were folded in: `MtIo.stdin` returning bytes, with the test fakes named; a BOM r
 `ignoreBOM`; the socket decoding strictly; `ES2024.String` for `isWellFormed`; `taskProblems`'s
 order, `#idempotencyKey` staying in the service, and the pure `assignable` shared by every caller;
 no isolated workspaces among the facts; and a DAG's param names held to the param grammar.
+*Amended on 2026-11-16, a fifth time.* The plan's review was folded in. The user chose to skip a
+dot-entry in the workflows directory silently, as `discoverRoles` does, a badly named file, an
+entry that is not a regular `.yaml` file and a symlink still reported. The reviewer accepted the
+plan's reading that a step is written below its parents, a parent written after its child refused
+by the check, now in §21.4.

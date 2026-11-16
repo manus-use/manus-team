@@ -29,9 +29,9 @@
   - Write plain-English commit messages: no mention of Claude or AI, no `Co-Authored-By` trailer, no Chinese text.
   - The letters `p`,`g`,`w` in that order, in any case, must not appear in anything you write.
 - **Node 22.** Run `export PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH` before every command.
-- **Baseline.** `npx vitest run --project unit` gives `Tests  1999 passed (1999)`. `npx vitest run --project e2e` gives `Tests  164 passed (164)`. `npm run typecheck` reports no errors. One unit test, `tests/update-run.test.ts`'s "kills the whole group at its time limit", is known to fail now and then under load; run the suite again before looking into a single failure.
+- **Baseline.** `npx vitest run --project unit` gives `Tests  1999 passed (1999)`. `npx vitest run --project e2e` gives `Tests  164 passed (164)`. `npm run typecheck` reports no errors. One unit test, `tests/update-run.test.ts`'s "kills the whole group at its time limit", is known to fail now and then under load; Task 1 gives it room, before the rest of the plan adds its tests.
 - **Finding edits.** Find each edit by its quoted text, not by line number. Every quoted text is whole lines, and appears exactly once in its file at the point the step applies it. Apply a step's edits in the order given. Every step of this plan was applied in that order, from `e73ee3e`, in a throwaway copy, and gave the counts and failures it states; the plan's own text was then applied in a second fresh copy, which gave them again.
-- **One writer.** `db/` modules stay the only writers of a database: `db/kanban.ts` writes both new tables, every task, link, gate, member and subscription a workflow makes, and every event. The service, chat, the worker API and the terminal only call it. `src/db/WRITERS.md` says so (Tasks 10 and 11).
+- **One writer.** `db/` modules stay the only writers of a database: `db/kanban.ts` writes both new tables, every task, link, gate, member and subscription a workflow makes, and every event. The service, chat, the worker API and the terminal only call it. `src/db/WRITERS.md` says so (Tasks 11 and 12).
 - **Words a person sees** (replies, refusals, `mt` output, the log, the README and the guide) never name a plan, and do not use the long dash.
 - **No real agent.** No test runs bytesec.
 
@@ -40,10 +40,10 @@
 Each has its reason. Where the code and the spec disagree, the code is the fact, and the decision says which reading keeps the spec's intent; those are listed again under "Where the code forced a reading" below.
 
 1. **The DAG has a module of its own, `src/kanban/dag.ts`**, which `workflow.ts` re-exports (`checkDagShape`, `readDag`), as §21.15 names them there: the DAG is read without any workflow file (an agent's, the terminal's), and the database's reads (`kanban-read.ts`) import its type without the file's parser.
-2. **A step's parents are written above it.** §21.5 says the expansion writes tasks "in step order, then item order, and a step's parents come before it in a file with no cycle", which holds only for a file written in that order; a file listing a child first, with no cycle, would expand to a DAG with a parent after its child, which the DAG's own check refuses. The file's check refuses it instead, after the cycle check, naming the step: "steps.a.parents names b, which is written after it: write a step below its parents". Step order stays the file's, as §21.1 asks.
+2. **A step's parents are written above it.** §21.5 says the expansion writes tasks "in step order, then item order, and a step's parents come before it in a file with no cycle", which holds only for a file written in that order; a file listing a child first, with no cycle, would expand to a DAG with a parent after its child, which the DAG's own check refuses. The file's check refuses it instead, after the cycle check, naming the step: "steps.a.parents names b, which is written after it: write a step below its parents". Step order stays the file's, as §21.1 asks. The reading is written into §21.4, with the plan.
 3. **A file is parsed with `parse(text, { logLevel: 'error' })`.** The parser's default warns on stderr when a key is itself a mapping, which an unquoted `{{x}}` makes; the check reports it as a problem instead, so a warning would only be noise in `mt` and the gateway's log. A duplicated key is still the parser's error.
 4. **A problem names its place, not the file.** `section` and `reject` prefix their message with a path; the check gives them `<name>.yaml` and takes it off, so a problem reads `unknown setting steps.evaluate.timeout (known: …)`, and the startup line `workflow onboarding is not usable: …` names the workflow once.
-5. **A dot-entry is reported once and ignored**, as §21.1 lists it with a badly named file and a symlink; `discoverRoles` skips dot-entries silently, which the spec does not ask of workflows.
+5. **A dot-entry is skipped silently**, as `discoverRoles` skips one, so the directory can be under version control: the user's decision, written into §21.1. A badly named file, a file that is not `.yaml` and a symlink are still reported once and ignored.
 6. **The list rules apply to every list param**: an empty list, an empty item, an item twice and an item holding a known secret are refused whether or not a `for_each` takes it, as an item that lands in text only would label nothing and read badly. Items are trimmed, and compared as given.
 7. **`@` is resolved for any value starting with it, quoted or not**, in a param that lands in a person field, `"{{owner}}"`, `{ person: "{{owner}}" }`, or `"{{item}}"` in a for_each step, where each item is resolved. The parser matches mention names only for an unquoted value, as §21.6 says; a quoted `"@Alice Smith"` is whole anyway. Talk tier is the service's check, as `create`'s.
 8. **Chat's `personOf` says its refusal plainly**, mirroring `#mentioned`'s three cases, as the service's refusal is escaped again by `refused`; `#mentioned`'s own replies are already escaped.
@@ -59,6 +59,9 @@ Each has its reason. Where the code and the spec disagree, the code is the fact,
 18. **An instance's "done" count is its finished members**, done or archived, as the status counts an archived member as finished (§21.10).
 19. **Times in `instances` and `show` are UTC, to the minute**, as no other board reply has a time to follow.
 20. **`unknown_workflow`'s message** is `there is no workflow <name>; the usable ones are a, b; their params: a takes …; b takes …`, the names first, then the params, each part cut so the whole stays within 4 KiB, saying `and N more` and `the params of N more left out`.
+21. **`@Name` with no mention to resolve it.** At the terminal and from a run there is no message, so no `personOf`; a value starting with `@` in a param that lands in a person field is refused `person_not_assignable`, in the words the terminal uses for a person (`personRefused`'s), rather than tried as a role name. In a text field it stays text.
+22. **A ref or a step holding a known secret is refused**, by `checkDagTasks`, before any other check of the task, and without quoting it: a ref names the task in every refusal and in `show`, and is stored unmasked, as names are.
+23. **A workflows directory that cannot be read** gives two startup lines, `workflows directory <dir> cannot be read: …` and `workflows: none`, so `mt service check` warns of the first, as of any other problem line (Decision 10), and the gateway still starts.
 
 ## Known limitations
 
@@ -109,15 +112,52 @@ From spec §21.17, kept as it says: no conditions and no loops; no item pairing;
 | `tests/helpers/workflow.ts` (create) | `VENDOR_EVAL`, the example of §21.1 |
 | `tests/fakes/cli-agent.mjs` (modify) | `kanban-body` |
 | `tests/well-formed.test.ts`, `tests/strict-utf8.test.ts`, `tests/kanban-task-checks.test.ts`, `tests/kanban-gate-command.test.ts`, `tests/kanban-workflow-schema.test.ts`, `tests/kanban-dag.test.ts`, `tests/kanban-workflow-file.test.ts`, `tests/kanban-workflow-expand.test.ts`, `tests/kanban-workflow-check.test.ts`, `tests/kanban-workflow-writer.test.ts`, `tests/kanban-workflow-service.test.ts`, `tests/kanban-workflow-instances.test.ts`, `tests/kanban-workflow-chat-parse.test.ts`, `tests/kanban-workflow-chat.test.ts`, `tests/kanban-workflow-worker.test.ts`, `tests/mt-kanban-workflow.test.ts`, `tests/kanban-workflow-task-show.test.ts`, `tests/kanban-workflow.e2e.ts` (create) | |
+| `tests/update-run.test.ts` (modify) | its time limit's test given 10 s (Task 1) |
 | `tests/mt-kanban.test.ts`, `tests/mt-kanban-operator-tasks.test.ts`, `tests/mt-kanban-worktree.test.ts`, `tests/gateway-startup.test.ts`, `tests/kanban-boards-schema.test.ts`, `tests/kanban-schema.test.ts`, `tests/kanban-thread-roots.test.ts`, `tests/kanban-worktree-schema.test.ts`, `tests/kanban-worker.test.ts`, `tests/mt.test.ts` (modify) | the stdin fakes; the schema's version; the list form of the move; the worker's command list |
 
-Running counts, unit then end to end: Task 1 2000 / 164, Task 2 2006 / 164, Task 3 2011 / 164, Task 4 2013 / 164, Task 5 2018 / 164, Task 6 2048 / 164, Task 7 2069 / 164, Task 8 2087 / 164, Task 9 2096 / 164, Task 10 2098 / 164, Task 11 2109 / 164, Task 12 2125 / 164, Task 13 2132 / 164, Task 14 2138 / 164, Task 15 2151 / 164, Task 16 2160 / 164, Task 17 2173 / 164, Task 18 2175 / 164, Task 19 2175 / 168, Task 20 2175 / 168.
+Running counts, unit then end to end: Task 1 1999 / 164, Task 2 2000 / 164, Task 3 2006 / 164, Task 4 2011 / 164, Task 5 2013 / 164, Task 6 2018 / 164, Task 7 2049 / 164, Task 8 2070 / 164, Task 9 2089 / 164, Task 10 2100 / 164, Task 11 2102 / 164, Task 12 2114 / 164, Task 13 2131 / 164, Task 14 2138 / 164, Task 15 2144 / 164, Task 16 2157 / 164, Task 17 2166 / 164, Task 18 2179 / 164, Task 19 2181 / 164, Task 20 2181 / 168, Task 21 2181 / 168.
 
-How §21.16's tests map to the tasks: the file's keys, names, grammar, symlink and dot-entry, size, parents, cycle, for_each, references, list param in a name field, `required` and `default`, gates (`{{`, `$NAME`, mask, secret, size, timeout, 21, 601 s, 300 s by default), literal roles and workspaces, supervised roles, the foreseeable workspace conflict and step order (Task 7); a start's params on each path, the pair's first `=`, lists, quotes, a text param twice, sizes, title characters, items, `@` for a person field only, substitution once in every text field, names checked, all to all, a fan-in, 101 tasks (Task 8, the parser's pairs in Task 14); the repeated key before the file is read, a key reused, the namespaces, another board, an archived instance's key, the board in each path, a run's start on its task's board and created from it, one failure naming step and item with nothing written, the person at the terminal and without tier, `unknown_workflow` cut at 4 KiB (Task 12); every write in one transaction, a refusal rolling it back, the `created` events, the gate's `created_by`, the stored DAG masked but its gates with the hash taken before, the members' unique ref as a backstop (Task 11); the status table, `list` with a broken file, `instances` and `all`, `show`'s members, related tasks and another instance as one line, `archive` (Task 13, and the replies in Task 15); the DAG's every key and default, an unknown key, `null`, lone surrogates, the canonical form and its hash, its sizes, from a run the settings, gates, `workflow` and `params`, refs and parents, 0 and 101 tasks, `{{` kept, the BOM (Tasks 6 and 17); `taskProblems` and `create`'s refusals in order, `assignable` (Task 3); broken bytes from every worker command, a file and stdin, and the socket (Tasks 2 and 17); preview and apply: the preview's `--json` byte for byte, a refusal on stderr, a dry run, an apply of a preview, what changed between them, a repeat and a key's other use, the hash in no output, a preview opening no database, a dry run's gate commands, "(no workflow)", `show --dag` applied again (Tasks 12 and 17); chat's reply, 30 lines under 3,800 characters, the thread, the holds released, every subscription moved in one call, a start in a direct message and inside a thread, the tiers, a sender with no union_id (Task 15); the startup's lines, `workflows: none`, a broken workflow not stopping the start, `mt workflow check` with and without a name, its exit codes, in a run's shell, `mt service check`'s warnings (Task 9); the worker's `apply-dag` with refs, its key taken off first, its 192 KiB before sending, `start-workflow`'s schema and `unknown_workflow`, `mt kanban workflow start` refused in a run's shell naming `start-workflow` (Task 16); the workflow commands refused `no_board` on an unmigrated database (Task 17) and `task show` working there (Task 18); and the end-to-end list (Task 19).
+How §21.16's tests map to the tasks: the file's keys, names, grammar, symlink and dot-entry, size, parents, cycle, for_each, references, list param in a name field, `required` and `default`, gates (`{{`, `$NAME`, mask, secret, size, timeout, 21, 601 s, 300 s by default), literal roles and workspaces, supervised roles, the foreseeable workspace conflict and step order (Task 8); a start's params on each path, the pair's first `=`, lists, quotes, a text param twice, sizes, title characters, items, `@` for a person field only, substitution once in every text field, names checked, all to all, a fan-in, 101 tasks (Task 9, the parser's pairs in Task 15); the repeated key before the file is read, a key reused, the namespaces, another board, an archived instance's key, the board in each path, a run's start on its task's board and created from it, one failure naming step and item with nothing written, the person at the terminal and without tier, `unknown_workflow` cut at 4 KiB (Task 13); every write in one transaction, a refusal rolling it back, the `created` events, the gate's `created_by`, the stored DAG masked but its gates with the hash taken before, the members' unique ref as a backstop (Task 12); the status table, `list` with a broken file, `instances` and `all`, `show`'s members, related tasks and another instance as one line, `archive` (Task 14, and the replies in Task 16); the DAG's every key and default, an unknown key, `null`, lone surrogates, the canonical form and its hash, its sizes, from a run the settings, gates, `workflow` and `params`, refs and parents, 0 and 101 tasks, `{{` kept, the BOM (Tasks 7 and 18); `taskProblems` and `create`'s refusals in order, `assignable` (Task 4); broken bytes from every worker command, a file and stdin, and the socket (Tasks 3 and 18); preview and apply: the preview's `--json` byte for byte, a refusal on stderr, a dry run, an apply of a preview, what changed between them, a repeat and a key's other use, the hash in no output, a preview opening no database, a dry run's gate commands, "(no workflow)", `show --dag` applied again (Tasks 13 and 18); chat's reply, 30 lines under 3,800 characters, the thread, the holds released, every subscription moved in one call, a start in a direct message and inside a thread, the tiers, a sender with no union_id (Task 16); the startup's lines, `workflows: none`, a broken workflow not stopping the start, `mt workflow check` with and without a name, its exit codes, in a run's shell, `mt service check`'s warnings (Task 10); the worker's `apply-dag` with refs, its key taken off first, its 192 KiB before sending, `start-workflow`'s schema and `unknown_workflow`, `mt kanban workflow start` refused in a run's shell naming `start-workflow` (Task 17); the workflow commands refused `no_board` on an unmigrated database (Task 18) and `task show` working there (Task 19); and the end-to-end list (Task 20).
 
 ---
 
-### Task 1: The type checker's lib, for `isWellFormed`
+### Task 1: A steadier test of `runDetached`'s time limit
+
+**Files:**
+
+- Modify: `tests/update-run.test.ts`
+
+Not of spec §21: it keeps the suite steady while this plan adds its tests. `tests/update-run.test.ts`'s "kills the whole group at its time limit, a child of the command included" times a 1.5 s limit from before the spawn and allowed 5 s; under the load of the larger suite a slow spawn has run past that. The bound becomes 10 s, still well short of the 30 s the child would sleep, so the test still shows the group was killed at its limit and not left to finish.
+
+- [ ] **Step 1.1: Edit the test.**
+
+In `tests/update-run.test.ts`, replace:
+
+```ts
+    expect(Date.now() - started).toBeLessThan(5_000);
+```
+
+with:
+
+```ts
+    // Well short of the 30 s the child would sleep, with room for a loaded machine's slow spawn.
+    expect(Date.now() - started).toBeLessThan(10_000);
+```
+
+- [ ] **Step 1.2: Run it.** Run `npx vitest run --project unit tests/update-run.test.ts`. Expected: `Tests  18 passed (18)`.
+
+- [ ] **Step 1.3: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  1999 passed (1999)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+
+- [ ] **Step 1.4: Commit.**
+
+```bash
+git add tests/update-run.test.ts
+git commit -m "Give runDetached's test of a group killed at its time limit 10 seconds, well short of the child's 30, so a loaded machine's slow spawn does not fail it"
+```
+
+---
+
+### Task 2: The type checker's lib, for `isWellFormed`
 
 **Files:**
 
@@ -126,7 +166,7 @@ How §21.16's tests map to the tasks: the file's keys, names, grammar, symlink a
 
 Spec §21.15. The DAG's checks refuse a string that is not well formed (spec §21.5), with `String.prototype.isWellFormed`, which Node 22 has and the type checker's `ES2023` lib does not declare. `tsconfig.json` gains `"ES2024.String"` beside `"ES2023"`; `tsconfig.build.json` extends it. Nothing else changes, so a test that calls it is enough: it passes under vitest, which does not type-check, and fails `npm run typecheck` until the lib is there.
 
-- [ ] **Step 1.1: Write the tests.**
+- [ ] **Step 2.1: Write the tests.**
 
 Create `tests/well-formed.test.ts`:
 
@@ -148,9 +188,9 @@ describe('isWellFormed', () => {
 });
 ```
 
-- [ ] **Step 1.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/well-formed.test.ts`. Expected: `Tests  1 passed (1)`: vitest does not type-check. Run `npm run typecheck`. Expected: `error TS2550: Property 'isWellFormed' does not exist on type …. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2024' or later.`, once for each call.
+- [ ] **Step 2.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/well-formed.test.ts`. Expected: `Tests  1 passed (1)`: vitest does not type-check. Run `npm run typecheck`. Expected: `error TS2550: Property 'isWellFormed' does not exist on type …. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2024' or later.`, once for each call.
 
-- [ ] **Step 1.3: Implement.**
+- [ ] **Step 2.3: Implement.**
 
 In `tsconfig.json`, replace:
 
@@ -164,9 +204,9 @@ with:
     "lib": ["ES2023", "ES2024.String"],
 ```
 
-- [ ] **Step 1.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2000 passed (2000)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 2.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2000 passed (2000)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 1.5: Commit.**
+- [ ] **Step 2.5: Commit.**
 
 ```bash
 git add tests/well-formed.test.ts tsconfig.json
@@ -175,7 +215,7 @@ git commit -m "Add ES2024.String to the type checker's lib, for String.prototype
 
 ---
 
-### Task 2: Strict UTF-8: stdin as bytes, and the socket's decoding
+### Task 3: Strict UTF-8: stdin as bytes, and the socket's decoding
 
 **Files:**
 
@@ -184,7 +224,7 @@ git commit -m "Add ES2024.String to the type checker's lib, for String.prototype
 
 Spec §21.5. Text is read strictly as UTF-8 on every path a DAG can take, and so on every path of the same kind: `readAll` (`src/cli/kanban.ts`) returns the bytes it read, `MtIo.stdin` answers `Uint8Array | undefined`, and every worker command decodes its input with `decodeUtf8` (`src/text.ts`, a fatal `TextDecoder` with `ignoreBOM: true`), refusing bytes that are not UTF-8 as `invalid` and a byte order mark as not JSON. The operator's `--body-file` decodes the same way, from a file and from stdin, and the worker socket (`src/kanban/socket.ts`) refuses a request that is not UTF-8 as `bad_request`. The test fakes the spec names, `tests/mt-kanban.test.ts`, `tests/mt-kanban-operator-tasks.test.ts` (twice) and `tests/mt-kanban-worktree.test.ts`, return `Buffer.from(text)`. Every UTF-8 input reads as before.
 
-- [ ] **Step 2.1: Write the tests.**
+- [ ] **Step 3.1: Write the tests.**
 
 In `tests/mt-kanban-operator-tasks.test.ts`, replace:
 
@@ -376,9 +416,9 @@ describe('the worker socket', () => {
 });
 ```
 
-- [ ] **Step 2.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/strict-utf8.test.ts`. Expected: `Tests  5 failed | 1 passed (6)`; the first failure: `TypeError: (0 , decodeUtf8) is not a function`.
+- [ ] **Step 3.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/strict-utf8.test.ts`. Expected: `Tests  5 failed | 1 passed (6)`; the first failure: `TypeError: (0 , decodeUtf8) is not a function`.
 
-- [ ] **Step 2.3: Implement.**
+- [ ] **Step 3.3: Implement.**
 
 In `src/cli/kanban.ts`, replace:
 
@@ -558,9 +598,9 @@ export function decodeUtf8(bytes: Uint8Array): string | undefined {
 }
 ```
 
-- [ ] **Step 2.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2006 passed (2006)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 3.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2006 passed (2006)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 2.5: Commit.**
+- [ ] **Step 3.5: Commit.**
 
 ```bash
 git add src/cli/kanban.ts src/cli/mt.ts src/cli/operator.ts src/kanban/socket.ts src/text.ts tests/mt-kanban-operator-tasks.test.ts tests/mt-kanban-worktree.test.ts tests/mt-kanban.test.ts tests/strict-utf8.test.ts
@@ -569,7 +609,7 @@ git commit -m "Read every worker command's stdin, the operator's body and a sock
 
 ---
 
-### Task 3: `taskProblems` and `assignable`, out of the service
+### Task 4: `taskProblems` and `assignable`, out of the service
 
 **Files:**
 
@@ -578,7 +618,7 @@ git commit -m "Read every worker command's stdin, the operator's body and a sock
 
 Spec §21.6, §21.15. The terminal's preview opens no database, so it has no `KanbanService` to judge a task with. `create`'s per-task checks, its body, `#contract` and `#assignable`, move into `src/kanban/task-checks.ts`, pure, with their messages unchanged and in today's order: the title, `createdBy`, `createdVia`, the types of the body, workspace, board and parents, the contract, the workspace being configured, the numbers, the crash rule, the assignee, the reviewer. `checkTask(req, facts)` answers the checked contract and names, `taskProblems(req, facts)` the first refusal; the facts are the roles, the workspaces, `supervisedRoles` and an optional `canTalk`, absent when no person can be given work. `assignable(name, facts)` is the one assignable check, which `create`, `assign`, `assignReviewer` and a named reviewer of `requestReview` all call. `#idempotencyKey` stays in the service, as it reads the database for a run's task. The test walks a request with every field wrong through `create` and through `taskProblems`, fixing one at a time, so each refusal is seen in its order, before the move and after.
 
-- [ ] **Step 3.1: Write the tests.**
+- [ ] **Step 4.1: Write the tests.**
 
 Create `tests/kanban-task-checks.test.ts`:
 
@@ -738,9 +778,9 @@ describe('assignable', () => {
 });
 ```
 
-- [ ] **Step 3.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-task-checks.test.ts`. Expected: `Tests  no tests`: the file fails to load, `Error: Cannot find module '../src/kanban/task-checks.js' imported from '<worktree>/tests/kanban-task-checks.test.ts'`.
+- [ ] **Step 4.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-task-checks.test.ts`. Expected: `Tests  no tests`: the file fails to load, `Error: Cannot find module '../src/kanban/task-checks.js' imported from '<worktree>/tests/kanban-task-checks.test.ts'`.
 
-- [ ] **Step 3.3: Implement.**
+- [ ] **Step 4.3: Implement.**
 
 In `src/kanban/service.ts`, replace:
 
@@ -1209,9 +1249,9 @@ export function taskProblems(req: TaskRequest, facts: TaskFacts): Refusal | unde
 }
 ```
 
-- [ ] **Step 3.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2011 passed (2011)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 4.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2011 passed (2011)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 3.5: Commit.**
+- [ ] **Step 4.5: Commit.**
 
 ```bash
 git add src/kanban/service.ts src/kanban/task-checks.ts tests/kanban-task-checks.test.ts
@@ -1220,7 +1260,7 @@ git commit -m "Move create's per-task checks into a pure taskProblems, and its a
 
 ---
 
-### Task 4: `holdsSecret`, in a module of its own
+### Task 5: `holdsSecret`, in a module of its own
 
 **Files:**
 
@@ -1229,7 +1269,7 @@ git commit -m "Move create's per-task checks into a pure taskProblems, and its a
 
 Spec §21.15. A workflow's gate checks refuse a command holding a known secret as `addGate` does, with `holdsSecret`, today a private function of `service.ts`. It moves, unchanged, to `src/kanban/gate-command.ts`, which the service imports, so the pure workflow module never imports the service. The test pins the forms it finds, and `addGate`'s refusal through it.
 
-- [ ] **Step 4.1: Write the tests.**
+- [ ] **Step 5.1: Write the tests.**
 
 Create `tests/kanban-gate-command.test.ts`:
 
@@ -1291,9 +1331,9 @@ describe('addGate', () => {
 });
 ```
 
-- [ ] **Step 4.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-gate-command.test.ts`. Expected: `Tests  no tests`: the file fails to load, `Error: Cannot find module '../src/kanban/gate-command.js' imported from '<worktree>/tests/kanban-gate-command.test.ts'`.
+- [ ] **Step 5.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-gate-command.test.ts`. Expected: `Tests  no tests`: the file fails to load, `Error: Cannot find module '../src/kanban/gate-command.js' imported from '<worktree>/tests/kanban-gate-command.test.ts'`.
 
-- [ ] **Step 4.3: Implement.**
+- [ ] **Step 5.3: Implement.**
 
 Create `src/kanban/gate-command.ts`:
 
@@ -1366,9 +1406,9 @@ with:
   if (!statSync(path).isFile()) throw new Error(`${path} is not a file`);
 ```
 
-- [ ] **Step 4.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2013 passed (2013)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 5.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2013 passed (2013)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 4.5: Commit.**
+- [ ] **Step 5.5: Commit.**
 
 ```bash
 git add src/kanban/gate-command.ts src/kanban/service.ts tests/kanban-gate-command.test.ts
@@ -1377,16 +1417,16 @@ git commit -m "Move holdsSecret out of the service into a module of its own, so 
 
 ---
 
-### Task 5: Migration 009: instances and their members
+### Task 6: Migration 009: instances and their members
 
 **Files:**
 
 - Create: `schema/009_workflows.sql`, `tests/kanban-workflow-schema.test.ts`
 - Modify: `src/core/ids.ts`, `tests/gateway-startup.test.ts`, `tests/kanban-boards-schema.test.ts`, `tests/kanban-schema.test.ts`, `tests/kanban-thread-roots.test.ts`, `tests/kanban-worktree-schema.test.ts`
 
-Spec §21.7. `kanban_workflow_instances` holds an instance's name (null for a DAG with none), its DAG, the SHA-256 of its canonical form, its `source` (`start` or `apply`), its board, who made it and how, and its idempotency key, unique; `kanban_workflow_tasks`, `WITHOUT ROWID`, holds each member by its task's id, with its ref, step, item and position, `UNIQUE (instance_id, position)` and `UNIQUE (instance_id, ref)`. Foreign keys are allowed, as both tables are new. An index on `(board, created_at)` serves `instances`, and one on `kanban_tasks(created_from_task)` serves `show`'s related tasks. `newWorkflowId` (`src/core/ids.ts`) mints `w_…`. Five tests that pin the schema's version, or list the kanban tables, move to 9; WRITERS.md gains the tables' rows with their writer, in Task 11.
+Spec §21.7. `kanban_workflow_instances` holds an instance's name (null for a DAG with none), its DAG, the SHA-256 of its canonical form, its `source` (`start` or `apply`), its board, who made it and how, and its idempotency key, unique; `kanban_workflow_tasks`, `WITHOUT ROWID`, holds each member by its task's id, with its ref, step, item and position, `UNIQUE (instance_id, position)` and `UNIQUE (instance_id, ref)`. Foreign keys are allowed, as both tables are new. An index on `(board, created_at)` serves `instances`, and one on `kanban_tasks(created_from_task)` serves `show`'s related tasks. `newWorkflowId` (`src/core/ids.ts`) mints `w_…`. Five tests that pin the schema's version, or list the kanban tables, move to 9; WRITERS.md gains the tables' rows with their writer, in Task 12.
 
-- [ ] **Step 5.1: Write the tests.**
+- [ ] **Step 6.1: Write the tests.**
 
 In `tests/gateway-startup.test.ts`, replace:
 
@@ -1603,9 +1643,9 @@ with:
         expect(migrate(d, SCHEMA_DIR)).toBe(9);
 ```
 
-- [ ] **Step 5.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-schema.test.ts tests/kanban-schema.test.ts tests/kanban-boards-schema.test.ts tests/kanban-worktree-schema.test.ts tests/kanban-thread-roots.test.ts tests/gateway-startup.test.ts`. Expected: `Tests  10 failed | 37 passed (47)`; the first failure: `AssertionError: expected false to be true // Object.is equality`.
+- [ ] **Step 6.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-schema.test.ts tests/kanban-schema.test.ts tests/kanban-boards-schema.test.ts tests/kanban-worktree-schema.test.ts tests/kanban-thread-roots.test.ts tests/gateway-startup.test.ts`. Expected: `Tests  10 failed | 37 passed (47)`; the first failure: `AssertionError: expected false to be true // Object.is equality`.
 
-- [ ] **Step 5.3: Implement.**
+- [ ] **Step 6.3: Implement.**
 
 Create `schema/009_workflows.sql`:
 
@@ -1675,9 +1715,9 @@ export function newWorkflowId(): string {
   return `w_${randomToken(12)}`;
 ```
 
-- [ ] **Step 5.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2018 passed (2018)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 6.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2018 passed (2018)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 5.5: Commit.**
+- [ ] **Step 6.5: Commit.**
 
 ```bash
 git add schema/009_workflows.sql src/core/ids.ts tests/gateway-startup.test.ts tests/kanban-boards-schema.test.ts tests/kanban-schema.test.ts tests/kanban-thread-roots.test.ts tests/kanban-workflow-schema.test.ts tests/kanban-worktree-schema.test.ts
@@ -1686,16 +1726,16 @@ git commit -m "Add migration 009: a workflow's instances, with their DAG, its ha
 
 ---
 
-### Task 6: The DAG: its shape, defaults, canonical form and checks
+### Task 7: The DAG: its shape, defaults, canonical form and checks
 
 **Files:**
 
 - Create: `src/kanban/dag.ts`, `tests/kanban-dag.test.ts`
 - Modify: `src/kanban/gate-command.ts`, `src/kanban/types.ts`, `src/kanban/worker.ts`
 
-Spec §21.5. `src/kanban/dag.ts`, pure. `checkDagShape(raw, from)` checks the format (1 alone), every key at each level, an unknown one refused naming its place, every type, every string well formed, the refs (unique, 1 to 64 bytes of letters, digits, `.`, `_`, `:` and `-`) and parents (earlier refs, each once), `null` refused where a key's default is not `null`, where gates may come from (`terminal` and `expansion` take them, `run` refuses any), from a run the settings its `create` cannot set, a `workflow` name and params, and a gate holding the mask `••••`; then it fills in every default, makes the canonical form (compact JSON, the tables' key order, a contract's fields in `CONTRACT_FIELDS`' order, the params by name, unmasked), measures it against 192 KiB from a run and 1 MiB elsewhere, and hashes it. `readDag(text, from)` parses JSON first. `dagFile` is the canonical form indented by two spaces, `maskDag` the stored form, masked but for its gates. `checkDagTasks(dag, check)` is step 2's per-task check: `checkTask` for each task, `addGate`'s rules for each gate (`gateProblem`, `gatesProblem`, beside `holdsSecret` in `gate-command.ts`), a title of one line, `task new`'s sizes, a name or an item holding a known secret, any person at the terminal, and a task whose parents certainly work in different workspaces, each refusal naming the task by ref, step and item. `RefusalCode` gains `too_large` and `unknown_workflow`, `WorkerCode` losing its own `too_large`.
+Spec §21.5. `src/kanban/dag.ts`, pure. `checkDagShape(raw, from)` checks the format (1 alone), every key at each level, an unknown one refused naming its place, every type, every string well formed, the refs (unique, 1 to 64 bytes of letters, digits, `.`, `_`, `:` and `-`) and parents (earlier refs, each once), `null` refused where a key's default is not `null`, where gates may come from (`terminal` and `expansion` take them, `run` refuses any), from a run the settings its `create` cannot set, a `workflow` name and params, and a gate holding the mask `••••`; then it fills in every default, makes the canonical form (compact JSON, the tables' key order, a contract's fields in `CONTRACT_FIELDS`' order, the params by name, unmasked), measures it against 192 KiB from a run and 1 MiB elsewhere, and hashes it. `readDag(text, from)` parses JSON first. `dagFile` is the canonical form indented by two spaces, `maskDag` the stored form, masked but for its gates. `checkDagTasks(dag, check)` is step 2's per-task check: `checkTask` for each task, `addGate`'s rules for each gate (`gateProblem`, `gatesProblem`, beside `holdsSecret` in `gate-command.ts`), a title of one line, `task new`'s sizes, a ref, a step, a name or an item holding a known secret (a ref or step refused without quoting it, as it names the task), any person at the terminal, and a task whose parents certainly work in different workspaces, each refusal naming the task by ref, step and item. `RefusalCode` gains `too_large` and `unknown_workflow`, `WorkerCode` losing its own `too_large`.
 
-- [ ] **Step 6.1: Write the tests.**
+- [ ] **Step 7.1: Write the tests.**
 
 Create `tests/kanban-dag.test.ts`:
 
@@ -2143,6 +2183,16 @@ describe('checkDagTasks', () => {
     expect(problem(tiny({ contract: { outcome: 'x'.repeat(8193) } }))).toMatchObject({ code: 'too_large', message: "a: its contract's outcome is 8193 bytes; at most 8192" });
   });
 
+  it('refuses a ref or a step holding a known secret, without quoting it', () => {
+    addSecrets(['secretref12345']);
+    expect(problem(tiny({ ref: 'secretref12345' }))).toEqual({
+      ok: false,
+      code: 'invalid',
+      message: 'tasks[0]: its ref or its step holds a known secret, and a ref is stored and shown as written',
+    });
+    expect(problem(tiny({ step: 'secretref12345' }))?.message).toBe('tasks[0]: its ref or its step holds a known secret, and a ref is stored and shown as written');
+  });
+
   it('refuses a name or an item holding a known secret', () => {
     expect(problem(tiny({ workspace: SECRET }))).toEqual({ ok: false, code: 'invalid', message: 'a: its workspace holds a known secret, and a name is stored as written' });
     expect(problem(tiny({ item: `acme ${SECRET}` }))?.message).toBe(
@@ -2198,9 +2248,9 @@ describe('gateProblem and gatesProblem', () => {
 });
 ```
 
-- [ ] **Step 6.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-dag.test.ts`. Expected: `Tests  no tests`: the file fails to load, `Error: Cannot find module '../src/kanban/dag.js' imported from '<worktree>/tests/kanban-dag.test.ts'`.
+- [ ] **Step 7.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-dag.test.ts`. Expected: `Tests  no tests`: the file fails to load, `Error: Cannot find module '../src/kanban/dag.js' imported from '<worktree>/tests/kanban-dag.test.ts'`.
 
-- [ ] **Step 6.3: Implement.**
+- [ ] **Step 7.3: Implement.**
 
 Create `src/kanban/dag.ts`:
 
@@ -2714,7 +2764,11 @@ function certainWorkspace(t: DagTask, roles: ReadonlyMap<string, Role>): string 
 export function checkDagTasks(dag: Dag, check: DagCheck): Refusal | undefined {
   const byRef = new Map(dag.tasks.map((t) => [t.ref, t]));
   const terminal = check.createdVia.kind === 'operator';
-  for (const t of dag.tasks) {
+  for (const [i, t] of dag.tasks.entries()) {
+    // A ref and a step are stored as written, and name the task in every refusal: one holding a secret is refused, unquoted.
+    if (redactKnownSecrets(t.ref) !== t.ref || redactKnownSecrets(t.step) !== t.step) {
+      return refuse('invalid', `tasks[${i}]: its ref or its step holds a known secret, and a ref is stored and shown as written`);
+    }
     const at = taskPlace(t);
     const no = (code: Refusal['code'], why: string): Refusal => refuse(code, `${at}: ${why}`);
     if (t.title.trim() === '') return no('invalid', 'a task needs a title');
@@ -2884,9 +2938,9 @@ with:
   | 'unknown_command'
 ```
 
-- [ ] **Step 6.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2048 passed (2048)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 7.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2049 passed (2049)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 6.5: Commit.**
+- [ ] **Step 7.5: Commit.**
 
 ```bash
 git add src/kanban/dag.ts src/kanban/gate-command.ts src/kanban/types.ts src/kanban/worker.ts tests/kanban-dag.test.ts
@@ -2895,16 +2949,16 @@ git commit -m "Add the DAG: its format, its shape with every default filled in, 
 
 ---
 
-### Task 7: A workflow file and its checks
+### Task 8: A workflow file and its checks
 
 **Files:**
 
 - Create: `src/kanban/workflow.ts`, `tests/helpers/workflow.ts`, `tests/kanban-workflow-file.test.ts`
 - Modify: `src/names.ts`
 
-Spec §21.1, §21.2, §21.4. `src/kanban/workflow.ts`. `checkWorkflow(name, text, facts)` parses with the `yaml` package's `parse` (YAML 1.2's core schema; a duplicated key is the parser's error; warnings silenced with `logLevel: 'error'`, as a key that is a mapping would otherwise warn on stderr), checks the keys with `config.ts`'s `section` and `reject` at every level, their place named and the file's name taken off, the names in the role grammar (`nameProblem` gains `workflow`, `step` and `param`), `item` reserved, the params (`required` or a `default`, never both or neither), the parents (steps of the file, never itself, no cycle, named `a -> b -> a`, each written above its child), `for_each` over a declared list param, every `{{` opening a reference to a declared param or `{{item}}` in a for_each step, a name field one whole reference or a name written out that `create` would take, no list param there, the gates (no `{{`, no mask, `addGate`'s rules), and a step whose parents certainly disagree on a workspace. A mapping where text belongs says to quote a `{{`. `listWorkflows(dir, facts)` reads the directory: usable, broken with why, and each entry that is no workflow (a dot-entry, a name out of the grammar, a symlink, not a regular `.yaml` file) said once; a file past 64 KiB is broken. `readWorkflow` reads one by name, `unknown_workflow` for none. `workflowLines` gives the startup's lines, `paramsLine` a workflow's params. The example of spec §21.1 is `tests/helpers/workflow.ts`'s `VENDOR_EVAL`.
+Spec §21.1, §21.2, §21.4. `src/kanban/workflow.ts`. `checkWorkflow(name, text, facts)` parses with the `yaml` package's `parse` (YAML 1.2's core schema; a duplicated key is the parser's error; warnings silenced with `logLevel: 'error'`, as a key that is a mapping would otherwise warn on stderr), checks the keys with `config.ts`'s `section` and `reject` at every level, their place named and the file's name taken off, the names in the role grammar (`nameProblem` gains `workflow`, `step` and `param`), `item` reserved, the params (`required` or a `default`, never both or neither), the parents (steps of the file, never itself, no cycle, named `a -> b -> a`, each written above its child), `for_each` over a declared list param, every `{{` opening a reference to a declared param or `{{item}}` in a for_each step, a name field one whole reference or a name written out that `create` would take, no list param there, the gates (no `{{`, no mask, `addGate`'s rules), and a step whose parents certainly disagree on a workspace. A mapping where text belongs says to quote a `{{`. `listWorkflows(dir, facts)` reads the directory: usable, broken with why, and each entry that is no workflow (a name out of the grammar, a symlink, not a regular `.yaml` file) said once, a dot-entry skipped silently, as `discoverRoles` skips one; a file past 64 KiB is broken. `readWorkflow` reads one by name, `unknown_workflow` for none. `workflowLines` gives the startup's lines, `paramsLine` a workflow's params. The example of spec §21.1 is `tests/helpers/workflow.ts`'s `VENDOR_EVAL`.
 
-- [ ] **Step 7.1: Write the tests.**
+- [ ] **Step 8.1: Write the tests.**
 
 Create `tests/helpers/workflow.ts`:
 
@@ -3204,7 +3258,7 @@ describe('the workspaces a step\'s parents work in', () => {
 });
 
 describe('the directory', () => {
-  it('lists the usable workflows and the broken ones, ignoring a badly named file, a symlink and a dot-entry with one note each', () => {
+  it('lists the usable workflows and the broken ones, ignoring a badly named file and a symlink with one note each, and a dot-entry silently', () => {
     const wf = join(dir, 'workflows');
     mkdirSync(wf);
     writeFileSync(join(wf, 'vendor-eval.yaml'), VENDOR_EVAL);
@@ -3212,6 +3266,7 @@ describe('the directory', () => {
     writeFileSync(join(wf, 'Bad_Name.yaml'), VENDOR_EVAL);
     writeFileSync(join(wf, 'notes.txt'), 'x');
     writeFileSync(join(wf, '.hidden.yaml'), VENDOR_EVAL);
+    mkdirSync(join(wf, '.git'));
     mkdirSync(join(wf, 'dir.yaml'));
     symlinkSync(join(wf, 'vendor-eval.yaml'), join(wf, 'linked.yaml'));
     const list = listWorkflows(wf, FACTS);
@@ -3220,7 +3275,6 @@ describe('the directory', () => {
       { name: 'onboarding', problem: 'steps.welcome.gates[0].command holds {{, and a gate is a shell command: name the value as an environment variable instead' },
     ]);
     expect(list.ignored).toEqual([
-      `ignoring ${join(wf, '.hidden.yaml')}: a dot-entry, so not a workflow`,
       expect.stringMatching(new RegExp(`^ignoring ${join(wf, 'Bad_Name.yaml')}: workflow name "Bad_Name" must be lowercase letters`)),
       `ignoring ${join(wf, 'dir.yaml')}: not a regular file, so not a workflow`,
       `ignoring ${join(wf, 'linked.yaml')}: a symlink, which is not followed: a workflow is a file of its own in the home`,
@@ -3257,9 +3311,9 @@ describe('the directory', () => {
 });
 ```
 
-- [ ] **Step 7.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-file.test.ts`. Expected: `Tests  no tests`: the file fails to load, `Error: Cannot find module '../src/kanban/workflow.js' imported from '<worktree>/tests/kanban-workflow-file.test.ts'`.
+- [ ] **Step 8.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-file.test.ts`. Expected: `Tests  no tests`: the file fails to load, `Error: Cannot find module '../src/kanban/workflow.js' imported from '<worktree>/tests/kanban-workflow-file.test.ts'`.
 
-- [ ] **Step 7.3: Implement.**
+- [ ] **Step 8.3: Implement.**
 
 Create `src/kanban/workflow.ts`:
 
@@ -3730,7 +3784,6 @@ export function checkWorkflow(name: string, source: string, facts: WorkflowFacts
 
 /** Why an entry of the directory is no workflow, or undefined for one that is: a regular `<name>.yaml`, the name in the grammar. */
 function notAWorkflow(dir: string, entry: string): string | undefined {
-  if (entry.startsWith('.')) return 'a dot-entry, so not a workflow';
   if (!entry.endsWith('.yaml')) return 'not a .yaml file, so not a workflow';
   const stat = lstatSync(join(dir, entry), { throwIfNoEntry: false });
   if (stat?.isSymbolicLink() === true) return 'a symlink, which is not followed: a workflow is a file of its own in the home';
@@ -3747,8 +3800,9 @@ function readFile(path: string): { ok: true; text: string } | { ok: false; probl
 
 /**
  * The directory, read now (spec §21.4): every usable workflow, by name, each
- * broken one with why, and every entry that is no workflow, said once. A
- * missing directory has none.
+ * broken one with why, and every other entry that is no workflow, said once. A
+ * dot-entry is skipped silently, as `discoverRoles` skips one, so the directory
+ * can be under version control. A missing directory has none.
  */
 export function listWorkflows(dir: string, facts: WorkflowFacts): WorkflowList {
   let entries: string[];
@@ -3760,6 +3814,7 @@ export function listWorkflows(dir: string, facts: WorkflowFacts): WorkflowList {
   }
   const out: WorkflowList = { usable: [], broken: [], ignored: [] };
   for (const entry of entries) {
+    if (entry.startsWith('.')) continue;
     const why = notAWorkflow(dir, entry);
     if (why !== undefined) {
       out.ignored.push(`ignoring ${join(dir, entry)}: ${why}`);
@@ -3843,9 +3898,9 @@ with:
 export function nameProblem(kind: 'role' | 'workspace' | 'board' | 'workflow' | 'step' | 'param', name: string): string | undefined {
 ```
 
-- [ ] **Step 7.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2069 passed (2069)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 8.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2070 passed (2070)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 7.5: Commit.**
+- [ ] **Step 8.5: Commit.**
 
 ```bash
 git add src/kanban/workflow.ts src/names.ts tests/helpers/workflow.ts tests/kanban-workflow-file.test.ts
@@ -3854,16 +3909,16 @@ git commit -m "Read and check a workflow file: the YAML, the keys at every level
 
 ---
 
-### Task 8: Params, substitution and the expansion
+### Task 9: Params, substitution and the expansion
 
 **Files:**
 
 - Create: `tests/kanban-workflow-expand.test.ts`
 - Modify: `src/kanban/workflow.ts`
 
-Spec §21.2, §21.3, §21.5, §21.6. `paramValues(w, given, personOf)` reads each path's params against the file: chat's pairs, a quoted value one item and an unquoted one split at its commas; the terminal's, split at every comma; a run's JSON, a string or a list of strings, the other type refused. Every param declared, the required ones given, the defaults filled in, a text param given once, a list's items trimmed, none empty, twice or holding a known secret, an empty list refused, a value of at most 8 KiB, a list of at most 100 items, the params at most 64 KiB as JSON, a value landing in a title on one line, and a value starting with `@` resolved by `personOf` only for a param that lands in a person field, `"{{owner}}"` or `{ person: "{{owner}}" }`. `expand(w, given, board, personOf)` makes the DAG: one task a step, or one an item for a for_each step, `<step>:<n>`; every text field substituted once, a value put in as written; a name field's value checked as a name, a role's place refusing a person and a person's place a role's name; parents all to all; at most 100 tasks. Every key is written out, as spec §21.5 asks of an expanded DAG.
+Spec §21.2, §21.3, §21.5, §21.6. `paramValues(w, given, personOf)` reads each path's params against the file: chat's pairs, a quoted value one item and an unquoted one split at its commas; the terminal's, split at every comma; a run's JSON, a string or a list of strings, the other type refused. Every param declared, the required ones given, the defaults filled in, a text param given once, a list's items trimmed, none empty, twice or holding a known secret, an empty list refused, a value of at most 8 KiB, a list of at most 100 items, the params at most 64 KiB as JSON, a value landing in a title on one line, and a value starting with `@` resolved by `personOf` only for a param that lands in a person field, `"{{owner}}"` or `{ person: "{{owner}}" }`; with no `personOf`, at the terminal or from a run, such a value is refused `person_not_assignable` in the terminal's words, as no mention can resolve it. `expand(w, given, board, personOf)` makes the DAG: one task a step, or one an item for a for_each step, `<step>:<n>`; every text field substituted once, a value put in as written; a name field's value checked as a name, a role's place refusing a person and a person's place a role's name; parents all to all; at most 100 tasks. Every key is written out, as spec §21.5 asks of an expanded DAG.
 
-- [ ] **Step 8.1: Write the tests.**
+- [ ] **Step 9.1: Write the tests.**
 
 Create `tests/kanban-workflow-expand.test.ts`:
 
@@ -4136,6 +4191,17 @@ steps:
     expect(refusal(expand(w, chat(['owner', '@Bob'], ['note', 'x']), 'default', personOf))).toEqual({ code: 'invalid', message: '@Bob is not mentioned' });
   });
 
+  it('refuses an @Name in a person field with no mentions to resolve it by, at the terminal or from a run, and keeps one in text', () => {
+    const w = workflow('params:\n  owner: { required: true }\n  note: { default: x }\nsteps:\n  a: { title: "Ask {{note}}", assignee: "{{owner}}" }\n');
+    for (const given of [terminal(['owner', '@Alice Smith']), json({ owner: '@Alice Smith' })]) {
+      expect(refusal(expand(w, given, 'default'))).toEqual({
+        code: 'person_not_assignable',
+        message: '"@Alice Smith" is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier',
+      });
+    }
+    expect(dagOf(expand(w, json({ owner: 'worker', note: '@Bob' }), 'default')).tasks[0]?.title).toBe('Ask @Bob');
+  });
+
   it('resolves @ in the items of a list a person field takes as {{item}}', () => {
     const w = workflow('params:\n  owners: { list: true, required: true }\nsteps:\n  a: { title: "Ask {{item}}", for_each: owners, assignee: "{{item}}" }\n');
     const personOf = (value: string) => ({ ok: true as const, principal: `lark:on_${value.slice(1).toLowerCase()}` });
@@ -4205,9 +4271,9 @@ describe('paramValues', () => {
 });
 ```
 
-- [ ] **Step 8.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-expand.test.ts`. Expected: `Tests  18 failed (18)`; the first failure: `TypeError: (0 , expand) is not a function`.
+- [ ] **Step 9.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-expand.test.ts`. Expected: `Tests  19 failed (19)`; the first failure: `TypeError: (0 , expand) is not a function`.
 
-- [ ] **Step 8.3: Implement.**
+- [ ] **Step 9.3: Implement.**
 
 In `src/kanban/workflow.ts`, replace:
 
@@ -4362,6 +4428,16 @@ export function paramValues(w: Workflow, given: GivenParams, personOf?: PersonOf
     if (titled.has(p.name) && texts.some((t) => titleRefused(t))) {
       return refuse('invalid', `param ${p.name} lands in a title, which is one line: it may hold no line break, control character or bidi control`);
     }
+    if (persons.has(p.name) && personOf === undefined) {
+      // At the terminal or from a run, no message carries a mention to resolve `@Name` by.
+      const at = texts.find((t) => t.startsWith('@'));
+      if (at !== undefined) {
+        return refuse(
+          'person_not_assignable',
+          `${said(at)} is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier`,
+        );
+      }
+    }
     if (persons.has(p.name) && personOf !== undefined) {
       const resolved: string[] = [];
       for (const t of texts) {
@@ -4467,9 +4543,9 @@ export function expand(w: Workflow, given: GivenParams, board: string, personOf?
 }
 ```
 
-- [ ] **Step 8.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2087 passed (2087)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2089 passed (2089)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 8.5: Commit.**
+- [ ] **Step 9.5: Commit.**
 
 ```bash
 git add src/kanban/workflow.ts tests/kanban-workflow-expand.test.ts
@@ -4478,16 +4554,16 @@ git commit -m "Expand a workflow with its params into a DAG: each path's params 
 
 ---
 
-### Task 9: The checks' output: `mt workflow check`, the startup, `mt service check`
+### Task 10: The checks' output: `mt workflow check`, the startup, `mt service check`
 
 **Files:**
 
 - Create: `src/cli/workflow.ts`, `tests/kanban-workflow-check.test.ts`
 - Modify: `src/cli/mt.ts`, `src/cli/service.ts`, `src/index.ts`
 
-Spec §2.6, §21.4. `mt workflow check [<name>]` (`src/cli/workflow.ts`) finds the home, the config and the roles as `roleCheck` does, this shell over the gateway's `.env` (never the file in a board run's shell, where it says its secret check is weaker), loads the team with `unsetPassEnv`, saying the names left unset on stderr, and registers the team's secrets and the Lark app secret; then prints a line a workflow, sorted by name, and the entries it ignored. Exit 0 when all are usable, 1 when one is not or a named one has no file, 2 for a wrong command line; it opens no database. `loadStartup` (`src/index.ts`) runs the check with the gateway's facts and returns `workflows`, its lines, which `createGateway(config, team, { workflows })` notes after the roles' line, a broken workflow not stopping it. `mt service check` prints the lines that say something is wrong as `warning:` lines, from the `loadStartup` of the build it checks, with a unit and without, and passes.
+Spec §2.6, §21.4. `mt workflow check [<name>]` (`src/cli/workflow.ts`) finds the home, the config and the roles as `roleCheck` does, this shell over the gateway's `.env` (never the file in a board run's shell, where it says its secret check is weaker), loads the team with `unsetPassEnv`, saying the names left unset on stderr, and registers the team's secrets and the Lark app secret; then prints a line a workflow, sorted by name, and the entries it ignored. Exit 0 when all are usable, 1 when one is not or a named one has no file, 2 for a wrong command line; it opens no database. `loadStartup` (`src/index.ts`) runs the check with the gateway's facts and returns `workflows`, its lines, which `createGateway(config, team, { workflows })` notes after the roles' line, a broken workflow not stopping it; a directory that cannot be read gives two lines, `workflows directory <dir> cannot be read: …` and `workflows: none`, so `mt service check` warns of the first. `mt service check` prints the lines that say something is wrong as `warning:` lines, from the `loadStartup` of the build it checks, with a unit and without, and passes.
 
-- [ ] **Step 9.1: Write the tests.**
+- [ ] **Step 10.1: Write the tests.**
 
 Create `tests/kanban-workflow-check.test.ts`:
 
@@ -4632,6 +4708,12 @@ describe('the startup', () => {
     expect(loadStartup(env).workflows).toEqual([`workflow onboarding is not usable: ${BROKEN_PROBLEM}`, 'workflows: vendor-eval; not usable: onboarding']);
   });
 
+  it('says a directory that cannot be read, and that there are no workflows, without stopping', () => {
+    writeFileSync(join(root, 'home', 'workflows'), 'not a directory\n');
+    const lines = loadStartup(env).workflows;
+    expect(lines).toEqual([expect.stringMatching(new RegExp(`^workflows directory ${join(root, 'home', 'workflows')} cannot be read: ENOTDIR`)), 'workflows: none']);
+  });
+
   it("notes the lines after the roles' line", async () => {
     workflows(join(root, 'home'), { 'vendor-eval.yaml': VENDOR_EVAL, 'onboarding.yaml': BROKEN });
     const started = loadStartup(env);
@@ -4671,6 +4753,16 @@ describe("mt service check's warnings", () => {
     return { code, out, err: err.join('\n') };
   }
 
+  it('warns of a workflows directory that cannot be read, and passes', async () => {
+    fx = await serviceFake();
+    writeFileSync(join(fx.mtHome, 'workflows'), 'not a directory\n');
+    const r = await check();
+    expect(r.code).toBe(0);
+    expect(r.out.filter((l) => l.startsWith('warning: '))).toEqual([
+      expect.stringMatching(new RegExp(`^warning: workflows directory ${join(fx.mtHome, 'workflows')} cannot be read: ENOTDIR`)),
+    ]);
+  });
+
   for (const unit of [true, false]) {
     it(`prints the build's unusable workflows as warnings, and passes, ${unit ? 'with a unit' : 'with no unit'}`, async () => {
       fx = await serviceFake();
@@ -4689,9 +4781,9 @@ describe("mt service check's warnings", () => {
 });
 ```
 
-- [ ] **Step 9.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-check.test.ts`. Expected: `Tests  9 failed (9)`; the first failure: `AssertionError: expected { code: 2, out: '', …(1) } to deeply equal { code: +0, …(2) }`.
+- [ ] **Step 10.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-check.test.ts`. Expected: `Tests  11 failed (11)`; the first failure: `AssertionError: expected { code: 2, out: '', …(1) } to deeply equal { code: +0, …(2) }`.
 
-- [ ] **Step 9.3: Implement.**
+- [ ] **Step 10.3: Implement.**
 
 In `src/cli/mt.ts`, replace:
 
@@ -4962,7 +5054,9 @@ function startupWorkflows(config: GatewayConfig, team: Team): string[] {
       listWorkflows(dir, { roles: team.roles, workspaces: new Set(team.workspaces.keys()), supervisedRoles: true }),
     );
   } catch (err) {
-    return [`workflows: none; ${dir} cannot be read: ${err instanceof Error ? err.message : String(err)}`];
+    // Two lines, so mt service check warns of the first and leaves the summary to the gateway's note.
+    const why = (err instanceof Error ? err.message : String(err)).replace(`cannot read ${dir}: `, '');
+    return [`workflows directory ${dir} cannot be read: ${why}`, 'workflows: none'];
   }
 ```
 
@@ -5024,9 +5118,9 @@ with:
   const gateway = await createGateway(config, team, { workflows });
 ```
 
-- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2096 passed (2096)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 10.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2100 passed (2100)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 9.5: Commit.**
+- [ ] **Step 10.5: Commit.**
 
 ```bash
 git add src/cli/mt.ts src/cli/service.ts src/cli/workflow.ts src/index.ts tests/kanban-workflow-check.test.ts
@@ -5035,7 +5129,7 @@ git commit -m "Check the workflow files with mt workflow check, at startup throu
 
 ---
 
-### Task 10: The writer's shared inserts, and `threadSubscriptions`
+### Task 11: The writer's shared inserts, and `threadSubscriptions`
 
 **Files:**
 
@@ -5043,7 +5137,7 @@ git commit -m "Check the workflow files with mt workflow check, at startup throu
 
 Spec §21.8. Behaviour unchanged: `createTask`'s insert (the row, its links, its subscriptions and its `created` event) becomes `insertTask`, `addGate`'s limits and insert `insertGate`, and `archive`'s body `archiveIn`, each taking extra payload keys, so a workflow's tasks, gates and archives are made exactly as any. `threadSubscriptions(db, taskIds, at, threadId, rootId)` replaces `threadSubscription`, moving every listed task's subscription in one transaction under the same rules, and answers how many moved; the service's `threadSubscriptions` replaces its `threadSubscription`, and `KanbanChat.threaded` calls it with one task. The existing tests of the move call the list form, with `moved` a count, and two new ones move several at once and refuse a list that is not of text. WRITERS.md's `kanban_subscriptions` row names it.
 
-- [ ] **Step 10.1: Write the tests.**
+- [ ] **Step 11.1: Write the tests.**
 
 In `tests/kanban-thread-roots.test.ts`, replace:
 
@@ -5158,9 +5252,9 @@ with:
 
 ```
 
-- [ ] **Step 10.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-thread-roots.test.ts`. Expected: `Tests  5 failed | 4 passed (9)`; the first failure: `TypeError: (0 , threadSubscriptions) is not a function`.
+- [ ] **Step 11.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-thread-roots.test.ts`. Expected: `Tests  5 failed | 4 passed (9)`; the first failure: `TypeError: (0 , threadSubscriptions) is not a function`.
 
-- [ ] **Step 10.3: Implement.**
+- [ ] **Step 11.3: Implement.**
 
 In `src/db/WRITERS.md`, replace:
 
@@ -5548,9 +5642,9 @@ with:
     return board.threadSubscriptions(this.#db, taskIds, at, threadId, rootId);
 ```
 
-- [ ] **Step 10.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2098 passed (2098)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 11.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2102 passed (2102)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 10.5: Commit.**
+- [ ] **Step 11.5: Commit.**
 
 ```bash
 git add src/db/WRITERS.md src/db/kanban.ts src/kanban/chat.ts src/kanban/service.ts tests/kanban-thread-roots.test.ts
@@ -5559,16 +5653,16 @@ git commit -m "Share createTask's insert, addGate's and archive's with helpers a
 
 ---
 
-### Task 11: `applyDag` and `archiveWorkflow`, the writer's
+### Task 12: `applyDag` and `archiveWorkflow`, the writer's
 
 **Files:**
 
 - Create: `tests/kanban-workflow-writer.test.ts`
 - Modify: `src/db/WRITERS.md`, `src/db/kanban-read.ts`, `src/db/kanban.ts`
 
-Spec §21.7, §21.8, §21.10. In `src/db/kanban.ts`: `applyDag(db, instance, members, now)` makes a checked DAG in one `tx`: the board worked out (a run's task's for a run), the key looked up again through `keyRefused` (a repeat answered `existing: true`, another board's `other_board`, another kind's, another workflow's or another DAG's hash `invalid`), the board checked live; then the instance row with its DAG masked but for its gates, and each task through `insertTask`, its `created` event carrying `workflow`, `workflowName`, `ref`, `step` and `item`, its gates through `insertGate` with `created_by` the instance's maker and `workflow` in `gate_added`, and its member row, the item masked. `BOARD_KEYS` gains `workflow`, `workflowName`, `ref` and `step`. `archiveWorkflow` archives every member not yet archived through `archiveIn`, `workflow` in each event, answering the runs it decided. In `src/db/kanban-read.ts`: `InstanceRow`, `MemberRow`, `hasWorkflows`, `getInstance`, `instanceByKey`, `membersOf`, `memberOf` (undefined on a database with no members table), `instancesOn` (newest first, at most a limit, with the total) and `relatedTasks`. WRITERS.md gains the two tables' rows.
+Spec §21.7, §21.8, §21.10. In `src/db/kanban.ts`: `applyDag(db, instance, members, now)` makes a checked DAG in one `tx`: the board worked out (a run's task's for a run), the key looked up again through `keyRefused` (a repeat answered `existing: true`, another board's `other_board`, another kind's, another workflow's or another DAG's hash `invalid`), the board checked live; then the instance row with its DAG masked but for its gates, and each task through `insertTask`, its `created` event carrying `workflow`, `workflowName`, `ref`, `step` and `item`, its gates through `insertGate` with `created_by` the instance's maker and `workflow` in `gate_added`, and its member row, the item masked. `BOARD_KEYS` gains `workflow`, `workflowName`, `ref` and `step`. `archiveWorkflow` archives every member not yet archived through `archiveIn`, `workflow` in each event, answering the runs it decided. In `src/db/kanban-read.ts`: `InstanceRow`, `MemberRow`, `hasWorkflows`, `getInstance`, `instanceByKey`, `membersOf`, `memberOf` (undefined on a database with no members table), `instancesOn` (newest first, at most a limit, with the total) and `relatedTasks`. WRITERS.md gains the two tables' rows. A test makes 100 tasks, each naming every earlier one as a parent: 4,950 links, 100 members and 100 `created` events from one call.
 
-- [ ] **Step 11.1: Write the tests.**
+- [ ] **Step 12.1: Write the tests.**
 
 Create `tests/kanban-workflow-writer.test.ts`:
 
@@ -5677,6 +5771,20 @@ const count = (table: string): number => (h.db.prepare(`SELECT count(*) AS n FRO
 const counts = () => ['kanban_tasks', 'kanban_links', 'kanban_gates', 'kanban_workflow_instances', 'kanban_workflow_tasks', 'kanban_events', 'kanban_subscriptions'].map(count);
 
 describe('applyDag', () => {
+  it('makes 100 tasks, each after every earlier one, 4,950 links, in one call', () => {
+    const r = checkDagShape(
+      { format: 1, tasks: Array.from({ length: 100 }, (_, i) => ({ ref: `t${i}`, title: `Task ${i}`, assignee: 'worker', parents: Array.from({ length: i }, (_, j) => `t${j}`) })) },
+      'terminal',
+    );
+    if (!r.ok) throw new Error(r.message);
+    const made = apply({ dag: r.dag, sha256: r.sha256, source: 'apply', name: null }, members(r.dag));
+    expect(made.members).toHaveLength(100);
+    expect(count('kanban_links')).toBe(4950);
+    expect(count('kanban_workflow_tasks')).toBe(100);
+    expect((h.db.prepare("SELECT count(*) AS n FROM kanban_events WHERE kind = 'created'").get() as { n: number }).n).toBe(100);
+    expect(parentsOf(h.db, made.members[99]?.taskId ?? '')).toHaveLength(99);
+  });
+
   it('makes every task, link, gate and member, in order, on the board', () => {
     const r = apply();
     expect(r.existing).toBe(false);
@@ -5866,9 +5974,9 @@ describe("an instance's reads", () => {
 });
 ```
 
-- [ ] **Step 11.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-writer.test.ts`. Expected: `Tests  11 failed (11)`; the first failure: `TypeError: (0 , applyDag) is not a function`.
+- [ ] **Step 12.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-writer.test.ts`. Expected: `Tests  12 failed (12)`; the first failure: `TypeError: (0 , applyDag) is not a function`.
 
-- [ ] **Step 11.3: Implement.**
+- [ ] **Step 12.3: Implement.**
 
 In `src/db/WRITERS.md`, replace:
 
@@ -6329,9 +6437,9 @@ export function archiveWorkflow(
 }
 ```
 
-- [ ] **Step 11.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2109 passed (2109)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 12.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2114 passed (2114)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 11.5: Commit.**
+- [ ] **Step 12.5: Commit.**
 
 ```bash
 git add src/db/WRITERS.md src/db/kanban-read.ts src/db/kanban.ts tests/kanban-workflow-writer.test.ts
@@ -6340,16 +6448,16 @@ git commit -m "Write a workflow's instance in one transaction with applyDag, eve
 
 ---
 
-### Task 12: The service: preview, start and apply
+### Task 13: The service: preview, start and apply
 
 **Files:**
 
 - Create: `tests/kanban-workflow-service.test.ts`
 - Modify: `src/kanban/service.ts`
 
-Spec §21.6. `KanbanServiceDeps.workflowsDir`. `previewWorkflow(req)`: the file read now, the expansion, the shape, and step 2's checks, the board's and the people's included, never the key's; nothing written. `startWorkflow(req)`: the workflow name's type, the board (a run's task's whatever else, else the one asked for, else `default`), the key namespaced as a task's and looked up first, read-only, so a repeat is answered even with the file removed or broken; then the expansion, step 2 and the writer. `applyDag(req)`: the DAG shaped, made canonical and measured first (`run` for a run's, else `terminal`), a run's DAG naming another board refused `other_board`; then the key, compared by the DAG's hash; step 2, and with `dryRun` an answer of what it would make or the instance its key made; else the writer. Step 2 (`#checkDag`) is the board as the database has it now and `checkDagTasks` with the team and the people as the process holds them. An unknown workflow is `unknown_workflow`, its message naming the usable ones and their params, cut at 4 KiB. `#idempotencyKey` now takes the key and the `createdVia`, its messages unchanged.
+Spec §21.6. `KanbanServiceDeps.workflowsDir`. `previewWorkflow(req)`: the file read now, the expansion, the shape, and step 2's checks, the board's and the people's included, never the key's; nothing written. `startWorkflow(req)`: the workflow name's type, the board (a run's task's whatever else, else the one asked for, else `default`), the key namespaced as a task's and looked up first, read-only, so a repeat is answered even with the file removed or broken; then the expansion, step 2 and the writer. `applyDag(req)`: the DAG shaped, made canonical and measured first (`run` for a run's, else `terminal`), a run's DAG naming another board refused `other_board`; then the key, compared by the DAG's hash; step 2, and with `dryRun` an answer of what it would make or the instance its key made; else the writer. Step 2 (`#checkDag`) is the board as the database has it now and `checkDagTasks` with the team and the people as the process holds them. An unknown workflow is `unknown_workflow`, its message naming the usable ones and their params, cut at 4 KiB. `#idempotencyKey` now takes the key and the `createdVia`, its messages unchanged. A test applies 100 tasks from the terminal, the last with 99 parents: `WORKER_LIMITS.parents`, 50, bounds a worker's request and does not hold here (spec §21.3).
 
-- [ ] **Step 12.1: Write the tests.**
+- [ ] **Step 13.1: Write the tests.**
 
 Create `tests/kanban-workflow-service.test.ts`:
 
@@ -6657,6 +6765,14 @@ describe('applyDag', () => {
     expect(made(apply({ ...plain, board: 'default' }, viaRun)).instance.board).toBe('default');
   });
 
+  it('applies 100 tasks from the terminal, the last with 99 parents: no worker limit on parents holds here', () => {
+    const dag = { format: 1, tasks: Array.from({ length: 100 }, (_, i) => ({ ref: `t${i}`, title: `Task ${i}`, assignee: 'worker', parents: Array.from({ length: i }, (_, j) => `t${j}`) })) };
+    const r = made(apply(dag));
+    expect(r.tasks).toHaveLength(100);
+    expect((h.db.prepare('SELECT count(*) AS n FROM kanban_links').get() as { n: number }).n).toBe(4950);
+    expect(parentsOf(h.db, r.tasks[99]?.taskId ?? '')).toHaveLength(99);
+  });
+
   it("stores a DAG's texts masked but its gates, and an archived instance's key stays used", () => {
     const dag = { format: 1, params: {}, tasks: [{ ref: 'a', title: `Use ${SECRET}`, assignee: 'worker', gates: [{ command: 'test -s $OUT' }] }] };
     const r = made(apply(dag, { idempotencyKey: 'k' }));
@@ -6668,9 +6784,9 @@ describe('applyDag', () => {
 });
 ```
 
-- [ ] **Step 12.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-service.test.ts`. Expected: `Tests  16 failed (16)`; the first failure: `TypeError: service.startWorkflow is not a function`.
+- [ ] **Step 13.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-service.test.ts`. Expected: `Tests  17 failed (17)`; the first failure: `TypeError: service.startWorkflow is not a function`.
 
-- [ ] **Step 12.3: Implement.**
+- [ ] **Step 13.3: Implement.**
 
 In `src/kanban/service.ts`, replace:
 
@@ -7128,9 +7244,9 @@ with:
     if (run === undefined) return board.refuse('not_found', `no run ${via.runId}`);
 ```
 
-- [ ] **Step 12.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2125 passed (2125)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 13.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2131 passed (2131)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 12.5: Commit.**
+- [ ] **Step 13.5: Commit.**
 
 ```bash
 git add src/kanban/service.ts tests/kanban-workflow-service.test.ts
@@ -7139,7 +7255,7 @@ git commit -m "Preview, start and apply a workflow through the service: the key 
 
 ---
 
-### Task 13: The service: list, instances, show and archive
+### Task 14: The service: list, instances, show and archive
 
 **Files:**
 
@@ -7148,7 +7264,7 @@ git commit -m "Preview, start and apply a workflow through the service: the key 
 
 Spec §21.10. `instanceStatus(phases)` (`workflow.ts`), pure: archived when every member is, done when every one is done or archived, blocked when any is, with the count, running otherwise. The service's `workflows()` reads the directory now; `instances(board, all)` reads the board's 200 newest, the running and blocked unless `all`, with the total; `instance(id)` gives the members with their display status, the file's description while it is there, the related tasks apart, and another instance whose members are related as one entry; `archiveWorkflow(id, by)` archives every member through the writer.
 
-- [ ] **Step 13.1: Write the tests.**
+- [ ] **Step 14.1: Write the tests.**
 
 Create `tests/kanban-workflow-instances.test.ts`:
 
@@ -7331,9 +7447,9 @@ describe('archiveWorkflow', () => {
 });
 ```
 
-- [ ] **Step 13.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-instances.test.ts`. Expected: `Tests  7 failed (7)`; the first failure: `TypeError: (0 , instanceStatus) is not a function`.
+- [ ] **Step 14.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-instances.test.ts`. Expected: `Tests  7 failed (7)`; the first failure: `TypeError: (0 , instanceStatus) is not a function`.
 
-- [ ] **Step 13.3: Implement.**
+- [ ] **Step 14.3: Implement.**
 
 In `src/kanban/service.ts`, replace:
 
@@ -7580,9 +7696,9 @@ export function instanceStatus(phases: readonly Phase[]): InstanceState {
 }
 ```
 
-- [ ] **Step 13.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2132 passed (2132)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 14.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2138 passed (2138)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 13.5: Commit.**
+- [ ] **Step 14.5: Commit.**
 
 ```bash
 git add src/kanban/service.ts src/kanban/workflow.ts tests/kanban-workflow-instances.test.ts
@@ -7591,7 +7707,7 @@ git commit -m "See and manage workflows through the service: the files as they a
 
 ---
 
-### Task 14: `/kanban workflow` in chat: the parser
+### Task 15: `/kanban workflow` in chat: the parser
 
 **Files:**
 
@@ -7600,7 +7716,7 @@ git commit -m "See and manage workflows through the service: the files as they a
 
 Spec §21.6, §21.10. `src/kanban/chat-parse.ts` gains the `workflow` group: `list`, `instances [all]`, `show <instance>`, `archive <instance>`, `preview <name> key=value …` and `start <name> key=value …`, with a usage line each and the verbs listed for none or an unknown one. `parseKanban(arg, mentions)` takes the message's mention names, and `parsePairs` reads the pairs: separated by spaces, tabs or line breaks, each split at its first `=`, the key in the param grammar, a value up to the next space or quoted with `"…"` or `“…”` and no escape, an unquoted value starting with `@` matched whole against the longest mention name it begins with, a stray word refused with the usage line and, after a value ending in `,`, the hint to quote. Each pair is `{ key, value, quoted }`, knowing no workflow. `KanbanChat`'s tiers gain the six verbs, talk for the four that make nothing; the commands answer in the next task.
 
-- [ ] **Step 14.1: Write the tests.**
+- [ ] **Step 15.1: Write the tests.**
 
 Create `tests/kanban-workflow-chat-parse.test.ts`:
 
@@ -7715,9 +7831,9 @@ describe('the pairs', () => {
 });
 ```
 
-- [ ] **Step 14.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-chat-parse.test.ts`. Expected: `Tests  6 failed (6)`; the first failure: `AssertionError: expected { ok: false, …(1) } to deeply equal { ok: true, …(1) }`.
+- [ ] **Step 15.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-chat-parse.test.ts`. Expected: `Tests  6 failed (6)`; the first failure: `AssertionError: expected { ok: false, …(1) } to deeply equal { ok: true, …(1) }`.
 
-- [ ] **Step 14.3: Implement.**
+- [ ] **Step 15.3: Implement.**
 
 In `src/kanban/chat-parse.ts`, replace:
 
@@ -7948,9 +8064,9 @@ with:
   'workflow archive': 'operate',
 ```
 
-- [ ] **Step 14.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2138 passed (2138)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 15.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2144 passed (2144)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 14.5: Commit.**
+- [ ] **Step 15.5: Commit.**
 
 ```bash
 git add src/kanban/chat-parse.ts src/kanban/chat.ts tests/kanban-workflow-chat-parse.test.ts
@@ -7959,7 +8075,7 @@ git commit -m "Parse /kanban workflow and its verbs in chat, with a start's and 
 
 ---
 
-### Task 15: `/kanban workflow` in chat: the commands and their replies
+### Task 16: `/kanban workflow` in chat: the commands and their replies
 
 **Files:**
 
@@ -7968,7 +8084,7 @@ git commit -m "Parse /kanban workflow and its verbs in chat, with a start's and 
 
 Spec §21.9, §21.10. `KanbanChat`: the parse given the mention names; `list`, `instances`, `show` and `preview` at talk tier, `start` and `archive` at operator tier, after the union_id check. A start goes on the chat's board, refused when it is archived, keyed by `lark:<message_id>`, with `personOf` turning a mentioned `@Name` into its principal for a person field; in a group at chat scope every member is held before the dispatcher is told, and the answer names the instance as its `thread`, in both wordings; `threaded` moves every member's subscription in one `threadSubscriptions` call when its id starts `w_`, and releases every hold. The board's id rendering takes `w_…`. `chat-render.ts`: `renderStarted` (at most 30 task lines, titles cut at 80, lines dropped from the end until the whole is under 3,800 characters, then how many more and the `show` that lists them, then who hears, a person's card in the thread's or the chat's words), `renderPreview`, `renderWorkflows`, `renderInstances`, `renderInstance` (cut to fit, saying what was cut), `previewLines`, `fitted` and the help's six lines. The router's log line names an instance as one.
 
-- [ ] **Step 15.1: Write the tests.**
+- [ ] **Step 16.1: Write the tests.**
 
 Create `tests/kanban-workflow-chat.test.ts`:
 
@@ -8249,9 +8365,9 @@ describe('/kanban workflow list, instances, show and archive', () => {
 });
 ```
 
-- [ ] **Step 15.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-chat.test.ts`. Expected: `Tests  10 failed | 3 passed (13)`; the first failure: `Error: not started: **The task board.** …`, as the start is answered with the help.
+- [ ] **Step 16.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-chat.test.ts`. Expected: `Tests  10 failed | 3 passed (13)`; the first failure: `Error: not started: **The task board.** …`.
 
-- [ ] **Step 15.3: Implement.**
+- [ ] **Step 16.3: Implement.**
 
 In `src/core/router.ts`, replace:
 
@@ -8819,9 +8935,9 @@ with:
     return { ok: true, principal: personPrincipal(unionIds[0] ?? '') };
 ```
 
-- [ ] **Step 15.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2151 passed (2151)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 16.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2157 passed (2157)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 15.5: Commit.**
+- [ ] **Step 16.5: Commit.**
 
 ```bash
 git add src/core/router.ts src/kanban/chat-render.ts src/kanban/chat.ts tests/kanban-workflow-chat.test.ts
@@ -8830,7 +8946,7 @@ git commit -m "Answer /kanban workflow in chat: a start at operator tier, keyed 
 
 ---
 
-### Task 16: The worker's `start-workflow` and `apply-dag`
+### Task 17: The worker's `start-workflow` and `apply-dag`
 
 **Files:**
 
@@ -8839,7 +8955,7 @@ git commit -m "Answer /kanban workflow in chat: a start at operator tier, keyed 
 
 Spec §7.1, §7.3, §21.5, §21.6. `WORKER_COMMANDS` gains both. `start-workflow` takes `workflow`, `params` (a new field kind: an object of text and lists of text, within 64 KiB) and `idempotency_key`, checked by `badInput` as every command is, and answers `{ok, instance_id, existing, board, tasks: [{task_id, ref, step, item}]}`. `apply-dag` skips the flat schema: `idempotency_key` and `dry_run` are taken off, and the rest is the DAG, read by the service's own checks; with `dry_run` it answers `dry_run: true`, the tasks and their gates, and no `instance_id` unless its key made one, and tells the dispatcher nothing. The work protocol (`prompt.ts`) gains a line for each, and its closing sentence names both. `mt kanban apply-dag` refuses a DAG over 192 KiB in its canonical form before sending it, `too_large`. `mt kanban workflow …` is an operator's group, refused in a run's shell naming the two commands; the usage lists them. Three tests that pin the worker's command list gain them.
 
-- [ ] **Step 16.1: Write the tests.**
+- [ ] **Step 17.1: Write the tests.**
 
 In `tests/kanban-worker.test.ts`, replace:
 
@@ -9131,9 +9247,9 @@ with:
     expect(usage).toContain('  mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag> < input.json');
 ```
 
-- [ ] **Step 16.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-worker.test.ts`. Expected: `Tests  9 failed (9)`; the first failure: `AssertionError: expected { ok: false, …(2) } to deeply equal { ok: true, …(4) }`.
+- [ ] **Step 17.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-worker.test.ts`. Expected: `Tests  9 failed (9)`; the first failure: `AssertionError: expected { ok: false, …(2) } to deeply equal { ok: true, …(4) }`.
 
-- [ ] **Step 16.3: Implement.**
+- [ ] **Step 17.3: Implement.**
 
 In `src/cli/kanban.ts`, replace:
 
@@ -9425,9 +9541,9 @@ function madeAnswer(r: WorkflowMade): WorkerResponse {
 /** A report's answer: where the task is now, and the run's outcome. */
 ```
 
-- [ ] **Step 16.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2160 passed (2160)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 17.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2166 passed (2166)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 16.5: Commit.**
+- [ ] **Step 17.5: Commit.**
 
 ```bash
 git add src/cli/kanban.ts src/cli/mt.ts src/kanban/prompt.ts src/kanban/worker.ts tests/kanban-worker.test.ts tests/kanban-workflow-worker.test.ts tests/mt-kanban.test.ts tests/mt.test.ts
@@ -9436,7 +9552,7 @@ git commit -m "Add the worker's start-workflow and apply-dag, with a params fiel
 
 ---
 
-### Task 17: `mt kanban workflow` at the terminal
+### Task 18: `mt kanban workflow` at the terminal
 
 **Files:**
 
@@ -9445,7 +9561,7 @@ git commit -m "Add the worker's start-workflow and apply-dag, with a params fiel
 
 Spec §2.6, §21.6, §21.10. `src/cli/gate.ts`: `loadOperator` is `openBoard`'s loading, the settings, the team, the secrets and the note on unset passEnv names, with no database; `openBoard` calls it, takes `workflows: true` to look for the workflows' tables and refuse `no_board` with "start the gateway once, so it is migrated", and gives the service `workflowsDir`. `src/cli/operator.ts`: `preview` (as `openBoard` loads, opening no database, supervised roles accepted and no person; `--json` writes the DAG file alone on stdout, a refusal on stderr), `start` and `apply` (a regular file or `-`, up to 4 MiB, decoded strictly, as JSON; `--dry-run` lists each gate's command), both with `--key`, answering every task, uncut, or the worker's shape with `--json`, then the nudge; `list`, `instances`, `show` (`--board` refusing `unknown_board` and `other_board`, `--dag` printing the stored DAG masked, never the hash) and `archive`. `usableMessage` moves into `workflow.ts`, shared by the service and the preview. `src/cli/plain.ts` gives their plain text, and `mt`'s usage lists them.
 
-- [ ] **Step 17.1: Write the tests.**
+- [ ] **Step 18.1: Write the tests.**
 
 Create `tests/mt-kanban-workflow.test.ts`:
 
@@ -9753,9 +9869,9 @@ describe('an unmigrated database', () => {
 });
 ```
 
-- [ ] **Step 17.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-kanban-workflow.test.ts`. Expected: `Tests  13 failed (13)`; the first failure: `AssertionError: expected 2 to be +0 // Object.is equality`.
+- [ ] **Step 18.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-kanban-workflow.test.ts`. Expected: `Tests  13 failed (13)`; the first failure: `AssertionError: expected 2 to be +0 // Object.is equality`.
 
-- [ ] **Step 17.3: Implement.**
+- [ ] **Step 18.3: Implement.**
 
 In `src/cli/gate.ts`, replace:
 
@@ -10646,9 +10762,9 @@ export function usableMessage(message: string, usable: readonly Workflow[], max:
 /** A workflow's params, as `list` and `mt workflow check` say them: `topic (required), vendors (list, required), reviewer (default reviewer)`. */
 ```
 
-- [ ] **Step 17.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2173 passed (2173)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 18.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2179 passed (2179)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 17.5: Commit.**
+- [ ] **Step 18.5: Commit.**
 
 ```bash
 git add src/cli/gate.ts src/cli/mt.ts src/cli/operator.ts src/cli/plain.ts src/kanban/service.ts src/kanban/workflow.ts tests/mt-kanban-workflow.test.ts
@@ -10657,7 +10773,7 @@ git commit -m "Add mt kanban workflow at the terminal: preview, loading as openB
 
 ---
 
-### Task 18: `task show` of a member
+### Task 19: `task show` of a member
 
 **Files:**
 
@@ -10666,7 +10782,7 @@ git commit -m "Add mt kanban workflow at the terminal: preview, loading as openB
 
 Spec §21.10. `TaskView.member`: `taskView` reads `memberOf`, which reads the members table only where it exists, so `mt kanban task show` keeps working on a database not yet migrated. Chat's `renderShow` and the terminal's `showText` give one line, `memberLine`, the instance, its step and item; `--json` gives `task.workflow`, or null.
 
-- [ ] **Step 18.1: Write the tests.**
+- [ ] **Step 19.1: Write the tests.**
 
 Create `tests/kanban-workflow-task-show.test.ts`:
 
@@ -10767,9 +10883,9 @@ describe('task show of a member', () => {
 });
 ```
 
-- [ ] **Step 18.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-task-show.test.ts`. Expected: `Tests  1 failed | 1 passed (2)`; the first failure: `AssertionError: expected [ …(4) ] to include 'workflow: `w_qbb07dhs09m3` vendor-eva…'`.
+- [ ] **Step 19.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/kanban-workflow-task-show.test.ts`. Expected: `Tests  1 failed | 1 passed (2)`; the first failure: `AssertionError: expected [ …(4) ] to include 'workflow: `w_napnvvkad3y0` vendor-eva…'`.
 
-- [ ] **Step 18.3: Implement.**
+- [ ] **Step 19.3: Implement.**
 
 In `src/cli/operator.ts`, replace:
 
@@ -10895,9 +11011,9 @@ export function memberLine(
   return `workflow: ${code(m.instanceId)} ${escape(m.name ?? '(no workflow)')}, step ${escape(m.step)}${m.item === null ? '' : `, item ${escape(m.item)}`}`;
 ```
 
-- [ ] **Step 18.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2175 passed (2175)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 19.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2181 passed (2181)`. Run `npx vitest run --project e2e`. Expected: `Tests  164 passed (164)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 18.5: Commit.**
+- [ ] **Step 19.5: Commit.**
 
 ```bash
 git add src/cli/operator.ts src/cli/plain.ts src/db/kanban-read.ts src/kanban/chat-render.ts tests/kanban-workflow-task-show.test.ts
@@ -10906,7 +11022,7 @@ git commit -m "Give task show of a workflow's member one line, its instance, ste
 
 ---
 
-### Task 19: End to end
+### Task 20: End to end
 
 **Files:**
 
@@ -10915,7 +11031,7 @@ git commit -m "Give task show of a workflow's member one line, its instance, ste
 
 Spec §21.16. The fake CLI agent (`tests/fakes/cli-agent.mjs`) gains `kanban-body`: it runs `mt kanban show`, and when its task's body is a worker command and its JSON, `start-workflow {…}` or `apply-dag {…}`, runs it and writes its answer to `asked.log`; then it reports complete. `tests/kanban-workflow.e2e.ts` runs the router, `KanbanChat`, the dispatcher, the real CLI driver, the shim, the real socket and the notifier together: the example started from a group, its steps run in order, its notices in the instance's thread; a deciding step's start of a second workflow, whose tasks follow the first's thread; a planner's graph of five tasks made by `apply-dag` in one transaction, its root claimed after; and a terminal's preview as a file, edited, checked and applied, which no chat follows.
 
-- [ ] **Step 19.1: Write the fake's mode and the test.**
+- [ ] **Step 20.1: Write the fake's mode and the test.**
 
 In `tests/fakes/cli-agent.mjs`, replace:
 
@@ -11263,11 +11379,11 @@ describe('workflows, end to end', () => {
 });
 ```
 
-- [ ] **Step 19.2: Run it.** Run `npx vitest run --project e2e tests/kanban-workflow.e2e.ts`. Expected: `Tests  4 passed (4)`.
+- [ ] **Step 20.2: Run it.** Run `npx vitest run --project e2e tests/kanban-workflow.e2e.ts`. Expected: `Tests  4 passed (4)`.
 
-- [ ] **Step 19.3: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2175 passed (2175)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 20.3: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2181 passed (2181)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
-- [ ] **Step 19.4: Commit.**
+- [ ] **Step 20.4: Commit.**
 
 ```bash
 git add tests/fakes/cli-agent.mjs tests/kanban-workflow.e2e.ts
@@ -11276,15 +11392,15 @@ git commit -m "Test workflows end to end: a start from a group run in order thro
 
 ---
 
-### Task 20: The README, the guide and the config example
+### Task 21: The README, the guide and the config example
 
 **Files:**
 
 - Modify: `README.md`, `config.example.yaml`, `docs/kanban-guide.md`
 
-Spec §21.15, plan T's row in §12. The README's `mt` list and chat table gain the workflow commands, and the board's section a short account of workflows; its roles section says where the files live. The guide gains section 12, on workflows: the file, starting, managing, a deciding step and workspaces, and the terminal and agents; the recipes and rules of thumb become sections 13 and 14; recipe 3's planner makes its graph with `apply-dag`, with a dry run first, and recipe 4 applies a previewed DAG from a workflow file. `config.example.yaml` says workflows are files of their own. No test.
+Spec §21.15, plan T's row in §12. The README's `mt` list and chat table gain the workflow commands, and the board's section a short account of workflows; its roles section says where the files live. The guide gains section 12, on workflows: the file, starting, managing, a deciding step and workspaces, and the terminal and agents; the recipes and rules of thumb become sections 13 and 14; recipe 3's planner makes its graph with `apply-dag`, with a dry run first, and recipe 4 applies a previewed DAG from a workflow file, its `research` workspace added with `mt workspace add … --isolated`. `config.example.yaml` says workflows are files of their own. No test.
 
-- [ ] **Step 20.1: Edit the documents.**
+- [ ] **Step 21.1: Edit the documents.**
 
 In `README.md`, replace:
 
@@ -11959,7 +12075,21 @@ steps:
 ```
 
 `research` is an isolated workspace (section 6), so the three prototypes each get a directory
-of their own and run side by side; in a shared one they would queue. A name field takes a name,
+of their own and run side by side; in a shared one they would queue. Add it once, on the
+gateway's host, from a git repository, and restart the gateway:
+
+```
+$ mt workspace add research /srv/repos/research --isolated
+```
+
+or, by hand, in `config.yaml`:
+
+```yaml
+workspaces:
+  default: /srv/repos/main
+  research: { path: /srv/repos/research, isolated: true }
+```
+ A name field takes a name,
 or one whole reference such as `"{{item}}"`, never one put together from parts, so
 `"research-{{item}}"` is refused by the check.
 
@@ -12057,9 +12187,9 @@ with:
 ## 14. Rules of thumb
 ```
 
-- [ ] **Step 20.2: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2175 passed (2175)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors. `git diff e73ee3e -- README.md docs/kanban-guide.md config.example.yaml | grep "^+" | grep -c "—"` prints `0`.
+- [ ] **Step 21.2: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2181 passed (2181)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors. `git diff e73ee3e -- README.md docs/kanban-guide.md config.example.yaml | grep "^+" | grep -c "—"` prints `0`.
 
-- [ ] **Step 20.3: Commit.**
+- [ ] **Step 21.3: Commit.**
 
 ```bash
 git add README.md config.example.yaml docs/kanban-guide.md
@@ -12069,7 +12199,7 @@ git commit -m "Document workflows: the README's commands, tables and a short acc
 
 ## Done when
 
-- `npx vitest run --project unit` gives `Tests  2175 passed (2175)`. `npx vitest run --project e2e` gives `Tests  168 passed (168)`, run twice. `npm run typecheck` and `npm run build` report no errors. All under Node 22, in the worktree.
+- `npx vitest run --project unit` gives `Tests  2181 passed (2181)`. `npx vitest run --project e2e` gives `Tests  168 passed (168)`, run twice. `npm run typecheck` and `npm run build` report no errors. All under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing, and `git diff e73ee3e -- src README.md docs/kanban-guide.md config.example.yaml | grep "^+" | grep -c "—"` prints `0`.
 - A workflow file is checked at every level, by `mt workflow check`, at startup and at each preview and start (`tests/kanban-workflow-file.test.ts`, `tests/kanban-workflow-check.test.ts`).
 - A start expands its params into a DAG, which is shaped, made canonical, measured, hashed and checked task by task, then made in one transaction, or refused whole, naming the task (`tests/kanban-workflow-expand.test.ts`, `tests/kanban-dag.test.ts`, `tests/kanban-workflow-service.test.ts`, `tests/kanban-workflow-writer.test.ts`).
@@ -12078,16 +12208,16 @@ git commit -m "Document workflows: the README's commands, tables and a short acc
 
 ## Before relying on it: the smoke checklist
 
-For the user, once the plan is built and merged, on the real host, with the real Lark tenant. Run each command as the gateway's user. `<mt>` below is the `mt` the service's build has, `~/.nvm/versions/node/v22.15.0/bin/node <checkout>/dist/mt.js` until `PATH` has one; never a bare `mt` under another node. The items need the board on (`kanban.enabled: true`), a group the bot is in, a role `worker` (and `reviewer` for the example's last step), and you an operator.
+For the user, once the plan is built and merged, on the real host, with the real Lark tenant. Run each command as the gateway's user. `<mt>` below is the `mt` the service's build has, `~/.nvm/versions/node/v22.15.0/bin/node <checkout>/dist/mt.js` until `PATH` has one; never a bare `mt` under another node. The items need the board on (`kanban.enabled: true`), a group the bot is in, the roles `worker` and `reviewer` (the example's last step), and for item 7 `planner` with the guide's recipe 3 `role.md` (`<mt> role create planner`, then put that `role.md` in `~/.manus-team/roles/planner/`, and restart), and you an operator. Every build and every `<mt>` runs under Node 22, `~/.nvm/versions/node/v22.15.0/bin/node`.
 
 0. **Make the host ready**, once. Back up the database while the service is stopped, as this build's first start migrates it to version 9: `<mt> service stop && sqlite3 ~/.manus-team/team.db ".backup /tmp/team-v8.db"`. Build with Node 22 (`cd <checkout> && PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH npm run build`), then `<mt> service start`. `<mt> service logs -n 30` says `schema at version 9` and, after the roles' line, `workflows: none`.
-1. **A file, checked.** `mkdir -p ~/.manus-team/workflows` and write the example of spec §21.1 to `~/.manus-team/workflows/vendor-eval.yaml`. `<mt> workflow check` prints `vendor-eval: ok, 3 steps; params: topic (required), vendors (list, required), reviewer (default reviewer)`, exit 0 (`echo $?`). Break a copy, `cp vendor-eval.yaml onboarding.yaml` and add a gate `command: "echo {{topic}}"` to a step: `<mt> workflow check` prints `onboarding: not usable: steps.….gates[0].command holds {{, …`, exit 1; `<mt> service check` prints it as a `warning:` line and still ends `ok: this build would start as …`. Restart the service: the log says `workflow onboarding is not usable: …` and `workflows: vendor-eval; not usable: onboarding`, and the gateway connects. Remove `onboarding.yaml`.
+1. **A file, checked.** `mkdir -p ~/.manus-team/workflows && cd ~/.manus-team/workflows`, and write the example of spec §21.1 to `vendor-eval.yaml` there. `<mt> workflow check` prints `vendor-eval: ok, 3 steps; params: topic (required), vendors (list, required), reviewer (default reviewer)`, exit 0 (`echo $?`). Break a copy, `cp vendor-eval.yaml onboarding.yaml`, and add a gate `command: "echo {{topic}}"` under `gates:` to its `shortlist` step: `<mt> workflow check` prints `onboarding: not usable: steps.shortlist.gates[0].command holds {{, …`, exit 1; `<mt> service check` prints it as a `warning:` line and still ends `ok: this build would start as …`. Restart the service: the log says `workflow onboarding is not usable: …` and `workflows: vendor-eval; not usable: onboarding`, and the gateway connects. Remove `onboarding.yaml`.
 2. **A preview, in the group.** `/kanban workflow preview vendor-eval topic="log storage" vendors=acme,globex`: a reply of four lines, `shortlist`, `evaluate:1`, `evaluate:2` (each `after shortlist, 1 gate`), `recommend` (`after evaluate:1, evaluate:2`), and `Nothing was made: …`. `/kanban task list` shows nothing new. Type the quotes on a phone, where they arrive as `“…”`: the same reply.
 3. **A start.** `/kanban workflow start vendor-eval topic="log storage" vendors=acme,globex`: a reply in a thread on the command, `Started vendor-eval as w_…, 4 tasks:`, a line a task, and `This thread hears …`. Lark shows the group's timeline with the command and its thread only. The shortlist runs first; each evaluation after it, one at a time in the shared workspace; the recommendation after both; every notice, `Done: …` and the like, lands in the thread. `/kanban task show` of an evaluation has a line `workflow: w_… vendor-eval, step evaluate, item acme`.
 4. **Seeing it.** `/kanban workflow instances` lists it, `running, 1 of 4 done` and so on; `/kanban workflow show w_…` its steps' tasks; `/kanban workflow list` the file with its params. `<mt> kanban workflow show w_… --dag` prints the stored DAG, with no hash.
 5. **A person, by @-mention.** A workflow with `assignee: "{{owner}}"` started with `owner=@<a person whose display name has a space>`: their task is theirs (`/kanban task show` names them), and their card comes in the instance's thread when they are in the group, by direct message otherwise. `owner=@Nobody` is refused, `Not done: @Nobody is not someone this message mentions …`.
 6. **The terminal.** `<mt> kanban workflow preview vendor-eval --param topic=queues --param vendors=acme --json > /tmp/dag.json`; edit a title in it; `<mt> kanban workflow apply /tmp/dag.json --dry-run` lists every task and `gate: test -s evaluation.md (up to 30 s)`, and makes nothing; `<mt> kanban workflow apply /tmp/dag.json --key smoke-1` makes it, with the edited title, and the gateway runs it (it answered the nudge: no `mt: no gateway answered` line). No chat hears of it. Running the apply again says `already made, as w_…`.
-7. **An agent's graph.** Give the `planner` role recipe 3's `role.md`, and send the recipe's task: the planner's run sends `mt kanban apply-dag` (first with `"dry_run": true`), the four tasks appear at once, as an instance shown "(no workflow)", and the chat that made the plan hears each of them. A `role.md` asking for a gate in the DAG gets `apply-dag takes none` back.
+7. **An agent's graph.** With the `planner` role of the prerequisites, send recipe 3's task: the planner's run sends `mt kanban apply-dag` (first with `"dry_run": true`), the four tasks appear at once, as an instance shown "(no workflow)", and the chat that made the plan hears each of them. A `role.md` asking for a gate in the DAG gets `apply-dag takes none` back.
 8. **Archive.** `/kanban workflow archive w_…` for the instance of item 3: every task of it archived, its open run stopped; `/kanban workflow instances` no longer lists it, and `instances all` does, as archived.
 
 **Clean up.** `rm ~/.manus-team/workflows/*.yaml` if the files were only for the smoke; the instances stay on the board, archived or done, and `/tmp/team-v8.db` is the way back to the database before the migration.
