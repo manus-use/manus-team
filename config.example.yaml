@@ -132,7 +132,9 @@ agent:
   #   - ANTHROPIC_API_KEY
 
 # The task board. Off by default; these keys are snake_case, as the kanban
-# design spells them, and are set in this file only.
+# design spells them, and are set in this file only. Its workflows are not
+# set here: each is a file of its own, $MT_HOME/workflows/<name>.yaml, read at
+# each preview and start, and checked by mt workflow check.
 # kanban:
 #   enabled: true
 #   # Open agent runs at once, across every board and role. Defaults to

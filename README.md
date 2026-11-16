@@ -344,6 +344,10 @@ roles/implementer/
   .env            # optional; this role's own secrets, owner-only (e.g. 0600)
 ```
 
+Workflows live beside the roles, one file each, `$MT_HOME/workflows/<name>.yaml`, named as roles
+are; the files are read at each preview and start, so an edit needs no restart. `mt workflow
+check` checks them, and the board guide's section 12 says what they hold.
+
 ```yaml
 # roles/implementer/config.yaml
 description: Writes and changes code
@@ -476,6 +480,7 @@ board run's agent reports. In a checkout, run it as `npm run -s mt -- …`.
 mt role create <name> [--clone-from <role>] [--description "..."] [--own-workspace]
 mt role list
 mt role check [<name>]
+mt workflow check [<name>]
 mt workspace add <name> <absolute-path> [--isolated]
 mt workspace add <name> --clone <git-url> [--isolated]
 mt workspace list
@@ -506,9 +511,16 @@ mt kanban task worktree <task_id> [--board <name>]
 mt kanban gate add <task_id> [--timeout <s>] -- <command...>
 mt kanban gate list <task_id>
 mt kanban gate remove <task_id> <gate_id>
+mt kanban workflow list
+mt kanban workflow instances [all] [--board <name>]
+mt kanban workflow show <instance> [--board <name>] [--dag]
+mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]... [--json]
+mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>]
+mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run]
+mt kanban workflow archive <instance> [--board <name>]
 
 # the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:
-mt kanban <show|complete|review|changes|block|comment|create|link> < input.json
+mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag> < input.json
 ```
 
 The role, workspace and operator's board commands find the home, config file and database the
@@ -644,9 +656,35 @@ work — research, a document, an operation in Lark, a chore, a change to code �
 role, whose agent runs it in a workspace, which is just a directory, or to a person.
 
 For a walk-through with messages to paste, from one task to chains, fan-out and review, see
-[docs/kanban-guide.md](docs/kanban-guide.md). Its section 12 has recipes for whole graphs of
-tasks: parallel branches, build, review and release, a planner role that writes the graph, a
-script that builds one from a terminal, rerouting around a failed task, and two boards.
+[docs/kanban-guide.md](docs/kanban-guide.md). Its section 12 is on workflows, and section 13 has
+recipes for whole graphs of tasks: parallel branches, build, review and release, a planner role
+that writes the graph, a DAG applied from a terminal, rerouting around a failed task, and two
+boards.
+
+**Workflows.** A graph of tasks the team runs again and again is written once, as a file,
+`$MT_HOME/workflows/<name>.yaml`: a list of steps, each a task to make, with `parents` between
+them, `for_each` to make one task an item of a list, and params filled into their text.
+
+```yaml
+description: Shortlist vendors, evaluate each in parallel, then recommend one
+params:
+  topic:    { required: true }
+  vendors:  { list: true, required: true }
+steps:
+  shortlist: { title: "Shortlist vendors for {{topic}}", assignee: worker }
+  evaluate:  { title: "Evaluate {{item}} for {{topic}}", assignee: worker, for_each: vendors, parents: [shortlist] }
+  recommend: { title: "Recommend a vendor for {{topic}}", assignee: worker, parents: [evaluate] }
+```
+
+`/kanban workflow start vendor-eval topic="log storage" vendors=acme,globex` makes all four
+tasks and their links at once, as one instance, `w_…`, or none of them; `/kanban workflow
+preview` shows what a start would make. A workflow has no conditions: one that must branch has a
+deciding step, whose agent reads its parents' handoffs and creates the branch it chose. Params
+never reach a gate. `mt workflow check` checks the files, and the gateway says at startup which
+are usable; a broken one does not stop it. At the terminal, `mt kanban workflow preview … --json`
+writes the DAG a start would make as a file, which `mt kanban workflow apply` makes, with
+`--dry-run` to check it first; an agent starts a workflow with `mt kanban start-workflow`, or
+makes a graph of its own at once with `mt kanban apply-dag`, which takes no gates.
 
 ```
 /kanban task new Draft the Q3 summary
@@ -703,6 +741,12 @@ typed without `task`, such as `/kanban new`, is an unknown command.
 | `/kanban board use <name>` | operate: this chat, all its threads, is on that board from now on |
 | `/kanban board set <name> max_running <number\|none>`, or `workspace <workspace\|none>` | operate: the board's own limit, inside `kanban.max_running`, or its tasks' default workspace; `none` clears either |
 | `/kanban board archive <name>` | operate: refused while any of its tasks is open, in review or blocked; never `default` |
+| `/kanban workflow list` | talk: the workflow files, each with its params, and each broken one with why |
+| `/kanban workflow instances [all]` | talk: this chat's board's instances, running and blocked ones unless `all` |
+| `/kanban workflow show <instance>` | talk: one instance, its steps' tasks in order, and its related tasks apart |
+| `/kanban workflow preview <name> key=value ...` | talk: what a start would make, one line a task; makes nothing |
+| `/kanban workflow start <name> key=value ...` | operate: makes every task of the workflow at once, on this chat's board; this chat hears each |
+| `/kanban workflow archive <instance>` | operate: archives every task of the instance |
 | `/kanban help` | talk |
 
 Whoever acts is recorded as `lark:<union_id>`; a sender whose message carried no union_id can
