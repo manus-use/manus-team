@@ -913,8 +913,6 @@ export interface InstanceRow {
   name: string | null;
   /** The DAG it was made from, as stored: masked but for its gates. */
   dag: Dag;
-  /** Of the DAG's canonical form, unmasked: how a repeated key tells the same DAG from another. Never printed. */
-  dagSha256: string;
   source: 'start' | 'apply';
   board: string;
   createdBy: string;
@@ -958,12 +956,21 @@ interface MemberRaw {
 const INSTANCE_COLS = 'instance_id, name, dag, dag_sha256, source, board, created_by, created_via, idempotency_key, created_at';
 const MEMBER_COLS = 'task_id, instance_id, ref, step, item, position';
 
+/**
+ * An instance found by its key, with the hash of its DAG's canonical form,
+ * unmasked: how a repeated key tells the same DAG from another (spec §21.6). Only
+ * `keyRefused` reads the hash; it is never printed, so no `InstanceRow` holds it.
+ */
+export interface KeyedInstance {
+  instance: InstanceRow;
+  dagSha256: string;
+}
+
 function decodeInstance(r: InstanceRaw): InstanceRow {
   return {
     instanceId: r.instance_id,
     name: r.name,
     dag: JSON.parse(r.dag) as Dag,
-    dagSha256: r.dag_sha256,
     source: r.source as InstanceRow['source'],
     board: r.board,
     createdBy: r.created_by,
@@ -987,11 +994,11 @@ export function getInstance(db: Db, instanceId: string): InstanceRow | undefined
   return row === undefined ? undefined : decodeInstance(row);
 }
 
-export function instanceByKey(db: Db, idempotencyKey: string): InstanceRow | undefined {
+export function instanceByKey(db: Db, idempotencyKey: string): KeyedInstance | undefined {
   const row = db
     .prepare<[string], InstanceRaw>(`SELECT ${INSTANCE_COLS} FROM kanban_workflow_instances WHERE idempotency_key = ?`)
     .get(idempotencyKey);
-  return row === undefined ? undefined : decodeInstance(row);
+  return row === undefined ? undefined : { instance: decodeInstance(row), dagSha256: row.dag_sha256 };
 }
 
 /** An instance's members, in their DAG's order. */
@@ -1000,6 +1007,47 @@ export function membersOf(db: Db, instanceId: string): MemberRow[] {
     .prepare<[string], MemberRaw>(`SELECT ${MEMBER_COLS} FROM kanban_workflow_tasks WHERE instance_id = ? ORDER BY position`)
     .all(instanceId)
     .map(decodeMember);
+}
+
+/**
+ * An instance's members in their DAG's order, each with its task, in two
+ * queries whatever their number. A member's task is never missing: the members
+ * table's foreign key holds it, and no task is ever deleted. Were one missing,
+ * its member would be left out, so a read never throws on it.
+ */
+export function membersWithTasks(db: Db, instanceId: string): Array<MemberRow & { task: TaskRow }> {
+  const tasks = new Map(
+    db
+      .prepare<[string], TaskRaw>(
+        `SELECT ${TASK_COLS} FROM kanban_tasks WHERE task_id IN (SELECT task_id FROM kanban_workflow_tasks WHERE instance_id = ?)`,
+      )
+      .all(instanceId)
+      .map((r) => [r.task_id, decodeTask(r)]),
+  );
+  return membersOf(db, instanceId).flatMap((m) => {
+    const task = tasks.get(m.taskId);
+    return task === undefined ? [] : [{ ...m, task }];
+  });
+}
+
+/**
+ * The phases of the members of a board's newest `limit` instances, as
+ * `instancesOn` reads them, in one aggregate query: by instance, how many
+ * members are in each phase. An instance with no member is absent.
+ */
+export function memberPhases(db: Db, board: string, limit: number): Map<string, Array<{ phase: Phase; n: number }>> {
+  const rows = db
+    .prepare<[string, number], { instance_id: string; phase: Phase; n: number }>(
+      `SELECT m.instance_id, t.phase, count(*) AS n
+         FROM kanban_workflow_tasks m JOIN kanban_tasks t ON t.task_id = m.task_id
+        WHERE m.instance_id IN (SELECT instance_id FROM kanban_workflow_instances WHERE board = ?
+                                 ORDER BY created_at DESC, rowid DESC LIMIT ?)
+        GROUP BY m.instance_id, t.phase`,
+    )
+    .all(board, limit);
+  const out = new Map<string, Array<{ phase: Phase; n: number }>>();
+  for (const r of rows) out.set(r.instance_id, [...(out.get(r.instance_id) ?? []), { phase: r.phase, n: r.n }]);
+  return out;
 }
 
 /**

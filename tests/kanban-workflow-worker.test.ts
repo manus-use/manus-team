@@ -123,6 +123,28 @@ describe('start-workflow', () => {
   });
 });
 
+/** Every instance's DAG hash, read from the table: what no answer may hold. */
+const hashes = (): string[] => (t.db.prepare('SELECT dag_sha256 AS h FROM kanban_workflow_instances').all() as Array<{ h: string }>).map((r) => r.h);
+
+describe("the answers' DAG hash", () => {
+  it('is in no answer of start-workflow or apply-dag, a repeat and a dry run included', async () => {
+    const answers = [
+      await ask('start-workflow', { workflow: 'vendor-eval', params: { topic: 'logs', vendors: ['acme'] }, idempotency_key: 's' }),
+      await ask('start-workflow', { workflow: 'vendor-eval', params: { topic: 'logs', vendors: ['acme'] }, idempotency_key: 's' }),
+      await ask('apply-dag', { format: 1, tasks: [{ ref: 'a', title: 'A', assignee: 'worker' }], idempotency_key: 'd' }),
+      await ask('apply-dag', { format: 1, tasks: [{ ref: 'a', title: 'A', assignee: 'worker' }], idempotency_key: 'd' }),
+      await ask('apply-dag', { format: 1, tasks: [{ ref: 'a', title: 'A', assignee: 'worker' }], idempotency_key: 'd', dry_run: true }),
+    ];
+    expect(hashes()).toHaveLength(2);
+    for (const a of answers) {
+      expect(a.ok).toBe(true);
+      const text = JSON.stringify(a);
+      expect(text).not.toMatch(/sha256/i);
+      for (const h of hashes()) expect(text).not.toContain(h);
+    }
+  });
+});
+
 describe('apply-dag', () => {
   const graph = {
     format: 1,
@@ -245,5 +267,8 @@ describe('mt kanban apply-dag and mt kanban workflow in a run\'s shell', () => {
     });
     const json = await mt(['kanban', 'workflow', 'apply', 'dag.json', '--json']);
     expect(JSON.parse(json.out)).toMatchObject({ ok: false, code: 'operator_command' });
+    // A preview's stdout is a DAG file: its refusal goes to stderr, with --json too.
+    const preview = await mt(['kanban', 'workflow', 'preview', 'vendor-eval', '--param', 'topic=x', '--json']);
+    expect(preview).toMatchObject({ code: 1, out: '', err: expect.stringMatching(/^mt: mt kanban workflow preview is an operator's command, not a board run's/) });
   });
 });

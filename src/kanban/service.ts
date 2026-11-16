@@ -15,7 +15,8 @@ import {
   instanceByKey,
   instancesOn,
   memberOf,
-  membersOf,
+  memberPhases,
+  membersWithTasks,
   relatedTasks,
   runsOf,
   statusOf,
@@ -63,15 +64,15 @@ import {
   type BoardRow,
   type ChatAt,
   type CommentRow,
-  type Contract,
+  type CreateRequest,
   type CreatedVia,
   type GateRow,
+  type Phase,
   type Refusal,
   type Rendering,
   type ReportedBlockKind,
   type Reporter,
   type Result,
-  type RetryOnCrash,
   type RunRow,
   type TaskRow,
   type Waiting,
@@ -180,26 +181,8 @@ function verdict(r: GateResult, timeoutS: number): string {
   return r.signal === null ? 'could not start' : `was ended by ${r.signal}`;
 }
 
-/** A task to create, as a person or a worker asks for it. Names are not yet checked. */
-export interface CreateRequest {
-  title: string;
-  body?: string;
-  contract?: Contract;
-  /** A role name, or a person's principal `lark:<union_id>`. */
-  assignee?: string;
-  reviewer?: string;
-  workspace?: string;
-  parents?: readonly string[];
-  priority?: number;
-  idempotencyKey?: string;
-  failureLimit?: number;
-  retryOnCrash?: RetryOnCrash;
-  maxRuntimeS?: number;
-  createdBy: string;
-  createdVia: CreatedVia;
-  /** The board it goes on (spec §16): chat's is the chat's board. A run's task's follow-ups go on its board, whatever this says. */
-  board?: string;
-}
+/** A task to create: in types.ts, so the checks need nothing of the service; exported here too, as its callers name it. */
+export type { CreateRequest } from './types.js';
 
 /** A workflow to start (spec §21.6), as chat, the terminal or a run asks for it. Nothing is checked yet. */
 export interface StartRequest {
@@ -263,14 +246,6 @@ export const INSTANCES_READ = 200;
 
 /** How long `unknown_workflow`'s message may be, in bytes: a gate refusal's output's size (spec §21.6). */
 export const WORKFLOW_MESSAGE_BYTES = 4 * 1024;
-
-/** An instance's members, each with its task. */
-function madeTasks(db: Db, instanceId: string): Array<MemberRow & { task: TaskRow }> {
-  return membersOf(db, instanceId).flatMap((m) => {
-    const task = getTask(db, m.taskId);
-    return task === undefined ? [] : [{ ...m, task }];
-  });
-}
 
 /** A claim, with what was read for it. */
 export interface Claimed {
@@ -1327,11 +1302,11 @@ export class KanbanService {
 
   /** A key's instance, read-only (spec §21.6 step 0): the repeat's answer, or why the key is another's; undefined for a key not used. */
   #repeat(key: string, want: Parameters<typeof board.keyRefused>[1]): Result<WorkflowMade> | undefined {
-    const existing = instanceByKey(this.#db, key);
-    if (existing === undefined) return undefined;
-    const refused = board.keyRefused(existing, want);
+    const keyed = instanceByKey(this.#db, key);
+    if (keyed === undefined) return undefined;
+    const refused = board.keyRefused(keyed, want);
     if (refused !== undefined) return refused;
-    return { ok: true, instance: existing, tasks: madeTasks(this.#db, existing.instanceId), existing: true };
+    return { ok: true, instance: keyed.instance, tasks: membersWithTasks(this.#db, keyed.instance.instanceId), existing: true };
   }
 
   /** The one transaction (spec §21.6 step 3). */
@@ -1371,17 +1346,17 @@ export class KanbanService {
   instances(onBoard: string, all = false): { instances: InstanceSummary[]; total: number; read: number } {
     if (!isText(onBoard)) return { instances: [], total: 0, read: 0 };
     const { instances, total } = instancesOn(this.#db, onBoard, INSTANCES_READ);
-    const summaries = instances.map((instance) => ({ instance, ...this.#state(instance.instanceId) }));
+    // Every status from one aggregate query of the members' phases, not a read of each member.
+    const phases = memberPhases(this.#db, onBoard, INSTANCES_READ);
+    const summaries = instances.map((instance) => ({
+      instance,
+      ...instanceStatus((phases.get(instance.instanceId) ?? []).flatMap(({ phase, n }) => Array<Phase>(n).fill(phase))),
+    }));
     return {
       instances: all ? summaries : summaries.filter((s) => s.status === 'running' || s.status === 'blocked'),
       total,
       read: instances.length,
     };
-  }
-
-  /** An instance's status, from its members' phases. */
-  #state(instanceId: string): InstanceState {
-    return instanceStatus(madeTasks(this.#db, instanceId).map((m) => m.task.phase));
   }
 
   /**
@@ -1394,7 +1369,7 @@ export class KanbanService {
     if (!isText(instanceId)) return board.refuse('invalid', 'an instance id is text');
     const instance = getInstance(this.#db, instanceId);
     if (instance === undefined) return board.refuse('not_found', `no workflow instance ${visible(instanceId)}`);
-    const members = madeTasks(this.#db, instanceId).map((m) => ({ ...m, status: statusOf(this.#db, m.task) }));
+    const members = membersWithTasks(this.#db, instanceId).map((m) => ({ ...m, status: statusOf(this.#db, m.task) }));
     const related: InstanceView['related'] = [];
     const others = new Map<string, { instanceId: string; name: string | null; tasks: number }>();
     for (const task of relatedTasks(this.#db, instanceId)) {

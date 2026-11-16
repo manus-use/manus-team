@@ -86,6 +86,9 @@ async function mt(argv: string[], opts: { stdin?: string; env?: Record<string, s
 }
 
 const PARAMS = ['--param', 'topic=log storage', '--param', 'vendors=acme,globex'];
+/** An instance's DAG hash, read from the table: what no answer may print. */
+const hashOf = (id: string): string =>
+  (gateway.prepare('SELECT dag_sha256 AS h FROM kanban_workflow_instances WHERE instance_id = ?').get(id) as { h: string } | undefined)?.h ?? 'none';
 const count = (table: string): number => (gateway.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n;
 
 describe('mt kanban workflow preview', () => {
@@ -249,7 +252,7 @@ describe('mt kanban workflow list, instances, show and archive', () => {
     ]);
     const dag = (await mt(['show', id, '--dag'])).out;
     expect(JSON.parse(dag)).toMatchObject({ format: 1, workflow: 'vendor-eval', params: { topic: `logs ${MASK}` } });
-    expect(dag).not.toContain(getInstance(gateway, id)?.dagSha256 ?? 'none');
+    expect(dag).not.toContain(hashOf(id));
     createBoard(gateway, 'research', ME, NOW);
     expect(await mt(['show', id, '--board', 'research'])).toEqual({ code: 1, out: '', err: `mt: instance ${id} is on board default, not research` });
     expect(await mt(['show', id, '--board', 'nowhere'])).toEqual({ code: 1, out: '', err: 'mt: there is no board nowhere' });
@@ -259,6 +262,32 @@ describe('mt kanban workflow list, instances, show and archive', () => {
     for (const t of started.tasks) expect(getTask(gateway, t.task_id)?.phase).toBe('archived');
     expect((await mt(['archive', id])).out).toBe(`every task of ${id} is archived already; nothing changed`);
     expect((await mt(['instances'])).out).toBe('no running or blocked workflow instances on board default; mt kanban workflow instances all shows done and archived ones too');
+  });
+
+  it("prints the DAG's hash in no --json answer: start, apply, its dry run, show and instances", async () => {
+    const path = join(f.root, 'dag.json');
+    writeFileSync(path, (await mt(['preview', 'vendor-eval', ...PARAMS, '--json'])).out);
+    const started = await mt(['start', 'vendor-eval', ...PARAMS, '--key', 's-1', '--json']);
+    const id = (JSON.parse(started.out) as { instance_id: string }).instance_id;
+    const applied = await mt(['apply', path, '--key', 'a-1', '--json']);
+    const appliedId = (JSON.parse(applied.out) as { instance_id: string }).instance_id;
+    const outs = [
+      started,
+      await mt(['start', 'vendor-eval', ...PARAMS, '--key', 's-1', '--json']),
+      applied,
+      await mt(['apply', path, '--key', 'a-1', '--json']),
+      await mt(['apply', path, '--dry-run', '--json']),
+      await mt(['apply', path, '--key', 'a-1', '--dry-run', '--json']),
+      await mt(['show', id, '--json']),
+      await mt(['show', appliedId, '--json']),
+      await mt(['instances', '--json']),
+      await mt(['instances', 'all', '--json']),
+    ].map((r) => r.out);
+    for (const out of outs) {
+      expect(out).not.toMatch(/sha256/i);
+      expect(out).not.toContain(hashOf(id));
+      expect(out).not.toContain(hashOf(appliedId));
+    }
   });
 
   it('re-applies a shown DAG to make a like instance', async () => {

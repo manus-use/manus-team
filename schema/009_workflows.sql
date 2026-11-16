@@ -7,7 +7,9 @@
 -- prompt and the notices know nothing of workflows (§1). Foreign keys are
 -- allowed here, as both tables are new. db/kanban.ts is the only writer of both
 -- (src/db/WRITERS.md): every row is written in the apply's transaction, with its
--- tasks, and never changed or removed.
+-- tasks, and never changed or removed. `dag` and `created_via` are stored as
+-- text, checked to be JSON, unlike a task's JSONB columns: `dag` holds the
+-- masked DAG's canonical form, byte for byte, read back whole by `show --dag`.
 CREATE TABLE kanban_workflow_instances (
   instance_id      TEXT PRIMARY KEY,                -- w_..., opaque
   name             TEXT,                            -- the workflow's, or null for a DAG with none

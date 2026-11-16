@@ -1,7 +1,6 @@
 import { visible } from '../names.js';
 import type { Role } from '../roles.js';
-import type { CreateRequest } from './service.js';
-import { CONTRACT_FIELDS, type Assignee, type Contract, type Refusal, type Result } from './types.js';
+import { CONTRACT_FIELDS, type Assignee, type Contract, type CreateRequest, type Refusal, type Result } from './types.js';
 
 /**
  * The checks a task gets before it is made (spec §21.15): `KanbanService.create`'s,

@@ -42,6 +42,7 @@ import {
   getTaskByKey,
   gatesOf,
   instanceByKey,
+  membersWithTasks,
   isFinished,
   membersOf,
   openAgentRunIn,
@@ -50,6 +51,7 @@ import {
   runsOf,
   subscriptionsOf,
   type InstanceRow,
+  type KeyedInstance,
   type MemberRow,
 } from './kanban-read.js';
 
@@ -2087,20 +2089,16 @@ export interface AppliedDag {
   existing: boolean;
 }
 
-/** An instance's members, each with its task. */
-function membersWithTasks(d: Db, instanceId: string): Array<MemberRow & { task: TaskRow }> {
-  return membersOf(d, instanceId).map((m) => ({ ...m, task: mustGet(d, m.taskId) }));
-}
-
 /**
  * Why a key's instance is not this start's or apply's (spec §21.6 step 0), or
  * undefined when it is a repeat: another board's is `other_board`; another
  * kind's, another workflow's, or another DAG's, `invalid`, naming it.
  */
 export function keyRefused(
-  existing: InstanceRow,
+  keyed: KeyedInstance,
   want: { board: string; source: 'start' | 'apply'; name: string | null; sha256?: string },
 ): Refusal | undefined {
+  const existing = keyed.instance;
   const id = existing.instanceId;
   if (existing.board !== want.board) {
     return refuse('other_board', `instance ${id} was made with this idempotency key on board ${existing.board}, not ${want.board}`);
@@ -2115,7 +2113,7 @@ export function keyRefused(
   if (want.source === 'start' && existing.name !== want.name) {
     return refuse('invalid', `this idempotency key was used to start workflow ${existing.name ?? '(no workflow)'}, as ${id}, not ${want.name ?? '(no workflow)'}`);
   }
-  if (want.source === 'apply' && want.sha256 !== undefined && existing.dagSha256 !== want.sha256) {
+  if (want.source === 'apply' && want.sha256 !== undefined && keyed.dagSha256 !== want.sha256) {
     return refuse('invalid', `this idempotency key was used to apply another DAG, as ${id}`);
   }
   return undefined;
@@ -2142,11 +2140,11 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
       board = mustGet(d, run.taskId).board;
     }
     if (instance.idempotencyKey !== null) {
-      const existing = instanceByKey(d, instance.idempotencyKey);
-      if (existing !== undefined) {
-        const refused = keyRefused(existing, { board, source: instance.source, name: instance.name, sha256: instance.sha256 });
+      const keyed = instanceByKey(d, instance.idempotencyKey);
+      if (keyed !== undefined) {
+        const refused = keyRefused(keyed, { board, source: instance.source, name: instance.name, sha256: instance.sha256 });
         if (refused !== undefined) return refused;
-        return { ok: true, instance: existing, members: membersWithTasks(d, existing.instanceId), existing: true };
+        return { ok: true, instance: keyed.instance, members: membersWithTasks(d, keyed.instance.instanceId), existing: true };
       }
     }
     const live = liveBoard(d, board);

@@ -165,7 +165,9 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
     command === 'workflow'
       ? `${runShellRefusal(what)}; a board run starts a workflow with mt kanban start-workflow, and makes a DAG of its own with mt kanban apply-dag`
       : runShellRefusal(what);
-  if (command !== 'gate' && rest.includes('--json')) io.out(jsonLine({ ok: false, code: 'operator_command', message }));
+  // A preview's stdout is the DAG file it writes: its refusal goes to stderr, as the preview's own do.
+  const json = command !== 'gate' && rest.includes('--json') && !(command === 'workflow' && sub === 'preview');
+  if (json) io.out(jsonLine({ ok: false, code: 'operator_command', message }));
   else refuse(io, message);
   return 1;
 }

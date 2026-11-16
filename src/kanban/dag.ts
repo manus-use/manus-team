@@ -209,6 +209,8 @@ function taskShape(raw: unknown, i: number, refs: ReadonlySet<string>, from: Dag
   if (typeof ref !== 'string' || ref === '' || bytes(ref) > DAG_LIMITS.refBytes || !REF.test(ref)) {
     return refuse('invalid', `${place}.ref is 1 to ${DAG_LIMITS.refBytes} bytes of letters, digits, '.', '_', ':' and '-'`);
   }
+  // A ref names its task in every refusal after this one: one holding a known secret is refused here, unquoted.
+  if (redactKnownSecrets(ref) !== ref) return refuse('invalid', `${place}.ref holds a known secret, and a ref is stored and shown as written`);
   if (refs.has(ref)) return refuse('invalid', `${place}.ref ${ref} is the ref of an earlier task too; a ref is unique in a DAG`);
   place = `tasks[${i}] (${ref})`;
   const nulls: Refusal | undefined = ['step', 'priority', 'contract', 'retry_on_crash', 'parents', 'gates']
@@ -347,6 +349,10 @@ export function checkDagShape(raw: unknown, from: DagSource): Result<ShapedDag> 
   const workflow = raw.workflow ?? null;
   if (workflow !== null && (typeof workflow !== 'string' || !NAME_PATTERN.test(workflow))) {
     return refuse('invalid', "workflow is a workflow's name, or null for a DAG with none");
+  }
+  // Checked in the shape, so before an apply's key lookup: the name is stored and shown, and a refusal never quotes it.
+  if (workflow !== null && redactKnownSecrets(workflow) !== workflow) {
+    return refuse('invalid', 'workflow holds a known secret, and a workflow name is stored and shown as written');
   }
   if (from === 'run' && workflow !== null) {
     return refuse(

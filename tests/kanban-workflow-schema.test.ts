@@ -6,7 +6,7 @@ import { newWorkflowId } from '../src/core/ids.js';
 import { getTask } from '../src/db/kanban-read.js';
 import { migrate, openDb } from '../src/db/open.js';
 import { SCHEMA_DIR, testDb, type TestDb } from './helpers/db.js';
-import { NOW, newTask } from './helpers/kanban.js';
+import { NOW, claimed, newTask } from './helpers/kanban.js';
 
 /**
  * Migration 009 (spec §21.7): an instance and its members, two tables of their
@@ -100,8 +100,14 @@ describe('migration 009', () => {
       try {
         expect(migrate(d, only)).toBe(8);
         const task = newTask(d);
+        // A task made by a run of another, its created_from_task set: the index 009 adds is on that column.
+        const run = claimed(d, task.taskId);
+        const follow = newTask(d, { createdBy: `run:${run.runId}`, createdVia: { kind: 'run', runId: run.runId } });
+        expect(follow.createdFromTask).toBe(task.taskId);
+        const before = [getTask(d, task.taskId), getTask(d, follow.taskId)];
         expect(migrate(d, SCHEMA_DIR)).toBe(9);
-        expect(getTask(d, task.taskId)).toEqual(task);
+        expect([getTask(d, task.taskId), getTask(d, follow.taskId)]).toEqual(before);
+        expect(d.prepare('SELECT task_id FROM kanban_tasks WHERE created_from_task = ?').all(task.taskId)).toEqual([{ task_id: follow.taskId }]);
         expect(d.prepare('SELECT count(*) AS n FROM kanban_workflow_instances').get()).toEqual({ n: 0 });
       } finally {
         d.close();

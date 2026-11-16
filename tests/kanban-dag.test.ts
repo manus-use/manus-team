@@ -441,13 +441,25 @@ describe('checkDagTasks', () => {
     expect(problem(tiny({ contract: { outcome: 'x'.repeat(8193) } }))).toMatchObject({ code: 'too_large', message: "a: its contract's outcome is 8193 bytes; at most 8192" });
   });
 
+  it('refuses a ref holding a known secret in its shape, never quoting it in a later refusal', () => {
+    addSecrets(['secretref12345']);
+    const message = 'tasks[0].ref holds a known secret, and a ref is stored and shown as written';
+    expect(refused(tiny({ ref: 'secretref12345', priority: 'high' }))).toEqual({ code: 'invalid', message });
+    expect(refused({ format: 1, tasks: [{ ref: 'secretref12345', title: 'A' }, { ref: 'secretref12345', title: 'B' }] })).toEqual({ code: 'invalid', message });
+    expect(refused({ format: 1, tasks: [{ ref: 'a', title: 'A' }, { ref: 'b', title: 'B', parents: ['secretref12345'] }] }).message).not.toContain('secretref12345');
+  });
+
+  it("refuses a workflow name holding a known secret, without quoting it", () => {
+    addSecrets(['secretname12345']);
+    expect(refused(tiny({}, { workflow: 'secretname12345' }))).toEqual({
+      code: 'invalid',
+      message: 'workflow holds a known secret, and a workflow name is stored and shown as written',
+    });
+  });
+
   it('refuses a ref or a step holding a known secret, without quoting it', () => {
     addSecrets(['secretref12345']);
-    expect(problem(tiny({ ref: 'secretref12345' }))).toEqual({
-      ok: false,
-      code: 'invalid',
-      message: 'tasks[0]: its ref or its step holds a known secret, and a ref is stored and shown as written',
-    });
+    expect(refused(tiny({ ref: 'secretref12345' }))).toEqual({ code: 'invalid', message: 'tasks[0].ref holds a known secret, and a ref is stored and shown as written' });
     expect(problem(tiny({ step: 'secretref12345' }))?.message).toBe('tasks[0]: its ref or its step holds a known secret, and a ref is stored and shown as written');
   });
 

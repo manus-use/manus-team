@@ -1,8 +1,8 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { archive, block, closeRun, complete, createTask } from '../src/db/kanban.js';
-import { getRun, getTask } from '../src/db/kanban-read.js';
+import { getRun, getTask, membersWithTasks } from '../src/db/kanban-read.js';
 import { KanbanService, type WorkflowMade } from '../src/kanban/service.js';
 import type { Phase, Result } from '../src/kanban/types.js';
 import { instanceStatus } from '../src/kanban/workflow.js';
@@ -104,6 +104,40 @@ describe('instances', () => {
     expect(ids(true)).toHaveLength(3);
     expect(service.instances('default', true)).toMatchObject({ total: 3, read: 3 });
     expect(service.instances('elsewhere', true)).toEqual({ instances: [], total: 0, read: 0 });
+  });
+
+  it("reads every instance's status in one aggregate query, however many members and instances there are", () => {
+    const prepared = (): number => {
+      const spy = vi.spyOn(h.db, 'prepare');
+      try {
+        service.instances('default', true);
+        return spy.mock.calls.length;
+      } finally {
+        spy.mockRestore();
+      }
+    };
+    const first = start();
+    block(h.db, first.tasks[0]?.taskId ?? '', { kind: 'person', principal: ALICE }, { kind: 'needs_input', reason: 'which logs?' }, NOW);
+    const one = prepared();
+    for (let n = 0; n < 4; n += 1) start();
+    expect(prepared()).toBe(one);
+    expect(service.instances('default', true).instances.map((i) => [i.status, i.done, i.total, i.blocked])).toEqual([
+      ...Array.from({ length: 4 }, () => ['running', 0, 4, 0]),
+      ['blocked', 0, 4, 1],
+    ]);
+  });
+});
+
+describe('membersWithTasks', () => {
+  it("gives an instance's members in position order, each with its task, in two queries however many there are", () => {
+    const r = start();
+    const spy = vi.spyOn(h.db, 'prepare');
+    const members = membersWithTasks(h.db, r.instance.instanceId);
+    expect(spy.mock.calls.length).toBe(2);
+    spy.mockRestore();
+    expect(members.map((m) => [m.position, m.ref, m.task.taskId])).toEqual(r.tasks.map((t) => [t.position, t.ref, t.taskId]));
+    expect(members.map((m) => m.task)).toEqual(r.tasks.map((t) => getTask(h.db, t.taskId)));
+    expect(membersWithTasks(h.db, 'w_none')).toEqual([]);
   });
 });
 

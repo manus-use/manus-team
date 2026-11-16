@@ -156,7 +156,10 @@ describe('applyDag', () => {
     const plain = dag();
     const r = apply({ dag: plain.dag, sha256: plain.sha256 });
     const stored = getInstance(h.db, r.instance.instanceId);
-    expect(stored?.dagSha256).toBe(plain.sha256);
+    expect(h.db.prepare('SELECT dag_sha256 AS h FROM kanban_workflow_instances WHERE instance_id = ?').get(r.instance.instanceId)).toEqual({ h: plain.sha256 });
+    // Kept for the key's check alone: no row that leaves the database layer holds it.
+    expect(stored).not.toHaveProperty('dagSha256');
+    expect(r.instance).not.toHaveProperty('dagSha256');
     expect(stored?.dag.params).toEqual({ topic: `logs ${MASK}` });
     expect(stored?.dag.tasks[2]).toMatchObject({ title: `Evaluate globex ${MASK}`, item: `globex ${MASK}`, gates: [{ command: 'test -s evaluation.md', timeout_s: 30 }] });
   });
