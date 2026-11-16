@@ -46,7 +46,7 @@ whoever does a task, and review (§5.3) applies to any work.
 
 | Deferred | Seam |
 |---|---|
-| Templates and workflow definitions | Built as **workflows** (§21, plan T): a file rendered into a DAG of tasks and links, or a DAG written by hand or by an agent, applied in one transaction. Nothing in the kernel knows about them: an instance and its members are two tables of their own, and `kanban_tasks` is unchanged |
+| Templates and workflow definitions | Built as **workflows** (§21, plan T): a file expanded into a DAG of tasks and links, or a DAG written by hand or by an agent, applied in one transaction. Nothing in the kernel knows about them: an instance and its members are two tables of their own, and `kanban_tasks` is unchanged |
 | Automatic decomposition by an agent | A decomposer is just a task assigned to a role that calls `mt kanban create`. The CLI already allows it |
 | A judge model ("is this really done?") | Completion contracts and gates (§4.3, §7.7) carry the acceptance criteria; a judge would read the same fields |
 | Tenants; projects with operators and roles of their own | Boards (§16) are queues, not permissions: each task records its board. Who may act on a board, and which roles it may use, would be checked per board in the service, beside the tiers (§16.9) |
@@ -567,8 +567,8 @@ fresh install) has no registrations. A deployment with no config file (environme
   mt kanban task show|stop|archive <task> · assign <task> <role> · link <parent> <child>   [--board <name>]
   mt kanban task unblock <task> [comment…] · comment <task> <text…>                       [--board <name>]
   mt kanban workflow list · instances [all] · show <w_…> [--dag] · archive <w_…>           [--board <name>]   # §21.10
-  mt kanban workflow render <name> [--board <name>] [--param <key>=<value>]…                                   # §21.6
-  mt kanban workflow check-dag <dag.json|-> · apply <dag.json|-> [--key <k>]                                    # §21.6
+  mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]… [--json]                         # §21.6
+  mt kanban workflow apply <dag.json|-> [--key <k>] [--dry-run]                                                 # §21.6
   mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]… [--key <k>]                         # §21.6
   ```
 
@@ -1311,7 +1311,7 @@ mt kanban comment    < comment.json # {body, task_id?}
 mt kanban create     < task.json    # {title, body, contract?, assignee, reviewer?, workspace?, parents?, idempotency_key?}
 mt kanban link       < link.json    # {parent_id, child_id}
 mt kanban start-workflow < start.json # {workflow, params?, idempotency_key?} (§21.6, plan T)
-mt kanban apply-dag  < dag.json     # a DAG (§21.5), with no gates, and idempotency_key? (§21.6, plan T)
+mt kanban apply-dag  < dag.json     # a DAG (§21.5), with no gates, idempotency_key? and dry_run? (§21.6, plan T)
 ```
 
 - **JSON in on stdin, JSON out, always.** A summary is free text; passing it through shell arguments
@@ -1688,7 +1688,7 @@ getting nowhere, which no liveness check catches.
 | `/kanban gate remove <id> <gate>` | operate | |
 | `/kanban task archive <id>` | operate | |
 | `/kanban board list [all]` · `/kanban board create\|use\|set\|archive …` | talk for `board list`, operate for the rest | §16.3; `board list` replaced `/kanban boards` in plan H, with no alias |
-| `/kanban workflow list` · `instances [all]` · `show <w_…>` · `preview <name> key=value…` · `start <name> key=value…` · `archive <w_…>` | talk for `list`, `instances`, `show` and `preview`, operate for `start` and `archive` | §21 (plan T); `preview` makes nothing, and there is no apply from chat |
+| `/kanban workflow list` · `instances [all]` · `show <w_…>` · `preview <name> key=value…` · `start <name> key=value…` · `archive <w_…>` | talk for `list`, `instances`, `show` and `preview`, operate for `start` and `archive` | §21 (plan T); `preview` makes nothing, and there is no apply from chat; the terminal's `mt kanban workflow preview` and `start` are the same verbs |
 | `/kanban help` | talk | every command, with its tier |
 
 **The grammar: a group, then a verb.** Every task command is `/kanban task <verb> …`; a board's are
@@ -2209,7 +2209,7 @@ branch.
 | **W. A directory of its own for each task** | an isolated workspace, written `{ path, isolated: true, base? }` beside the plain path (§18.1); `kanban_tasks.worktree` (migration `007`), fixed at a task's first agent claim there, and the task's place, which its runs, sessions, gates and reported commit use, with the one-agent limit binding only the shared directory (§18.2); `$MT_HOME/worktrees/<workspace>/<task_id>`, recorded in `workspaces` as `wt:<task_id>` (§18.3); made before the first run, reused, never removed (§18.4); a worktree on `mt/<task_id>` from the base, a parent's branch or a fan-in's merge, a conflict blocking the task (§18.5); git with no hook and no fsmonitor, never forcing, merging into or deleting anything else (§18.6); a directory that cannot be made blocking the task, uncounted (§18.7); the prompt's directory lines (§18.8); `directory:` in `task show`, `mt kanban task worktree`, `mt workspace add --isolated` (§18.9). Plan: `docs/plans/2026-11-10-plan-w-worktrees.md` | H |
 | **L. Cards and notices in a task's thread** | a task created by `/kanban task new` in a group at chat scope answered in a thread on its command, with `reply_in_thread` (`SendTarget.replyInThread`), in one of two wordings, the quoted one when Lark refuses the thread; `SendResult.threadId`; its subscription moved to the thread Lark answers with by `threadSubscription`, called through `KanbanCommands.threaded` with the command's message id as its root (`kanban_subscriptions.root_message_id`, migration `008`); `CreatedVia.rootId`, a task created in a thread recording its root (`InboundMessage.rootId`), and the root copied to follow-ups; the hold, a `held(taskId)` the card poster checks at each send, on a fresh task from a group at chat scope; board sends in a thread replying to the root (`SendTarget.root`), the notifier's, the cards' and the forwarded approval cards' (`KanbanSink`); a person's card in the thread, with an @-mention by `open_id`, when the channel's `chatMembers` port says they are a member, cached five minutes per chat and bounded by `CARD_SEND_MS`, by direct message otherwise; a 230013 direct message falling back to the thread, and any non-retryable refusal in the thread to a direct message, never to the main timeline (`SendTarget.stayInThread`, also on the threaded "Created" reply); `card_sent` recording `in`, read from Lark's answer; the one line as the notice of a `card_sent` by direct message, not of the claim; `im:chat.members:read`, and the one log line when it is missing; WRITERS.md's row for `kanban_subscriptions`; the README's and the guide's statements of where a card goes, the one line, and the "Created" reply, updated as built (§19) | D2 |
 | **U. Updating a deployed gateway** | `mt update`, `--check` and `--yes`, refused in a board run's shell (§20); the checkout `mt` runs from, which must be the one the service's unit records, readable, and the top of a git worktree, on a branch with an upstream, clean with no operation under way, an ancestor of its upstream after a `git fetch`, with no ignored file at a path the commits add; the service's state read at step 2; the commits, a new or changed migration, whether `npm ci` runs, the open agent runs counted read-only on the database the service would open, and whether the service is restarted, shown before a question asked only at a terminal; the service's pid and the database's `user_version` recorded at step 3 and checked before the backup and any going back; `git merge --ff-only`, `npm ci` only when `package.json` or `package-lock.json` changed, and `npm run build`, with the service's node and the npm beside it, named by path in every printed command; `mt service check`, install's check as a command with the unit's `PATH`, the gateway's module graph and `better-sqlite3`'s native module loaded, run by the new build as the preflight, with no unit doing a hand-run gateway's check itself (`mt role check`'s loads and `loadStartup`, stand-ins only for names unset), and printing the database's version; going back by `git reset --keep`, `npm ci` if one ran and the build; the online backup in one step to `$MT_HOME/backups`, owner-only, `journal_mode` `delete`, checked, at step 3's version, the last five and the newest of each version kept; `migrate()` refusing a database newer than the build, as a configuration error with exit 78; the steps forward when the version moved, the steps back when only the pid did; `state()`'s unreadable result; a warning for `MT_SCHEMA_DIR`; the restart by `mt service restart`'s code, a stopped service left stopped, confirmed by `connected as` after the schema line within 60 seconds, else the log's tail and the steps back; a lock per checkout and per home, never cleared automatically; SIGINT, SIGHUP and SIGTERM, EPIPE and EIO; git and npm detached, in batch mode, with time limits; exit 3; §17's `check`, `install`'s closing line and the README's "Deploying" naming `mt update` | §17's `mt service`; independent of the board's plans |
-| **T. Workflows** | workflow files under `$MT_HOME/workflows`, parsed with the role files' `yaml` parser and checks, an unknown key an error (§21.1); params, substitution in text fields and checked names, never in gates (§21.2); for_each, fan-in on every task, all to all, at most 100 tasks (§21.3); the checks in `src/kanban/workflow.ts`, `mt workflow check`, the startup lines and `mt service check`'s warnings, the file read at each start (§21.4); the DAG, format 1, its refs, its 192 KiB, and gates only from the terminal or a render of the operator's file (§21.5); `mt kanban workflow render`, `check-dag`, `apply` and `start`, `/kanban workflow preview` and `start`, the worker's `mt kanban start-workflow` and `apply-dag`, `unknown_workflow`, the tiers, the board, the keys with the DAG's hash, and the stored DAG (§21.6); migration `009`, `kanban_workflow_instances` and `kanban_workflow_tasks` (§21.7); `applyDag`, `archiveWorkflow` and `threadSubscriptions` in `db/kanban.ts`, with `createTask`'s, `addGate`'s and `archive`'s writes shared, each task's `created` event carrying the instance, and WRITERS.md's rows (§21.8); the subscriptions, the one reply cut to fit, the instance's thread and every member held (§21.9); `list`, `instances`, `show` and `archive`, the derived status (§21.10); the README's and the guide's workflows, with the example, the deciding step, the fan-out's one-at-a-time in a shared workspace (§21.12), and Recipe 3's planner making its graph with `apply-dag` | L |
+| **T. Workflows** | workflow files under `$MT_HOME/workflows`, parsed with the role files' `yaml` parser and checks, an unknown key an error (§21.1); params, substitution in text fields and checked names, never in gates (§21.2); for_each, fan-in on every task, all to all, at most 100 tasks (§21.3); the checks in `src/kanban/workflow.ts`, `mt workflow check`, the startup lines and `mt service check`'s warnings, the file read at each start (§21.4); the DAG, format 1, its refs, its 192 KiB, and gates only from the terminal or a render of the operator's file (§21.5); `preview` and `start` in chat and at the terminal, `preview --json` writing the DAG, `apply` and `apply --dry-run` at the terminal, the worker's `mt kanban start-workflow` and `apply-dag`, with its `dry_run`, `unknown_workflow`, the tiers, the board, the keys with the DAG's hash, and the stored DAG (§21.6); migration `009`, `kanban_workflow_instances` and `kanban_workflow_tasks` (§21.7); `applyDag`, `archiveWorkflow` and `threadSubscriptions` in `db/kanban.ts`, with `createTask`'s, `addGate`'s and `archive`'s writes shared, each task's `created` event carrying the instance, and WRITERS.md's rows (§21.8); the subscriptions, the one reply cut to fit, the instance's thread and every member held (§21.9); `list`, `instances`, `show` and `archive`, the derived status (§21.10); the README's and the guide's workflows, with the example, the deciding step, the fan-out's one-at-a-time in a shared workspace (§21.12), and Recipe 3's planner making its graph with `apply-dag` | L |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D2, nothing can deliver a card to a person, so **plans C and D1 refuse human assignees and
@@ -4033,14 +4033,14 @@ where "this build: up to N" comes from; and `migrate`'s own message.
 ## 21. Workflows
 
 A team runs the same shape of work again and again: shortlist, evaluate each candidate, recommend
-one; draft, review, publish. Typing the graph each time, task by task with `parent:` lines, is
-slow and goes wrong. A **workflow** is that graph written once, in a file: a list of steps, each a
-task to make, with the links between them. **Starting** it makes one **instance**, `w_…`: the
-file read, its params filled in, and every task and link made at once. A start is a **render**,
-the file made into a DAG of tasks (§21.5), and an **apply**, the DAG made on the board; the two can
-be taken apart, and a DAG can be written by hand or by an agent and applied with no file at all
-(§21.6). "Start", because "run"
-already means one attempt at a task (§3.3). Built by plan T (§12).
+one; draft, review, publish. Typing the graph each time, task by task with `parent:` lines, is slow
+and goes wrong. A **workflow** is that graph written once, in a file: a list of steps, each a task
+to make, with the links between them. **Starting** it makes one **instance**, `w_…`: the file read,
+its params filled in, and every task and link made at once. A start is an **expansion**, the file
+made into a DAG of tasks (§21.5), and an **apply**, the DAG made on the board. **Preview** shows the
+expansion and makes nothing, and at the terminal writes it as a file, which `apply` makes; a DAG can
+also be written by hand or by an agent and applied with no workflow file at all (§21.6). "Start",
+because "run" already means one attempt at a task (§3.3). Built by plan T (§12).
 
 **A workflow is a fixed graph, with no conditions.** Every step of the file becomes tasks at the
 start, and nothing in the file says "if". A workflow that must branch has a **deciding step**: a
@@ -4093,7 +4093,7 @@ steps:
   that is not a regular `.yaml` file is not a workflow: reported once by the check and ignored, as
   `discoverRoles` ignores a badly named entry. A symlink is not followed, as a role's files are not
   (§2.1): a workflow is the operator's, kept in the home.
-- **At most 64 KiB.** A workflow is a few dozen lines, and what it renders is stored with every
+- **At most 64 KiB.** A workflow is a few dozen lines, and what it expands to is stored with every
   instance (§21.7).
 - **Parsed as a role's `config.yaml` is**: the `yaml` package's `parse` (`src/roles.ts`), YAML
   1.2's core schema, so `yes` stays text; a duplicated key is an error, as the parser makes it.
@@ -4208,7 +4208,7 @@ The same checks run in three places, from one module, `src/kanban/workflow.ts`:
 |---|---|---|
 | `mt workflow check [<name>]` | when an operator runs it | reported, exit 1 |
 | gateway startup | once, after the roles and workspaces are loaded | reported, one line each; the gateway starts |
-| a render | every render, preview and start, on the file as it is then | refused, naming the problem |
+| an expansion | every preview and start, on the file as it is then | refused, naming the problem |
 
 **What is checked, from the file alone and the team:**
 
@@ -4230,13 +4230,13 @@ The same checks run in three places, from one module, `src/kanban/workflow.ts`:
   would be unresolvable at their claim (§2.3 rule 3), so it is refused, saying to set the step's
   workspace. A parent whose workspace is decided later, at its claim, cannot be judged, and is not.
 
-**What only a render can check**, with the params given: the params themselves, each value put in
-a name field, the items, the count of 100, every task's sizes, every person, and the workspace
+**What only an expansion can check**, with the params given: the params themselves, each value put
+in a name field, the items, the count of 100, every task's sizes, every person, and the workspace
 rule above with the substituted names.
 
 **A broken workflow does not stop the gateway.** Startup is where a role or workspace that does not
 resolve is fatal (§2.1, §2.3), because every task depends on them; a workflow is used only when
-someone renders or starts it, so only it is unusable, and saying so at startup is enough. The
+someone previews or starts it, so only it is unusable, and saying so at startup is enough. The
 startup lines are notes, masked, beside `roles: …; workspaces: …`:
 
 ```
@@ -4271,22 +4271,22 @@ database. In a board run's shell it reads neither the gateway's `.env` nor any s
 shell's (`withGatewayFile` returns the shell as it is there), so its secret check is weaker there,
 and it says so in one line.
 
-**The files are read at each render**, not held from startup. An edit, a new file or a removed one
-takes effect at the next render or start, with no restart and nothing to reload; the startup check
-is for reporting alone, and a file broken after it is refused at its render with the same message.
-Reading a file of at most 64 KiB and checking it is far quicker than an apply's transaction, so
-nothing is cached.
+**The files are read at each expansion**, not held from startup. An edit, a new file or a removed
+one takes effect at the next preview or start, with no restart and nothing to reload; the startup
+check is for reporting alone, and a file broken after it is refused at its next preview or start
+with the same message. Reading a file of at most 64 KiB and checking it is far quicker than an
+apply's transaction, so nothing is cached.
 
 ### 21.5 The DAG
 
-A start is two steps, which can also be taken apart: **render**, which reads the file, fills in
-the params and expands each for_each into a **DAG**, a JSON document of the tasks to make and
-their links; and **apply**, which checks a DAG against the board and makes it, in one
-transaction. `start` is the two in one step, as before. Rendering apart lets an operator see,
-diff and keep exactly what a start would make, and edit it before it is made; applying apart lets
-a DAG come from elsewhere: written by hand at the terminal, or by an agent planning a graph
-(§21.6). Whatever path made it, an instance is made from a DAG, and stores the DAG it was made
-from (§21.7).
+A start is two steps, which can also be taken apart: the **expansion**, which reads the file, fills
+in the params and expands each for_each into a **DAG**, a JSON document of the tasks to make and
+their links; and the **apply**, which checks a DAG against the board and makes it, in one
+transaction. `start` is the two in one step, as before. `preview --json` at the terminal writes the
+expansion out, so an operator can see, diff and keep exactly what a start would make, and edit it
+before it is made; `apply` lets a DAG come from elsewhere: written by hand at the terminal, or by an
+agent planning a graph (§21.6). Whatever path made it, an instance is made from a DAG, and stores
+the DAG it was made from (§21.7).
 
 ```json
 {
@@ -4318,8 +4318,8 @@ from (§21.7).
 | Key | |
 |---|---|
 | `format` | required; the number `1`. Any other is refused, saying which this build reads, so a DAG written for a later format is never half understood |
-| `workflow` | the name of the workflow it was rendered from, in the role grammar, or `null` for a DAG with none, which shows as "(no workflow)" (§21.10). A label: apply reads no file by it |
-| `params` | the params it was rendered with, text or lists of text, at most 64 KiB serialized (§21.2); `{}` or absent for a DAG with none. A record: apply substitutes nothing |
+| `workflow` | the name of the workflow it was expanded from, in the role grammar, or `null` for a DAG with none, which shows as "(no workflow)" (§21.10). A label: apply reads no file by it |
+| `params` | the params it was expanded with, text or lists of text, at most 64 KiB serialized (§21.2); `{}` or absent for a DAG with none. A record: apply substitutes nothing |
 | `board` | a board's name, or `null` or absent for the path's own board (§21.6) |
 | `tasks` | an array of 1 to 100 tasks, in the order they are made |
 
@@ -4337,30 +4337,44 @@ from (§21.7).
 **Why each rule:**
 
 - **Refs, not task ids.** Nothing is made yet, so there are no ids to name; a ref is the DAG's own
-  name for a task. Render writes a step's ref as its name, and a for_each task's as
+  name for a task. The expansion writes a step's ref as its name, and a for_each task's as
   `<step>:<n>`, its item's place in the list from 1: an item is free text of up to 8 KiB, which a
   ref, typed in `parents` and read in a refusal, cannot be. The item is in its own field.
-- **Parents come earlier.** A parent named later in the array, or not in it, is refused, naming
-  the ref. So the refs form a DAG by construction, with no walk needed to find a cycle, and the
-  array is the one order in which the writer can make the tasks, as a link's foreign key is
-  checked at its insert, `show` lists them, and positions are numbered (§21.7). Render writes them
-  in that order: step order, then item order, and a step's parents come before it in a file with
-  no cycle (§21.4).
+- **Parents come earlier.** A parent named later in the array, or not in it, is refused, naming the
+  ref. So the refs form a DAG by construction, with no walk needed to find a cycle, and the array is
+  the one order in which the writer can make the tasks, as a link's foreign key is checked at its
+  insert, `show` lists them, and positions are numbered (§21.7). The expansion writes them in that
+  order: step order, then item order, and a step's parents come before it in a file with no cycle
+  (§21.4).
 - **Parents are refs only.** A DAG makes a graph of its own, and its members are exactly what it
   made (§21.7); a task already on the board is linked afterwards, with `link`, by whoever may link
   it (§21.11).
 - **Nothing is substituted.** A DAG holds the text that will be stored. A `{{` anywhere in it is
   plain text, gates included, so no step of apply turns data into shell.
-- **Every field explicit in a rendered DAG.** Render writes every key of every task, nulls
+- **Every field explicit in an expanded DAG.** The expansion writes every key of every task, nulls
   included, so the file reads as what will be made; a hand-written DAG may leave out what it does
   not set.
-- **Sizes.** The whole DAG is at most **192 KiB** in UTF-8, as read: the worker socket refuses a
-  request over 256 KiB (`DEFAULT_MAX_REQUEST_BYTES`), and a DAG from a run travels inside one,
-  with its envelope and its JSON escaping, so the bound leaves it room; the same bound holds on
-  every path, a rendered DAG included, as it is the stored record (§21.7). Within it, the params'
-  64 KiB, at most 100 tasks, and every task held to `task new`'s limits (§9.1), its title to the
-  characters a title takes (§21.2), its gates to `addGate`'s (§21.4: 20 a task, 600 s together, a
-  gate with no `timeout_s` counted as 300 s).
+- **The canonical form.** One serialization of a DAG, used to measure it and to hash it on every
+  path: compact JSON (no spaces or line breaks) of the DAG as parsed, without `idempotency_key` and
+  `dry_run`, every key of §21.5's tables written in their order, a key left out written as its
+  default (`null`, `[]`, `{}`, `0` for `priority`, `"always"` for `retry_on_crash`, `300` for a
+  gate's `timeout_s`), a contract's fields in `CONTRACT_FIELDS`' order, the params by name, and
+  every string as given, **unmasked**. So reindenting a file, reordering its keys, or writing a
+  default out or leaving it out changes neither its size nor its hash; a different value does. The
+  expansion writes exactly this form, but indented.
+- **Sizes**, of the canonical form in UTF-8. **192 KiB for `apply-dag`**, the one path where a DAG
+  crosses the worker socket: the socket refuses a request over 256 KiB
+  (`DEFAULT_MAX_REQUEST_BYTES`), and the DAG travels inside one with its envelope and its JSON
+  escaping, so the bound leaves it room; `mt kanban apply-dag` measures it before sending. **1 MiB
+  for a start**, expanded on the gateway, **and for a terminal `apply`**, which read a file and send
+  nothing over the socket: the bound is only on what is stored with the instance (§21.7), and the
+  100 tasks, each held to `task new`'s limits, are the bound that matters. **Text must be UTF-8**: a
+  DAG read from a file or stdin, at the terminal or by `mt kanban apply-dag`, is decoded strictly,
+  and bytes that are not UTF-8 are refused `invalid`, never replaced by U+FFFD, which would apply a
+  DAG other than the one written and hash it as that. Within the bound, the params' 64 KiB, at most
+  100 tasks, and every task held to `task new`'s limits (§9.1), its title to the characters a title
+  takes (§21.2), its gates to `addGate`'s (§21.4: 20 a task, 600 s together, a gate with no
+  `timeout_s` counted as 300 s).
 - **Checked as tasks are.** Each task is checked as `create` checks it (`#assignable`, the
   workspace, the contract, the numbers, the crash rule), each gate as `addGate`, and the step whose
   parents certainly disagree on a workspace refused as in a file (§21.4), here from the DAG's own
@@ -4371,69 +4385,98 @@ defining one is the operator's (§10). So a DAG's gates are taken:
 
 - from the terminal's `apply`, whose user is the operator, who may define gates anyway (§2.6), a
   hand-written DAG's included;
-- from a render on the gateway's side of the operator's own file: chat's `start` and a run's
+- from an expansion on the gateway's side of the operator's own file: chat's `start` and a run's
   `start-workflow`, whose gates are the file's, which no param reaches (§21.2);
 - **never from a DAG a run hands in**: `apply-dag` refuses a DAG with any gate, `invalid`, saying
   that gates are the operator's and that a workflow file's gates come with `start-workflow`. An
   empty `gates` list is no gate.
 
+**What else a run's DAG may not set.** `priority`, `failure_limit`, `retry_on_crash` and
+`max_runtime_s` are refused from `apply-dag`, `invalid`, as gates are, unless absent or at their
+defaults (`null`, `0` for `priority`, `"always"`): a run's `mt kanban create` takes none of them
+(`SCHEMAS.create`, `src/kanban/worker.ts`), as they set the order of the queue, the failure
+breaker and the runtime limit, which are the operator's, and an agent's DAG gets no more than its
+`create`. `workflow` and `params` must be absent, or `null` and `{}` (§21.6).
+
 A DAG an agent writes could otherwise put any command on a task, which `mt kanban create` does not
 allow and `mt kanban gate` refuses in a run's shell (§2.6).
 
-### 21.6 Render, check, apply and start
+### 21.6 Preview, start and apply
+
+| | Chat | Terminal |
+|---|---|---|
+| see what would be made, make nothing | `/kanban workflow preview <name> k=v …` | `mt kanban workflow preview <name> --param k=v …` |
+| make it in one step | `/kanban workflow start <name> k=v …` | `mt kanban workflow start <name> --param k=v …` |
+| get the DAG as a file | none | `mt kanban workflow preview … --json > dag.json` |
+| check a file, make nothing | none | `mt kanban workflow apply dag.json --dry-run` |
+| make it from a file | none | `mt kanban workflow apply dag.json --key k` |
 
 ```
-mt kanban workflow render <name> [--board <b>] [--param <key>=<value>]… > dag.json   # writes nothing
-mt kanban workflow check-dag <dag.json|->                                              # every check apply makes; writes nothing
-mt kanban workflow apply <dag.json|-> [--key <k>]                                      # makes exactly that DAG
-mt kanban workflow start <name> [--board <b>] [--param <key>=<value>]… [--key <k>]     # render and apply, one step
-/kanban workflow preview vendor-eval topic="log storage" vendors=acme,globex,initech    # shows what start would make
-/kanban workflow start vendor-eval topic="log storage" vendors=acme,globex,initech
-mt kanban start-workflow < start.json   # a run: {"workflow", "params"?, "idempotency_key"?}, rendered and applied on the gateway
-mt kanban apply-dag < dag.json          # a run: a DAG of its own, with no gates, and "idempotency_key"? beside its keys
+mt kanban start-workflow < start.json   # a run: {"workflow", "params"?, "idempotency_key"?}, expanded and applied on the gateway
+mt kanban apply-dag < dag.json          # a run: a DAG of its own, with no gates, and "idempotency_key"? and "dry_run"? beside its keys
 ```
 
-**Render** reads the file (§21.4), checks the params against it, substitutes and expands, and
-writes the DAG: at the terminal to stdout, as JSON with two-space indents and keys in the order of
-§21.5, so two renders of one file and params are byte for byte the same and `diff` shows a
-change. It is masked, as every line `mt` prints is; that changes no gate, as a gate holding a known
-secret is refused (§21.4), and text masked is masked again when stored. It writes nothing and
-opens no database: what it checks is what the file, the params and the team can say, every check
-of §21.4 and §21.2; the board, the key and who has talk tier are apply's. A problem goes to
-stderr, exit 1.
+The verbs are the same in chat and at the terminal, and the terminal takes `--board` with
+`preview` and `start`, `--key` with `start` and `apply`, and `--json` with each.
 
-**Check-dag** reads a DAG, from a file or stdin, and makes every check apply would make, against
-the board's database, opened as the operator's commands open it (`openBoard`), but no write:
-`ok: 5 tasks, 5 links, 1 gate, on board research`, or the first refusal, exit 1; `--json` in the
-worker's shape. It cannot say what changes between it and the apply, which is why apply checks
-again.
+**Preview** reads the file (§21.4), checks the params against it, substitutes and expands, and
+shows the DAG it would make, the same in chat and at the terminal: a readable summary, one line a
+task, with its ref, its title, its assignee and its parents' refs, and how many gates it has
+(§21.9), and "Nothing was made", or the refusal a start would get now. It writes nothing. **In
+chat**, on the gateway, it makes every check a start makes before its transaction, the board's, the
+key's and the people's included: the start's checks without the start. **At the terminal** it
+loads exactly as `openBoard` does (`src/cli/gate.ts`), but opens no database: `loadTeamSettings`
+and `loadTeam` with `unsetPassEnv`, the team's secrets and the Lark app secret registered, the
+same note on stderr for the passEnv names this shell leaves unset, and a service with
+`supervisedRoles: true`, so that `preview`, `apply --dry-run` and `apply` judge a DAG against one
+configuration. What needs the database, the board's being there and live and the key, is
+`apply --dry-run`'s and `apply`'s; a person is refused, as a terminal start refuses one.
+
+**`preview --json`** at the terminal prints the DAG file itself instead (§21.5), and nothing else
+on stdout: JSON with two-space indents and keys in the order of §21.5, so two previews of one file
+and params are byte for byte the same and `diff` shows a change. It is masked, as every line `mt`
+prints is; that changes no gate, as a gate holding a known secret is refused (§21.4), and text
+masked is masked again when stored. A refusal goes to stderr, exit 1, so a refused preview never
+leaves half a file in `dag.json`. Its `board` is `--board`'s, else `default`.
 
 **Apply** reads a DAG from a regular file, or stdin for `-`, as `--body-file` reads a body (§2.6),
-and makes exactly it: the steps below, the checks again, then the one transaction. What it makes
-is the DAG, and only the DAG: a workflow file edited since the render changes nothing.
+and makes exactly it: the steps below, the checks again, then the one transaction. What it makes is
+the DAG, and only the DAG: a workflow file edited since the preview changes nothing. **`apply
+--dry-run`** makes every check apply makes, against the board's database, the key's lookup included,
+and writes nothing: no transaction, no nudge. Its answer has apply's shape with `dry_run: true` and
+no instance id: `would make 5 tasks, 5 links, 1 gate, on board research`, then a line a task, each
+followed by its gates' commands, one a line with its timeout, masked, so the operator sees every
+command the apply would put on the board before it does; or with `--json` `{"ok": true, "dry_run":
+true, "existing", "board", "tasks": [{"ref", "step", "item", "gates": [{"command",
+"timeout_s"}]}]}`; a key already used answers `existing: true` with the instance's id, as apply
+would. It cannot say what changes between it and the apply, which is why apply checks again.
 
-**Start** is render and apply in one call, with the rendered DAG never written out, as before.
-**Preview** in chat is render and check-dag: the rendered graph as a reply (§21.9), and "Nothing
-was made", or the refusal a start would get now. There is **no apply from chat**: a DAG is a file,
-made by render or a tool and kept beside a script, not typed into a message of at most 4,000
-characters, and chat's start already renders the operator's file.
+**Start** is the expansion and the apply in one call, with the expanded DAG never written out, as
+before. There is **no apply from chat**: a DAG is a file, made by `preview --json` or a tool and
+kept beside a script, not typed into a message of at most 4,000 characters, and chat's start
+already expands the operator's file.
 
 **From a run**, two commands, both the worker's, with JSON on stdin (§7.3):
 
-- **`start-workflow`**, as before: rendered and applied on the gateway, from the operator's file,
+- **`start-workflow`**, as before: expanded and applied on the gateway, from the operator's file,
   its gates included;
 - **`apply-dag`**, new, a tenth command: a DAG the agent wrote itself, as one JSON object, which may
-  carry one more key beside the DAG's own, `idempotency_key`, taken off before the DAG is checked.
-  No gates (§21.5). Its `workflow` must be `null`: the name would say the operator's file made the
-  instance, and an agent made its tasks; `start-workflow` starts a workflow. Its `board`, if given,
+  carry two more keys beside the DAG's own, `idempotency_key` and `dry_run`, taken off before the
+  DAG is checked. With `"dry_run": true` it is `apply --dry-run`: every check, nothing written, the
+  answer with `dry_run: true` and no `instance_id`, so an agent can check a graph before it makes
+  it. It costs one flag on a path the terminal has anyway.
+  No gates, and none of the four settings `create` does not take (§21.5). Its `workflow` must be
+  absent or `null`, and its `params` absent or `{}`: a name would say the operator's file made the
+  instance, and params would say they were filled into it, where an agent made its tasks;
+  `start-workflow` starts a workflow. Its `board`, if given,
   must be the run's task's, else `other_board`: a run's work stays on its board (§16.5), and a
   DAG that names another is refused rather than moved quietly. This is the planner's way to make a
   whole graph at once (the guide's Recipe 3): a run's `create` makes one task, and a claimable one
   is claimed before `create` answers (§7.2), so a graph made task by task can start running half
   made, and is left half made if the agent stops; `apply-dag` makes all of it in one transaction,
   or nothing.
-- *A decision.* **No `render-workflow` for agents.** It would cost little, but what it rendered
-  could not be applied: a file with gates gives a DAG `apply-dag` refuses, and its `workflow` name
+- *A decision.* **No preview for agents.** It would cost little, but what it expanded could not be
+  applied: a file with gates gives a DAG `apply-dag` refuses, and its `workflow` name
   too. A preview an agent cannot act on invites editing it around the rule, and `start-workflow`'s
   refusal already names the usable workflows and their params (below), which is what an agent needs
   to choose one.
@@ -4464,22 +4507,22 @@ principal in both (§21.17).
 
 Preview reads its pairs in the same way.
 
-**Params at the terminal**, for `render` and `start`: `--param key=value`, repeated; the shell has
+**Params at the terminal**, for `preview` and `start`: `--param key=value`, repeated; the shell has
 already removed the quotes, so a list param's value is split at every comma, and repeating the key
 adds items. An item holding a comma cannot be given here (§21.17). **From a run**, as JSON: a text
 param is a string, a list param an array of strings, and the other type is refused; nothing is
 split.
 
-**Who may render, apply and start:**
+**Who may preview, start and apply:**
 
 - **in chat**, `start` at operator tier, as `/kanban task new`: a start starts agents,
   unsupervised, in workspaces (§9.1). A person named, in a param or in the file, needs talk tier,
   as when named in `task new` (§4.2). `preview` is talk tier: it makes nothing, and says no more
   than `list` and the board's own tasks do;
 - **at the terminal**, the operator, as `mt kanban task new`, recorded as `operator:<login>`:
-  `render`, `check-dag`, `apply` and `start`. As there, only roles are given work: a terminal reads
-  no Lark settings, so a person, in a param, the file or a DAG, is refused (`person_not_assignable`,
-  §2.6);
+  `preview`, `start` and `apply`, with or without `--dry-run`. As there, only roles are given work:
+  a terminal reads no Lark settings, so a person, in a param, the file or a DAG, is refused
+  (`person_not_assignable`, §2.6);
 - **from an agent's run**, `start-workflow` and `apply-dag`, allowed as `mt kanban create` is
   (§7.3), with the run's token, in the run's scope (§7.2): before the run is decided, and after its
   own report, until it closes. The tasks are recorded as created from the run's task
@@ -4515,33 +4558,40 @@ of a gate refusal's output (§7.7), the names first and the params after, with h
 out: the worker CLI has no message limit of its own, and an agent's context should not take a
 directory's worth. The work protocol (§7.1) gains one line beside `mt kanban create`'s, naming the
 command and its JSON, and another for `apply-dag`, saying it carries no gates. `mt kanban apply-dag`
-refuses a DAG over 192 KiB itself, before it is sent, as `too_large`.
+refuses a DAG whose canonical form is over 192 KiB itself, before it is sent, as `too_large`, and
+input that is not UTF-8 as `invalid`.
 
 **The steps of an apply**, in `KanbanService.applyDag`, whatever path the DAG came by; a start
-renders the DAG first (step 1), and an apply reads it:
+expands the file into a DAG first (step 1), and an apply reads it; a preview and a dry run stop
+before step 3:
 
-0. **look the key up first**, read-only, when there is one: an instance with that key on this
-   board is answered at once, `existing: true`, before a file is read or a param or task checked. A
-   repeat is a redelivery, or an agent re-running a command whose answer it did not see; the file
-   may have been edited or removed since, or a person's tier changed, and answering a repeat with a
-   refusal would tell the caller the start failed when it was made. A key on another board is
-   `other_board`. **A key reused for something else is refused `invalid`**, naming the instance:
-   for a start, a key used for another workflow's name; for an apply, a key used for another DAG,
-   told by the SHA-256 of the DAG as it was given, which the instance keeps (§21.7). A key reused by
+0. **look the key up first**, read-only, when there is one: an instance with that key on this board
+   is answered at once, `existing: true`, before a file is read or a param or task checked. A repeat
+   is a redelivery, or an agent re-running a command whose answer it did not see; the file may have
+   been edited or removed since, or a person's tier changed, and answering a repeat with a refusal
+   would tell the caller the start failed when it was made. A key on another board is `other_board`.
+   **A key reused for something else is refused `invalid`**, naming the instance: for a start, a key
+   used for another workflow's name; for an apply, a key used for another DAG, told by the SHA-256
+   of its canonical form (§21.5), which the instance keeps (§21.7); and a key a start used, given to
+   an apply, or an apply's given to a start, told by the instance's `source`. A key reused by
    mistake must not return an instance of something else. The writer looks the key up again in its
    transaction (§21.8), the guard against two racing;
-1. for a start, render (above); for an apply, read the DAG, at most 192 KiB, and check its shape
-   (§21.5): the format, the keys, the refs and parents, where its gates came from;
+1. for a start, the expansion (above); for an apply, read the DAG, strictly as UTF-8, and check its
+   size and shape (§21.5): the canonical form within its path's bound, the format, the keys, the
+   refs and parents, where its gates came from, and from a run the settings it may not set;
 2. check every task as `create` would (`#assignable`, the workspace, the contract, the numbers,
-   the crash rule), and every gate as `addGate` would, plus the 100 and every name, against the
-   team, the people and the board **as they are now**: a role removed, or a person who lost talk
-   tier, between a render and its apply is refused at the apply. **One failure refuses the whole
+   the crash rule), and every gate as `addGate` would, plus the 100 and every name, **just before
+   the transaction**, against the team and the people as the process holds them in memory, and the
+   board as the database has it **now**: a role removed, or a person who lost talk
+   tier, between a preview and its apply is refused at the apply. **One failure refuses the whole
    apply**, naming the ref, and the step and item (`evaluate:2, step evaluate, item "globex": role
    "evaluator" is not configured`), and nothing is made. The checks run before any write, so a
    refusal costs no transaction;
 3. in one transaction, the writer's `applyDag` (§21.8) writes the instance with its DAG, every task,
-   every link, every gate and every member row, checking the board, the key and the gates' bounds
-   again inside it;
+   every link, every gate and every member row. Inside it, what is in the database is checked
+   again: the board, live, the key, and the gates' bounds. The roles, the workspaces and the people
+   are in memory, not in the database, and are not read again inside it: they were checked in step
+   2, an instant before, as `create` checks them before `createTask`;
 4. tell the dispatcher once: chat's `changed()`, the terminal's one nudge (§2.6), the worker
    socket's `changed()` after the answer. One pass finds every root task ready.
 
@@ -4556,14 +4606,14 @@ gateway is asked, and it says the board is off and nothing runs the tasks until 
 gateway that does not answer loses nothing, and it says why without saying to try again: a second
 start without `--key` makes a second instance.
 
-**The refusals of a start or an apply**, on every path, in the worker's codes (`RefusalCode`, and the worker
-API's own):
+**The refusals of a start or an apply**, on every path, in the worker's codes (`RefusalCode`, and
+the worker API's own):
 
 | Code | When |
 |---|---|
 | `unknown_workflow` | no usable file of that name; the message names the usable ones (above) |
-| `invalid` | from a run, a field `start-workflow` does not take, as `badInput` refuses one for every worker command; a DAG of another format, with an unknown key, a ref missing, repeated or of other characters, a parent not earlier in it, gates from a run, a `workflow` name from a run; the file is broken (§21.4), a param unknown, missing, of the wrong type, given twice, or with a character a title refuses, an item empty, repeated or holding a secret, a name holding a secret, a key reused for another workflow or another DAG, or in another's namespace, 101 tasks |
-| `too_large` | a DAG past 192 KiB, the params past 64 KiB, a value or an item past 8 KiB, a list past 100 items, a task's field past `task new`'s limits after substitution |
+| `invalid` | from a run, a field `start-workflow` does not take, as `badInput` refuses one for every worker command; a DAG of another format, with an unknown key, a ref missing, repeated or of other characters, a parent not earlier in it, not UTF-8; from a run, gates, a setting `create` does not take, a `workflow` name or params; a gate command holding the mask `••••`; the file is broken (§21.4), a param unknown, missing, of the wrong type, given twice, or with a character a title refuses, an item empty, repeated or holding a secret, a name holding a secret, a key reused for another workflow or another DAG, or used by a start for an apply or the reverse, or in another's namespace, 101 tasks |
+| `too_large` | a DAG's canonical form past 192 KiB from a run or 1 MiB elsewhere, the params past 64 KiB, a value or an item past 8 KiB, a list past 100 items, a task's field past `task new`'s limits after substitution |
 | `unknown_role`, `supervised_role`, `unknown_workspace` | a name, in the file or from a param, as `create` refuses it, naming the step and item |
 | `person_not_assignable` | a person without talk tier, or any person at the terminal (§2.6) |
 | `unknown_board`, `board_archived` | the board, as for `task new` (§16.4) |
@@ -4573,12 +4623,12 @@ API's own):
 | `operator_command` | `mt kanban workflow …` in a run's shell (§21.6) |
 | `bad_request` | from a run: the request is not JSON, or not an object |
 
-`check-dag` and `preview` give the same refusals, having made nothing. In chat each is said as any
-refusal is, "Not done: …", on one line (§9.1).
+`preview` and `apply --dry-run` give the same refusals, having made nothing. In chat each is said as
+any refusal is, "Not done: …", on one line (§9.1).
 
 **The board**: in chat, the chat's board (§16.4), refused when it is archived, as `task new` is;
-at the terminal, for `render` and `start`, `--board`, else `default`, and render writes it into the
-DAG; for `apply` and `check-dag`, the DAG's `board`, else `default`; from a run, its task's board,
+at the terminal, for `preview` and `start`, `--board`, else `default`, and `preview --json` writes
+it into the DAG; for `apply`, the DAG's `board`, else `default`; from a run, its task's board,
 for `start-workflow` whatever else (§16.5), as its request has no board field, and for
 `apply-dag` refusing another (above). One instance is on one board: every task is made on
 it, and a parent and its child are on one board anyway (§16.5).
@@ -4595,12 +4645,13 @@ it, and a parent and its child are on one board anyway (§16.5).
   another board is refused `other_board` (§16.5); a key is kept for good, an archived instance's
   included;
 - without a key, at the terminal or from a run, every start or apply is a new instance, as an
-  unkeyed `task new` is. Render and check-dag take no key: they make nothing.
+  unkeyed `task new` is. A preview takes no key: it makes nothing. A dry run takes one, to say
+  whether the apply would answer with an instance already made.
 
 The tasks themselves carry no key: they are made in the instance's transaction or not at all, so
 the instance's key covers them, and a key of their own would only be a second thing to keep unique.
 
-**The stored DAG.** The instance keeps the DAG it was made from (§21.7), the rendered one for a
+**The stored DAG.** The instance keeps the DAG it was made from (§21.7), the expanded one for a
 start, in place of a copy of the file: the DAG is what was made, the file only what it was made
 from, and a hand-applied DAG has no file. An edit to the file, or its removal, never changes an
 instance already made; `show --dag` prints the stored DAG, so what an instance was made of can
@@ -4610,8 +4661,8 @@ always be read, and the instance keeps the workflow's name when it has one.
 
 | Table, column | Notes |
 |---|---|
-| `kanban_workflow_instances` | `instance_id` (`w_…`, opaque, `newWorkflowId` in `src/core/ids.ts`), `name` (the workflow's, or null for a DAG with none), `dag` (JSON: the DAG it was made from, §21.5, the rendered one for a start, its string values masked on write but its gates' commands, which are stored as written), `dag_sha256` (of the DAG as given, before masking: how a repeated key tells the same DAG from another, §21.6), `board` (`REFERENCES kanban_boards(name)`), `created_by`, `created_via` (JSON, as a task's: the chat, the run, or `{kind: operator}`), `idempotency_key` (unique, nullable), `created_at`; `STRICT` |
-| `kanban_workflow_tasks` | `task_id` (the key, `REFERENCES kanban_tasks(task_id)`), `instance_id` (`REFERENCES kanban_workflow_instances`), `ref` (the task's ref in the DAG), `step`, `item` (the for_each item, masked on write; null for a task without one), `position` (the task's place in the DAG's array, from 0); `UNIQUE (instance_id, position)`; `STRICT, WITHOUT ROWID` |
+| `kanban_workflow_instances` | `instance_id` (`w_…`, opaque, `newWorkflowId` in `src/core/ids.ts`), `name` (the workflow's, or null for a DAG with none), `dag` (JSON: the DAG it was made from, §21.5, the expanded one for a start, its string values masked on write but its gates' commands, which are stored as written), `dag_sha256` (of the DAG's canonical form, §21.5, unmasked: how a repeated key tells the same DAG from another, §21.6; never printed, in `show`, `show --json` or `show --dag`), `source` (`start` or `apply`, so a key cannot pass between the two, §21.6), `board` (`REFERENCES kanban_boards(name)`), `created_by`, `created_via` (JSON, as a task's: the chat, the run, or `{kind: operator}`), `idempotency_key` (unique, nullable), `created_at`; `STRICT` |
+| `kanban_workflow_tasks` | `task_id` (the key, `REFERENCES kanban_tasks(task_id)`), `instance_id` (`REFERENCES kanban_workflow_instances`), `ref` (the task's ref in the DAG), `step`, `item` (the for_each item, masked on write; null for a task without one), `position` (the task's place in the DAG's array, from 0); `UNIQUE (instance_id, position)`, `UNIQUE (instance_id, ref)`, as refs are unique in a DAG; `STRICT, WITHOUT ROWID` |
 
 - **A task records its instance, step and item in the members table, not in `kanban_tasks`.**
   §1's seam promised that nothing in the kernel knows about workflows, and a column on the
@@ -4754,15 +4805,16 @@ are batched: at most 20 a message, every 2 s.
 ```
 
 The same are `mt kanban workflow list|instances|show|archive`, with `--board` and `--json` as the
-operator's other commands take them (§2.6), and `show --dag`. `list`, `instances`, `show` and
+operator's other commands take them (§2.6), and `show --dag`, which is the terminal's alone: a DAG
+of up to 1 MiB is no chat message. `list`, `instances`, `show` and
 `preview` are talk tier, as `task list` and `task show` are; `start` and `archive` operate. `/kanban
 workflow` is a fourth group, beside `task`, `board` and `gate` (§9.1); `/kanban workflow` with no
 verb lists its verbs, and `/kanban help` gains them.
 
-**`list`** reads the directory at each call, as a render reads its file: each usable workflow with
-its description and params, and each one that is not usable with why, so a person in chat learns
-why a start would be refused. At most 30, then how many more. An instance made from a DAG with no
-workflow is not in `list`, which lists files; it is in `instances`, as "(no workflow)".
+**`list`** reads the directory at each call, as an expansion reads its file: each usable workflow
+with its description and params, and each one that is not usable with why, so a person in chat
+learns why a start would be refused. At most 30, then how many more. An instance made from a DAG
+with no workflow is not in `list`, which lists files; it is in `instances`, as "(no workflow)".
 
 **Status is derived, never stored**, from the members' phases and their display status (§4.1), by
 one pure function, for §4.1's reason: stored, it would have to be rewritten from every place a task
@@ -4801,8 +4853,12 @@ task commands do (§16.5). An id that is no instance's is `not_found`.
 - in chat, cut to fit one message as the reply is (§21.9), saying what was cut; the terminal's
   gives everything, and its `--json` gives each task's `phase` and `status`, as `task show --json`
   does;
-- `--dag` prints the stored DAG, masked, as JSON: what was made, which `apply` takes again as it
-  is, to make another instance like it.
+- `--dag`, at the terminal only, prints the stored DAG, masked, as JSON: what was made. `apply`
+  takes it again to make another instance like it, with any secret in its text now `••••`. A gate
+  command never holds a known secret (§21.4), so masking leaves gates as they are; but `apply`
+  refuses a gate command containing the mask `••••`, saying the DAG was printed masked and the
+  command must be written out again, as a masked command would run broken (§10.1). The hash is
+  not printed.
 
 `/kanban task show` of a member gains one line: the instance, its step and item.
 
@@ -4858,14 +4914,14 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   terminal, a run's token from a run (§10). An apply makes only what `create` and `addGate` make,
   and its gates come only from the operator (below).
 - **Gates are the operator's.** A gate is operator-defined (§10). A DAG's gates are taken only from
-  the terminal, whose user is the operator, and from a render on the gateway of the operator's file
-  in the home; never from a DAG a run hands in (§21.5), and never substituted. Nobody who starts a
-  workflow, in chat or from a run, can put text in a gate, since no param reaches one (§21.2), and
-  nothing in a DAG is substituted. An agent runs
-  as the gateway's user and could write a file in `$MT_HOME/workflows` itself, as it could edit
-  `config.yaml` or a role's files (§2.6): that is not a boundary, and not a new one.
+  the terminal, whose user is the operator, and from an expansion on the gateway of the operator's
+  file in the home; never from a DAG a run hands in (§21.5), and never substituted. Nobody who
+  starts a workflow, in chat or from a run, can put text in a gate, since no param reaches one
+  (§21.2), and nothing in a DAG is substituted. An agent runs as the gateway's user and could write
+  a file in `$MT_HOME/workflows` itself, as it could edit `config.yaml` or a role's files (§2.6):
+  that is not a boundary, and not a new one.
 - **Params are free text**, from chat and from agents. They are masked on write in the instance's
-  `params` and in each member's `item` (layer 3, §10.1), and land in titles, bodies and contracts,
+  stored DAG and in each member's `item` (layer 3, §10.1), and land in titles, bodies and contracts,
   which `createTask` masks as it masks any; every reply that shows them masks them again (layer
   1). A param in a name field is refused if it holds a known secret, as names are stored unmasked.
 - **The stored DAG** is masked on write but for its gates, and shown masked (§21.7).
@@ -4876,11 +4932,11 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
 
 - **A file edited between the check and a start**: the start reads it then, and is refused if it
   is broken now.
-- **A file edited between a render and its apply**: nothing changes; the apply makes the DAG, which
-  is what was rendered. Render again to take the edit.
+- **A file edited between a `preview --json` and its apply**: nothing changes; the apply makes the
+  DAG, which is what was previewed. Preview again to take the edit.
 - **A role removed, a workspace removed, a board archived, or a person who lost talk tier, between
-  a render and its apply**: the apply checks again (§21.6), and is refused, naming the ref.
-- **A DAG edited by hand at the terminal** after its render: applied as edited, with its gates, by
+  a preview and its apply**: the apply checks again (§21.6), and is refused, naming the ref.
+- **A DAG edited by hand at the terminal** after its preview: applied as edited, with its gates, by
   the operator, who may define gates anyway; the instance keeps the workflow's name it says, and
   the edited DAG.
 - **A DAG applied twice with one key**: the second answers the first, `existing: true`; with the
@@ -4910,14 +4966,14 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
 
 - **`src/kanban/workflow.ts`**, new and pure but for one file read: `readWorkflow(dir, name)`, the
   parse and checks (`checkWorkflow(text, facts)`, the facts being the roles, workspaces and whether
-  supervised roles are accepted), `render(workflow, params, board)` to a DAG (§21.5),
+  supervised roles are accepted), `expand(workflow, params, board)` to a DAG (§21.5),
   `readDag(json)` and `checkDagShape(dag, from)`, which knows where gates may come from, and the
   status function. The service, `mt workflow check` and the startup check all call it. Its gate
   check uses `holdsSecret`, today a private function of `service.ts`, which plan T moves to a shared
   module both import, so the pure module does not import the service.
 - **`src/kanban/service.ts`**: `KanbanServiceDeps.workflowsDir`, `$MT_HOME/workflows`, given by the
-  gateway and by `openBoard` (`src/cli/gate.ts`); `renderWorkflow`, `checkDag`, `applyDag` and
-  `startWorkflow`, which is `renderWorkflow` then `applyDag`, `workflows()` (for `list`),
+  gateway and by `openBoard` (`src/cli/gate.ts`); `previewWorkflow`, `applyDag` with its `dryRun`,
+  and `startWorkflow`, which is the expansion then `applyDag`, `workflows()` (for `list`),
   `instances(board, all)`, `instance(id)` (for `show`) and `archiveWorkflow`, each checking its
   input as the others do.
 - **`src/db/kanban.ts`**: `applyDag`, `archiveWorkflow`, `threadSubscriptions`, with
@@ -4938,10 +4994,9 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   gains them, and its 192 KiB check of `apply-dag`'s input.
 - **`src/cli/mt.ts`**: `workflow` in `OPERATOR_GROUPS` and `SUBCOMMANDS`, the refusal in a run's
   shell naming `start-workflow` and `apply-dag`, `mt workflow check`, and `USAGE`.
-  **`src/cli/operator.ts`**: the `workflow` group, `render` writing the DAG to stdout, `check-dag`
-  and `apply` reading one as `--body-file` reads a body, with a nudge after `start`, `apply` and
-  `archive`. **`src/cli/plain.ts`**: their plain
-  text.
+  **`src/cli/operator.ts`**: the `workflow` group, `preview` and its `--json` writing the DAG to
+  stdout, `apply` and its `--dry-run` reading one as `--body-file` reads a body, with a nudge after
+  `start`, `apply` and `archive`. **`src/cli/plain.ts`**: their plain text.
 - **`src/index.ts`**: `loadStartup` runs the workflow check and returns its lines, which
   `createGateway` notes after the roles' line. **`src/cli/service.ts`**: `check` prints them as
   `warning:` lines, from the `loadStartup` of the build it checks.
@@ -4985,21 +5040,31 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   blocked reasons, related tasks apart and another instance as one line, `--dag`; `archive` of
   every member in one transaction, runs superseded and their turns cancelled, related tasks left,
   a second archive changing nothing; the tiers of each command, and a sender with no union_id.
-- **Unit, the DAG**: format 1 and another refused; every key at each level, an unknown one refused
-  naming its place; a ref missing, repeated, too long or of other characters; `step` absent taken
-  from the ref; a parent later in the array, absent, or named twice; 0 and 101 tasks; 192 KiB and
-  one byte more; the params' 64 KiB; every task field checked as `create` checks it; a `{{` kept as
-  text, in a gate too; gates at the terminal and in a render of the file accepted, from a run's
+- **Unit, the DAG**: the canonical form the same for a reindented file, reordered keys and defaults
+  written or left out, and different for one changed value; its size measured, 192 KiB for
+  `apply-dag` and 1 MiB for a start and a terminal apply; bytes that are not UTF-8 refused, from a
+  file and from stdin; from a run, `priority`, `failure_limit`, `retry_on_crash` and `max_runtime_s`
+  refused unless at their defaults, and `workflow` and `params` unless absent, `null` and `{}`; a
+  gate command holding `••••` refused; a repeated ref refused by the members table's unique index as
+  a backstop; format 1 and another refused; every key at each level, an unknown one refused naming
+  its place; a ref missing, repeated, too long or of other characters; `step` absent taken from the
+  ref; a parent later in the array, absent, or named twice; 0 and 101 tasks; 192 KiB and one byte
+  more; the params' 64 KiB; every task field checked as `create` checks it; a `{{` kept as text, in
+  a gate too; gates at the terminal and in an expansion of the file accepted, from a run's
   `apply-dag` refused, and `gates: []` accepted; a run's DAG with a `workflow` name refused, with
   another board `other_board`, with none on its task's board.
-- **Unit, render and apply**: a render byte for byte the same twice, every key written, refs
-  `step` and `step:n`; render opening no database; check-dag writing nothing and refusing what
-  apply would; an apply of a render making what a start makes; a role removed, a person who lost
-  talk tier and a board archived between render and apply refused at apply; a file edited after a
-  render changing nothing; a repeat by key with the same DAG `existing: true`, with another
-  refused; the stored DAG masked but for its gates, and its hash taken before masking; a DAG with
-  no workflow shown as "(no workflow)"; `show --dag` applied again making a like instance; preview
-  making nothing, at talk tier, with a refusal as start's.
+- **Unit, preview and apply**: `preview --json` byte for byte the same twice, every key written,
+  refs `step` and `step:n`, a refusal on stderr with nothing on stdout; preview's summary the same
+  in chat and at the terminal; `apply --dry-run`, and `apply-dag` with `dry_run`, writing nothing,
+  refusing what apply would, answering `dry_run: true` with no instance id, and `existing: true` for
+  a used key; an apply of a preview making what a start makes; a role removed, a person who lost
+  talk tier and a board archived between preview and apply refused at apply; a file edited after a
+  preview changing nothing; a repeat by key with the same DAG `existing: true`, with another
+  refused, and a start's key given to an apply and the reverse refused; the hash in no output;
+  preview at the terminal loading as `openBoard` does, opening no database; a dry run listing each
+  gate's command; the stored DAG masked but for its gates, and its hash taken before masking; a DAG
+  with no workflow shown as "(no workflow)"; `show --dag` applied again making a like instance;
+  preview making nothing, at talk tier, with a refusal as start's.
 - **Unit, chat's reply**: 30 lines at most, cut titles, the count of the rest, under 3,800
   characters with 100 tasks of 512-byte titles; the thread naming the instance, every member held
   and released by `threaded`, and every member's subscription moved in one call; a start in a
@@ -5017,7 +5082,7 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   starting a second workflow through `mt kanban start-workflow`, whose tasks follow the first's
   thread; a planner's agent applying a graph of five tasks with `apply-dag`, all made before any is
   claimed, its root claimed after the answer, its tasks following the planner's chat; a terminal
-  render, edit and apply followed by no chat.
+  `preview --json`, edit, `apply --dry-run` and apply, followed by no chat.
 
 ### 21.17 Limits
 
@@ -5028,7 +5093,7 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   field; in chat no `"` inside a value; at the terminal no comma inside an item (the worker's JSON
   has neither limit).
 - **At most 100 tasks an instance**, one board, and a DAG of at most 192 KiB.
-- **No apply from chat**, and no render for agents: chat previews and starts the operator's files;
+- **No apply from chat**, and no preview for agents: chat previews and starts the operator's files;
   an agent starts a file with `start-workflow` or applies its own DAG (§21.6).
 - **A DAG's parents are its own refs.** It cannot name a task already on the board; that is a
   `link` after the apply.
@@ -5108,3 +5173,23 @@ its `workflow` required null and its board its task's; a repeated apply told fro
 DAG's SHA-256, kept on the instance; the stored DAG masked on write but for its gates, with no
 `params` column; `ref` on each member and in the events; preview at talk tier, making nothing; and
 no `render-workflow` for agents, as what it rendered could not be applied.
+*Amended on 2026-11-16, again.* The user approved new verbs, the same in chat and at the
+terminal: `preview` to see what a start would make, printing one summary in both and, at the
+terminal with `--json`, the DAG file; `start` to make it in one step; `apply` to make a DAG from a
+file, and `apply --dry-run` to check one and make nothing. `render` and `check-dag` are gone,
+`preview` and `apply --dry-run` doing their work. The word "plan" was avoided: the planner role and
+the guide's Recipe 3 already use it for an agent that breaks work into tasks, and terraform's
+`plan` is a diff against existing state, where a DAG is made from nothing. A chat apply of a
+saved draft is left for later. The main agent added `dry_run` to `apply-dag`, as one flag on a path
+the terminal has anyway. A third review then found: that the DAG's hash had no defined input, so
+one canonical form is measured and hashed on every path, unmasked, untouched by reindenting; that
+192 KiB belongs only to `apply-dag`, which crosses the socket, a start and a terminal apply having
+1 MiB, and that text not in UTF-8 is refused rather than replaced; that a run's DAG could set
+the priority, the failure breaker and the runtime limit its `create` cannot, so they are refused,
+and its `workflow` and `params` too; that `show --dag` printed masked text whose gates `apply` would
+run broken, so a gate holding the mask is refused, and `--dag` is the terminal's; that preview must
+load its configuration as `openBoard` does; the stored DAG holding the params; refs unique in the
+members table; what the transaction checks again and what is checked just before it; the hash
+never printed; a key passing between a start and an apply refused, by the instance's `source`; and
+each gate's command in a dry run's answer.
+
