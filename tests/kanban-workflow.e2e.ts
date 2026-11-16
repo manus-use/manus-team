@@ -9,7 +9,6 @@ import { Router } from '../src/core/router.js';
 import { SessionRegistry } from '../src/core/registry.js';
 import { NamedWorkspaces } from '../src/core/workspace.js';
 import { getInstance, getTask, membersOf, runsOf, subscriptionsOf } from '../src/db/kanban-read.js';
-import { migrate, openDb } from '../src/db/open.js';
 import { createCliDriver } from '../src/driver/cli/driver.js';
 import type { Driver } from '../src/driver/types.js';
 import { KanbanChat } from '../src/kanban/chat.js';
@@ -25,7 +24,7 @@ import { Authorizer, defaultAuthConfig } from '../src/policy/auth.js';
 import { clearSecrets } from '../src/secrets.js';
 import type { InboundMessage, Principal } from '../src/types.js';
 import { FakeChannel } from './helpers/channel.js';
-import { SCHEMA_DIR, testDb, type TestDb } from './helpers/db.js';
+import { testDb, type TestDb } from './helpers/db.js';
 import { role } from './helpers/dispatch.js';
 
 /**
@@ -255,39 +254,44 @@ describe('workflows, end to end', () => {
     }
   });
 
-  it("previews at the terminal as a file, which is edited, checked with a dry run and applied, followed by no chat", async () => {
+  it("previews at the terminal as a file, which is edited, checked with a dry run and applied, run by the gateway and followed by no chat", async () => {
     const s = await build();
+    // The terminal's database is the gateway's, so the gateway's dispatcher runs what the apply made.
     writeFileSync(
       join(s.home, 'config.yaml'),
-      [`workspace: ${join(s.dir, 'repo')}`, `db: ${join(s.dir, 'terminal.db')}`, 'agent:', '  driver: structured-cli', '  command: bytesec', '  unsupervised: true', ''].join('\n'),
+      [`workspace: ${join(s.dir, 'repo')}`, `db: ${join(s.t.dir, 'team.db')}`, 'agent:', '  driver: structured-cli', '  command: bytesec', '  unsupervised: true', ''].join('\n'),
     );
     mkdirSync(join(s.home, 'roles', 'worker'), { recursive: true });
     writeFileSync(join(s.home, 'roles', 'worker', 'config.yaml'), 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n');
-    const db = openDb(join(s.dir, 'terminal.db'));
-    migrate(db, SCHEMA_DIR);
-    try {
-      const mt = async (argv: string[]) => {
-        const out: string[] = [];
-        const err: string[] = [];
-        const code = await runMt(['kanban', 'workflow', ...argv], { env: { MT_HOME: s.home, PATH: process.env['PATH'], HOME: s.dir }, out: (l) => out.push(l), err: (l) => err.push(l) });
-        return { code, out: out.join('\n'), err: err.join('\n') };
-      };
-      const preview = await mt(['preview', 'research', '--param', 'topic=logs', '--param', 'vendors=acme', '--json']);
-      expect(preview.code).toBe(0);
-      const dag = JSON.parse(preview.out) as { tasks: Array<{ title: string }> };
-      dag.tasks[2]!.title = 'Recommend one vendor for logs, in a page';
-      const file = join(s.dir, 'dag.json');
-      writeFileSync(file, JSON.stringify(dag, null, 2));
-      const dry = await mt(['apply', file, '--dry-run']);
-      expect(dry.out.split('\n')[0]).toBe('would make 3 tasks, 2 links, 0 gates, on board default; nothing was made');
-      const applied = JSON.parse((await mt(['apply', file, '--key', 'e2e', '--json'])).out) as { instance_id: string; tasks: Array<{ task_id: string }> };
-      expect(applied.tasks).toHaveLength(3);
-      const sent = s.lark.texts.length;
-      for (const t of applied.tasks) expect(subscriptionsOf(db, t.task_id)).toEqual([]);
-      expect(getTask(db, applied.tasks[2]?.task_id ?? '')?.title).toBe('Recommend one vendor for logs, in a page');
-      expect(s.lark.texts).toHaveLength(sent);
-    } finally {
-      db.close();
+    const mt = async (argv: string[]) => {
+      const out: string[] = [];
+      const err: string[] = [];
+      const code = await runMt(['kanban', 'workflow', ...argv], { env: { MT_HOME: s.home, PATH: process.env['PATH'], HOME: s.dir }, out: (l) => out.push(l), err: (l) => err.push(l) });
+      return { code, out: out.join('\n'), err: err.join('\n') };
+    };
+    const preview = await mt(['preview', 'research', '--param', 'topic=logs', '--param', 'vendors=acme', '--json']);
+    expect(preview.code).toBe(0);
+    const dag = JSON.parse(preview.out) as { tasks: Array<{ title: string }> };
+    dag.tasks[2]!.title = 'Recommend one vendor for logs, in a page';
+    const file = join(s.dir, 'dag.json');
+    writeFileSync(file, JSON.stringify(dag, null, 2));
+    const dry = await mt(['apply', file, '--dry-run']);
+    expect(dry.out.split('\n')[0]).toBe('would make 3 tasks, 2 links, 0 gates, on board default; nothing was made');
+    expect(allTasks(s)).toEqual([]);
+    // Every call to the fake Lark, a text, a card or a reaction, from here on would be chat following the apply.
+    const sent = s.lark.calls.length;
+    const applied = JSON.parse((await mt(['apply', file, '--key', 'e2e', '--json'])).out) as { instance_id: string; tasks: Array<{ task_id: string }> };
+    expect(applied.tasks).toHaveLength(3);
+    const ids = applied.tasks.map((t) => t.task_id);
+    for (const id of ids) expect(subscriptionsOf(s.t.db, id)).toEqual([]);
+    expect(getTask(s.t.db, ids[2] ?? '')?.title).toBe('Recommend one vendor for logs, in a page');
+
+    await runAll(s, () => ids);
+    for (const id of ids) {
+      expect(order(s, id).claimed).toBeGreaterThan(0);
+      expect(getTask(s.t.db, id)?.phase).toBe('done');
     }
+    await s.notifier.deliver();
+    expect(s.lark.calls).toHaveLength(sent);
   });
 });
