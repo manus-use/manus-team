@@ -4320,7 +4320,7 @@ the DAG it was made from (§21.7).
 |---|---|---|
 | `format` | none | required; the number `1`. Any other is refused, saying which this build reads, so a DAG written for a later format is never half understood |
 | `workflow` | `null` | the name of the workflow it was expanded from, in the role grammar, or `null` for a DAG with none, which shows as "(no workflow)" (§21.10). A label: apply reads no file by it |
-| `params` | `{}` | the params it was expanded with, text or lists of text, at most 64 KiB serialized (§21.2); `{}` or absent for a DAG with none. A record: apply substitutes nothing |
+| `params` | `{}` | the params it was expanded with, each named in the param grammar (§21.1), text or lists of text, at most 64 KiB serialized (§21.2); `{}` or absent for a DAG with none. A record: apply substitutes nothing |
 | `board` | `null` | a board's name, or `null` or absent for the path's own board (§21.6) |
 | `tasks` | none | an array of 1 to 100 tasks, in the order they are made |
 
@@ -4371,11 +4371,12 @@ lone surrogate, which is no text and cannot be stored as UTF-8; it is refused `i
   path: compact JSON (no spaces or line breaks) of the DAG as parsed, without `idempotency_key` and
   `dry_run`, every key of the tables above written in their order, a key left out written as its
   default from the tables (`step` as the `ref`, `body` as `null`, a contract field not set omitted),
-  a contract's fields in `CONTRACT_FIELDS`' order, the params sorted by their names' code points,
-  and every string as given, **unmasked**. So reindenting a file, reordering its keys, or writing a
-  default out or leaving it out changes neither its size nor its hash; a different value does.
-  `preview --json` writes exactly this form, but indented, with every default written out in the
-  same way, so deleting a key that holds its default from a previewed file never changes the hash.
+  a contract's fields in `CONTRACT_FIELDS`' order, the params sorted by name, in plain code-unit
+  order, as a DAG's param names are held to the param grammar (§21.1), which is ASCII, and every
+  string as given, **unmasked**. So reindenting a file, reordering its keys, or writing a default
+  out or leaving it out changes neither its size nor its hash; a different value does. `preview
+  --json` writes exactly this form, but indented, with every default written out in the same way, so
+  deleting a key that holds its default from a previewed file never changes the hash.
 - **Sizes**, of the canonical form in UTF-8. **192 KiB for `apply-dag`**, the one path where a DAG
   crosses the worker socket: the socket refuses a request over 256 KiB
   (`DEFAULT_MAX_REQUEST_BYTES`), and the DAG travels inside one as its `input` object, beside the
@@ -4388,12 +4389,20 @@ lone surrogate, which is no text and cannot be stored as UTF-8; it is refused `i
   to a **raw cap of 4 MiB**, apart from the canonical 1 MiB: indentation and defaults written out
   make a file larger than its canonical form, and the raw cap only stops a wrong file being read
   whole. **Text must be UTF-8**: the bytes read are decoded with `new TextDecoder('utf-8', { fatal:
-  true })`, and bytes that are not UTF-8 are refused `invalid`, never replaced by U+FFFD, which
-  would apply a DAG other than the one written and hash it as that. So `readAll`
+  true, ignoreBOM: true })`, and bytes that are not UTF-8 are refused `invalid`, never replaced by
+  U+FFFD, which would apply a DAG other than the one written and hash it as that. `ignoreBOM` keeps
+  a byte order mark in the text, where it is a leading U+FEFF, which `JSON.parse` refuses, so a DAG
+  with a BOM is refused as invalid JSON rather than read as if it had none. So `readAll`
   (`src/cli/kanban.ts`) returns bytes, and the worker CLI decodes them so for **every** worker
   command, not only `apply-dag`: a report or a comment with a broken byte is refused rather than
-  stored with a replacement character, which is safer and as simple; the terminal's file reads for
-  `apply` and `--body-file` decode the same way. Within the bound, the params' 64 KiB, at most 100
+  stored with a replacement character, which is safer and as simple. `MtIo.stdin` (`src/cli/mt.ts`)
+  returns `Uint8Array | undefined` instead of text, and the test fakes that give it return
+  `Buffer.from(text)`: `tests/mt-kanban.test.ts:76`, `tests/mt-kanban-operator-tasks.test.ts:73`
+  and `:482`, and `tests/mt-kanban-worktree.test.ts:53`. The terminal's reads decode the same way:
+  `apply`'s file and `-`, and `bodyOf`'s stdin and its `readFileSync(file)` for `--body-file`. On
+  the gateway's side, the worker socket (`src/kanban/socket.ts`, where it joins a request's chunks)
+  decodes strictly too, and refuses a request that is not UTF-8 as `bad_request`, as it refuses one
+  that is not JSON. Within the bound, the params' 64 KiB, at most 100
   tasks, and every task held to `task new`'s limits (§9.1), its title to the characters a title
   takes (§21.2), its gates to `addGate`'s (§21.4: 20 a task, 600 s together, a gate with no
   `timeout_s` counted as 300 s).
@@ -4454,14 +4463,15 @@ included, but not the key's: a preview has no message id of its own to repeat, a
 the start's, so the lookup could never match. The start's checks without the start. **At the
 terminal** it loads exactly as `openBoard` does (`src/cli/gate.ts`), but opens no database:
 `loadTeamSettings` and `loadTeam` with `unsetPassEnv`, the team's secrets and the Lark app secret
-registered, the same note on stderr for the passEnv names this shell leaves unset, and a service
-with `supervisedRoles: true`, so that `preview`, `apply --dry-run` and `apply` judge a DAG against
-one configuration. With no database there is no `KanbanService` to ask, so **the per-task checks of
-`create`** (`#assignable`, the workspace's being configured, the names, the contract, the numbers,
-the crash rule) **move into a pure function**, `taskProblems(task, facts)`, whose facts are the
-roles, the workspaces, the isolated ones, `supervisedRoles`, and a talk check that may be absent,
-when a person is refused as at the terminal; it reads no database. `create`, `previewWorkflow` and
-the terminal's preview all call it, so one function judges a task however it is made (§21.15). What
+registered, the same note on stderr for the passEnv names this shell leaves unset, and facts with
+`supervisedRoles: true`, as `openBoard`'s service has, so that `preview`, `apply --dry-run` and
+`apply` judge a DAG against one configuration. With no database there is no `KanbanService` to ask,
+so **the per-task checks of `create`** (`#assignable`, the workspace's being configured, the names,
+the contract, the numbers, the crash rule) **move into a pure function**, `taskProblems(task,
+facts)`, whose facts are the roles, the workspaces, `supervisedRoles`, and a talk check that may be
+absent, when a person is refused as at the terminal; it reads no database. No check of `create`'s
+reads the isolated workspaces, so they are not among the facts. `create`, `previewWorkflow` and the
+terminal's preview all call it, so one function judges a task however it is made (§21.15). What
 needs the database, the board's being there and live and the key, is `apply --dry-run`'s and
 `apply`'s; a person is refused, as a terminal start refuses one.
 
@@ -5011,9 +5021,15 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   module both import, so the pure module does not import the service.
 - **`src/kanban/task-checks.ts`**, new and pure: `taskProblems(task, facts)`, the per-task checks
   `create` makes today in `#assignable`, `#contract` and its own body, moved out of the service with
-  their messages unchanged; its facts are the roles, the workspaces, the isolated ones,
-  `supervisedRoles` and an optional talk check. `KanbanService.create`, `previewWorkflow` and the
-  terminal's preview call it; it needs no database.
+  their messages unchanged; its facts are the roles, the workspaces, `supervisedRoles` and an
+  optional talk check. It returns the first problem, in `create`'s order today: the title,
+  `createdBy`, `createdVia`, the types of the body, workspace, board and parents, the contract, the
+  workspace being configured, the numbers, the crash rule, the assignee, the reviewer. `create`
+  calls it, then `#idempotencyKey`, which stays in the service, as it reads the database for a run's
+  task. It also exports the pure assignable check, `assignable(name, facts)`, returning the
+  `Assignee` or the refusal, which `assign`, `assignReviewer`, `requestReview` (a named reviewer)
+  and `create` all use in place of `#assignable`. `KanbanService.create`, `previewWorkflow` and the
+  terminal's preview call `taskProblems`; it needs no database.
 - **`src/kanban/service.ts`**: `KanbanServiceDeps.workflowsDir`, `$MT_HOME/workflows`, given by the
   gateway and by `openBoard` (`src/cli/gate.ts`); `previewWorkflow`, `applyDag` with its `dryRun`,
   and `startWorkflow`, which is the expansion then `applyDag`, `workflows()` (for `list`),
@@ -5045,6 +5061,7 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   `createGateway` notes after the roles' line. **`src/cli/service.ts`**: `check` prints them as
   `warning:` lines, from the `loadStartup` of the build it checks.
 - **`schema/009_workflows.sql`**.
+- **`tsconfig.json`**: `"ES2024.String"` added to `lib`, for `String.prototype.isWellFormed`.
 
 ### 21.16 Testing
 
@@ -5091,7 +5108,10 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   refused; a gate holding `••••` refused by the file's check, a start and an apply, and accepted by
   `gate add`; the terminal's raw cap of 4 MiB and `apply-dag`'s of 256 KiB; a broken byte refused by
   every worker command, a report's included; `taskProblems` giving `create`'s messages with and
-  without a talk check; the canonical form the same for a reindented file, reordered keys and
+  without a talk check; `create`'s refusals unchanged, each in its order, before and after the move;
+  `assign`, `assignReviewer` and `review` refusing through `assignable` as before; a BOM refused as
+  invalid JSON; a request to the socket that is not UTF-8 refused `bad_request`; a DAG param name
+  outside the grammar refused; the canonical form the same for a reindented file, reordered keys and
   defaults written or left out, and different for one changed value; its size measured, 192 KiB for
   `apply-dag` and 1 MiB for a start and a terminal apply; bytes that are not UTF-8 refused, from a
   file and from stdin; from a run, `priority`, `failure_limit`, `retry_on_crash` and `max_runtime_s`
@@ -5255,3 +5275,8 @@ a pure `taskProblems`; each task key's default, `body` as `null` and a contract 
 omitted, so a default deleted never changes the hash, and the params by code point; lone
 surrogates; the mask's refusal by the file's check, a start and an apply, `gate add` unchanged; no
 key check in chat's preview; and the 192 KiB and 1 MiB in plan T's row and the limits.
+*Amended on 2026-11-16, a fourth time.* A fifth review approved the section, and its minor points
+were folded in: `MtIo.stdin` returning bytes, with the test fakes named; a BOM refused, through
+`ignoreBOM`; the socket decoding strictly; `ES2024.String` for `isWellFormed`; `taskProblems`'s
+order, `#idempotencyKey` staying in the service, and the pure `assignable` shared by every caller;
+no isolated workspaces among the facts; and a DAG's param names held to the param grammar.
