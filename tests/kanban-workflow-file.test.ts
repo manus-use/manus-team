@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -295,6 +295,18 @@ describe('the directory', () => {
   it('refuses a file past 64 KiB', () => {
     writeFileSync(join(dir, 'big.yaml'), `${VENDOR_EVAL}# ${'x'.repeat(64 * 1024)}\n`);
     expect(listWorkflows(dir, FACTS).broken).toEqual([{ name: 'big', problem: expect.stringMatching(/^the file is \d+ bytes; a workflow is at most 65536$/) }]);
+  });
+
+  it('takes a file that cannot be read for one broken workflow, the others still usable', () => {
+    writeFileSync(join(dir, 'vendor-eval.yaml'), VENDOR_EVAL);
+    writeFileSync(join(dir, 'locked.yaml'), VENDOR_EVAL, { mode: 0o000 });
+    chmodSync(join(dir, 'locked.yaml'), 0o000);
+    const list = listWorkflows(dir, FACTS);
+    expect(list.usable.map((w) => w.name)).toEqual(['vendor-eval']);
+    expect(list.broken).toEqual([{ name: 'locked', problem: 'the file cannot be read: EACCES' }]);
+    expect(workflowLines(list)).toEqual(['workflow locked is not usable: the file cannot be read: EACCES', 'workflows: vendor-eval; not usable: locked']);
+    expect(readWorkflow(dir, 'vendor-eval', FACTS)).toMatchObject({ ok: true, workflow: { name: 'vendor-eval' } });
+    expect(readWorkflow(dir, 'locked', FACTS)).toEqual({ ok: false, code: 'invalid', message: 'workflow locked is not usable: the file cannot be read: EACCES' });
   });
 
   it('reads one workflow by name: unknown_workflow for no usable file, invalid for a broken one', () => {

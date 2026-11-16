@@ -130,8 +130,10 @@ function startupWorkflows(config: GatewayConfig, team: Team): string[] {
       listWorkflows(dir, { roles: team.roles, workspaces: new Set(team.workspaces.keys()), supervisedRoles: true }),
     );
   } catch (err) {
+    // Only the directory itself throws, a ConfigError; a file that cannot be read is one broken workflow.
+    if (!(err instanceof ConfigError)) throw err;
     // Two lines, so mt service check warns of the first and leaves the summary to the gateway's note.
-    const why = (err instanceof Error ? err.message : String(err)).replace(`cannot read ${dir}: `, '');
+    const why = err.message.replace(`cannot read ${dir}: `, '');
     return [`workflows directory ${dir} cannot be read: ${why}`, 'workflows: none'];
   }
 }

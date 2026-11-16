@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -73,9 +73,37 @@ describe('mt workflow check', () => {
     expect(await f.run(['workflow', 'check', 'vendor-eval'])).toMatchObject({ code: 0, out: expect.stringMatching(/^vendor-eval: ok, 3 steps; /) });
     expect(await f.run(['workflow', 'check', 'onboarding'])).toEqual({ code: 1, out: `onboarding: not usable: ${BROKEN_PROBLEM}`, err: '' });
     expect(await f.run(['workflow', 'check', 'release'])).toEqual({ code: 1, out: `release: no workflow file ${join(dir, 'release.yaml')}`, err: '' });
+    const bad = "workflow name \"../roles\" must be lowercase letters, digits and '-', start with a letter, not end with '-', and be at most 40 characters";
+    expect(await f.run(['workflow', 'check', '../roles'])).toEqual({ code: 1, out: bad, err: '' });
+    expect((await f.run(['workflow', 'check', 'Vendor-Eval'])).out).toMatch(/^workflow name "Vendor-Eval" must be lowercase letters/);
     const two = await f.run(['workflow', 'check', 'a', 'b']);
     expect(two.code).toBe(2);
     expect(two.err).toMatch(/^mt: workflow check takes at most one name/);
+  });
+
+  it('says a file that cannot be read is not usable, never crashing, and checks the others', async () => {
+    const dir = workflows(f.home, { 'vendor-eval.yaml': VENDOR_EVAL, 'locked.yaml': VENDOR_EVAL });
+    chmodSync(join(dir, 'locked.yaml'), 0o000);
+    expect(await f.run(['workflow', 'check'])).toEqual({
+      code: 1,
+      out: [
+        'locked: not usable: the file cannot be read: EACCES',
+        'vendor-eval: ok, 3 steps; params: topic (required), vendors (list, required), reviewer (default reviewer)',
+      ].join('\n'),
+      err: '',
+    });
+    expect(await f.run(['workflow', 'check', 'locked'])).toEqual({ code: 1, out: 'locked: not usable: the file cannot be read: EACCES', err: '' });
+    expect(await f.run(['workflow', 'check', 'vendor-eval'])).toMatchObject({ code: 0 });
+  });
+
+  it('says a workflows directory that cannot be read, exit 1, with no stack trace', async () => {
+    writeFileSync(join(f.home, 'workflows'), 'not a directory\n');
+    const all = await f.run(['workflow', 'check']);
+    expect(all).toMatchObject({ code: 1, out: '' });
+    expect(all.err).toMatch(new RegExp(`^mt: workflows directory ${join(f.home, 'workflows')} cannot be read: ENOTDIR`));
+    expect(all.err).not.toMatch(/\n\s+at /);
+    const one = await f.run(['workflow', 'check', 'vendor-eval']);
+    expect(one).toEqual({ code: 1, out: 'vendor-eval: not usable: the file cannot be read: ENOTDIR', err: '' });
   });
 
   it('says so when there is no workflow', async () => {
@@ -136,6 +164,12 @@ describe('the startup', () => {
     expect(loadStartup(env).workflows).toEqual(['workflows: none']);
     workflows(join(root, 'home'), { 'vendor-eval.yaml': VENDOR_EVAL, 'onboarding.yaml': BROKEN });
     expect(loadStartup(env).workflows).toEqual([`workflow onboarding is not usable: ${BROKEN_PROBLEM}`, 'workflows: vendor-eval; not usable: onboarding']);
+  });
+
+  it('says a file that cannot be read is not usable, the others still listed', () => {
+    const dir = workflows(join(root, 'home'), { 'vendor-eval.yaml': VENDOR_EVAL, 'locked.yaml': VENDOR_EVAL });
+    chmodSync(join(dir, 'locked.yaml'), 0o000);
+    expect(loadStartup(env).workflows).toEqual(['workflow locked is not usable: the file cannot be read: EACCES', 'workflows: vendor-eval; not usable: locked']);
   });
 
   it('says a directory that cannot be read, and that there are no workflows, without stopping', () => {

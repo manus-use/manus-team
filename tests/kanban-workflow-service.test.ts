@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { archiveBoard, archiveWorkflow, createBoard } from '../src/db/kanban.js';
@@ -118,6 +118,14 @@ describe('startWorkflow', () => {
       message: 'evaluate:2, step evaluate, item "evaluator": role "evaluator" is not configured',
     });
     expect([tasks(), instances()]).toEqual([0, 0]);
+  });
+
+  it('starts a usable workflow beside a file that cannot be read, and refuses that one invalid', () => {
+    writeFileSync(join(dir, 'locked.yaml'), VENDOR_EVAL);
+    chmodSync(join(dir, 'locked.yaml'), 0o000);
+    expect(start({ workflow: 'locked' })).toEqual({ ok: false, code: 'invalid', message: 'workflow locked is not usable: the file cannot be read: EACCES' });
+    expect(start({ workflow: 'nope' })).toMatchObject({ ok: false, code: 'unknown_workflow', message: expect.stringMatching(/the usable ones are vendor-eval;/) });
+    expect(made(start()).tasks.length).toBeGreaterThan(0);
   });
 
   it('cuts the message of unknown_workflow at 4 KiB, the names first, saying what was left out', () => {

@@ -285,6 +285,16 @@ steps:
       ['lark:on_bo', 'lark:on_bo'],
     ]);
   });
+
+  it('refuses a list whose items name one person twice once resolved', () => {
+    const w = workflow('params:\n  owners: { list: true, required: true }\nsteps:\n  a: { title: "Ask {{item}}", for_each: owners, assignee: "{{item}}" }\n');
+    const personOf = (value: string) => ({ ok: true as const, principal: value === '@Ann' || value === '@Annie' ? 'lark:on_ann' : `lark:on_${value.slice(1)}` });
+    expect(refusal(expand(w, chat(['owners', '@Ann,@Annie']), 'default', personOf))).toEqual({
+      code: 'invalid',
+      message: 'param owners names "lark:on_ann" twice; each item labels its task',
+    });
+    expect(refusal(expand(w, chat(['owners', '@Ann,lark:on_ann']), 'default', personOf))).toMatchObject({ code: 'invalid' });
+  });
 });
 
 describe('for_each', () => {

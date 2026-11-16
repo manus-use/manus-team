@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { ConfigError, reject, section } from '../config.js';
@@ -467,17 +467,38 @@ export function checkWorkflow(name: string, source: string, facts: WorkflowFacts
 /** Why an entry of the directory is no workflow, or undefined for one that is: a regular `<name>.yaml`, the name in the grammar. */
 function notAWorkflow(dir: string, entry: string): string | undefined {
   if (!entry.endsWith('.yaml')) return 'not a .yaml file, so not a workflow';
-  const stat = lstatSync(join(dir, entry), { throwIfNoEntry: false });
+  // An entry whose lstat fails is judged by its name only; its read then says why it is broken.
+  const stat = statOf(join(dir, entry));
+  if (stat === 'unreadable') return nameProblem('workflow', entry.slice(0, -'.yaml'.length));
   if (stat?.isSymbolicLink() === true) return 'a symlink, which is not followed: a workflow is a file of its own in the home';
   if (stat?.isFile() !== true) return 'not a regular file, so not a workflow';
   return nameProblem('workflow', entry.slice(0, -'.yaml'.length));
 }
 
-/** A file's text, or why it cannot be a workflow: past 64 KiB. */
+/** An entry's lstat, undefined for none, or `unreadable` when the lstat itself fails. */
+function statOf(path: string): Stats | undefined | 'unreadable' {
+  try {
+    return lstatSync(path, { throwIfNoEntry: false });
+  } catch {
+    return 'unreadable';
+  }
+}
+
+/** Why a read failed, by its code: one file that cannot be read is one broken workflow, never a broken directory. */
+function unreadable(err: unknown): { ok: false; problem: string } {
+  const code = (err as NodeJS.ErrnoException).code;
+  return { ok: false, problem: `the file cannot be read: ${typeof code === 'string' ? code : 'unknown error'}` };
+}
+
+/** A file's text, or why it cannot be a workflow: past 64 KiB, or not readable. */
 function readFile(path: string): { ok: true; text: string } | { ok: false; problem: string } {
-  const size = lstatSync(path).size;
-  if (size > WORKFLOW_LIMITS.fileBytes) return { ok: false, problem: `the file is ${size} bytes; a workflow is at most ${WORKFLOW_LIMITS.fileBytes}` };
-  return { ok: true, text: readFileSync(path, 'utf8') };
+  try {
+    const size = lstatSync(path).size;
+    if (size > WORKFLOW_LIMITS.fileBytes) return { ok: false, problem: `the file is ${size} bytes; a workflow is at most ${WORKFLOW_LIMITS.fileBytes}` };
+    return { ok: true, text: readFileSync(path, 'utf8') };
+  } catch (err) {
+    return unreadable(err);
+  }
 }
 
 /**
@@ -522,7 +543,7 @@ function refuse(code: Refusal['code'], message: string): Refusal {
 export function readWorkflow(dir: string, name: string, facts: WorkflowFacts): Result<{ workflow: Workflow }> {
   if (typeof name !== 'string' || !NAME_PATTERN.test(name)) return refuse('unknown_workflow', `there is no workflow ${q(String(name))}`);
   const entry = `${name}.yaml`;
-  const stat = lstatSync(join(dir, entry), { throwIfNoEntry: false });
+  const stat = statOf(join(dir, entry));
   if (stat === undefined) return refuse('unknown_workflow', `there is no workflow ${name}`);
   const why = notAWorkflow(dir, entry);
   if (why !== undefined) return refuse('unknown_workflow', `there is no workflow ${name}: ${join(dir, entry)} is ${why}`);
@@ -738,6 +759,11 @@ export function paramValues(w: Workflow, given: GivenParams, personOf?: PersonOf
         const r = personOf(t);
         if (!r.ok) return r;
         resolved.push(r.principal);
+      }
+      if (Array.isArray(value)) {
+        // Two items may name one person, by a mention and a principal, or by two mentions of one person.
+        const twice = resolved.find((item, n) => resolved.indexOf(item) !== n);
+        if (twice !== undefined) return refuse('invalid', `param ${p.name} names ${said(twice)} twice; each item labels its task`);
       }
       value = typeof value === 'string' ? (resolved[0] ?? '') : resolved;
     }

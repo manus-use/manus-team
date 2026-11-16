@@ -2,7 +2,8 @@ import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { ConfigError, loadTeamSettings, type Env } from '../config.js';
 import { readGatewayEnv, withGatewayEnv } from '../gateway-env.js';
-import { listWorkflows, paramsLine, readWorkflow, type Workflow, type WorkflowFacts } from '../kanban/workflow.js';
+import { nameProblem } from '../names.js';
+import { listWorkflows, paramsLine, readWorkflow, type Workflow, type WorkflowFacts, type WorkflowList } from '../kanban/workflow.js';
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { loadTeam, teamSecrets } from '../team.js';
 import { refuse } from './args.js';
@@ -20,6 +21,15 @@ import type { MtIo } from './mt.js';
  * Exit 0 when every workflow checked is usable, 1 otherwise, and 2 for a wrong
  * command line.
  */
+
+/** True only when the file is certainly missing; one whose lstat fails is read, and its read says why. */
+function noFile(path: string): boolean {
+  try {
+    return lstatSync(path, { throwIfNoEntry: false }) === undefined;
+  } catch {
+    return false;
+  }
+}
 
 function okLine(w: Workflow): string {
   return `${w.name}: ok, ${w.steps.length} step${w.steps.length === 1 ? '' : 's'}; params: ${paramsLine(w)}`;
@@ -53,7 +63,13 @@ export function workflowCheck(only: string | undefined, io: MtIo): number {
   }
   const say = (line: string): void => io.out(redactKnownSecrets(line));
   if (only !== undefined) {
-    if (lstatSync(join(dir, `${only}.yaml`), { throwIfNoEntry: false }) === undefined) {
+    // A name outside the grammar is no file of the directory: said so before any path is made of it.
+    const bad = nameProblem('workflow', only);
+    if (bad !== undefined) {
+      say(bad);
+      return 1;
+    }
+    if (noFile(join(dir, `${only}.yaml`))) {
       say(`${only}: no workflow file ${join(dir, `${only}.yaml`)}`);
       return 1;
     }
@@ -65,7 +81,14 @@ export function workflowCheck(only: string | undefined, io: MtIo): number {
     say(`${only}: not usable: ${r.message.replace(/^workflow \S+ is not usable: /, '').replace(/^there is no workflow \S+: /, '')}`);
     return 1;
   }
-  const list = listWorkflows(dir, facts);
+  let list: WorkflowList;
+  try {
+    list = listWorkflows(dir, facts);
+  } catch (err) {
+    // Only the directory itself throws; a file that cannot be read is one broken workflow.
+    if (err instanceof ConfigError) return refuse(io, err.message.replace(`cannot read ${dir}: `, `workflows directory ${dir} cannot be read: `));
+    throw err;
+  }
   const lines = [
     ...list.usable.map((w) => ({ name: w.name, line: okLine(w) })),
     ...list.broken.map((b) => ({ name: b.name, line: `${b.name}: not usable: ${b.problem}` })),
