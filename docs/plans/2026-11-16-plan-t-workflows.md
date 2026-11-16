@@ -12197,6 +12197,30 @@ git commit -m "Document workflows: the README's commands, tables and a short acc
 ```
 
 
+## Review follow-ups
+
+Fixed after the review of the 21 tasks, each behaviour fix test-first, on top of `c8db9e7`:
+
+1. **One unreadable workflow file broke the whole directory read.** `readFile` in `src/kanban/workflow.ts` now catches a failed `lstat` or read and returns `the file cannot be read: <code>`, and an entry whose `lstat` fails is judged by its name and then read, so it is one broken workflow. `readWorkflow` reads such a file the same way. `startupWorkflows` in `src/index.ts` catches only the `ConfigError` that `listWorkflows` throws for the directory itself, and `mt workflow check` turns that error into one refusal, exit 1, with no stack trace. A mode-000 file beside a good one: the good one stays usable in `listWorkflows`, `readWorkflow`, the startup lines, `mt workflow check` with and without a name, and a start (`tests/kanban-workflow-file.test.ts`, `tests/kanban-workflow-check.test.ts`, `tests/kanban-workflow-service.test.ts`).
+2. **The stray-word hint** now says: "Leave no space after a list's commas, as `vendors=acme,globex`, or quote a value that holds spaces, as `topic="log storage"`." A test parses both examples and reads them against the example workflow: two vendors, one topic (`tests/kanban-workflow-chat-parse.test.ts`).
+3. **Refs in shape refusals.** `taskShape` in `src/kanban/dag.ts` refuses a ref holding a known secret right after its grammar check, `tasks[<i>].ref holds a known secret, …`, before any refusal that would quote it, a repeated ref's included (`tests/kanban-dag.test.ts`).
+4. **Duplicate items after @ resolution.** `paramValues` checks a list's items for uniqueness again once each `@` is resolved, so two mentions of one person, or a mention and that person's principal, are refused as a repeated item (`tests/kanban-workflow-expand.test.ts`).
+5. **`mt workflow check <name>`** runs `nameProblem('workflow', name)` first, printing its problem with exit 1, so `../roles` makes no path (`tests/kanban-workflow-check.test.ts`).
+6. **dagSha256.** `InstanceRow` no longer holds it. `instanceByKey` returns a `KeyedInstance`, the row and its hash, which only `keyRefused` reads; `applyDag` and the service's repeat hand on the row alone. The writer test reads the hash from the table and checks that neither the stored nor the returned row has it; a new test checks that no `--json` answer of `start`, `apply`, `apply --dry-run`, `show` or `instances` holds it, a repeat by key included (`tests/mt-kanban-workflow.test.ts`), nor any answer of the worker's `start-workflow` or `apply-dag` (`tests/kanban-workflow-worker.test.ts`).
+7. **A DAG's workflow name holding a known secret** is refused `invalid` in `checkDagShape`, so before an apply's key lookup, without quoting it (`tests/kanban-dag.test.ts`).
+8. **`instances`** reads every status with one aggregate query, `memberPhases` in `src/db/kanban-read.ts`: the members' phases counted by instance and phase over the board's newest 200. `membersWithTasks` there is the one helper `applyDag` and the service share, two queries whatever the number of members. A member's task is never missing, as the foreign key holds it and no task is deleted; were one missing, its member would be left out, so a read never throws. Tests count the statements prepared (`tests/kanban-workflow-instances.test.ts`).
+9. **Mention lists.** A mention name followed by `,` goes on as a list, and each item after a comma is matched against the mention names the same way, so `owners=@Alice Smith,@Bob Jones` is two people (`tests/kanban-workflow-chat-parse.test.ts`).
+10. **refuseInRun** writes the refusal of `mt kanban workflow preview` to stderr even with `--json`, as a preview's stdout is a DAG file (`tests/kanban-workflow-worker.test.ts`).
+11. **Chat show** bounds its Params line as a whole, at 1,200 characters, saying how many params were left out, so the reply stays under 3,800 (`tests/kanban-workflow-chat.test.ts`).
+12. **QUOTES** takes `”` as an opening quote too, closing at `”` or `"` (`tests/kanban-workflow-chat-parse.test.ts`).
+13. **The 009 header comment** says `dag` and `created_via` are stored as text, checked to be JSON, unlike a task's JSONB columns.
+14. **The upgrade test** seeds a task made by a run of another, its `created_from_task` set, at version 8, and checks both tasks and the column survive the migration (`tests/kanban-workflow-schema.test.ts`).
+15. **CreateRequest** moved to `src/kanban/types.ts`; `src/kanban/task-checks.ts` imports nothing from the service, and the service re-exports the type for its callers.
+
+The spec's §21.4, §21.5 and §21.6 say what changed for items 1, 2, 3, 7 and 9 (and the quotes of item 12).
+
+Final counts, under Node 22: `npx vitest run --project unit` gives `Tests  2195 passed (2195)`; `npx vitest run --project e2e` gives `Tests  168 passed (168)`, run twice; `npx tsc --noEmit` and `npm run build` report no errors; `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
+
 ## Done when
 
 - `npx vitest run --project unit` gives `Tests  2181 passed (2181)`. `npx vitest run --project e2e` gives `Tests  168 passed (168)`, run twice. `npm run typecheck` and `npm run build` report no errors. All under Node 22, in the worktree.

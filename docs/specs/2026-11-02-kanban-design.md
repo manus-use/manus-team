@@ -4249,7 +4249,12 @@ workflow onboarding is not usable: steps.welcome.gates[0].command holds {{, and 
 workflows: release, vendor-eval; not usable: onboarding
 ```
 
-with `workflows: none` when the directory is missing or empty. **`loadStartup`** (`src/index.ts`)
+with `workflows: none` when the directory is missing or empty. **A file that cannot be read** (its
+mode, say, or an entry whose `lstat` fails) is one broken workflow, `the file cannot be read:
+<code>` (`EACCES`), never a broken directory: every other file is still checked, listed and usable,
+at startup, in `mt workflow check` and at a start. Only the directory itself failing to be read is
+the `ConfigError` `listWorkflows` throws, which startup turns into its two lines and `mt workflow
+check` into one refusal, exit 1, never a stack trace. **`loadStartup`** (`src/index.ts`)
 runs the check, after `loadTeam`, and returns its lines with the config and the team, so
 `createGateway` notes them and `mt service check` (§20.5), which calls the `loadStartup` of the
 build it checks, prints them as `warning:` lines (`src/cli/service.ts`) and does not fail on them,
@@ -4323,7 +4328,7 @@ the DAG it was made from (§21.7).
 | Key | Default | |
 |---|---|---|
 | `format` | none | required; the number `1`. Any other is refused, saying which this build reads, so a DAG written for a later format is never half understood |
-| `workflow` | `null` | the name of the workflow it was expanded from, in the role grammar, or `null` for a DAG with none, which shows as "(no workflow)" (§21.10). A label: apply reads no file by it |
+| `workflow` | `null` | the name of the workflow it was expanded from, in the role grammar, or `null` for a DAG with none, which shows as "(no workflow)" (§21.10). A label: apply reads no file by it. One holding a known secret is refused `invalid` in the shape, so before an apply's key lookup, without quoting it, as the name is stored and shown |
 | `params` | `{}` | the params it was expanded with, each named in the param grammar (§21.1), text or lists of text, at most 64 KiB serialized (§21.2); `{}` or absent for a DAG with none. A record: apply substitutes nothing |
 | `board` | `null` | a board's name, or `null` or absent for the path's own board (§21.6) |
 | `tasks` | none | an array of 1 to 100 tasks, in the order they are made |
@@ -4332,7 +4337,7 @@ the DAG it was made from (§21.7).
 
 | Key | Default | |
 |---|---|---|
-| `ref` | none | required; unique in the DAG; 1 to 64 bytes of letters, digits, `.`, `_`, `:` and `-`. What `parents` name |
+| `ref` | none | required; unique in the DAG; 1 to 64 bytes of letters, digits, `.`, `_`, `:` and `-`. What `parents` name. A ref names its task in every refusal after its own, so one holding a known secret is refused right after this grammar check, without quoting it |
 | `step` | the `ref` | the step it came from, in the same characters. A label `show` groups by |
 | `item` | `null` | the for_each item, text, or `null`; at most 8 KiB, holding no known secret, as items do (§21.3) |
 | `title` | none | required; as `create` takes it |
@@ -4531,19 +4536,25 @@ already expands the operator's file.
 **Params from chat.** The rest of the message after the name, on any lines, is `key=value` pairs,
 separated by spaces, tabs or line breaks. **A pair splits at its first `=`**: the key before it,
 in the param grammar, and the value after, which may hold more `=`. A value is either up to the
-next space, or quoted with `"…"`; a typed `"` may arrive as `“` and `”`, as phone and macOS
-keyboards substitute them, so that pair is taken as quotes too. There is no escape inside quotes,
+next space, or quoted with `"…"`; a typed `"` may arrive as `“` or `”`, either side, as phone and
+macOS keyboards substitute them, so a value opening with any of the three is quoted, and closes at
+`”` or `"`. There is no escape inside quotes,
 so a value cannot hold a `"` (§21.17). A **list** is comma-separated, each item trimmed, or the
 key repeated, each occurrence adding its items; **a quoted value is one item**, not split, so
 `vendors="Acme, Inc"` is one vendor. A text param given twice is refused. **A word that is not a
 pair** is refused with the usage line; when it follows a value ending in `,`, as in `vendors=acme,
-globex`, the refusal says to quote a value with spaces, or to leave none after the commas.
+globex`, the refusal adds: "Leave no space after a list's commas, as `vendors=acme,globex`, or
+quote a value that holds spaces, as `topic="log storage"`." Its list example is two items, as a
+quoted list value would be one.
 
 **A person** is given by @-mention, `owner=@Alice Smith`. Lark's text shows a mention as `@Name`,
 and a name may hold spaces, so the parser cannot find where such a value ends by itself:
 `KanbanChat` passes **the message's mention names** (`InboundMessage.mentions`) into the parser,
 which is pure all the same, and an unquoted value starting with `@` is matched against them, the
-longest name first, so `@Alice Smith` is taken whole where `@Alice` is a mention too. The parser
+longest name first, so `@Alice Smith` is taken whole where `@Alice` is a mention too. A mention name
+followed by `,` goes on as a list, and each item after a comma is matched the same way, so
+`owners=@Alice Smith,@Bob Jones` is two people. Once each `@` is resolved, a list naming one
+person twice, by two mentions or a mention and a principal, is refused as any repeated item is. The parser
 returns each pair as `{ key, value, quoted }`, knowing no workflow. The service reads the pairs
 against the file, and **`@` is resolved only for a param that lands in a person field**, an
 `assignee` or `reviewer` the file writes as `"{{owner}}"` or `{ person: "{{owner}}" }`: there
