@@ -269,6 +269,7 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
     `**${label(task.title)}** ${id(task.taskId)}: ${view.status}`,
     `assignee: ${who(task.assignee)} · reviewer: ${who(task.reviewer)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}${board}`,
   ];
+  if (view.member !== undefined) out.push(memberLine(view.member, label, id));
   for (const w of view.waiting ?? []) out.push(waitingLine(w, label, id));
   if (task.phase === 'blocked' && task.blockKind !== null) {
     out.push(`blocked (${forDisplay(task.blockKind)}): ${label(task.blockReason ?? '', 500)}`);
@@ -303,6 +304,18 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
     for (const c of shown) out.push(`${label(c.author, 80)}:`, block(c.body, 400));
   }
   return out.join('\n');
+}
+
+/**
+ * A member's line in `task show` (spec §21.10): its instance, its step and its
+ * item, in chat and at the terminal in the same words.
+ */
+export function memberLine(
+  m: { instanceId: string; name: string | null; step: string; item: string | null },
+  escape: (text: string) => string = (t) => t,
+  code: (id: string) => string = (t) => t,
+): string {
+  return `workflow: ${code(m.instanceId)} ${escape(m.name ?? '(no workflow)')}, step ${escape(m.step)}${m.item === null ? '' : `, item ${escape(m.item)}`}`;
 }
 
 /**

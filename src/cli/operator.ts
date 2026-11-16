@@ -524,6 +524,11 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
           waiting_on_role: roleWait === undefined ? null : { role: roleWait.role, max_running: roleWait.maxRunning },
           // Every reason a pass skips it, in the order the pass checks them; empty for none.
           waiting: (r.view.waiting ?? []).map(waitingJson),
+          // The workflow's instance it is a member of (spec §21.10), or null.
+          workflow:
+            r.view.member === undefined
+              ? null
+              : { instance_id: r.view.member.instanceId, name: r.view.member.name, step: r.view.member.step, item: r.view.member.item },
         },
         parents: r.view.parents.map((p) => ({ task_id: p.taskId, phase: p.phase, status: r.view.statuses.get(p.taskId) ?? null })),
         children: r.view.children.map((c) => ({ task_id: c.taskId, phase: c.phase, status: r.view.statuses.get(c.taskId) ?? null })),
