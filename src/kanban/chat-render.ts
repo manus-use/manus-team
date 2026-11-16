@@ -837,6 +837,24 @@ function paramText(value: string | readonly string[]): string {
   return typeof value === 'string' ? value : value.join(', ');
 }
 
+/** How long `show`'s Params line may be, as a whole: with the head's other lines, a reply keeps room for its tasks. */
+const PARAMS_LINE_MAX = 1_200;
+
+/** `show`'s Params line: each param, as many as fit in PARAMS_LINE_MAX, then how many were left out. */
+function paramsLine(params: ReadonlyArray<readonly [string, string | readonly string[]]>): string {
+  const parts = params.map(([k, v]) => `${label(k, 40)}: ${label(paramText(v), 200)}`);
+  const more = (n: number): string => ` · … and ${n} more param${n === 1 ? '' : 's'}`;
+  let line = 'Params:';
+  for (const [n, part] of parts.entries()) {
+    const next = `${line}${n === 0 ? ' ' : ' · '}${part}`;
+    const left = parts.length - n - 1;
+    // Room is kept for the count of those left out, unless this is the last.
+    if (next.length + (left > 0 ? more(left).length : 0) > PARAMS_LINE_MAX) return `${line}${n === 0 ? ' …' : ''}${more(parts.length - n)}`;
+    line = next;
+  }
+  return line;
+}
+
 /** `/kanban workflow show` (spec §21.10): the instance, its steps' tasks in position order, its related tasks apart, cut to fit. */
 export function renderInstance(
   view: {
@@ -863,7 +881,7 @@ export function renderInstance(
     `Started by ${makerText(instance.createdBy, nameOf)}, ${howMade(instance.createdVia, view.members[0]?.task.createdFromTask ?? null)}, ${whenText(instance.createdAt)}`,
   ];
   const params = Object.entries(instance.dag.params);
-  if (params.length > 0) head.push(`Params: ${params.map(([k, v]) => `${label(k, 40)}: ${label(paramText(v), 200)}`).join(' · ')}`);
+  if (params.length > 0) head.push(paramsLine(params));
   const lines: string[] = [];
   let step: string | undefined;
   for (const m of view.members) {

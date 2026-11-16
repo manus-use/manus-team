@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { parseKanban, parsePairs, typed } from '../src/kanban/chat-parse.js';
+import { checkWorkflow, paramValues } from '../src/kanban/workflow.js';
+import { role } from './helpers/dispatch.js';
+import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
  * `/kanban workflow …` as typed in chat (spec §21.6, §21.10): its verbs, and a
@@ -70,10 +73,12 @@ describe('the pairs', () => {
       ['vendors', 'Acme, Inc', true],
       ['vendors', 'globex', false],
     ]);
-    expect(pairs('topic=“log storage” note=”')).toEqual([
+    expect(pairs('topic=“log storage” note=”x y” other=”a"')).toEqual([
       ['topic', 'log storage', true],
-      ['note', '”', false],
+      ['note', 'x y', true],
+      ['other', 'a', true],
     ]);
+    expect(refused('note=”')).toBe('The value of `note` opens a quote it does not close. Usage: `/kanban workflow start <name> key=value ...`');
     expect(pairs('topic="two\nlines"')).toEqual([['topic', 'two\nlines', true]]);
     expect(refused('topic="open')).toBe('The value of `topic` opens a quote it does not close. Usage: `/kanban workflow start <name> key=value ...`');
     expect(refused('topic="a"b')).toBe(
@@ -93,12 +98,32 @@ describe('the pairs', () => {
     expect(refused('owner=@Bob Jones', ['Alice Smith'])).toMatch(/^`Jones` is not a `key=value` pair\./);
   });
 
+  it('continues a list after a mention name and a comma, each item a mention or not', () => {
+    const names = ['Alice Smith', 'Bob Jones'];
+    expect(pairs('owners=@Alice Smith,@Bob Jones note=x', names)).toEqual([
+      ['owners', '@Alice Smith,@Bob Jones', false],
+      ['note', 'x', false],
+    ]);
+    expect(pairs('owners=@Alice Smith,worker,@Bob Jones', names)).toEqual([['owners', '@Alice Smith,worker,@Bob Jones', false]]);
+    expect(pairs('owners=@Alice Smith,', names)).toEqual([['owners', '@Alice Smith,', false]]);
+  });
+
   it('refuses a stray word with the usage, and with a hint after a value ending in a comma', () => {
     expect(refused('topic=logs please')).toBe('`please` is not a `key=value` pair. Usage: `/kanban workflow start <name> key=value ...`');
     expect(refused('vendors=acme, globex')).toBe(
-      '`globex` is not a `key=value` pair. Quote a value with spaces, as `vendors="acme, globex"`, or leave no space after its commas. ' +
+      '`globex` is not a `key=value` pair. Leave no space after a list\'s commas, as `vendors=acme,globex`, or quote a value that holds spaces, as `topic="log storage"`. ' +
         'Usage: `/kanban workflow start <name> key=value ...`',
     );
+    // The hint's examples do what it says: the list's two items, and the quoted value whole.
+    const facts = { roles: new Map([['worker', role('worker')], ['reviewer', role('reviewer')]]), workspaces: new Set(['default']), supervisedRoles: false };
+    const w = checkWorkflow('vendor-eval', VENDOR_EVAL, facts);
+    if (!w.ok) throw new Error(w.problem);
+    const given = parsePairs('vendors=acme,globex topic="log storage"', []);
+    if (!given.ok) throw new Error(given.usage);
+    const values = paramValues(w.workflow, { from: 'chat', pairs: given.pairs });
+    if (!values.ok) throw new Error(values.message);
+    expect(values.values.get('vendors')).toEqual(['acme', 'globex']);
+    expect(values.values.get('topic')).toBe('log storage');
     expect(refused('Topic=x')).toBe('`Topic` is not a param name. Usage: `/kanban workflow start <name> key=value ...`');
     expect(parseKanban('workflow preview vendor-eval oops')).toEqual({
       ok: false,

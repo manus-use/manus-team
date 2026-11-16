@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getInstance, getTask, subscriptionsOf } from '../src/db/kanban-read.js';
 import { createBoard } from '../src/db/kanban.js';
 import { KanbanChat } from '../src/kanban/chat.js';
-import { WORKFLOW_REPLY_MAX, renderStarted } from '../src/kanban/chat-render.js';
+import { WORKFLOW_REPLY_MAX, renderInstance, renderStarted } from '../src/kanban/chat-render.js';
 import { PeopleDirectory } from '../src/kanban/people.js';
 import { KanbanService } from '../src/kanban/service.js';
 import type { TaskRow } from '../src/kanban/types.js';
@@ -219,6 +219,32 @@ describe('/kanban workflow preview', () => {
     expect((await chat.run('workflow preview vendor-eval topic=logs', message(TEAM, { sender: GUEST }), TEAM)).text).toBe(
       'Not done: workflow vendor-eval needs param vendors',
     );
+  });
+});
+
+describe("show's params", () => {
+  it('bounds the Params line as a whole, saying how many were left out, so the reply stays under its limit', () => {
+    const params = Object.fromEntries(Array.from({ length: 40 }, (_, n) => [`param-${String(n).padStart(2, '0')}-${'p'.repeat(30)}`, 'v'.repeat(300)]));
+    const view = {
+      instance: { instanceId: 'w_1', name: 'big', board: 'default', createdBy: 'operator:me', createdVia: { kind: 'operator' }, createdAt: NOW, dag: { params } },
+      description: 'd'.repeat(400),
+      members: [],
+      related: [],
+      relatedInstances: [],
+      status: 'running',
+      done: 0,
+      total: 0,
+      blocked: 0,
+    };
+    const text = renderInstance(view, 'default', () => 'nobody', () => undefined);
+    const line = text.split('\n').find((l) => l.startsWith('Params: ')) ?? '';
+    expect(line.length).toBeLessThanOrEqual(1_200);
+    expect(line).toMatch(/ · … and \d+ more params$/);
+    expect(line).toContain('param-00');
+    expect(text.length).toBeLessThan(WORKFLOW_REPLY_MAX);
+    const few = renderInstance({ ...view, instance: { ...view.instance, dag: { params: { topic: 'logs' } } } }, 'default', () => 'nobody', () => undefined);
+    expect(few).toContain('Params: topic: logs');
+    expect(few).not.toContain('more params');
   });
 });
 

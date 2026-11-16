@@ -563,15 +563,16 @@ function parseWorkflow(text: string, mentions: readonly string[]): ParsedKanban 
   }
 }
 
-/** The quotes a value may open with, and the ones each may close with: a typed `"` may arrive as `“` and `”` (spec §21.6). */
-const QUOTES: Readonly<Record<string, readonly string[]>> = { '"': ['"', '”'], '“': ['”', '"'] };
+/** The quotes a value may open with, and the ones each may close with: a typed `"` may arrive as `“` or `”`, either side (spec §21.6). */
+const QUOTES: Readonly<Record<string, readonly string[]>> = { '"': ['"', '”'], '“': ['”', '"'], '”': ['”', '"'] };
 
 /**
  * A preview's or a start's params (spec §21.6): `key=value` pairs separated by
  * spaces, tabs or line breaks, each split at its first `=`, the key in the
  * param grammar. A value runs to the next space, or is quoted, with no escape;
- * an unquoted value starting with `@` takes the longest of the message's
- * mention names it begins with, whole. A word that is no pair is refused with
+ * an unquoted value, or an item of it after a comma, starting with `@` takes
+ * the longest of the message's mention names it begins with, whole, so a list
+ * goes on after a mention name and a comma. A word that is no pair is refused with
  * the usage line, and after a value ending in `,`, a hint.
  */
 export function parsePairs(
@@ -595,7 +596,7 @@ export function parsePairs(
       const last = pairs.at(-1);
       const hint =
         last !== undefined && !last.quoted && last.value.endsWith(',')
-          ? ' Quote a value with spaces, as `vendors="acme, globex"`, or leave no space after its commas.'
+          ? ' Leave no space after a list\'s commas, as `vendors=acme,globex`, or quote a value that holds spaces, as `topic="log storage"`.'
           : '';
       return { ok: false, usage: `\`${echoed(key, 80)}\` is not a \`key=value\` pair.${hint} Usage: \`${USAGE[verb]}\`` };
     }
@@ -616,9 +617,21 @@ export function parsePairs(
       i = close + 1;
       continue;
     }
-    const mention = text[i] === '@' ? names.find((n) => text.startsWith(`@${n}`, i) && space(text[i + n.length + 1])) : undefined;
-    let stop = mention === undefined ? i : i + mention.length + 1;
-    while (stop < text.length && !space(text[stop])) stop += 1;
+    // Each item of the value, at its start or after a comma, may be a mention name, whole, ending at a space or a comma.
+    const mentionAt = (at: number): string | undefined =>
+      text[at] === '@' ? names.find((n) => text.startsWith(`@${n}`, at) && (space(text[at + n.length + 1]) || text[at + n.length + 1] === ',')) : undefined;
+    let stop = i;
+    let itemStart = true;
+    while (stop < text.length && !space(text[stop])) {
+      const mention = itemStart ? mentionAt(stop) : undefined;
+      if (mention !== undefined) {
+        stop += mention.length + 1;
+        itemStart = false;
+        continue;
+      }
+      itemStart = text[stop] === ',';
+      stop += 1;
+    }
     pairs.push({ key, value: text.slice(i, stop), quoted: false });
     i = stop;
   }
