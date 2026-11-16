@@ -4,6 +4,8 @@ import { parse as parseYaml } from 'yaml';
 import { ConfigError, reject, section } from '../config.js';
 import { NAME_PATTERN, nameProblem, visible } from '../names.js';
 import type { Role } from '../roles.js';
+import { redactKnownSecrets } from '../secrets.js';
+import { DAG_FORMAT, DAG_LIMITS, titleRefused, type Dag, type DagTask, type ParamValue } from './dag.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
 import { assignable, isRecord, type TaskFacts } from './task-checks.js';
 import { GATE_LIMITS, type Contract, type Refusal, type Result, type RetryOnCrash } from './types.js';
@@ -558,4 +560,244 @@ export function workflowLines(list: WorkflowList): string[] {
     ...list.ignored,
     `workflows: ${usable.length === 0 ? 'none' : usable.join(', ')}${broken.length === 0 ? '' : `; not usable: ${broken.join(', ')}`}`,
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Params and the expansion (spec §21.2, §21.3, §21.5)
+// ---------------------------------------------------------------------------
+
+/** A pair as chat's parser reads it (spec §21.6): a quoted value is one item of a list, never split. */
+export interface ParamPair {
+  key: string;
+  value: string;
+  quoted: boolean;
+}
+
+/**
+ * The params a start was given, as each path gives them (spec §21.6): chat's
+ * pairs, the terminal's `--param key=value`, already unquoted by the shell, or
+ * a run's JSON, where nothing is split.
+ */
+export type GivenParams =
+  | { from: 'chat'; pairs: readonly ParamPair[] }
+  | { from: 'terminal'; pairs: readonly { key: string; value: string }[] }
+  | { from: 'json'; params: unknown };
+
+/** How a value starting with `@`, in a param that lands in a person field, becomes a principal: chat's, by the message's mentions. */
+export type PersonOf = (value: string) => Result<{ principal: string }>;
+
+/** A name a param's refusal quotes: masked, as it is free text. */
+function said(value: string): string {
+  return q(redactKnownSecrets(value));
+}
+
+function bytesOf(text: string): number {
+  return Buffer.byteLength(text, 'utf8');
+}
+
+/** The params that land in a person field, as `"{{owner}}"` or `{ person: "{{owner}}" }`, and the list a person field's `{{item}}` comes from. */
+function personParams(w: Workflow): Set<string> {
+  const out = new Set<string>();
+  for (const s of w.steps) {
+    for (const spec of [s.assignee, s.reviewer]) {
+      if (spec === undefined || spec.must === 'role') continue;
+      const ref = REFERENCE.exec(spec.value)?.[1];
+      if (ref === ITEM && s.forEach !== undefined) out.add(s.forEach);
+      else if (ref !== undefined && ref !== ITEM) out.add(ref);
+    }
+  }
+  return out;
+}
+
+/** The params whose values land in a title, by `{{name}}`, or by `{{item}}` in a for_each step. */
+function titleParams(w: Workflow): Set<string> {
+  const out = new Set<string>();
+  for (const s of w.steps) {
+    for (const m of s.title.matchAll(/\{\{([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\}\}/g)) {
+      const name = m[1] ?? '';
+      if (name === ITEM && s.forEach !== undefined) out.add(s.forEach);
+      else if (name !== ITEM) out.add(name);
+    }
+  }
+  return out;
+}
+
+/**
+ * The params of a start, against the file (spec §21.2): every one declared,
+ * the required ones given, the defaults filled in, a text param given once, a
+ * list's items trimmed, none empty or twice or holding a known secret, the
+ * sizes, a value landing in a title on one line, and `@` resolved only in a
+ * param that lands in a person field. What a refusal says names the param.
+ */
+export function paramValues(w: Workflow, given: GivenParams, personOf?: PersonOf): Result<{ values: Map<string, ParamValue> }> {
+  const declared = new Map(w.params.map((p) => [p.name, p]));
+  const takes = w.params.length === 0 ? 'it takes none' : `it takes ${w.params.map((p) => p.name).join(', ')}`;
+  const unknown = (key: string): Refusal => refuse('invalid', `workflow ${w.name} takes no param ${said(key)} (${takes})`);
+  const raw = new Map<string, ParamValue>();
+  if (given.from === 'json') {
+    const params = given.params ?? {};
+    if (!isRecord(params)) return refuse('invalid', 'params is an object of text and lists of text');
+    for (const [key, value] of Object.entries(params)) {
+      const p = declared.get(key);
+      if (p === undefined) return unknown(key);
+      if (p.list) {
+        if (!Array.isArray(value) || !value.every((v) => typeof v === 'string')) return refuse('invalid', `param ${key} is a list: give a list of text`);
+        raw.set(key, [...(value as string[])]);
+      } else {
+        if (typeof value !== 'string') return refuse('invalid', `param ${key} is text: give it as text`);
+        raw.set(key, value);
+      }
+    }
+  } else {
+    for (const pair of given.pairs) {
+      const p = declared.get(pair.key);
+      if (p === undefined) return unknown(pair.key);
+      const before = raw.get(pair.key);
+      if (!p.list) {
+        if (before !== undefined) return refuse('invalid', `param ${pair.key} is given twice; it takes one value`);
+        raw.set(pair.key, pair.value);
+        continue;
+      }
+      // A quoted value from chat is one item; anything else is split at its commas (spec §21.6).
+      const items = given.from === 'chat' && (pair as ParamPair).quoted ? [pair.value] : pair.value.split(',');
+      raw.set(pair.key, [...((before as string[] | undefined) ?? []), ...items]);
+    }
+  }
+  const values = new Map<string, ParamValue>();
+  const persons = personParams(w);
+  const titled = titleParams(w);
+  for (const p of w.params) {
+    let value = raw.get(p.name) ?? p.default;
+    if (value === undefined) return refuse('invalid', `workflow ${w.name} needs param ${p.name}${p.description === undefined ? '' : `: ${p.description}`}`);
+    if (Array.isArray(value)) {
+      if (value.length > DAG_LIMITS.listItems) return refuse('too_large', `param ${p.name} has ${value.length} items; a list has at most ${DAG_LIMITS.listItems}`);
+      const items = value.map((v) => v.trim());
+      if (items.length === 0) return refuse('invalid', `param ${p.name} is an empty list, and a step over it would make no tasks`);
+      for (const [n, item] of items.entries()) {
+        if (item === '') return refuse('invalid', `param ${p.name} has an empty item`);
+        if (bytesOf(item) > DAG_LIMITS.valueBytes) return refuse('too_large', `an item of param ${p.name} is ${bytesOf(item)} bytes; at most ${DAG_LIMITS.valueBytes}`);
+        if (items.indexOf(item) !== n) return refuse('invalid', `param ${p.name} names ${said(item)} twice; each item labels its task`);
+        if (redactKnownSecrets(item) !== item) return refuse('invalid', `an item of param ${p.name} holds a known secret`);
+      }
+      value = items;
+    } else if (bytesOf(value) > DAG_LIMITS.valueBytes) {
+      return refuse('too_large', `param ${p.name} is ${bytesOf(value)} bytes; at most ${DAG_LIMITS.valueBytes}`);
+    }
+    const texts = typeof value === 'string' ? [value] : value;
+    if (!texts.every((t) => t.isWellFormed())) return refuse('invalid', `param ${p.name} is not well formed text: a lone surrogate is no text`);
+    if (titled.has(p.name) && texts.some((t) => titleRefused(t))) {
+      return refuse('invalid', `param ${p.name} lands in a title, which is one line: it may hold no line break, control character or bidi control`);
+    }
+    if (persons.has(p.name) && personOf === undefined) {
+      // At the terminal or from a run, no message carries a mention to resolve `@Name` by.
+      const at = texts.find((t) => t.startsWith('@'));
+      if (at !== undefined) {
+        return refuse(
+          'person_not_assignable',
+          `${said(at)} is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier`,
+        );
+      }
+    }
+    if (persons.has(p.name) && personOf !== undefined) {
+      const resolved: string[] = [];
+      for (const t of texts) {
+        if (!t.startsWith('@')) {
+          resolved.push(t);
+          continue;
+        }
+        const r = personOf(t);
+        if (!r.ok) return r;
+        resolved.push(r.principal);
+      }
+      value = typeof value === 'string' ? (resolved[0] ?? '') : resolved;
+    }
+    values.set(p.name, value);
+  }
+  const size = bytesOf(JSON.stringify(Object.fromEntries(values)));
+  if (size > DAG_LIMITS.paramsBytes) return refuse('too_large', `the params are ${size} bytes as JSON; at most ${DAG_LIMITS.paramsBytes} together`);
+  return { ok: true, values };
+}
+
+/** A name a field's reference gave, checked as a name (spec §21.2): in the grammar, or a person's principal where a person may go. */
+function nameGiven(value: string, place: string, spec: NameSpec, kind: 'person' | 'workspace', param: string): Refusal | undefined {
+  const fills = `param ${param} fills ${place}`;
+  if (redactKnownSecrets(value) !== value) return refuse('invalid', `${fills}, and its value holds a known secret: a name is stored as written`);
+  if (kind === 'person' && value.includes(':')) {
+    if (spec.must === 'role') return refuse('invalid', `${fills}, a role's place, and ${said(value)} is a person`);
+    return undefined;
+  }
+  if (kind === 'person' && spec.must === 'person') return refuse('invalid', `${fills}, a person's place, and ${said(value)} is a role's name`);
+  if (!NAME_PATTERN.test(value)) {
+    return refuse('invalid', `${fills}, a ${kind === 'workspace' ? 'workspace' : 'role'} name, and ${said(value)} is none: ${nameProblem(kind === 'workspace' ? 'workspace' : 'role', value) ?? ''}`);
+  }
+  return undefined;
+}
+
+/**
+ * The expansion (spec §21.3, §21.5): the file made, with its params, into a DAG
+ * of every task and link, every key written out. Each for_each step makes one
+ * task an item, `<step>:<n>`; a step naming a for_each step as a parent waits
+ * for all of its tasks, all to all. Substitution is text, once: a value is put
+ * in as written, and not read again for braces. The DAG is shaped, measured and
+ * its tasks checked by the caller, as any DAG is.
+ */
+export function expand(w: Workflow, given: GivenParams, board: string, personOf?: PersonOf): Result<{ dag: Dag }> {
+  const params = paramValues(w, given, personOf);
+  if (!params.ok) return params;
+  const values = params.values;
+  const textOf = (name: string): string => {
+    const v = values.get(name);
+    return Array.isArray(v) ? v.join(', ') : (v ?? '');
+  };
+  const refsOf = new Map<string, string[]>();
+  const tasks: DagTask[] = [];
+  for (const s of w.steps) {
+    const items: Array<string | null> = s.forEach === undefined ? [null] : [...((values.get(s.forEach) as string[] | undefined) ?? [])];
+    const refs: string[] = [];
+    for (const [n, item] of items.entries()) {
+      const sub = (t: string): string => t.replace(/\{\{([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\}\}/g, (_m, name: string) => (name === ITEM ? (item ?? '') : textOf(name)));
+      const name = (spec: NameSpec | undefined, place: string, kind: 'person' | 'workspace'): Result<{ value: string | null }> => {
+        if (spec === undefined) return { ok: true, value: null };
+        const ref = REFERENCE.exec(spec.value)?.[1];
+        if (ref === undefined || REFERENCE.exec(spec.value)?.[0] !== spec.value) return { ok: true, value: spec.value };
+        const value = ref === ITEM ? (item ?? '') : textOf(ref);
+        const bad = nameGiven(value, place, spec, kind, ref === ITEM ? (s.forEach ?? ITEM) : ref);
+        return bad ?? { ok: true, value };
+      };
+      const assignee = name(s.assignee, `steps.${s.name}.assignee`, 'person');
+      if (!assignee.ok) return assignee;
+      const reviewer = name(s.reviewer, `steps.${s.name}.reviewer`, 'person');
+      if (!reviewer.ok) return reviewer;
+      const workspace = name(s.workspace === undefined ? undefined : { value: s.workspace, must: undefined }, `steps.${s.name}.workspace`, 'workspace');
+      if (!workspace.ok) return workspace;
+      const contract: Contract = {};
+      for (const [field, value] of Object.entries(s.contract) as [keyof Contract, string][]) contract[field] = sub(value);
+      const ref = s.forEach === undefined ? s.name : `${s.name}:${n + 1}`;
+      refs.push(ref);
+      const body = s.body === undefined ? null : sub(s.body);
+      tasks.push({
+        ref,
+        step: s.name,
+        item,
+        title: sub(s.title),
+        body: body === '' ? null : body,
+        assignee: assignee.value,
+        reviewer: reviewer.value,
+        workspace: workspace.value,
+        priority: s.priority ?? 0,
+        contract,
+        failure_limit: s.failureLimit ?? null,
+        retry_on_crash: s.retryOnCrash ?? 'always',
+        max_runtime_s: s.maxRuntimeS ?? null,
+        parents: s.parents.flatMap((p) => refsOf.get(p) ?? []),
+        gates: s.gates.map((g) => ({ command: g.command, timeout_s: g.timeoutS })),
+      });
+    }
+    refsOf.set(s.name, refs);
+    if (tasks.length > DAG_LIMITS.tasks) {
+      const total = w.steps.reduce((sum, x) => sum + (x.forEach === undefined ? 1 : ((values.get(x.forEach) as string[] | undefined)?.length ?? 0)), 0);
+      return refuse('invalid', `workflow ${w.name} would make ${total} tasks with these params; an instance has at most ${DAG_LIMITS.tasks}`);
+    }
+  }
+  return { ok: true, dag: { format: DAG_FORMAT, workflow: w.name, params: Object.fromEntries(values), board, tasks } };
 }
