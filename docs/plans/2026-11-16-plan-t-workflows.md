@@ -12089,9 +12089,10 @@ workspaces:
   default: /srv/repos/main
   research: { path: /srv/repos/research, isolated: true }
 ```
- A name field takes a name,
-or one whole reference such as `"{{item}}"`, never one put together from parts, so
-`"research-{{item}}"` is refused by the check.
+
+Every prototype names the same workspace, `research`. A name field takes a name, or one whole
+reference such as `"{{item}}"`, never one put together from parts, so `"research-{{item}}"` is
+refused by the check.
 
 ```
 $ mt workflow check caching
@@ -12126,11 +12127,11 @@ is now, and lists every task and every gate command, and makes nothing:
 ```
 $ mt kanban workflow apply caching.json --dry-run
 would make 5 tasks, 6 links, 0 gates, on board web-app; nothing was made
-  brief  Write the caching options brief  role worker
-  proto:1  Prototype caching option a  role worker, after brief
-  proto:2  Prototype caching option b  role worker, after brief
-  proto:3  Prototype caching option c  role worker, after brief
-  report  Write the caching recommendation  role worker, after proto:1, proto:2, proto:3
+  brief    Write the caching options brief   role worker
+  proto:1  Prototype caching option a        role worker  after brief
+  proto:2  Prototype caching option b        role worker  after brief
+  proto:3  Prototype caching option c        role worker  after brief
+  report   Write the caching recommendation  role worker  after proto:1, proto:2, proto:3
 $ mt kanban workflow apply caching.json --key caching:web-app --json
 {"ok":true,"instance_id":"w_…","existing":false,"board":"web-app","tasks":[{"task_id":"k_…","ref":"brief","step":"brief","item":null},…],"nudged":true}
 ```
@@ -12140,8 +12141,9 @@ nothing and answers with the instance, `"existing":true`; the same key with a DA
 is refused, as is a key a `start` used. Without a key every apply is a new instance. A key is kept
 for good, an archived instance's included: to make the graph again, change the key.
 
-`mt kanban workflow start caching --board web-app --key caching:web-app` is the preview and the
-apply in one step, with the file as it is, when there is nothing to edit.
+Instead of the preview and the apply, `mt kanban workflow start caching --board web-app --key
+caching-start:web-app` does both in one step, with the file as it is, when there is nothing to
+edit. Its key is a new one: a start refuses a key an apply used.
 
 Notes:
 
@@ -12221,6 +12223,20 @@ The spec's §21.4, §21.5 and §21.6 say what changed for items 1, 2, 3, 7 and 9
 
 Final counts, under Node 22: `npx vitest run --project unit` gives `Tests  2195 passed (2195)`; `npx vitest run --project e2e` gives `Tests  168 passed (168)`, run twice; `npx tsc --noEmit` and `npm run build` report no errors; `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
 
+Fixed after the final review, its Minor findings, each behaviour fix test-first, on top of `a3151b8`:
+
+16. **The guide's note on name fields** after recipe 4's `workspaces:` fence has its lead sentence again, "Every prototype names the same workspace, `research`.", after a blank line; the same in this plan's copy of the guide.
+17. **Recipe 4's start** is offered "Instead of the preview and the apply", with a key of its own, `--key caching-start:web-app`, as a start refuses the key an apply used.
+18. **The terminal's end to end test** points the config's `db:` at the gateway's own database, `join(s.t.dir, 'team.db')`, counts the fake Lark's calls before the apply, and checks that every member is claimed and runs to done with no call to Lark after it (`tests/kanban-workflow.e2e.ts`).
+19. **`mt workflow check` refuses a file of more than 100 steps**, which could never start, as each step makes at least one task: `checkWorkflow` in `src/kanban/workflow.ts` says `the file has 101 steps; a workflow has at most 100, …`, before it reads the steps; 100 steps pass (`tests/kanban-workflow-file.test.ts`).
+20. **An archived instance's members are "finished"**: `archived, 4 of 4 finished`, in chat's `instances` and `show` and the terminal's, through one helper, `membersDone` in `src/kanban/chat-render.ts`; every other status still says "done". Counting only done members instead was the other choice, and read worse: every archived instance "0 of N done", a finished one's included (`tests/kanban-workflow-chat.test.ts`, `tests/mt-kanban-workflow.test.ts`).
+21. **`apply --dry-run`** prints its tasks in preview's columns, aligned, with the same suffixes, `after shortlist  1 gate`, each task's gate commands below it; the guide's example and this plan's copy match (`tests/mt-kanban-workflow.test.ts`).
+22. **The smoke checklist** says `<mt> role create planner` "if it does not exist yet".
+
+The spec's §21.4 says what changed for item 19, and §21.10 for item 20.
+
+Final counts, under Node 22: `npx vitest run --project unit` gives `Tests  2196 passed (2196)`; `npx vitest run --project e2e` gives `Tests  168 passed (168)`, run twice; `npx tsc --noEmit` and `npm run build` report no errors; `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing.
+
 ## Done when
 
 - `npx vitest run --project unit` gives `Tests  2181 passed (2181)`. `npx vitest run --project e2e` gives `Tests  168 passed (168)`, run twice. `npm run typecheck` and `npm run build` report no errors. All under Node 22, in the worktree.
@@ -12232,7 +12248,7 @@ Final counts, under Node 22: `npx vitest run --project unit` gives `Tests  2195 
 
 ## Before relying on it: the smoke checklist
 
-For the user, once the plan is built and merged, on the real host, with the real Lark tenant. Run each command as the gateway's user. `<mt>` below is the `mt` the service's build has, `~/.nvm/versions/node/v22.15.0/bin/node <checkout>/dist/mt.js` until `PATH` has one; never a bare `mt` under another node. The items need the board on (`kanban.enabled: true`), a group the bot is in, the roles `worker` and `reviewer` (the example's last step), and for item 7 `planner` with the guide's recipe 3 `role.md` (`<mt> role create planner`, then put that `role.md` in `~/.manus-team/roles/planner/`, and restart), and you an operator. Every build and every `<mt>` runs under Node 22, `~/.nvm/versions/node/v22.15.0/bin/node`.
+For the user, once the plan is built and merged, on the real host, with the real Lark tenant. Run each command as the gateway's user. `<mt>` below is the `mt` the service's build has, `~/.nvm/versions/node/v22.15.0/bin/node <checkout>/dist/mt.js` until `PATH` has one; never a bare `mt` under another node. The items need the board on (`kanban.enabled: true`), a group the bot is in, the roles `worker` and `reviewer` (the example's last step), and for item 7 `planner` with the guide's recipe 3 `role.md` (`<mt> role create planner` if it does not exist yet, then put that `role.md` in `~/.manus-team/roles/planner/`, and restart), and you an operator. Every build and every `<mt>` runs under Node 22, `~/.nvm/versions/node/v22.15.0/bin/node`.
 
 0. **Make the host ready**, once. Back up the database while the service is stopped, as this build's first start migrates it to version 9: `<mt> service stop && sqlite3 ~/.manus-team/team.db ".backup /tmp/team-v8.db"`. Build with Node 22 (`cd <checkout> && PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH npm run build`), then `<mt> service start`. `<mt> service logs -n 30` says `schema at version 9` and, after the roles' line, `workflows: none`.
 1. **A file, checked.** `mkdir -p ~/.manus-team/workflows && cd ~/.manus-team/workflows`, and write the example of spec §21.1 to `vendor-eval.yaml` there. `<mt> workflow check` prints `vendor-eval: ok, 3 steps; params: topic (required), vendors (list, required), reviewer (default reviewer)`, exit 0 (`echo $?`). Break a copy, `cp vendor-eval.yaml onboarding.yaml`, and add a gate `command: "echo {{topic}}"` under `gates:` to its `shortlist` step: `<mt> workflow check` prints `onboarding: not usable: steps.shortlist.gates[0].command holds {{, …`, exit 1; `<mt> service check` prints it as a `warning:` line and still ends `ok: this build would start as …`. Restart the service: the log says `workflow onboarding is not usable: …` and `workflows: vendor-eval; not usable: onboarding`, and the gateway connects. Remove `onboarding.yaml`.
