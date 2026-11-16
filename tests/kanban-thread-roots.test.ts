@@ -2,7 +2,7 @@ import { copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { advanceSubscription, createTask, threadSubscription } from '../src/db/kanban.js';
+import { advanceSubscription, createTask, threadSubscriptions } from '../src/db/kanban.js';
 import { eventsOf, subscriptionsOf } from '../src/db/kanban-read.js';
 import { migrate, openDb } from '../src/db/open.js';
 import { KanbanService } from '../src/kanban/service.js';
@@ -47,7 +47,7 @@ describe('migration 008', () => {
           `INSERT INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, created_at)
            VALUES ('k_old', 'lark', 'cli_app', 'oc_team', 'omt_topic', ?)`,
         ).run(NOW);
-        expect(migrate(d, SCHEMA_DIR)).toBe(8);
+        expect(migrate(d, SCHEMA_DIR)).toBe(9);
         expect(subscriptionsOf(d, 'k_old')).toMatchObject([{ threadId: 'omt_topic', rootMessageId: null }]);
       } finally {
         d.close();
@@ -87,21 +87,21 @@ describe("a subscription's root", () => {
   });
 });
 
-describe('threadSubscription', () => {
+describe('threadSubscriptions', () => {
   it('moves a chat-scope subscription into its thread, once, with its root and its cursor, writing no event', () => {
     const task = newTask(h.db, { createdVia: VIA });
     const [before] = subscriptionsOf(h.db, task.taskId);
     const created = eventsOf(h.db, task.taskId).at(-1)?.id ?? 0;
     expect(advanceSubscription(h.db, before?.id ?? 0, created).ok).toBe(true);
     const events = eventsOf(h.db, task.taskId).length;
-    expect(threadSubscription(h.db, task.taskId, CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: true });
+    expect(threadSubscriptions(h.db, [task.taskId], CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: 1 });
     expect(subscriptionsOf(h.db, task.taskId)).toEqual([
       { ...before, threadId: 'omt_new', rootMessageId: 'om_cmd', cursor: created },
     ]);
     expect(eventsOf(h.db, task.taskId)).toHaveLength(events);
     // A second call, for that thread or another, changes nothing.
-    expect(threadSubscription(h.db, task.taskId, CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: false });
-    expect(threadSubscription(h.db, task.taskId, CHAT, 'omt_other', 'om_other')).toEqual({ ok: true, moved: false });
+    expect(threadSubscriptions(h.db, [task.taskId], CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: 0 });
+    expect(threadSubscriptions(h.db, [task.taskId], CHAT, 'omt_other', 'om_other')).toEqual({ ok: true, moved: 0 });
     expect(subscriptionsOf(h.db, task.taskId).map((s) => [s.threadId, s.rootMessageId])).toEqual([['omt_new', 'om_cmd']]);
   });
 
@@ -109,10 +109,10 @@ describe('threadSubscription', () => {
     const task = newTask(h.db, { createdVia: VIA });
     const neighbour = newTask(h.db, { createdVia: VIA });
     const inThread = newTask(h.db, { createdVia: { kind: 'chat', channel: 'lark', appId: 'cli_app', conversationId: 'oc_chat', threadId: 'omt_topic' } });
-    expect(threadSubscription(h.db, task.taskId, { ...CHAT, appId: 'cli_other' }, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: false });
-    expect(threadSubscription(h.db, task.taskId, { ...CHAT, conversationId: 'oc_other' }, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: false });
-    expect(threadSubscription(h.db, inThread.taskId, CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: false });
-    expect(threadSubscription(h.db, task.taskId, CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: true });
+    expect(threadSubscriptions(h.db, [task.taskId], { ...CHAT, appId: 'cli_other' }, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: 0 });
+    expect(threadSubscriptions(h.db, [task.taskId], { ...CHAT, conversationId: 'oc_other' }, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: 0 });
+    expect(threadSubscriptions(h.db, [inThread.taskId], CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: 0 });
+    expect(threadSubscriptions(h.db, [task.taskId], CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: 1 });
     expect(subscriptionsOf(h.db, neighbour.taskId).map((s) => [s.threadId, s.rootMessageId])).toEqual([['', null]]);
     expect(subscriptionsOf(h.db, inThread.taskId).map((s) => [s.threadId, s.rootMessageId])).toEqual([['omt_topic', null]]);
   });
@@ -120,12 +120,27 @@ describe('threadSubscription', () => {
   it('is refused through the service for an empty thread or root, or anything but text', () => {
     const service = new KanbanService({ db: h.db, roles: new Map(DEFAULT_ROLES.map((r) => [r.name, r])), workspaces: WORKSPACES });
     const task = newTask(h.db, { createdVia: VIA });
-    expect(service.threadSubscription(task.taskId, CHAT, '', 'om_cmd')).toMatchObject({ ok: false, code: 'invalid' });
-    expect(service.threadSubscription(task.taskId, CHAT, 'omt_new', '')).toMatchObject({ ok: false, code: 'invalid' });
-    expect(service.threadSubscription(task.taskId, { ...CHAT, appId: 7 } as unknown as typeof CHAT, 'omt_new', 'om_cmd')).toMatchObject({
+    expect(service.threadSubscriptions([task.taskId], CHAT, '', 'om_cmd')).toMatchObject({ ok: false, code: 'invalid' });
+    expect(service.threadSubscriptions([task.taskId], CHAT, 'omt_new', '')).toMatchObject({ ok: false, code: 'invalid' });
+    expect(service.threadSubscriptions([task.taskId], { ...CHAT, appId: 7 } as unknown as typeof CHAT, 'omt_new', 'om_cmd')).toMatchObject({
       ok: false,
       code: 'invalid',
     });
-    expect(service.threadSubscription(task.taskId, CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: true });
+    expect(service.threadSubscriptions([task.taskId], CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: 1 });
+  });
+
+  it("moves every task's subscription in one call, a task named twice once, and those already moved stay", () => {
+    const tasks = [newTask(h.db, { createdVia: VIA }), newTask(h.db, { createdVia: VIA }), newTask(h.db, { createdVia: VIA })];
+    const ids = tasks.map((t) => t.taskId);
+    expect(threadSubscriptions(h.db, [ids[0] ?? ''], CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: 1 });
+    expect(threadSubscriptions(h.db, [...ids, ids[1] ?? ''], CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: 2 });
+    for (const id of ids) expect(subscriptionsOf(h.db, id).map((s) => [s.threadId, s.rootMessageId])).toEqual([['omt_new', 'om_cmd']]);
+    expect(threadSubscriptions(h.db, [], CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: true, moved: 0 });
+  });
+
+  it('refuses through the service a list that is not of text', () => {
+    const service = new KanbanService({ db: h.db, roles: new Map(DEFAULT_ROLES.map((r) => [r.name, r])), workspaces: WORKSPACES });
+    expect(service.threadSubscriptions([7] as unknown as string[], CHAT, 'omt_new', 'om_cmd')).toEqual({ ok: false, code: 'invalid', message: 'task ids are text' });
   });
 });
+

@@ -9,29 +9,54 @@ import {
   chatBoardOf,
   gatesOf,
   getBoard,
+  getInstance,
   getRun,
   getTask,
+  instanceByKey,
+  instancesOn,
+  memberOf,
+  memberPhases,
+  membersWithTasks,
+  relatedTasks,
   runsOf,
+  statusOf,
   taskView,
   type BoardEntry,
   type BoardSummary,
   type CardReading,
+  type InstanceRow,
+  type MemberRow,
   type TaskView,
 } from '../db/kanban-read.js';
 import { buildEnv } from '../driver/env.js';
 import { nameProblem, visible } from '../names.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { roleLimit, type Role } from '../roles.js';
-import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
+import { checkDagShape, checkDagTasks, type Dag, type DagTask, type ShapedDag } from './dag.js';
+import { holdsSecret } from './gate-command.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
+import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
 import { limitsReached, workspaceBusy } from './waiting.js';
+import type { DisplayStatus } from './status.js';
+import {
+  expand,
+  instanceStatus,
+  listWorkflows,
+  readWorkflow,
+  usableMessage,
+  type GivenParams,
+  type InstanceState,
+  type PersonOf,
+  type Workflow,
+  type WorkflowFacts,
+  type WorkflowList,
+} from './workflow.js';
 import { isWorktreeId, worktreeId, worktreeOf } from '../db/workspaces.js';
 import { placeName, placeOf, resolveTaskWorkspace } from './workspace.js';
 import {
   BLOCK_KINDS,
-  CONTRACT_FIELDS,
   DEFAULT_BOARD,
   GATE_LIMITS,
   type AgentSnapshot,
@@ -39,15 +64,15 @@ import {
   type BoardRow,
   type ChatAt,
   type CommentRow,
-  type Contract,
+  type CreateRequest,
   type CreatedVia,
   type GateRow,
+  type Phase,
   type Refusal,
   type Rendering,
   type ReportedBlockKind,
   type Reporter,
   type Result,
-  type RetryOnCrash,
   type RunRow,
   type TaskRow,
   type Waiting,
@@ -130,6 +155,11 @@ export interface KanbanServiceDeps {
    * so `show` can say a task is waiting on its role's limit (spec §6.3).
    */
   maxRunningPerRole?: number;
+  /**
+   * Where the workflow files are, `$MT_HOME/workflows` (spec §21.1), read at each
+   * preview and start. Absent -- tests of the board alone -- there are none.
+   */
+  workflowsDir?: string;
 }
 
 /** A report's options: aborted when the gateway stops, which kills its gates and applies nothing. */
@@ -151,26 +181,71 @@ function verdict(r: GateResult, timeoutS: number): string {
   return r.signal === null ? 'could not start' : `was ended by ${r.signal}`;
 }
 
-/** A task to create, as a person or a worker asks for it. Names are not yet checked. */
-export interface CreateRequest {
-  title: string;
-  body?: string;
-  contract?: Contract;
-  /** A role name, or a person's principal `lark:<union_id>`. */
-  assignee?: string;
-  reviewer?: string;
-  workspace?: string;
-  parents?: readonly string[];
-  priority?: number;
+/** A task to create: in types.ts, so the checks need nothing of the service; exported here too, as its callers name it. */
+export type { CreateRequest } from './types.js';
+
+/** A workflow to start (spec §21.6), as chat, the terminal or a run asks for it. Nothing is checked yet. */
+export interface StartRequest {
+  workflow: string;
+  params: GivenParams;
+  /** Chat's: a value starting with `@`, in a param that lands in a person field, as the principal it mentions. */
+  personOf?: PersonOf;
+  /** As a task's: chat's message, the terminal's `--key`, a run's `idempotency_key`; namespaced here. */
   idempotencyKey?: string;
-  failureLimit?: number;
-  retryOnCrash?: RetryOnCrash;
-  maxRuntimeS?: number;
   createdBy: string;
   createdVia: CreatedVia;
-  /** The board it goes on (spec §16): chat's is the chat's board. A run's task's follow-ups go on its board, whatever this says. */
+  /** Chat's board, or the terminal's `--board`, else `default`; a run's is its task's, whatever this says. */
   board?: string;
 }
+
+/** A DAG to make (spec §21.6), parsed but not yet checked: the terminal's file, or a run's `apply-dag` input without its own keys. */
+export interface ApplyRequest {
+  dag: unknown;
+  idempotencyKey?: string;
+  /** Every check, and nothing written (spec §21.6). */
+  dryRun?: boolean;
+  createdBy: string;
+  createdVia: CreatedVia;
+}
+
+/** What a start or an apply made, or found made with its key: the instance, and its members with their tasks. */
+export interface WorkflowMade {
+  instance: InstanceRow;
+  tasks: Array<MemberRow & { task: TaskRow }>;
+  existing: boolean;
+}
+
+/** A dry run's answer (spec §21.6): what the apply would make, or the instance its key already made; nothing written. */
+export interface WorkflowDryRun {
+  dryRun: true;
+  existing: boolean;
+  instanceId: string | null;
+  board: string;
+  tasks: DagTask[];
+}
+
+/** An instance as `instances` lists it: the row, and its status. */
+export interface InstanceSummary extends InstanceState {
+  instance: InstanceRow;
+}
+
+/** One instance as `show` gives it (spec §21.10). */
+export interface InstanceView extends InstanceState {
+  instance: InstanceRow;
+  /** The workflow file's description, while the file is there and usable; undefined otherwise. */
+  description: string | undefined;
+  members: Array<MemberRow & { task: TaskRow; status: DisplayStatus }>;
+  /** Tasks that are not members, with a member as a parent or as their created_from_task, and not another instance's. */
+  related: Array<{ task: TaskRow; status: DisplayStatus }>;
+  /** Other instances whose members are related to this one, as a deciding step's start makes: one line each. */
+  relatedInstances: Array<{ instanceId: string; name: string | null; tasks: number }>;
+}
+
+/** How many of a board's newest instances `instances` reads (spec §21.7). */
+export const INSTANCES_READ = 200;
+
+/** How long `unknown_workflow`'s message may be, in bytes: a gate refusal's output's size (spec §21.6). */
+export const WORKFLOW_MESSAGE_BYTES = 4 * 1024;
 
 /** A claim, with what was read for it. */
 export interface Claimed {
@@ -190,9 +265,6 @@ export interface Claimed {
 /** The kinds a worker or a person may report; gave_up is the breaker's. */
 const REPORTABLE: readonly ReportedBlockKind[] = BLOCK_KINDS.filter((k): k is ReportedBlockKind => k !== 'gave_up');
 
-/** A person's principal, as channels identify them. */
-const PERSON = /^lark:[A-Za-z0-9_-]+$/;
-
 /** What a run records of its agent (spec §3.3): never an environment value. */
 export function agentSnapshot(role: Role): AgentSnapshot {
   return {
@@ -207,41 +279,9 @@ export function agentSnapshot(role: Role): AgentSnapshot {
 // Every entry point takes what an agent's JSON or chat sent, typed or not: a
 // wrong type is refused as `invalid`, never thrown, and never reaches a write.
 
-function isText(v: unknown): v is string {
-  return typeof v === 'string';
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-function isTextList(v: unknown): v is readonly string[] {
-  return Array.isArray(v) && v.every(isText);
-}
-
-/** Absent, or a whole number SQLite stores exactly, at least `min`. */
-function isWhole(n: unknown, min: number): boolean {
-  return n === undefined || (Number.isSafeInteger(n) && (n as number) >= min);
-}
-
 /** Throws unless the path is a regular file: a directory where role.md or a SKILL.md was is not one. */
 function regularFile(path: string): void {
   if (!statSync(path).isFile()) throw new Error(`${path} is not a file`);
-}
-
-/**
- * Whether a gate command holds a known secret (spec §10.1): as written, with its
- * control characters stripped, as the escapers match it, and with the shell's
- * quotes and backslashes taken out, so `sk\$x` or `'sk''x'` -- which the shell
- * runs as the secret -- count as well. A backslash-newline, which the shell
- * removes, is taken out first, and that form is matched with its control
- * characters stripped too.
- */
-function holdsSecret(command: string): boolean {
-  // A backslash-newline is a continuation the shell removes, so it goes before the quotes do.
-  const unquoted = command.replace(/\\\r?\n/g, '').replace(/['"\\]/g, '');
-  const forms = [command, stripControl(command), unquoted, stripControl(unquoted)];
-  return forms.some((form) => redactKnownSecrets(form) !== form);
 }
 
 /** A refusal unless every id given is text. */
@@ -251,23 +291,6 @@ function idsRefused(...ids: unknown[]): Refusal | undefined {
 
 /** A commit id, abbreviated or whole, SHA-1 or SHA-256. */
 const COMMIT = /^[0-9a-f]{7,64}$/;
-
-/** A refusal unless createdVia is one of the three shapes, with text fields. */
-function createdViaRefused(via: unknown): Refusal | undefined {
-  const fine =
-    isRecord(via) &&
-    (via.kind === 'run'
-      ? isText(via.runId)
-      : via.kind === 'operator'
-        ? Object.keys(via).length === 1
-        : via.kind === 'chat' &&
-          isText(via.channel) &&
-          isText(via.appId) &&
-          isText(via.conversationId) &&
-          isText(via.threadId) &&
-          (via.rootId === undefined || isText(via.rootId)));
-  return fine ? undefined : board.refuse('invalid', 'created_via is a chat, with text fields, a run id, or the operator');
-}
 
 /** A refusal unless the handoff has a text summary, and its report fields their types. */
 function handoffRefused(by: Reporter, handoff: unknown): Refusal | undefined {
@@ -321,6 +344,7 @@ export class KanbanService {
   readonly #checks: ReportChecks | undefined;
   readonly #maxRunning: number;
   readonly #maxRunningPerRole: number | undefined;
+  readonly #workflowsDir: string | undefined;
   /**
    * Tasks a report is running its checks for, with where the gates run -- the
    * task's own directory, by its `wt:` id, or its workspace's shared one (spec
@@ -343,6 +367,7 @@ export class KanbanService {
     this.#checks = deps.checks;
     this.#maxRunning = deps.maxRunning ?? Number.MAX_SAFE_INTEGER;
     this.#maxRunningPerRole = deps.maxRunningPerRole;
+    this.#workflowsDir = deps.workflowsDir;
   }
 
   /**
@@ -410,46 +435,19 @@ export class KanbanService {
    * should fail while the person is still looking, not strand the task later.
    */
   create(req: CreateRequest): Result<{ task: TaskRow; existing: boolean }> {
-    if (!isRecord(req)) return board.refuse('invalid', 'a task to create is an object');
-    if (!isText(req.title) || req.title.trim() === '') return board.refuse('invalid', 'a task needs a title');
-    if (!isText(req.createdBy)) return board.refuse('invalid', 'created_by is text');
-    const via = createdViaRefused(req.createdVia);
-    if (via !== undefined) return via;
-    if (req.body !== undefined && !isText(req.body)) return board.refuse('invalid', 'a body is text');
-    if (req.workspace !== undefined && !isText(req.workspace)) return board.refuse('invalid', 'a workspace is a name');
-    if (req.board !== undefined && !isText(req.board)) return board.refuse('invalid', 'a board is a name');
-    if (req.parents !== undefined && !isTextList(req.parents)) {
-      return board.refuse('invalid', 'parents are a list of task ids');
-    }
-    const contract = this.#contract(req.contract);
-    if (!contract.ok) return contract;
-    if (req.workspace !== undefined && !this.#workspaces.has(req.workspace)) {
-      return board.refuse('unknown_workspace', `workspace ${visible(JSON.stringify(req.workspace))} is not configured`);
-    }
-    if (
-      !isWhole(req.priority, Number.MIN_SAFE_INTEGER) ||
-      !isWhole(req.failureLimit, 1) ||
-      !isWhole(req.maxRuntimeS, 1)
-    ) {
-      return board.refuse('invalid', 'priority must be a whole number, and failure_limit and max_runtime_s at least 1');
-    }
-    if (req.retryOnCrash !== undefined && req.retryOnCrash !== 'always' && req.retryOnCrash !== 'if-no-side-effects') {
-      return board.refuse('invalid', 'retry_on_crash must be always or if-no-side-effects');
-    }
-    const assignee = req.assignee === undefined ? undefined : this.#assignable(req.assignee);
-    if (assignee !== undefined && !assignee.ok) return assignee;
-    const reviewer = req.reviewer === undefined ? undefined : this.#assignable(req.reviewer);
-    if (reviewer !== undefined && !reviewer.ok) return reviewer;
-    const key = this.#idempotencyKey(req);
+    // The checks a task gets however it is made (spec §21.15), then its key, which reads the database.
+    const checked = checkTask(req, this.#facts());
+    if (!checked.ok) return checked;
+    const key = this.#idempotencyKey(req.idempotencyKey, req.createdVia);
     if (!key.ok) return key;
     return board.createTask(
       this.#db,
       {
         title: req.title,
         ...(req.body === undefined ? {} : { body: req.body }),
-        contract: contract.contract,
-        assignee: assignee?.assignee ?? null,
-        reviewer: reviewer?.assignee ?? null,
+        contract: checked.contract,
+        assignee: checked.assignee ?? null,
+        reviewer: checked.reviewer ?? null,
         workspace: req.workspace ?? null,
         ...(req.parents === undefined ? {} : { parents: req.parents }),
         ...(req.priority === undefined ? {} : { priority: req.priority }),
@@ -468,7 +466,7 @@ export class KanbanService {
   assign(taskId: string, assignee: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
-    const who = this.#assignable(assignee);
+    const who = assignable(assignee, this.#facts());
     if (!who.ok) return who;
     return board.assign(this.#db, taskId, who.assignee, by, this.#clock.now());
   }
@@ -476,7 +474,7 @@ export class KanbanService {
   assignReviewer(taskId: string, reviewer: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
-    const who = this.#assignable(reviewer);
+    const who = assignable(reviewer, this.#facts());
     if (!who.ok) return who;
     return board.assignReviewer(this.#db, taskId, who.assignee, by, this.#clock.now());
   }
@@ -749,7 +747,7 @@ export class KanbanService {
     const { reviewer, ...rest } = handoff;
     let named: Assignee | undefined;
     if (reviewer !== undefined) {
-      const who = this.#assignable(reviewer);
+      const who = assignable(reviewer, this.#facts());
       if (!who.ok) return who;
       named = who.assignee;
     }
@@ -1129,17 +1127,285 @@ export class KanbanService {
   }
 
   /**
-   * A task's subscription at this chat moved into the thread its "Created" reply
-   * opened, with the command message as its root (spec §19.4): `KanbanChat`'s,
-   * once Lark answered the reply with its thread.
+   * The tasks' subscriptions at this chat moved into the thread their "Created"
+   * reply opened, with the command message as its root, in one call (spec
+   * §19.4, §21.9): `KanbanChat`'s, once Lark answered the reply with its thread.
+   * One task for `/kanban task new`; every member for a workflow's start.
    */
-  threadSubscription(taskId: string, at: ChatAt, threadId: string, rootId: string): Result<{ moved: boolean }> {
-    const ids = idsRefused(taskId, threadId, rootId);
+  threadSubscriptions(taskIds: readonly string[], at: ChatAt, threadId: string, rootId: string): Result<{ moved: number }> {
+    if (!isTextList(taskIds)) return board.refuse('invalid', 'task ids are text');
+    const ids = idsRefused(threadId, rootId);
     if (ids !== undefined) return ids;
     if (!isRecord(at) || !isText(at.channel) || !isText(at.appId) || !isText(at.conversationId)) {
       return board.refuse('invalid', 'a chat is its channel, bot and conversation, as text');
     }
-    return board.threadSubscription(this.#db, taskId, at, threadId, rootId);
+    return board.threadSubscriptions(this.#db, taskIds, at, threadId, rootId);
+  }
+
+  // -------------------------------------------------------------------------
+  // Workflows (spec §21.6)
+  // -------------------------------------------------------------------------
+
+  /** The team, as a workflow file is checked against it (spec §21.4). */
+  #workflowFacts(): WorkflowFacts {
+    return { roles: this.#roles, workspaces: this.#workspaces, supervisedRoles: this.#supervisedRoles };
+  }
+
+  /**
+   * A workflow, read now (spec §21.4), or the refusal a start gets: for no
+   * usable file of that name, `unknown_workflow`, naming the usable ones and
+   * their params, cut at 4 KiB, the names first.
+   */
+  #workflow(name: unknown): Result<{ workflow: Workflow }> {
+    const dir = this.#workflowsDir;
+    const read =
+      dir === undefined ? board.refuse('unknown_workflow', `there is no workflow ${visible(JSON.stringify(String(name)))}`) : readWorkflow(dir, name as string, this.#workflowFacts());
+    if (read.ok || read.code !== 'unknown_workflow') return read;
+    return board.refuse('unknown_workflow', this.#usable(read.message));
+  }
+
+  /** `message`, then the usable workflows and their params, at most 4 KiB. */
+  #usable(message: string): string {
+    const usable = this.#workflowsDir === undefined ? [] : listWorkflows(this.#workflowsDir, this.#workflowFacts()).usable;
+    return usableMessage(message, usable, WORKFLOW_MESSAGE_BYTES);
+  }
+
+  /** The board a start or an apply goes on (spec §21.6): a run's task's, whatever else; otherwise the one asked for, else `default`. */
+  #boardFor(via: CreatedVia, asked: string | null | undefined): Result<{ board: string; run?: RunRow }> {
+    if (via.kind !== 'run') return { ok: true, board: asked ?? DEFAULT_BOARD };
+    const run = getRun(this.#db, via.runId);
+    if (run === undefined) return board.refuse('not_found', `no run ${via.runId}`);
+    const task = getTask(this.#db, run.taskId);
+    if (task === undefined) return board.refuse('not_found', `no task ${run.taskId}`);
+    return { ok: true, board: task.board, run };
+  }
+
+  /**
+   * Step 2 of an apply (spec §21.6): the board as the database has it now, then
+   * every task checked as `create` would, every gate as `addGate`, every name,
+   * against the team and the people as this process holds them, just before the
+   * transaction, so a refusal costs none.
+   */
+  #checkDag(dag: Dag, onBoard: string, createdBy: string, createdVia: CreatedVia): Refusal | undefined {
+    const found = getBoard(this.#db, onBoard);
+    if (found === undefined) return board.refuse('unknown_board', `there is no board ${visible(onBoard)}`);
+    if (found.archivedAt !== null) return board.refuse('board_archived', `board ${onBoard} is archived; nothing is added to it`);
+    return checkDagTasks(dag, { facts: this.#facts(), createdBy, createdVia });
+  }
+
+  /** The writer's members of a checked DAG: each task's fields, its parents as earlier positions, its gates. */
+  #members(dag: Dag): board.NewMember[] {
+    const at = new Map(dag.tasks.map((t, i) => [t.ref, i]));
+    const as = (name: string | null): Assignee | null => (name === null ? null : { kind: name.includes(':') ? 'human' : 'role', name });
+    return dag.tasks.map((t) => ({
+      task: {
+        title: t.title,
+        ...(t.body === null ? {} : { body: t.body }),
+        contract: t.contract,
+        assignee: as(t.assignee),
+        reviewer: as(t.reviewer),
+        workspace: t.workspace,
+        priority: t.priority,
+        failureLimit: t.failure_limit,
+        retryOnCrash: t.retry_on_crash,
+        maxRuntimeS: t.max_runtime_s,
+      },
+      ref: t.ref,
+      step: t.step,
+      item: t.item,
+      parents: t.parents.map((p) => at.get(p) ?? -1),
+      gates: t.gates.map((g) => ({ command: g.command, timeoutS: g.timeout_s })),
+    }));
+  }
+
+  /** A start's expansion (spec §21.6 step 1): the file read now, its params, the DAG made, shaped and measured. */
+  #expanded(req: StartRequest, onBoard: string): Result<ShapedDag & { workflow: Workflow }> {
+    if (!isRecord(req)) return board.refuse('invalid', 'a start is an object');
+    if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
+    const read = this.#workflow(req.workflow);
+    if (!read.ok) return read;
+    const expanded = expand(read.workflow, req.params, onBoard, req.personOf);
+    if (!expanded.ok) return expanded;
+    const shaped = checkDagShape(expanded.dag, 'expansion');
+    if (!shaped.ok) return shaped;
+    return { ...shaped, workflow: read.workflow };
+  }
+
+  /**
+   * What a start would make, making nothing (spec §21.6): every check a start
+   * makes before its transaction, the board's and the people's included, but
+   * not the key's, as a preview has none of its own.
+   */
+  previewWorkflow(req: StartRequest): Result<{ dag: Dag; workflow: Workflow }> {
+    const on = this.#boardFor(req.createdVia, req.board);
+    if (!on.ok) return on;
+    const shaped = this.#expanded(req, on.board);
+    if (!shaped.ok) return shaped;
+    const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
+    if (refused !== undefined) return refused;
+    return { ok: true, dag: shaped.dag, workflow: shaped.workflow };
+  }
+
+  /**
+   * Start a workflow (spec §21.6): its key looked up first, read-only, so a
+   * repeat is answered whatever the file says now; then the expansion, the
+   * checks, and the one transaction. The caller tells the dispatcher.
+   */
+  startWorkflow(req: StartRequest): Result<WorkflowMade> {
+    if (!isRecord(req)) return board.refuse('invalid', 'a start is an object');
+    if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
+    const on = this.#boardFor(req.createdVia, req.board);
+    if (!on.ok) return on;
+    const key = this.#idempotencyKey(req.idempotencyKey, req.createdVia);
+    if (!key.ok) return key;
+    const repeat = key.key === null ? undefined : this.#repeat(key.key, { board: on.board, source: 'start', name: req.workflow });
+    if (repeat !== undefined) return repeat;
+    const shaped = this.#expanded(req, on.board);
+    if (!shaped.ok) return shaped;
+    const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
+    if (refused !== undefined) return refused;
+    return this.#write(shaped, { name: shaped.workflow.name, source: 'start', board: on.board, key: key.key, createdBy: req.createdBy, createdVia: req.createdVia });
+  }
+
+  /**
+   * Make a DAG (spec §21.6), at the terminal or from a run: read already, it is
+   * shaped, made canonical and measured first, as an unknown key or the wrong
+   * shape is no DAG at all; then its key is looked up, compared by the DAG's
+   * hash; then the checks, and with `dryRun` nothing more; else the one
+   * transaction. A run's DAG takes no gates, and its board is its task's.
+   */
+  applyDag(req: ApplyRequest): Result<WorkflowMade | WorkflowDryRun> {
+    if (!isRecord(req)) return board.refuse('invalid', 'an apply is an object');
+    const shaped = checkDagShape(req.dag, req.createdVia?.kind === 'run' ? 'run' : 'terminal');
+    if (!shaped.ok) return shaped;
+    const on = this.#boardFor(req.createdVia, shaped.dag.board);
+    if (!on.ok) return on;
+    if (on.run !== undefined && shaped.dag.board !== null && shaped.dag.board !== on.board) {
+      return board.refuse(
+        'other_board',
+        `the DAG is for board ${visible(shaped.dag.board)}, and a run's work stays on its task's board, ${on.board}`,
+      );
+    }
+    const key = this.#idempotencyKey(req.idempotencyKey, req.createdVia);
+    if (!key.ok) return key;
+    const want = { board: on.board, source: 'apply' as const, name: shaped.dag.workflow, sha256: shaped.sha256 };
+    const repeat = key.key === null ? undefined : this.#repeat(key.key, want);
+    if (repeat !== undefined) {
+      if (!repeat.ok || req.dryRun !== true) return repeat;
+      return { ok: true, dryRun: true, existing: true, instanceId: repeat.instance.instanceId, board: on.board, tasks: shaped.dag.tasks };
+    }
+    const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
+    if (refused !== undefined) return refused;
+    if (req.dryRun === true) return { ok: true, dryRun: true, existing: false, instanceId: null, board: on.board, tasks: shaped.dag.tasks };
+    return this.#write(shaped, { name: shaped.dag.workflow, source: 'apply', board: on.board, key: key.key, createdBy: req.createdBy, createdVia: req.createdVia });
+  }
+
+  /** A key's instance, read-only (spec §21.6 step 0): the repeat's answer, or why the key is another's; undefined for a key not used. */
+  #repeat(key: string, want: Parameters<typeof board.keyRefused>[1]): Result<WorkflowMade> | undefined {
+    const keyed = instanceByKey(this.#db, key);
+    if (keyed === undefined) return undefined;
+    const refused = board.keyRefused(keyed, want);
+    if (refused !== undefined) return refused;
+    return { ok: true, instance: keyed.instance, tasks: membersWithTasks(this.#db, keyed.instance.instanceId), existing: true };
+  }
+
+  /** The one transaction (spec §21.6 step 3). */
+  #write(
+    shaped: ShapedDag,
+    i: { name: string | null; source: 'start' | 'apply'; board: string; key: string | null; createdBy: string; createdVia: CreatedVia },
+  ): Result<WorkflowMade> {
+    const r = board.applyDag(
+      this.#db,
+      {
+        name: i.name,
+        dag: shaped.dag,
+        sha256: shaped.sha256,
+        source: i.source,
+        board: i.board,
+        createdBy: i.createdBy,
+        createdVia: i.createdVia,
+        idempotencyKey: i.key,
+      },
+      this.#members(shaped.dag),
+      this.#clock.now(),
+    );
+    if (!r.ok) return r;
+    return { ok: true, instance: r.instance, tasks: r.members, existing: r.existing };
+  }
+
+  /** The workflow files as the directory holds them now (spec §21.10): `list`'s. */
+  workflows(): WorkflowList {
+    return this.#workflowsDir === undefined ? { usable: [], broken: [], ignored: [] } : listWorkflows(this.#workflowsDir, this.#workflowFacts());
+  }
+
+  /**
+   * A board's instances, newest first (spec §21.10): of its 200 most recent, the
+   * running and blocked ones, or with `all` every one, each with its status; and
+   * how many the board has in all.
+   */
+  instances(onBoard: string, all = false): { instances: InstanceSummary[]; total: number; read: number } {
+    if (!isText(onBoard)) return { instances: [], total: 0, read: 0 };
+    const { instances, total } = instancesOn(this.#db, onBoard, INSTANCES_READ);
+    // Every status from one aggregate query of the members' phases, not a read of each member.
+    const phases = memberPhases(this.#db, onBoard, INSTANCES_READ);
+    const summaries = instances.map((instance) => ({
+      instance,
+      ...instanceStatus((phases.get(instance.instanceId) ?? []).flatMap(({ phase, n }) => Array<Phase>(n).fill(phase))),
+    }));
+    return {
+      instances: all ? summaries : summaries.filter((s) => s.status === 'running' || s.status === 'blocked'),
+      total,
+      read: instances.length,
+    };
+  }
+
+  /**
+   * One instance in detail, on any board, by id (spec §21.10): its members, in
+   * position order, with their display status; its description, while its file
+   * is still there; and its related tasks, apart, a member of another instance
+   * among them shown as that instance.
+   */
+  instance(instanceId: string): Result<{ view: InstanceView }> {
+    if (!isText(instanceId)) return board.refuse('invalid', 'an instance id is text');
+    const instance = getInstance(this.#db, instanceId);
+    if (instance === undefined) return board.refuse('not_found', `no workflow instance ${visible(instanceId)}`);
+    const members = membersWithTasks(this.#db, instanceId).map((m) => ({ ...m, status: statusOf(this.#db, m.task) }));
+    const related: InstanceView['related'] = [];
+    const others = new Map<string, { instanceId: string; name: string | null; tasks: number }>();
+    for (const task of relatedTasks(this.#db, instanceId)) {
+      const member = memberOf(this.#db, task.taskId);
+      if (member === undefined) {
+        related.push({ task, status: statusOf(this.#db, task) });
+        continue;
+      }
+      const seen = others.get(member.instanceId) ?? { instanceId: member.instanceId, name: member.name, tasks: 0 };
+      seen.tasks += 1;
+      others.set(member.instanceId, seen);
+    }
+    const file = instance.name === null || this.#workflowsDir === undefined ? undefined : readWorkflow(this.#workflowsDir, instance.name, this.#workflowFacts());
+    return {
+      ok: true,
+      view: {
+        instance,
+        description: file?.ok === true ? file.workflow.description : undefined,
+        members,
+        related,
+        relatedInstances: [...others.values()],
+        ...instanceStatus(members.map((m) => m.task.phase)),
+      },
+    };
+  }
+
+  /**
+   * Archive every member of an instance not already archived, in one transaction
+   * (spec §21.10): an undecided run superseded, whose turn the caller cancels; a
+   * done task keeps the time it was done; related tasks are left alone. Who may
+   * is the caller's: an operator, as for archiving a task.
+   */
+  archiveWorkflow(instanceId: string, by: string): Result<{ instance: InstanceRow; archived: TaskRow[]; runs: RunRow[] }> {
+    if (!isText(instanceId)) return board.refuse('invalid', 'an instance id is text');
+    if (!isText(by) || by.trim() === '') return board.refuse('invalid', 'who archives is text, not blank');
+    return board.archiveWorkflow(this.#db, instanceId, by, this.#clock.now());
   }
 
   /** Who the next claim is for, resolved against the team as it is now. */
@@ -1203,44 +1469,17 @@ export class KanbanService {
   }
 
   /**
-   * A name the board may hand work to: a configured role whose agent runs
-   * unsupervised, or a person with talk tier once people can be reached.
+   * What a task is checked against (spec §21.15): the team as this process holds
+   * it, and the people, who need talk tier, once people can be reached.
    */
-  #assignable(name: unknown): Result<{ assignee: Assignee }> {
-    if (!isText(name)) return board.refuse('invalid', 'an assignee or reviewer is a role name or a person, as text');
-    if (name.trim() === '') return board.refuse('invalid', 'an assignee or reviewer needs a name');
-    // Echoed quoted: a name is the caller's text, and may hold anything.
-    const quoted = JSON.stringify(name);
-    if (name.includes(':')) {
-      if (!PERSON.test(name)) {
-        return board.refuse('invalid', `${quoted} is neither a role name nor a person (lark:<union_id>)`);
-      }
-      if (this.#people === undefined) {
-        return board.refuse(
-          'person_not_assignable',
-          `${quoted} cannot be given work yet: nothing can deliver a task card to a person until the board is in Lark`,
-        );
-      }
-      if (!this.#people.canTalk(name)) {
-        // Being assigned is permission to report on the task (spec §4.2). A person is
-        // known by the open_id Lark last gave with their union_id, from chat.
-        return board.refuse(
-          'person_not_assignable',
-          `${quoted} cannot be given work: being assigned lets a person report on the task, which needs talk tier, ` +
-            'and this gateway does not know them to have it -- a person is known once they have used /kanban, or been @-mentioned in it',
-        );
-      }
-      return { ok: true, assignee: { kind: 'human', name } };
-    }
-    const role = this.#roles.get(name);
-    if (role === undefined) return board.refuse('unknown_role', `role ${quoted} is not configured`);
-    if (!role.agent.unsupervised && !this.#supervisedRoles) {
-      return board.refuse(
-        'supervised_role',
-        `role ${quoted} has a supervised agent; its approval requests would reach nobody until the board is in Lark`,
-      );
-    }
-    return { ok: true, assignee: { kind: 'role', name } };
+  #facts(): TaskFacts {
+    const people = this.#people;
+    return {
+      roles: this.#roles,
+      workspaces: this.#workspaces,
+      supervisedRoles: this.#supervisedRoles,
+      ...(people === undefined ? {} : { canTalk: (principal: string) => people.canTalk(principal) }),
+    };
   }
 
   /**
@@ -1248,10 +1487,10 @@ export class KanbanService {
    * and only chat may use one; a run's is namespaced by the run's task, so a
    * worker repeating a command gets its own task back and nobody else's; the
    * operator's is namespaced as `operator:<key>`, so a script run again at a
-   * terminal gets its own tasks back, never a chat's or a run's.
+   * terminal gets its own tasks back, never a chat's or a run's. A workflow's
+   * instance is keyed the same way (spec §21.6).
    */
-  #idempotencyKey(req: CreateRequest): Result<{ key: string | null }> {
-    const key: unknown = req.idempotencyKey;
+  #idempotencyKey(key: unknown, via: CreatedVia): Result<{ key: string | null }> {
     if (key === undefined) return { ok: true, key: null };
     if (!isText(key) || key === '') return board.refuse('invalid', 'an idempotency key is non-empty text');
     // Stored, and not masked: it identifies. So it may not carry a secret.
@@ -1259,32 +1498,16 @@ export class KanbanService {
     if (key.startsWith(RUN_KEY)) {
       return board.refuse('invalid', `an idempotency key starting ${RUN_KEY} is the board's own`);
     }
-    if (req.createdVia.kind !== 'chat' && key.startsWith(CHAT_KEY)) {
+    if (via.kind !== 'chat' && key.startsWith(CHAT_KEY)) {
       return board.refuse('invalid', `an idempotency key starting ${CHAT_KEY} is for chat`);
     }
-    if (req.createdVia.kind !== 'operator' && key.startsWith(OPERATOR_KEY)) {
+    if (via.kind !== 'operator' && key.startsWith(OPERATOR_KEY)) {
       return board.refuse('invalid', `an idempotency key starting ${OPERATOR_KEY} is for the terminal`);
     }
-    if (req.createdVia.kind === 'operator') return { ok: true, key: `${OPERATOR_KEY}${key}` };
-    if (req.createdVia.kind !== 'run') return { ok: true, key };
-    const run = getRun(this.#db, req.createdVia.runId);
-    if (run === undefined) return board.refuse('not_found', `no run ${req.createdVia.runId}`);
+    if (via.kind === 'operator') return { ok: true, key: `${OPERATOR_KEY}${key}` };
+    if (via.kind !== 'run') return { ok: true, key };
+    const run = getRun(this.#db, via.runId);
+    if (run === undefined) return board.refuse('not_found', `no run ${via.runId}`);
     return { ok: true, key: `${RUN_KEY}${run.taskId}:${key}` };
-  }
-
-  /** A contract has only the five fields, each text (spec §4.3). */
-  #contract(raw: unknown): Result<{ contract: Contract }> {
-    if (raw === undefined) return { ok: true, contract: {} };
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-      return board.refuse('invalid', 'a contract is an object of text fields');
-    }
-    const contract: Contract = {};
-    for (const [key, value] of Object.entries(raw)) {
-      const field = CONTRACT_FIELDS.find((f) => f === key);
-      if (field === undefined) return board.refuse('invalid', `unknown contract field ${JSON.stringify(key)}`);
-      if (typeof value !== 'string') return board.refuse('invalid', `contract field ${field} must be text`);
-      contract[field] = value;
-    }
-    return { ok: true, contract };
   }
 }

@@ -132,6 +132,12 @@ export function renderHelp(): string {
     [USAGE['board use'], operate],
     [USAGE['board set'], operate],
     [USAGE['board archive'], operate],
+    [USAGE['workflow list'], talk],
+    [USAGE['workflow instances'], talk],
+    [USAGE['workflow show'], talk],
+    [USAGE['workflow preview'], talk],
+    [USAGE['workflow start'], operate],
+    [USAGE['workflow archive'], operate],
   ];
   return [
     '**The task board.** A task is any work -- research, a document, an operation in Lark, a chore, a change to code -- given to a role, whose agent runs it in a workspace, or to a person.',
@@ -140,6 +146,7 @@ export function renderHelp(): string {
     "A task with a `reviewer:` is reviewed before it is done: its assignee's done, or its agent's, goes to the reviewer. An operator may answer any review, ending a reviewer role's run.",
     'The chat a task is created in hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up, or is stranded, and who a person was given it.',
     "A board is a queue of tasks of its own. Each chat is on one, `default` until `/kanban board use` moves it, and its `/kanban task new` and `/kanban task list` act on that board; a task's follow-ups and parents are on its board.",
+    "A workflow is a graph of tasks written once, in a file the operator keeps; a start makes all of its tasks at once, on this chat's board, and this chat hears each of them.",
   ].join('\n');
 }
 
@@ -262,6 +269,7 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
     `**${label(task.title)}** ${id(task.taskId)}: ${view.status}`,
     `assignee: ${who(task.assignee)} · reviewer: ${who(task.reviewer)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}${board}`,
   ];
+  if (view.member !== undefined) out.push(memberLine(view.member, label, id));
   for (const w of view.waiting ?? []) out.push(waitingLine(w, label, id));
   if (task.phase === 'blocked' && task.blockKind !== null) {
     out.push(`blocked (${forDisplay(task.blockKind)}): ${label(task.blockReason ?? '', 500)}`);
@@ -296,6 +304,18 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
     for (const c of shown) out.push(`${label(c.author, 80)}:`, block(c.body, 400));
   }
   return out.join('\n');
+}
+
+/**
+ * A member's line in `task show` (spec §21.10): its instance, its step and its
+ * item, in chat and at the terminal in the same words.
+ */
+export function memberLine(
+  m: { instanceId: string; name: string | null; step: string; item: string | null },
+  escape: (text: string) => string = (t) => t,
+  code: (id: string) => string = (t) => t,
+): string {
+  return `workflow: ${code(m.instanceId)} ${escape(m.name ?? '(no workflow)')}, step ${escape(m.step)}${m.item === null ? '' : `, item ${escape(m.item)}`}`;
 }
 
 /**
@@ -653,4 +673,246 @@ export function unblockButton(appId: string, event: KanbanEvent): CardButton {
     style: 'primary',
     value: { kind: 'kanban', act: 'unblock', task: event.taskId, event: String(event.id), nonce: boardCardNonce(appId, event.taskId, ref) },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Workflows (spec §21.9, §21.10)
+// ---------------------------------------------------------------------------
+
+/** How long a reply about a workflow may be: under 3,800 characters, the notices' own bound, as Lark takes 4,000 in one message. */
+export const WORKFLOW_REPLY_MAX = 3_800;
+
+/** A reply lists at most 30 tasks, as `/kanban task list` lists 30 lines. */
+export const WORKFLOW_REPLY_TASKS = 30;
+
+/** A title in a reply's line, cut at 80 characters. */
+const WORKFLOW_TITLE_MAX = 80;
+
+/**
+ * `head` and as many of `lines` as fit, then `more(n)` for the `n` left out,
+ * then `tail`: at most `WORKFLOW_REPLY_TASKS` lines, dropped from the end until
+ * the whole is under `WORKFLOW_REPLY_MAX` (spec §21.9).
+ */
+export function fitted(head: readonly string[], lines: readonly string[], tail: readonly string[], more: (n: number) => string): string {
+  let kept = Math.min(lines.length, WORKFLOW_REPLY_TASKS);
+  const render = (n: number): string =>
+    [...head, ...lines.slice(0, n), ...(n < lines.length ? [more(lines.length - n)] : []), ...tail].join('\n');
+  while (kept > 0 && render(kept).length >= WORKFLOW_REPLY_MAX) kept -= 1;
+  return render(kept);
+}
+
+/** One task of a DAG, as a preview says it, in chat and at the terminal alike (spec §21.6). */
+export interface PreviewLine {
+  ref: string;
+  title: string;
+  assignee: string | null;
+  parents: readonly string[];
+  gates: number;
+}
+
+/** A DAG's tasks, as a preview lists them: its ref, its title, its assignee, its parents' refs, and how many gates it has. */
+export function previewLines(dag: { tasks: readonly { ref: string; title: string; assignee: string | null; parents: readonly string[]; gates: readonly unknown[] }[] }): PreviewLine[] {
+  return dag.tasks.map((t) => ({ ref: t.ref, title: t.title, assignee: t.assignee, parents: t.parents, gates: t.gates.length }));
+}
+
+/** A DAG's name as a reply says it: its workflow's, or "(no workflow)" for one with none (spec §21.10). */
+export function workflowName(name: string | null): string {
+  return name ?? '(no workflow)';
+}
+
+/** `/kanban workflow preview` (spec §21.9): what a start would make, one line a task, and that nothing was made. */
+export function renderPreview(
+  name: string,
+  dag: { board: string | null; tasks: readonly { ref: string; title: string; assignee: string | null; parents: readonly string[]; gates: readonly unknown[] }[] },
+  whom: (name: string) => string,
+): string {
+  const board = dag.board === null || dag.board === DEFAULT_BOARD ? '' : `, on board **${label(dag.board)}**`;
+  const n = dag.tasks.length;
+  const lines = previewLines(dag).map((t) => {
+    const after = t.parents.length === 0 ? '' : `, after ${t.parents.map((p) => `\`${label(p, 64)}\``).join(', ')}`;
+    const gates = t.gates === 0 ? '' : `, ${t.gates} gate${t.gates === 1 ? '' : 's'}`;
+    return `- \`${label(t.ref, 64)}\` ${label(t.title, WORKFLOW_TITLE_MAX)}, for ${t.assignee === null ? 'nobody yet' : whom(t.assignee)}${after}${gates}`;
+  });
+  return fitted(
+    [`${label(name)} would make ${n} task${n === 1 ? '' : 's'}${board}:`],
+    lines,
+    [`Nothing was made: \`/kanban workflow start ${label(name)}\`, with these params, makes it.`],
+    (more) => `… and ${more} more.`,
+  );
+}
+
+/**
+ * A start's reply (spec §21.9): the instance, one line a task in position order
+ * with its id, its title and its assignee, and who hears, in the words of the
+ * thread or of the chat.
+ */
+export function renderStarted(
+  made: { instance: { instanceId: string; name: string | null; board: string }; tasks: readonly { task: TaskRow }[] },
+  where: 'thread' | 'chat',
+  whom: (a: Assignee) => string,
+): string {
+  const { instance, tasks } = made;
+  const n = tasks.length;
+  const board = instance.board === DEFAULT_BOARD ? '' : `, on board **${label(instance.board)}**`;
+  const lines = tasks.map(
+    ({ task }) => `- ${id(task.taskId)} ${label(task.title, WORKFLOW_TITLE_MAX)}, for ${task.assignee === null ? 'nobody yet' : whom(task.assignee)}`,
+  );
+  const person = tasks.some(({ task }) => task.assignee?.kind === 'human' || task.reviewer?.kind === 'human');
+  const cards =
+    !person
+      ? ''
+      : where === 'thread'
+        ? " A person's card comes in this thread when their task is ready, or by direct message if they are not in this group."
+        : ' A person is sent their card by direct message once their task is ready.';
+  return fitted(
+    [`Started ${label(workflowName(instance.name))} as ${id(instance.instanceId)}, ${n} task${n === 1 ? '' : 's'}${board}:`],
+    lines,
+    [
+      `${where === 'thread' ? 'This thread' : 'This chat'} hears when each task is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.${cards}`,
+    ],
+    (more) => `… and ${more} more: \`/kanban workflow show ${instance.instanceId}\` lists them all.`,
+  );
+}
+
+/** `/kanban workflow list` (spec §21.10): each usable workflow with its description and params, and each that is not with why. */
+export function renderWorkflows(list: {
+  usable: readonly { name: string; description: string | undefined }[];
+  broken: readonly { name: string; problem: string }[];
+}, params: (name: string) => string): string {
+  const lines = [
+    ...list.usable.map((w) => ({
+      name: w.name,
+      line: `- **${label(w.name)}**${w.description === undefined ? '' : `: ${label(w.description, 200)}`} · params: ${label(params(w.name), 400)}`,
+    })),
+    ...list.broken.map((b) => ({ name: b.name, line: `- **${label(b.name)}** is not usable: ${label(b.problem, 300)}` })),
+  ]
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .map((l) => l.line);
+  if (lines.length === 0) return 'No workflows: a workflow is a file, `$MT_HOME/workflows/<name>.yaml`, which the operator writes.';
+  return fitted(['**Workflows**'], lines, ['`/kanban workflow preview <name> key=value ...` shows what a start would make.'], (more) => `… and ${more} more.`);
+}
+
+/** A time as a reply says it, to the minute, in UTC. */
+export function whenText(ms: number): string {
+  return `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+/** Who made an instance, as a reply names them: a person by the name Lark last gave, the operator by login, a run by its id. */
+export function makerText(createdBy: string, nameOf: (principal: string) => string | undefined): string {
+  if (createdBy.startsWith('operator:')) return `the operator ${label(createdBy.slice('operator:'.length), 80)}`;
+  if (createdBy.startsWith('run:')) return `run ${id(createdBy.slice('run:'.length))}`;
+  const name = nameOf(createdBy);
+  return name === undefined ? label(createdBy, 80) : label(name, 80);
+}
+
+/**
+ * An instance's members done of its total (spec §21.10), as chat and the terminal
+ * say it. An archived member counts as finished, so an archived instance's are
+ * "finished", never "done", which its members are not.
+ */
+export function membersDone(s: { status: string; done: number; total: number }): string {
+  return `${s.done} of ${s.total} ${s.status === 'archived' ? 'finished' : 'done'}`;
+}
+
+/** `/kanban workflow instances [all]` (spec §21.10): the board's instances, newest first, at most 30 lines. */
+export function renderInstances(
+  summaries: readonly { instance: { instanceId: string; name: string | null; createdBy: string; createdAt: number }; status: string; done: number; total: number; blocked: number }[],
+  opts: { board: string; all: boolean; total: number; read: number; nameOf: (principal: string) => string | undefined },
+): string {
+  const on = opts.board === DEFAULT_BOARD ? '' : ` on board **${label(opts.board)}**`;
+  const past = opts.total > opts.read ? [`Only the ${opts.read} newest are read; an older instance is shown by its id, with \`/kanban workflow show\`.`] : [];
+  if (summaries.length === 0) {
+    return [
+      opts.all ? `No workflow instances${on}.` : `No running or blocked workflow instances${on}. \`/kanban workflow instances all\` shows done and archived ones too.`,
+      ...past,
+    ].join('\n');
+  }
+  const lines = summaries.map((s) => {
+    const status = s.status === 'blocked' ? `blocked (${s.blocked})` : s.status;
+    return `- ${id(s.instance.instanceId)} **${label(workflowName(s.instance.name))}** ${status}, ${membersDone(s)} · by ${makerText(s.instance.createdBy, opts.nameOf)}, ${whenText(s.instance.createdAt)}`;
+  });
+  return fitted([`Workflow instances${on}:`], lines, past, (more) => `… and ${more} more.`);
+}
+
+/** How an instance was made, as `show` says it: in chat, at the terminal, or by a run, by its task. */
+function howMade(via: { kind: string }, fromTask: string | null): string {
+  if (via.kind === 'chat') return 'in chat';
+  if (via.kind === 'operator') return 'at the terminal';
+  return fromTask === null ? 'by a run' : `by a run of ${id(fromTask)}`;
+}
+
+/** A param's value, as `show` says it: a list's items joined. */
+function paramText(value: string | readonly string[]): string {
+  return typeof value === 'string' ? value : value.join(', ');
+}
+
+/** How long `show`'s Params line may be, as a whole: with the head's other lines, a reply keeps room for its tasks. */
+const PARAMS_LINE_MAX = 1_200;
+
+/** `show`'s Params line: each param, as many as fit in PARAMS_LINE_MAX, then how many were left out. */
+function paramsLine(params: ReadonlyArray<readonly [string, string | readonly string[]]>): string {
+  const parts = params.map(([k, v]) => `${label(k, 40)}: ${label(paramText(v), 200)}`);
+  const more = (n: number): string => ` · … and ${n} more param${n === 1 ? '' : 's'}`;
+  let line = 'Params:';
+  for (const [n, part] of parts.entries()) {
+    const next = `${line}${n === 0 ? ' ' : ' · '}${part}`;
+    const left = parts.length - n - 1;
+    // Room is kept for the count of those left out, unless this is the last.
+    if (next.length + (left > 0 ? more(left).length : 0) > PARAMS_LINE_MAX) return `${line}${n === 0 ? ' …' : ''}${more(parts.length - n)}`;
+    line = next;
+  }
+  return line;
+}
+
+/** `/kanban workflow show` (spec §21.10): the instance, its steps' tasks in position order, its related tasks apart, cut to fit. */
+export function renderInstance(
+  view: {
+    instance: { instanceId: string; name: string | null; board: string; createdBy: string; createdVia: { kind: string }; createdAt: number; dag: { params: Readonly<Record<string, string | readonly string[]>> } };
+    description: string | undefined;
+    members: readonly { step: string; item: string | null; task: TaskRow; status: DisplayStatus }[];
+    related: readonly { task: TaskRow; status: DisplayStatus }[];
+    relatedInstances: readonly { instanceId: string; name: string | null; tasks: number }[];
+    status: string;
+    done: number;
+    total: number;
+    blocked: number;
+  },
+  chatBoard: string,
+  whom: (a: Assignee | null) => string,
+  nameOf: (principal: string) => string | undefined,
+): string {
+  const { instance } = view;
+  const board = instance.board === chatBoard && chatBoard === DEFAULT_BOARD ? '' : ` · board: **${label(instance.board)}**`;
+  const status = view.status === 'blocked' ? `blocked (${view.blocked})` : view.status;
+  const head = [
+    `**${label(workflowName(instance.name))}** ${id(instance.instanceId)}: ${status}, ${membersDone(view)}${board}`,
+    ...(view.description === undefined ? [] : [label(view.description, 300)]),
+    `Started by ${makerText(instance.createdBy, nameOf)}, ${howMade(instance.createdVia, view.members[0]?.task.createdFromTask ?? null)}, ${whenText(instance.createdAt)}`,
+  ];
+  const params = Object.entries(instance.dag.params);
+  if (params.length > 0) head.push(paramsLine(params));
+  const lines: string[] = [];
+  let step: string | undefined;
+  for (const m of view.members) {
+    if (m.step !== step) {
+      step = m.step;
+      lines.push(`**${label(m.step, 64)}**`);
+    }
+    const item = m.item === null ? '' : ` ${label(m.item, 80)}:`;
+    const why = m.task.phase === 'blocked' && m.task.blockKind !== null ? ` (${forDisplay(m.task.blockKind)}): ${label(m.task.blockReason ?? '', 200)}` : '';
+    lines.push(`- ${id(m.task.taskId)}${item} ${m.status}${why} · ${whom(m.task.assignee)}`);
+  }
+  if (view.related.length > 0 || view.relatedInstances.length > 0) {
+    lines.push('**Related**, not members:');
+    for (const r of view.related) lines.push(`- ${id(r.task.taskId)} ${label(r.task.title, WORKFLOW_TITLE_MAX)}: ${r.status}`);
+    for (const o of view.relatedInstances) {
+      lines.push(`- ${id(o.instanceId)} ${label(workflowName(o.name))}, ${o.tasks} task${o.tasks === 1 ? '' : 's'}: \`/kanban workflow show ${o.instanceId}\``);
+    }
+  }
+  // Every line counts here, not only the tasks': as many as fit, then what was cut.
+  let kept = lines.length;
+  const render = (n: number): string =>
+    [...head, ...lines.slice(0, n), ...(n < lines.length ? [`… and ${lines.length - n} more lines: \`mt kanban workflow show ${instance.instanceId}\` at the terminal gives every one.`] : [])].join('\n');
+  while (kept > 0 && render(kept).length >= WORKFLOW_REPLY_MAX) kept -= 1;
+  return render(kept);
 }

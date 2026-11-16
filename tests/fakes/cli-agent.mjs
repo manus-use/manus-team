@@ -28,6 +28,9 @@
  *               file `gate-ok` is in the workspace; then write it and report again
  *   kanban-review run `mt kanban show`, then ask for review with `mt kanban review`,
  *               saying, on a rework, the reviewer's reason it revised for
+ *   kanban-body run `mt kanban show`; when the task's body is a worker command and
+ *               its JSON, `start-workflow {…}` or `apply-dag {…}`, run it, writing
+ *               its answer to `asked.log` beside the log; then report complete
  *
  * Every invocation appends its argv to `FAKE_CLI_LOG` as one JSON line. That file
  * is how a test sees the composed prompt -- which is the whole of this driver's
@@ -293,6 +296,25 @@ switch (MODE) {
     const asked = mt('review', { summary: reason === undefined ? `drafted: ${title}` : `revised (${reason}): ${title}` });
     delta(`review: ${asked.answer}`);
     summary('completed', `asked for review of ${title}`);
+    break;
+  }
+
+  case 'kanban-body': {
+    const shown = mt('show');
+    let task = { title: '?', body: '' };
+    try {
+      task = JSON.parse(shown.answer).task;
+    } catch {
+      process.stderr.write(`mt kanban show failed: ${shown.error} ${shown.answer}\n`);
+    }
+    const m = /^(start-workflow|apply-dag) (\{[\s\S]*\})$/.exec(task.body ?? '');
+    if (m !== null) {
+      const asked = mt(m[1], JSON.parse(m[2]));
+      if (LOG !== undefined) appendFileSync(join(dirname(LOG), 'asked.log'), `${asked.answer}\n`);
+    }
+    const done = mt('complete', { summary: `did: ${task.title}` });
+    delta(`complete: ${done.answer}`);
+    summary('completed', `reported on ${task.title}`);
     break;
   }
 

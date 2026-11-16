@@ -75,7 +75,7 @@ async function mt(
     stdinIsTTY,
     stdin: async (max) => {
       const text = typeof stdin === 'function' ? stdin() : stdin;
-      return Buffer.byteLength(text) > max ? undefined : text;
+      return Buffer.byteLength(text) > max ? undefined : Buffer.from(text);
     },
   });
   // One line of JSON, always.
@@ -175,7 +175,7 @@ describe('mt kanban', () => {
   it('is in the usage', async () => {
     const out: string[] = [];
     await runMt(['help'], { env: {}, out: (l) => out.push(l), err: () => undefined });
-    expect(out.join('\n')).toContain('mt kanban <show|complete|review|changes|block|comment|create|link> < input.json');
+    expect(out.join('\n')).toContain('mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag> < input.json');
   });
 });
 

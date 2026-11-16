@@ -72,7 +72,7 @@ async function mt(argv: string[], opts: Run = {}) {
     stdinIsTTY: opts.tty ?? false,
     stdin: async (max) => {
       const text = opts.stdin ?? '';
-      return Buffer.byteLength(text) > max ? undefined : text;
+      return Buffer.byteLength(text) > max ? undefined : Buffer.from(text);
     },
   });
   return { code, out: out.join('\n'), err: err.join('\n') };
@@ -481,7 +481,7 @@ describe("in a board run's shell", () => {
       stdinIsTTY: false,
       stdin: async () => {
         read = true;
-        return 'body';
+        return Buffer.from('body');
       },
     });
     expect({ code, out, err, read }).toEqual({ code: 1, out: [], err: [said('mt kanban task new')], read: false });

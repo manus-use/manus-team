@@ -64,8 +64,9 @@ function run(
 
 describe('migration 003', () => {
   it('creates every kanban table, all STRICT', () => {
-    // 004 adds a column to kanban_comments and an index, 005 the people table, 006 the boards' two tables, 007 and 008 a column each.
-    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(8);
+    // 004 adds a column to kanban_comments and an index, 005 the people table, 006 the boards' two tables, 007 and 008 a column each,
+    // 009 the workflows' two tables.
+    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(9);
     const tables = h.db
       .prepare<[], { name: string; strict: number }>(
         "SELECT name, strict FROM pragma_table_list WHERE name LIKE 'kanban_%' ORDER BY name",
@@ -81,6 +82,8 @@ describe('migration 003', () => {
       { name: 'kanban_runs', strict: 1 },
       { name: 'kanban_subscriptions', strict: 1 },
       { name: 'kanban_tasks', strict: 1 },
+      { name: 'kanban_workflow_instances', strict: 1 },
+      { name: 'kanban_workflow_tasks', strict: 1 },
     ]);
   });
 

@@ -120,7 +120,7 @@ describe('worker API: who is asking', () => {
     expect(await b.api.handle({ run: run.runId, token, command: 'finish' })).toEqual({
       ok: false,
       code: 'unknown_command',
-      message: 'no command "finish" (one of show, complete, review, changes, block, comment, create, link)',
+      message: 'no command "finish" (one of show, complete, review, changes, block, comment, create, link, start-workflow, apply-dag)',
     });
   });
 });

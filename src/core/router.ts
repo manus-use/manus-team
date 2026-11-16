@@ -537,7 +537,10 @@ export class Router {
         replyUuid(this.#deps.appId, message.messageId, 'kanban'),
       );
       threadId = sent.threadId;
-      if (threadId === undefined) this.#note(`kanban: the reply to ${message.messageId} came back with no thread; task ${taskId} stays at chat scope`);
+      if (threadId === undefined) {
+        const what = taskId.startsWith('w_') ? `instance ${taskId}'s tasks stay` : `task ${taskId} stays`;
+        this.#note(`kanban: the reply to ${message.messageId} came back with no thread; ${what} at chat scope`);
+      }
     } catch (err) {
       const refused = err instanceof ChannelError && err.code !== 0 && !err.retryable;
       this.#note(`reply (kanban) failed: ${err instanceof Error ? err.message : String(err)}${refused ? '; sending it quoted' : ''}`);

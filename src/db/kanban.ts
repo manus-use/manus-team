@@ -1,9 +1,10 @@
 import type { Db } from './open.js';
 import { txImmediate } from './open.js';
-import { newRunId, newTaskId } from '../core/ids.js';
+import { newRunId, newTaskId, newWorkflowId } from '../core/ids.js';
 import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
+import { canonicalDag, maskDag, type Dag } from '../kanban/dag.js';
 import type { GateRun } from '../kanban/gates.js';
 import { placeName, placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
 import { worktreeId } from './workspaces.js';
@@ -35,16 +36,23 @@ import type {
 } from '../kanban/types.js';
 import {
   getBoard,
+  getInstance,
   getRun,
   getTask,
   getTaskByKey,
   gatesOf,
+  instanceByKey,
+  membersWithTasks,
   isFinished,
+  membersOf,
   openAgentRunIn,
   openRunOf,
   parentsOf,
   runsOf,
   subscriptionsOf,
+  type InstanceRow,
+  type KeyedInstance,
+  type MemberRow,
 } from './kanban-read.js';
 
 /**
@@ -115,6 +123,11 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'packageHash',
   'seedDropped',
   'board',
+  // A workflow's instance, its name, and a member's ref and step (spec §21.8); its item is a param's text, and masked.
+  'workflow',
+  'workflowName',
+  'ref',
+  'step',
 ]);
 
 /** One row of the board's log, masked value by value. */
@@ -336,60 +349,79 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
       if (p === undefined) return refuse('not_found', `no task ${parent} to be a parent`);
       if (p.board !== board) return refuse('other_board', onOtherBoard(parent, p.board, board));
     }
-
-    const taskId = newTaskId();
-    d.prepare(
-      `INSERT INTO kanban_tasks
-         (task_id, title, body, contract, assignee_kind, assignee, reviewer_kind, reviewer,
-          workspace, phase, priority, idempotency_key, failure_limit, retry_on_crash,
-          max_runtime_s, created_by, created_via, created_at, created_from_task, board)
-       VALUES (?, ?, ?, jsonb(?), ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, jsonb(?), ?, ?, ?)`,
-    ).run(
-      taskId,
-      mask(t.title),
-      mask(t.body ?? ''),
-      JSON.stringify(maskContract(t.contract ?? {})),
-      t.assignee?.kind ?? null,
-      t.assignee?.name ?? null,
-      t.reviewer?.kind ?? null,
-      t.reviewer?.name ?? null,
-      t.workspace ?? null,
-      t.priority ?? 0,
-      t.idempotencyKey ?? null,
-      t.failureLimit ?? null,
-      t.retryOnCrash ?? 'always',
-      t.maxRuntimeS ?? null,
-      t.createdBy,
-      JSON.stringify(t.createdVia),
-      now,
-      createdFromTask,
-      board,
-    );
-    const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
-    for (const parent of parents) link.run(parent, taskId, now);
-    subscribe(d, taskId, t.createdVia, createdFromTask, now);
-    record(
-      d,
-      {
-        taskId,
-        kind: 'created',
-        actor: t.createdBy,
-        payload: {
-          title: t.title,
-          assignee: t.assignee?.name ?? null,
-          assigneeKind: t.assignee?.kind ?? null,
-          reviewer: t.reviewer?.name ?? null,
-          reviewerKind: t.reviewer?.kind ?? null,
-          workspace: t.workspace ?? null,
-          parents,
-          createdFromTask,
-          board,
-        },
-      },
-      now,
-    );
+    const taskId = insertTask(d, { ...t, board, createdFromTask, parents }, now);
     return { ok: true, task: mustGet(d, taskId), existing: false };
   });
+}
+
+/** A task as `insertTask` writes it: its board and its creating task worked out, its parents checked. */
+interface TaskInsert extends NewTask {
+  board: string;
+  createdFromTask: string | null;
+  parents: readonly string[];
+}
+
+/**
+ * The insert every task is made by, `createTask`'s and a workflow's alike (spec
+ * §21.8): the row, its links, its subscriptions and its `created` event, whose
+ * payload gains `payload`'s keys. Inside the caller's transaction, which has
+ * checked everything; answers the new task's id.
+ */
+function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, unknown> = {}): string {
+  const { board, createdFromTask, parents } = t;
+  const taskId = newTaskId();
+  d.prepare(
+    `INSERT INTO kanban_tasks
+       (task_id, title, body, contract, assignee_kind, assignee, reviewer_kind, reviewer,
+        workspace, phase, priority, idempotency_key, failure_limit, retry_on_crash,
+        max_runtime_s, created_by, created_via, created_at, created_from_task, board)
+     VALUES (?, ?, ?, jsonb(?), ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, jsonb(?), ?, ?, ?)`,
+  ).run(
+    taskId,
+    mask(t.title),
+    mask(t.body ?? ''),
+    JSON.stringify(maskContract(t.contract ?? {})),
+    t.assignee?.kind ?? null,
+    t.assignee?.name ?? null,
+    t.reviewer?.kind ?? null,
+    t.reviewer?.name ?? null,
+    t.workspace ?? null,
+    t.priority ?? 0,
+    t.idempotencyKey ?? null,
+    t.failureLimit ?? null,
+    t.retryOnCrash ?? 'always',
+    t.maxRuntimeS ?? null,
+    t.createdBy,
+    JSON.stringify(t.createdVia),
+    now,
+    createdFromTask,
+    board,
+  );
+  const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
+  for (const parent of parents) link.run(parent, taskId, now);
+  subscribe(d, taskId, t.createdVia, createdFromTask, now);
+  record(
+    d,
+    {
+      taskId,
+      kind: 'created',
+      actor: t.createdBy,
+      payload: {
+        title: t.title,
+        assignee: t.assignee?.name ?? null,
+        assigneeKind: t.assignee?.kind ?? null,
+        reviewer: t.reviewer?.name ?? null,
+        reviewerKind: t.reviewer?.kind ?? null,
+        workspace: t.workspace ?? null,
+        parents,
+        createdFromTask,
+        board,
+        ...payload,
+      },
+    },
+    now,
+  );
+  return taskId;
 }
 
 /**
@@ -435,26 +467,35 @@ export function advanceSubscription(db: Db, subscriptionId: number, cursor: numb
 }
 
 /**
- * Move a task's subscription at a chat into the thread its "Created" reply
- * opened (spec §19.4): its `thread_id` from '' to the thread's, and its root to
- * the command message, in one transaction. Only a subscription of this task, at
- * this chat, for this bot, still at chat scope with no root, moves, so a second
- * call changes nothing. Its cursor moves with it: nothing already sent is sent
- * again, and nothing pending is lost. It writes no event, as a cursor's move
- * writes none.
+ * Move the tasks' subscriptions at a chat into the thread their "Created" reply
+ * opened (spec §19.4, §21.9): each one's `thread_id` from '' to the thread's,
+ * and its root to the command message, all in one transaction: one task for
+ * `/kanban task new`, every member of an instance for a workflow's start. Only
+ * a subscription of these tasks, at this chat, for this bot, still at chat
+ * scope with no root, moves, so a second call changes nothing. Its cursor moves
+ * with it: nothing already sent is sent again, and nothing pending is lost. It
+ * writes no event, as a cursor's move writes none. Answers how many moved.
  */
-export function threadSubscription(db: Db, taskId: string, at: ChatAt, threadId: string, rootId: string): Result<{ moved: boolean }> {
+export function threadSubscriptions(
+  db: Db,
+  taskIds: readonly string[],
+  at: ChatAt,
+  threadId: string,
+  rootId: string,
+): Result<{ moved: number }> {
   return tx(db, (d) => {
     if (threadId === '' || rootId === '') return refuse('invalid', 'a thread and its root are not empty');
     // OR IGNORE: a subscription of the task already in that thread is left as it is.
-    const { changes } = d
-      .prepare(
-        `UPDATE OR IGNORE kanban_subscriptions SET thread_id = ?, root_message_id = ?
-          WHERE task_id = ? AND channel = ? AND account_id = ? AND conversation_id = ?
-            AND thread_id = '' AND root_message_id IS NULL`,
-      )
-      .run(threadId, rootId, taskId, at.channel, at.appId, at.conversationId);
-    return { ok: true, moved: changes === 1 };
+    const move = d.prepare(
+      `UPDATE OR IGNORE kanban_subscriptions SET thread_id = ?, root_message_id = ?
+        WHERE task_id = ? AND channel = ? AND account_id = ? AND conversation_id = ?
+          AND thread_id = '' AND root_message_id IS NULL`,
+    );
+    let moved = 0;
+    for (const taskId of new Set(taskIds)) {
+      moved += move.run(threadId, rootId, taskId, at.channel, at.appId, at.conversationId).changes;
+    }
+    return { ok: true, moved };
   });
 }
 
@@ -514,32 +555,54 @@ export function addGate(
     if (task.phase === 'done' || task.phase === 'archived') {
       return refuse('illegal_transition', `task ${taskId} is ${task.phase}; a gate on it would never run`);
     }
-    const gates = gatesOf(d, taskId);
-    if (gates.length >= GATE_LIMITS.perTask) {
-      return refuse('invalid', `task ${taskId} has ${gates.length} gates, the most a task may have`);
-    }
-    const total = gates.reduce((sum, g) => sum + g.timeoutS, 0) + gate.timeoutS;
-    if (total > GATE_LIMITS.totalTimeoutS) {
-      return refuse(
-        'invalid',
-        `task ${taskId}'s gates would take up to ${total} s together; at most ${GATE_LIMITS.totalTimeoutS} s, ` +
-          'since a report waits for them',
-      );
-    }
-    const { lastInsertRowid } = d
-      .prepare('INSERT INTO kanban_gates (task_id, command, timeout_s, created_by, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(taskId, gate.command, gate.timeoutS, by, now);
-    const id = Number(lastInsertRowid);
-    record(
-      d,
-      { taskId, kind: 'gate_added', actor: by, payload: { gateId: id, command: gate.command, timeoutS: gate.timeoutS } },
-      now,
-    );
-    return {
-      ok: true,
-      gate: { id, taskId, command: gate.command, timeoutS: gate.timeoutS, createdBy: by, createdAt: now },
-    };
+    return insertGate(d, taskId, gate, by, now);
   });
+}
+
+/**
+ * The insert every gate is added by, `addGate`'s and a workflow's alike (spec
+ * §21.8): GATE_LIMITS checked against the task's gates so far, inside the
+ * caller's transaction, then the row and its `gate_added` event, whose payload
+ * gains `payload`'s keys.
+ */
+function insertGate(
+  d: Db,
+  taskId: string,
+  gate: { command: string; timeoutS: number },
+  by: string,
+  now: number,
+  payload: Record<string, unknown> = {},
+): Result<{ gate: GateRow }> {
+  const gates = gatesOf(d, taskId);
+  if (gates.length >= GATE_LIMITS.perTask) {
+    return refuse('invalid', `task ${taskId} has ${gates.length} gates, the most a task may have`);
+  }
+  const total = gates.reduce((sum, g) => sum + g.timeoutS, 0) + gate.timeoutS;
+  if (total > GATE_LIMITS.totalTimeoutS) {
+    return refuse(
+      'invalid',
+      `task ${taskId}'s gates would take up to ${total} s together; at most ${GATE_LIMITS.totalTimeoutS} s, ` +
+        'since a report waits for them',
+    );
+  }
+  const { lastInsertRowid } = d
+    .prepare('INSERT INTO kanban_gates (task_id, command, timeout_s, created_by, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(taskId, gate.command, gate.timeoutS, by, now);
+  const id = Number(lastInsertRowid);
+  record(
+    d,
+    {
+      taskId,
+      kind: 'gate_added',
+      actor: by,
+      payload: { gateId: id, command: gate.command, timeoutS: gate.timeoutS, ...payload },
+    },
+    now,
+  );
+  return {
+    ok: true,
+    gate: { id, taskId, command: gate.command, timeoutS: gate.timeoutS, createdBy: by, createdAt: now },
+  };
 }
 
 /**
@@ -1839,14 +1902,34 @@ export function archive(
     const task = getTask(d, taskId);
     if (task === undefined) return refuse('not_found', `no task ${taskId}`);
     if (task.phase === 'archived') return refuse('illegal_transition', `task ${taskId} is already archived`);
-    const run = supersede(d, openRunOf(d, taskId), now);
-    d.prepare(
-      `UPDATE kanban_tasks SET phase = 'archived', blocked_from = NULL, closed_at = coalesce(closed_at, ?)
-        WHERE task_id = ?`,
-    ).run(now, taskId);
-    record(d, { taskId, runId: run?.runId ?? null, kind: 'archived', actor: by, payload: { from: task.phase } }, now);
-    return { ok: true, task: mustGet(d, taskId), run };
+    return { ok: true, ...archiveIn(d, task, by, now) };
   });
+}
+
+/**
+ * The body every archive runs, `archive`'s and a workflow's alike (spec §21.8),
+ * inside the caller's transaction, on a task not yet archived: its open run
+ * superseded if undecided, the task archived, keeping the time it was done, and
+ * its `archived` event, whose payload gains `payload`'s keys.
+ */
+function archiveIn(
+  d: Db,
+  task: TaskRow,
+  by: string,
+  now: number,
+  payload: Record<string, unknown> = {},
+): { task: TaskRow; run: RunRow | undefined } {
+  const run = supersede(d, openRunOf(d, task.taskId), now);
+  d.prepare(
+    `UPDATE kanban_tasks SET phase = 'archived', blocked_from = NULL, closed_at = coalesce(closed_at, ?)
+      WHERE task_id = ?`,
+  ).run(now, task.taskId);
+  record(
+    d,
+    { taskId: task.taskId, runId: run?.runId ?? null, kind: 'archived', actor: by, payload: { from: task.phase, ...payload } },
+    now,
+  );
+  return { task: mustGet(d, task.taskId), run };
 }
 
 /**
@@ -1964,5 +2047,179 @@ export function countSubmission(db: Db, runId: string, now: number): Result<{ n:
     d.prepare('UPDATE kanban_runs SET submissions = submissions + 1 WHERE run_id = ?').run(runId);
     record(d, { taskId: run.taskId, runId, kind: 'submitted', actor: 'gateway', payload: { n: run.submissions } }, now);
     return { ok: true, n: run.submissions };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Workflows (spec §21.7, §21.8)
+// ---------------------------------------------------------------------------
+
+/** An instance to make: its name, its checked DAG and that DAG's hash, unmasked, and who makes it, how. */
+export interface NewInstance {
+  name: string | null;
+  dag: Dag;
+  sha256: string;
+  source: 'start' | 'apply';
+  /** The board it goes on; a run's goes on its task's, whatever this says. */
+  board: string;
+  createdBy: string;
+  createdVia: CreatedVia;
+  /** Namespaced as a task's (spec §3.1), or null for none. */
+  idempotencyKey: string | null;
+}
+
+/** One of the DAG's tasks, as the writer makes it: its fields, its member fields, its parents as earlier positions, and its gates. */
+export interface NewMember {
+  task: Pick<
+    NewTask,
+    'title' | 'body' | 'contract' | 'assignee' | 'reviewer' | 'workspace' | 'priority' | 'failureLimit' | 'retryOnCrash' | 'maxRuntimeS'
+  >;
+  ref: string;
+  step: string;
+  item: string | null;
+  /** The positions of its parents, each earlier in the array than it. */
+  parents: readonly number[];
+  gates: readonly { command: string; timeoutS: number }[];
+}
+
+/** What an apply made, or found made with its key: the instance, and its members with their tasks, in position order. */
+export interface AppliedDag {
+  instance: InstanceRow;
+  members: Array<MemberRow & { task: TaskRow }>;
+  existing: boolean;
+}
+
+/**
+ * Why a key's instance is not this start's or apply's (spec §21.6 step 0), or
+ * undefined when it is a repeat: another board's is `other_board`; another
+ * kind's, another workflow's, or another DAG's, `invalid`, naming it.
+ */
+export function keyRefused(
+  keyed: KeyedInstance,
+  want: { board: string; source: 'start' | 'apply'; name: string | null; sha256?: string },
+): Refusal | undefined {
+  const existing = keyed.instance;
+  const id = existing.instanceId;
+  if (existing.board !== want.board) {
+    return refuse('other_board', `instance ${id} was made with this idempotency key on board ${existing.board}, not ${want.board}`);
+  }
+  if (existing.source !== want.source) {
+    return refuse(
+      'invalid',
+      `this idempotency key was used ${existing.source === 'start' ? 'to start a workflow' : 'to apply a DAG'}, as ${id}; ` +
+        'a key used by a start is not used by an apply, nor the reverse',
+    );
+  }
+  if (want.source === 'start' && existing.name !== want.name) {
+    return refuse('invalid', `this idempotency key was used to start workflow ${existing.name ?? '(no workflow)'}, as ${id}, not ${want.name ?? '(no workflow)'}`);
+  }
+  if (want.source === 'apply' && want.sha256 !== undefined && keyed.dagSha256 !== want.sha256) {
+    return refuse('invalid', `this idempotency key was used to apply another DAG, as ${id}`);
+  }
+  return undefined;
+}
+
+/**
+ * Make a checked DAG on the board, in one transaction (spec §21.8): the board
+ * worked out (a run's task's for a run), the key looked up again, the guard
+ * against two racing, the board checked live; then the instance with its DAG,
+ * masked but for its gates; then each task through `insertTask`, with its
+ * subscriptions and its `created` event carrying the instance, its links, its
+ * gates through `insertGate`, and its member row. A refusal, or a member's
+ * repeated ref, rolls everything back: all of it is made, or none.
+ */
+export function applyDag(db: Db, instance: NewInstance, members: readonly NewMember[], now: number): Result<AppliedDag> {
+  return tx(db, (d) => {
+    let board = instance.board;
+    let createdFromTask: string | null = null;
+    if (instance.createdVia.kind === 'run') {
+      const run = getRun(d, instance.createdVia.runId);
+      if (run === undefined) return refuse('not_found', `no run ${instance.createdVia.runId}`);
+      createdFromTask = run.taskId;
+      // A run's work stays on its task's board (spec §16.5).
+      board = mustGet(d, run.taskId).board;
+    }
+    if (instance.idempotencyKey !== null) {
+      const keyed = instanceByKey(d, instance.idempotencyKey);
+      if (keyed !== undefined) {
+        const refused = keyRefused(keyed, { board, source: instance.source, name: instance.name, sha256: instance.sha256 });
+        if (refused !== undefined) return refused;
+        return { ok: true, instance: keyed.instance, members: membersWithTasks(d, keyed.instance.instanceId), existing: true };
+      }
+    }
+    const live = liveBoard(d, board);
+    if (!live.ok) return refuse(live.code, `${live.message}; nothing is added to it`);
+    const instanceId = newWorkflowId();
+    d.prepare(
+      `INSERT INTO kanban_workflow_instances
+         (instance_id, name, dag, dag_sha256, source, board, created_by, created_via, idempotency_key, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      instanceId,
+      instance.name,
+      canonicalDag(maskDag(instance.dag)),
+      instance.sha256,
+      instance.source,
+      board,
+      instance.createdBy,
+      JSON.stringify(instance.createdVia),
+      instance.idempotencyKey,
+      now,
+    );
+    const member = d.prepare(
+      'INSERT INTO kanban_workflow_tasks (task_id, instance_id, ref, step, item, position) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    const ids: string[] = [];
+    for (const [position, m] of members.entries()) {
+      const parents = m.parents.map((p) => {
+        const id = ids[p];
+        if (id === undefined) throw new Error(`member ${m.ref} names a parent at ${p}, which is not earlier`);
+        return id;
+      });
+      const taskId = insertTask(
+        d,
+        { ...m.task, board, createdFromTask, parents, idempotencyKey: null, createdBy: instance.createdBy, createdVia: instance.createdVia },
+        now,
+        { workflow: instanceId, workflowName: instance.name, ref: m.ref, step: m.step, item: m.item },
+      );
+      for (const gate of m.gates) {
+        // The apply put it on the task, for whoever made the instance (spec §21.8).
+        const added = insertGate(d, taskId, gate, instance.createdBy, now, { workflow: instanceId });
+        if (!added.ok) return refuse(added.code, `${m.ref}: ${added.message}`);
+      }
+      member.run(taskId, instanceId, m.ref, m.step, m.item === null ? null : mask(m.item), position);
+      ids.push(taskId);
+    }
+    const made = getInstance(d, instanceId);
+    if (made === undefined) throw new Error(`instance ${instanceId} vanished inside its own transaction`);
+    return { ok: true, instance: made, members: membersWithTasks(d, instanceId), existing: false };
+  });
+}
+
+/**
+ * Archive an instance (spec §21.8, §21.10): every member not already archived,
+ * in one transaction, through `archiveIn`, each `archived` event carrying the
+ * instance. Answers the members it archived, and the runs it decided, whose
+ * turns the caller cancels; none for an instance wholly archived already.
+ */
+export function archiveWorkflow(
+  db: Db,
+  instanceId: string,
+  by: string,
+  now: number,
+): Result<{ instance: InstanceRow; archived: TaskRow[]; runs: RunRow[] }> {
+  return tx(db, (d) => {
+    const instance = getInstance(d, instanceId);
+    if (instance === undefined) return refuse('not_found', `no workflow instance ${instanceId}`);
+    const archived: TaskRow[] = [];
+    const runs: RunRow[] = [];
+    for (const m of membersOf(d, instanceId)) {
+      const task = mustGet(d, m.taskId);
+      if (task.phase === 'archived') continue;
+      const r = archiveIn(d, task, by, now, { workflow: instanceId });
+      archived.push(r.task);
+      if (r.run !== undefined) runs.push(r.run);
+    }
+    return { ok: true, instance, archived, runs };
   });
 }

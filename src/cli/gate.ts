@@ -1,11 +1,12 @@
 import { existsSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { loadTeamSettings, type Env } from '../config.js';
+import { join } from 'node:path';
+import { loadTeamSettings, type Env, type TeamSettings } from '../config.js';
 import { openDb } from '../db/open.js';
 import { KanbanService } from '../kanban/service.js';
 import type { GateRow } from '../kanban/types.js';
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
-import { loadTeam, teamSecrets } from '../team.js';
+import { loadTeam, teamSecrets, type Team } from '../team.js';
 import { refuse, table } from './args.js';
 import type { MtIo } from './mt.js';
 
@@ -78,10 +79,17 @@ export interface OpenOptions {
   refuse?: Refuse;
   /** What a `passEnv` name unset in this shell means for the command; a gate's refusal of a secret, unless given. */
   unsetNote?: string;
+  /** The workflow commands need the workflows' tables too (spec §21.7): a database not migrated to them is refused. */
+  workflows?: boolean;
 }
 
-/** The board, as the gateway's own service over its database; or why not, already said. */
-export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): BoardAccess | number {
+/**
+ * The gateway's settings and team, loaded as the gateway loads them, with the
+ * secrets it would register, and the passEnv names this shell leaves unset said
+ * on stderr; or why not, already said. What `openBoard` does before it opens the
+ * database, and all the terminal's workflow preview does, which opens none (spec §21.6).
+ */
+export function loadOperator(io: MtIo, what: string, opts: OpenOptions = {}): { settings: TeamSettings; team: Team } | number {
   const no = opts.refuse ?? ((_code: string, message: string) => refuse(io, message));
   if (inBoardRun(io.env)) {
     return no('operator_command', runShellRefusal(what));
@@ -94,6 +102,15 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   if (unset.length > 0) {
     io.err(`mt: ${unset.join(', ')} not set in this shell, so ${opts.unsetNote ?? 'a gate holding those values cannot be refused here'}`);
   }
+  return { settings, team };
+}
+
+/** The board, as the gateway's own service over its database; or why not, already said. */
+export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): BoardAccess | number {
+  const no = opts.refuse ?? ((_code: string, message: string) => refuse(io, message));
+  const loaded = loadOperator(io, what, opts);
+  if (typeof loaded === 'number') return loaded;
+  const { settings, team } = loaded;
   if (!existsSync(settings.dbPath)) {
     return no('no_board', `there is no board at ${settings.dbPath}: the gateway creates its database when it first starts`);
   }
@@ -104,15 +121,18 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   } catch (err) {
     return no('failed', failed(err));
   }
+  // The table the command needs: the board's, or for the workflow commands the workflows' (spec §21.7).
+  const table = opts.workflows === true ? 'kanban_workflow_instances' : 'kanban_gates';
   try {
-    migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kanban_gates'").get();
+    migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
   } catch (err) {
     db.close();
     return no('failed', failed(err));
   }
   if (migrated === undefined) {
     db.close();
-    return no('no_board', `the database at ${settings.dbPath} has no board yet: start the gateway once, so it is migrated`);
+    const has = opts.workflows === true ? 'no workflows yet' : 'no board yet';
+    return no('no_board', `the database at ${settings.dbPath} has ${has}: start the gateway once, so it is migrated`);
   }
   // As the gateway builds its own: a supervised role's approvals go to the chat that follows its task (spec §7.1).
   const service = new KanbanService({
@@ -126,6 +146,8 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     // task is waiting on (spec §6.3, §16), and a board's own max_running is held inside the gateway's.
     ...(settings.kanban === undefined ? {} : { maxRunning: settings.kanban.maxRunning }),
     ...(settings.kanban?.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: settings.kanban.maxRunningPerRole }),
+    // As the gateway's: the operator's files, read at each preview and start (spec §21.1).
+    workflowsDir: join(settings.home, 'workflows'),
   });
   return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, close: () => db.close() };
 }

@@ -40,3 +40,17 @@ export function isInvisible(code: number): boolean {
     code === 0xfeff
   );
 }
+
+/**
+ * Bytes as text, when they are UTF-8; undefined when they are not, rather than
+ * any byte replaced by U+FFFD, which would make text other than the one sent. A
+ * byte order mark is kept, as a leading U+FEFF, so JSON with one is refused as
+ * not JSON rather than read as if it had none (spec §21.5).
+ */
+export function decodeUtf8(bytes: Uint8Array): string | undefined {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return undefined;
+  }
+}

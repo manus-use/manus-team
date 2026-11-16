@@ -2,8 +2,8 @@
 
 This guide is for people on the team who drive the manus-team board from Lark: operators who
 create and steer tasks, and the people tasks and reviews are given to. It starts with one task
-for one agent and builds up to chains, fan-out and review. Section 12 has recipes for whole
-graphs of tasks.
+for one agent and builds up to chains, fan-out and review. Section 12 is on workflows, graphs
+written once and started many times, and section 13 has recipes for whole graphs of tasks.
 
 A task is any work, not only code: research, writing a document, a script, an ops chore. It is
 given to a **role**, whose agent runs it in a **workspace** (a directory on the gateway's host),
@@ -1068,7 +1068,167 @@ mt kanban task stop k_…
 - Add `--json` for one line of JSON, for scripts. `mt` exits 0 when done, 1 when refused, and
   2 for a wrong command line.
 
-## 12. Recipes: graphs of tasks
+## 12. Workflows
+
+A team runs the same shape of work again and again: shortlist, evaluate each candidate,
+recommend one; draft, review, publish. A **workflow** is that graph written once, in a file on
+the gateway's host, and started as often as needed. **Starting** it makes one **instance**,
+`w_…`: every task and every link of the graph, at once, in one go, or none of them.
+
+### The file
+
+One YAML file a workflow, at `~/.manus-team/workflows/<name>.yaml`, named as a role is:
+lowercase letters, digits and `-`. This is `vendor-eval.yaml`:
+
+```yaml
+description: Shortlist vendors, evaluate each in parallel, then recommend one
+params:
+  topic:    { required: true, description: what is being bought }
+  vendors:  { list: true, required: true }
+  reviewer: { default: reviewer }
+steps:
+  shortlist:
+    title: Shortlist vendors for {{topic}}
+    assignee: worker
+    outcome: a shortlist with one line per vendor
+  evaluate:
+    for_each: vendors
+    parents: [shortlist]
+    title: Evaluate {{item}} for {{topic}}
+    assignee: worker
+    gates:
+      - command: test -s evaluation.md
+        timeout_s: 30
+  recommend:
+    parents: [evaluate]
+    title: Recommend a vendor for {{topic}}
+    assignee: worker
+    reviewer: { role: "{{reviewer}}" }
+    verify: every score comes from a parent's summary
+```
+
+- **A step is a task to make.** It takes the fields `create` does: `title`, `body`,
+  `assignee`, `reviewer`, `workspace`, `priority`, the contract (`outcome`, `verify`,
+  `constraints`, `boundaries`, `stop_when`), `failure_limit`, `retry_on_crash` and
+  `max_runtime_s`, and `gates`, as `/kanban gate add` takes them. An unknown key is an error
+  that names its place, such as `steps.evaluate.timeout`.
+- **`parents`** names the steps a step waits for, each written above it. A step whose parent is
+  a `for_each` step waits for all of its tasks.
+- **`for_each: <list param>`** makes one task an item, with `{{item}}` set to the item. Two
+  `for_each` steps over one list are linked all to all: each review waits for every evaluation.
+- **Params** are text, or lists with `list: true`; each is `required: true` or has a `default`.
+  `{{name}}` fills them into the text fields, a list as its items joined by `, `. In
+  `assignee`, `reviewer` and `workspace` the whole value may be one reference, `"{{reviewer}}"`,
+  and it is checked as a name. **Quote a value that starts with `{{`**: YAML reads an unquoted
+  `{{reviewer}}` as a mapping.
+- **Params never reach a gate.** A gate is a shell command the gateway runs; a `{{` in one is an
+  error. A gate that needs a value names it as an environment variable, `$NAME`, from the role's
+  environment.
+- **At most 100 tasks** an instance, and a file of at most 64 KiB.
+
+`mt workflow check` reads the files, and says of each whether it is usable, and why not:
+
+```
+$ mt workflow check
+vendor-eval: ok, 3 steps; params: topic (required), vendors (list, required), reviewer (default reviewer)
+```
+
+The gateway checks them at startup too, and notes the broken ones; a broken workflow does not
+stop it. The files are read at each preview and start, so an edit needs no restart.
+
+### Starting it
+
+```
+/kanban workflow start vendor-eval topic="log storage" vendors=acme,globex
+```
+
+> Started vendor-eval as `w_…`, 4 tasks:
+> - `k_…` Shortlist vendors for log storage, for role worker
+> - `k_…` Evaluate acme for log storage, for role worker
+> - `k_…` Evaluate globex for log storage, for role worker
+> - `k_…` Recommend a vendor for log storage, for role worker
+> This thread hears when each task is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
+
+- **Params** are `key=value`, split at the first `=`. Quote a value with spaces, `"…"`; a list
+  is comma-separated, or its key repeated, and a quoted value is one item, so
+  `vendors="Acme, Inc"` is one vendor. A person is an @-mention, `owner=@Alice Smith`, for a param
+  that lands in `assignee` or `reviewer`.
+- **An operator's command**, as `/kanban task new` is: a start starts agents. The tasks go on this
+  chat's board, and this chat follows every one; in a group the reply opens a thread of its own,
+  the instance's, where its cards and notices go.
+- **One failure refuses the whole start**, naming the task, and nothing is made:
+
+  > Not done: evaluate:2, step evaluate, item "globex": role "evaluator" is not configured
+- **A start is keyed by its message**: a redelivery makes nothing twice.
+
+`/kanban workflow preview vendor-eval topic="log storage" vendors=acme,globex` says what a start
+would make, with each task's parents and gates, and makes nothing. Anyone allowed may preview.
+
+### Seeing and managing
+
+```
+/kanban workflow list                 # the workflow files: name, description, params
+/kanban workflow instances [all]      # this chat's board's instances: running and blocked unless all
+/kanban workflow show w_…             # one instance: its steps' tasks, and its related tasks apart
+/kanban workflow archive w_…          # archive every task of it
+```
+
+An instance's status is derived from its tasks: **blocked** when any is, with how many,
+**done** when every one is done or archived, **archived** when every one is, **running**
+otherwise. Nothing is automatic on a failure: a blocked task is unblocked, reassigned or routed
+around with the task commands, as in recipe 5. Its tasks are ordinary tasks, and every change to
+one is made with them. `/kanban task show` of one says which instance and step it is from.
+
+### A step that decides
+
+A workflow has no conditions: every step becomes tasks at the start. One that must branch has a
+**deciding step**, whose agent reads its parents' handoffs, decides, and then makes the tasks of
+the branch it chose, with `mt kanban create`, by starting another workflow with `mt kanban
+start-workflow`, or with a graph of its own, `mt kanban apply-dag`. A gate on that step, such as
+`test -s decision.md`, holds it until the decision is written down:
+
+```yaml
+  decide:
+    parents: [evaluate]
+    title: Decide whether to pilot a vendor or look again, for {{topic}}
+    assignee: worker
+    body: >
+      Read the evaluations. Write decision.md saying which and why. To pilot, start the
+      workflow pilot with mt kanban start-workflow; to look again, start vendor-eval
+      with a new list of vendors.
+    gates:
+      - command: test -s decision.md
+```
+
+The tasks it makes are created from the deciding task, follow its chat and thread, and show as
+a related instance in `/kanban workflow show` of the first.
+
+### Workspaces
+
+A workflow's tasks resolve their workspaces at their claims, as any task's do: a step's own
+`workspace`, its role's, its parents', the board's. **A fan-out in one shared workspace runs one
+task at a time**: the evaluations above queue behind each other in the shortlist's workspace.
+They run side by side only in an isolated workspace (section 6), or with roles that work in
+workspaces of their own. A step whose parents certainly work in different workspaces, and which
+names none, is refused by the check: set its `workspace`.
+
+### From a terminal, and from an agent
+
+At the terminal, `mt kanban workflow start vendor-eval --param topic="log storage" --param
+vendors=acme,globex --key ls-1` starts it, with `--board` and `--json` as the other commands
+take them, and `mt kanban workflow preview … --json > dag.json` writes the **DAG** a start would
+make: a JSON file of every task, its parents by ref, and its gates. Edit it if need be, check it
+with `mt kanban workflow apply dag.json --dry-run`, which lists every task and gate command and
+makes nothing, and make it with `mt kanban workflow apply dag.json --key ls-1` (recipe 4). `mt
+kanban workflow show w_… --dag` prints the DAG an instance was made from, which `apply` takes
+again.
+
+An agent starts a workflow from its run with `mt kanban start-workflow < start.json`, as
+`{"workflow": "vendor-eval", "params": {"topic": "log storage", "vendors": ["acme", "globex"]}}`,
+and makes a graph of its own at once with `mt kanban apply-dag < dag.json` (recipe 3), which
+takes no gates: gates are the operator's.
+
+## 13. Recipes: graphs of tasks
 
 Each recipe below is a small graph of tasks (a DAG: each task waits for its parents, and nothing
 waits on itself), with the messages to paste, what happens at each step, and what goes wrong.
@@ -1356,8 +1516,8 @@ Deploy with the usual checklist in docs/release.md.
 
 ### Recipe 3: a planner breaks work into a DAG
 
-Instead of writing each task yourself, give a goal to a role whose agent writes the graph. The
-`planner` role's `role.md` says what to make. An excerpt, from
+Instead of writing each task yourself, give a goal to a role whose agent writes the graph, and
+makes all of it at once. The `planner` role's `role.md` says what to make. An excerpt, from
 `~/.manus-team/roles/planner/role.md` on the gateway's host:
 
 ```markdown
@@ -1365,12 +1525,13 @@ You plan; you do not do the work. Split the goal in your task into 3 to 8 tasks 
 `worker`. Give each task a contract with an "outcome" and a "verification". Where a task's
 result needs checking, name `reviewer` as its "reviewer".
 
-Create the tasks with `mt kanban create`, in dependency order: a task's "parents" name the tasks
-it needs, so create those first. Give every task an "idempotency_key" made from its step, such as
-"step-2-serializer", so that running the same command again does not make it twice.
+Write the plan as one DAG and make it with `mt kanban apply-dag`: each task has a "ref", and
+its "parents" name the refs of the tasks it needs, each written earlier in the list. Check it
+first with "dry_run": true, then send it again without it. Give it an "idempotency_key", such as
+"plan-1", so that sending it again does not make it twice.
 
-When every task is created, report complete, with a summary that lists each task's id and title
-in order.
+When the graph is made, report complete, with a summary that lists each task's id and title in
+order.
 ```
 
 **The task.** A goal, and a contract for the plan:
@@ -1387,40 +1548,51 @@ Goal: every report in the reports API can be downloaded as CSV. The code is in t
 > Created `k_…`: **Plan the reports CSV export**, for role planner. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 **What the planner does.** Its agent runs in `planner`, reads the goal, and sends one
-`mt kanban create` a task, each answered with the new id:
+`mt kanban apply-dag` with the whole graph:
 
 ```json
-{"title": "Write the CSV column mapping for every report type", "body": "List each report type and its columns in docs/csv-columns.md.", "assignee": "worker", "workspace": "api", "contract": {"outcome": "docs/csv-columns.md covers every report type", "verification": "each report type in src/reports/ appears in it"}, "idempotency_key": "step-1-columns"}
+{"format": 1, "idempotency_key": "plan-1", "tasks": [
+  {"ref": "columns", "title": "Write the CSV column mapping for every report type", "body": "List each report type and its columns in docs/csv-columns.md.", "assignee": "worker", "workspace": "api", "contract": {"outcome": "docs/csv-columns.md covers every report type", "verification": "each report type in src/reports/ appears in it"}},
+  {"ref": "serializer", "title": "Add the CSV serializer", "body": "Implement src/csv.ts from the mapping in docs/csv-columns.md.", "assignee": "worker", "reviewer": "reviewer", "workspace": "api", "parents": ["columns"]},
+  {"ref": "routes", "title": "Add the CSV routes", "assignee": "worker", "reviewer": "reviewer", "workspace": "api", "parents": ["serializer"]},
+  {"ref": "docs", "title": "Document CSV export", "assignee": "worker", "workspace": "api", "parents": ["routes"]}
+]}
 ```
+
+answered with every task, by its ref:
 
 ```json
-{"ok":true,"task_id":"k_…","existing":false}
+{"ok":true,"instance_id":"w_…","existing":false,"board":"default","tasks":[{"task_id":"k_…","ref":"columns","step":"columns","item":null},…]}
 ```
+
+The graph is made in one transaction, all of it or none, so no task starts before its parents
+are linked, and a planner that stops half way leaves no half of a graph. With `"dry_run": true`
+the same DAG is checked as an apply checks it and nothing is made: the answer has `"dry_run":
+true` and no `instance_id`. Sending it again with the same key answers with the same instance
+and `"existing":true`, and makes nothing; a key is the planning task's own. A refusal names the
+task it is about:
 
 ```json
-{"title": "Add the CSV serializer", "body": "Implement src/csv.ts from the mapping in docs/csv-columns.md.", "assignee": "worker", "reviewer": "reviewer", "workspace": "api", "parents": ["k_…"], "idempotency_key": "step-2-serializer"}
+{"ok":false,"code":"unknown_role","message":"serializer: role \"reviwer\" is not configured"}
 ```
 
-and so on: the routes, with the serializer as parent and `reviewer` as reviewer, then the docs,
-with the routes as parent. Sending a create again with the same key answers with the same id and
-`"existing":true`, and makes nothing. A key is the planning task's own: another planning task can
-use the same keys. The planner then reports complete, and the chat hears:
+A planner's DAG takes no gates, and no `priority`, `failure_limit`, `retry_on_crash` or
+`max_runtime_s` but at their defaults, as its `mt kanban create` takes none: they are the
+operator's. Add gates afterwards with `/kanban gate add`. The planner then reports complete, and
+the chat hears:
 
 > Done: **Plan the reports CSV export** `k_…`
-> > Created 4 tasks for worker, in order: k\_… column mapping; k\_… serializer (reviewer: reviewer); k\_… routes (reviewer: reviewer); k\_… docs.
-
-The chat hears nothing as each task is created; the planner's summary is the list.
+> > Made 4 tasks for worker, as w\_…, in order: k\_… column mapping; k\_… serializer (reviewer: reviewer); k\_… routes (reviewer: reviewer); k\_… docs.
 
 **Where the tasks go:**
 
-- **On the planner's board.** A task an agent creates is on the board of the task it ran, whatever
-  it asks for: a planning task created from a chat on board `web-app` fills `web-app`.
-- **This chat follows them.** Each created task inherits the planning task's subscriptions, so the
-  chat that created the plan hears when each one is done, needs review, blocks, gives up or is
+- **On the planner's board.** A task an agent makes is on the board of the task it ran, and a
+  DAG naming another board is refused.
+- **This chat follows them.** Each task inherits the planning task's subscriptions, so the chat
+  that created the plan hears when each one is done, needs review, blocks, gives up or is
   stranded, and so on down the line.
 - **They are not the plan's children.** The planning task does not wait for them, and is done as
-  soon as it reports. A created task with no `parents` can start at once, even while the planner
-  is still at work: here, the column mapping starts while the planner creates the rest.
+  soon as it reports. `/kanban workflow show w_…` lists them, as "(no workflow)".
 - **They run in `worker`, unless the plan names a workspace.** `worker` has its own workspace, so
   without `"workspace"` every task runs there, one at a time, however wide the graph. Here the body
   asks for `api`, where the code is. To run branches in parallel, give each branch its own
@@ -1428,24 +1600,25 @@ The chat hears nothing as each task is created; the planner's summary is the lis
   with `api` marked `isolated: true`, the planner's parallel tasks each get a worktree of `api`
   and run at once.
 
-**Checking the graph.** `/kanban task list`:
+**Checking the graph.** `/kanban workflow show w_…`, or `/kanban task list`:
 
-> `k_…` **running**: Write the CSV column mapping for every report type · role worker
+> `k_…` **ready**: Write the CSV column mapping for every report type · role worker
 > `k_…` **todo**: Add the CSV serializer · role worker
 > `k_…` **todo**: Add the CSV routes · role worker
 > `k_…` **todo**: Document CSV export · role worker
 
-`/kanban task show k_…` on any of them gives its parents and children, so you can walk the graph:
+`/kanban task show k_…` on any of them gives its parents and children, and the instance it is
+from, so you can walk the graph:
 
 > **Add the CSV serializer** `k_…`: todo
 > assignee: role worker · reviewer: role reviewer · workspace: api
-> parents: `k_…` (running)
+> workflow: `w_…` (no workflow), step serializer
+> parents: `k_…` (ready)
 > children: `k_…` (todo)
 > > Implement src/csv.ts from the mapping in docs/csv-columns.md.
 
-The parents and children lines give each task's status, as `/kanban task list` does. Check that
-every task but the first has a parent, that no task you expected in parallel has a sibling as
-parent, and that the reviewers are where checking is needed.
+Check that every task but the first has a parent, that no task you expected in parallel has a
+sibling as parent, and that the reviewers are where checking is needed.
 
 **Pitfalls:**
 
@@ -1463,139 +1636,131 @@ parent, and that the reviewers are where checking is needed.
 
   > `k_…` is unblocked, back to open.
 
-- **The planner must create tasks in order.** `mt kanban link` only works on a task that has not
-  started, and only on a task the planner's own task created. A created task with no parents is
-  claimed at once, so linking it afterwards is refused:
+- **A parent comes before its child.** A task's `parents` name refs written earlier in the list;
+  a ref named later, or not in the DAG, is refused, naming it. A task already on the board is no
+  parent here: link it afterwards with `mt kanban link`.
+- **Too many tasks at the root.** Every task with no parents starts as soon as there is room.
+  Keep the plan to one or two roots.
+- **A plan the team makes again and again** is better as a workflow file (section 12): the
+  planner then starts it with `mt kanban start-workflow`, and the file's gates come with it.
 
-  ```json
-  {"ok":false,"code":"run_open","message":"task k_… has an open run, r_…; a parent added now could not hold it back"}
-  ```
+### Recipe 4: a DAG from the terminal
 
-  Naming the parents in each `create` is what holds a task back.
-- **Too many tasks at the root.** Every task created with no parents starts as soon as there is
-  room. Keep the plan to one or two roots.
+The graph of recipe 1, a brief, three prototypes in parallel and a recommendation that waits for
+all three, kept as a workflow file on the gateway's host and made from a shell there. The file,
+`~/.manus-team/workflows/caching.yaml`:
 
-### Recipe 4: a DAG scripted from the terminal
-
-The graph of recipe 1, made with `mt kanban task new` on the gateway's host. `--json` prints one
-line of JSON:
-
-```
-$ mt kanban task new "Write the caching options brief" --board web-app --assignee worker --json
-{"ok":true,"task_id":"k_…","board":"web-app","existing":false,"nudged":true}
-```
-
-and a refusal, with exit status 1:
-
-```
-{"ok":false,"code":"unknown_board","message":"there is no board nope; no task is added to it"}
-```
-
-`nudged` says whether the running gateway was told to look for work at once; when it is false,
-`mt` also says why on stderr, and the task waits for the gateway's next sweep, or its next start.
-
-`--key <key>` makes a `task new` safe to run again. The first run with a key makes the task; a
-later one with the same key makes nothing and returns the task it made, with `"existing":true` in
-the JSON, and `"nudged":false`, since nothing changed for the gateway to act on; in plain text:
-
-```
-$ mt kanban task new "Write the caching options brief" --board web-app --key caching-dag:web-app:brief
-task k_… already exists with key caching-dag:web-app:brief: Write the caching options brief, on board web-app; nothing new was created
-```
-
-The key names the task, whatever the rest of the command says: a second run with another title
-still returns the first task, with "(archived)" after its title if it has been archived since. A
-key holding a control character or a bidi control is refused, as a title is. A key is the terminal's own, so it never returns a task made from
-chat or by an agent. A key already used on one board is refused on another, `other_board`, so
-the script puts the board in its keys.
-
-The script reads each id with `node -e`, and passes it on as `--parent`. After a failure halfway,
-run it again: it makes only what is missing.
-
-```sh
-#!/bin/sh
-# A brief, three prototypes in parallel, and a recommendation that waits for all three.
-# Safe to run again: each task has a key, and a second run gets the same task back.
-set -eu
-BOARD=${BOARD:-web-app}
-
-# The task_id in mt's --json line; on a refusal, its message on stderr, and exit 1.
-task_id() {
-  node -e '
-    let s = "";
-    process.stdin.on("data", (d) => (s += d)).on("end", () => {
-      if (s.trim() === "") process.exit(1); // mt printed its usage on stderr
-      const r = JSON.parse(s);
-      if (!r.ok) { console.error(`refused: ${r.message}`); process.exit(1); }
-      console.log(r.task_id);
-    });'
-}
-
-# new <name> <title> [flags...]: the id of the task this script calls <name>, made on the first run only.
-new() {
-  name=$1 title=$2
-  shift 2
-  mt kanban task new "$title" --board "$BOARD" --key "caching-dag:$BOARD:$name" --json "$@" | task_id
-}
-
-brief=$(new brief "Write the caching options brief" --assignee worker \
-  --outcome "a brief naming three caching options for the reports API, each with what to measure" \
-  --constraints "put the brief itself in your summary, not only in a file" \
-  --body "Read docs/reports-api.md and propose three ways to cache report results.")
-
-proto() {
-  new "proto-$1" "Prototype caching option $1" --assignee worker --workspace "research-$1" \
-    --parent "$brief" \
-    --outcome "a measured p95 latency for option $1, with and without the cache" \
-    --constraints "put the numbers, and how you got them, in your summary"
-}
-a=$(proto a)
-b=$(proto b)
-c=$(proto c)
-
-report=$(new report "Write the caching recommendation" --assignee worker \
-  --parent "$a" --parent "$b" --parent "$c" \
-  --outcome "docs/caching.md, one table of the three options and a recommendation" \
-  --verify "every number in the table comes from a parent's summary")
-
-echo "brief:      $brief"
-echo "prototypes: $a $b $c"
-echo "report:     $report"
+```yaml
+description: A brief, three prototypes in parallel, and a recommendation
+params:
+  options: { list: true, default: [a, b, c] }
+steps:
+  brief:
+    title: Write the caching options brief
+    assignee: worker
+    outcome: a brief naming three caching options for the reports API, each with what to measure
+    constraints: put the brief itself in your summary, not only in a file
+    body: Read docs/reports-api.md and propose three ways to cache report results.
+  proto:
+    for_each: options
+    parents: [brief]
+    title: Prototype caching option {{item}}
+    assignee: worker
+    workspace: research
+    outcome: a measured p95 latency for option {{item}}, with and without the cache
+  report:
+    parents: [proto]
+    title: Write the caching recommendation
+    assignee: worker
+    outcome: docs/caching.md, one table of the three options and a recommendation
+    verify: every number in the table comes from a parent's summary
 ```
 
-Make the board first, once (`mt kanban board create web-app`), then run it:
+`research` is an isolated workspace (section 6), so the three prototypes each get a directory
+of their own and run side by side; in a shared one they would queue. Add it once, on the
+gateway's host, from a git repository, and restart the gateway:
 
 ```
-$ sh caching-dag.sh
-brief:      k_…
-prototypes: k_… k_… k_…
-report:     k_…
-$ mt kanban task list --board web-app
-task  status  assignee     title
-k_…   ready   role worker  Write the caching options brief
-k_…   todo    role worker  Prototype caching option a
-k_…   todo    role worker  Prototype caching option b
-k_…   todo    role worker  Prototype caching option c
-k_…   todo    role worker  Write the caching recommendation
+$ mt workspace add research /srv/repos/research --isolated
 ```
 
-A second `sh caching-dag.sh` prints the same ids and creates nothing. `BOARD=billing sh
-caching-dag.sh` makes the same graph on `billing`, under keys of its own.
+or, by hand, in `config.yaml`:
+
+```yaml
+workspaces:
+  default: /srv/repos/main
+  research: { path: /srv/repos/research, isolated: true }
+```
+
+Every prototype names the same workspace, `research`. A name field takes a name, or one whole
+reference such as `"{{item}}"`, never one put together from parts, so `"research-{{item}}"` is
+refused by the check.
+
+```
+$ mt workflow check caching
+caching: ok, 3 steps; params: options (list, default a, b, c)
+```
+
+**Preview it as a file.** `preview --json` writes the DAG a start would make, every key of every
+task written out, and nothing else on stdout; a refusal goes to stderr, so it never leaves half a
+file:
+
+```
+$ mt kanban workflow preview caching --board web-app --json > caching.json
+```
+
+The file is the plan: diff it, keep it beside the script, or edit it. Here the report gets a
+reviewer, by hand:
+
+```json
+    {
+      "ref": "report",
+      "step": "report",
+      "item": null,
+      "title": "Write the caching recommendation",
+      "body": null,
+      "assignee": "worker",
+      "reviewer": "reviewer",
+```
+
+**Check it, then make it.** `--dry-run` makes every check an apply makes, against the board as it
+is now, and lists every task and every gate command, and makes nothing:
+
+```
+$ mt kanban workflow apply caching.json --dry-run
+would make 5 tasks, 6 links, 0 gates, on board web-app; nothing was made
+  brief    Write the caching options brief   role worker
+  proto:1  Prototype caching option a        role worker  after brief
+  proto:2  Prototype caching option b        role worker  after brief
+  proto:3  Prototype caching option c        role worker  after brief
+  report   Write the caching recommendation  role worker  after proto:1, proto:2, proto:3
+$ mt kanban workflow apply caching.json --key caching:web-app --json
+{"ok":true,"instance_id":"w_…","existing":false,"board":"web-app","tasks":[{"task_id":"k_…","ref":"brief","step":"brief","item":null},…],"nudged":true}
+```
+
+`--key` makes the apply safe to run again: a second run with the same key and the same DAG makes
+nothing and answers with the instance, `"existing":true`; the same key with a DAG changed since
+is refused, as is a key a `start` used. Without a key every apply is a new instance. A key is kept
+for good, an archived instance's included: to make the graph again, change the key.
+
+Instead of the preview and the apply, `mt kanban workflow start caching --board web-app --key
+caching-start:web-app` does both in one step, with the file as it is, when there is nothing to
+edit. Its key is a new one: a start refuses a key an apply used.
 
 Notes:
 
-- **Every command names its board.** `task new` and `task list` are on `default` without
-  `--board`. Give `--board` to `show`, `link` and the rest too: a task on another board is then
-  refused rather than changed.
-- **`sed` works too.** The JSON is one line, written by `JSON.stringify`, and ids are lowercase
-  letters and digits, so `sed -n 's/.*"task_id":"\(k_[0-9a-z]*\)".*/\1/p'` finds the id. It
-  prints nothing for a refusal, where `node -e` also prints the reason.
-- **A key is kept for good.** Archiving the task does not free its key: a run after that returns
-  the archived task. To make the graph again, change the keys, say with a version in them.
+- **The apply checks again.** A role removed, a board archived or a workspace dropped between the
+  preview and the apply is refused at the apply, naming the task. A workflow file edited since
+  changes nothing: the apply makes the DAG.
+- **Gates come with the file and the DAG at the terminal**, as the operator's: a gate command
+  holding the mask `••••`, as one printed masked by `show --dag` would, is refused, and must be
+  written out again.
 - **No chat follows these tasks**, so nobody is told when they are done or block. Watch with
-  `mt kanban task list --board web-app`, or create the first task from chat.
-- **Gates** are `mt kanban gate add k_… -- npm test`, with `--` before the command, and take no
-  `--board`.
+  `mt kanban workflow show w_…`, or start the workflow from chat if a group should hear.
+- **A DAG written by hand** needs only `"format": 1` and its tasks, each with a `ref` and a
+  `title`; every other key takes its default. It shows as "(no workflow)".
+- **Scripting `mt kanban task new`** still works for a graph that is no workflow: each `--key`
+  returns its task on a second run, and `--parent` links it.
 
 ### Recipe 5: when a task in the middle fails
 
@@ -1834,14 +1999,14 @@ priority and then age decide. A board at its own `max_running` gives up its turn
   holds back everything under it. Two or three levels are usually enough.
 - **Put the handoff in the summary.** A child, and a reviewer, read their parents' summaries
   first, and a child in another workspace cannot read its parents' files by relative path.
-- **Use idempotency keys when scripting.** An agent's `mt kanban create` takes an
-  `idempotency_key`; give one to every task it makes. The terminal's `mt kanban task new` takes
-  none, so a script keeps its own record of what it made (recipe 4).
+- **Use idempotency keys when scripting.** An agent's `mt kanban create` and `mt kanban apply-dag`
+  take an `idempotency_key`, and the terminal's `task new`, `workflow start` and `workflow apply`
+  take `--key` (recipe 4).
 - **Use `--board` on scripted commands**, every one, so that a task lands on, and a command acts
   on, the board you mean.
 - **Reroute with link first, archive last** (recipe 5).
 
-## 13. Rules of thumb
+## 14. Rules of thumb
 
 - Write `outcome:` and `verify:` on every task you care about, and `stop when:` on anything
   risky.

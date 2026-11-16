@@ -1,18 +1,21 @@
 import { readFileSync, statSync } from 'node:fs';
-import { listed, whenMade } from '../kanban/chat-render.js';
+import { join } from 'node:path';
+import { listed, previewLines, whenMade } from '../kanban/chat-render.js';
 import { boardSetting, isPerson, LIST_FILTERS, tooBig, type NewTaskCommand } from '../kanban/chat-parse.js';
-import type { KanbanService } from '../kanban/service.js';
+import { DAG_LIMITS, checkDagShape, checkDagTasks, dagFile } from '../kanban/dag.js';
+import { WORKFLOW_MESSAGE_BYTES, type KanbanService, type WorkflowMade } from '../kanban/service.js';
+import { expand, listWorkflows, paramsLine, readWorkflow, usableMessage } from '../kanban/workflow.js';
 import { maskAll, workerSocketPath } from '../kanban/socket.js';
 import { DEFAULT_BOARD, type BoardRow, type Contract, type Refusal, type Waiting } from '../kanban/types.js';
 import { WORKER_LIMITS } from '../kanban/limits.js';
 import { NUDGE } from '../kanban/worker.js';
 import { visible } from '../names.js';
 import { parse, UsageError } from './args.js';
-import { operatorName, withBoard } from './gate.js';
+import { loadOperator, operatorName, withBoard } from './gate.js';
 import { ask } from './kanban.js';
 import type { MtIo } from './mt.js';
-import { BIDI, INVISIBLE } from '../text.js';
-import { boardsText, line, listText, showText, who } from './plain.js';
+import { BIDI, decodeUtf8, INVISIBLE } from '../text.js';
+import { boardsText, dryRunText, instanceText, instancesText, line, listText, madeText, previewText, showText, who, workflowsText } from './plain.js';
 
 /**
  * The operator's `mt kanban task …` and `mt kanban board …` (spec §2.6): chat's
@@ -54,6 +57,8 @@ interface Done {
   nudge?: boolean;
   /** A `task new --key`: running it again returns the task, rather than making it twice. */
   keyed?: boolean;
+  /** What a keyed command returns when run again: its task, or a workflow's instance. */
+  makes?: 'task' | 'instance';
 }
 
 type Outcome = Done | { ok: false; code: string; message: string };
@@ -133,6 +138,7 @@ async function act(
   json: boolean,
   what: string,
   fn: (service: KanbanService, by: string) => Outcome,
+  opts: { workflows?: boolean } = {},
 ): Promise<number> {
   const no = (code: string, message: string): number => {
     if (json) io.out(jsonLine({ ok: false, code, message }));
@@ -151,7 +157,7 @@ async function act(
       outcome = fn(board.service, operatorName(io));
       return 0;
     },
-    { refuse: no, unsetNote: 'those values are not masked here' },
+    { refuse: no, unsetNote: 'those values are not masked here', ...(opts.workflows === true ? { workflows: true } : {}) },
   );
   if (outcome === undefined) return code;
   if (!outcome.ok) return no(outcome.code, outcome.message);
@@ -170,7 +176,7 @@ async function act(
     if (r.failed !== undefined) {
       io.err(
         `mt: no gateway answered at ${r.socket} (${r.failed}); the change stands, and running the command again ` +
-          `${done.keyed === true ? 'with the same --key returns this task' : 'would make it twice'}: ` +
+          `${done.keyed === true ? `with the same --key returns this ${done.makes ?? 'task'}` : 'would make it twice'}: ` +
           'a running gateway acts on it at its next sweep, and a stopped one when it next starts',
       );
     }
@@ -304,15 +310,17 @@ async function bodyOf(values: { body?: string | undefined; 'body-file'?: string 
     if (io.stdinIsTTY === true) {
       return early(io, json, 'invalid', '--body-file - reads the body on stdin; stdin is a terminal: redirect a file or pipe it');
     }
-    const text = await (io.stdin?.(max) ?? Promise.resolve(''));
-    return text ?? early(io, json, 'too_large', `A body is at most ${max} bytes.`);
+    const bytes = await (io.stdin?.(max) ?? Promise.resolve(new Uint8Array()));
+    if (bytes === undefined) return early(io, json, 'too_large', `A body is at most ${max} bytes.`);
+    return decodeUtf8(bytes) ?? early(io, json, 'invalid', 'the body on stdin is not UTF-8');
   }
   try {
     // A regular file only: a FIFO or a device could block, or never end.
     const st = statSync(file);
     if (!st.isFile()) return early(io, json, 'invalid', `${file} is not a regular file: give a file, or - for stdin`);
     if (st.size > max) return early(io, json, 'too_large', `A body is at most ${max} bytes.`);
-    return readFileSync(file, 'utf8');
+    const text = decodeUtf8(readFileSync(file));
+    return text ?? early(io, json, 'invalid', `the body in ${file} is not UTF-8`);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
     return early(io, json, 'invalid', `cannot read the body from ${file}: ${code}`);
@@ -516,6 +524,11 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
           waiting_on_role: roleWait === undefined ? null : { role: roleWait.role, max_running: roleWait.maxRunning },
           // Every reason a pass skips it, in the order the pass checks them; empty for none.
           waiting: (r.view.waiting ?? []).map(waitingJson),
+          // The workflow's instance it is a member of (spec §21.10), or null.
+          workflow:
+            r.view.member === undefined
+              ? null
+              : { instance_id: r.view.member.instanceId, name: r.view.member.name, step: r.view.member.step, item: r.view.member.item },
         },
         parents: r.view.parents.map((p) => ({ task_id: p.taskId, phase: p.phase, status: r.view.statuses.get(p.taskId) ?? null })),
         children: r.view.children.map((c) => ({ task_id: c.taskId, phase: c.phase, status: r.view.statuses.get(c.taskId) ?? null })),
@@ -706,9 +719,382 @@ function task(args: readonly string[], io: MtIo): Promise<number> {
   }
 }
 
-/** `mt kanban task …` and `mt kanban board …`, outside a board run: the operator's. */
+/** `mt kanban task …`, `board …` and `workflow …`, outside a board run: the operator's. */
 export async function operatorCommand(command: string, rest: readonly string[], io: MtIo): Promise<number> {
   if (command === 'board') return board(rest, io);
   if (command === 'task') return task(rest, io);
+  if (command === 'workflow') return workflow(rest, io);
   throw new UsageError(`unknown command: kanban ${command}`);
+}
+
+// ---------------------------------------------------------------------------
+// Workflows (spec §21.6, §21.10)
+// ---------------------------------------------------------------------------
+
+/** The verbs of `mt kanban workflow`. */
+export const WORKFLOW_COMMANDS: readonly string[] = ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive'];
+
+/** `--param key=value`, repeated, each split at its first `=` (spec §21.6); the shell has already removed the quotes. */
+function paramPairs(values: readonly string[] | undefined): { key: string; value: string }[] {
+  return (values ?? []).map((p) => {
+    const eq = p.indexOf('=');
+    if (eq <= 0) throw new UsageError('--param takes key=value');
+    return { key: p.slice(0, eq), value: p.slice(eq + 1) };
+  });
+}
+
+/** A key, one line, as `task new`'s is. */
+function keyFlag(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (/[\p{Cc}\u2028\u2029]/u.test(value) || new RegExp(BIDI.source).test(value)) {
+    throw new UsageError('a key is one line, with no control characters and no bidi controls');
+  }
+  const key = value.trim();
+  if (key === '') throw new UsageError('--key needs a value');
+  return key;
+}
+
+/** JSON indented by two spaces, masked, with nothing in it a terminal acts on: `preview --json`'s file and `show --dag`'s. */
+function jsonFile(value: unknown): string {
+  return JSON.stringify(maskAll(value), null, 2).replace(UNSAFE_IN_JSON, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+/** A start's or an apply's answer in the worker's shape (spec §21.6). */
+function madeJson(made: WorkflowMade): Record<string, unknown> {
+  return {
+    instance_id: made.instance.instanceId,
+    existing: made.existing,
+    board: made.instance.board,
+    tasks: made.tasks.map((t) => ({ task_id: t.taskId, ref: t.ref, step: t.step, item: t.item })),
+    // Nothing made, so the gateway was not asked to look.
+    ...(made.existing ? { nudged: false } : {}),
+  };
+}
+
+/**
+ * `mt kanban workflow preview <name> [--board] [--param k=v]… [--json]` (spec
+ * §21.6): loaded exactly as `openBoard` loads, opening no database; every check
+ * a start makes but the board's, the people's and the key's, a person refused as
+ * at the terminal. `--json` writes the DAG file alone on stdout; a refusal goes
+ * to stderr, so it never leaves half a file.
+ */
+function preview(rest: readonly string[], io: MtIo): number {
+  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, param: { type: 'string', multiple: true } });
+  const [name, extra] = positionals;
+  if (name === undefined || extra !== undefined) throw new UsageError('kanban workflow preview takes a workflow name');
+  const pairs = paramPairs(values.param);
+  const boardName = boardFlag(values.board) ?? DEFAULT_BOARD;
+  const json = values.json === true;
+  const no = (_code: string, message: string): number => {
+    io.err(`mt: ${line(message, 4096)}`);
+    return 1;
+  };
+  const loaded = loadOperator(io, 'mt kanban workflow preview', { refuse: no, unsetNote: 'those values are not masked here' });
+  if (typeof loaded === 'number') return loaded;
+  const { settings, team } = loaded;
+  // As openBoard's service judges a task: supervised roles accepted, and no person, as no talk check is here.
+  const facts = { roles: team.roles, workspaces: new Set(team.workspaces.keys()), supervisedRoles: true };
+  const dir = join(settings.home, 'workflows');
+  const read = readWorkflow(dir, name, facts);
+  if (!read.ok) {
+    return no(read.code, read.code === 'unknown_workflow' ? usableMessage(read.message, listWorkflows(dir, facts).usable, WORKFLOW_MESSAGE_BYTES) : read.message);
+  }
+  const expanded = expand(read.workflow, { from: 'terminal', pairs }, boardName);
+  if (!expanded.ok) return no(expanded.code, expanded.message);
+  const shaped = checkDagShape(expanded.dag, 'expansion');
+  if (!shaped.ok) return no(shaped.code, shaped.message);
+  const refused = checkDagTasks(shaped.dag, { facts, createdBy: operatorName(io), createdVia: { kind: 'operator' } });
+  if (refused !== undefined) return no(refused.code, refused.message);
+  if (json) io.out(jsonFile(JSON.parse(dagFile(shaped.dag))));
+  else for (const l of previewText(name, boardName, previewLines(shaped.dag))) io.out(l);
+  return 0;
+}
+
+/** `mt kanban workflow start <name> [--board] [--param k=v]… [--key] [--json]` (spec §21.6). */
+function start(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, param: { type: 'string', multiple: true }, key: { type: 'string' } });
+  const [name, extra] = positionals;
+  if (name === undefined || extra !== undefined) throw new UsageError('kanban workflow start takes a workflow name');
+  const pairs = paramPairs(values.param);
+  const boardName = boardFlag(values.board) ?? DEFAULT_BOARD;
+  const key = keyFlag(values.key);
+  return act(
+    io,
+    values.json === true,
+    'mt kanban workflow start',
+    (service, by) => {
+      const r = service.startWorkflow({
+        workflow: name,
+        params: { from: 'terminal', pairs },
+        ...(key === undefined ? {} : { idempotencyKey: key }),
+        createdBy: by,
+        createdVia: { kind: 'operator' },
+        board: boardName,
+      });
+      if (!r.ok) return refused(r);
+      return { ok: true, lines: madeText(r), json: madeJson(r), nudge: !r.existing, ...(key === undefined ? {} : { keyed: true }), makes: 'instance' };
+    },
+    { workflows: true },
+  );
+}
+
+/** A DAG file read as `--body-file` reads a body (spec §21.6): a regular file, or `-` for stdin, up to 4 MiB, strictly as UTF-8, as JSON. */
+async function dagOf(file: string, io: MtIo, json: boolean): Promise<unknown | number> {
+  const max = DAG_LIMITS.rawBytes;
+  let bytes: Uint8Array | undefined;
+  if (file === '-') {
+    if (io.stdinIsTTY === true) return early(io, json, 'invalid', 'apply - reads the DAG on stdin; stdin is a terminal: redirect a file or pipe it');
+    bytes = await (io.stdin?.(max) ?? Promise.resolve(new Uint8Array()));
+    if (bytes === undefined) return early(io, json, 'too_large', `the DAG on stdin is over ${max} bytes`);
+  } else {
+    try {
+      // A regular file only: a FIFO or a device could block, or never end.
+      const st = statSync(file);
+      if (!st.isFile()) return early(io, json, 'invalid', `${file} is not a regular file: give a file, or - for stdin`);
+      if (st.size > max) return early(io, json, 'too_large', `${file} is ${st.size} bytes; a DAG file is read up to ${max}`);
+      bytes = readFileSync(file);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
+      return early(io, json, 'invalid', `cannot read the DAG from ${file}: ${code}`);
+    }
+  }
+  const text = decodeUtf8(bytes);
+  if (text === undefined) return early(io, json, 'invalid', `the DAG ${file === '-' ? 'on stdin' : `in ${file}`} is not UTF-8`);
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    // A byte order mark, kept by the strict decoding, is not JSON either.
+    return early(io, json, 'invalid', 'the DAG is not JSON');
+  }
+}
+
+/** `mt kanban workflow apply <dag.json|-> [--key] [--dry-run] [--json]` (spec §21.6): the DAG's board, else `default`. */
+async function applyFile(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, { ...JSON_FLAG, key: { type: 'string' }, 'dry-run': { type: 'boolean' } });
+  const [file, extra] = positionals;
+  if (file === undefined || extra !== undefined) throw new UsageError('kanban workflow apply takes a DAG file, or - for stdin');
+  const json = values.json === true;
+  const key = keyFlag(values.key);
+  const dryRun = values['dry-run'] === true;
+  const dag = await dagOf(file, io, json);
+  if (typeof dag === 'number') return dag;
+  return act(
+    io,
+    json,
+    'mt kanban workflow apply',
+    (service, by) => {
+      const r = service.applyDag({
+        dag,
+        ...(key === undefined ? {} : { idempotencyKey: key }),
+        ...(dryRun ? { dryRun: true } : {}),
+        createdBy: by,
+        createdVia: { kind: 'operator' },
+      });
+      if (!r.ok) return refused(r);
+      if (!('dryRun' in r)) {
+        return { ok: true, lines: madeText(r), json: madeJson(r), nudge: !r.existing, ...(key === undefined ? {} : { keyed: true }), makes: 'instance' };
+      }
+      // Nothing written, so no nudge (spec §21.6).
+      return {
+        ok: true,
+        lines: dryRunText(r),
+        json: {
+          dry_run: true,
+          existing: r.existing,
+          ...(r.instanceId === null ? {} : { instance_id: r.instanceId }),
+          board: r.board,
+          tasks: r.tasks.map((t) => ({ ref: t.ref, step: t.step, item: t.item, gates: t.gates })),
+        },
+      };
+    },
+    { workflows: true },
+  );
+}
+
+/** `mt kanban workflow list` (spec §21.10): the files as they are now. */
+function listWorkflowFiles(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, JSON_FLAG);
+  if (positionals.length > 0) throw new UsageError('kanban workflow list takes no arguments');
+  return act(
+    io,
+    values.json === true,
+    'mt kanban workflow list',
+    (service) => {
+      const list = service.workflows();
+      const params = new Map(list.usable.map((w) => [w.name, paramsLine(w)]));
+      return {
+        ok: true,
+        lines: workflowsText(list, (name) => params.get(name) ?? ''),
+        json: {
+          workflows: list.usable.map((w) => ({
+            name: w.name,
+            description: w.description ?? null,
+            params: w.params.map((p) => ({ name: p.name, list: p.list, required: p.required, default: p.default ?? null, description: p.description ?? null })),
+          })),
+          not_usable: list.broken,
+        },
+      };
+    },
+    { workflows: true },
+  );
+}
+
+/** `mt kanban workflow instances [all] [--board]` (spec §21.10): `default`'s unless named. */
+function instances(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
+  const [word, extra] = positionals;
+  const all = word?.toLowerCase();
+  if (extra !== undefined || (all !== undefined && all !== 'all')) throw new UsageError('kanban workflow instances takes at most all');
+  const boardName = boardFlag(values.board) ?? DEFAULT_BOARD;
+  return act(
+    io,
+    values.json === true,
+    'mt kanban workflow instances',
+    (service) => {
+      const missing = noSuchBoard(service, boardName);
+      if (missing !== undefined) return missing;
+      const r = service.instances(boardName, all === 'all');
+      return {
+        ok: true,
+        lines: instancesText(r.instances, { board: boardName, all: all === 'all', total: r.total, read: r.read }),
+        json: {
+          board: boardName,
+          total: r.total,
+          instances: r.instances.map((s) => ({
+            instance_id: s.instance.instanceId,
+            name: s.instance.name,
+            status: s.status,
+            done: s.done,
+            total: s.total,
+            created_by: s.instance.createdBy,
+            created_at: s.instance.createdAt,
+          })),
+        },
+      };
+    },
+    { workflows: true },
+  );
+}
+
+/** With `--board`, a refusal unless the board exists and the instance is on it (spec §21.10). */
+function instanceOffBoard(service: KanbanService, board: string | undefined, instanceId: string): Outcome | undefined {
+  if (board === undefined) return undefined;
+  const missing = noSuchBoard(service, board);
+  if (missing !== undefined) return missing;
+  const r = service.instance(instanceId);
+  if (!r.ok) return refused(r);
+  if (r.view.instance.board !== board) {
+    return refused({ code: 'other_board', message: `instance ${instanceId} is on board ${visible(r.view.instance.board)}, not ${visible(board)}` });
+  }
+  return undefined;
+}
+
+/** `mt kanban workflow show <instance> [--board] [--dag] [--json]` (spec §21.10): everything, uncut; `--dag` the stored DAG. */
+function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, dag: { type: 'boolean' } });
+  const [instanceId, extra] = positionals;
+  if (instanceId === undefined || extra !== undefined) throw new UsageError('kanban workflow show takes an instance id');
+  const board = boardFlag(values.board);
+  if (values.dag === true && values.json === true) throw new UsageError('kanban workflow show takes --dag or --json, not both');
+  let dagText: string | undefined;
+  return act(
+    io,
+    values.json === true,
+    'mt kanban workflow show',
+    (service) => {
+      const guard = instanceOffBoard(service, board, instanceId);
+      if (guard !== undefined) return guard;
+      const r = service.instance(instanceId);
+      if (!r.ok) return refused(r);
+      const v = r.view;
+      // What was made, masked: never the hash (spec §21.7).
+      if (values.dag === true) dagText = jsonFile(v.instance.dag);
+      return {
+        ok: true,
+        lines: values.dag === true ? [] : instanceText(v),
+        json: {
+          instance: {
+            instance_id: v.instance.instanceId,
+            name: v.instance.name,
+            board: v.instance.board,
+            status: v.status,
+            done: v.done,
+            total: v.total,
+            created_by: v.instance.createdBy,
+            created_via: v.instance.createdVia.kind,
+            created_at: v.instance.createdAt,
+            params: v.instance.dag.params,
+            description: v.description ?? null,
+          },
+          tasks: v.members.map((m) => ({
+            task_id: m.taskId,
+            ref: m.ref,
+            step: m.step,
+            item: m.item,
+            title: m.task.title,
+            assignee: m.task.assignee?.name ?? null,
+            phase: m.task.phase,
+            status: m.status,
+          })),
+          related: v.related.map((x) => ({ task_id: x.task.taskId, title: x.task.title, phase: x.task.phase, status: x.status })),
+          related_instances: v.relatedInstances.map((o) => ({ instance_id: o.instanceId, name: o.name, tasks: o.tasks })),
+        },
+      };
+    },
+    { workflows: true },
+  ).then((code) => {
+    if (code === 0 && dagText !== undefined) io.out(dagText);
+    return code;
+  });
+}
+
+/** `mt kanban workflow archive <instance> [--board]` (spec §21.10): every member, in one transaction; the gateway's pass cancels the runs it decided. */
+function archiveInstance(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
+  const [instanceId, extra] = positionals;
+  if (instanceId === undefined || extra !== undefined) throw new UsageError('kanban workflow archive takes an instance id');
+  const board = boardFlag(values.board);
+  return act(
+    io,
+    values.json === true,
+    'mt kanban workflow archive',
+    (service, by) => {
+      const guard = instanceOffBoard(service, board, instanceId);
+      if (guard !== undefined) return guard;
+      const r = service.archiveWorkflow(instanceId, by);
+      if (!r.ok) return refused(r);
+      const n = r.archived.length;
+      const name = line(r.instance.name ?? '(no workflow)', 80);
+      return {
+        ok: true,
+        lines: [n === 0 ? `every task of ${instanceId} is archived already; nothing changed` : `archived ${n} task${n === 1 ? '' : 's'} of ${instanceId} (${name}); its related tasks are left as they are`],
+        json: { instance_id: instanceId, archived: r.archived.map((t) => t.taskId), runs: r.runs.map((x) => x.runId) },
+        nudge: n > 0,
+      };
+    },
+    { workflows: true },
+  );
+}
+
+/** `mt kanban workflow <verb> …`. */
+function workflow(args: readonly string[], io: MtIo): Promise<number> {
+  const [verb, ...rest] = args;
+  switch (verb) {
+    case 'list':
+      return listWorkflowFiles(rest, io);
+    case 'instances':
+      return instances(rest, io);
+    case 'show':
+      return showInstance(rest, io);
+    case 'preview':
+      return Promise.resolve(preview(rest, io));
+    case 'start':
+      return start(rest, io);
+    case 'apply':
+      return applyFile(rest, io);
+    case 'archive':
+      return archiveInstance(rest, io);
+    default:
+      throw new UsageError(`kanban workflow takes ${WORKFLOW_COMMANDS.slice(0, -1).join(', ')} or ${WORKFLOW_COMMANDS.at(-1)}`);
+  }
 }

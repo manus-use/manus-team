@@ -11,6 +11,7 @@ import { operatorCommand, TASK_COMMANDS } from './operator.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
 import { SERVICE_USAGE, serviceCommand, type ServiceDeps } from './service.js';
 import { updateCommand, type UpdateDeps } from './update.js';
+import { workflowCheck } from './workflow.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
 
 /**
@@ -49,8 +50,8 @@ export interface MtIo {
   err: (line: string) => void;
   /** Runs git; injectable so a failed clone can be tested. */
   git?: Git;
-  /** All of stdin, or undefined once it passes `maxBytes`: `mt kanban`'s input. */
-  stdin?: (maxBytes: number) => Promise<string | undefined>;
+  /** All of stdin, as bytes, or undefined once it passes `maxBytes`: `mt kanban`'s input, decoded by the command. */
+  stdin?: (maxBytes: number) => Promise<Uint8Array | undefined>;
   /** Stdin is a terminal: `mt kanban` refuses rather than wait on one for input that never comes. */
   stdinIsTTY?: boolean;
   /** An agent command's version, from `<command> --version`; injectable so `mt role check` is tested without one. */
@@ -66,6 +67,7 @@ const USAGE = [
   '  mt role create <name> [--clone-from <role>] [--description "..."] [--own-workspace]',
   '  mt role list',
   '  mt role check [<name>]',
+  '  mt workflow check [<name>]',
   '  mt workspace add <name> <absolute-path> [--isolated]',
   '  mt workspace add <name> --clone <git-url> [--isolated]',
   '  mt workspace list',
@@ -91,8 +93,15 @@ const USAGE = [
   '  mt kanban gate add <task_id> [--timeout <s>] -- <command...>',
   '  mt kanban gate list <task_id>',
   '  mt kanban gate remove <task_id> <gate_id>',
+  '  mt kanban workflow list [--json]',
+  '  mt kanban workflow instances [all] [--board <name>] [--json]',
+  '  mt kanban workflow show <instance> [--board <name>] [--dag | --json]',
+  '  mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]... [--json]',
+  '  mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>] [--json]',
+  '  mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--json]',
+  '  mt kanban workflow archive <instance> [--board <name>] [--json]',
   "the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
-  '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
+  `  mt kanban <${WORKER_COMMANDS.join('|')}> < input.json`,
 ].join('\n');
 
 function expectNothing(positionals: readonly string[], what: string): void {
@@ -131,13 +140,14 @@ function gate(argv: readonly string[], io: MtIo): number {
  * The operator's groups (spec §2.6), which refuse to run in a board run's shell.
  * Every other `mt kanban <command>` is the worker CLI's (spec §7.3).
  */
-const OPERATOR_GROUPS: readonly string[] = ['task', 'board', 'gate'];
+const OPERATOR_GROUPS: readonly string[] = ['task', 'board', 'gate', 'workflow'];
 
 /** The subcommands whose name a run's refusal gives: `mt kanban board set`, not just `mt kanban board`. */
 const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
   task: TASK_COMMANDS,
   board: ['list', 'create', 'set', 'archive', 'use'],
   gate: ['add', 'list', 'remove'],
+  workflow: ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive'],
 };
 
 /**
@@ -150,8 +160,14 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
   const sub = rest[0];
   const named = command !== undefined && sub !== undefined && SUBCOMMANDS[command]?.includes(sub) === true;
   const what = ['mt kanban', ...(command === undefined ? [] : [command]), ...(named ? [sub] : [])].join(' ');
-  const message = runShellRefusal(what);
-  if (command !== 'gate' && rest.includes('--json')) io.out(jsonLine({ ok: false, code: 'operator_command', message }));
+  // A run starts a workflow, or applies a DAG of its own, with the worker's commands (spec §21.6).
+  const message =
+    command === 'workflow'
+      ? `${runShellRefusal(what)}; a board run starts a workflow with mt kanban start-workflow, and makes a DAG of its own with mt kanban apply-dag`
+      : runShellRefusal(what);
+  // A preview's stdout is the DAG file it writes: its refusal goes to stderr, as the preview's own do.
+  const json = command !== 'gate' && rest.includes('--json') && !(command === 'workflow' && sub === 'preview');
+  if (json) io.out(jsonLine({ ok: false, code: 'operator_command', message }));
   else refuse(io, message);
   return 1;
 }
@@ -234,6 +250,12 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       const [name, extra] = parse(rest, {}).positionals;
       if (extra !== undefined) throw new UsageError('role check takes at most one name');
       return roleCheck(name, io);
+    }
+    if (group === 'workflow' && command === 'check') {
+      // Files only, and no authority: any shell, a board run's included (spec §21.4).
+      const [name, extra] = parse(rest, {}).positionals;
+      if (extra !== undefined) throw new UsageError('workflow check takes at most one name');
+      return workflowCheck(name, io);
     }
     if (group === 'workspace' && command === 'add') {
       const { values, positionals } = parse(rest, { clone: { type: 'string' }, isolated: { type: 'boolean' } });

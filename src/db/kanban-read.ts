@@ -1,4 +1,5 @@
 import type { Db } from './open.js';
+import type { Dag } from '../kanban/dag.js';
 import { displayStatus, type DisplayStatus } from '../kanban/status.js';
 import { worktreeOf } from './workspaces.js';
 import type {
@@ -570,6 +571,8 @@ export interface TaskView {
    * the service's `show`, which knows the isolated workspaces.
    */
   workdir?: { path: string | null; branch: string | null; first?: true };
+  /** The workflow's instance the task is a member of (spec §21.10), with its step and item; absent for a task that is none's. */
+  member?: { instanceId: string; name: string | null; step: string; item: string | null };
 }
 
 /** A task's display status (spec §4.1), derived from its parents and its runs. */
@@ -588,6 +591,8 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
   const children = childrenOf(db, taskId);
   const runs = runsOf(db, taskId);
   const undecided = runs.find((r) => r.outcome === null);
+  // Read only when the members table is there: a database not yet migrated has none (spec §21.7).
+  const member = memberOf(db, taskId);
   return {
     task,
     status: displayStatus({
@@ -601,6 +606,7 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
     runs,
     comments: commentsOf(db, taskId),
     ...(task.worktree === null ? {} : { workdir: workdirOf(db, task.worktree) }),
+    ...(member === undefined ? {} : { member: { instanceId: member.instanceId, name: member.name, step: member.step, item: member.item } }),
   };
 }
 
@@ -894,4 +900,199 @@ export function chatBoardOf(db: Db, at: ChatAt): string | undefined {
 /** Whether the database has the board's tables: one migrated before the board has none (spec §20.3). */
 export function hasBoard(db: Db): boolean {
   return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kanban_runs'").get() !== undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Workflows (spec §21.7, §21.10)
+// ---------------------------------------------------------------------------
+
+/** One start of a workflow, or one apply of a DAG (spec §21.7). */
+export interface InstanceRow {
+  instanceId: string;
+  /** The workflow's name, or null for a DAG with none. */
+  name: string | null;
+  /** The DAG it was made from, as stored: masked but for its gates. */
+  dag: Dag;
+  source: 'start' | 'apply';
+  board: string;
+  createdBy: string;
+  createdVia: CreatedVia;
+  idempotencyKey: string | null;
+  createdAt: number;
+}
+
+/** A task an instance made: its ref and step in the DAG, its item, and its place in the DAG's array. */
+export interface MemberRow {
+  taskId: string;
+  instanceId: string;
+  ref: string;
+  step: string;
+  item: string | null;
+  position: number;
+}
+
+interface InstanceRaw {
+  instance_id: string;
+  name: string | null;
+  dag: string;
+  dag_sha256: string;
+  source: string;
+  board: string;
+  created_by: string;
+  created_via: string;
+  idempotency_key: string | null;
+  created_at: number;
+}
+
+interface MemberRaw {
+  task_id: string;
+  instance_id: string;
+  ref: string;
+  step: string;
+  item: string | null;
+  position: number;
+}
+
+const INSTANCE_COLS = 'instance_id, name, dag, dag_sha256, source, board, created_by, created_via, idempotency_key, created_at';
+const MEMBER_COLS = 'task_id, instance_id, ref, step, item, position';
+
+/**
+ * An instance found by its key, with the hash of its DAG's canonical form,
+ * unmasked: how a repeated key tells the same DAG from another (spec §21.6). Only
+ * `keyRefused` reads the hash; it is never printed, so no `InstanceRow` holds it.
+ */
+export interface KeyedInstance {
+  instance: InstanceRow;
+  dagSha256: string;
+}
+
+function decodeInstance(r: InstanceRaw): InstanceRow {
+  return {
+    instanceId: r.instance_id,
+    name: r.name,
+    dag: JSON.parse(r.dag) as Dag,
+    source: r.source as InstanceRow['source'],
+    board: r.board,
+    createdBy: r.created_by,
+    createdVia: JSON.parse(r.created_via) as CreatedVia,
+    idempotencyKey: r.idempotency_key,
+    createdAt: r.created_at,
+  };
+}
+
+function decodeMember(r: MemberRaw): MemberRow {
+  return { taskId: r.task_id, instanceId: r.instance_id, ref: r.ref, step: r.step, item: r.item, position: r.position };
+}
+
+/** Whether the database has the workflows' tables: one not yet migrated to 009 has none (spec §21.7). */
+export function hasWorkflows(db: Db): boolean {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kanban_workflow_tasks'").get() !== undefined;
+}
+
+export function getInstance(db: Db, instanceId: string): InstanceRow | undefined {
+  const row = db.prepare<[string], InstanceRaw>(`SELECT ${INSTANCE_COLS} FROM kanban_workflow_instances WHERE instance_id = ?`).get(instanceId);
+  return row === undefined ? undefined : decodeInstance(row);
+}
+
+export function instanceByKey(db: Db, idempotencyKey: string): KeyedInstance | undefined {
+  const row = db
+    .prepare<[string], InstanceRaw>(`SELECT ${INSTANCE_COLS} FROM kanban_workflow_instances WHERE idempotency_key = ?`)
+    .get(idempotencyKey);
+  return row === undefined ? undefined : { instance: decodeInstance(row), dagSha256: row.dag_sha256 };
+}
+
+/** An instance's members, in their DAG's order. */
+export function membersOf(db: Db, instanceId: string): MemberRow[] {
+  return db
+    .prepare<[string], MemberRaw>(`SELECT ${MEMBER_COLS} FROM kanban_workflow_tasks WHERE instance_id = ? ORDER BY position`)
+    .all(instanceId)
+    .map(decodeMember);
+}
+
+/**
+ * An instance's members in their DAG's order, each with its task, in two
+ * queries whatever their number. A member's task is never missing: the members
+ * table's foreign key holds it, and no task is ever deleted. Were one missing,
+ * its member would be left out, so a read never throws on it.
+ */
+export function membersWithTasks(db: Db, instanceId: string): Array<MemberRow & { task: TaskRow }> {
+  const tasks = new Map(
+    db
+      .prepare<[string], TaskRaw>(
+        `SELECT ${TASK_COLS} FROM kanban_tasks WHERE task_id IN (SELECT task_id FROM kanban_workflow_tasks WHERE instance_id = ?)`,
+      )
+      .all(instanceId)
+      .map((r) => [r.task_id, decodeTask(r)]),
+  );
+  return membersOf(db, instanceId).flatMap((m) => {
+    const task = tasks.get(m.taskId);
+    return task === undefined ? [] : [{ ...m, task }];
+  });
+}
+
+/**
+ * The phases of the members of a board's newest `limit` instances, as
+ * `instancesOn` reads them, in one aggregate query: by instance, how many
+ * members are in each phase. An instance with no member is absent.
+ */
+export function memberPhases(db: Db, board: string, limit: number): Map<string, Array<{ phase: Phase; n: number }>> {
+  const rows = db
+    .prepare<[string, number], { instance_id: string; phase: Phase; n: number }>(
+      `SELECT m.instance_id, t.phase, count(*) AS n
+         FROM kanban_workflow_tasks m JOIN kanban_tasks t ON t.task_id = m.task_id
+        WHERE m.instance_id IN (SELECT instance_id FROM kanban_workflow_instances WHERE board = ?
+                                 ORDER BY created_at DESC, rowid DESC LIMIT ?)
+        GROUP BY m.instance_id, t.phase`,
+    )
+    .all(board, limit);
+  const out = new Map<string, Array<{ phase: Phase; n: number }>>();
+  for (const r of rows) out.set(r.instance_id, [...(out.get(r.instance_id) ?? []), { phase: r.phase, n: r.n }]);
+  return out;
+}
+
+/**
+ * The instance a task is a member of, with the instance's workflow name, for
+ * `task show`'s line (spec §21.10); undefined for a task that is none's, and on
+ * a database not yet migrated, which has no members table.
+ */
+export function memberOf(db: Db, taskId: string): (MemberRow & { name: string | null }) | undefined {
+  if (!hasWorkflows(db)) return undefined;
+  const row = db
+    .prepare<[string], MemberRaw & { name: string | null }>(
+      `SELECT m.task_id, m.instance_id, m.ref, m.step, m.item, m.position, i.name
+         FROM kanban_workflow_tasks m JOIN kanban_workflow_instances i ON i.instance_id = m.instance_id
+        WHERE m.task_id = ?`,
+    )
+    .get(taskId);
+  return row === undefined ? undefined : { ...decodeMember(row), name: row.name };
+}
+
+/** A board's instances, newest first, at most `limit` (spec §21.10), and how many it has in all. */
+export function instancesOn(db: Db, board: string, limit: number): { instances: InstanceRow[]; total: number } {
+  const instances = db
+    .prepare<[string, number], InstanceRaw>(
+      `SELECT ${INSTANCE_COLS} FROM kanban_workflow_instances WHERE board = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+    )
+    .all(board, limit)
+    .map(decodeInstance);
+  const total = db.prepare<[string], { n: number }>('SELECT count(*) AS n FROM kanban_workflow_instances WHERE board = ?').get(board)?.n ?? 0;
+  return { instances, total };
+}
+
+/**
+ * An instance's related tasks (spec §21.10): tasks that are not its members and
+ * have a member as a parent, or as their `created_from_task`, oldest first.
+ */
+export function relatedTasks(db: Db, instanceId: string): TaskRow[] {
+  return db
+    .prepare<[string, string, string], TaskRaw>(
+      `SELECT ${TASK_COLS} FROM kanban_tasks
+        WHERE task_id NOT IN (SELECT task_id FROM kanban_workflow_tasks WHERE instance_id = ?)
+          AND (created_from_task IN (SELECT task_id FROM kanban_workflow_tasks WHERE instance_id = ?)
+               OR task_id IN (SELECT l.child_id FROM kanban_links l JOIN kanban_workflow_tasks m ON m.task_id = l.parent_id
+                               WHERE m.instance_id = ?))
+        ORDER BY created_at, rowid`,
+    )
+    .all(instanceId, instanceId, instanceId)
+    .map(decodeTask);
 }

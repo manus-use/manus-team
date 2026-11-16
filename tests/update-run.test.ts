@@ -35,7 +35,8 @@ describe('runDetached', () => {
     const r = await sh('sleep 30 & wait', 1_500);
     expect(r.timedOut).toBe(true);
     expect(r.code).toBe(143);
-    expect(Date.now() - started).toBeLessThan(5_000);
+    // Well short of the 30 s the child would sleep, with room for a loaded machine's slow spawn.
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 
   it('sends SIGKILL 5 seconds after a SIGTERM that is ignored', async () => {

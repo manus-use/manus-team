@@ -29,6 +29,7 @@ import { KanbanSink } from './kanban/sink.js';
 import { claimSocketPath, listenWorker, lockGateway, workerSocketPath, type GatewayLock, type WorkerServer } from './kanban/socket.js';
 import { WorkerApi } from './kanban/worker.js';
 import { TaskDirectories } from './kanban/worktree.js';
+import { listWorkflows, workflowLines } from './kanban/workflow.js';
 import type { Channel } from './channel/types.js';
 
 /**
@@ -107,20 +108,45 @@ export function registerConfiguredSecrets(config: GatewayConfig, team: Team): vo
  * reason the gateway would not start. Change its name, its argument or what it
  * throws knowing that `mt update`'s preflight runs that check.
  */
-export function loadStartup(env: Env = process.env): { config: GatewayConfig; team: Team; gatewayEnv: GatewayEnvFile } {
+export function loadStartup(env: Env = process.env): { config: GatewayConfig; team: Team; gatewayEnv: GatewayEnvFile; workflows: string[] } {
   const loaded = loadGatewayEnv(env);
   const config = loadConfig(loaded.env);
   // Read and checked before anything starts: a broken role or workspace found
   // later strands work; found here it is a line in the startup error.
   const team = loadTeam(config, loaded.env);
   registerConfiguredSecrets(config, team);
-  return { config, team, gatewayEnv: loaded.file };
+  return { config, team, gatewayEnv: loaded.file, workflows: startupWorkflows(config, team) };
+}
+
+/**
+ * The workflow check's lines (spec §21.4): notes, as a broken workflow does not
+ * stop the gateway; only it is unusable. With the team as the gateway's service
+ * judges it, supervised roles accepted. `mt service check` prints them too.
+ */
+function startupWorkflows(config: GatewayConfig, team: Team): string[] {
+  const dir = join(config.home, 'workflows');
+  try {
+    return workflowLines(
+      listWorkflows(dir, { roles: team.roles, workspaces: new Set(team.workspaces.keys()), supervisedRoles: true }),
+    );
+  } catch (err) {
+    // Only the directory itself throws, a ConfigError; a file that cannot be read is one broken workflow.
+    if (!(err instanceof ConfigError)) throw err;
+    // Two lines, so mt service check warns of the first and leaves the summary to the gateway's note.
+    const why = err.message.replace(`cannot read ${dir}: `, '');
+    return [`workflows directory ${dir} cannot be read: ${why}`, 'workflows: none'];
+  }
 }
 
 /** How long a shutdown waits for the dispatcher's work before it closes the database. */
 const SHUTDOWN_DRAIN_MS = 5_000;
 
-export async function createGateway(config: GatewayConfig, team: Team): Promise<Gateway> {
+/** What `loadStartup` found beside the config and the team: the workflow check's lines, noted after the roles' (spec §21.4). */
+export interface StartupNotes {
+  workflows?: readonly string[];
+}
+
+export async function createGateway(config: GatewayConfig, team: Team, startup: StartupNotes = {}): Promise<Gateway> {
   // Every secret the gateway itself holds, masked wherever text leaves it (spec
   // §10.1). Before anything can print, the notes below included, or store agent
   // text. The dispatcher adds each run's token when it is claimed and removes it
@@ -156,6 +182,7 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
     `roles: ${[...team.roles.keys()].sort().join(', ')}; ` +
       `workspaces: ${[...team.workspaces.keys()].sort().join(', ')}`,
   );
+  for (const line of startup.workflows ?? []) note(line);
 
   await mkdir(dirname(config.dbPath), { recursive: true, mode: 0o700 });
   await mkdir(config.downloadDir, { recursive: true, mode: 0o700 });
@@ -520,12 +547,12 @@ export async function createGateway(config: GatewayConfig, team: Team): Promise<
 export async function main(): Promise<void> {
   // Secrets registered inside, before anything else can fail, so an error raised
   // between loadTeam and the gateway starting is masked whatever createGateway does first.
-  const { config, team, gatewayEnv } = loadStartup();
+  const { config, team, gatewayEnv, workflows } = loadStartup();
   if (gatewayEnv.present) {
     // Names only, as mt role check gives them.
     process.stderr.write(`gateway .env: ${gatewayEnv.path} sets ${Object.keys(gatewayEnv.values).sort().join(', ') || 'nothing'}\n`);
   }
-  const gateway = await createGateway(config, team);
+  const gateway = await createGateway(config, team, { workflows });
   await gateway.start();
 
   let shuttingDown = false;

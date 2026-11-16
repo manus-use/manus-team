@@ -337,7 +337,11 @@ export type RefusalCode =
   /** The board is archived: nothing is added to it, and no chat moves onto it. */
   | 'board_archived'
   /** A parent and its child would be on different boards (spec §16). */
-  | 'other_board';
+  | 'other_board'
+  /** Something over its size: a DAG, the params, a value or a task's field (spec §21.5). */
+  | 'too_large'
+  /** No usable workflow file of that name (spec §21.6). */
+  | 'unknown_workflow';
 
 /** The gate that refused a report, as the reporter is shown it (spec §7.7). */
 export interface FailedGate {
@@ -368,3 +372,24 @@ export type Waiting =
   | { kind: 'board'; board: string; maxRunning: number }
   | { kind: 'role'; role: string; maxRunning: number }
   | { kind: 'workspace'; workspace: string; taskId: string; runId: string };
+
+/** A task to create, as a person or a worker asks for it. Names are not yet checked. */
+export interface CreateRequest {
+  title: string;
+  body?: string;
+  contract?: Contract;
+  /** A role name, or a person's principal `lark:<union_id>`. */
+  assignee?: string;
+  reviewer?: string;
+  workspace?: string;
+  parents?: readonly string[];
+  priority?: number;
+  idempotencyKey?: string;
+  failureLimit?: number;
+  retryOnCrash?: RetryOnCrash;
+  maxRuntimeS?: number;
+  createdBy: string;
+  createdVia: CreatedVia;
+  /** The board it goes on (spec §16): chat's is the chat's board. A run's task's follow-ups go on its board, whatever this says. */
+  board?: string;
+}

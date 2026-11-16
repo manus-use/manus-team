@@ -1,7 +1,9 @@
 import { createConnection } from 'node:net';
 import type { Readable } from 'node:stream';
+import { checkDagShape } from '../kanban/dag.js';
 import { DEFAULT_MAX_REQUEST_BYTES } from '../kanban/socket.js';
 import { WORKER_COMMANDS } from '../kanban/worker.js';
+import { decodeUtf8 } from '../text.js';
 import type { MtIo } from './mt.js';
 
 /**
@@ -33,8 +35,8 @@ export const NOT_IN_A_RUN =
 
 const USAGE = `usage: mt kanban <${WORKER_COMMANDS.join('|')}>, with its input as JSON on stdin`;
 
-/** All of a stream, or undefined once it passes `maxBytes`. */
-export async function readAll(stream: Readable, maxBytes: number): Promise<string | undefined> {
+/** All of a stream, as the bytes it gave, or undefined once it passes `maxBytes`. */
+export async function readAll(stream: Readable, maxBytes: number): Promise<Uint8Array | undefined> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of stream) {
@@ -43,7 +45,7 @@ export async function readAll(stream: Readable, maxBytes: number): Promise<strin
     if (size > maxBytes) return undefined;
     chunks.push(buf);
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks);
 }
 
 /** One request line to the socket, and the gateway's one answer line, waited for up to `timeoutMs`. */
@@ -105,9 +107,15 @@ export async function kanbanCommand(command: string | undefined, rest: readonly 
       });
       return 1;
     }
-    const text = await (io.stdin?.(DEFAULT_MAX_REQUEST_BYTES) ?? Promise.resolve(''));
-    if (text === undefined) {
+    const bytes = await (io.stdin?.(DEFAULT_MAX_REQUEST_BYTES) ?? Promise.resolve(new Uint8Array()));
+    if (bytes === undefined) {
       say({ ok: false, code: 'too_large', message: `the input is over ${DEFAULT_MAX_REQUEST_BYTES} bytes` });
+      return 1;
+    }
+    // Strictly: a broken byte is refused, never stored as a replacement character (spec §21.5).
+    const text = decodeUtf8(bytes);
+    if (text === undefined) {
+      say({ ok: false, code: 'invalid', message: `mt kanban ${command} reads one JSON object on stdin, in UTF-8, and this is not UTF-8` });
       return 1;
     }
     try {
@@ -116,6 +124,16 @@ export async function kanbanCommand(command: string | undefined, rest: readonly 
       // Not quoted: the input is the agent's text, and may hold anything.
       say({ ok: false, code: 'invalid', message: `mt kanban ${command} reads one JSON object on stdin, and this is not JSON` });
       return 1;
+    }
+    // A DAG's canonical form over 192 KiB is refused here, before it is sent (spec §21.5); any other
+    // refusal of its shape is the gateway's, which says it the same way.
+    if (command === 'apply-dag' && typeof input === 'object' && input !== null && !Array.isArray(input)) {
+      const { idempotency_key: _key, dry_run: _dryRun, ...dag } = input as Record<string, unknown>;
+      const shaped = checkDagShape(dag, 'run');
+      if (!shaped.ok && shaped.code === 'too_large') {
+        say({ ok: false, code: 'too_large', message: shaped.message });
+        return 1;
+      }
     }
   }
 
