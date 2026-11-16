@@ -17,6 +17,7 @@ import { createConnection, createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { redactKnownSecrets } from '../secrets.js';
+import { decodeUtf8 } from '../text.js';
 
 /**
  * The gateway's local socket (spec §7.2, §10): how `mt kanban` reaches the worker
@@ -378,9 +379,15 @@ export async function listenWorker(
       // Read; what is left is the handler's, however long it takes. Once it has
       // answered, the linger bounds the connection again.
       clearTimeout(deadline);
+      // Strictly: bytes that are not UTF-8 are refused, never read with replacement characters (spec §21.5).
+      const text = decodeUtf8(Buffer.concat(chunks));
+      if (text === undefined) {
+        reply({ ok: false, code: 'bad_request', message: 'a request is one line of JSON, in UTF-8' });
+        return;
+      }
       let request: unknown;
       try {
-        request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        request = JSON.parse(text);
       } catch {
         reply({ ok: false, code: 'bad_request', message: 'a request is one line of JSON' });
         return;

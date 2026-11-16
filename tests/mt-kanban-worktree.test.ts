@@ -50,7 +50,7 @@ async function mt(argv: string[]) {
     out: (l) => out.push(l),
     err: (l) => err.push(l),
     stdinIsTTY: false,
-    stdin: async () => '',
+    stdin: async () => Buffer.from(''),
   });
   return { code, out: out.join('\n'), err: err.join('\n') };
 }

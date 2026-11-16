@@ -49,8 +49,8 @@ export interface MtIo {
   err: (line: string) => void;
   /** Runs git; injectable so a failed clone can be tested. */
   git?: Git;
-  /** All of stdin, or undefined once it passes `maxBytes`: `mt kanban`'s input. */
-  stdin?: (maxBytes: number) => Promise<string | undefined>;
+  /** All of stdin, as bytes, or undefined once it passes `maxBytes`: `mt kanban`'s input, decoded by the command. */
+  stdin?: (maxBytes: number) => Promise<Uint8Array | undefined>;
   /** Stdin is a terminal: `mt kanban` refuses rather than wait on one for input that never comes. */
   stdinIsTTY?: boolean;
   /** An agent command's version, from `<command> --version`; injectable so `mt role check` is tested without one. */

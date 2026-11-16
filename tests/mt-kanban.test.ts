@@ -75,7 +75,7 @@ async function mt(
     stdinIsTTY,
     stdin: async (max) => {
       const text = typeof stdin === 'function' ? stdin() : stdin;
-      return Buffer.byteLength(text) > max ? undefined : text;
+      return Buffer.byteLength(text) > max ? undefined : Buffer.from(text);
     },
   });
   // One line of JSON, always.

@@ -11,7 +11,7 @@ import { parse, UsageError } from './args.js';
 import { operatorName, withBoard } from './gate.js';
 import { ask } from './kanban.js';
 import type { MtIo } from './mt.js';
-import { BIDI, INVISIBLE } from '../text.js';
+import { BIDI, decodeUtf8, INVISIBLE } from '../text.js';
 import { boardsText, line, listText, showText, who } from './plain.js';
 
 /**
@@ -304,15 +304,17 @@ async function bodyOf(values: { body?: string | undefined; 'body-file'?: string 
     if (io.stdinIsTTY === true) {
       return early(io, json, 'invalid', '--body-file - reads the body on stdin; stdin is a terminal: redirect a file or pipe it');
     }
-    const text = await (io.stdin?.(max) ?? Promise.resolve(''));
-    return text ?? early(io, json, 'too_large', `A body is at most ${max} bytes.`);
+    const bytes = await (io.stdin?.(max) ?? Promise.resolve(new Uint8Array()));
+    if (bytes === undefined) return early(io, json, 'too_large', `A body is at most ${max} bytes.`);
+    return decodeUtf8(bytes) ?? early(io, json, 'invalid', 'the body on stdin is not UTF-8');
   }
   try {
     // A regular file only: a FIFO or a device could block, or never end.
     const st = statSync(file);
     if (!st.isFile()) return early(io, json, 'invalid', `${file} is not a regular file: give a file, or - for stdin`);
     if (st.size > max) return early(io, json, 'too_large', `A body is at most ${max} bytes.`);
-    return readFileSync(file, 'utf8');
+    const text = decodeUtf8(readFileSync(file));
+    return text ?? early(io, json, 'invalid', `the body in ${file} is not UTF-8`);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
     return early(io, json, 'invalid', `cannot read the body from ${file}: ${code}`);
