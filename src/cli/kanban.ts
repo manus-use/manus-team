@@ -1,5 +1,6 @@
 import { createConnection } from 'node:net';
 import type { Readable } from 'node:stream';
+import { checkDagShape } from '../kanban/dag.js';
 import { DEFAULT_MAX_REQUEST_BYTES } from '../kanban/socket.js';
 import { WORKER_COMMANDS } from '../kanban/worker.js';
 import { decodeUtf8 } from '../text.js';
@@ -123,6 +124,16 @@ export async function kanbanCommand(command: string | undefined, rest: readonly 
       // Not quoted: the input is the agent's text, and may hold anything.
       say({ ok: false, code: 'invalid', message: `mt kanban ${command} reads one JSON object on stdin, and this is not JSON` });
       return 1;
+    }
+    // A DAG's canonical form over 192 KiB is refused here, before it is sent (spec §21.5); any other
+    // refusal of its shape is the gateway's, which says it the same way.
+    if (command === 'apply-dag' && typeof input === 'object' && input !== null && !Array.isArray(input)) {
+      const { idempotency_key: _key, dry_run: _dryRun, ...dag } = input as Record<string, unknown>;
+      const shaped = checkDagShape(dag, 'run');
+      if (!shaped.ok && shaped.code === 'too_large') {
+        say({ ok: false, code: 'too_large', message: shaped.message });
+        return 1;
+      }
     }
   }
 

@@ -94,7 +94,7 @@ const USAGE = [
   '  mt kanban gate list <task_id>',
   '  mt kanban gate remove <task_id> <gate_id>',
   "the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
-  '  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json',
+  `  mt kanban <${WORKER_COMMANDS.join('|')}> < input.json`,
 ].join('\n');
 
 function expectNothing(positionals: readonly string[], what: string): void {
@@ -133,13 +133,14 @@ function gate(argv: readonly string[], io: MtIo): number {
  * The operator's groups (spec §2.6), which refuse to run in a board run's shell.
  * Every other `mt kanban <command>` is the worker CLI's (spec §7.3).
  */
-const OPERATOR_GROUPS: readonly string[] = ['task', 'board', 'gate'];
+const OPERATOR_GROUPS: readonly string[] = ['task', 'board', 'gate', 'workflow'];
 
 /** The subcommands whose name a run's refusal gives: `mt kanban board set`, not just `mt kanban board`. */
 const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
   task: TASK_COMMANDS,
   board: ['list', 'create', 'set', 'archive', 'use'],
   gate: ['add', 'list', 'remove'],
+  workflow: ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive'],
 };
 
 /**
@@ -152,7 +153,11 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
   const sub = rest[0];
   const named = command !== undefined && sub !== undefined && SUBCOMMANDS[command]?.includes(sub) === true;
   const what = ['mt kanban', ...(command === undefined ? [] : [command]), ...(named ? [sub] : [])].join(' ');
-  const message = runShellRefusal(what);
+  // A run starts a workflow, or applies a DAG of its own, with the worker's commands (spec §21.6).
+  const message =
+    command === 'workflow'
+      ? `${runShellRefusal(what)}; a board run starts a workflow with mt kanban start-workflow, and makes a DAG of its own with mt kanban apply-dag`
+      : runShellRefusal(what);
   if (command !== 'gate' && rest.includes('--json')) io.out(jsonLine({ ok: false, code: 'operator_command', message }));
   else refuse(io, message);
   return 1;

@@ -23,7 +23,7 @@ describe('mt', () => {
     expect(usage).toContain('  mt kanban board list [all] [--json]');
     expect(usage).toContain('  mt kanban gate list <task_id>');
     expect(usage).toContain("the worker's commands, which work only in a board run's shell");
-    expect(usage).toContain('  mt kanban <show|complete|review|changes|block|comment|create|link> < input.json');
+    expect(usage).toContain('  mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag> < input.json');
   });
 
   it('refuses an unknown command with the usage, exit 2', async () => {

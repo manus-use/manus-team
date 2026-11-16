@@ -2,7 +2,8 @@ import type { Db } from '../db/open.js';
 import { getTask, runByTokenHash, taskView, type ReviewRequest } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { briefFor } from './brief.js';
-import type { KanbanService } from './service.js';
+import { DAG_LIMITS } from './dag.js';
+import type { KanbanService, WorkflowMade } from './service.js';
 import { hashToken, sameHash, TOKEN_PATTERN } from './token.js';
 import { WORKER_LIMITS } from './limits.js';
 import {
@@ -43,7 +44,18 @@ import {
  * socket as it is sent.
  */
 
-export const WORKER_COMMANDS = ['show', 'complete', 'review', 'changes', 'block', 'comment', 'create', 'link'] as const;
+export const WORKER_COMMANDS = [
+  'show',
+  'complete',
+  'review',
+  'changes',
+  'block',
+  'comment',
+  'create',
+  'link',
+  'start-workflow',
+  'apply-dag',
+] as const;
 export type WorkerCommand = (typeof WORKER_COMMANDS)[number];
 
 /** What a refusal can say: the board's codes, and the worker API's own. */
@@ -90,7 +102,9 @@ type Field =
   | { kind: 'text'; max: number; required: boolean }
   | { kind: 'json' }
   | { kind: 'ids' }
-  | { kind: 'contract' };
+  | { kind: 'contract' }
+  /** A workflow's params (spec §21.6): an object of text and lists of text, within their sizes. */
+  | { kind: 'params' };
 
 const text = (max: number, required = true): Field => ({ kind: 'text', max, required });
 const name = (required = true): Field => text(WORKER_LIMITS.name, required);
@@ -114,6 +128,9 @@ const SCHEMAS: Record<WorkerCommand, Readonly<Record<string, Field>>> = {
     idempotency_key: name(false),
   },
   link: { parent_id: name(), child_id: name() },
+  'start-workflow': { workflow: name(), params: { kind: 'params' }, idempotency_key: name(false) },
+  // A DAG, read by the DAG's own checks (spec §21.5) rather than this flat schema; its two keys of its own are taken off first.
+  'apply-dag': {},
 };
 
 const ENVELOPE = ['run', 'token', 'command', 'input'];
@@ -223,6 +240,16 @@ function badInput(command: WorkerCommand, input: Record<string, unknown>): Worke
           return refused('too_large', `${key} names ${value.length} tasks; at most ${WORKER_LIMITS.parents}`);
         }
         break;
+      case 'params': {
+        if (!isRecord(value) || !Object.values(value).every((v) => typeof v === 'string' || (Array.isArray(v) && v.every((x) => typeof x === 'string')))) {
+          return refused('invalid', `${key} is an object of text and lists of text`);
+        }
+        const size = bytes(JSON.stringify(value));
+        if (size > DAG_LIMITS.paramsBytes) {
+          return refused('too_large', `${key} is ${size} bytes as JSON; at most ${DAG_LIMITS.paramsBytes} together`);
+        }
+        break;
+      }
       case 'contract':
         if (!isRecord(value)) return refused('invalid', `${key} is an object of text fields`);
         for (const [f, v] of Object.entries(value)) {
@@ -360,10 +387,11 @@ export class WorkerApi {
 
     const input = raw.input ?? {};
     if (!isRecord(input)) return refused('invalid', `${command} reads a JSON object on stdin`);
-    const bad = badInput(command, input);
+    const bad = command === 'apply-dag' ? undefined : badInput(command, input);
     if (bad !== undefined) return bad;
     const r = await this.#act(command, run, input, opts);
-    if (r.ok && command !== 'show') this.#changed();
+    // A dry run made nothing, and so is no change to look at.
+    if (r.ok && command !== 'show' && r['dry_run'] !== true) this.#changed();
     return r;
   }
 
@@ -449,6 +477,43 @@ export class WorkerApi {
         }
         const r = this.#service.link(parent, child, actor);
         return r.ok ? { ok: true, added: r.added } : refusal(r);
+      }
+      case 'start-workflow': {
+        // On the run's task's board, whatever else, created from its task (spec §21.6).
+        const key = str('idempotency_key');
+        const r = this.#service.startWorkflow({
+          workflow: str('workflow') ?? '',
+          params: { from: 'json', params: input['params'] ?? {} },
+          ...(key === undefined ? {} : { idempotencyKey: key }),
+          createdBy: actor,
+          createdVia: { kind: 'run', runId: run.runId },
+        });
+        return r.ok ? madeAnswer(r) : refusal(r);
+      }
+      case 'apply-dag': {
+        // Its own two keys, beside the DAG's, are taken off before the DAG is checked (spec §21.6).
+        const { idempotency_key: key, dry_run: dryRun, ...dag } = input;
+        if (key !== undefined && key !== null && (typeof key !== 'string' || bytes(key) > WORKER_LIMITS.name)) {
+          return refused('invalid', `idempotency_key is text, of at most ${WORKER_LIMITS.name} bytes`);
+        }
+        if (dryRun !== undefined && dryRun !== null && typeof dryRun !== 'boolean') return refused('invalid', 'dry_run is true or false');
+        const r = this.#service.applyDag({
+          dag,
+          ...(typeof key === 'string' ? { idempotencyKey: key } : {}),
+          ...(dryRun === true ? { dryRun: true } : {}),
+          createdBy: actor,
+          createdVia: { kind: 'run', runId: run.runId },
+        });
+        if (!r.ok) return refusal(r);
+        if (!('dryRun' in r)) return madeAnswer(r);
+        return {
+          ok: true,
+          dry_run: true,
+          existing: r.existing,
+          ...(r.instanceId === null ? {} : { instance_id: r.instanceId }),
+          board: r.board,
+          tasks: r.tasks.map((t) => ({ ref: t.ref, step: t.step, item: t.item, gates: t.gates })),
+        };
       }
     }
   }
@@ -543,6 +608,17 @@ function refusal(r: { ok: false; code: RefusalCode; message: string; gate?: Fail
     code: r.code,
     message: r.message,
     gate: { command: g.command, exit_code: g.exitCode, signal: g.signal, timed_out: g.timedOut, output: g.output },
+  };
+}
+
+/** A start's or an apply's answer (spec §21.6): the instance, and each task with its ref, so an agent finds the task it named. */
+function madeAnswer(r: WorkflowMade): WorkerResponse {
+  return {
+    ok: true,
+    instance_id: r.instance.instanceId,
+    existing: r.existing,
+    board: r.instance.board,
+    tasks: r.tasks.map((t) => ({ task_id: t.taskId, ref: t.ref, step: t.step, item: t.item })),
   };
 }
 
