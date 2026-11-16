@@ -337,7 +337,11 @@ export type RefusalCode =
   /** The board is archived: nothing is added to it, and no chat moves onto it. */
   | 'board_archived'
   /** A parent and its child would be on different boards (spec §16). */
-  | 'other_board';
+  | 'other_board'
+  /** Something over its size: a DAG, the params, a value or a task's field (spec §21.5). */
+  | 'too_large'
+  /** No usable workflow file of that name (spec §21.6). */
+  | 'unknown_workflow';
 
 /** The gate that refused a report, as the reporter is shown it (spec §7.7). */
 export interface FailedGate {

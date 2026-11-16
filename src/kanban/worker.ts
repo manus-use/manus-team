@@ -54,8 +54,6 @@ export type WorkerCode =
   /** The request itself is not one: not JSON, not an object, a missing field. */
   | 'bad_request'
   | 'unknown_command'
-  /** A request, or a field of one, over its size. */
-  | 'too_large'
   /** Something failed that the request did not cause. */
   | 'internal';
 
