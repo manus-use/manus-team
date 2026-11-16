@@ -1050,17 +1050,19 @@ export class KanbanService {
   }
 
   /**
-   * A task's subscription at this chat moved into the thread its "Created" reply
-   * opened, with the command message as its root (spec §19.4): `KanbanChat`'s,
-   * once Lark answered the reply with its thread.
+   * The tasks' subscriptions at this chat moved into the thread their "Created"
+   * reply opened, with the command message as its root, in one call (spec
+   * §19.4, §21.9): `KanbanChat`'s, once Lark answered the reply with its thread.
+   * One task for `/kanban task new`; every member for a workflow's start.
    */
-  threadSubscription(taskId: string, at: ChatAt, threadId: string, rootId: string): Result<{ moved: boolean }> {
-    const ids = idsRefused(taskId, threadId, rootId);
+  threadSubscriptions(taskIds: readonly string[], at: ChatAt, threadId: string, rootId: string): Result<{ moved: number }> {
+    if (!isTextList(taskIds)) return board.refuse('invalid', 'task ids are text');
+    const ids = idsRefused(threadId, rootId);
     if (ids !== undefined) return ids;
     if (!isRecord(at) || !isText(at.channel) || !isText(at.appId) || !isText(at.conversationId)) {
       return board.refuse('invalid', 'a chat is its channel, bot and conversation, as text');
     }
-    return board.threadSubscription(this.#db, taskId, at, threadId, rootId);
+    return board.threadSubscriptions(this.#db, taskIds, at, threadId, rootId);
   }
 
   /** Who the next claim is for, resolved against the team as it is now. */

@@ -246,7 +246,7 @@ export class KanbanChat {
   threaded(taskId: string, key: BindingKey, messageId: string, threadId: string | undefined): void {
     try {
       if (threadId === undefined || threadId === '') return;
-      const r = this.#deps.service.threadSubscription(taskId, chatAt(key), threadId, messageId);
+      const r = this.#deps.service.threadSubscriptions([taskId], chatAt(key), threadId, messageId);
       if (!r.ok) this.#note(`kanban: task ${taskId} stays at chat scope: its subscription was not moved to thread ${threadId} (${r.code})`);
     } finally {
       this.#release(taskId);

@@ -336,60 +336,79 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
       if (p === undefined) return refuse('not_found', `no task ${parent} to be a parent`);
       if (p.board !== board) return refuse('other_board', onOtherBoard(parent, p.board, board));
     }
-
-    const taskId = newTaskId();
-    d.prepare(
-      `INSERT INTO kanban_tasks
-         (task_id, title, body, contract, assignee_kind, assignee, reviewer_kind, reviewer,
-          workspace, phase, priority, idempotency_key, failure_limit, retry_on_crash,
-          max_runtime_s, created_by, created_via, created_at, created_from_task, board)
-       VALUES (?, ?, ?, jsonb(?), ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, jsonb(?), ?, ?, ?)`,
-    ).run(
-      taskId,
-      mask(t.title),
-      mask(t.body ?? ''),
-      JSON.stringify(maskContract(t.contract ?? {})),
-      t.assignee?.kind ?? null,
-      t.assignee?.name ?? null,
-      t.reviewer?.kind ?? null,
-      t.reviewer?.name ?? null,
-      t.workspace ?? null,
-      t.priority ?? 0,
-      t.idempotencyKey ?? null,
-      t.failureLimit ?? null,
-      t.retryOnCrash ?? 'always',
-      t.maxRuntimeS ?? null,
-      t.createdBy,
-      JSON.stringify(t.createdVia),
-      now,
-      createdFromTask,
-      board,
-    );
-    const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
-    for (const parent of parents) link.run(parent, taskId, now);
-    subscribe(d, taskId, t.createdVia, createdFromTask, now);
-    record(
-      d,
-      {
-        taskId,
-        kind: 'created',
-        actor: t.createdBy,
-        payload: {
-          title: t.title,
-          assignee: t.assignee?.name ?? null,
-          assigneeKind: t.assignee?.kind ?? null,
-          reviewer: t.reviewer?.name ?? null,
-          reviewerKind: t.reviewer?.kind ?? null,
-          workspace: t.workspace ?? null,
-          parents,
-          createdFromTask,
-          board,
-        },
-      },
-      now,
-    );
+    const taskId = insertTask(d, { ...t, board, createdFromTask, parents }, now);
     return { ok: true, task: mustGet(d, taskId), existing: false };
   });
+}
+
+/** A task as `insertTask` writes it: its board and its creating task worked out, its parents checked. */
+interface TaskInsert extends NewTask {
+  board: string;
+  createdFromTask: string | null;
+  parents: readonly string[];
+}
+
+/**
+ * The insert every task is made by, `createTask`'s and a workflow's alike (spec
+ * §21.8): the row, its links, its subscriptions and its `created` event, whose
+ * payload gains `payload`'s keys. Inside the caller's transaction, which has
+ * checked everything; answers the new task's id.
+ */
+function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, unknown> = {}): string {
+  const { board, createdFromTask, parents } = t;
+  const taskId = newTaskId();
+  d.prepare(
+    `INSERT INTO kanban_tasks
+       (task_id, title, body, contract, assignee_kind, assignee, reviewer_kind, reviewer,
+        workspace, phase, priority, idempotency_key, failure_limit, retry_on_crash,
+        max_runtime_s, created_by, created_via, created_at, created_from_task, board)
+     VALUES (?, ?, ?, jsonb(?), ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, jsonb(?), ?, ?, ?)`,
+  ).run(
+    taskId,
+    mask(t.title),
+    mask(t.body ?? ''),
+    JSON.stringify(maskContract(t.contract ?? {})),
+    t.assignee?.kind ?? null,
+    t.assignee?.name ?? null,
+    t.reviewer?.kind ?? null,
+    t.reviewer?.name ?? null,
+    t.workspace ?? null,
+    t.priority ?? 0,
+    t.idempotencyKey ?? null,
+    t.failureLimit ?? null,
+    t.retryOnCrash ?? 'always',
+    t.maxRuntimeS ?? null,
+    t.createdBy,
+    JSON.stringify(t.createdVia),
+    now,
+    createdFromTask,
+    board,
+  );
+  const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
+  for (const parent of parents) link.run(parent, taskId, now);
+  subscribe(d, taskId, t.createdVia, createdFromTask, now);
+  record(
+    d,
+    {
+      taskId,
+      kind: 'created',
+      actor: t.createdBy,
+      payload: {
+        title: t.title,
+        assignee: t.assignee?.name ?? null,
+        assigneeKind: t.assignee?.kind ?? null,
+        reviewer: t.reviewer?.name ?? null,
+        reviewerKind: t.reviewer?.kind ?? null,
+        workspace: t.workspace ?? null,
+        parents,
+        createdFromTask,
+        board,
+        ...payload,
+      },
+    },
+    now,
+  );
+  return taskId;
 }
 
 /**
@@ -435,26 +454,35 @@ export function advanceSubscription(db: Db, subscriptionId: number, cursor: numb
 }
 
 /**
- * Move a task's subscription at a chat into the thread its "Created" reply
- * opened (spec §19.4): its `thread_id` from '' to the thread's, and its root to
- * the command message, in one transaction. Only a subscription of this task, at
- * this chat, for this bot, still at chat scope with no root, moves, so a second
- * call changes nothing. Its cursor moves with it: nothing already sent is sent
- * again, and nothing pending is lost. It writes no event, as a cursor's move
- * writes none.
+ * Move the tasks' subscriptions at a chat into the thread their "Created" reply
+ * opened (spec §19.4, §21.9): each one's `thread_id` from '' to the thread's,
+ * and its root to the command message, all in one transaction: one task for
+ * `/kanban task new`, every member of an instance for a workflow's start. Only
+ * a subscription of these tasks, at this chat, for this bot, still at chat
+ * scope with no root, moves, so a second call changes nothing. Its cursor moves
+ * with it: nothing already sent is sent again, and nothing pending is lost. It
+ * writes no event, as a cursor's move writes none. Answers how many moved.
  */
-export function threadSubscription(db: Db, taskId: string, at: ChatAt, threadId: string, rootId: string): Result<{ moved: boolean }> {
+export function threadSubscriptions(
+  db: Db,
+  taskIds: readonly string[],
+  at: ChatAt,
+  threadId: string,
+  rootId: string,
+): Result<{ moved: number }> {
   return tx(db, (d) => {
     if (threadId === '' || rootId === '') return refuse('invalid', 'a thread and its root are not empty');
     // OR IGNORE: a subscription of the task already in that thread is left as it is.
-    const { changes } = d
-      .prepare(
-        `UPDATE OR IGNORE kanban_subscriptions SET thread_id = ?, root_message_id = ?
-          WHERE task_id = ? AND channel = ? AND account_id = ? AND conversation_id = ?
-            AND thread_id = '' AND root_message_id IS NULL`,
-      )
-      .run(threadId, rootId, taskId, at.channel, at.appId, at.conversationId);
-    return { ok: true, moved: changes === 1 };
+    const move = d.prepare(
+      `UPDATE OR IGNORE kanban_subscriptions SET thread_id = ?, root_message_id = ?
+        WHERE task_id = ? AND channel = ? AND account_id = ? AND conversation_id = ?
+          AND thread_id = '' AND root_message_id IS NULL`,
+    );
+    let moved = 0;
+    for (const taskId of new Set(taskIds)) {
+      moved += move.run(threadId, rootId, taskId, at.channel, at.appId, at.conversationId).changes;
+    }
+    return { ok: true, moved };
   });
 }
 
@@ -514,32 +542,54 @@ export function addGate(
     if (task.phase === 'done' || task.phase === 'archived') {
       return refuse('illegal_transition', `task ${taskId} is ${task.phase}; a gate on it would never run`);
     }
-    const gates = gatesOf(d, taskId);
-    if (gates.length >= GATE_LIMITS.perTask) {
-      return refuse('invalid', `task ${taskId} has ${gates.length} gates, the most a task may have`);
-    }
-    const total = gates.reduce((sum, g) => sum + g.timeoutS, 0) + gate.timeoutS;
-    if (total > GATE_LIMITS.totalTimeoutS) {
-      return refuse(
-        'invalid',
-        `task ${taskId}'s gates would take up to ${total} s together; at most ${GATE_LIMITS.totalTimeoutS} s, ` +
-          'since a report waits for them',
-      );
-    }
-    const { lastInsertRowid } = d
-      .prepare('INSERT INTO kanban_gates (task_id, command, timeout_s, created_by, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(taskId, gate.command, gate.timeoutS, by, now);
-    const id = Number(lastInsertRowid);
-    record(
-      d,
-      { taskId, kind: 'gate_added', actor: by, payload: { gateId: id, command: gate.command, timeoutS: gate.timeoutS } },
-      now,
-    );
-    return {
-      ok: true,
-      gate: { id, taskId, command: gate.command, timeoutS: gate.timeoutS, createdBy: by, createdAt: now },
-    };
+    return insertGate(d, taskId, gate, by, now);
   });
+}
+
+/**
+ * The insert every gate is added by, `addGate`'s and a workflow's alike (spec
+ * §21.8): GATE_LIMITS checked against the task's gates so far, inside the
+ * caller's transaction, then the row and its `gate_added` event, whose payload
+ * gains `payload`'s keys.
+ */
+function insertGate(
+  d: Db,
+  taskId: string,
+  gate: { command: string; timeoutS: number },
+  by: string,
+  now: number,
+  payload: Record<string, unknown> = {},
+): Result<{ gate: GateRow }> {
+  const gates = gatesOf(d, taskId);
+  if (gates.length >= GATE_LIMITS.perTask) {
+    return refuse('invalid', `task ${taskId} has ${gates.length} gates, the most a task may have`);
+  }
+  const total = gates.reduce((sum, g) => sum + g.timeoutS, 0) + gate.timeoutS;
+  if (total > GATE_LIMITS.totalTimeoutS) {
+    return refuse(
+      'invalid',
+      `task ${taskId}'s gates would take up to ${total} s together; at most ${GATE_LIMITS.totalTimeoutS} s, ` +
+        'since a report waits for them',
+    );
+  }
+  const { lastInsertRowid } = d
+    .prepare('INSERT INTO kanban_gates (task_id, command, timeout_s, created_by, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(taskId, gate.command, gate.timeoutS, by, now);
+  const id = Number(lastInsertRowid);
+  record(
+    d,
+    {
+      taskId,
+      kind: 'gate_added',
+      actor: by,
+      payload: { gateId: id, command: gate.command, timeoutS: gate.timeoutS, ...payload },
+    },
+    now,
+  );
+  return {
+    ok: true,
+    gate: { id, taskId, command: gate.command, timeoutS: gate.timeoutS, createdBy: by, createdAt: now },
+  };
 }
 
 /**
@@ -1839,14 +1889,34 @@ export function archive(
     const task = getTask(d, taskId);
     if (task === undefined) return refuse('not_found', `no task ${taskId}`);
     if (task.phase === 'archived') return refuse('illegal_transition', `task ${taskId} is already archived`);
-    const run = supersede(d, openRunOf(d, taskId), now);
-    d.prepare(
-      `UPDATE kanban_tasks SET phase = 'archived', blocked_from = NULL, closed_at = coalesce(closed_at, ?)
-        WHERE task_id = ?`,
-    ).run(now, taskId);
-    record(d, { taskId, runId: run?.runId ?? null, kind: 'archived', actor: by, payload: { from: task.phase } }, now);
-    return { ok: true, task: mustGet(d, taskId), run };
+    return { ok: true, ...archiveIn(d, task, by, now) };
   });
+}
+
+/**
+ * The body every archive runs, `archive`'s and a workflow's alike (spec §21.8),
+ * inside the caller's transaction, on a task not yet archived: its open run
+ * superseded if undecided, the task archived, keeping the time it was done, and
+ * its `archived` event, whose payload gains `payload`'s keys.
+ */
+function archiveIn(
+  d: Db,
+  task: TaskRow,
+  by: string,
+  now: number,
+  payload: Record<string, unknown> = {},
+): { task: TaskRow; run: RunRow | undefined } {
+  const run = supersede(d, openRunOf(d, task.taskId), now);
+  d.prepare(
+    `UPDATE kanban_tasks SET phase = 'archived', blocked_from = NULL, closed_at = coalesce(closed_at, ?)
+      WHERE task_id = ?`,
+  ).run(now, task.taskId);
+  record(
+    d,
+    { taskId: task.taskId, runId: run?.runId ?? null, kind: 'archived', actor: by, payload: { from: task.phase, ...payload } },
+    now,
+  );
+  return { task: mustGet(d, task.taskId), run };
 }
 
 /**
