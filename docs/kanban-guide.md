@@ -1691,9 +1691,10 @@ workspaces:
   default: /srv/repos/main
   research: { path: /srv/repos/research, isolated: true }
 ```
- A name field takes a name,
-or one whole reference such as `"{{item}}"`, never one put together from parts, so
-`"research-{{item}}"` is refused by the check.
+
+Every prototype names the same workspace, `research`. A name field takes a name, or one whole
+reference such as `"{{item}}"`, never one put together from parts, so `"research-{{item}}"` is
+refused by the check.
 
 ```
 $ mt workflow check caching
@@ -1742,8 +1743,9 @@ nothing and answers with the instance, `"existing":true`; the same key with a DA
 is refused, as is a key a `start` used. Without a key every apply is a new instance. A key is kept
 for good, an archived instance's included: to make the graph again, change the key.
 
-`mt kanban workflow start caching --board web-app --key caching:web-app` is the preview and the
-apply in one step, with the file as it is, when there is nothing to edit.
+Instead of the preview and the apply, `mt kanban workflow start caching --board web-app --key
+caching-start:web-app` does both in one step, with the file as it is, when there is nothing to
+edit. Its key is a new one: a start refuses a key an apply used.
 
 Notes:
 
