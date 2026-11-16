@@ -9,11 +9,16 @@ import {
   chatBoardOf,
   gatesOf,
   getBoard,
+  getInstance,
   getRun,
   getTask,
   instanceByKey,
+  instancesOn,
+  memberOf,
   membersOf,
+  relatedTasks,
   runsOf,
+  statusOf,
   taskView,
   type BoardEntry,
   type BoardSummary,
@@ -33,15 +38,19 @@ import { holdsSecret } from './gate-command.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
 import { limitsReached, workspaceBusy } from './waiting.js';
+import type { DisplayStatus } from './status.js';
 import {
   expand,
+  instanceStatus,
   listWorkflows,
   paramsLine,
   readWorkflow,
   type GivenParams,
+  type InstanceState,
   type PersonOf,
   type Workflow,
   type WorkflowFacts,
+  type WorkflowList,
 } from './workflow.js';
 import { isWorktreeId, worktreeId, worktreeOf } from '../db/workspaces.js';
 import { placeName, placeOf, resolveTaskWorkspace } from './workspace.js';
@@ -231,6 +240,26 @@ export interface WorkflowDryRun {
   board: string;
   tasks: DagTask[];
 }
+
+/** An instance as `instances` lists it: the row, and its status. */
+export interface InstanceSummary extends InstanceState {
+  instance: InstanceRow;
+}
+
+/** One instance as `show` gives it (spec §21.10). */
+export interface InstanceView extends InstanceState {
+  instance: InstanceRow;
+  /** The workflow file's description, while the file is there and usable; undefined otherwise. */
+  description: string | undefined;
+  members: Array<MemberRow & { task: TaskRow; status: DisplayStatus }>;
+  /** Tasks that are not members, with a member as a parent or as their created_from_task, and not another instance's. */
+  related: Array<{ task: TaskRow; status: DisplayStatus }>;
+  /** Other instances whose members are related to this one, as a deciding step's start makes: one line each. */
+  relatedInstances: Array<{ instanceId: string; name: string | null; tasks: number }>;
+}
+
+/** How many of a board's newest instances `instances` reads (spec §21.7). */
+export const INSTANCES_READ = 200;
 
 /** How long `unknown_workflow`'s message may be, in bytes: a gate refusal's output's size (spec §21.6). */
 export const WORKFLOW_MESSAGE_BYTES = 4 * 1024;
@@ -1349,6 +1378,81 @@ export class KanbanService {
     );
     if (!r.ok) return r;
     return { ok: true, instance: r.instance, tasks: r.members, existing: r.existing };
+  }
+
+  /** The workflow files as the directory holds them now (spec §21.10): `list`'s. */
+  workflows(): WorkflowList {
+    return this.#workflowsDir === undefined ? { usable: [], broken: [], ignored: [] } : listWorkflows(this.#workflowsDir, this.#workflowFacts());
+  }
+
+  /**
+   * A board's instances, newest first (spec §21.10): of its 200 most recent, the
+   * running and blocked ones, or with `all` every one, each with its status; and
+   * how many the board has in all.
+   */
+  instances(onBoard: string, all = false): { instances: InstanceSummary[]; total: number; read: number } {
+    if (!isText(onBoard)) return { instances: [], total: 0, read: 0 };
+    const { instances, total } = instancesOn(this.#db, onBoard, INSTANCES_READ);
+    const summaries = instances.map((instance) => ({ instance, ...this.#state(instance.instanceId) }));
+    return {
+      instances: all ? summaries : summaries.filter((s) => s.status === 'running' || s.status === 'blocked'),
+      total,
+      read: instances.length,
+    };
+  }
+
+  /** An instance's status, from its members' phases. */
+  #state(instanceId: string): InstanceState {
+    return instanceStatus(madeTasks(this.#db, instanceId).map((m) => m.task.phase));
+  }
+
+  /**
+   * One instance in detail, on any board, by id (spec §21.10): its members, in
+   * position order, with their display status; its description, while its file
+   * is still there; and its related tasks, apart, a member of another instance
+   * among them shown as that instance.
+   */
+  instance(instanceId: string): Result<{ view: InstanceView }> {
+    if (!isText(instanceId)) return board.refuse('invalid', 'an instance id is text');
+    const instance = getInstance(this.#db, instanceId);
+    if (instance === undefined) return board.refuse('not_found', `no workflow instance ${visible(instanceId)}`);
+    const members = madeTasks(this.#db, instanceId).map((m) => ({ ...m, status: statusOf(this.#db, m.task) }));
+    const related: InstanceView['related'] = [];
+    const others = new Map<string, { instanceId: string; name: string | null; tasks: number }>();
+    for (const task of relatedTasks(this.#db, instanceId)) {
+      const member = memberOf(this.#db, task.taskId);
+      if (member === undefined) {
+        related.push({ task, status: statusOf(this.#db, task) });
+        continue;
+      }
+      const seen = others.get(member.instanceId) ?? { instanceId: member.instanceId, name: member.name, tasks: 0 };
+      seen.tasks += 1;
+      others.set(member.instanceId, seen);
+    }
+    const file = instance.name === null || this.#workflowsDir === undefined ? undefined : readWorkflow(this.#workflowsDir, instance.name, this.#workflowFacts());
+    return {
+      ok: true,
+      view: {
+        instance,
+        description: file?.ok === true ? file.workflow.description : undefined,
+        members,
+        related,
+        relatedInstances: [...others.values()],
+        ...instanceStatus(members.map((m) => m.task.phase)),
+      },
+    };
+  }
+
+  /**
+   * Archive every member of an instance not already archived, in one transaction
+   * (spec §21.10): an undecided run superseded, whose turn the caller cancels; a
+   * done task keeps the time it was done; related tasks are left alone. Who may
+   * is the caller's: an operator, as for archiving a task.
+   */
+  archiveWorkflow(instanceId: string, by: string): Result<{ instance: InstanceRow; archived: TaskRow[]; runs: RunRow[] }> {
+    if (!isText(instanceId)) return board.refuse('invalid', 'an instance id is text');
+    if (!isText(by) || by.trim() === '') return board.refuse('invalid', 'who archives is text, not blank');
+    return board.archiveWorkflow(this.#db, instanceId, by, this.#clock.now());
   }
 
   /** Who the next claim is for, resolved against the team as it is now. */

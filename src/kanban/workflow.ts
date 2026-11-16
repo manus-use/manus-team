@@ -8,7 +8,7 @@ import { redactKnownSecrets } from '../secrets.js';
 import { DAG_FORMAT, DAG_LIMITS, titleRefused, type Dag, type DagTask, type ParamValue } from './dag.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
 import { assignable, isRecord, type TaskFacts } from './task-checks.js';
-import { GATE_LIMITS, type Contract, type Refusal, type Result, type RetryOnCrash } from './types.js';
+import { GATE_LIMITS, type Contract, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
 export { checkDagShape, readDag } from './dag.js';
 
@@ -800,4 +800,39 @@ export function expand(w: Workflow, given: GivenParams, board: string, personOf?
     }
   }
   return { ok: true, dag: { format: DAG_FORMAT, workflow: w.name, params: Object.fromEntries(values), board, tasks } };
+}
+
+// ---------------------------------------------------------------------------
+// An instance's status (spec §21.10)
+// ---------------------------------------------------------------------------
+
+export type InstanceStatus = 'archived' | 'done' | 'blocked' | 'running';
+
+/** An instance's status, with how many of its members are finished, of how many, and how many are blocked. */
+export interface InstanceState {
+  status: InstanceStatus;
+  /** Done or archived: an archived member counts as finished, as an archived parent does for its children (spec §4.1). */
+  done: number;
+  total: number;
+  blocked: number;
+}
+
+/**
+ * An instance's status, derived from its members' phases, never stored (spec
+ * §21.10): archived when every member is, done when every member is done or
+ * archived, blocked when any is, and running otherwise. Blocked is checked before
+ * running, as a blocked task is what a person must act on.
+ */
+export function instanceStatus(phases: readonly Phase[]): InstanceState {
+  const total = phases.length;
+  const done = phases.filter((p) => p === 'done' || p === 'archived').length;
+  const blocked = phases.filter((p) => p === 'blocked').length;
+  const status: InstanceStatus = phases.every((p) => p === 'archived')
+    ? 'archived'
+    : done === total
+      ? 'done'
+      : blocked > 0
+        ? 'blocked'
+        : 'running';
+  return { status, done, total, blocked };
 }
