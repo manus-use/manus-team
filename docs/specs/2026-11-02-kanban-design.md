@@ -2209,7 +2209,7 @@ branch.
 | **W. A directory of its own for each task** | an isolated workspace, written `{ path, isolated: true, base? }` beside the plain path (§18.1); `kanban_tasks.worktree` (migration `007`), fixed at a task's first agent claim there, and the task's place, which its runs, sessions, gates and reported commit use, with the one-agent limit binding only the shared directory (§18.2); `$MT_HOME/worktrees/<workspace>/<task_id>`, recorded in `workspaces` as `wt:<task_id>` (§18.3); made before the first run, reused, never removed (§18.4); a worktree on `mt/<task_id>` from the base, a parent's branch or a fan-in's merge, a conflict blocking the task (§18.5); git with no hook and no fsmonitor, never forcing, merging into or deleting anything else (§18.6); a directory that cannot be made blocking the task, uncounted (§18.7); the prompt's directory lines (§18.8); `directory:` in `task show`, `mt kanban task worktree`, `mt workspace add --isolated` (§18.9). Plan: `docs/plans/2026-11-10-plan-w-worktrees.md` | H |
 | **L. Cards and notices in a task's thread** | a task created by `/kanban task new` in a group at chat scope answered in a thread on its command, with `reply_in_thread` (`SendTarget.replyInThread`), in one of two wordings, the quoted one when Lark refuses the thread; `SendResult.threadId`; its subscription moved to the thread Lark answers with by `threadSubscription`, called through `KanbanCommands.threaded` with the command's message id as its root (`kanban_subscriptions.root_message_id`, migration `008`); `CreatedVia.rootId`, a task created in a thread recording its root (`InboundMessage.rootId`), and the root copied to follow-ups; the hold, a `held(taskId)` the card poster checks at each send, on a fresh task from a group at chat scope; board sends in a thread replying to the root (`SendTarget.root`), the notifier's, the cards' and the forwarded approval cards' (`KanbanSink`); a person's card in the thread, with an @-mention by `open_id`, when the channel's `chatMembers` port says they are a member, cached five minutes per chat and bounded by `CARD_SEND_MS`, by direct message otherwise; a 230013 direct message falling back to the thread, and any non-retryable refusal in the thread to a direct message, never to the main timeline (`SendTarget.stayInThread`, also on the threaded "Created" reply); `card_sent` recording `in`, read from Lark's answer; the one line as the notice of a `card_sent` by direct message, not of the claim; `im:chat.members:read`, and the one log line when it is missing; WRITERS.md's row for `kanban_subscriptions`; the README's and the guide's statements of where a card goes, the one line, and the "Created" reply, updated as built (§19) | D2 |
 | **U. Updating a deployed gateway** | `mt update`, `--check` and `--yes`, refused in a board run's shell (§20); the checkout `mt` runs from, which must be the one the service's unit records, readable, and the top of a git worktree, on a branch with an upstream, clean with no operation under way, an ancestor of its upstream after a `git fetch`, with no ignored file at a path the commits add; the service's state read at step 2; the commits, a new or changed migration, whether `npm ci` runs, the open agent runs counted read-only on the database the service would open, and whether the service is restarted, shown before a question asked only at a terminal; the service's pid and the database's `user_version` recorded at step 3 and checked before the backup and any going back; `git merge --ff-only`, `npm ci` only when `package.json` or `package-lock.json` changed, and `npm run build`, with the service's node and the npm beside it, named by path in every printed command; `mt service check`, install's check as a command with the unit's `PATH`, the gateway's module graph and `better-sqlite3`'s native module loaded, run by the new build as the preflight, with no unit doing a hand-run gateway's check itself (`mt role check`'s loads and `loadStartup`, stand-ins only for names unset), and printing the database's version; going back by `git reset --keep`, `npm ci` if one ran and the build; the online backup in one step to `$MT_HOME/backups`, owner-only, `journal_mode` `delete`, checked, at step 3's version, the last five and the newest of each version kept; `migrate()` refusing a database newer than the build, as a configuration error with exit 78; the steps forward when the version moved, the steps back when only the pid did; `state()`'s unreadable result; a warning for `MT_SCHEMA_DIR`; the restart by `mt service restart`'s code, a stopped service left stopped, confirmed by `connected as` after the schema line within 60 seconds, else the log's tail and the steps back; a lock per checkout and per home, never cleared automatically; SIGINT, SIGHUP and SIGTERM, EPIPE and EIO; git and npm detached, in batch mode, with time limits; exit 3; §17's `check`, `install`'s closing line and the README's "Deploying" naming `mt update` | §17's `mt service`; independent of the board's plans |
-| **T. Workflows** | workflow files under `$MT_HOME/workflows`, parsed with the role files' `yaml` parser and checks, an unknown key an error (§21.1); params, substitution in text fields and checked names, never in gates (§21.2); for_each, fan-in on every task, all to all, at most 100 tasks (§21.3); the checks in `src/kanban/workflow.ts`, `mt workflow check`, the startup lines and `mt service check`'s warnings, the file read at each start (§21.4); the DAG, format 1, its refs, its 192 KiB, and gates only from the terminal or a render of the operator's file (§21.5); `preview` and `start` in chat and at the terminal, `preview --json` writing the DAG, `apply` and `apply --dry-run` at the terminal, the worker's `mt kanban start-workflow` and `apply-dag`, with its `dry_run`, `unknown_workflow`, the tiers, the board, the keys with the DAG's hash, and the stored DAG (§21.6); migration `009`, `kanban_workflow_instances` and `kanban_workflow_tasks` (§21.7); `applyDag`, `archiveWorkflow` and `threadSubscriptions` in `db/kanban.ts`, with `createTask`'s, `addGate`'s and `archive`'s writes shared, each task's `created` event carrying the instance, and WRITERS.md's rows (§21.8); the subscriptions, the one reply cut to fit, the instance's thread and every member held (§21.9); `list`, `instances`, `show` and `archive`, the derived status (§21.10); the README's and the guide's workflows, with the example, the deciding step, the fan-out's one-at-a-time in a shared workspace (§21.12), and Recipe 3's planner making its graph with `apply-dag` | L |
+| **T. Workflows** | workflow files under `$MT_HOME/workflows`, parsed with the role files' `yaml` parser and checks, an unknown key an error (§21.1); params, substitution in text fields and checked names, never in gates (§21.2); for_each, fan-in on every task, all to all, at most 100 tasks (§21.3); the checks in `src/kanban/workflow.ts`, `mt workflow check`, the startup lines and `mt service check`'s warnings, the file read at each start (§21.4); the DAG, format 1, its refs, its canonical form of at most 192 KiB from a run and 1 MiB elsewhere, and gates only from the terminal or an expansion of the operator's file (§21.5); `preview` and `start` in chat and at the terminal, `preview --json` writing the DAG, `apply` and `apply --dry-run` at the terminal, the worker's `mt kanban start-workflow` and `apply-dag`, with its `dry_run`, `unknown_workflow`, the tiers, the board, the keys with the DAG's hash, and the stored DAG (§21.6); migration `009`, `kanban_workflow_instances` and `kanban_workflow_tasks` (§21.7); `applyDag`, `archiveWorkflow` and `threadSubscriptions` in `db/kanban.ts`, with `createTask`'s, `addGate`'s and `archive`'s writes shared, each task's `created` event carrying the instance, and WRITERS.md's rows (§21.8); the subscriptions, the one reply cut to fit, the instance's thread and every member held (§21.9); `list`, `instances`, `show` and `archive`, the derived status (§21.10); the README's and the guide's workflows, with the example, the deciding step, the fan-out's one-at-a-time in a shared workspace (§21.12), and Recipe 3's planner making its graph with `apply-dag` | L |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D2, nothing can deliver a card to a person, so **plans C and D1 refuse human assignees and
@@ -4221,7 +4221,8 @@ The same checks run in three places, from one module, `src/kanban/workflow.ts`:
 - roles and workspaces written literally existing and usable, as `create` asks of them
   (`#assignable`: configured; for a role, unsupervised unless supervised roles are accepted); a
   person written literally is checked at a start, as only the gateway knows who has talk tier;
-- gates: no `{{`, a command of at most 4 KiB with no NUL and holding no known secret (`holdsSecret`,
+- gates: no `{{`, no mask `••••` (a command copied from masked output would run broken, §21.10), a
+  command of at most 4 KiB with no NUL and holding no known secret (`holdsSecret`,
   §7.7), a timeout from 1 to 600 s, at most 20 on a step, at most 600 s together, a gate with no
   `timeout_s` counted as 300 s (`GATE_LIMITS.defaultTimeoutS`), as `addGate` stores it, so three
   such gates on one step fail the check;
@@ -4315,24 +4316,36 @@ the DAG it was made from (§21.7).
 
 **The top level**, every key checked, an unknown one refused naming its place:
 
-| Key | |
-|---|---|
-| `format` | required; the number `1`. Any other is refused, saying which this build reads, so a DAG written for a later format is never half understood |
-| `workflow` | the name of the workflow it was expanded from, in the role grammar, or `null` for a DAG with none, which shows as "(no workflow)" (§21.10). A label: apply reads no file by it |
-| `params` | the params it was expanded with, text or lists of text, at most 64 KiB serialized (§21.2); `{}` or absent for a DAG with none. A record: apply substitutes nothing |
-| `board` | a board's name, or `null` or absent for the path's own board (§21.6) |
-| `tasks` | an array of 1 to 100 tasks, in the order they are made |
+| Key | Default | |
+|---|---|---|
+| `format` | none | required; the number `1`. Any other is refused, saying which this build reads, so a DAG written for a later format is never half understood |
+| `workflow` | `null` | the name of the workflow it was expanded from, in the role grammar, or `null` for a DAG with none, which shows as "(no workflow)" (§21.10). A label: apply reads no file by it |
+| `params` | `{}` | the params it was expanded with, text or lists of text, at most 64 KiB serialized (§21.2); `{}` or absent for a DAG with none. A record: apply substitutes nothing |
+| `board` | `null` | a board's name, or `null` or absent for the path's own board (§21.6) |
+| `tasks` | none | an array of 1 to 100 tasks, in the order they are made |
 
 **A task**, an object, every key checked as at the top:
 
-| Key | |
-|---|---|
-| `ref` | required; unique in the DAG; 1 to 64 bytes of letters, digits, `.`, `_`, `:` and `-`. What `parents` name |
-| `step` | the step it came from, in the same characters; absent, the `ref`. A label `show` groups by |
-| `item` | the for_each item, text, or `null`; at most 8 KiB, holding no known secret, as items do (§21.3) |
-| `title`, `body`, `assignee`, `reviewer`, `workspace`, `priority`, `contract`, `failure_limit`, `retry_on_crash`, `max_runtime_s` | as `mt kanban create`'s JSON (§7.3) and `create` take them: `contract` an object of the five stored fields, `verification` and `stop_when` by those names; a name a role, or a person as `lark:<union_id>`; absent or `null`, the field's default |
-| `parents` | refs of tasks **earlier in the array**; no ref twice |
-| `gates` | a list of `{ command, timeout_s? }`, as `addGate` takes them (§7.7), taken as written; only where gates may come from (below) |
+| Key | Default | |
+|---|---|---|
+| `ref` | none | required; unique in the DAG; 1 to 64 bytes of letters, digits, `.`, `_`, `:` and `-`. What `parents` name |
+| `step` | the `ref` | the step it came from, in the same characters. A label `show` groups by |
+| `item` | `null` | the for_each item, text, or `null`; at most 8 KiB, holding no known secret, as items do (§21.3) |
+| `title` | none | required; as `create` takes it |
+| `body` | `null` | text; `""` is taken as `null`, as `create` stores either as no body |
+| `assignee`, `reviewer`, `workspace` | `null` | a name: a role, or a person as `lark:<union_id>`, or a workspace |
+| `priority` | `0` | a whole number |
+| `contract` | `{}` | an object of the five stored fields, `verification` and `stop_when` by those names, each text; a field not set is **omitted**, and a field given as `null` is taken as omitted |
+| `failure_limit`, `max_runtime_s` | `null` | as §3.1 |
+| `retry_on_crash` | `"always"` | or `"if-no-side-effects"` |
+| `parents` | `[]` | refs of tasks **earlier in the array**; no ref twice |
+| `gates` | `[]` | a list of `{ command, timeout_s }`, `timeout_s` defaulting to `300`, as `addGate` takes them (§7.7), taken as written; only where gates may come from (below) |
+
+Every key takes its default when absent, and `null` given for a key whose default is not `null`
+(`step`, `priority`, `contract`, `retry_on_crash`, `parents`, `gates`, `params`) is refused
+`invalid`, so a key has one way to say "not set". **Every string** in a DAG, and in a start's
+params, must be well formed (`String.prototype.isWellFormed`): JSON's `\ud800` escape can give a
+lone surrogate, which is no text and cannot be stored as UTF-8; it is refused `invalid`.
 
 **Why each rule:**
 
@@ -4356,23 +4369,32 @@ the DAG it was made from (§21.7).
   not set.
 - **The canonical form.** One serialization of a DAG, used to measure it and to hash it on every
   path: compact JSON (no spaces or line breaks) of the DAG as parsed, without `idempotency_key` and
-  `dry_run`, every key of §21.5's tables written in their order, a key left out written as its
-  default (`null`, `[]`, `{}`, `0` for `priority`, `"always"` for `retry_on_crash`, `300` for a
-  gate's `timeout_s`), a contract's fields in `CONTRACT_FIELDS`' order, the params by name, and
-  every string as given, **unmasked**. So reindenting a file, reordering its keys, or writing a
-  default out or leaving it out changes neither its size nor its hash; a different value does. The
-  expansion writes exactly this form, but indented.
+  `dry_run`, every key of the tables above written in their order, a key left out written as its
+  default from the tables (`step` as the `ref`, `body` as `null`, a contract field not set omitted),
+  a contract's fields in `CONTRACT_FIELDS`' order, the params sorted by their names' code points,
+  and every string as given, **unmasked**. So reindenting a file, reordering its keys, or writing a
+  default out or leaving it out changes neither its size nor its hash; a different value does.
+  `preview --json` writes exactly this form, but indented, with every default written out in the
+  same way, so deleting a key that holds its default from a previewed file never changes the hash.
 - **Sizes**, of the canonical form in UTF-8. **192 KiB for `apply-dag`**, the one path where a DAG
   crosses the worker socket: the socket refuses a request over 256 KiB
-  (`DEFAULT_MAX_REQUEST_BYTES`), and the DAG travels inside one with its envelope and its JSON
-  escaping, so the bound leaves it room; `mt kanban apply-dag` measures it before sending. **1 MiB
-  for a start**, expanded on the gateway, **and for a terminal `apply`**, which read a file and send
-  nothing over the socket: the bound is only on what is stored with the instance (§21.7), and the
-  100 tasks, each held to `task new`'s limits, are the bound that matters. **Text must be UTF-8**: a
-  DAG read from a file or stdin, at the terminal or by `mt kanban apply-dag`, is decoded strictly,
-  and bytes that are not UTF-8 are refused `invalid`, never replaced by U+FFFD, which would apply a
-  DAG other than the one written and hash it as that. Within the bound, the params' 64 KiB, at most
-  100 tasks, and every task held to `task new`'s limits (§9.1), its title to the characters a title
+  (`DEFAULT_MAX_REQUEST_BYTES`), and the DAG travels inside one as its `input` object, beside the
+  envelope's run, token and command, so the bound leaves room for the envelope; `mt kanban
+  apply-dag` measures it before sending. Before any of that, `mt kanban apply-dag` reads stdin up to
+  the socket's 256 KiB, its raw cap, as every worker command does. **1 MiB for a start**, expanded
+  on the gateway, **and for a terminal `apply`**, which read a file and send nothing over the
+  socket: the bound is only on what is stored with the instance (§21.7), and the 100 tasks, each
+  held to `task new`'s limits, are the bound that matters. A terminal `apply` reads a file or `-` up
+  to a **raw cap of 4 MiB**, apart from the canonical 1 MiB: indentation and defaults written out
+  make a file larger than its canonical form, and the raw cap only stops a wrong file being read
+  whole. **Text must be UTF-8**: the bytes read are decoded with `new TextDecoder('utf-8', { fatal:
+  true })`, and bytes that are not UTF-8 are refused `invalid`, never replaced by U+FFFD, which
+  would apply a DAG other than the one written and hash it as that. So `readAll`
+  (`src/cli/kanban.ts`) returns bytes, and the worker CLI decodes them so for **every** worker
+  command, not only `apply-dag`: a report or a comment with a broken byte is refused rather than
+  stored with a replacement character, which is safer and as simple; the terminal's file reads for
+  `apply` and `--body-file` decode the same way. Within the bound, the params' 64 KiB, at most 100
+  tasks, and every task held to `task new`'s limits (§9.1), its title to the characters a title
   takes (§21.2), its gates to `addGate`'s (§21.4: 20 a task, 600 s together, a gate with no
   `timeout_s` counted as 300 s).
 - **Checked as tasks are.** Each task is checked as `create` checks it (`#assignable`, the
@@ -4398,6 +4420,10 @@ defaults (`null`, `0` for `priority`, `"always"`): a run's `mt kanban create` ta
 breaker and the runtime limit, which are the operator's, and an agent's DAG gets no more than its
 `create`. `workflow` and `params` must be absent, or `null` and `{}` (§21.6).
 
+A gate command holding the mask `••••` is refused wherever a workflow's or a DAG's gate is taken:
+by the file's check (§21.4), by a start and by an apply. `/kanban gate add` and `mt kanban gate add`
+are unchanged: a gate typed by hand is the operator's command as written.
+
 A DAG an agent writes could otherwise put any command on a task, which `mt kanban create` does not
 allow and `mt kanban gate` refuses in a run's shell (§2.6).
 
@@ -4419,18 +4445,25 @@ mt kanban apply-dag < dag.json          # a run: a DAG of its own, with no gates
 The verbs are the same in chat and at the terminal, and the terminal takes `--board` with
 `preview` and `start`, `--key` with `start` and `apply`, and `--json` with each.
 
-**Preview** reads the file (§21.4), checks the params against it, substitutes and expands, and
-shows the DAG it would make, the same in chat and at the terminal: a readable summary, one line a
-task, with its ref, its title, its assignee and its parents' refs, and how many gates it has
-(§21.9), and "Nothing was made", or the refusal a start would get now. It writes nothing. **In
-chat**, on the gateway, it makes every check a start makes before its transaction, the board's, the
-key's and the people's included: the start's checks without the start. **At the terminal** it
-loads exactly as `openBoard` does (`src/cli/gate.ts`), but opens no database: `loadTeamSettings`
-and `loadTeam` with `unsetPassEnv`, the team's secrets and the Lark app secret registered, the
-same note on stderr for the passEnv names this shell leaves unset, and a service with
-`supervisedRoles: true`, so that `preview`, `apply --dry-run` and `apply` judge a DAG against one
-configuration. What needs the database, the board's being there and live and the key, is
-`apply --dry-run`'s and `apply`'s; a person is refused, as a terminal start refuses one.
+**Preview** reads the file (§21.4), checks the params against it, substitutes and expands, and shows
+the DAG it would make, the same in chat and at the terminal: a readable summary, one line a task,
+with its ref, its title, its assignee and its parents' refs, and how many gates it has (§21.9), and
+"Nothing was made", or the refusal a start would get now. It writes nothing. **In chat**, on the
+gateway, it makes every check a start makes before its transaction, the board's and the people's
+included, but not the key's: a preview has no message id of its own to repeat, as its message is not
+the start's, so the lookup could never match. The start's checks without the start. **At the
+terminal** it loads exactly as `openBoard` does (`src/cli/gate.ts`), but opens no database:
+`loadTeamSettings` and `loadTeam` with `unsetPassEnv`, the team's secrets and the Lark app secret
+registered, the same note on stderr for the passEnv names this shell leaves unset, and a service
+with `supervisedRoles: true`, so that `preview`, `apply --dry-run` and `apply` judge a DAG against
+one configuration. With no database there is no `KanbanService` to ask, so **the per-task checks of
+`create`** (`#assignable`, the workspace's being configured, the names, the contract, the numbers,
+the crash rule) **move into a pure function**, `taskProblems(task, facts)`, whose facts are the
+roles, the workspaces, the isolated ones, `supervisedRoles`, and a talk check that may be absent,
+when a person is refused as at the terminal; it reads no database. `create`, `previewWorkflow` and
+the terminal's preview all call it, so one function judges a task however it is made (§21.15). What
+needs the database, the board's being there and live and the key, is `apply --dry-run`'s and
+`apply`'s; a person is refused, as a terminal start refuses one.
 
 **`preview --json`** at the terminal prints the DAG file itself instead (§21.5), and nothing else
 on stdout: JSON with two-space indents and keys in the order of §21.5, so two previews of one file
@@ -4563,7 +4596,13 @@ input that is not UTF-8 as `invalid`.
 
 **The steps of an apply**, in `KanbanService.applyDag`, whatever path the DAG came by; a start
 expands the file into a DAG first (step 1), and an apply reads it; a preview and a dry run stop
-before step 3:
+before step 3. **An apply reads before step 0**: it reads the DAG, within its raw cap, decodes it as
+strict UTF-8, parses it, checks its shape (the format, every key known, every type, well-formed
+strings, the refs and parents, where its gates came from, and from a run the settings it may not
+set), makes it canonical and measures it (§21.5). Only then is the key looked up: the hash the
+lookup compares is the canonical form's, and a DAG with an unknown key or the wrong shape is refused
+`invalid` before any `existing` answer, as it is not a DAG at all. A start keeps step 0 first, as it
+has no DAG until its file is expanded:
 
 0. **look the key up first**, read-only, when there is one: an instance with that key on this board
    is answered at once, `existing: true`, before a file is read or a param or task checked. A repeat
@@ -4576,9 +4615,8 @@ before step 3:
    an apply, or an apply's given to a start, told by the instance's `source`. A key reused by
    mistake must not return an instance of something else. The writer looks the key up again in its
    transaction (§21.8), the guard against two racing;
-1. for a start, the expansion (above); for an apply, read the DAG, strictly as UTF-8, and check its
-   size and shape (§21.5): the canonical form within its path's bound, the format, the keys, the
-   refs and parents, where its gates came from, and from a run the settings it may not set;
+1. for a start, the expansion (above), then the same shape checks, canonical form and measure; for
+   an apply, nothing more, as it read its DAG before step 0;
 2. check every task as `create` would (`#assignable`, the workspace, the contract, the numbers,
    the crash rule), and every gate as `addGate` would, plus the 100 and every name, **just before
    the transaction**, against the team and the people as the process holds them in memory, and the
@@ -4971,6 +5009,11 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   status function. The service, `mt workflow check` and the startup check all call it. Its gate
   check uses `holdsSecret`, today a private function of `service.ts`, which plan T moves to a shared
   module both import, so the pure module does not import the service.
+- **`src/kanban/task-checks.ts`**, new and pure: `taskProblems(task, facts)`, the per-task checks
+  `create` makes today in `#assignable`, `#contract` and its own body, moved out of the service with
+  their messages unchanged; its facts are the roles, the workspaces, the isolated ones,
+  `supervisedRoles` and an optional talk check. `KanbanService.create`, `previewWorkflow` and the
+  terminal's preview call it; it needs no database.
 - **`src/kanban/service.ts`**: `KanbanServiceDeps.workflowsDir`, `$MT_HOME/workflows`, given by the
   gateway and by `openBoard` (`src/cli/gate.ts`); `previewWorkflow`, `applyDag` with its `dryRun`,
   and `startWorkflow`, which is the expansion then `applyDag`, `workflows()` (for `list`),
@@ -4991,7 +5034,8 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   flat schema, its gates refused; `unknown_workflow` and `too_large` in `RefusalCode`, as
   `KanbanService.startWorkflow` refuses sizes itself, on every path, and not only the worker API.
   **`src/kanban/prompt.ts`**: their lines in the work protocol. **`src/cli/kanban.ts`**'s usage
-  gains them, and its 192 KiB check of `apply-dag`'s input.
+  gains them, and its 192 KiB check of `apply-dag`'s canonical form; `readAll` returns bytes, and
+  every worker command's input is decoded with a fatal `TextDecoder`.
 - **`src/cli/mt.ts`**: `workflow` in `OPERATOR_GROUPS` and `SUBCOMMANDS`, the refusal in a run's
   shell naming `start-workflow` and `apply-dag`, `mt workflow check`, and `USAGE`.
   **`src/cli/operator.ts`**: the `workflow` group, `preview` and its `--json` writing the DAG to
@@ -5040,8 +5084,15 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
   blocked reasons, related tasks apart and another instance as one line, `--dag`; `archive` of
   every member in one transaction, runs superseded and their turns cancelled, related tasks left,
   a second archive changing nothing; the tiers of each command, and a sender with no union_id.
-- **Unit, the DAG**: the canonical form the same for a reindented file, reordered keys and defaults
-  written or left out, and different for one changed value; its size measured, 192 KiB for
+- **Unit, the DAG**: an unknown key refused before an `existing` answer, with a key already used;
+  each default of the task table, a key holding its default deleted from a previewed file leaving
+  the hash as it was, `body` `""` and `null` the same, a contract field `null` and omitted the same,
+  `null` refused where the default is not `null`, the params ordered by code point; a lone surrogate
+  refused; a gate holding `••••` refused by the file's check, a start and an apply, and accepted by
+  `gate add`; the terminal's raw cap of 4 MiB and `apply-dag`'s of 256 KiB; a broken byte refused by
+  every worker command, a report's included; `taskProblems` giving `create`'s messages with and
+  without a talk check; the canonical form the same for a reindented file, reordered keys and
+  defaults written or left out, and different for one changed value; its size measured, 192 KiB for
   `apply-dag` and 1 MiB for a start and a terminal apply; bytes that are not UTF-8 refused, from a
   file and from stdin; from a run, `priority`, `failure_limit`, `retry_on_crash` and `max_runtime_s`
   refused unless at their defaults, and `workflow` and `params` unless absent, `null` and `{}`; a
@@ -5092,7 +5143,8 @@ A workflow's tasks resolve their workspaces at their claims, by §2.3, like any 
 - **Params are text and lists of text.** No numbers, choices or patterns; no literal `{{` in a text
   field; in chat no `"` inside a value; at the terminal no comma inside an item (the worker's JSON
   has neither limit).
-- **At most 100 tasks an instance**, one board, and a DAG of at most 192 KiB.
+- **At most 100 tasks an instance**, one board, and a DAG whose canonical form is at most 192 KiB
+  from a run and 1 MiB elsewhere.
 - **No apply from chat**, and no preview for agents: chat previews and starts the operator's files;
   an agent starts a file with `start-workflow` or applies its own DAG (§21.6).
 - **A DAG's parents are its own refs.** It cannot name a task already on the board; that is a
@@ -5192,4 +5244,14 @@ load its configuration as `openBoard` does; the stored DAG holding the params; r
 members table; what the transaction checks again and what is checked just before it; the hash
 never printed; a key passing between a start and an apply refused, by the instance's `source`; and
 each gate's command in a dry run's answer.
-
+*Amended on 2026-11-16, a third time.* A fourth review found: that an apply looked its key up
+before it had a DAG to hash, so an apply reads, decodes, parses, checks the shape of and makes
+canonical its DAG first, refusing an unknown key before any `existing` answer, a start keeping its
+order; that the strict UTF-8 needed bytes, so `readAll` returns them and every worker command
+decodes them strictly, with raw caps of 4 MiB at the terminal and the socket's 256 KiB for
+`apply-dag`, and that the DAG crosses the socket as an object, so its room is the envelope's; that
+the terminal's preview had no service to check tasks with, so `create`'s per-task checks move into
+a pure `taskProblems`; each task key's default, `body` as `null` and a contract field not set
+omitted, so a default deleted never changes the hash, and the params by code point; lone
+surrogates; the mask's refusal by the file's check, a start and an apply, `gate add` unchanged; no
+key check in chat's preview; and the 192 KiB and 1 MiB in plan T's row and the limits.
