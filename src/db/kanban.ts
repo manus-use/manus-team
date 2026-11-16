@@ -1,9 +1,10 @@
 import type { Db } from './open.js';
 import { txImmediate } from './open.js';
-import { newRunId, newTaskId } from '../core/ids.js';
+import { newRunId, newTaskId, newWorkflowId } from '../core/ids.js';
 import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
+import { canonicalDag, maskDag, type Dag } from '../kanban/dag.js';
 import type { GateRun } from '../kanban/gates.js';
 import { placeName, placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
 import { worktreeId } from './workspaces.js';
@@ -35,16 +36,21 @@ import type {
 } from '../kanban/types.js';
 import {
   getBoard,
+  getInstance,
   getRun,
   getTask,
   getTaskByKey,
   gatesOf,
+  instanceByKey,
   isFinished,
+  membersOf,
   openAgentRunIn,
   openRunOf,
   parentsOf,
   runsOf,
   subscriptionsOf,
+  type InstanceRow,
+  type MemberRow,
 } from './kanban-read.js';
 
 /**
@@ -115,6 +121,11 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'packageHash',
   'seedDropped',
   'board',
+  // A workflow's instance, its name, and a member's ref and step (spec §21.8); its item is a param's text, and masked.
+  'workflow',
+  'workflowName',
+  'ref',
+  'step',
 ]);
 
 /** One row of the board's log, masked value by value. */
@@ -2034,5 +2045,183 @@ export function countSubmission(db: Db, runId: string, now: number): Result<{ n:
     d.prepare('UPDATE kanban_runs SET submissions = submissions + 1 WHERE run_id = ?').run(runId);
     record(d, { taskId: run.taskId, runId, kind: 'submitted', actor: 'gateway', payload: { n: run.submissions } }, now);
     return { ok: true, n: run.submissions };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Workflows (spec §21.7, §21.8)
+// ---------------------------------------------------------------------------
+
+/** An instance to make: its name, its checked DAG and that DAG's hash, unmasked, and who makes it, how. */
+export interface NewInstance {
+  name: string | null;
+  dag: Dag;
+  sha256: string;
+  source: 'start' | 'apply';
+  /** The board it goes on; a run's goes on its task's, whatever this says. */
+  board: string;
+  createdBy: string;
+  createdVia: CreatedVia;
+  /** Namespaced as a task's (spec §3.1), or null for none. */
+  idempotencyKey: string | null;
+}
+
+/** One of the DAG's tasks, as the writer makes it: its fields, its member fields, its parents as earlier positions, and its gates. */
+export interface NewMember {
+  task: Pick<
+    NewTask,
+    'title' | 'body' | 'contract' | 'assignee' | 'reviewer' | 'workspace' | 'priority' | 'failureLimit' | 'retryOnCrash' | 'maxRuntimeS'
+  >;
+  ref: string;
+  step: string;
+  item: string | null;
+  /** The positions of its parents, each earlier in the array than it. */
+  parents: readonly number[];
+  gates: readonly { command: string; timeoutS: number }[];
+}
+
+/** What an apply made, or found made with its key: the instance, and its members with their tasks, in position order. */
+export interface AppliedDag {
+  instance: InstanceRow;
+  members: Array<MemberRow & { task: TaskRow }>;
+  existing: boolean;
+}
+
+/** An instance's members, each with its task. */
+function membersWithTasks(d: Db, instanceId: string): Array<MemberRow & { task: TaskRow }> {
+  return membersOf(d, instanceId).map((m) => ({ ...m, task: mustGet(d, m.taskId) }));
+}
+
+/**
+ * Why a key's instance is not this start's or apply's (spec §21.6 step 0), or
+ * undefined when it is a repeat: another board's is `other_board`; another
+ * kind's, another workflow's, or another DAG's, `invalid`, naming it.
+ */
+export function keyRefused(
+  existing: InstanceRow,
+  want: { board: string; source: 'start' | 'apply'; name: string | null; sha256?: string },
+): Refusal | undefined {
+  const id = existing.instanceId;
+  if (existing.board !== want.board) {
+    return refuse('other_board', `instance ${id} was made with this idempotency key on board ${existing.board}, not ${want.board}`);
+  }
+  if (existing.source !== want.source) {
+    return refuse(
+      'invalid',
+      `this idempotency key was used ${existing.source === 'start' ? 'to start a workflow' : 'to apply a DAG'}, as ${id}; ` +
+        'a key used by a start is not used by an apply, nor the reverse',
+    );
+  }
+  if (want.source === 'start' && existing.name !== want.name) {
+    return refuse('invalid', `this idempotency key was used to start workflow ${existing.name ?? '(no workflow)'}, as ${id}, not ${want.name ?? '(no workflow)'}`);
+  }
+  if (want.source === 'apply' && want.sha256 !== undefined && existing.dagSha256 !== want.sha256) {
+    return refuse('invalid', `this idempotency key was used to apply another DAG, as ${id}`);
+  }
+  return undefined;
+}
+
+/**
+ * Make a checked DAG on the board, in one transaction (spec §21.8): the board
+ * worked out (a run's task's for a run), the key looked up again, the guard
+ * against two racing, the board checked live; then the instance with its DAG,
+ * masked but for its gates; then each task through `insertTask`, with its
+ * subscriptions and its `created` event carrying the instance, its links, its
+ * gates through `insertGate`, and its member row. A refusal, or a member's
+ * repeated ref, rolls everything back: all of it is made, or none.
+ */
+export function applyDag(db: Db, instance: NewInstance, members: readonly NewMember[], now: number): Result<AppliedDag> {
+  return tx(db, (d) => {
+    let board = instance.board;
+    let createdFromTask: string | null = null;
+    if (instance.createdVia.kind === 'run') {
+      const run = getRun(d, instance.createdVia.runId);
+      if (run === undefined) return refuse('not_found', `no run ${instance.createdVia.runId}`);
+      createdFromTask = run.taskId;
+      // A run's work stays on its task's board (spec §16.5).
+      board = mustGet(d, run.taskId).board;
+    }
+    if (instance.idempotencyKey !== null) {
+      const existing = instanceByKey(d, instance.idempotencyKey);
+      if (existing !== undefined) {
+        const refused = keyRefused(existing, { board, source: instance.source, name: instance.name, sha256: instance.sha256 });
+        if (refused !== undefined) return refused;
+        return { ok: true, instance: existing, members: membersWithTasks(d, existing.instanceId), existing: true };
+      }
+    }
+    const live = liveBoard(d, board);
+    if (!live.ok) return refuse(live.code, `${live.message}; nothing is added to it`);
+    const instanceId = newWorkflowId();
+    d.prepare(
+      `INSERT INTO kanban_workflow_instances
+         (instance_id, name, dag, dag_sha256, source, board, created_by, created_via, idempotency_key, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      instanceId,
+      instance.name,
+      canonicalDag(maskDag(instance.dag)),
+      instance.sha256,
+      instance.source,
+      board,
+      instance.createdBy,
+      JSON.stringify(instance.createdVia),
+      instance.idempotencyKey,
+      now,
+    );
+    const member = d.prepare(
+      'INSERT INTO kanban_workflow_tasks (task_id, instance_id, ref, step, item, position) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    const ids: string[] = [];
+    for (const [position, m] of members.entries()) {
+      const parents = m.parents.map((p) => {
+        const id = ids[p];
+        if (id === undefined) throw new Error(`member ${m.ref} names a parent at ${p}, which is not earlier`);
+        return id;
+      });
+      const taskId = insertTask(
+        d,
+        { ...m.task, board, createdFromTask, parents, idempotencyKey: null, createdBy: instance.createdBy, createdVia: instance.createdVia },
+        now,
+        { workflow: instanceId, workflowName: instance.name, ref: m.ref, step: m.step, item: m.item },
+      );
+      for (const gate of m.gates) {
+        // The apply put it on the task, for whoever made the instance (spec §21.8).
+        const added = insertGate(d, taskId, gate, instance.createdBy, now, { workflow: instanceId });
+        if (!added.ok) return refuse(added.code, `${m.ref}: ${added.message}`);
+      }
+      member.run(taskId, instanceId, m.ref, m.step, m.item === null ? null : mask(m.item), position);
+      ids.push(taskId);
+    }
+    const made = getInstance(d, instanceId);
+    if (made === undefined) throw new Error(`instance ${instanceId} vanished inside its own transaction`);
+    return { ok: true, instance: made, members: membersWithTasks(d, instanceId), existing: false };
+  });
+}
+
+/**
+ * Archive an instance (spec §21.8, §21.10): every member not already archived,
+ * in one transaction, through `archiveIn`, each `archived` event carrying the
+ * instance. Answers the members it archived, and the runs it decided, whose
+ * turns the caller cancels; none for an instance wholly archived already.
+ */
+export function archiveWorkflow(
+  db: Db,
+  instanceId: string,
+  by: string,
+  now: number,
+): Result<{ instance: InstanceRow; archived: TaskRow[]; runs: RunRow[] }> {
+  return tx(db, (d) => {
+    const instance = getInstance(d, instanceId);
+    if (instance === undefined) return refuse('not_found', `no workflow instance ${instanceId}`);
+    const archived: TaskRow[] = [];
+    const runs: RunRow[] = [];
+    for (const m of membersOf(d, instanceId)) {
+      const task = mustGet(d, m.taskId);
+      if (task.phase === 'archived') continue;
+      const r = archiveIn(d, task, by, now, { workflow: instanceId });
+      archived.push(r.task);
+      if (r.run !== undefined) runs.push(r.run);
+    }
+    return { ok: true, instance, archived, runs };
   });
 }
