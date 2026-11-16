@@ -1,5 +1,5 @@
 import type { BoardEntry, BoardSummary, TaskView } from '../db/kanban-read.js';
-import { counted, listed, memberLine, runState, waitingLine, workdirLine, type PreviewLine } from '../kanban/chat-render.js';
+import { counted, listed, memberLine, membersDone, runState, waitingLine, workdirLine, type PreviewLine } from '../kanban/chat-render.js';
 import type { DisplayStatus } from '../kanban/status.js';
 import type { Assignee, GateRow } from '../kanban/types.js';
 import { redactKnownSecrets } from '../secrets.js';
@@ -226,7 +226,7 @@ export function instancesText(
     s.instance.instanceId,
     line(s.instance.name ?? '(no workflow)', 80),
     s.status === 'blocked' ? `blocked (${s.blocked})` : s.status,
-    `${s.done} of ${s.total} done`,
+    membersDone(s),
     line(s.instance.createdBy, 80),
     when(s.instance.createdAt),
   ]);
@@ -253,7 +253,7 @@ export function instanceText(view: {
         ? 'at the terminal'
         : `by a run of ${view.members[0]?.task.createdFromTask ?? 'a task'}`;
   const out = [
-    `${line(instance.name ?? '(no workflow)', 80)} (${instance.instanceId}): ${view.status === 'blocked' ? `blocked (${view.blocked})` : view.status}, ${view.done} of ${view.total} done, on board ${line(instance.board, 80)}`,
+    `${line(instance.name ?? '(no workflow)', 80)} (${instance.instanceId}): ${view.status === 'blocked' ? `blocked (${view.blocked})` : view.status}, ${membersDone(view)}, on board ${line(instance.board, 80)}`,
     ...(view.description === undefined ? [] : [line(view.description, 400)]),
     `started by ${line(instance.createdBy, 80)}, ${how}, ${when(instance.createdAt)}`,
   ];

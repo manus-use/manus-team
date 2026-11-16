@@ -4896,6 +4896,11 @@ changes:
 done, would then leave the instance running for good, with nothing left to run, so an archived
 member counts as finished here, as an archived parent does for its children (§4.1). Blocked is
 checked before running, as a blocked task is what a person must act on.
+Members are counted the same way, done or archived of the total, and said "done" ("running, 1 of 4
+done"), but "finished" for an archived instance ("archived, 4 of 4 finished"), in chat and at the
+terminal: its members are archived, not done. Counting only done members instead would read "0 of
+4 done" for every archived instance, a finished one's included, and "3 of 4 done" for a done one
+with a member archived by hand.
 
 **`instances`** lists the board's instances, newest first: id, name, status, members done of
 total, who started it and when. By default only running and blocked; `all` adds done and

@@ -805,6 +805,15 @@ export function makerText(createdBy: string, nameOf: (principal: string) => stri
   return name === undefined ? label(createdBy, 80) : label(name, 80);
 }
 
+/**
+ * An instance's members done of its total (spec §21.10), as chat and the terminal
+ * say it. An archived member counts as finished, so an archived instance's are
+ * "finished", never "done", which its members are not.
+ */
+export function membersDone(s: { status: string; done: number; total: number }): string {
+  return `${s.done} of ${s.total} ${s.status === 'archived' ? 'finished' : 'done'}`;
+}
+
 /** `/kanban workflow instances [all]` (spec §21.10): the board's instances, newest first, at most 30 lines. */
 export function renderInstances(
   summaries: readonly { instance: { instanceId: string; name: string | null; createdBy: string; createdAt: number }; status: string; done: number; total: number; blocked: number }[],
@@ -820,7 +829,7 @@ export function renderInstances(
   }
   const lines = summaries.map((s) => {
     const status = s.status === 'blocked' ? `blocked (${s.blocked})` : s.status;
-    return `- ${id(s.instance.instanceId)} **${label(workflowName(s.instance.name))}** ${status}, ${s.done} of ${s.total} done · by ${makerText(s.instance.createdBy, opts.nameOf)}, ${whenText(s.instance.createdAt)}`;
+    return `- ${id(s.instance.instanceId)} **${label(workflowName(s.instance.name))}** ${status}, ${membersDone(s)} · by ${makerText(s.instance.createdBy, opts.nameOf)}, ${whenText(s.instance.createdAt)}`;
   });
   return fitted([`Workflow instances${on}:`], lines, past, (more) => `… and ${more} more.`);
 }
@@ -876,7 +885,7 @@ export function renderInstance(
   const board = instance.board === chatBoard && chatBoard === DEFAULT_BOARD ? '' : ` · board: **${label(instance.board)}**`;
   const status = view.status === 'blocked' ? `blocked (${view.blocked})` : view.status;
   const head = [
-    `**${label(workflowName(instance.name))}** ${id(instance.instanceId)}: ${status}, ${view.done} of ${view.total} done${board}`,
+    `**${label(workflowName(instance.name))}** ${id(instance.instanceId)}: ${status}, ${membersDone(view)}${board}`,
     ...(view.description === undefined ? [] : [label(view.description, 300)]),
     `Started by ${makerText(instance.createdBy, nameOf)}, ${howMade(instance.createdVia, view.members[0]?.task.createdFromTask ?? null)}, ${whenText(instance.createdAt)}`,
   ];

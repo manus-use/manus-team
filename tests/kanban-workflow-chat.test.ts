@@ -285,6 +285,9 @@ describe('/kanban workflow list, instances, show and archive', () => {
     expect((await chat.run('workflow instances', message(TEAM), TEAM)).text).toBe(
       'No running or blocked workflow instances. `/kanban workflow instances all` shows done and archived ones too.',
     );
+    // An archived member counts as finished, not done: an archived instance says so.
+    expect((await chat.run('workflow instances all', message(TEAM), TEAM)).text).toMatch(new RegExp(`\\*\\* archived, 4 of 4 finished · by Owner`));
+    expect((await chat.run(`workflow show ${id}`, message(TEAM), TEAM)).text.split('\n')[0]).toBe(`**vendor-eval** \`${id}\`: archived, 4 of 4 finished`);
     expect((await chat.run('workflow show w_none', message(TEAM), TEAM)).text).toBe('Not done: no workflow instance w\\_none');
   });
 

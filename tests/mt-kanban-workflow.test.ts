@@ -262,6 +262,9 @@ describe('mt kanban workflow list, instances, show and archive', () => {
     for (const t of started.tasks) expect(getTask(gateway, t.task_id)?.phase).toBe('archived');
     expect((await mt(['archive', id])).out).toBe(`every task of ${id} is archived already; nothing changed`);
     expect((await mt(['instances'])).out).toBe('no running or blocked workflow instances on board default; mt kanban workflow instances all shows done and archived ones too');
+    // An archived member counts as finished, not done: an archived instance says so.
+    expect((await mt(['instances', 'all'])).out.split('\n')[1]).toMatch(new RegExp(`^${id}\\s+vendor-eval\\s+archived\\s+3 of 3 finished\\s+`));
+    expect((await mt(['show', id])).out.split('\n')[0]).toBe(`vendor-eval (${id}): archived, 3 of 3 finished, on board default`);
   });
 
   it("prints the DAG's hash in no --json answer: start, apply, its dry run, show and instances", async () => {
