@@ -26,12 +26,12 @@ import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
+import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
 import { limitsReached, workspaceBusy } from './waiting.js';
 import { isWorktreeId, worktreeId, worktreeOf } from '../db/workspaces.js';
 import { placeName, placeOf, resolveTaskWorkspace } from './workspace.js';
 import {
   BLOCK_KINDS,
-  CONTRACT_FIELDS,
   DEFAULT_BOARD,
   GATE_LIMITS,
   type AgentSnapshot,
@@ -190,9 +190,6 @@ export interface Claimed {
 /** The kinds a worker or a person may report; gave_up is the breaker's. */
 const REPORTABLE: readonly ReportedBlockKind[] = BLOCK_KINDS.filter((k): k is ReportedBlockKind => k !== 'gave_up');
 
-/** A person's principal, as channels identify them. */
-const PERSON = /^lark:[A-Za-z0-9_-]+$/;
-
 /** What a run records of its agent (spec §3.3): never an environment value. */
 export function agentSnapshot(role: Role): AgentSnapshot {
   return {
@@ -206,23 +203,6 @@ export function agentSnapshot(role: Role): AgentSnapshot {
 
 // Every entry point takes what an agent's JSON or chat sent, typed or not: a
 // wrong type is refused as `invalid`, never thrown, and never reaches a write.
-
-function isText(v: unknown): v is string {
-  return typeof v === 'string';
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-function isTextList(v: unknown): v is readonly string[] {
-  return Array.isArray(v) && v.every(isText);
-}
-
-/** Absent, or a whole number SQLite stores exactly, at least `min`. */
-function isWhole(n: unknown, min: number): boolean {
-  return n === undefined || (Number.isSafeInteger(n) && (n as number) >= min);
-}
 
 /** Throws unless the path is a regular file: a directory where role.md or a SKILL.md was is not one. */
 function regularFile(path: string): void {
@@ -251,23 +231,6 @@ function idsRefused(...ids: unknown[]): Refusal | undefined {
 
 /** A commit id, abbreviated or whole, SHA-1 or SHA-256. */
 const COMMIT = /^[0-9a-f]{7,64}$/;
-
-/** A refusal unless createdVia is one of the three shapes, with text fields. */
-function createdViaRefused(via: unknown): Refusal | undefined {
-  const fine =
-    isRecord(via) &&
-    (via.kind === 'run'
-      ? isText(via.runId)
-      : via.kind === 'operator'
-        ? Object.keys(via).length === 1
-        : via.kind === 'chat' &&
-          isText(via.channel) &&
-          isText(via.appId) &&
-          isText(via.conversationId) &&
-          isText(via.threadId) &&
-          (via.rootId === undefined || isText(via.rootId)));
-  return fine ? undefined : board.refuse('invalid', 'created_via is a chat, with text fields, a run id, or the operator');
-}
 
 /** A refusal unless the handoff has a text summary, and its report fields their types. */
 function handoffRefused(by: Reporter, handoff: unknown): Refusal | undefined {
@@ -410,36 +373,9 @@ export class KanbanService {
    * should fail while the person is still looking, not strand the task later.
    */
   create(req: CreateRequest): Result<{ task: TaskRow; existing: boolean }> {
-    if (!isRecord(req)) return board.refuse('invalid', 'a task to create is an object');
-    if (!isText(req.title) || req.title.trim() === '') return board.refuse('invalid', 'a task needs a title');
-    if (!isText(req.createdBy)) return board.refuse('invalid', 'created_by is text');
-    const via = createdViaRefused(req.createdVia);
-    if (via !== undefined) return via;
-    if (req.body !== undefined && !isText(req.body)) return board.refuse('invalid', 'a body is text');
-    if (req.workspace !== undefined && !isText(req.workspace)) return board.refuse('invalid', 'a workspace is a name');
-    if (req.board !== undefined && !isText(req.board)) return board.refuse('invalid', 'a board is a name');
-    if (req.parents !== undefined && !isTextList(req.parents)) {
-      return board.refuse('invalid', 'parents are a list of task ids');
-    }
-    const contract = this.#contract(req.contract);
-    if (!contract.ok) return contract;
-    if (req.workspace !== undefined && !this.#workspaces.has(req.workspace)) {
-      return board.refuse('unknown_workspace', `workspace ${visible(JSON.stringify(req.workspace))} is not configured`);
-    }
-    if (
-      !isWhole(req.priority, Number.MIN_SAFE_INTEGER) ||
-      !isWhole(req.failureLimit, 1) ||
-      !isWhole(req.maxRuntimeS, 1)
-    ) {
-      return board.refuse('invalid', 'priority must be a whole number, and failure_limit and max_runtime_s at least 1');
-    }
-    if (req.retryOnCrash !== undefined && req.retryOnCrash !== 'always' && req.retryOnCrash !== 'if-no-side-effects') {
-      return board.refuse('invalid', 'retry_on_crash must be always or if-no-side-effects');
-    }
-    const assignee = req.assignee === undefined ? undefined : this.#assignable(req.assignee);
-    if (assignee !== undefined && !assignee.ok) return assignee;
-    const reviewer = req.reviewer === undefined ? undefined : this.#assignable(req.reviewer);
-    if (reviewer !== undefined && !reviewer.ok) return reviewer;
+    // The checks a task gets however it is made (spec §21.15), then its key, which reads the database.
+    const checked = checkTask(req, this.#facts());
+    if (!checked.ok) return checked;
     const key = this.#idempotencyKey(req);
     if (!key.ok) return key;
     return board.createTask(
@@ -447,9 +383,9 @@ export class KanbanService {
       {
         title: req.title,
         ...(req.body === undefined ? {} : { body: req.body }),
-        contract: contract.contract,
-        assignee: assignee?.assignee ?? null,
-        reviewer: reviewer?.assignee ?? null,
+        contract: checked.contract,
+        assignee: checked.assignee ?? null,
+        reviewer: checked.reviewer ?? null,
         workspace: req.workspace ?? null,
         ...(req.parents === undefined ? {} : { parents: req.parents }),
         ...(req.priority === undefined ? {} : { priority: req.priority }),
@@ -468,7 +404,7 @@ export class KanbanService {
   assign(taskId: string, assignee: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
-    const who = this.#assignable(assignee);
+    const who = assignable(assignee, this.#facts());
     if (!who.ok) return who;
     return board.assign(this.#db, taskId, who.assignee, by, this.#clock.now());
   }
@@ -476,7 +412,7 @@ export class KanbanService {
   assignReviewer(taskId: string, reviewer: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
-    const who = this.#assignable(reviewer);
+    const who = assignable(reviewer, this.#facts());
     if (!who.ok) return who;
     return board.assignReviewer(this.#db, taskId, who.assignee, by, this.#clock.now());
   }
@@ -749,7 +685,7 @@ export class KanbanService {
     const { reviewer, ...rest } = handoff;
     let named: Assignee | undefined;
     if (reviewer !== undefined) {
-      const who = this.#assignable(reviewer);
+      const who = assignable(reviewer, this.#facts());
       if (!who.ok) return who;
       named = who.assignee;
     }
@@ -1203,44 +1139,17 @@ export class KanbanService {
   }
 
   /**
-   * A name the board may hand work to: a configured role whose agent runs
-   * unsupervised, or a person with talk tier once people can be reached.
+   * What a task is checked against (spec §21.15): the team as this process holds
+   * it, and the people, who need talk tier, once people can be reached.
    */
-  #assignable(name: unknown): Result<{ assignee: Assignee }> {
-    if (!isText(name)) return board.refuse('invalid', 'an assignee or reviewer is a role name or a person, as text');
-    if (name.trim() === '') return board.refuse('invalid', 'an assignee or reviewer needs a name');
-    // Echoed quoted: a name is the caller's text, and may hold anything.
-    const quoted = JSON.stringify(name);
-    if (name.includes(':')) {
-      if (!PERSON.test(name)) {
-        return board.refuse('invalid', `${quoted} is neither a role name nor a person (lark:<union_id>)`);
-      }
-      if (this.#people === undefined) {
-        return board.refuse(
-          'person_not_assignable',
-          `${quoted} cannot be given work yet: nothing can deliver a task card to a person until the board is in Lark`,
-        );
-      }
-      if (!this.#people.canTalk(name)) {
-        // Being assigned is permission to report on the task (spec §4.2). A person is
-        // known by the open_id Lark last gave with their union_id, from chat.
-        return board.refuse(
-          'person_not_assignable',
-          `${quoted} cannot be given work: being assigned lets a person report on the task, which needs talk tier, ` +
-            'and this gateway does not know them to have it -- a person is known once they have used /kanban, or been @-mentioned in it',
-        );
-      }
-      return { ok: true, assignee: { kind: 'human', name } };
-    }
-    const role = this.#roles.get(name);
-    if (role === undefined) return board.refuse('unknown_role', `role ${quoted} is not configured`);
-    if (!role.agent.unsupervised && !this.#supervisedRoles) {
-      return board.refuse(
-        'supervised_role',
-        `role ${quoted} has a supervised agent; its approval requests would reach nobody until the board is in Lark`,
-      );
-    }
-    return { ok: true, assignee: { kind: 'role', name } };
+  #facts(): TaskFacts {
+    const people = this.#people;
+    return {
+      roles: this.#roles,
+      workspaces: this.#workspaces,
+      supervisedRoles: this.#supervisedRoles,
+      ...(people === undefined ? {} : { canTalk: (principal: string) => people.canTalk(principal) }),
+    };
   }
 
   /**
@@ -1270,21 +1179,5 @@ export class KanbanService {
     const run = getRun(this.#db, req.createdVia.runId);
     if (run === undefined) return board.refuse('not_found', `no run ${req.createdVia.runId}`);
     return { ok: true, key: `${RUN_KEY}${run.taskId}:${key}` };
-  }
-
-  /** A contract has only the five fields, each text (spec §4.3). */
-  #contract(raw: unknown): Result<{ contract: Contract }> {
-    if (raw === undefined) return { ok: true, contract: {} };
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-      return board.refuse('invalid', 'a contract is an object of text fields');
-    }
-    const contract: Contract = {};
-    for (const [key, value] of Object.entries(raw)) {
-      const field = CONTRACT_FIELDS.find((f) => f === key);
-      if (field === undefined) return board.refuse('invalid', `unknown contract field ${JSON.stringify(key)}`);
-      if (typeof value !== 'string') return board.refuse('invalid', `contract field ${field} must be text`);
-      contract[field] = value;
-    }
-    return { ok: true, contract };
   }
 }
