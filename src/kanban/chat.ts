@@ -14,6 +14,8 @@ import {
   type NewTaskCommand,
   type ReportCommand,
   type ReviewCommand,
+  type ParamPair,
+  type WorkflowCommand,
 } from './chat-parse.js';
 import {
   label,
@@ -22,7 +24,12 @@ import {
   renderGateFailure,
   renderGates,
   renderHelp,
+  renderInstance,
+  renderInstances,
   renderList,
+  renderPreview,
+  renderStarted,
+  renderWorkflows,
   renderReviewCard,
   renderShow,
   renderTaskCard,
@@ -31,15 +38,18 @@ import {
 import { redactKnownSecrets } from '../secrets.js';
 import { CARD_SEND_MS } from './cards.js';
 import { personPrincipal, type PeopleDirectory } from './people.js';
-import type { KanbanService } from './service.js';
+import type { KanbanService, WorkflowMade } from './service.js';
+import { paramsLine } from './workflow.js';
 import {
   DEFAULT_BOARD,
   type Assignee,
   type BoardRow,
   type ChatAt,
+  type CreatedVia,
   type PersonReportsAs,
   type Refusal,
   type Reporter,
+  type Result,
   type RunRow,
   type TaskRow,
 } from './types.js';
@@ -158,9 +168,14 @@ function cardNote(r: Refusal): string {
   return why.charAt(0).toUpperCase() + why.slice(1);
 }
 
-/** The board's own ids are code; anything else the sender typed is escaped like any text. */
+/** The board's own ids, a task's, a run's and an instance's, are code; anything else the sender typed is escaped like any text. */
 function id(taskId: string): string {
-  return /^[kr]_[0-9a-z]+$/.test(taskId) ? `\`${taskId}\`` : forDisplay(taskId);
+  return /^[krw]_[0-9a-z]+$/.test(taskId) ? `\`${taskId}\`` : forDisplay(taskId);
+}
+
+/** An instance's id, `w_…` (spec §21.9): what `KanbanAnswer.thread` names for a start, where it names a task for `task new`. */
+function isInstance(id: string): boolean {
+  return id.startsWith('w_');
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
@@ -251,13 +266,24 @@ export class KanbanChat {
    * either way, once the move is written.
    */
   threaded(taskId: string, key: BindingKey, messageId: string, threadId: string | undefined): void {
+    // An instance's reply is its every member's (spec §21.9): all moved in one call, and all released.
+    const ids = isInstance(taskId) ? this.#members(taskId) : [taskId];
     try {
       if (threadId === undefined || threadId === '') return;
-      const r = this.#deps.service.threadSubscriptions([taskId], chatAt(key), threadId, messageId);
-      if (!r.ok) this.#note(`kanban: task ${taskId} stays at chat scope: its subscription was not moved to thread ${threadId} (${r.code})`);
+      const r = this.#deps.service.threadSubscriptions(ids, chatAt(key), threadId, messageId);
+      if (!r.ok) {
+        const what = isInstance(taskId) ? `instance ${taskId}'s tasks stay` : `task ${taskId} stays`;
+        this.#note(`kanban: ${what} at chat scope: ${isInstance(taskId) ? 'their subscriptions were' : 'its subscription was'} not moved to thread ${threadId} (${r.code})`);
+      }
     } finally {
-      this.#release(taskId);
+      for (const id of ids) this.#release(id);
     }
+  }
+
+  /** An instance's members' task ids, or none for an id that is no instance's. */
+  #members(instanceId: string): string[] {
+    const r = this.#deps.service.instance(instanceId);
+    return r.ok ? r.view.members.map((m) => m.taskId) : [];
   }
 
   /** A task held until `threaded`, or `holdMs` at most. */
@@ -273,7 +299,8 @@ export class KanbanChat {
   }
 
   async #run(arg: string, message: InboundMessage, key: BindingKey): Promise<string | KanbanAnswer> {
-    const parsed = parseKanban(arg);
+    // The message's mention names, so a param's `@Alice Smith` is read whole (spec §21.6).
+    const parsed = parseKanban(arg, (message.mentions ?? []).flatMap((m) => (m.name === null ? [] : [m.name])));
     if (!parsed.ok) return parsed.usage;
     const command = parsed.command;
     // Noted first: an @-mention in this very command is checked for talk tier through it.
@@ -307,6 +334,11 @@ export class KanbanChat {
         const r = this.#deps.service.listGates(command.taskId);
         return r.ok ? renderGates(command.taskId, r.gates) : refused(r);
       }
+      case 'workflow list':
+      case 'workflow instances':
+      case 'workflow show':
+      case 'workflow preview':
+        return this.#workflowRead(command, message, key);
       default:
         break;
     }
@@ -412,9 +444,132 @@ export class KanbanChat {
       case 'board set':
       case 'board archive':
         return this.#board(command, by, key);
+      case 'workflow start':
+        return this.#startWorkflow(command, by, message, key);
+      case 'workflow archive': {
+        const r = service.archiveWorkflow(command.instanceId, by);
+        if (!r.ok) return refused(r);
+        if (r.archived.length === 0) return `Every task of ${id(r.instance.instanceId)} is archived already; nothing changed.`;
+        for (const run of r.runs) this.#decided(run);
+        this.#changed();
+        const n = r.archived.length;
+        return `Archived ${n} task${n === 1 ? '' : 's'} of ${id(r.instance.instanceId)} (${label(r.instance.name ?? '(no workflow)')}). Its related tasks are left as they are.`;
+      }
       default:
         return renderHelp();
     }
+  }
+
+  /** `/kanban workflow list`, `instances`, `show` and `preview` (spec §21.10): talk tier, and making nothing. */
+  #workflowRead(command: WorkflowCommand, message: InboundMessage, key: BindingKey): string {
+    const service = this.#deps.service;
+    const board = service.chatBoard(chatAt(key));
+    const nameOf = (p: string): string | undefined => this.#deps.people.nameOf(p);
+    switch (command.verb) {
+      case 'workflow list': {
+        const list = service.workflows();
+        const byName = new Map(list.usable.map((w) => [w.name, w]));
+        return renderWorkflows(list, (name) => {
+          const w = byName.get(name);
+          return w === undefined ? '' : paramsLine(w);
+        });
+      }
+      case 'workflow instances': {
+        const r = service.instances(board.name, command.all);
+        return renderInstances(r.instances, { board: board.name, all: command.all, total: r.total, read: r.read, nameOf });
+      }
+      case 'workflow show': {
+        const r = service.instance(command.instanceId);
+        if (!r.ok) return refused(r);
+        return renderInstance(r.view, board.name, (a) => (a === null ? 'nobody' : this.#whom(a)), nameOf);
+      }
+      case 'workflow preview': {
+        // The start's checks without the start, its key's but none (spec §21.6).
+        const r = service.previewWorkflow({
+          workflow: command.name,
+          params: { from: 'chat', pairs: command.pairs },
+          personOf: (value) => this.#personOf(value, message),
+          createdBy: principalOf(message.sender) ?? '',
+          createdVia: this.#via(message, key),
+          board: board.name,
+        });
+        if (!r.ok) return refused(r);
+        return renderPreview(command.name, r.dag, (name) => this.#whom({ kind: name.includes(':') ? 'human' : 'role', name }));
+      }
+      default:
+        return renderHelp();
+    }
+  }
+
+  /** Where a command came from, as the board records it: this chat, and in a group's thread its root (spec §19.4). */
+  #via(message: InboundMessage, key: BindingKey): CreatedVia {
+    return {
+      kind: 'chat',
+      channel: key.channel,
+      appId: key.appId,
+      conversationId: key.conversationId,
+      threadId: key.threadId,
+      ...(message.chatType !== 'group' || key.threadId === '' || message.rootId === undefined ? {} : { rootId: message.rootId }),
+    };
+  }
+
+  /**
+   * `/kanban workflow start` (spec §21.6, §21.9): on the chat's board, keyed by
+   * the message, every task followed by this chat. In a group at chat scope it
+   * is answered in a thread of its own, the instance's, in both wordings, and
+   * every member is held until the router says where its reply went.
+   */
+  #startWorkflow(command: { name: string; pairs: readonly ParamPair[] }, by: string, message: InboundMessage, key: BindingKey): string | KanbanAnswer {
+    const board = this.#deps.service.chatBoard(chatAt(key));
+    if (board.archivedAt !== null) {
+      return `This chat is on board ${boardName(board)}, which is archived: \`/kanban board use <board>\` moves it to another first.`;
+    }
+    const r = this.#deps.service.startWorkflow({
+      workflow: command.name,
+      params: { from: 'chat', pairs: command.pairs },
+      personOf: (value) => this.#personOf(value, message),
+      idempotencyKey: `lark:${message.messageId}`,
+      createdBy: by,
+      createdVia: this.#via(message, key),
+      board: board.name,
+    });
+    if (!r.ok) return refused(r);
+    if (r.existing) return `Already started, as ${id(r.instance.instanceId)}.`;
+    // Every member held from here, with no await before it, so the dispatcher's pass
+    // below, and the card poster, find them held (spec §21.9).
+    const thread = message.chatType === 'group' && key.threadId === '';
+    if (thread) for (const t of r.tasks) this.#hold(t.taskId);
+    try {
+      this.#changed();
+      if (thread) return { text: this.#started(r, 'thread'), quoted: this.#started(r, 'chat'), thread: r.instance.instanceId };
+      return this.#started(r, message.chatType === 'group' && key.threadId !== '' && message.rootId !== undefined ? 'thread' : 'chat');
+    } catch (err) {
+      if (thread) for (const t of r.tasks) this.#release(t.taskId);
+      throw err;
+    }
+  }
+
+  #started(made: WorkflowMade, where: 'thread' | 'chat'): string {
+    return renderStarted(made, where, (a) => this.#whom(a));
+  }
+
+  /**
+   * A param's `@Name`, for a person field, as the principal of the person the
+   * message mentions by that name (spec §21.6): as `assignee:` is read, but said
+   * as a refusal the service gives, plain, for chat to escape.
+   */
+  #personOf(value: string, message: InboundMessage): Result<{ principal: string }> {
+    const shown = value.slice(1).trim();
+    const found = (message.mentions ?? []).filter((m) => m.name === shown || m.key === value);
+    const unionIds = [...new Set(found.map((m) => m.unionId).filter((u): u is string => u !== null))];
+    if (found.length === 0) {
+      return { ok: false, code: 'invalid', message: `${value} is not someone this message mentions: type @ and pick them, so Lark says who they are` };
+    }
+    if (unionIds.length === 0) {
+      return { ok: false, code: 'invalid', message: `Lark did not say who ${value} is (no union_id came with the mention); ask the operator to check the app can read user ids` };
+    }
+    if (unionIds.length > 1) return { ok: false, code: 'invalid', message: `more than one person mentioned is called ${value}; say which with lark:<union_id>` };
+    return { ok: true, principal: personPrincipal(unionIds[0] ?? '') };
   }
 
   /** `/kanban board …` (spec §16): boards made, set and archived, and the chat moved onto one. */
