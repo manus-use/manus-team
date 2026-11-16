@@ -589,7 +589,7 @@ class Service {
    * passEnv name, as warnings; and the first reason the gateway would not start
    * as the service, a passEnv name aside, as a problem. Names only, never a value.
    */
-  private checkEnvironment(file: GatewayEnvFile, path: string): { warnings: string[]; problem: string | undefined } {
+  private checkEnvironment(file: GatewayEnvFile, path: string): { warnings: string[]; problem: string | undefined; unset: string[] } {
     const { t, io } = this;
     const out: string[] = [];
     const problems: string[] = [];
@@ -631,7 +631,7 @@ class Service {
       if (!(err instanceof ConfigError)) throw err;
       problems.push(err.message);
     }
-    return { warnings: out, problem: problems[0] };
+    return { warnings: out, problem: problems[0], unset: [...new Set(names.map((entry) => entry.split(': ')[1] ?? ''))] };
   }
 
   /**
@@ -669,7 +669,22 @@ class Service {
       );
     }
     // The npm the native load's advice names is found as the service's PATH finds it.
-    await this.loadModules(recorded.path);
+    const gateway = await this.loadModules(recorded.path);
+    // The build's own startup, as the service starts it, each unset passEnv name given a stand-in:
+    // for its warnings, the workflows it would find unusable (spec §21.4).
+    const loadStartup = gateway['loadStartup'];
+    if (typeof loadStartup === 'function') {
+      addSecrets([STAND_IN]);
+      const env: Record<string, string | undefined> = { HOME: deps.home, PATH: recorded.path, MT_HOME: t.mtHome };
+      for (const name of checked.unset) env[name] = STAND_IN;
+      let started: unknown;
+      try {
+        started = loadStartup(env);
+      } catch (err) {
+        throw new CommandFailed(`the gateway would not start: ${errorText(err)}`);
+      }
+      this.startupWarnings(started);
+    }
     io.out(`ok: this build would start as ${t.name}`);
     return 0;
   }
@@ -720,13 +735,30 @@ class Service {
       copy[name] = STAND_IN;
       io.out(`note: ${name} is not set here: the gateway will need it from the shell that starts it`);
     }
+    let started: unknown;
     try {
-      loadStartup(copy);
+      started = loadStartup(copy);
     } catch (err) {
       throw new CommandFailed(`the gateway would not start: ${errorText(err)}`);
     }
+    this.startupWarnings(started);
     io.out('ok: this build would start as a gateway started by hand from this shell');
     return 0;
+  }
+
+  /**
+   * The startup's workflow lines that say something is wrong (spec §21.4), as
+   * warnings: a broken workflow, or an entry that is no workflow. The gateway
+   * would start, so the check does not fail on them. The summary line, which
+   * names the usable ones, is the gateway's note, not a warning. A build from
+   * before workflows answers none.
+   */
+  private startupWarnings(started: unknown): void {
+    const lines = (started as { workflows?: unknown } | null)?.workflows;
+    if (!Array.isArray(lines)) return;
+    for (const line of lines) {
+      if (typeof line === 'string' && !line.startsWith('workflows: ')) this.io.out(redactKnownSecrets(`warning: ${line}`));
+    }
   }
 
   /**

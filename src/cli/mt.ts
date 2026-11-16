@@ -11,6 +11,7 @@ import { operatorCommand, TASK_COMMANDS } from './operator.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
 import { SERVICE_USAGE, serviceCommand, type ServiceDeps } from './service.js';
 import { updateCommand, type UpdateDeps } from './update.js';
+import { workflowCheck } from './workflow.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
 
 /**
@@ -66,6 +67,7 @@ const USAGE = [
   '  mt role create <name> [--clone-from <role>] [--description "..."] [--own-workspace]',
   '  mt role list',
   '  mt role check [<name>]',
+  '  mt workflow check [<name>]',
   '  mt workspace add <name> <absolute-path> [--isolated]',
   '  mt workspace add <name> --clone <git-url> [--isolated]',
   '  mt workspace list',
@@ -234,6 +236,12 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       const [name, extra] = parse(rest, {}).positionals;
       if (extra !== undefined) throw new UsageError('role check takes at most one name');
       return roleCheck(name, io);
+    }
+    if (group === 'workflow' && command === 'check') {
+      // Files only, and no authority: any shell, a board run's included (spec §21.4).
+      const [name, extra] = parse(rest, {}).positionals;
+      if (extra !== undefined) throw new UsageError('workflow check takes at most one name');
+      return workflowCheck(name, io);
     }
     if (group === 'workspace' && command === 'add') {
       const { values, positionals } = parse(rest, { clone: { type: 'string' }, isolated: { type: 'boolean' } });
