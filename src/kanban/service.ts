@@ -22,9 +22,9 @@ import { buildEnv } from '../driver/env.js';
 import { nameProblem, visible } from '../names.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { roleLimit, type Role } from '../roles.js';
-import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
+import { holdsSecret } from './gate-command.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
 import { limitsReached, workspaceBusy } from './waiting.js';
@@ -207,21 +207,6 @@ export function agentSnapshot(role: Role): AgentSnapshot {
 /** Throws unless the path is a regular file: a directory where role.md or a SKILL.md was is not one. */
 function regularFile(path: string): void {
   if (!statSync(path).isFile()) throw new Error(`${path} is not a file`);
-}
-
-/**
- * Whether a gate command holds a known secret (spec §10.1): as written, with its
- * control characters stripped, as the escapers match it, and with the shell's
- * quotes and backslashes taken out, so `sk\$x` or `'sk''x'` -- which the shell
- * runs as the secret -- count as well. A backslash-newline, which the shell
- * removes, is taken out first, and that form is matched with its control
- * characters stripped too.
- */
-function holdsSecret(command: string): boolean {
-  // A backslash-newline is a continuation the shell removes, so it goes before the quotes do.
-  const unquoted = command.replace(/\\\r?\n/g, '').replace(/['"\\]/g, '');
-  const forms = [command, stripControl(command), unquoted, stripControl(unquoted)];
-  return forms.some((form) => redactKnownSecrets(form) !== form);
 }
 
 /** A refusal unless every id given is text. */
