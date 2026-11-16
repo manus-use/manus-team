@@ -117,6 +117,12 @@ describe('the keys', () => {
     expect(problem('steps: {}\n')).toBe('the file needs steps, at least one');
     expect(problem('- a\n')).toBe('the file must be a mapping');
   });
+
+  it('takes 100 steps and refuses 101, as a start makes at least a task a step', () => {
+    const steps = (n: number): string => `steps:\n${Array.from({ length: n }, (_, i) => `  s${i}: { title: T }\n`).join('')}`;
+    expect(problem(steps(100))).toBeUndefined();
+    expect(problem(steps(101))).toBe('the file has 101 steps; a workflow has at most 100, as a start makes at least one task a step and an instance has at most 100');
+  });
 });
 
 describe('the names', () => {

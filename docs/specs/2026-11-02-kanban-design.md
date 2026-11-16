@@ -4215,6 +4215,8 @@ The same checks run in three places, from one module, `src/kanban/workflow.ts`:
 
 - the YAML, the keys and their types, at every level;
 - the names: the workflow's, each step's and each param's;
+- at most 100 steps, as every step makes at least one task and an instance has at most 100
+  (§21.3), so a longer file could never start;
 - each step's `parents` naming steps of the file, never itself, and no cycle among the steps,
   found by a walk of the parents with the cycle named (`shortlist -> evaluate -> shortlist`);
 - each step written below its parents: a parent written after its child is refused, naming

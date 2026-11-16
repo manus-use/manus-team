@@ -450,6 +450,11 @@ export function checkWorkflow(name: string, source: string, facts: WorkflowFacts
     const params = Object.entries(paramsMap).map(([n, v]) => paramOf(n, v, path));
     if (root['steps'] === undefined || root['steps'] === null) fail('the file needs steps, at least one');
     const stepsMap = section(path, 'steps', root['steps']);
+    // Every step makes at least one task, so a file past the bound could never start (spec §21.4).
+    const count = Object.keys(stepsMap).length;
+    if (count > DAG_LIMITS.tasks) {
+      fail(`the file has ${count} steps; a workflow has at most ${DAG_LIMITS.tasks}, as a start makes at least one task a step and an instance has at most ${DAG_LIMITS.tasks}`);
+    }
     const steps = Object.entries(stepsMap).map(([n, v]) => stepOf(n, v, path));
     if (steps.length === 0) fail('the file needs steps, at least one');
     checkWhole(steps, new Map(params.map((p) => [p.name, p])), facts);
