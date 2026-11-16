@@ -119,6 +119,13 @@ const TIERS: Readonly<Record<KanbanCommand['verb'], Tier>> = {
   'board use': 'operate',
   'board set': 'operate',
   'board archive': 'operate',
+  // A start starts agents, unsupervised, in workspaces, as task new does; a preview makes nothing (spec §21.6).
+  'workflow list': 'talk',
+  'workflow instances': 'talk',
+  'workflow show': 'talk',
+  'workflow preview': 'talk',
+  'workflow start': 'operate',
+  'workflow archive': 'operate',
 };
 
 /** The chat a command came from, for the board it is on: its conversation, whatever the thread (spec §16). */

@@ -1,4 +1,5 @@
 import { forDisplay } from '../channel/escape.js';
+import { NAME_PATTERN } from '../names.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
 import type { DisplayStatus } from './status.js';
@@ -72,7 +73,22 @@ export type KanbanCommand =
   | ReportCommand
   | ReviewCommand
   | { verb: 'board list'; archived: boolean }
-  | BoardCommand;
+  | BoardCommand
+  | WorkflowCommand;
+
+/** A param as chat gives it (spec §21.6): its key, its value, and whether it was quoted, which keeps a list's item whole. */
+export interface ParamPair {
+  key: string;
+  value: string;
+  quoted: boolean;
+}
+
+/** `/kanban workflow …` (spec §21.10): the workflow files, a chat board's instances, and a start or its preview. */
+export type WorkflowCommand =
+  | { verb: 'workflow list' }
+  | { verb: 'workflow instances'; all: boolean }
+  | { verb: 'workflow show' | 'workflow archive'; instanceId: string }
+  | { verb: 'workflow preview' | 'workflow start'; name: string; pairs: ParamPair[] };
 
 /** What `board set` changes (spec §16.6): a board's own max_running, or its workspace; null clears either. */
 export interface BoardSetting {
@@ -142,7 +158,16 @@ export const USAGE = {
   'board use': '/kanban board use <name>',
   'board set': '/kanban board set <name> max_running <number|none>, or workspace <workspace|none>',
   'board archive': '/kanban board archive <name>',
+  'workflow list': '/kanban workflow list',
+  'workflow instances': '/kanban workflow instances [all]',
+  'workflow show': '/kanban workflow show <instance>',
+  'workflow preview': '/kanban workflow preview <name> key=value ...',
+  'workflow start': '/kanban workflow start <name> key=value ...',
+  'workflow archive': '/kanban workflow archive <instance>',
 } as const;
+
+/** The verbs of `/kanban workflow …`, in the order the help lists them. */
+export const WORKFLOW_VERBS = ['list', 'instances', 'show', 'preview', 'start', 'archive'] as const;
 
 /**
  * The lines of `/kanban task new` that fill a field (spec §9.1), by their label. A
@@ -265,11 +290,13 @@ function words(text: string, n: number): string[] | undefined {
 const TASK_TAKES = `\`/kanban task\` takes ${TASK_VERBS.slice(0, -1).join(', ')} or ${TASK_VERBS.at(-1)}. \`/kanban help\` lists them.`;
 
 /**
- * Parse what follows `/kanban`: `help`, or a group, `task`, `board` or `gate`,
- * and its verb. The router gives the whole argument, newlines kept: `/kanban
- * task new` and `/kanban task comment` take several lines.
+ * Parse what follows `/kanban`: `help`, or a group, `task`, `board`, `gate` or
+ * `workflow`, and its verb. The router gives the whole argument, newlines kept:
+ * `/kanban task new` and `/kanban task comment` take several lines. `mentions`
+ * are the names the message's @-mentions show, which a param's value starting
+ * with `@` is matched against, as such a name may hold spaces (spec §21.6).
  */
-export function parseKanban(arg: string): ParsedKanban {
+export function parseKanban(arg: string, mentions: readonly string[] = []): ParsedKanban {
   // One kind of line break from here on: a pasted CRLF, or a lone CR, is a newline.
   // And no zero-width character at a line's start, where it would hide a verb or a label.
   const [word, after] = shift(arg.replace(/\r\n?/g, '\n').replace(LEADING_ZW, '$1'));
@@ -288,6 +315,8 @@ export function parseKanban(arg: string): ParsedKanban {
       return parseGate(rest);
     case 'board':
       return parseBoard(rest);
+    case 'workflow':
+      return parseWorkflow(rest, mentions);
     default:
       return { ok: false, usage: `Unknown \`/kanban\` command \`${echoed(rawGroup, 80)}\`. \`/kanban help\` lists them.` };
   }
@@ -497,4 +526,101 @@ function parseNew(text: string): ParsedKanban {
   }
   out.body = body.join('\n').replace(/^\s*\n/, '').trimEnd();
   return { ok: true, command: out };
+}
+
+/** What `/kanban workflow` says with no verb, or one it does not take. */
+const WORKFLOW_TAKES = `\`/kanban workflow\` takes ${WORKFLOW_VERBS.map((v) => `\`${USAGE[`workflow ${v}`]}\``).join(', ')}.`;
+
+/** `/kanban workflow list|instances [all]|show <id>|archive <id>|preview <name> …|start <name> …` (spec §21.10). */
+function parseWorkflow(text: string, mentions: readonly string[]): ParsedKanban {
+  const [rawVerb, rest] = shift(text.replace(START_ZW, '$1'));
+  const verb = rawVerb.toLowerCase();
+  switch (verb) {
+    case 'list':
+      return words(rest, 0) === undefined ? usage('workflow list') : { ok: true, command: { verb: 'workflow list' } };
+    case 'instances': {
+      const w = words(rest, 0) ?? words(rest, 1);
+      const all = w?.[0]?.toLowerCase();
+      if (w === undefined || (all !== undefined && all !== 'all')) return usage('workflow instances');
+      return { ok: true, command: { verb: 'workflow instances', all: all === 'all' } };
+    }
+    case 'show':
+    case 'archive': {
+      const w = words(rest, 1);
+      const command = `workflow ${verb}` as const;
+      return w?.[0] === undefined ? usage(command) : { ok: true, command: { verb: command, instanceId: w[0] } };
+    }
+    case 'preview':
+    case 'start': {
+      const command = `workflow ${verb}` as const;
+      const [name, after] = shift(rest);
+      if (name === '') return usage(command);
+      const pairs = parsePairs(after, mentions, command);
+      return pairs.ok ? { ok: true, command: { verb: command, name, pairs: pairs.pairs } } : pairs;
+    }
+    default:
+      return { ok: false, usage: WORKFLOW_TAKES };
+  }
+}
+
+/** The quotes a value may open with, and the ones each may close with: a typed `"` may arrive as `“` and `”` (spec §21.6). */
+const QUOTES: Readonly<Record<string, readonly string[]>> = { '"': ['"', '”'], '“': ['”', '"'] };
+
+/**
+ * A preview's or a start's params (spec §21.6): `key=value` pairs separated by
+ * spaces, tabs or line breaks, each split at its first `=`, the key in the
+ * param grammar. A value runs to the next space, or is quoted, with no escape;
+ * an unquoted value starting with `@` takes the longest of the message's
+ * mention names it begins with, whole. A word that is no pair is refused with
+ * the usage line, and after a value ending in `,`, a hint.
+ */
+export function parsePairs(
+  text: string,
+  mentions: readonly string[],
+  verb: 'workflow preview' | 'workflow start' = 'workflow start',
+): { ok: true; pairs: ParamPair[] } | { ok: false; usage: string } {
+  const names = [...new Set(mentions.filter((m) => m !== ''))].sort((a, b) => b.length - a.length);
+  const pairs: ParamPair[] = [];
+  const space = (c: string | undefined): boolean => c === undefined || /\s/.test(c);
+  let i = 0;
+  while (i < text.length) {
+    if (space(text[i])) {
+      i += 1;
+      continue;
+    }
+    let end = i;
+    while (end < text.length && !space(text[end]) && text[end] !== '=') end += 1;
+    const key = text.slice(i, end);
+    if (text[end] !== '=') {
+      const last = pairs.at(-1);
+      const hint =
+        last !== undefined && !last.quoted && last.value.endsWith(',')
+          ? ' Quote a value with spaces, as `vendors="acme, globex"`, or leave no space after its commas.'
+          : '';
+      return { ok: false, usage: `\`${echoed(key, 80)}\` is not a \`key=value\` pair.${hint} Usage: \`${USAGE[verb]}\`` };
+    }
+    if (!NAME_PATTERN.test(key)) {
+      return { ok: false, usage: `\`${echoed(key, 80)}\` is not a param name. Usage: \`${USAGE[verb]}\`` };
+    }
+    i = end + 1;
+    const open = text[i] ?? '';
+    const closes = QUOTES[open];
+    if (closes !== undefined) {
+      let close = i + 1;
+      while (close < text.length && !closes.includes(text[close] ?? '')) close += 1;
+      if (close >= text.length) return { ok: false, usage: `The value of \`${key}\` opens a quote it does not close. Usage: \`${USAGE[verb]}\`` };
+      if (!space(text[close + 1])) {
+        return { ok: false, usage: `The quoted value of \`${key}\` ends at its closing quote: put a space after it. Usage: \`${USAGE[verb]}\`` };
+      }
+      pairs.push({ key, value: text.slice(i + 1, close), quoted: true });
+      i = close + 1;
+      continue;
+    }
+    const mention = text[i] === '@' ? names.find((n) => text.startsWith(`@${n}`, i) && space(text[i + n.length + 1])) : undefined;
+    let stop = mention === undefined ? i : i + mention.length + 1;
+    while (stop < text.length && !space(text[stop])) stop += 1;
+    pairs.push({ key, value: text.slice(i, stop), quoted: false });
+    i = stop;
+  }
+  return { ok: true, pairs };
 }
