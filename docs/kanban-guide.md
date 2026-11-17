@@ -1033,6 +1033,8 @@ mt kanban task new "Draft the Q3 summary" --board web-app --assignee docs-writer
 mt kanban task list --board web-app
 mt kanban task show k_…
 mt kanban task stop k_…
+mt kanban people
+mt kanban task new "Book the venue for the offsite" --assignee lark:on_5d1e7a --chat oc_xxx
 ```
 
 > created k\_…: Draft the Q3 summary, for role docs-writer, in docs, on board web-app
@@ -1048,9 +1050,20 @@ mt kanban task stop k_…
   `--parent` (as often as needed), `--outcome`, `--verify`, `--constraints`, `--boundaries` and
   `--stop-when`. The body is `--body "…"`, or `--body-file` with a file, or `-` to read it from
   stdin.
-- Only roles: give a person work from chat, by @-mention.
-- No chat follows a task created here, so nobody is told when it is done or blocks. Look with
-  `mt kanban task show`, or create it from chat if a group should hear.
+- A person is `lark:<union_id>`: `--assignee`, `--reviewer` and `task assign` take one, checked
+  as chat checks one: known to this gateway, and at talk tier by the owner and `auth.talk` this
+  shell's settings give. `mt kanban people` lists the people the gateway knows, by name, with
+  their `lark:` ids and `talk` or `no`. There are no @-mentions here: `@Alice` is refused.
+- `--chat oc_…` makes that chat follow the task, as a chat follows a task made in it: the gateway
+  posts it a line, "Created `k_…` **Book the venue for the offsite**, for Dana Wu, by
+  operator:alice from a terminal.", then the task's notices. `--thread omt_…` puts them in a thread
+  of that chat whose root the board already knows, from a task made in it from chat; a thread it
+  does not know is refused. A chat outside a non-empty `auth.chats` is refused, as the gateway
+  would not answer there. Without `--chat`, no chat follows the task, so nobody is told when it
+  is done or blocks: look with `mt kanban task show`. The board is still `--board`, whatever the
+  chat. With `--key`, a second run answers the first task and names the chat that follows it.
+- `task list` has an `age` column, how long each task has been in its status, `45m`, `5h` or
+  `3d`; `--json` gives each task's `created_at` and `status_since`, in milliseconds.
 - After a change, the running gateway is told to look for work at once, and to stop the agent
   of a run the change ended. If no gateway answers, `mt` says so, and why; the change stands,
   and the gateway acts on it at its next sweep, or when it next starts. Do not run the command
@@ -1227,6 +1240,12 @@ with `mt kanban workflow apply dag.json --dry-run`, which lists every task and g
 makes nothing, and make it with `mt kanban workflow apply dag.json --key ls-1` (recipe 4). `mt
 kanban workflow show w_… --dag` prints the DAG an instance was made from, which `apply` takes
 again.
+
+`start` and `apply` take `--chat oc_… [--thread omt_…]` as `task new` does: every task of the
+instance is followed from that chat, and the gateway posts there the start's reply, naming the
+instance and its tasks. A param that lands in a person field, and a DAG's `assignee` or
+`reviewer`, take `lark:<union_id>`, checked at the start and by `apply --dry-run`; the preview
+opens no database, so it leaves people unchecked and says so.
 
 An agent starts a workflow from its run with `mt kanban start-workflow < start.json`, as
 `{"workflow": "vendor-eval", "params": {"topic": "log storage", "vendors": ["acme", "globex"]}}`,

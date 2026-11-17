@@ -18,7 +18,8 @@ granting access, a follow-up after an incident.
 
 And people, named in chat by @-mention: type @ and pick them from Lark's list. A person must
 have used `/kanban`, or been @-mentioned in it, before they can be given work, and needs talk
-tier.
+tier. At a terminal, which has no mentions, a person is `lark:<union_id>`: `mt kanban people`
+lists the people the gateway knows, with their ids and whether they have talk tier.
 
 **Where things go.** A workflow is one file, `~/.manus-team/workflows/<name>.yaml`, read at
 each preview and start, so an edit needs no restart. `mt workflow check <name>` checks it on
@@ -69,8 +70,8 @@ Start it from chat:
 /kanban workflow start weekly-report week=2026-W47 reviewer=@Bob Li
 ```
 
-From a terminal on the gateway's host, where a person cannot be given work, so the reviewer is
-the `reviewer` role:
+From a terminal on the gateway's host, here with the `reviewer` role as the reviewer; a person
+would be `--param reviewer=lark:<union_id>`:
 
 <!-- example: start weekly-report terminal -->
 ```
@@ -128,8 +129,8 @@ Start it from chat:
 /kanban workflow start content-pipeline topic="our new export button" approver=@Dana Wu
 ```
 
-Not from a terminal: the approver is a person, and a terminal gives no person work, so `mt
-kanban workflow start` refuses it. Check the file there:
+From a terminal, the approver is `--param approver=lark:<union_id>`, an id `mt kanban people`
+lists, and `--chat oc_xxx` names the group that hears. Check the file there:
 
 <!-- example: check content-pipeline -->
 ```
@@ -186,7 +187,8 @@ Start it from chat, with one @-mention for each owner, joined by commas:
 /kanban workflow start incident-followup incident=INC-2041 owners=@Alice Chen,@Bob Li
 ```
 
-Not from a terminal, as the owners are people. Check the file there:
+From a terminal, the owners are `lark:` ids, `--param owners=lark:on_…,lark:on_…`. Check the
+file there:
 
 <!-- example: check incident-followup -->
 ```
@@ -242,7 +244,8 @@ Start it from chat. `systems` has a default, so it can be left out:
 /kanban workflow start onboarding starter="Mei Lin" admin=@Ravi Patel manager=@Dana Wu
 ```
 
-Not from a terminal, as the admin and the manager are people. Check the file there:
+From a terminal, the admin and the manager are `lark:` ids, as `mt kanban people` lists them.
+Check the file there:
 
 <!-- example: check onboarding -->
 ```
@@ -320,7 +323,8 @@ Start it from chat:
 /kanban workflow start multi-service-change change="log every request's trace id" services=billing,orders,search releaser=@Ravi Patel
 ```
 
-Not from a terminal, as the releaser is a person. Check the file there:
+From a terminal, the releaser is a `lark:` id, as `mt kanban people` lists it. Check the file
+there:
 
 <!-- example: check multi-service-change -->
 ```
@@ -401,9 +405,10 @@ Start it from chat:
 /kanban workflow start triage-and-route request="a post on how we cut build times in half"
 ```
 
-or from a terminal, as it names no person. Started there, no chat follows the triage task, nor
-the workflow it starts, so nobody is told how either goes: watch them with `mt kanban workflow
-show w_…`, or start it from chat if a group should hear.
+or from a terminal. Started there, no chat follows the triage task, nor the workflow it starts,
+unless `--chat oc_xxx` names one: then that chat follows the triage task, and so the workflow
+its run starts, as a run's work follows its task's chats. Without it, watch them with `mt kanban
+workflow show w_…`.
 
 <!-- example: start triage-and-route terminal -->
 ```
@@ -452,10 +457,14 @@ Two facts shape the scripts below:
   failures prints them and exits 0.
 - **A script is the operator's shell, not an agent's.** It runs with the role's environment,
   and none of the gateway's `MT_KANBAN_*` or `MT_CRON_*` variables, so the operator's `mt`
-  commands work in it. Its `PATH` is the gateway's own, which need not hold `mt`, and `MT_HOME`
-  is not passed, so call the launcher the gateway writes at each start by its path,
-  `~/.manus-team/bin/mt`, which finds the home `~/.manus-team` by itself. For a gateway with a
-  home of its own, write it out: `MT_HOME=/srv/mt /srv/mt/bin/mt …`.
+  commands work in it. The gateway puts its own `mt` first on the script's `PATH`, and gives it
+  its `MT_HOME`, `MT_CONFIG` and `MT_DB`, so plain `mt` in a script is this gateway's `mt`, on
+  its own config and database, whatever else the host has installed.
+
+A script runs in the job's workspace, which the role's agents write to: keep the script itself
+outside it, under `$MT_HOME` for example, so it never runs what an agent left there. A gateway
+run by hand passes its scripts nothing of its own shell but those three: a setting only in that
+shell, such as `MT_ALLOW_CHATS`, belongs in the config file or the `.env`, where both read it.
 
 From chat each job is a `/cron add`, at operator tier; from a terminal, `mt cron add`, with
 `--chat` saying where it posts. Without `--chat`, a terminal's job posts nowhere, and its results
@@ -536,30 +545,28 @@ Use it to have someone look over the board each week for work that is stuck.
 
 <!-- example: cron board-review chat -->
 ```text
-/cron add "every friday 16:00" worker Below are last week's and this week's open tasks on the board web-app, each as JSON. List each task blocked this week, with its id, title and assignee. Then list each task open in both lists, as stale. One line each. If nothing is blocked or stale, answer [nothing to report].
+/cron add "every friday 16:00" worker Below are the open tasks on the board web-app, each with its status and its age in that status. List each task that is blocked, and each whose age is 7d or more, with its id, title, assignee and age. One line each. If there are none, answer [nothing to report].
 name: Board review
-script: mkdir -p .board-review && ~/.manus-team/bin/mt kanban task list --board web-app --json > .board-review/now.json && echo 'Last week:' && (cat .board-review/last.json 2>/dev/null || echo 'none yet') && echo 'This week:' && cat .board-review/now.json && mv .board-review/now.json .board-review/last.json
+script: mt kanban task list --board web-app
 ```
 
 <!-- example: cron board-review terminal -->
 ```
 mt cron add "every friday 16:00" worker \
-    "Below are last week's and this week's open tasks on the board web-app, each as JSON. List each task blocked this week, with its id, title and assignee. Then list each task open in both lists, as stale. One line each. If nothing is blocked or stale, answer [nothing to report]." \
+    "Below are the open tasks on the board web-app, each with its status and its age in that status. List each task that is blocked, and each whose age is 7d or more, with its id, title, assignee and age. One line each. If there are none, answer [nothing to report]." \
     --name "Board review" --chat oc_xxx \
-    --script "mkdir -p .board-review && ~/.manus-team/bin/mt kanban task list --board web-app --json > .board-review/now.json && echo 'Last week:' && (cat .board-review/last.json 2>/dev/null || echo 'none yet') && echo 'This week:' && cat .board-review/now.json && mv .board-review/now.json .board-review/last.json"
+    --script "mt kanban task list --board web-app"
 ```
 
-What happens: each Friday at 16:00 the script lists the board's open tasks, each with its id,
-status, title and assignee, and keeps the list in the job's workspace, as
-`.board-review/last.json`. It prints the list it kept a week ago, `none yet` the first time,
-beside this week's, so the agent can tell which tasks were open both times. The list says no
-task's age, which is why "stale" here means "open last week as well". A `/cron run` in the
-middle of the week keeps its own list too, and the next Friday compares with that one.
+What happens: each Friday at 16:00 the script lists the board's open tasks, a line each, with
+its id, its status, its `age`, how long it has been in that status (`45m`, `5h`, `3d`), its
+assignee and its title. The agent flags what is blocked, and what has sat for a week or more.
+Nothing is kept between fires: the age is the board's, from the time each task last changed
+status, so a `/cron run` in the middle of the week sees the same ages a Friday would.
 
 **The pattern:** the script reads the board, because a fire's agent cannot: in its shell the
-operator's `mt kanban` commands are refused. And the script keeps the state from one week to
-the next, in a file: the job's previous result holds only what the agent last said, here the
-tasks it flagged, not the whole board.
+operator's `mt kanban` commands are refused. The board's own times say what is stale, so the
+script keeps no state of its own.
 
 ### 4. One-off reminders
 
@@ -633,33 +640,34 @@ Use it to start a workflow by the clock: here, workflow 1, weekly-report, every 
 
 <!-- example: cron weekly-workflow chat -->
 ```text
-/cron add "every monday 09:00" worker The script below has just started this week's report workflow, and printed its answer as JSON. Post the instance_id, and one line: how many tasks it made, or, if existing is true, that this week's report was already started. End with: /kanban workflow show, then the id, follows it.
+/cron add "every monday 09:00" worker The script below has just started this week's report workflow, and printed its answer as JSON; the gateway posts the start's reply in this chat. If existing is true, say in one line that this week's report was already started. Otherwise answer [nothing to report].
 name: Weekly report
-script: ~/.manus-team/bin/mt kanban workflow start weekly-report --board reports --param week=$(date +%G-W%V) --param reviewer=reviewer --key weekly-$(date +%G-%V) --json
+script: mt kanban workflow start weekly-report --board reports --param week=$(date +%G-W%V) --param reviewer=lark:on_5d1e7a --key weekly-$(date +%G-%V) --chat oc_xxx --json
 ```
 
 <!-- example: cron weekly-workflow terminal -->
 ```
 mt cron add "every monday 09:00" worker \
-    "The script below has just started this week's report workflow, and printed its answer as JSON. Post the instance_id, and one line: how many tasks it made, or, if existing is true, that this week's report was already started. End with: /kanban workflow show, then the id, follows it." \
+    "The script below has just started this week's report workflow, and printed its answer as JSON; the gateway posts the start's reply in this chat. If existing is true, say in one line that this week's report was already started. Otherwise answer [nothing to report]." \
     --name "Weekly report" --chat oc_xxx \
-    --script '~/.manus-team/bin/mt kanban workflow start weekly-report --board reports --param week=$(date +%G-W%V) --param reviewer=reviewer --key weekly-$(date +%G-%V) --json'
+    --script 'mt kanban workflow start weekly-report --board reports --param week=$(date +%G-W%V) --param reviewer=lark:on_5d1e7a --key weekly-$(date +%G-%V) --chat oc_xxx --json'
 ```
 
 The board `reports` is made once, with `/kanban board create reports` or `mt kanban board create
 reports`.
 
 What happens: each Monday at 09:00 the script starts weekly-report as the operator, with the
-week filled in, such as `2026-W47`. `--key weekly-2026-47` makes the start safe to repeat: a
-second start that week, from `/cron run` or a retry, makes nothing and answers with the same
-instance and `"existing": true`. `date` runs on the gateway's host, in its zone, not in the
-job's `tz`, so near midnight on a Sunday the two can disagree about the week. The agent posts
-the id. That post is how the chat hears of it:
-a workflow started from a terminal is followed by no chat, so its tasks' notices go nowhere, and
-`/kanban workflow show w_…` is how the chat follows it.
+week filled in, such as `2026-W47`, and Dana Wu, `lark:on_5d1e7a`, as the reviewer: the start
+checks her as chat would, known to the gateway and at talk tier. `--chat oc_xxx`, this chat's id,
+makes the chat follow every task of the instance, and the gateway posts the start's reply here,
+naming the instance and its tasks, then each task's notices. `--key weekly-2026-47` makes the
+start safe to repeat: a second start that week, from `/cron run` or a retry, makes nothing,
+posts nothing, and answers with the same instance and `"existing": true`, which the agent says.
+`date` runs on the gateway's host, in its zone, not in the job's `tz`, so near midnight on a
+Sunday the two can disagree about the week.
 
-**The pattern:** the script does the operator's part, the agent the telling. Two rules make it
-this way round. A fire's agent cannot start a workflow: `mt kanban start-workflow` works only in
-a board run, and the operator's `mt kanban workflow start` is refused in an agent's shell. And a
-terminal gives no person work, so the reviewer is the `reviewer` role here, where chat would
-name a person.
+**The pattern:** the script does the operator's part, the gateway the telling. A fire's agent
+cannot start a workflow: `mt kanban start-workflow` works only in a board run, and the
+operator's `mt kanban workflow start` is refused in an agent's shell. So the script starts it,
+`--chat` says who hears, and the agent speaks only when there is something the reply does not
+say.
