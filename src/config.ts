@@ -292,6 +292,8 @@ export interface TeamSettings {
    * cron is off, and give a job the gateway's zone (the cron spec, §2.2).
    */
   cron?: { enabled?: boolean; tz?: string };
+  /** The bot's app id, `LARK_APP_ID` or `lark.appId`, when either is set: where `mt cron --chat` delivers from. */
+  appId?: string;
   /**
    * `kanban.enabled` as the config sets it, absent when it does not (the board is
    * then off): so the operator's `mt kanban` can say the board is off, and why.
@@ -533,6 +535,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     configPath: text === undefined ? undefined : path,
     dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'team.db'),
     ...(file.kanban.enabled === undefined ? {} : { kanbanEnabled: file.kanban.enabled }),
+    ...((envString(env, 'LARK_APP_ID') ?? file.lark.appId) === undefined ? {} : { appId: envString(env, 'LARK_APP_ID') ?? file.lark.appId ?? '' }),
     ...(file.cron.enabled === undefined && file.cron.tz === undefined
       ? {}
       : { cron: { ...(file.cron.enabled === undefined ? {} : { enabled: file.cron.enabled }), ...(file.cron.tz === undefined ? {} : { tz: file.cron.tz }) } }),

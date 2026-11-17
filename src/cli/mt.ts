@@ -11,6 +11,8 @@ import { operatorCommand, TASK_COMMANDS } from './operator.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
 import { SERVICE_USAGE, serviceCommand, type ServiceDeps } from './service.js';
 import { updateCommand, type UpdateDeps } from './update.js';
+import { CRON_USAGE, cronAgent, cronOperator } from './cron.js';
+import { CRON_COMMANDS } from '../cron/worker.js';
 import { workflowCheck } from './workflow.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
 
@@ -102,6 +104,7 @@ const USAGE = [
   '  mt kanban workflow archive <instance> [--board <name>] [--json]',
   "the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
   `  mt kanban <${WORKER_COMMANDS.join('|')}> < input.json`,
+  CRON_USAGE,
 ].join('\n');
 
 function expectNothing(positionals: readonly string[], what: string): void {
@@ -275,6 +278,18 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       );
     }
     if (group === 'kanban') return await kanban(command, rest, io);
+    if (group === 'cron') {
+      // Two grammars told apart by the shell (the cron spec, §6.4): an agent's gets its four
+      // commands, with JSON on stdin, whatever follows them, and the operator's are refused
+      // before their arguments are read.
+      if (inAgentRun(io.env)) {
+        if (command !== undefined && (CRON_COMMANDS as readonly string[]).includes(command)) {
+          return await cronAgent(command, rest, io);
+        }
+        return refuse(io, runShellRefusal(['mt cron', ...(command === undefined ? [] : [command])].join(' '), io.env));
+      }
+      return await cronOperator(command, rest, withGatewayFile(io));
+    }
     if (group === 'service') {
       // An agent restarting or removing the gateway would end its own run, and every other.
       if (inAgentRun(io.env)) return refuse(io, runShellRefusal('mt service', io.env));
