@@ -557,14 +557,18 @@ function list(rest: readonly string[], io: MtIo): Promise<number> {
     const missing = noSuchBoard(service, board);
     if (missing !== undefined) return missing;
     const entries = service.list(board);
+    // When each changed phase, in milliseconds as every --json time is; the plain list's age is the readable form.
+    const since = service.phaseSince(board);
     const tasks = listed(entries, filter).map((e) => ({
       task_id: e.task.taskId,
       status: e.status,
       title: e.task.title,
       assignee: e.task.assignee?.name ?? null,
       assignee_kind: e.task.assignee?.kind ?? null,
+      created_at: e.task.createdAt,
+      status_since: since.get(e.task.taskId) ?? e.task.createdAt,
     }));
-    return { ok: true, lines: listText(entries, filter, board), json: { board, tasks } };
+    return { ok: true, lines: listText(entries, filter, board, { since, now: Date.now() }), json: { board, tasks } };
   });
 }
 

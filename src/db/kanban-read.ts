@@ -636,6 +636,29 @@ export function boardList(db: Db, board?: string): BoardEntry[] {
     .map((task) => ({ task, status: statusOf(db, task) }));
 }
 
+/**
+ * When each task of a board last changed phase (kanban spec §22.3): the time of
+ * its newest event among those that set one, as db/kanban.ts writes them --
+ * `created`, `review_requested`, `changes_requested`, `completed`, `blocked`
+ * unless a dependency block, which keeps the phase, `stopped`, `run_ended` whose
+ * `next` blocked the task, `unblocked` and `archived`. One query for the board,
+ * by the events' `(task_id, id)` index; a task with none is not in the map.
+ */
+export function phaseSince(db: Db, board: string): Map<string, number> {
+  const rows = db
+    .prepare<[string], { task_id: string; at: number; newest: number }>(
+      `SELECT e.task_id AS task_id, e.created_at AS at, max(e.id) AS newest
+         FROM kanban_events e JOIN kanban_tasks t ON t.task_id = e.task_id
+        WHERE t.board = ?
+          AND (e.kind IN ('created', 'review_requested', 'changes_requested', 'completed', 'stopped', 'unblocked', 'archived')
+               OR (e.kind = 'blocked' AND coalesce(json_extract(e.payload, '$.kind'), '') <> 'dependency')
+               OR (e.kind = 'run_ended' AND json_extract(e.payload, '$.next') = 'blocked'))
+        GROUP BY e.task_id`,
+    )
+    .all(board);
+  return new Map(rows.map((r) => [r.task_id, r.at]));
+}
+
 // ---------------------------------------------------------------------------
 // What the dispatcher reads (plan C2)
 // ---------------------------------------------------------------------------

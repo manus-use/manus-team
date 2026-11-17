@@ -103,15 +103,16 @@ describe('boardsText', () => {
 
 describe('listText', () => {
   it('lists the active tasks as a table, every one, and says when there are none', () => {
-    expect(listText(service.list('default'), undefined, 'default')).toEqual([
+    const ages = () => ({ since: service.phaseSince('default'), now: 1_760_000_000_000 + 90 * 60_000 });
+    expect(listText(service.list('default'), undefined, 'default', ages())).toEqual([
       'no open tasks on board default; mt kanban task list all shows done and archived ones too',
     ]);
-    expect(listText(service.list('default'), 'done', 'default')).toEqual(['no done tasks on board default']);
+    expect(listText(service.list('default'), 'done', 'default', ages())).toEqual(['no done tasks on board default']);
     const ids = Array.from({ length: 31 }, (_, i) => create(`task ${i}`));
-    const lines = listText(service.list('default'), undefined, 'default');
+    const lines = listText(service.list('default'), undefined, 'default', ages());
     expect(lines).toHaveLength(32);
-    expect(lines[0]).toMatch(/^task\s+status\s+assignee\s+title$/);
-    expect(lines[1]).toMatch(new RegExp(`^${ids[0]}\\s+ready\\s+role implementer\\s+task 0$`));
+    expect(lines[0]).toMatch(/^task\s+status\s+age\s+assignee\s+title$/);
+    expect(lines[1]).toMatch(new RegExp(`^${ids[0]}\\s+ready\\s+1h\\s+role implementer\\s+task 0$`));
   });
 });
 

@@ -18,6 +18,7 @@ import {
   memberOf,
   memberPhases,
   membersWithTasks,
+  phaseSince,
   relatedTasks,
   runsOf,
   statusOf,
@@ -1179,6 +1180,11 @@ export class KanbanService {
   /** Every task on a board -- or on every board -- with its display status (spec §4.1): `/kanban task list`. */
   list(onBoard?: string): BoardEntry[] {
     return boardList(this.#db, onBoard);
+  }
+
+  /** When each of a board's tasks last changed phase, in one read (kanban spec §22.3): `mt kanban task list`'s times. */
+  phaseSince(onBoard: string): ReadonlyMap<string, number> {
+    return phaseSince(this.#db, onBoard);
   }
 
   /**

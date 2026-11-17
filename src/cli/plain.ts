@@ -70,11 +70,26 @@ export function boardsText(summaries: readonly BoardSummary[]): string[] {
   });
 }
 
-/** `mt kanban task list` (spec §9.1): one board's tasks, as chat lists them, every one rather than the first 30. */
+/**
+ * How long a task has been in its status, as the task list's `age` says it (kanban
+ * spec §22.3): whole minutes under an hour, whole hours under a day, whole days after.
+ */
+export function ageText(ms: number): string {
+  const minutes = Math.floor(Math.max(0, ms) / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+
+/**
+ * `mt kanban task list` (spec §9.1): one board's tasks, as chat lists them, every one rather than the first 30,
+ * each with its age in its status, from `since`, else its creation, to `now` by this terminal's clock (kanban spec §22.3).
+ */
 export function listText(
   entries: readonly BoardEntry[],
   filter: DisplayStatus | 'all' | undefined,
   board: string,
+  ages: { since: ReadonlyMap<string, number>; now: number },
 ): string[] {
   const shown = listed(entries, filter);
   const on = `on board ${line(board, 80)}`;
@@ -85,8 +100,14 @@ export function listText(
         : `no ${filter === 'all' ? '' : `${filter} `}tasks ${on}`,
     ];
   }
-  const rows = shown.map((e) => [e.task.taskId, e.status, who(e.task.assignee), line(e.task.title, 120)]);
-  return table([['task', 'status', 'assignee', 'title'], ...rows]);
+  const rows = shown.map((e) => [
+    e.task.taskId,
+    e.status,
+    ageText(ages.now - (ages.since.get(e.task.taskId) ?? e.task.createdAt)),
+    who(e.task.assignee),
+    line(e.task.title, 120),
+  ]);
+  return table([['task', 'status', 'age', 'assignee', 'title'], ...rows]);
 }
 
 /** `mt kanban people` (kanban spec §22.2): each person this bot has seen, by name, with their principal and talk tier. */
