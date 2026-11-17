@@ -127,7 +127,7 @@ describe('a due job', () => {
   });
 
   it("skips a slot due while the job's previous fire runs, and that fire goes on", async () => {
-    const h = harness();
+    const h = harness({ settings: { idleTimeoutS: 3600 } });
     const j = h.add({ schedule: 'every 10m' });
     const held = holdsTurn(h.driver);
     h.clock.advance(10 * MIN);

@@ -73,7 +73,7 @@ export interface CronHarnessOptions {
   clock?: ManualClock;
   roles?: readonly Role[];
   settings?: Partial<CronSettings>;
-  deps?: Partial<CronSchedulerDeps>;
+  deps?: Pick<CronSchedulerDeps, 'runner' | 'renderRoot' | 'packages' | 'worker' | 'env' | 'sweepRendersAtBoot'>;
   workspaces?: ReadonlyMap<string, string>;
 }
 
@@ -124,6 +124,10 @@ export function cronHarness(opts: CronHarnessOptions = {}): CronHarness {
     settings: { maxRunning: 2, idleTimeoutS: 600, ...opts.settings },
     clock,
     note: (line) => notes.push(line),
+    roles,
+    workspaceDirs: workspaces,
+    // No real script runs unless a test gives a runner: an empty environment otherwise.
+    env: {},
     ...opts.deps,
   });
   const s = scheduler;

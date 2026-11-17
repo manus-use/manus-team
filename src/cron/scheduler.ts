@@ -1,3 +1,5 @@
+import { accessSync, constants, readFileSync, statSync } from 'node:fs';
+import { delimiter } from 'node:path';
 import type { Channel, SendTarget } from '../channel/types.js';
 import { cronUuid } from '../core/ids.js';
 import type { SessionRegistry } from '../core/registry.js';
@@ -25,13 +27,19 @@ import {
   type FireRow,
   type JobRow,
 } from '../db/cron.js';
+import { lastEventAt } from '../db/events.js';
 import type { Db } from '../db/open.js';
+import type { WorkerAccess } from '../kanban/dispatcher.js';
+import { gateEnv, spawnGate, type GateExit, type GateRunner } from '../kanban/gates.js';
+import { roleSections } from '../kanban/prompt.js';
 import { turnText } from '../kanban/session-log.js';
-import { redactKnownSecrets } from '../secrets.js';
+import { nativeFor, PackagesInUse, renderNative, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
+import type { Role } from '../roles.js';
+import { redactKnownSecrets, withholdSecretSuffix } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, TurnTerminal } from '../types.js';
 import { CRON_OWNER } from './owner.js';
-import { answerMessages, composeFirePrompt, isNothing, outcomeLine } from './prompt.js';
+import { SCRIPT_PROMPT_BYTES, answerMessages, composeFirePrompt, isNothing, outcomeLine } from './prompt.js';
 import { isOneOff, lateLimit, missedSlots, parseSchedule, runAfter, type Schedule } from './schedule.js';
 import type { CronService } from './service.js';
 
@@ -63,6 +71,10 @@ import type { CronService } from './service.js';
 export const TICK_MS = 30_000;
 /** A pending stamp older than this at a start is dropped (§4.4). */
 export const STAMP_MAX_AGE_MS = 3_600_000;
+/** A fire's script's time limit (§5.1): fixed, as a script gathers data for a prompt. */
+export const SCRIPT_TIMEOUT_MS = 120_000;
+/** Begins a script's output in the prompt when its start was cut (§5.1). */
+const CUT_MARKER = '[earlier output cut]\n';
 
 export interface CronSettings {
   /** Fires at once (§10). */
@@ -82,6 +94,22 @@ export interface CronSchedulerDeps {
   clock?: Clock;
   /** Metadata only: ids, outcomes, counts and times. */
   note?: (line: string) => void;
+  /** The roles as loaded: whose environment a script gets, whose role.md and skills a fire's agent. */
+  roles: ReadonlyMap<string, Role>;
+  /** Workspace name to directory: where a fire's script runs. */
+  workspaceDirs: ReadonlyMap<string, string>;
+  /** The environment an agent's allowlist is taken from; the gateway's own, unless a test gives one. */
+  env?: Readonly<Record<string, string | undefined>>;
+  /** Runs a fire's script; `spawnGate`, unless a test gives one. */
+  runner?: GateRunner;
+  /** Where roles are rendered as native agent packages, `$MT_HOME/rendered` (§5.2); absent, none is. */
+  renderRoot?: string;
+  /** The rendered packages in use, shared with the dispatcher (§5.2); absent, the scheduler's own. */
+  packages?: PackagesInUse;
+  /** Sweep the rendered packages at boot, as the dispatcher's boot does when the board is on (§13). */
+  sweepRendersAtBoot?: boolean;
+  /** The socket and the shim a fire's agent finds the gateway's mt through (§7.2). */
+  worker?: WorkerAccess;
 }
 
 /** Where a fire's session is bound (§5.2): the cron channel, at the job and the fire. */
@@ -103,6 +131,12 @@ interface Entry {
   archiving: boolean;
   /** A fire marked timed out whose job was then removed: its line has no one to tell. */
   silent: boolean;
+  /** The tick its idle cancel was sent in: it is released at a later one (§5.4). */
+  cancelTick?: number;
+  /** Aborts its script, for a removal or a stop (§5.1). */
+  abort: AbortController;
+  /** The native package its agent runs, held in the in-use set while it runs. */
+  packageDir?: string;
   /** Its session's environment, held only here. */
   env: Record<string, string>;
   /** Its agent's own arguments. */
@@ -120,6 +154,9 @@ export class CronScheduler {
   readonly #deps: CronSchedulerDeps;
   readonly #clock: Clock;
   readonly #note: (line: string) => void;
+  readonly #packages: PackagesInUse;
+  /** Ticks so far: an idle cancel's release waits for the next one. */
+  #tickNo = 0;
   /** The in-flight set: running fires this process started, by fire id. */
   readonly #entries = new Map<number, Entry>();
   /** Work in the background: fires, sends and archives, so `idle()` can wait for it. */
@@ -134,6 +171,7 @@ export class CronScheduler {
   constructor(deps: CronSchedulerDeps) {
     this.#deps = deps;
     this.#clock = deps.clock ?? systemClock;
+    this.#packages = deps.packages ?? new PackagesInUse();
     const note = deps.note ?? (() => undefined);
     this.#note = (line) => {
       try {
@@ -209,6 +247,15 @@ export class CronScheduler {
     } catch (err) {
       this.#note(`cron: dropping old runs failed: ${message(err)}`);
     }
+    // With the board off, the dispatcher's boot does not: nothing is in use at boot.
+    const root = this.#deps.renderRoot;
+    if (this.#deps.sweepRendersAtBoot === true && root !== undefined) {
+      try {
+        sweepRoles(root, new Set(this.#deps.roles.keys()));
+      } catch (err) {
+        this.#note(`cron: sweeping the rendered packages after a restart failed: ${message(err)}`);
+      }
+    }
   }
 
   /** Once connected (§4.4): the first tick, then one every TICK_MS. */
@@ -228,7 +275,10 @@ export class CronScheduler {
     if (this.#timer !== undefined) clearInterval(this.#timer);
     this.#timer = undefined;
     // Left open for the next boot; only an archive under way is still waited for, by idle().
-    for (const entry of [...this.#entries.values()]) if (!entry.archiving) entry.leave();
+    for (const entry of [...this.#entries.values()]) {
+      entry.abort.abort();
+      if (!entry.archiving) entry.leave();
+    }
   }
 
   /** Wait for the background work, or at most `boundMs`: true once drained. */
@@ -269,6 +319,7 @@ export class CronScheduler {
     try {
       do {
         this.#again = false;
+        this.#tickNo += 1;
         this.#step('stopping removed jobs', () => this.#removed());
         this.#step('checking idle fires', () => this.#idleLimits());
         this.#step('sending pending deliveries', () => this.#pending());
@@ -304,8 +355,9 @@ export class CronScheduler {
     purgeRemoved(this.#deps.db, (jobId) => this.inFlight(jobId));
   }
 
-  /** A removal's stop (§4.2 (b)): the turn cancelled and the archive started at once. */
+  /** A removal's stop (§4.2 (b)): the script aborted, or the turn cancelled and the archive started at once. */
   #stopFire(entry: Entry): void {
+    entry.abort.abort();
     if (entry.sessionId === undefined) return;
     const actor = this.#deps.sessions.liveActor(entry.sessionId);
     if (actor !== undefined) void actor.cancel().catch(() => undefined);
@@ -315,7 +367,33 @@ export class CronScheduler {
   // -------------------------------------------------------------------------
   // Step 2: the idle limits (§5.4)
 
-  #idleLimits(): void {}
+  /**
+   * A fire whose session has had no event for `idle_timeout_s` is marked
+   * `timed_out` and its turn cancelled; one marked so a tick ago and still not
+   * archiving ignored the cancel, and its session is released by its archive.
+   */
+  #idleLimits(): void {
+    const now = this.#clock.now();
+    const limit = this.#deps.settings.idleTimeoutS * 1000;
+    for (const entry of this.#entries.values()) {
+      if (entry.sessionId === undefined || entry.archiving) continue;
+      if (entry.mark === 'timed_out' && entry.cancelTick !== undefined) {
+        if (this.#tickNo > entry.cancelTick) {
+          this.#note(`cron: fire ${entry.fireId} ignored its cancel; releasing its session`);
+          this.#archive(entry, undefined);
+        }
+        continue;
+      }
+      if (entry.mark !== undefined) continue;
+      const last = lastEventAt(this.#deps.db, entry.sessionId);
+      if (last === undefined || now - last < limit) continue;
+      entry.mark = 'timed_out';
+      entry.cancelTick = this.#tickNo;
+      this.#note(`cron: fire ${entry.fireId} of job ${entry.jobId} had no activity for ${this.#deps.settings.idleTimeoutS} s; cancelling its turn`);
+      const actor = this.#deps.sessions.liveActor(entry.sessionId);
+      if (actor !== undefined) void actor.cancel().catch(() => undefined);
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Step 3: pending deliveries (§5.6)
@@ -490,11 +568,13 @@ export class CronScheduler {
       key: fireKey(this.#deps.appId, job.jobId, fire.fireId),
       archiving: false,
       silent: false,
+      abort: new AbortController(),
       env: {},
       args: [],
       done: left,
       leave: () => {
-        this.#entries.delete(fire.fireId);
+        if (!this.#entries.delete(fire.fireId)) return;
+        if (entry.packageDir !== undefined) this.#packages.release(entry.packageDir);
         leave();
       },
     };
@@ -532,17 +612,102 @@ export class CronScheduler {
   }
 
   /**
-   * What comes before the session: the fire's prompt, or undefined when the fire
-   * was ended or left on the way.
+   * What comes before the session (§5.1, §5.2): the script, then the role's
+   * role.md, read and rendered; the fire's prompt, or undefined when the fire
+   * was ended, or left for the next boot, on the way.
    */
-  async #prepare(_entry: Entry, job: JobRow, fire: FireRow): Promise<string | undefined> {
+  async #prepare(entry: Entry, job: JobRow, fire: FireRow): Promise<string | undefined> {
+    const role = this.#deps.roles.get(job.role);
+    if (role === undefined) {
+      this.#endNow(entry, { fireId: entry.fireId, outcome: 'skipped_unavailable', error: `role ${job.role} is not configured`, message: true });
+      return undefined;
+    }
+    let script: string | undefined;
+    if (job.script !== null) {
+      const exit = await this.#script(entry, job, role);
+      if (this.#stopped) return undefined;
+      // Marked while it ran: a removal aborted it, which is no script failure (§5.1).
+      if (entry.mark !== undefined) {
+        this.#endNow(entry, { fireId: entry.fireId, outcome: entry.mark, error: this.#markError(entry.mark), message: false });
+        return undefined;
+      }
+      if (exit.timedOut || exit.exitCode !== 0) {
+        this.#endNow(entry, { fireId: entry.fireId, outcome: 'script_failed', error: scriptFailure(exit), message: true });
+        return undefined;
+      }
+      script = scriptOutput(exit.output);
+    }
+    let bytes: Buffer | undefined;
+    try {
+      if (role.roleMdPath !== undefined) {
+        if (!statSync(role.roleMdPath).isFile()) throw new Error('not a file');
+        bytes = readFileSync(role.roleMdPath);
+      }
+      for (const skill of role.skills) accessSync(skill.path, constants.R_OK);
+    } catch {
+      // Not run without its instructions (§5.2), as a task's role is unresolvable without them.
+      this.#endNow(entry, { fireId: entry.fireId, outcome: 'skipped_unavailable', error: `role ${role.name}'s role.md cannot be read`, message: true });
+      return undefined;
+    }
+    const rendered = this.#render(entry, role, bytes);
+    entry.env = { ...rendered?.env, ...this.#workerEnv(role), MT_CRON_FIRE: String(entry.fireId) };
+    entry.args = rendered?.args ?? [];
     const previous = lastResult(this.#deps.db, job.jobId);
     return composeFirePrompt({
-      role: [],
+      role: rendered === undefined ? roleSections(bytes?.toString('utf8'), role.skills) : [],
       job,
       scheduledAt: fire.scheduledAt,
+      ...(script === undefined ? {} : { script }),
       ...(previous === undefined ? {} : { previous: { result: previous.result ?? '', at: previous.scheduledAt } }),
     });
+  }
+
+  /** The job's script, as a gate runs (§5.1): in the workspace, with the role's environment, killed at its limit. */
+  async #script(entry: Entry, job: JobRow, role: Role): Promise<GateExit> {
+    const cwd = this.#deps.workspaceDirs.get(job.workspace);
+    const runner = this.#deps.runner ?? spawnGate;
+    if (cwd === undefined) return { exitCode: null, signal: null, timedOut: false, output: `workspace ${job.workspace} has no directory` };
+    return runner(job.script ?? '', {
+      cwd,
+      env: gateEnv(role, this.#deps.env ?? process.env),
+      timeoutMs: SCRIPT_TIMEOUT_MS,
+      signal: entry.abort.signal,
+    }).catch((err: unknown): GateExit => ({ exitCode: null, signal: null, timedOut: false, output: `the script could not run: ${message(err)}` }));
+  }
+
+  /**
+   * The role as its agent's own package (§5.2), or undefined: no render root, no
+   * renderer, opted out, or a render that failed, which is noted. Held in the
+   * shared in-use set while the fire runs, and swept against it.
+   */
+  #render(entry: Entry, role: Role, bytes: Buffer | undefined): Rendered | undefined {
+    const root = this.#deps.renderRoot;
+    if (root === undefined) return undefined;
+    const native = nativeFor(role);
+    if (!native.ok) return undefined;
+    let rendered: Rendered;
+    try {
+      rendered = renderNative(root, role, native.renderer, bytes);
+    } catch (err) {
+      this.#note(`cron: fire ${entry.fireId}: rendering role ${role.name} for ${native.renderer.id} failed, so its role.md and skills go in the prompt: ${message(err)}`);
+      return undefined;
+    }
+    entry.packageDir = rendered.dir;
+    this.#packages.hold(rendered.dir);
+    try {
+      sweepRole(root, role.name, this.#packages.keeping(rendered.dir));
+    } catch (err) {
+      this.#note(`cron: sweeping the old packages of role ${role.name} failed: ${message(err)}`);
+    }
+    return rendered;
+  }
+
+  /** The socket, and a PATH that finds the gateway's mt first (§7.2), as a run's. */
+  #workerEnv(role: Role): Record<string, string> {
+    const worker = this.#deps.worker;
+    if (worker === undefined) return {};
+    const rest = role.agent.env['PATH'] ?? worker.path;
+    return { MT_KANBAN_SOCKET: worker.socket, PATH: rest === undefined || rest === '' ? worker.mtDir : `${worker.mtDir}${delimiter}${rest}` };
   }
 
   /** The turn has ended (§5.5): read from its terminal, unless marked, archiving, or stopped. */
@@ -633,4 +798,35 @@ export class CronScheduler {
       else this.#endNow(entry, failure);
     } else this.#archive(entry, failure);
   }
+}
+
+/** The last `max` UTF-8 bytes of `text`, cut on a character. */
+function tailBytes(text: string, max: number): string {
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length <= max) return text;
+  return buf.subarray(buf.length - max).toString('utf8').replace(/^�+/, '');
+}
+
+/**
+ * A script's output for the prompt (§5.1): its raw tail masked, then its last
+ * SCRIPT_PROMPT_BYTES, a cut window starting with the marker; masked before it
+ * is cut, so a cut cannot leave the end of a secret showing.
+ */
+export function scriptOutput(raw: string): string {
+  const masked = redactKnownSecrets(raw);
+  if (Buffer.byteLength(masked, 'utf8') <= SCRIPT_PROMPT_BYTES) return masked;
+  return `${CUT_MARKER}${withholdSecretSuffix(tailBytes(masked, SCRIPT_PROMPT_BYTES - CUT_MARKER.length))}`;
+}
+
+/** A script's failure, as its line says it (§5.6): how it ended, and the last 300 characters of its output, masked. */
+export function scriptFailure(exit: GateExit): string {
+  const how = exit.timedOut
+    ? `timed out after ${SCRIPT_TIMEOUT_MS / 1000} s`
+    : exit.signal !== null
+      ? `killed by ${exit.signal}`
+      : exit.exitCode === null
+        ? 'it could not start'
+        : `exit ${exit.exitCode}`;
+  const tail = Array.from(redactKnownSecrets(exit.output).trim()).slice(-300).join('');
+  return `the script failed (${how})${tail === '' ? '' : `: ${tail}`}`;
 }
