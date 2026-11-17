@@ -7,7 +7,7 @@ import { role } from './helpers/dispatch.js';
 import { ALICE, VIA, WORKSPACES } from './helpers/kanban.js';
 
 /**
- * `create`'s per-task checks, moved into a pure `taskProblems` (spec §21.15):
+ * `create`'s per-task checks, moved into a pure `taskProblems` (workflows spec §15):
  * the same refusals, each in today's order, through `create` and through the
  * function; and the pure `assignable` that `assign`, `assignReviewer`, a named
  * reviewer and `create` share.

@@ -29,6 +29,7 @@ import {
   renderList,
   renderPreview,
   renderStarted,
+  startedReply,
   renderWorkflows,
   renderReviewCard,
   renderShow,
@@ -129,7 +130,7 @@ const TIERS: Readonly<Record<KanbanCommand['verb'], Tier>> = {
   'board use': 'operate',
   'board set': 'operate',
   'board archive': 'operate',
-  // A start starts agents, unsupervised, in workspaces, as task new does; a preview makes nothing (spec §21.6).
+  // A start starts agents, unsupervised, in workspaces, as task new does; a preview makes nothing (workflows spec §6).
   'workflow list': 'talk',
   'workflow instances': 'talk',
   'workflow show': 'talk',
@@ -173,7 +174,7 @@ function id(taskId: string): string {
   return /^[krw]_[0-9a-z]+$/.test(taskId) ? `\`${taskId}\`` : forDisplay(taskId);
 }
 
-/** An instance's id, `w_…` (spec §21.9): what `KanbanAnswer.thread` names for a start, where it names a task for `task new`. */
+/** An instance's id, `w_…` (workflows spec §9): what `KanbanAnswer.thread` names for a start, where it names a task for `task new`. */
 function isInstance(id: string): boolean {
   return id.startsWith('w_');
 }
@@ -266,7 +267,7 @@ export class KanbanChat {
    * either way, once the move is written.
    */
   threaded(taskId: string, key: BindingKey, messageId: string, threadId: string | undefined): void {
-    // An instance's reply is its every member's (spec §21.9): all moved in one call, and all released.
+    // An instance's reply is its every member's (workflows spec §9): all moved in one call, and all released.
     const ids = isInstance(taskId) ? this.#members(taskId) : [taskId];
     try {
       if (threadId === undefined || threadId === '') return;
@@ -299,7 +300,7 @@ export class KanbanChat {
   }
 
   async #run(arg: string, message: InboundMessage, key: BindingKey): Promise<string | KanbanAnswer> {
-    // The message's mention names, so a param's `@Alice Smith` is read whole (spec §21.6).
+    // The message's mention names, so a param's `@Alice Smith` is read whole (workflows spec §6).
     const parsed = parseKanban(arg, (message.mentions ?? []).flatMap((m) => (m.name === null ? [] : [m.name])));
     if (!parsed.ok) return parsed.usage;
     const command = parsed.command;
@@ -460,7 +461,7 @@ export class KanbanChat {
     }
   }
 
-  /** `/kanban workflow list`, `instances`, `show` and `preview` (spec §21.10): talk tier, and making nothing. */
+  /** `/kanban workflow list`, `instances`, `show` and `preview` (workflows spec §10): talk tier, and making nothing. */
   #workflowRead(command: WorkflowCommand, message: InboundMessage, key: BindingKey): string {
     const service = this.#deps.service;
     const board = service.chatBoard(chatAt(key));
@@ -484,7 +485,7 @@ export class KanbanChat {
         return renderInstance(r.view, board.name, (a) => (a === null ? 'nobody' : this.#whom(a)), nameOf);
       }
       case 'workflow preview': {
-        // The start's checks without the start, its key's but none (spec §21.6).
+        // The start's checks without the start, its key's but none (workflows spec §6).
         const r = service.previewWorkflow({
           workflow: command.name,
           params: { from: 'chat', pairs: command.pairs },
@@ -514,7 +515,7 @@ export class KanbanChat {
   }
 
   /**
-   * `/kanban workflow start` (spec §21.6, §21.9): on the chat's board, keyed by
+   * `/kanban workflow start` (workflows spec §6, §9): on the chat's board, keyed by
    * the message, every task followed by this chat. In a group at chat scope it
    * is answered in a thread of its own, the instance's, in both wordings, and
    * every member is held until the router says where its reply went.
@@ -536,7 +537,7 @@ export class KanbanChat {
     if (!r.ok) return refused(r);
     if (r.existing) return `Already started, as ${id(r.instance.instanceId)}.`;
     // Every member held from here, with no await before it, so the dispatcher's pass
-    // below, and the card poster, find them held (spec §21.9).
+    // below, and the card poster, find them held (workflows spec §9).
     const thread = message.chatType === 'group' && key.threadId === '';
     if (thread) for (const t of r.tasks) this.#hold(t.taskId);
     try {
@@ -550,12 +551,12 @@ export class KanbanChat {
   }
 
   #started(made: WorkflowMade, where: 'thread' | 'chat'): string {
-    return renderStarted(made, where, (a) => this.#whom(a));
+    return renderStarted(startedReply(made), where, (a) => this.#whom(a));
   }
 
   /**
    * A param's `@Name`, for a person field, as the principal of the person the
-   * message mentions by that name (spec §21.6): as `assignee:` is read, but said
+   * message mentions by that name (workflows spec §6): as `assignee:` is read, but said
    * as a refusal the service gives, plain, for chat to escape.
    */
   #personOf(value: string, message: InboundMessage): Result<{ principal: string }> {

@@ -5,7 +5,7 @@ import { role } from './helpers/dispatch.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
- * `/kanban workflow …` as typed in chat (spec §21.6, §21.10): its verbs, and a
+ * `/kanban workflow …` as typed in chat (workflows spec §6, §10): its verbs, and a
  * preview's or a start's pairs, with quotes, lists, @-mentions whose names hold
  * spaces, a pair split at its first `=`, and a stray word refused.
  */

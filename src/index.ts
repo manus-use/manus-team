@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { ConfigError, loadConfig, type Env, type GatewayConfig } from './config.js';
 import { loadGatewayEnv, type GatewayEnvFile } from './gateway-env.js';
 import { loadTeam, teamSecrets, type Team } from './team.js';
@@ -145,7 +145,7 @@ export function loadStartup(env: Env = process.env): { config: GatewayConfig; te
 }
 
 /**
- * The workflow check's lines (spec §21.4): notes, as a broken workflow does not
+ * The workflow check's lines (workflows spec §4): notes, as a broken workflow does not
  * stop the gateway; only it is unusable. With the team as the gateway's service
  * judges it, supervised roles accepted. `mt service check` prints them too.
  */
@@ -167,7 +167,7 @@ function startupWorkflows(config: GatewayConfig, team: Team): string[] {
 /** How long a shutdown waits for the dispatcher's work before it closes the database. */
 const SHUTDOWN_DRAIN_MS = 5_000;
 
-/** What `loadStartup` found beside the config and the team: the workflow check's lines, noted after the roles' (spec §21.4). */
+/** What `loadStartup` found beside the config and the team: the workflow check's lines, noted after the roles' (workflows spec §4). */
 export interface StartupNotes {
   workflows?: readonly string[];
 }
@@ -308,8 +308,10 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   let lock: GatewayLock | undefined;
   let dbLock: GatewayLock | undefined;
   // The socket and the shim, for a run's agent and a cron agent alike (spec §7.2, the cron spec §7).
-  const socket = workerSocketPath(config.home);
-  const access = { socket, mtDir: join(config.home, 'bin'), path: process.env['PATH'] };
+  // Resolved, as a script runs in a workspace: a relative MT_HOME never gives it a relative PATH entry or home.
+  const home = resolve(config.home);
+  const socket = workerSocketPath(home);
+  const access = { socket, mtDir: join(home, 'bin'), path: process.env['PATH'] };
   // One set of the rendered packages in use, the dispatcher's runs' and the scheduler's fires' (the cron spec, §5.2).
   const packages = new PackagesInUse();
   let boardApi: WorkerApi | undefined;
@@ -430,6 +432,12 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       // With the board off, its dispatcher's boot does not sweep the rendered packages.
       sweepRendersAtBoot: !config.kanban.enabled,
       worker: access,
+      // A script's plain mt opens exactly the gateway's files, resolved, as the script runs in a workspace (§5.1).
+      scriptHome: {
+        home,
+        configPath: config.configPath === undefined ? undefined : resolve(config.configPath),
+        dbPath: resolve(config.dbPath),
+      },
       tokens,
     });
     const s = scheduler;

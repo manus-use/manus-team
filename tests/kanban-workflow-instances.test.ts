@@ -13,7 +13,7 @@ import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
- * Seeing and managing workflows (spec §21.10): the derived status, `list`,
+ * Seeing and managing workflows (workflows spec §10): the derived status, `list`,
  * `instances`, `show`'s members and related tasks, and `archive`.
  */
 

@@ -7,16 +7,16 @@ import type { Role } from '../roles.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { DAG_FORMAT, DAG_LIMITS, titleRefused, type Dag, type DagTask, type ParamValue } from './dag.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
-import { assignable, isRecord, type TaskFacts } from './task-checks.js';
-import { GATE_LIMITS, type Contract, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
+import { assignable, isRecord, NO_MENTIONS, type TaskFacts } from './task-checks.js';
+import { GATE_LIMITS, type Contract, type CreatedVia, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
 export { checkDagShape, readDag } from './dag.js';
 
 /**
- * Workflows (spec §21): a graph of tasks written once, in a YAML file under
+ * Workflows (workflows spec): a graph of tasks written once, in a YAML file under
  * `$MT_HOME/workflows`, and started many times. This module reads a file and
- * checks it (spec §21.1 to §21.4), expands it with its params into a DAG (spec
- * §21.5), and derives an instance's status (spec §21.10). Pure but for reading
+ * checks it (workflows spec §1 to §4), expands it with its params into a DAG (workflows spec
+ * §5), and derives an instance's status (workflows spec §10). Pure but for reading
  * the directory: the service, `mt workflow check` and the startup check all
  * call it, so a file is judged the same way everywhere. Nothing in the kernel
  * knows about workflows (spec §1).
@@ -27,7 +27,7 @@ export const WORKFLOW_LIMITS = {
   fileBytes: 64 * 1024,
 } as const;
 
-/** A param (spec §21.2): text, or a list with `list: true`; required, or with a default. */
+/** A param (workflows spec §2): text, or a list with `list: true`; required, or with a default. */
 export interface WorkflowParam {
   name: string;
   list: boolean;
@@ -48,7 +48,7 @@ export interface WorkflowGate {
   timeoutS: number;
 }
 
-/** A step (spec §21.1): `KanbanService.create`'s fields, `addGate`'s gates, `parents` and `for_each`. */
+/** A step (workflows spec §1): `KanbanService.create`'s fields, `addGate`'s gates, `parents` and `for_each`. */
 export interface WorkflowStep {
   name: string;
   title: string;
@@ -122,7 +122,7 @@ const STEP_KEYS = [
   'for_each',
 ] as const;
 
-/** The for_each item's name, which no param may take (spec §21.1). */
+/** The for_each item's name, which no param may take (workflows spec §1). */
 export const ITEM = 'item';
 
 /** `reject`'s hints, for a key that looks like a credential, or `env`. */
@@ -181,7 +181,7 @@ function nameSpec(value: unknown, place: string, path: string): NameSpec | undef
   return { value: text(map[must], `${place}.${must}`), must };
 }
 
-/** Each `{{` in a text field opens a reference to a declared param, or to `item` in a for_each step (spec §21.2). */
+/** Each `{{` in a text field opens a reference to a declared param, or to `item` in a for_each step (workflows spec §2). */
 function references(value: string, place: string, params: ReadonlyMap<string, WorkflowParam>, forEach: boolean): void {
   for (let at = value.indexOf('{{'); at !== -1; at = value.indexOf('{{', at + 2)) {
     const m = REFERENCE.exec(value.slice(at));
@@ -207,7 +207,7 @@ function referenceOf(value: string, place: string): string | undefined {
   return m[1];
 }
 
-/** A param from the file (spec §21.2). */
+/** A param from the file (workflows spec §2). */
 function paramOf(name: string, value: unknown, path: string): WorkflowParam {
   const place = `params.${name}`;
   const problem = nameProblem('param', name);
@@ -237,7 +237,7 @@ function paramOf(name: string, value: unknown, path: string): WorkflowParam {
   return { name, list, required, default: fallback, description: optionalText(map['description'], `${place}.description`) };
 }
 
-/** A step from the file (spec §21.1), its fields checked as `create` checks them. */
+/** A step from the file (workflows spec §1), its fields checked as `create` checks them. */
 function stepOf(name: string, value: unknown, path: string): WorkflowStep {
   const place = `steps.${name}`;
   const problem = nameProblem('step', name);
@@ -289,7 +289,7 @@ function stepOf(name: string, value: unknown, path: string): WorkflowStep {
   };
 }
 
-/** A cycle among the steps, as `a -> b -> a`, or undefined: a walk of the parents (spec §21.4). */
+/** A cycle among the steps, as `a -> b -> a`, or undefined: a walk of the parents (workflows spec §4). */
 function cycleOf(steps: readonly WorkflowStep[]): string | undefined {
   const parents = new Map(steps.map((s) => [s.name, s.parents]));
   const done = new Set<string>();
@@ -367,7 +367,7 @@ function checkName(
   if (!r.ok) fail(`${where}: ${r.message}`);
 }
 
-/** The checks of the file alone and the team (spec §21.4), on what `stepOf` and `paramOf` read. */
+/** The checks of the file alone and the team (workflows spec §4), on what `stepOf` and `paramOf` read. */
 function checkWhole(steps: readonly WorkflowStep[], params: ReadonlyMap<string, WorkflowParam>, facts: WorkflowFacts): void {
   const names = new Set(steps.map((s) => s.name));
   for (const s of steps) {
@@ -383,7 +383,7 @@ function checkWhole(steps: readonly WorkflowStep[], params: ReadonlyMap<string, 
   const seen = new Set<string>();
   for (const s of steps) {
     const place = `steps.${s.name}`;
-    // The tasks are made in the file's order, so a parent is written above its child (spec §21.5).
+    // The tasks are made in the file's order, so a parent is written above its child (workflows spec §5).
     const later = s.parents.find((p) => !seen.has(p));
     if (later !== undefined) fail(`${place}.parents names ${later}, which is written after it: write a step below its parents`);
     seen.add(s.name);
@@ -404,7 +404,7 @@ function checkWhole(steps: readonly WorkflowStep[], params: ReadonlyMap<string, 
     checkName(s.workspace === undefined ? undefined : { value: s.workspace, must: undefined }, `${place}.workspace`, params, forEach, facts, 'workspace');
     for (const [i, gate] of s.gates.entries()) {
       const at = `${place}.gates[${i}].command`;
-      // Never a param in a gate (spec §21.2): it would let whoever starts a workflow write shell.
+      // Never a param in a gate (workflows spec §2): it would let whoever starts a workflow write shell.
       if (gate.command.includes('{{')) fail(`${at} holds {{, and a gate is a shell command: name the value as an environment variable instead`);
       const problem = gateProblem(gate);
       if (problem !== undefined) fail(`${at} ${problem}`);
@@ -426,7 +426,7 @@ function checkWhole(steps: readonly WorkflowStep[], params: ReadonlyMap<string, 
 }
 
 /**
- * A workflow file's checks (spec §21.4), from its text and the team: the YAML,
+ * A workflow file's checks (workflows spec §4), from its text and the team: the YAML,
  * the keys and their types at every level, the names, the parents, for_each,
  * every reference, the roles and workspaces written out, the gates, and a step
  * whose parents certainly disagree on a workspace. The first problem, by its
@@ -450,7 +450,7 @@ export function checkWorkflow(name: string, source: string, facts: WorkflowFacts
     const params = Object.entries(paramsMap).map(([n, v]) => paramOf(n, v, path));
     if (root['steps'] === undefined || root['steps'] === null) fail('the file needs steps, at least one');
     const stepsMap = section(path, 'steps', root['steps']);
-    // Every step makes at least one task, so a file past the bound could never start (spec §21.4).
+    // Every step makes at least one task, so a file past the bound could never start (workflows spec §4).
     const count = Object.keys(stepsMap).length;
     if (count > DAG_LIMITS.tasks) {
       fail(`the file has ${count} steps; a workflow has at most ${DAG_LIMITS.tasks}, as a start makes at least one task a step and an instance has at most ${DAG_LIMITS.tasks}`);
@@ -507,7 +507,7 @@ function readFile(path: string): { ok: true; text: string } | { ok: false; probl
 }
 
 /**
- * The directory, read now (spec §21.4): every usable workflow, by name, each
+ * The directory, read now (workflows spec §4): every usable workflow, by name, each
  * broken one with why, and every other entry that is no workflow, said once. A
  * dot-entry is skipped silently, as `discoverRoles` skips one, so the directory
  * can be under version control. A missing directory has none.
@@ -542,7 +542,7 @@ function refuse(code: Refusal['code'], message: string): Refusal {
 }
 
 /**
- * One workflow, read and checked now (spec §21.4): `unknown_workflow` for a name
+ * One workflow, read and checked now (workflows spec §4): `unknown_workflow` for a name
  * with no usable file of its own, `invalid` for a file that is broken.
  */
 export function readWorkflow(dir: string, name: string, facts: WorkflowFacts): Result<{ workflow: Workflow }> {
@@ -559,7 +559,7 @@ export function readWorkflow(dir: string, name: string, facts: WorkflowFacts): R
 }
 
 /**
- * `unknown_workflow`'s message (spec §21.6): `message`, then the usable
+ * `unknown_workflow`'s message (workflows spec §6): `message`, then the usable
  * workflows and their params, at most `max` bytes, the names first, then the
  * params, saying how many were left out.
  */
@@ -603,7 +603,7 @@ export function paramsLine(w: Workflow): string {
 }
 
 /**
- * The startup's lines (spec §21.4): one a broken workflow, one an entry that is
+ * The startup's lines (workflows spec §4): one a broken workflow, one an entry that is
  * no workflow, then `workflows: <usable>; not usable: <broken>`, or
  * `workflows: none` for a missing or empty directory. Notes, which the gateway
  * masks: a broken workflow does not stop it.
@@ -619,10 +619,10 @@ export function workflowLines(list: WorkflowList): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Params and the expansion (spec §21.2, §21.3, §21.5)
+// Params and the expansion (workflows spec §2, §3, §5)
 // ---------------------------------------------------------------------------
 
-/** A pair as chat's parser reads it (spec §21.6): a quoted value is one item of a list, never split. */
+/** A pair as chat's parser reads it (workflows spec §6): a quoted value is one item of a list, never split. */
 export interface ParamPair {
   key: string;
   value: string;
@@ -630,7 +630,7 @@ export interface ParamPair {
 }
 
 /**
- * The params a start was given, as each path gives them (spec §21.6): chat's
+ * The params a start was given, as each path gives them (workflows spec §6): chat's
  * pairs, the terminal's `--param key=value`, already unquoted by the shell, or
  * a run's JSON, where nothing is split.
  */
@@ -679,13 +679,16 @@ function titleParams(w: Workflow): Set<string> {
 }
 
 /**
- * The params of a start, against the file (spec §21.2): every one declared,
+ * The params of a start, against the file (workflows spec §2): every one declared,
  * the required ones given, the defaults filled in, a text param given once, a
  * list's items trimmed, none empty or twice or holding a known secret, the
  * sizes, a value landing in a title on one line, and `@` resolved only in a
  * param that lands in a person field. What a refusal says names the param.
+ * With no `personOf`, an `@` in a person field is refused as the start's
+ * `via` is told: at the terminal, that it has no mentions (kanban spec §22.2);
+ * from a run, that a person is given work from chat.
  */
-export function paramValues(w: Workflow, given: GivenParams, personOf?: PersonOf): Result<{ values: Map<string, ParamValue> }> {
+export function paramValues(w: Workflow, given: GivenParams, personOf?: PersonOf, via?: CreatedVia['kind']): Result<{ values: Map<string, ParamValue> }> {
   const declared = new Map(w.params.map((p) => [p.name, p]));
   const takes = w.params.length === 0 ? 'it takes none' : `it takes ${w.params.map((p) => p.name).join(', ')}`;
   const unknown = (key: string): Refusal => refuse('invalid', `workflow ${w.name} takes no param ${said(key)} (${takes})`);
@@ -714,7 +717,7 @@ export function paramValues(w: Workflow, given: GivenParams, personOf?: PersonOf
         raw.set(pair.key, pair.value);
         continue;
       }
-      // A quoted value from chat is one item; anything else is split at its commas (spec §21.6).
+      // A quoted value from chat is one item; anything else is split at its commas (workflows spec §6).
       const items = given.from === 'chat' && (pair as ParamPair).quoted ? [pair.value] : pair.value.split(',');
       raw.set(pair.key, [...((before as string[] | undefined) ?? []), ...items]);
     }
@@ -747,6 +750,7 @@ export function paramValues(w: Workflow, given: GivenParams, personOf?: PersonOf
     if (persons.has(p.name) && personOf === undefined) {
       // At the terminal or from a run, no message carries a mention to resolve `@Name` by.
       const at = texts.find((t) => t.startsWith('@'));
+      if (at !== undefined && via === 'operator') return refuse('invalid', NO_MENTIONS);
       if (at !== undefined) {
         return refuse(
           'person_not_assignable',
@@ -779,7 +783,7 @@ export function paramValues(w: Workflow, given: GivenParams, personOf?: PersonOf
   return { ok: true, values };
 }
 
-/** A name a field's reference gave, checked as a name (spec §21.2): in the grammar, or a person's principal where a person may go. */
+/** A name a field's reference gave, checked as a name (workflows spec §2): in the grammar, or a person's principal where a person may go. */
 function nameGiven(value: string, place: string, spec: NameSpec, kind: 'person' | 'workspace', param: string): Refusal | undefined {
   const fills = `param ${param} fills ${place}`;
   if (redactKnownSecrets(value) !== value) return refuse('invalid', `${fills}, and its value holds a known secret: a name is stored as written`);
@@ -795,15 +799,15 @@ function nameGiven(value: string, place: string, spec: NameSpec, kind: 'person' 
 }
 
 /**
- * The expansion (spec §21.3, §21.5): the file made, with its params, into a DAG
+ * The expansion (workflows spec §3, §5): the file made, with its params, into a DAG
  * of every task and link, every key written out. Each for_each step makes one
  * task an item, `<step>:<n>`; a step naming a for_each step as a parent waits
  * for all of its tasks, all to all. Substitution is text, once: a value is put
  * in as written, and not read again for braces. The DAG is shaped, measured and
  * its tasks checked by the caller, as any DAG is.
  */
-export function expand(w: Workflow, given: GivenParams, board: string, personOf?: PersonOf): Result<{ dag: Dag }> {
-  const params = paramValues(w, given, personOf);
+export function expand(w: Workflow, given: GivenParams, board: string, personOf?: PersonOf, via?: CreatedVia['kind']): Result<{ dag: Dag }> {
+  const params = paramValues(w, given, personOf, via);
   if (!params.ok) return params;
   const values = params.values;
   const textOf = (name: string): string => {
@@ -864,7 +868,7 @@ export function expand(w: Workflow, given: GivenParams, board: string, personOf?
 }
 
 // ---------------------------------------------------------------------------
-// An instance's status (spec §21.10)
+// An instance's status (workflows spec §10)
 // ---------------------------------------------------------------------------
 
 export type InstanceStatus = 'archived' | 'done' | 'blocked' | 'running';
@@ -879,8 +883,8 @@ export interface InstanceState {
 }
 
 /**
- * An instance's status, derived from its members' phases, never stored (spec
- * §21.10): archived when every member is, done when every member is done or
+ * An instance's status, derived from its members' phases, never stored (workflows spec
+ * §10): archived when every member is, done when every member is done or
  * archived, blocked when any is, and running otherwise. Blocked is checked before
  * running, as a blocked task is what a person must act on.
  */

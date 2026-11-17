@@ -156,13 +156,13 @@ describe('mt kanban task new', () => {
     expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 0 });
   });
 
-  it("refuses what chat refuses: a person, an unknown role, an archived board, a task over chat's limits", async () => {
+  it("refuses what chat refuses: a person it cannot check, an unknown role, an archived board, a task over chat's limits", async () => {
     expect(await mt(['task', 'new', 'x', '--assignee', 'lark:on_bob'])).toEqual({
       code: 1,
       out: '',
-      err: 'mt: "lark:on_bob" is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier',
+      err: 'mt: "lark:on_bob" cannot be checked for talk tier here: this shell finds no lark.appId or LARK_APP_ID, which the people this bot has seen are kept by',
     });
-    expect(await mt(['task', 'new', 'x', '--reviewer', '@Bob'])).toMatchObject({ code: 1 });
+    expect(await mt(['task', 'new', 'x', '--reviewer', '@Bob'])).toMatchObject({ code: 1, err: 'mt: there are no @-mentions at the terminal: a person is lark:<union_id>, which mt kanban people lists' });
     expect(await mt(['task', 'new', 'x', '--assignee', 'implementr'])).toMatchObject({ code: 1, err: 'mt: role "implementr" is not configured' });
     expect(await mt(['task', 'new', 'x', '--board', 'nowhere'])).toMatchObject({ code: 1, err: 'mt: there is no board nowhere; no task is added to it' });
     expect(await mt(['task', 'new', 'x'.repeat(513)])).toMatchObject({ code: 1, err: 'mt: A title is at most 512 bytes; put the rest in the body.' });
@@ -200,7 +200,7 @@ describe('mt kanban task new', () => {
     });
     const json = await mt(['task', 'new', 'Nightly', 'report', '--key', 'nightly-1', '--json']);
     // A repeat changes nothing, so it sends no nudge, and says so.
-    expect(JSON.parse(json.out)).toEqual({ ok: true, task_id: taskId, board: 'default', existing: true, nudged: false });
+    expect(JSON.parse(json.out)).toEqual({ ok: true, task_id: taskId, board: 'default', existing: true, nudged: false, follows: null });
     const fresh = await mt(['task', 'new', 'Weekly', '--key', 'weekly-1', '--json']);
     expect(JSON.parse(fresh.out)).toMatchObject({ ok: true, board: 'default', existing: false });
     expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 2 });
@@ -245,7 +245,7 @@ describe('mt kanban task new', () => {
     expect(JSON.parse(listed.out)).toEqual({
       ok: true,
       board: 'web-app',
-      tasks: [{ task_id: taskId, status: 'ready', title: 'On web', assignee: null, assignee_kind: null }],
+      tasks: [{ task_id: taskId, status: 'ready', title: 'On web', assignee: null, assignee_kind: null, created_at: getTask(gateway, taskId)?.createdAt, status_since: getTask(gateway, taskId)?.createdAt }],
     });
     expect(await mt(['task', 'list', '--board', 'nowhere'])).toMatchObject({ code: 1, err: 'mt: there is no board nowhere' });
     expect((await mt(['task', 'list', 'finished'])).code).toBe(2);
@@ -355,7 +355,7 @@ describe('the task commands', () => {
     const taskId = created((await mt(['task', 'new', 'Work', '--assignee', 'default'])).out);
     const later = (await mt(['task', 'new', 'Later'])).out;
     const child = created(later);
-    expect(later).toBe(`created ${child}: Later, for nobody yet (mt kanban task assign ${child} <role> gives it to someone), on board default`);
+    expect(later).toBe(`created ${child}: Later, for nobody yet (mt kanban task assign ${child} <role|lark:<union_id>> gives it to someone), on board default`);
     nudges = 0;
     const run = claimed(gateway, taskId);
 

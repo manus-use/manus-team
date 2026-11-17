@@ -112,7 +112,7 @@ export async function kanbanCommand(command: string | undefined, rest: readonly 
       say({ ok: false, code: 'too_large', message: `the input is over ${DEFAULT_MAX_REQUEST_BYTES} bytes` });
       return 1;
     }
-    // Strictly: a broken byte is refused, never stored as a replacement character (spec §21.5).
+    // Strictly: a broken byte is refused, never stored as a replacement character (workflows spec §5).
     const text = decodeUtf8(bytes);
     if (text === undefined) {
       say({ ok: false, code: 'invalid', message: `mt kanban ${command} reads one JSON object on stdin, in UTF-8, and this is not UTF-8` });
@@ -125,7 +125,7 @@ export async function kanbanCommand(command: string | undefined, rest: readonly 
       say({ ok: false, code: 'invalid', message: `mt kanban ${command} reads one JSON object on stdin, and this is not JSON` });
       return 1;
     }
-    // A DAG's canonical form over 192 KiB is refused here, before it is sent (spec §21.5); any other
+    // A DAG's canonical form over 192 KiB is refused here, before it is sent (workflows spec §5); any other
     // refusal of its shape is the gateway's, which says it the same way.
     if (command === 'apply-dag' && typeof input === 'object' && input !== null && !Array.isArray(input)) {
       const { idempotency_key: _key, dry_run: _dryRun, ...dag } = input as Record<string, unknown>;

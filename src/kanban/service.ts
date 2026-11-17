@@ -12,22 +12,28 @@ import {
   getInstance,
   getRun,
   getTask,
+  getTaskByKey,
   instanceByKey,
   instancesOn,
   memberOf,
   memberPhases,
   membersWithTasks,
+  phaseSince,
   relatedTasks,
   runsOf,
   statusOf,
+  subscriptionsOf,
   taskView,
+  threadRootOf,
   type BoardEntry,
   type BoardSummary,
   type CardReading,
   type InstanceRow,
   type MemberRow,
   type TaskView,
+  type ThreadAt,
 } from '../db/kanban-read.js';
+import { CHAT_ID, THREAD_ID } from '../core/lark-ids.js';
 import { buildEnv } from '../driver/env.js';
 import { nameProblem, visible } from '../names.js';
 import { redactKnownSecrets } from '../secrets.js';
@@ -66,6 +72,7 @@ import {
   type CommentRow,
   type CreateRequest,
   type CreatedVia,
+  type Follow,
   type GateRow,
   type Phase,
   type Refusal,
@@ -156,7 +163,7 @@ export interface KanbanServiceDeps {
    */
   maxRunningPerRole?: number;
   /**
-   * Where the workflow files are, `$MT_HOME/workflows` (spec §21.1), read at each
+   * Where the workflow files are, `$MT_HOME/workflows` (workflows spec §1), read at each
    * preview and start. Absent -- tests of the board alone -- there are none.
    */
   workflowsDir?: string;
@@ -184,7 +191,7 @@ function verdict(r: GateResult, timeoutS: number): string {
 /** A task to create: in types.ts, so the checks need nothing of the service; exported here too, as its callers name it. */
 export type { CreateRequest } from './types.js';
 
-/** A workflow to start (spec §21.6), as chat, the terminal or a run asks for it. Nothing is checked yet. */
+/** A workflow to start (workflows spec §6), as chat, the terminal or a run asks for it. Nothing is checked yet. */
 export interface StartRequest {
   workflow: string;
   params: GivenParams;
@@ -196,16 +203,20 @@ export interface StartRequest {
   createdVia: CreatedVia;
   /** Chat's board, or the terminal's `--board`, else `default`; a run's is its task's, whatever this says. */
   board?: string;
+  /** The chat that follows every member, named at the terminal (workflows spec §18.1); the operator's alone. */
+  follow?: Follow;
 }
 
-/** A DAG to make (spec §21.6), parsed but not yet checked: the terminal's file, or a run's `apply-dag` input without its own keys. */
+/** A DAG to make (workflows spec §6), parsed but not yet checked: the terminal's file, or a run's `apply-dag` input without its own keys. */
 export interface ApplyRequest {
   dag: unknown;
   idempotencyKey?: string;
-  /** Every check, and nothing written (spec §21.6). */
+  /** Every check, and nothing written (workflows spec §6). */
   dryRun?: boolean;
   createdBy: string;
   createdVia: CreatedVia;
+  /** As a start's: not a key of the DAG, so its hash is the same wherever it is heard (workflows spec §18.1). */
+  follow?: Follow;
 }
 
 /** What a start or an apply made, or found made with its key: the instance, and its members with their tasks. */
@@ -215,7 +226,7 @@ export interface WorkflowMade {
   existing: boolean;
 }
 
-/** A dry run's answer (spec §21.6): what the apply would make, or the instance its key already made; nothing written. */
+/** A dry run's answer (workflows spec §6): what the apply would make, or the instance its key already made; nothing written. */
 export interface WorkflowDryRun {
   dryRun: true;
   existing: boolean;
@@ -229,7 +240,7 @@ export interface InstanceSummary extends InstanceState {
   instance: InstanceRow;
 }
 
-/** One instance as `show` gives it (spec §21.10). */
+/** One instance as `show` gives it (workflows spec §10). */
 export interface InstanceView extends InstanceState {
   instance: InstanceRow;
   /** The workflow file's description, while the file is there and usable; undefined otherwise. */
@@ -241,10 +252,10 @@ export interface InstanceView extends InstanceState {
   relatedInstances: Array<{ instanceId: string; name: string | null; tasks: number }>;
 }
 
-/** How many of a board's newest instances `instances` reads (spec §21.7). */
+/** How many of a board's newest instances `instances` reads (workflows spec §7). */
 export const INSTANCES_READ = 200;
 
-/** How long `unknown_workflow`'s message may be, in bytes: a gate refusal's output's size (spec §21.6). */
+/** How long `unknown_workflow`'s message may be, in bytes: a gate refusal's output's size (workflows spec §6). */
 export const WORKFLOW_MESSAGE_BYTES = 4 * 1024;
 
 /** A claim, with what was read for it. */
@@ -321,6 +332,28 @@ const RUN_KEY = 'run-task:';
 const CHAT_KEY = 'lark:';
 /** The operator's `mt kanban task new --key <k>`, stored as `operator:<k>`, so it never meets chat's or a run's. */
 const OPERATOR_KEY = 'operator:';
+
+/**
+ * Why a `follow` is refused (kanban spec §22.1, workflows spec §18.1), or
+ * undefined: only the terminal names a chat, as a chat follows what is made in
+ * it and a run's work follows its task's chats; and it names one in Lark's
+ * shapes, for a bot, with a thread's root, and none at chat scope.
+ */
+function followRefused(follow: unknown, via: CreatedVia): Refusal | undefined {
+  if (follow === undefined) return undefined;
+  if (via?.kind !== 'operator') {
+    return board.refuse('invalid', "only the terminal names a chat to follow what it makes: a chat follows what is made in it, and a run's work its task's chats");
+  }
+  if (!isRecord(follow) || !isText(follow.appId) || follow.appId === '' || !isText(follow.chatId) || !CHAT_ID.test(follow.chatId)) {
+    return board.refuse('invalid', "a chat to follow is the bot's app id and a chat id, oc_…");
+  }
+  const { threadId, rootId } = follow;
+  if (!isText(threadId) || (threadId !== '' && !THREAD_ID.test(threadId))) return board.refuse('invalid', 'a thread to follow in is a thread id, omt_…, or none');
+  if (threadId === '' ? rootId !== null : !isText(rootId) || rootId === '') {
+    return board.refuse('invalid', 'a thread is followed with its root message, and a chat with none');
+  }
+  return undefined;
+}
 
 /**
  * A report refused while another on the task runs its gates: what to look at
@@ -435,9 +468,11 @@ export class KanbanService {
    * should fail while the person is still looking, not strand the task later.
    */
   create(req: CreateRequest): Result<{ task: TaskRow; existing: boolean }> {
-    // The checks a task gets however it is made (spec §21.15), then its key, which reads the database.
+    // The checks a task gets however it is made (workflows spec §15), then its key, which reads the database.
     const checked = checkTask(req, this.#facts());
     if (!checked.ok) return checked;
+    const follow = followRefused(req.follow, req.createdVia);
+    if (follow !== undefined) return follow;
     const key = this.#idempotencyKey(req.idempotencyKey, req.createdVia);
     if (!key.ok) return key;
     return board.createTask(
@@ -458,9 +493,41 @@ export class KanbanService {
         createdBy: req.createdBy,
         createdVia: req.createdVia,
         ...(req.board === undefined ? {} : { board: req.board }),
+        ...(req.follow === undefined ? {} : { follow: req.follow }),
       },
       this.#clock.now(),
     );
+  }
+
+  /**
+   * The root of a thread, as the notifier finds it (spec §19.7): the message a
+   * subscription in it recorded, or undefined for none, or at chat scope. The
+   * terminal's `--thread` follows only a thread whose root is known (kanban spec §22.1).
+   */
+  threadRoot(at: ThreadAt): string | undefined {
+    return threadRootOf(this.#db, at);
+  }
+
+  /**
+   * Whether a key has made its task, or its instance, already: the terminal
+   * looks a thread's root up only for what is not made yet, so a repeat is
+   * answered even once its thread's root is lost (kanban spec §22.1). Namespaced
+   * as `create` and a start namespace it; false for a key they would refuse.
+   */
+  keyMade(key: string, via: CreatedVia, what: 'task' | 'instance'): boolean {
+    const k = this.#idempotencyKey(key, via);
+    if (!k.ok || k.key === null) return false;
+    return what === 'task' ? getTaskByKey(this.#db, k.key) !== undefined : instanceByKey(this.#db, k.key) !== undefined;
+  }
+
+  /**
+   * The chat that follows a task for this bot, as stored: its first Lark
+   * subscription, the thread null at chat scope; null with none. A repeat's
+   * answer names it, never the `--chat` given now (kanban spec §22.1).
+   */
+  followOf(taskId: string, appId: string): { chat: string; thread: string | null } | null {
+    const s = subscriptionsOf(this.#db, taskId).find((x) => x.channel === 'lark' && x.appId === appId);
+    return s === undefined ? null : { chat: s.conversationId, thread: s.threadId === '' ? null : s.threadId };
   }
 
   assign(taskId: string, assignee: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
@@ -1115,6 +1182,11 @@ export class KanbanService {
     return boardList(this.#db, onBoard);
   }
 
+  /** When each of a board's tasks last changed phase, in one read (kanban spec §22.3): `mt kanban task list`'s times. */
+  phaseSince(onBoard: string): ReadonlyMap<string, number> {
+    return phaseSince(this.#db, onBoard);
+  }
+
   /**
    * A subscription has been told of every event up to `cursor`, or passed over
    * those that are no notice (spec §9.4). The notifier calls it after each send.
@@ -1129,7 +1201,7 @@ export class KanbanService {
   /**
    * The tasks' subscriptions at this chat moved into the thread their "Created"
    * reply opened, with the command message as its root, in one call (spec
-   * §19.4, §21.9): `KanbanChat`'s, once Lark answered the reply with its thread.
+   * §19.4, workflows spec §9): `KanbanChat`'s, once Lark answered the reply with its thread.
    * One task for `/kanban task new`; every member for a workflow's start.
    */
   threadSubscriptions(taskIds: readonly string[], at: ChatAt, threadId: string, rootId: string): Result<{ moved: number }> {
@@ -1143,16 +1215,16 @@ export class KanbanService {
   }
 
   // -------------------------------------------------------------------------
-  // Workflows (spec §21.6)
+  // Workflows (workflows spec §6)
   // -------------------------------------------------------------------------
 
-  /** The team, as a workflow file is checked against it (spec §21.4). */
+  /** The team, as a workflow file is checked against it (workflows spec §4). */
   #workflowFacts(): WorkflowFacts {
     return { roles: this.#roles, workspaces: this.#workspaces, supervisedRoles: this.#supervisedRoles };
   }
 
   /**
-   * A workflow, read now (spec §21.4), or the refusal a start gets: for no
+   * A workflow, read now (workflows spec §4), or the refusal a start gets: for no
    * usable file of that name, `unknown_workflow`, naming the usable ones and
    * their params, cut at 4 KiB, the names first.
    */
@@ -1170,7 +1242,7 @@ export class KanbanService {
     return usableMessage(message, usable, WORKFLOW_MESSAGE_BYTES);
   }
 
-  /** The board a start or an apply goes on (spec §21.6): a run's task's, whatever else; otherwise the one asked for, else `default`. */
+  /** The board a start or an apply goes on (workflows spec §6): a run's task's, whatever else; otherwise the one asked for, else `default`. */
   #boardFor(via: CreatedVia, asked: string | null | undefined): Result<{ board: string; run?: RunRow }> {
     if (via.kind !== 'run') return { ok: true, board: asked ?? DEFAULT_BOARD };
     const run = getRun(this.#db, via.runId);
@@ -1181,7 +1253,7 @@ export class KanbanService {
   }
 
   /**
-   * Step 2 of an apply (spec §21.6): the board as the database has it now, then
+   * Step 2 of an apply (workflows spec §6): the board as the database has it now, then
    * every task checked as `create` would, every gate as `addGate`, every name,
    * against the team and the people as this process holds them, just before the
    * transaction, so a refusal costs none.
@@ -1218,13 +1290,14 @@ export class KanbanService {
     }));
   }
 
-  /** A start's expansion (spec §21.6 step 1): the file read now, its params, the DAG made, shaped and measured. */
+  /** A start's expansion (workflows spec §6 step 1): the file read now, its params, the DAG made, shaped and measured. */
   #expanded(req: StartRequest, onBoard: string): Result<ShapedDag & { workflow: Workflow }> {
     if (!isRecord(req)) return board.refuse('invalid', 'a start is an object');
     if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
     const read = this.#workflow(req.workflow);
     if (!read.ok) return read;
-    const expanded = expand(read.workflow, req.params, onBoard, req.personOf);
+    // The start's kind, for an `@` with no mention to resolve it by: the terminal's refusal, or a run's (workflows spec §18.3).
+    const expanded = expand(read.workflow, req.params, onBoard, req.personOf, req.createdVia?.kind);
     if (!expanded.ok) return expanded;
     const shaped = checkDagShape(expanded.dag, 'expansion');
     if (!shaped.ok) return shaped;
@@ -1232,7 +1305,7 @@ export class KanbanService {
   }
 
   /**
-   * What a start would make, making nothing (spec §21.6): every check a start
+   * What a start would make, making nothing (workflows spec §6): every check a start
    * makes before its transaction, the board's and the people's included, but
    * not the key's, as a preview has none of its own.
    */
@@ -1247,13 +1320,15 @@ export class KanbanService {
   }
 
   /**
-   * Start a workflow (spec §21.6): its key looked up first, read-only, so a
+   * Start a workflow (workflows spec §6): its key looked up first, read-only, so a
    * repeat is answered whatever the file says now; then the expansion, the
    * checks, and the one transaction. The caller tells the dispatcher.
    */
   startWorkflow(req: StartRequest): Result<WorkflowMade> {
     if (!isRecord(req)) return board.refuse('invalid', 'a start is an object');
     if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
+    const follow = followRefused(req.follow, req.createdVia);
+    if (follow !== undefined) return follow;
     const on = this.#boardFor(req.createdVia, req.board);
     if (!on.ok) return on;
     const key = this.#idempotencyKey(req.idempotencyKey, req.createdVia);
@@ -1264,11 +1339,19 @@ export class KanbanService {
     if (!shaped.ok) return shaped;
     const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
-    return this.#write(shaped, { name: shaped.workflow.name, source: 'start', board: on.board, key: key.key, createdBy: req.createdBy, createdVia: req.createdVia });
+    return this.#write(shaped, {
+      name: shaped.workflow.name,
+      source: 'start',
+      board: on.board,
+      key: key.key,
+      createdBy: req.createdBy,
+      createdVia: req.createdVia,
+      ...(req.follow === undefined ? {} : { follow: req.follow }),
+    });
   }
 
   /**
-   * Make a DAG (spec §21.6), at the terminal or from a run: read already, it is
+   * Make a DAG (workflows spec §6), at the terminal or from a run: read already, it is
    * shaped, made canonical and measured first, as an unknown key or the wrong
    * shape is no DAG at all; then its key is looked up, compared by the DAG's
    * hash; then the checks, and with `dryRun` nothing more; else the one
@@ -1278,6 +1361,8 @@ export class KanbanService {
     if (!isRecord(req)) return board.refuse('invalid', 'an apply is an object');
     const shaped = checkDagShape(req.dag, req.createdVia?.kind === 'run' ? 'run' : 'terminal');
     if (!shaped.ok) return shaped;
+    const follow = followRefused(req.follow, req.createdVia);
+    if (follow !== undefined) return follow;
     const on = this.#boardFor(req.createdVia, shaped.dag.board);
     if (!on.ok) return on;
     if (on.run !== undefined && shaped.dag.board !== null && shaped.dag.board !== on.board) {
@@ -1297,10 +1382,18 @@ export class KanbanService {
     const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
     if (req.dryRun === true) return { ok: true, dryRun: true, existing: false, instanceId: null, board: on.board, tasks: shaped.dag.tasks };
-    return this.#write(shaped, { name: shaped.dag.workflow, source: 'apply', board: on.board, key: key.key, createdBy: req.createdBy, createdVia: req.createdVia });
+    return this.#write(shaped, {
+      name: shaped.dag.workflow,
+      source: 'apply',
+      board: on.board,
+      key: key.key,
+      createdBy: req.createdBy,
+      createdVia: req.createdVia,
+      ...(req.follow === undefined ? {} : { follow: req.follow }),
+    });
   }
 
-  /** A key's instance, read-only (spec §21.6 step 0): the repeat's answer, or why the key is another's; undefined for a key not used. */
+  /** A key's instance, read-only (workflows spec §6 step 0): the repeat's answer, or why the key is another's; undefined for a key not used. */
   #repeat(key: string, want: Parameters<typeof board.keyRefused>[1]): Result<WorkflowMade> | undefined {
     const keyed = instanceByKey(this.#db, key);
     if (keyed === undefined) return undefined;
@@ -1309,10 +1402,10 @@ export class KanbanService {
     return { ok: true, instance: keyed.instance, tasks: membersWithTasks(this.#db, keyed.instance.instanceId), existing: true };
   }
 
-  /** The one transaction (spec §21.6 step 3). */
+  /** The one transaction (workflows spec §6 step 3). */
   #write(
     shaped: ShapedDag,
-    i: { name: string | null; source: 'start' | 'apply'; board: string; key: string | null; createdBy: string; createdVia: CreatedVia },
+    i: { name: string | null; source: 'start' | 'apply'; board: string; key: string | null; createdBy: string; createdVia: CreatedVia; follow?: Follow },
   ): Result<WorkflowMade> {
     const r = board.applyDag(
       this.#db,
@@ -1325,6 +1418,7 @@ export class KanbanService {
         createdBy: i.createdBy,
         createdVia: i.createdVia,
         idempotencyKey: i.key,
+        ...(i.follow === undefined ? {} : { follow: i.follow }),
       },
       this.#members(shaped.dag),
       this.#clock.now(),
@@ -1333,13 +1427,13 @@ export class KanbanService {
     return { ok: true, instance: r.instance, tasks: r.members, existing: r.existing };
   }
 
-  /** The workflow files as the directory holds them now (spec §21.10): `list`'s. */
+  /** The workflow files as the directory holds them now (workflows spec §10): `list`'s. */
   workflows(): WorkflowList {
     return this.#workflowsDir === undefined ? { usable: [], broken: [], ignored: [] } : listWorkflows(this.#workflowsDir, this.#workflowFacts());
   }
 
   /**
-   * A board's instances, newest first (spec §21.10): of its 200 most recent, the
+   * A board's instances, newest first (workflows spec §10): of its 200 most recent, the
    * running and blocked ones, or with `all` every one, each with its status; and
    * how many the board has in all.
    */
@@ -1360,7 +1454,7 @@ export class KanbanService {
   }
 
   /**
-   * One instance in detail, on any board, by id (spec §21.10): its members, in
+   * One instance in detail, on any board, by id (workflows spec §10): its members, in
    * position order, with their display status; its description, while its file
    * is still there; and its related tasks, apart, a member of another instance
    * among them shown as that instance.
@@ -1398,7 +1492,7 @@ export class KanbanService {
 
   /**
    * Archive every member of an instance not already archived, in one transaction
-   * (spec §21.10): an undecided run superseded, whose turn the caller cancels; a
+   * (workflows spec §10): an undecided run superseded, whose turn the caller cancels; a
    * done task keeps the time it was done; related tasks are left alone. Who may
    * is the caller's: an operator, as for archiving a task.
    */
@@ -1469,7 +1563,7 @@ export class KanbanService {
   }
 
   /**
-   * What a task is checked against (spec §21.15): the team as this process holds
+   * What a task is checked against (workflows spec §15): the team as this process holds
    * it, and the people, who need talk tier, once people can be reached.
    */
   #facts(): TaskFacts {
@@ -1488,7 +1582,7 @@ export class KanbanService {
    * worker repeating a command gets its own task back and nobody else's; the
    * operator's is namespaced as `operator:<key>`, so a script run again at a
    * terminal gets its own tasks back, never a chat's or a run's. A workflow's
-   * instance is keyed the same way (spec §21.6).
+   * instance is keyed the same way (workflows spec §6).
    */
   #idempotencyKey(key: unknown, via: CreatedVia): Result<{ key: string | null }> {
     if (key === undefined) return { ok: true, key: null };

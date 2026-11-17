@@ -18,7 +18,7 @@ import { role } from './helpers/dispatch.js';
 import { ALICE, VIA } from './helpers/kanban.js';
 
 /**
- * The DAG (spec §21.5): its shape, every default, the canonical form and its
+ * The DAG (workflows spec §5): its shape, every default, the canonical form and its
  * hash, the sizes, where gates may come from, what a run's DAG may not set, and
  * each task checked as create checks it.
  */
@@ -31,7 +31,7 @@ beforeEach(() => {
 });
 afterEach(() => clearSecrets());
 
-/** The example of §21.5, written out in full, as an expansion writes it. */
+/** The example of workflows spec §5, written out in full, as an expansion writes it. */
 function example(): Record<string, unknown> {
   const task = (ref: string, step: string, item: string | null, title: string, parents: string[], extra: Record<string, unknown> = {}) => ({
     ref,
@@ -425,11 +425,14 @@ describe('checkDagTasks', () => {
     });
   });
 
-  it('refuses any person at the terminal', () => {
-    expect(problem(tiny({ assignee: 'lark:on_bob' }), { createdVia: { kind: 'operator' }, createdBy: 'operator:me' })).toEqual({
+  it('checks a person at the terminal as anywhere, and refuses an @-mention there', () => {
+    const terminal = { createdVia: { kind: 'operator' }, createdBy: 'operator:me' } as const;
+    expect(problem(tiny({ assignee: 'lark:on_bob' }), terminal)).toBeUndefined();
+    expect(problem(tiny({ reviewer: 'lark:on_carol' }), terminal)).toMatchObject({ ok: false, code: 'person_not_assignable', message: expect.stringMatching(/^a: "lark:on_carol" cannot be given work: /) });
+    expect(problem(tiny({ assignee: '@Bob' }), terminal)).toEqual({
       ok: false,
-      code: 'person_not_assignable',
-      message: 'a: "lark:on_bob" is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier',
+      code: 'invalid',
+      message: 'a: there are no @-mentions at the terminal: a person is lark:<union_id>, which mt kanban people lists',
     });
   });
 

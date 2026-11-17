@@ -9,7 +9,7 @@ import { SCHEMA_DIR, testDb, type TestDb } from './helpers/db.js';
 import { NOW, claimed, newTask } from './helpers/kanban.js';
 
 /**
- * Migration 009 (spec §21.7): an instance and its members, two tables of their
+ * Migration 009 (workflows spec §7): an instance and its members, two tables of their
  * own, with their keys and indexes, and an index on a task's created_from_task.
  */
 

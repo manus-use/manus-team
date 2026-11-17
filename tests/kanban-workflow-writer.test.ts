@@ -25,7 +25,7 @@ import { SCHEMA_DIR, testDb, type TestDb } from './helpers/db.js';
 import { ALICE, NOW, VIA, claimed, newTask } from './helpers/kanban.js';
 
 /**
- * The writer of a workflow's instance (spec §21.8): everything in one
+ * The writer of a workflow's instance (workflows spec §8): everything in one
  * transaction, a refusal rolling all of it back, each task's `created` event
  * carrying the instance, the gates' `created_by`, the key looked up again, the
  * stored DAG masked but for its gates; the archive of every member; and the

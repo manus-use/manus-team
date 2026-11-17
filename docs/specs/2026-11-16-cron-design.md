@@ -639,6 +639,55 @@ A fire with a script runs it first, before any session is made:
   shell environment `mt update` gives git and npm (`src/cli/update.ts`), which drops `MT_KANBAN_*`
   today. The script is
   the operator's command, run as gates are, and a fire's token is its agent's.
+- **Its `PATH` and its home** (plan V, kanban §12). On top of `gateEnv`, a script gets four
+  names, and only a script, not a gate:
+  - **`PATH` with `$MT_HOME/bin` first**, the directory of the `mt` launcher the gateway writes at
+    each start (`writeMtShim`, `src/kanban/shim.ts`), before the role's own `PATH` if its
+    environment sets one, else the gateway's, as a fire's agent gets it (`#workerEnv`). So plain
+    `mt` in a script runs this build's `mt` with the gateway's node, never another `mt` on the
+    host, and a gateway whose service `PATH` holds no `mt` needs no path written out. The launcher
+    is there whenever a script runs: it is written when the gateway claims its home, which it does
+    whenever cron is on (§4.1), and only then does a fire run.
+  - **`MT_HOME`, the gateway's home**, so `mt` finds the gateway's config, its `.env` and its
+    socket, where without it `mt` would take `~/.manus-team`, which need not be this gateway's.
+  - **`MT_CONFIG` and `MT_DB`, the file the gateway read and the database it opened**, `MT_CONFIG`
+    only when it read a file. *A decision, forced by the code.* `MT_HOME` alone finds
+    `$MT_HOME/config.yaml` and the database that file names. An installed service starts with
+    only `PATH`, `MT_HOME` and the home's `.env` (`mt service install`, `src/cli/service.ts`), and
+    the `.env` refuses `MT_CONFIG` and `MT_DB` (kanban §2.5), so for it `MT_HOME` is enough; but **a
+    gateway run by hand**, from a shell that sets `MT_CONFIG` or `MT_DB`, has locations the
+    script's allowlisted environment does not carry, and its scripts' `mt` would open another
+    config, or another database, and act on a board that is not the gateway's, with nothing to say
+    so. Passing the two locations the gateway resolved makes the script's `mt` open exactly its
+    files. Nothing else of the gateway's environment is passed: its other `MT_*` settings and
+    `LARK_*` may hold secrets, and the script sees what an operator's shell sees, the files and the
+    home's `.env`, as `withGatewayFile` reads it for every operator's command.
+  - **A limit, for a gateway run by hand.** Its settings that are only in its shell, other than
+    the two locations, `LARK_APP_ID`, `MT_OWNER_OPEN_ID`, `MT_ALLOW_TALK`, `MT_ALLOW_CHATS` and the
+    other overrides, are not seen by its scripts' `mt`. A script's `mt kanban task new --chat` may
+    then be refused for want of the app id, and a person refused or checked against another talk
+    list. For people and the app id it fails safe: what it lacks it refuses, and a person it
+    accepts that the gateway would not is refused their card at the send, where the card poster
+    checks talk tier again (kanban §4.2, §22.7). **Not for `MT_ALLOW_CHATS`**: one set only in the
+    gateway's shell leaves the script's `mt` with an empty `auth.chats`, which means any chat, so
+    its `--chat` can name a chat the gateway does not answer, and notices go where nobody can act on
+    them. Put such settings in the config file or the `.env`, where both read them.
+  - **The workspace's files.** A script runs in the job's workspace, which the role's agents write
+    to. A script that runs files from there acts with whatever those files say, operator powers
+    included; keep a job's script outside the workspace, under `$MT_HOME` for example.
+
+  **None of the four marks an agent's shell.** An agent's shell is told by `AGENT_VARIABLES`
+  (`MT_KANBAN_RUN`, `MT_KANBAN_TOKEN`, `MT_CRON_TOKEN`, `MT_CRON_FIRE`, §6.4), which `gateEnv` still
+  drops; `PATH`, `MT_HOME`, `MT_CONFIG` and `MT_DB` are none of them, and `MT_KANBAN_SOCKET`, which
+  a fire's agent gets, is not given, as the operator's commands find the socket from the home. So
+  the operator's commands still work in a script, and a script is a terminal for kanban §22's
+  `--chat` and people. The values come from the scheduler's deps: the `PATH` from `WorkerAccess`'s
+  `mtDir` and `path`, as `#workerEnv` builds a fire's agent's, and the three locations from a small
+  `ScriptHome { home, configPath, dbPath }` of their own, which `src/index.ts` fills from
+  `GatewayConfig`, so `WorkerAccess`, the socket's and the launcher's, is not made to carry what only
+  a script needs. A role's environment cannot name `MT_HOME`, `MT_CONFIG` or `MT_DB`, as `passEnv` and a
+  role's `.env` refuse `MT_*` (kanban §12, plan A2); they are set after it all the same, so the script reaches
+  this gateway whatever a later change lets a role set.
 - **Time-limited to 120 seconds**, then SIGTERM to its group and SIGKILL two seconds later, as a
   gate. Fixed rather than configured: a script gathers data for a prompt, and one that needs longer
   is work for the agent, or a job of its own.
@@ -919,7 +968,17 @@ mt cron pause <id> | resume <id> | run <id> | remove <id> [--json]
 - **Everything, scripts included**, and `--chat`, the only way to change where a job delivers;
   `edit` and `--workspace` are the terminal's alone (§6.1).
 - **`--chat`** takes a chat id as Lark gives one; it is checked for shape, not for whether the bot
-  is in it, which only a send can tell (§5.6).
+  is in it, which only a send can tell (§5.6). *Amended for plan V:* on `add` and on `edit`, a chat
+  not in `auth.chats` is refused when that list is not empty, `invalid`, in kanban §22.1's words,
+  "oc_… is not in auth.chats, so this gateway does not act in it: add it there, or name a chat
+  that is", from `TeamSettings.chats` (`MT_ALLOW_CHATS` or `auth.chats`, as `loadConfig` reads it).
+  The gateway admits no message from such a chat, so a job posting there would post where nobody
+  can `/cron show` it, pause it or answer it. An empty list means any chat, as for the gateway. A
+  job made before plan V that delivers to such a chat is left as it is: the check is on what the
+  terminal names, not a sweep. The check is `delivery()`'s, which runs before the add, so `mt cron
+  add --key k --chat oc_…` repeated after that chat has left `auth.chats` is refused, not answered
+  with the job the key made. `CHAT_ID` moves to `src/core/lark-ids.ts`, which the board's service
+  imports too (kanban §22.5).
 - **The zone** used when `--tz` is not given is the gateway's, from `cron.tz` or
   `$MT_HOME/run/gateway.tz`, and only with neither this shell's, which the answer then says (§2.2).
   With `--json`, an add given no `--tz` that makes a job says where its zone came from, as
@@ -1281,6 +1340,11 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   through `spawnGate` and `gateEnv` (`src/kanban/gates.ts`), role.md read and rendered with
   `renderNative` (§5.2), the session through the registry, the answer through `turnText`, the send
   through the Lark adapter.
+- **Plan V**: the script's environment, `gateEnv` and then `PATH`, `MT_HOME`, `MT_CONFIG` and
+  `MT_DB` (§5.1), in `#script`, the `PATH` from `WorkerAccess` and the rest from the scheduler's
+  new `ScriptHome` dep, which `src/index.ts` fills; `src/cli/cron.ts`'s `--chat` checked against
+  `auth.chats` on `add` and `edit`, and its `CHAT_ID` imported from `src/core/lark-ids.ts`; `docs/examples.md` calling plain `mt` in every script, its "two facts"
+  saying the script finds the gateway's `mt` and home by itself.
 - **`src/kanban/session-log.ts`**: `turnText(db, sessionId)`, the last turn's whole masked answer,
   uncut, and `lastTurnOf` cutting it to `LAST_OUTPUT_CHARS` as before (§5.5).
 - **`src/kanban/prompt.ts`**: the "# Your role" and "# Skills" headings moved out of
@@ -1407,6 +1471,16 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   its uuid, the same uuids and the same parts for a fire sent again after a restart, an answer of
   20,000 characters included, rebuilt from the session log and not from its 8 KiB `result`; each
   outcome's line, a one-off's interruption without "runs again"; the pause's line.
+- **Unit, a script's environment (plan V)**: `PATH` starting with `$MT_HOME/bin`, before the
+  role's `PATH` and before the gateway's; `MT_HOME`, `MT_CONFIG` and `MT_DB` the gateway's,
+  `MT_CONFIG` absent for an environment-only gateway;
+  no name of `AGENT_VARIABLES` and no `MT_KANBAN_SOCKET`; a gate's environment unchanged; and end
+  to end, a script running plain `mt kanban task list --json` and `mt kanban workflow start …
+  --chat` against the gateway's own database, a gateway run by hand with `MT_DB` elsewhere
+  included.
+- **Unit, `--chat` and `auth.chats` (plan V)**: `mt cron add --chat` and `mt cron edit --chat`
+  refusing a chat not in a non-empty list, in kanban §22.1's words, and taking any chat with an
+  empty one; a job delivering to such a chat before the check left as it is.
 - **Unit, the tokens**: a chat session's token working during its turn and refused between turns,
   after `/new`, and after its actor is built again; the 1,001st dropping the oldest; masked while
   held and not after; a fire's token refusing `add` and `pause`; a board run's token taking its
@@ -1484,7 +1558,9 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   against the file's `maxLiveSessions`, or 8, rather than the gateway's. For example, a home whose `.env` sets `MT_WORKSPACE=/srv/work` and
   whose `config.yaml` names no workspace: `mt workspace list` works at a terminal, and in a chat
   agent's shell fails "a workspace is required". `MT_OWNER_OPEN_ID` is read only by `loadConfig`,
-  which none of the four calls, so an owner only in the `.env` changes nothing for them. Chosen so
+  which none of the four calls, so an owner only in the `.env` changes nothing for them. (Plan V
+  has `teamSettingsFrom` read the owner and `MT_ALLOW_TALK` too, for the terminal's talk check,
+  kanban §22.2; the four do not use them, so this still holds.) Chosen so
   that no agent acts as the operator by accident, and none is handed the `.env`'s secrets by a
   check; an operator who wants a chat agent to restart or update the gateway runs those commands
   at a terminal. It is not a boundary: the agent runs as the gateway's user, and can unset the
@@ -1631,3 +1707,17 @@ period; and, as an erratum, that with `MT_AGENT_COMMAND` only in the `.env` `mt 
 "no roles: create one with mt role create <name>" and `mt role create` fails "there is no role
 default to copy from", as the code does, rather than both failing "there is no role default"
 (§14, §15).
+*Amended on 2026-11-17, for plan V.* The user chose that a script gets `$MT_HOME/bin` first on its
+`PATH` and `MT_HOME` set to the gateway's home, neither marking an agent's shell, so the cookbook's
+scripts call plain `mt` (§5.1). The main agent decided, where the code forced it: `MT_CONFIG` and
+`MT_DB` passed too, as the gateway resolved them, since a gateway run by hand with either in its
+shell would otherwise have its scripts' `mt` open another config or database; no
+other name of the service's environment, which may hold secrets; the three set after the role's
+environment; the launcher's directory taken from `WorkerAccess`, as a fire's agent's is; and gates
+left as they were.
+*Amended on 2026-11-17, for plan V, again.* The user decided that `mt cron add --chat` and `mt cron
+edit --chat` refuse a chat not in a non-empty `auth.chats`, as the board's `--chat` does (§6.2,
+kanban §22.1). A review found, and this revision takes: the reason for `MT_CONFIG` and `MT_DB` as
+a gateway run by hand, an installed service having only `PATH`, `MT_HOME` and the `.env`; the
+limit that such a gateway's shell-only settings are not seen by its scripts' `mt`, which fails
+safe; and the three locations in a `ScriptHome` dep of their own, not in `WorkerAccess`.

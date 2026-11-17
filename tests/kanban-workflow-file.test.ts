@@ -16,7 +16,7 @@ import { role } from './helpers/dispatch.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
- * A workflow file and its checks (spec §21.1 to §21.4): the keys at every level,
+ * A workflow file and its checks (workflows spec §1 to §4): the keys at every level,
  * the names, the params, the parents, for_each, the references, the roles and
  * workspaces written out, the gates, and the workspaces a step's parents
  * certainly work in. And the directory: what is ignored, and the startup lines.

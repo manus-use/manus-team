@@ -16,6 +16,8 @@
 
 **Spec:** `docs/specs/2026-11-02-kanban-design.md` §21 (from line 4033 to the end), with the edits it makes to §1 (line 49), §2.6 (lines 450, 487 and 569 to 572), §7.1 (line 1217), §7.3 (lines 1313 to 1325), §9.1 (line 1691), and plan T's row in §12 (line 2212).
 
+> **Note, 2026-11-17.** The spec's §21 has since moved into a document of its own, `docs/specs/2026-11-16-workflows-design.md`, renumbered from 1: the kanban spec's §21.N is §N there, and §21's opening is §0. The kanban spec keeps a short §21 pointing at it. The references below are left as they were written, to §21.N of the kanban spec, and the line numbers are those of the kanban spec at that time.
+
 ---
 
 ## Ground rules

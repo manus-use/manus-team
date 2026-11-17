@@ -57,3 +57,17 @@ export function personOf(db: Db, appId: string, unionId: string): PersonRow | un
     ? undefined
     : { appId: row.app_id, unionId: row.union_id, openId: row.open_id, name: row.name, seenAt: row.seen_at };
 }
+
+/**
+ * Every person this bot has seen (kanban spec §22.2), for `mt kanban people`:
+ * by the name Lark last gave, then by union_id, those with no name last.
+ */
+export function peopleOf(db: Db, appId: string): PersonRow[] {
+  return db
+    .prepare<[string], PersonRaw>(
+      `SELECT app_id, union_id, open_id, name, seen_at FROM people WHERE app_id = ?
+        ORDER BY name IS NULL, name, union_id`,
+    )
+    .all(appId)
+    .map((row) => ({ appId: row.app_id, unionId: row.union_id, openId: row.open_id, name: row.name, seenAt: row.seen_at }));
+}

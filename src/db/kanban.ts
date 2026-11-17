@@ -20,6 +20,7 @@ import type {
   Contract,
   CreatedVia,
   EndedOutcome,
+  Follow,
   GateRow,
   Phase,
   Refusal,
@@ -123,7 +124,7 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'packageHash',
   'seedDropped',
   'board',
-  // A workflow's instance, its name, and a member's ref and step (spec §21.8); its item is a param's text, and masked.
+  // A workflow's instance, its name, and a member's ref and step (workflows spec §8); its item is a param's text, and masked.
   'workflow',
   'workflowName',
   'ref',
@@ -305,10 +306,18 @@ export interface NewTask {
   createdVia: CreatedVia;
   /** The board it goes on (spec §16); `default` unless given. */
   board?: string;
+  /** The chat a terminal named to follow it (kanban spec §22.1), checked by the service. */
+  follow?: Follow;
 }
 
 /**
  * Create a task, linked to its parents, in one transaction.
+ *
+ * A task with a `follow` gets one more event, after `created`:
+ * `task_created_followed`, the "Created" line the notifier posts to that chat,
+ * as a terminal has no Lark client to post it (kanban spec §22.1). A
+ * workflow's members never get one: their instance's `workflow_started` names
+ * them all.
  *
  * A repeated idempotency key returns the existing task and changes nothing:
  * creation is retried by everything that can create -- Lark redelivers a
@@ -350,6 +359,7 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
       if (p.board !== board) return refuse('other_board', onOtherBoard(parent, p.board, board));
     }
     const taskId = insertTask(d, { ...t, board, createdFromTask, parents }, now);
+    if (t.follow !== undefined) record(d, { taskId, kind: 'task_created_followed', actor: t.createdBy, payload: { by: t.createdBy } }, now);
     return { ok: true, task: mustGet(d, taskId), existing: false };
   });
 }
@@ -362,8 +372,8 @@ interface TaskInsert extends NewTask {
 }
 
 /**
- * The insert every task is made by, `createTask`'s and a workflow's alike (spec
- * §21.8): the row, its links, its subscriptions and its `created` event, whose
+ * The insert every task is made by, `createTask`'s and a workflow's alike (workflows spec
+ * §8): the row, its links, its subscriptions and its `created` event, whose
  * payload gains `payload`'s keys. Inside the caller's transaction, which has
  * checked everything; answers the new task's id.
  */
@@ -399,7 +409,7 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
   );
   const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
   for (const parent of parents) link.run(parent, taskId, now);
-  subscribe(d, taskId, t.createdVia, createdFromTask, now);
+  subscribe(d, taskId, t.createdVia, createdFromTask, now, t.follow);
   record(
     d,
     {
@@ -428,15 +438,19 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
  * The chats that follow a new task (spec §9.4, §7.3): the chat it was created
  * in; or, for a task a run created, every chat following the creating run's
  * task, so whoever follows that task hears about its follow-ups too, in its
- * thread, with its root (spec §19.4). Each cursor starts at 0: every event of the
- * new task is newer than that. A root is written only with a thread: at chat
- * scope it comes from `threadSubscription` alone.
+ * thread, with its root (spec §19.4); or, for a terminal's, the chat it named,
+ * `follow`, in Lark, for this bot (kanban spec §22.1). Each cursor starts at 0:
+ * every event of the new task is newer than that. A root is written only with a
+ * thread: at chat scope it comes from `threadSubscription` alone.
  */
-function subscribe(d: Db, taskId: string, via: CreatedVia, createdFromTask: string | null, now: number): void {
+function subscribe(d: Db, taskId: string, via: CreatedVia, createdFromTask: string | null, now: number, follow?: Follow): void {
   const insert = d.prepare(
     `INSERT OR IGNORE INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, root_message_id, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
+  if (follow !== undefined) {
+    insert.run(taskId, 'lark', follow.appId, follow.chatId, follow.threadId, follow.threadId === '' ? null : follow.rootId, now);
+  }
   if (via.kind === 'chat') {
     const root = via.threadId === '' || via.rootId === undefined || via.rootId === '' ? null : via.rootId;
     insert.run(taskId, via.channel, via.appId, via.conversationId, via.threadId, root, now);
@@ -468,7 +482,7 @@ export function advanceSubscription(db: Db, subscriptionId: number, cursor: numb
 
 /**
  * Move the tasks' subscriptions at a chat into the thread their "Created" reply
- * opened (spec §19.4, §21.9): each one's `thread_id` from '' to the thread's,
+ * opened (spec §19.4, workflows spec §9): each one's `thread_id` from '' to the thread's,
  * and its root to the command message, all in one transaction: one task for
  * `/kanban task new`, every member of an instance for a workflow's start. Only
  * a subscription of these tasks, at this chat, for this bot, still at chat
@@ -560,8 +574,8 @@ export function addGate(
 }
 
 /**
- * The insert every gate is added by, `addGate`'s and a workflow's alike (spec
- * §21.8): GATE_LIMITS checked against the task's gates so far, inside the
+ * The insert every gate is added by, `addGate`'s and a workflow's alike (workflows spec
+ * §8): GATE_LIMITS checked against the task's gates so far, inside the
  * caller's transaction, then the row and its `gate_added` event, whose payload
  * gains `payload`'s keys.
  */
@@ -1907,7 +1921,7 @@ export function archive(
 }
 
 /**
- * The body every archive runs, `archive`'s and a workflow's alike (spec §21.8),
+ * The body every archive runs, `archive`'s and a workflow's alike (workflows spec §8),
  * inside the caller's transaction, on a task not yet archived: its open run
  * superseded if undecided, the task archived, keeping the time it was done, and
  * its `archived` event, whose payload gains `payload`'s keys.
@@ -2051,7 +2065,7 @@ export function countSubmission(db: Db, runId: string, now: number): Result<{ n:
 }
 
 // ---------------------------------------------------------------------------
-// Workflows (spec §21.7, §21.8)
+// Workflows (workflows spec §7, §8)
 // ---------------------------------------------------------------------------
 
 /** An instance to make: its name, its checked DAG and that DAG's hash, unmasked, and who makes it, how. */
@@ -2066,7 +2080,12 @@ export interface NewInstance {
   createdVia: CreatedVia;
   /** Namespaced as a task's (spec §3.1), or null for none. */
   idempotencyKey: string | null;
+  /** The chat a terminal named to follow every member (workflows spec §18.1), beside the DAG, not in it. */
+  follow?: Follow;
 }
+
+/** The members a `workflow_started` payload lists: the start's reply lists at most 30 (workflows spec §9, §18.2). */
+const STARTED_TASKS = 30;
 
 /** One of the DAG's tasks, as the writer makes it: its fields, its member fields, its parents as earlier positions, and its gates. */
 export interface NewMember {
@@ -2090,7 +2109,7 @@ export interface AppliedDag {
 }
 
 /**
- * Why a key's instance is not this start's or apply's (spec §21.6 step 0), or
+ * Why a key's instance is not this start's or apply's (workflows spec §6 step 0), or
  * undefined when it is a repeat: another board's is `other_board`; another
  * kind's, another workflow's, or another DAG's, `invalid`, naming it.
  */
@@ -2120,13 +2139,17 @@ export function keyRefused(
 }
 
 /**
- * Make a checked DAG on the board, in one transaction (spec §21.8): the board
+ * Make a checked DAG on the board, in one transaction (workflows spec §8): the board
  * worked out (a run's task's for a run), the key looked up again, the guard
  * against two racing, the board checked live; then the instance with its DAG,
  * masked but for its gates; then each task through `insertTask`, with its
  * subscriptions and its `created` event carrying the instance, its links, its
  * gates through `insertGate`, and its member row. A refusal, or a member's
- * repeated ref, rolls everything back: all of it is made, or none.
+ * repeated ref, rolls everything back: all of it is made, or none. With a
+ * `follow`, every member's insert subscribes it, and one `workflow_started` on
+ * the first member, after the member rows, holds the start's reply for the
+ * notifier to post (workflows spec §18.2): the facts, not the text, which the
+ * notifier makes, masked and worded as every notice is.
  */
 export function applyDag(db: Db, instance: NewInstance, members: readonly NewMember[], now: number): Result<AppliedDag> {
   return tx(db, (d) => {
@@ -2178,17 +2201,53 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
       });
       const taskId = insertTask(
         d,
-        { ...m.task, board, createdFromTask, parents, idempotencyKey: null, createdBy: instance.createdBy, createdVia: instance.createdVia },
+        {
+          ...m.task,
+          board,
+          createdFromTask,
+          parents,
+          idempotencyKey: null,
+          createdBy: instance.createdBy,
+          createdVia: instance.createdVia,
+          ...(instance.follow === undefined ? {} : { follow: instance.follow }),
+        },
         now,
         { workflow: instanceId, workflowName: instance.name, ref: m.ref, step: m.step, item: m.item },
       );
       for (const gate of m.gates) {
-        // The apply put it on the task, for whoever made the instance (spec §21.8).
+        // The apply put it on the task, for whoever made the instance (workflows spec §8).
         const added = insertGate(d, taskId, gate, instance.createdBy, now, { workflow: instanceId });
         if (!added.ok) return refuse(added.code, `${m.ref}: ${added.message}`);
       }
       member.run(taskId, instanceId, m.ref, m.step, m.item === null ? null : mask(m.item), position);
       ids.push(taskId);
+    }
+    const first = ids[0];
+    if (instance.follow !== undefined && first !== undefined) {
+      const human = (a: Assignee | null | undefined): boolean => a?.kind === 'human';
+      record(
+        d,
+        {
+          taskId: first,
+          kind: 'workflow_started',
+          actor: instance.createdBy,
+          payload: {
+            workflow: instanceId,
+            workflowName: instance.name,
+            board,
+            by: instance.createdBy,
+            count: members.length,
+            people: members.some((m) => human(m.task.assignee) || human(m.task.reviewer)),
+            tasks: members.slice(0, STARTED_TASKS).map((m, i) => ({
+              taskId: ids[i],
+              title: m.task.title,
+              assignee: m.task.assignee?.name ?? null,
+              assigneeKind: m.task.assignee?.kind ?? null,
+            })),
+          },
+        },
+        now,
+      );
     }
     const made = getInstance(d, instanceId);
     if (made === undefined) throw new Error(`instance ${instanceId} vanished inside its own transaction`);
@@ -2197,7 +2256,7 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
 }
 
 /**
- * Archive an instance (spec §21.8, §21.10): every member not already archived,
+ * Archive an instance (workflows spec §8, §10): every member not already archived,
  * in one transaction, through `archiveIn`, each `archived` event carrying the
  * instance. Answers the members it archived, and the runs it decided, whose
  * turns the caller cancels; none for an instance wholly archived already.

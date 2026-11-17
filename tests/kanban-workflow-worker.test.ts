@@ -19,7 +19,7 @@ import { ALICE, NOW, VIA } from './helpers/kanban.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
- * The worker's workflow commands (spec §21.6): `start-workflow`, its schema, its
+ * The worker's workflow commands (workflows spec §6): `start-workflow`, its schema, its
  * answer and `unknown_workflow`; `apply-dag`, its own two keys taken off before
  * the DAG is checked, its dry run, and what a run's DAG may not hold; `mt kanban
  * apply-dag`'s own 192 KiB check; and `mt kanban workflow` refused in a run's

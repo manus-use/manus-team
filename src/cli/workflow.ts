@@ -11,7 +11,7 @@ import { inAgentRun } from './gate.js';
 import type { MtIo } from './mt.js';
 
 /**
- * `mt workflow check [<name>]` (spec §2.6, §21.4): a workflow file's checks,
+ * `mt workflow check [<name>]` (spec §2.6, workflows spec §4): a workflow file's checks,
  * without starting it. It reads files only, and needs no authority, so it works
  * in any shell, a board run's included; it opens no database. It finds the home,
  * the config and the roles as the gateway does, this shell's environment over

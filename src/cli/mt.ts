@@ -80,12 +80,12 @@ const USAGE = [
   '  mt kanban board set <name> max_running <number|none> [--json]',
   '  mt kanban board set <name> workspace <workspace|none> [--json]',
   '  mt kanban board archive <name> [--json]',
-  '  mt kanban task new <title> [--board <name>] [--assignee <role>] [--reviewer <role>] [--workspace <name>]',
-  '      [--parent <task>]... [--outcome "..."] [--verify "..."] [--constraints "..."] [--boundaries "..."]',
-  '      [--stop-when "..."] [--body "..." | --body-file <path|->] [--key <key>] [--json]',
+  '  mt kanban task new <title> [--board <name>] [--assignee <role|lark:<union_id>>] [--reviewer <role|lark:<union_id>>]',
+  '      [--workspace <name>] [--parent <task>]... [--outcome "..."] [--verify "..."] [--constraints "..."] [--boundaries "..."]',
+  '      [--stop-when "..."] [--body "..." | --body-file <path|->] [--key <key>] [--chat <chat_id> [--thread <thread_id>]] [--json]',
   `  mt kanban task list [${LIST_FILTERS.join('|')}] [--board <name>] [--json]`,
   '  mt kanban task show <task_id> [--board <name>] [--json]',
-  '  mt kanban task assign <task_id> <role> [--board <name>] [--json]',
+  '  mt kanban task assign <task_id> <role|lark:<union_id>> [--board <name>] [--json]',
   '  mt kanban task link <parent_id> <child_id> [--board <name>] [--json]',
   '  mt kanban task unblock <task_id> [comment...] [--board <name>] [--json]',
   '  mt kanban task stop <task_id> [--board <name>] [--json]',
@@ -99,9 +99,11 @@ const USAGE = [
   '  mt kanban workflow instances [all] [--board <name>] [--json]',
   '  mt kanban workflow show <instance> [--board <name>] [--dag | --json]',
   '  mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]... [--json]',
-  '  mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>] [--json]',
-  '  mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--json]',
+  '  mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>]',
+  '      [--chat <chat_id> [--thread <thread_id>]] [--json]',
+  '  mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--chat <chat_id> [--thread <thread_id>]] [--json]',
   '  mt kanban workflow archive <instance> [--board <name>] [--json]',
+  '  mt kanban people [--json]',
   "the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
   `  mt kanban <${WORKER_COMMANDS.join('|')}> < input.json`,
   CRON_USAGE,
@@ -143,7 +145,7 @@ function gate(argv: readonly string[], io: MtIo): number {
  * The operator's groups (spec §2.6), which refuse to run in an agent's shell.
  * Every other `mt kanban <command>` is the worker CLI's (spec §7.3).
  */
-const OPERATOR_GROUPS: readonly string[] = ['task', 'board', 'gate', 'workflow'];
+const OPERATOR_GROUPS: readonly string[] = ['task', 'board', 'gate', 'workflow', 'people'];
 
 /** The subcommands whose name a run's refusal gives: `mt kanban board set`, not just `mt kanban board`. */
 const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
@@ -151,6 +153,7 @@ const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
   board: ['list', 'create', 'set', 'archive', 'use'],
   gate: ['add', 'list', 'remove'],
   workflow: ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive'],
+  people: [],
 };
 
 /**
@@ -163,7 +166,7 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
   const sub = rest[0];
   const named = command !== undefined && sub !== undefined && SUBCOMMANDS[command]?.includes(sub) === true;
   const what = ['mt kanban', ...(command === undefined ? [] : [command]), ...(named ? [sub] : [])].join(' ');
-  // A run starts a workflow, or applies a DAG of its own, with the worker's commands (spec §21.6):
+  // A run starts a workflow, or applies a DAG of its own, with the worker's commands (workflows spec §6):
   // said only in a board run's shell, the only one those commands work in.
   const message =
     command === 'workflow' && hasBoardRun(io.env)
@@ -257,7 +260,7 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       return roleCheck(name, io);
     }
     if (group === 'workflow' && command === 'check') {
-      // Files only, and no authority: any shell, a board run's included (spec §21.4).
+      // Files only, and no authority: any shell, a board run's included (workflows spec §4).
       const [name, extra] = parse(rest, {}).positionals;
       if (extra !== undefined) throw new UsageError('workflow check takes at most one name');
       return workflowCheck(name, io);

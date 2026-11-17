@@ -8,7 +8,7 @@ import { role } from './helpers/dispatch.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
- * A workflow's params and its expansion into a DAG (spec §21.2, §21.3, §21.5):
+ * A workflow's params and its expansion into a DAG (workflows spec §2, §3, §5):
  * each path's params, the defaults, the sizes, substitution once in every text
  * field, names checked as names, @ resolved only for a person field, for_each,
  * all to all, and the hundred tasks.
@@ -266,12 +266,18 @@ steps:
     expect(refusal(expand(w, chat(['owner', '@Bob'], ['note', 'x']), 'default', personOf))).toEqual({ code: 'invalid', message: '@Bob is not mentioned' });
   });
 
-  it('refuses an @Name in a person field with no mentions to resolve it by, at the terminal or from a run, and keeps one in text', () => {
+  it('refuses an @Name in a person field with no mentions to resolve it by, as the start came, and keeps one in text', () => {
     const w = workflow('params:\n  owner: { required: true }\n  note: { default: x }\nsteps:\n  a: { title: "Ask {{note}}", assignee: "{{owner}}" }\n');
+    // A run's start keeps its refusal: an agent has no mt kanban people.
     for (const given of [terminal(['owner', '@Alice Smith']), json({ owner: '@Alice Smith' })]) {
-      expect(refusal(expand(w, given, 'default'))).toEqual({
+      expect(refusal(expand(w, given, 'default', undefined, 'run'))).toEqual({
         code: 'person_not_assignable',
         message: '"@Alice Smith" is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier',
+      });
+      // The terminal's: there are no mentions there, and a person is lark:<union_id>.
+      expect(refusal(expand(w, given, 'default', undefined, 'operator'))).toEqual({
+        code: 'invalid',
+        message: 'there are no @-mentions at the terminal: a person is lark:<union_id>, which mt kanban people lists',
       });
     }
     expect(dagOf(expand(w, json({ owner: 'worker', note: '@Bob' }), 'default')).tasks[0]?.title).toBe('Ask @Bob');

@@ -12,7 +12,7 @@ import { mtFixture, type MtFixture } from './helpers/mt.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
- * The checks' output (spec §21.4): `mt workflow check`, with and without a
+ * The checks' output (workflows spec §4): `mt workflow check`, with and without a
  * name, its exit codes, in a run's shell; the startup's lines, which a broken
  * workflow does not stop; and `mt service check`'s warnings, which pass.
  */

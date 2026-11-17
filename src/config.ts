@@ -295,6 +295,19 @@ export interface TeamSettings {
   /** The bot's app id, `LARK_APP_ID` or `lark.appId`, when either is set: where `mt cron --chat` delivers from. */
   appId?: string;
   /**
+   * The talk allowlist as the gateway builds `auth.allowTalk`: the owner,
+   * `MT_OWNER_OPEN_ID` or `auth.owner`, and `MT_ALLOW_TALK` or `auth.talk`.
+   * Present only with an owner, as a gateway with none does not start: what
+   * the terminal checks a person's talk tier against (kanban spec §22.2).
+   */
+  talk?: readonly string[];
+  /**
+   * The chats the gateway acts in, `MT_ALLOW_CHATS` or `auth.chats`, as it
+   * builds `auth.allowChats`; empty for any chat. A terminal's `--chat` names
+   * none outside it (kanban spec §22.1, the cron spec §6.2).
+   */
+  chats?: readonly string[];
+  /**
    * `kanban.enabled` as the config sets it, absent when it does not (the board is
    * then off): so the operator's `mt kanban` can say the board is off, and why.
    */
@@ -359,13 +372,9 @@ export function loadConfig(
   const located = locate(env, readFile);
   const { file } = located;
 
-  const ownerOpenId =
-    envString(env, 'MT_OWNER_OPEN_ID') ??
-    file.auth.owner ??
-    fail('an owner is required: set auth.owner in the config file, or MT_OWNER_OPEN_ID');
+  const ownerOpenId = ownerOf(env, file) ?? fail('an owner is required: set auth.owner in the config file, or MT_OWNER_OPEN_ID');
   const team = teamSettingsFrom(env, located);
 
-  const allowTalk = envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk;
   const allowOperate = envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate;
   const { maxLiveSessions, liveName, maxRunning, maxRunningFrom } = runningLimits(env, file);
   if (maxRunning > maxLiveSessions) {
@@ -403,9 +412,9 @@ export function loadConfig(
       ownerOpenId,
       // The owner is always included. An allowlist that excludes the owner locks
       // out the only person who can fix it, and it is not editable from chat.
-      allowTalk: unique([ownerOpenId, ...allowTalk]),
+      allowTalk: talkOf(env, file, ownerOpenId),
       allowOperate: unique([ownerOpenId, ...allowOperate]),
-      allowChats: envList(env, 'MT_ALLOW_CHATS') ?? file.auth.chats,
+      allowChats: chatsOf(env, file),
       allowDirectMessages: envFlag(env, 'MT_ALLOW_DM') ?? file.auth.directMessages ?? true,
       // Default false. `@all` is a room-wide notification, not an instruction, and
       // treating it as one makes the bot answer announcements.
@@ -467,6 +476,21 @@ function locate(env: Env, readFile: FileReader): Located {
   return { home, path, text, file };
 }
 
+/** The owner, `MT_OWNER_OPEN_ID` else `auth.owner`: `loadConfig`'s, and the terminal's talk check's. */
+function ownerOf(env: Env, file: FileConfig): string | undefined {
+  return envString(env, 'MT_OWNER_OPEN_ID') ?? file.auth.owner;
+}
+
+/** The talk allowlist, `MT_ALLOW_TALK` else `auth.talk`, with the owner always first in it. */
+function talkOf(env: Env, file: FileConfig, owner: string): string[] {
+  return unique([owner, ...(envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk)]);
+}
+
+/** The chats the gateway acts in, `MT_ALLOW_CHATS` else `auth.chats`; empty for any. */
+function chatsOf(env: Env, file: FileConfig): readonly string[] {
+  return envList(env, 'MT_ALLOW_CHATS') ?? file.auth.chats;
+}
+
 function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: LoadOptions = {}): TeamSettings {
   const single = envString(env, 'MT_WORKSPACE') ?? file.workspace;
   if (single !== undefined && file.workspaces['default'] !== undefined) {
@@ -523,6 +547,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     ...(file.kanban.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: file.kanban.maxRunningPerRole }),
   };
   const appId = envString(env, 'LARK_APP_ID') ?? file.lark.appId;
+  const owner = ownerOf(env, file);
   const perRole = limits.maxRunningPerRole;
   if (perRole !== undefined && perRole > maxRunning) {
     // As a board's own max_running is held inside the gateway's (spec §16.6).
@@ -537,6 +562,8 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'team.db'),
     ...(file.kanban.enabled === undefined ? {} : { kanbanEnabled: file.kanban.enabled }),
     ...(appId === undefined ? {} : { appId }),
+    ...(owner === undefined ? {} : { talk: talkOf(env, file, owner) }),
+    chats: chatsOf(env, file),
     ...(file.cron.enabled === undefined && file.cron.tz === undefined
       ? {}
       : { cron: { ...(file.cron.enabled === undefined ? {} : { enabled: file.cron.enabled }), ...(file.cron.tz === undefined ? {} : { tz: file.cron.tz }) } }),

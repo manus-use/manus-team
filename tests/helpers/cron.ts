@@ -73,7 +73,7 @@ export interface CronHarnessOptions {
   clock?: ManualClock;
   roles?: readonly Role[];
   settings?: Partial<CronSettings>;
-  deps?: Pick<CronSchedulerDeps, 'runner' | 'renderRoot' | 'packages' | 'worker' | 'env' | 'sweepRendersAtBoot' | 'tokens'>;
+  deps?: Pick<CronSchedulerDeps, 'runner' | 'renderRoot' | 'packages' | 'worker' | 'env' | 'sweepRendersAtBoot' | 'tokens' | 'scriptHome'>;
   workspaces?: ReadonlyMap<string, string>;
 }
 

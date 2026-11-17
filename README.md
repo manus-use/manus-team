@@ -496,12 +496,13 @@ mt kanban board create <name>
 mt kanban board set <name> max_running <number|none>
 mt kanban board set <name> workspace <workspace|none>
 mt kanban board archive <name>
-mt kanban task new <title> [--board <name>] [--assignee <role>] [--reviewer <role>] [--workspace <name>]
-    [--parent <task_id>]... [--outcome "..."] [--verify "..."] [--constraints "..."]
+mt kanban task new <title> [--board <name>] [--assignee <role|lark:<union_id>>] [--reviewer <role|lark:<union_id>>]
+    [--workspace <name>] [--parent <task_id>]... [--outcome "..."] [--verify "..."] [--constraints "..."]
     [--boundaries "..."] [--stop-when "..."] [--body "..." | --body-file <path|->] [--key <key>]
+    [--chat <chat_id> [--thread <thread_id>]]
 mt kanban task list [todo|ready|running|review|reviewing|blocked|done|archived|all] [--board <name>]
 mt kanban task show <task_id> [--board <name>]
-mt kanban task assign <task_id> <role> [--board <name>]
+mt kanban task assign <task_id> <role|lark:<union_id>> [--board <name>]
 mt kanban task link <parent_id> <child_id> [--board <name>]
 mt kanban task unblock <task_id> [comment...] [--board <name>]
 mt kanban task stop <task_id> [--board <name>]
@@ -515,9 +516,10 @@ mt kanban workflow list
 mt kanban workflow instances [all] [--board <name>]
 mt kanban workflow show <instance> [--board <name>] [--dag]
 mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]... [--json]
-mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>]
-mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run]
+mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>] [--chat <chat_id> [--thread <thread_id>]]
+mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--chat <chat_id> [--thread <thread_id>]]
 mt kanban workflow archive <instance> [--board <name>]
+mt kanban people
 
 # the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:
 mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag> < input.json
@@ -567,9 +569,19 @@ a running gateway, through the board's own service, and take effect at once.
   bidi control. The key
   is stored as `operator:<key>`, so it never meets a key of chat's or of a run's, and one used on
   another board is refused (`other_board`). Archiving the task does not free its key.
-  `assign`, `--assignee` and `--reviewer` take a role: a person is given work from chat, by
-  @-mention, where the gateway can check their tier. A task created here is followed by no
-  chat, so nobody is told when it is done or blocks: `mt kanban task show` and `task list` tell you. Each
+  `assign`, `--assignee` and `--reviewer` take a role, or a person as `lark:<union_id>`, checked
+  as chat checks one: known to this gateway, and at talk tier by the allowlist this shell's
+  settings give (the owner, and `auth.talk` or `MT_ALLOW_TALK`). `mt kanban people` lists the
+  people the gateway knows, with their union_ids and whether they have talk tier; there are no
+  @-mentions at a terminal. A task created here is followed by no chat unless `--chat oc_…`
+  names one, checked as `mt cron add --chat` checks it, with `--thread omt_…` for a thread whose
+  root the board knows: that chat follows the task as it follows its own, and is posted a
+  "Created" line, then the task's notices. A chat outside a non-empty `auth.chats` is refused.
+  `workflow start` and `apply` take `--chat` and `--thread` too: every task of the instance is
+  followed, and the start's reply is posted there. `task list --json` gives each task's
+  `created_at` and `status_since`, in milliseconds, and the plain list an `age` column, the
+  time since its phase last changed (todo, ready and running count as one, from when it was made
+  or sent back): `45m`, `5h`, `3d`. Each
   prints plain text, or with `--json` one line of JSON, `{"ok": true, ...}` or
   `{"ok": false, "code": "...", "message": "..."}`; each exits 0 when done, 1 when refused, and
   2 for a wrong command line, said on stderr. After `task new`, `assign`, `unblock`, `stop`,
@@ -906,8 +918,10 @@ mt cron show c_xxx
 ```
 
 Each fire runs the job's script first, if it has one, in the workspace with the role's
-environment, killed after 120 s, and puts its output in the prompt with the job's previous
-result. An answer of exactly `[nothing to report]` is not posted. A fire whose session is
+environment, `$MT_HOME/bin` first on its `PATH` and the gateway's `MT_HOME`, `MT_CONFIG` and
+`MT_DB`, so plain `mt` in it is this gateway's, killed after 120 s, and puts its output in the
+prompt with the job's previous result. `mt cron add --chat` and `edit --chat` refuse a chat
+outside a non-empty `auth.chats`. An answer of exactly `[nothing to report]` is not posted. A fire whose session is
 quiet for `cron.idle_timeout_s` is stopped; a fire that fails three times in a row pauses its
 job, and says how to resume it. A slot missed by more than half its period (a one-off, by more
 than an hour), the gateway being down, is skipped, not fired late.

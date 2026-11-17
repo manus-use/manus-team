@@ -3,6 +3,8 @@ import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { loadTeamSettings, type Env, type TeamSettings } from '../config.js';
 import { openDb } from '../db/open.js';
+import { peopleOf } from '../db/people.js';
+import { PeopleDirectory } from '../kanban/people.js';
 import { KanbanService } from '../kanban/service.js';
 import type { GateRow } from '../kanban/types.js';
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
@@ -57,7 +59,7 @@ export function inAgentRun(env: Env): boolean {
 
 /**
  * A board run's shell alone: where `mt kanban <command>` is the worker CLI's,
- * sent to the socket, and where a run starts a workflow (spec §7.3, §21.6). A
+ * sent to the socket, and where a run starts a workflow (spec §7.3, workflows spec §6). A
  * chat turn's or a fire's shell has no run to report for.
  */
 export function hasBoardRun(env: Env): boolean {
@@ -80,13 +82,60 @@ export function runShellRefusal(what: string, env: Env): string {
 /** How an operator's command says it refused, and its exit code: on stderr, or as JSON for `--json`. */
 export type Refuse = (code: string, message: string) => number;
 
+/**
+ * What this shell's settings lack for the terminal to check a person's talk
+ * tier (kanban spec §22.2): the bot's app id, by which `people` keeps who it has
+ * seen, or an owner, without which there is no talk allowlist.
+ */
+export type PeopleMissing = 'appId' | 'owner';
+
 export interface BoardAccess {
   service: KanbanService;
   /** The gateway's home, where its socket is (spec §7.2). */
   home: string;
   /** `kanban.enabled` as the config sets it, undefined when it does not: the board runs only when it is true. */
   kanbanEnabled: boolean | undefined;
+  /** The bot's app id, as this shell's settings give it: the account of a chat `--chat` names (kanban spec §22.1). */
+  appId: string | undefined;
+  /** Why the service has no people, so a person cannot be checked here; undefined when it has them. */
+  peopleMissing: PeopleMissing | undefined;
+  /**
+   * The people this bot has seen, each with talk tier by this shell's allowlist,
+   * none with an owner missing: `mt kanban people`'s (kanban spec §22.2).
+   * Undefined with no app id, as there is no bot to list them for.
+   */
+  seen(): SeenPerson[] | undefined;
   close(): void;
+}
+
+/** A person as `mt kanban people` lists them. */
+export interface SeenPerson {
+  unionId: string;
+  name: string | null;
+  talk: boolean;
+}
+
+/** What `assignable` says of a person when the service has no talk check: right for a board not in Lark, wrong beside a gateway that is. */
+const NO_PEOPLE = 'cannot be given work yet: nothing can deliver a task card to a person until the board is in Lark';
+
+/** What the terminal says in its place, naming the setting this shell lacks. */
+const MISSING: Readonly<Record<PeopleMissing, string>> = {
+  appId: 'cannot be checked for talk tier here: this shell finds no lark.appId or LARK_APP_ID, which the people this bot has seen are kept by',
+  owner: 'cannot be checked for talk tier here: this shell finds no auth.owner or MT_OWNER_OPEN_ID, without which there is no talk allowlist to check against',
+};
+
+/** How a terminal finds a person's id, added to chat's words for a person it refused (kanban spec §22.2). */
+export const PEOPLE_HINT = 'mt kanban people lists the people this gateway knows, with their union_ids and whether they have talk tier';
+
+/**
+ * A refusal's message as the terminal says it: for a person the service could
+ * not check, the setting this shell lacks; for one it refused, chat's words and
+ * how to find a person's id. Any other refusal as it is.
+ */
+export function personHint(r: { code: string; message: string }, missing: PeopleMissing | undefined): string {
+  if (r.code !== 'person_not_assignable') return r.message;
+  if (missing !== undefined && r.message.includes(NO_PEOPLE)) return r.message.replace(NO_PEOPLE, MISSING[missing]);
+  return `${r.message}; ${PEOPLE_HINT}`;
 }
 
 export interface OpenOptions {
@@ -94,15 +143,21 @@ export interface OpenOptions {
   refuse?: Refuse;
   /** What a `passEnv` name unset in this shell means for the command; a gate's refusal of a secret, unless given. */
   unsetNote?: string;
-  /** The workflow commands need the workflows' tables too (spec §21.7): a database not migrated to them is refused. */
+  /** The workflow commands need the workflows' tables too (workflows spec §7): a database not migrated to them is refused. */
   workflows?: boolean;
+  /**
+   * What the command checks of the settings before the database is opened, a
+   * refusal or undefined: `--chat`'s app id and `auth.chats` (kanban spec §22.1),
+   * so they refuse even a repeat by key.
+   */
+  check?: (settings: TeamSettings) => { code: string; message: string } | undefined;
 }
 
 /**
  * The gateway's settings and team, loaded as the gateway loads them, with the
  * secrets it would register, and the passEnv names this shell leaves unset said
  * on stderr; or why not, already said. What `openBoard` does before it opens the
- * database, and all the terminal's workflow preview does, which opens none (spec §21.6).
+ * database, and all the terminal's workflow preview does, which opens none (workflows spec §6).
  */
 export function loadOperator(io: MtIo, what: string, opts: OpenOptions = {}): { settings: TeamSettings; team: Team } | number {
   const no = opts.refuse ?? ((_code: string, message: string) => refuse(io, message));
@@ -126,6 +181,8 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   const loaded = loadOperator(io, what, opts);
   if (typeof loaded === 'number') return loaded;
   const { settings, team } = loaded;
+  const early = opts.check?.(settings);
+  if (early !== undefined) return no(early.code, early.message);
   if (!existsSync(settings.dbPath)) {
     return no('no_board', `there is no board at ${settings.dbPath}: the gateway creates its database when it first starts`);
   }
@@ -136,7 +193,7 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   } catch (err) {
     return no('failed', failed(err));
   }
-  // The table the command needs: the board's, or for the workflow commands the workflows' (spec §21.7).
+  // The table the command needs: the board's, or for the workflow commands the workflows' (workflows spec §7).
   const table = opts.workflows === true ? 'kanban_workflow_instances' : 'kanban_gates';
   try {
     migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
@@ -149,6 +206,12 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     const has = opts.workflows === true ? 'no workflows yet' : 'no board yet';
     return no('no_board', `the database at ${settings.dbPath} has ${has}: start the gateway once, so it is migrated`);
   }
+  // Chat's own check of a person, against the same table (kanban spec §22.2): the people this bot has
+  // seen, and the talk allowlist this shell's settings give, as the gateway's authorizer holds it.
+  const { appId, talk } = settings;
+  const peopleMissing: PeopleMissing | undefined = appId === undefined ? 'appId' : talk === undefined ? 'owner' : undefined;
+  const people =
+    appId === undefined || talk === undefined ? undefined : new PeopleDirectory({ db, appId, canTalk: (openId) => talk.includes(openId) });
   // As the gateway builds its own: a supervised role's approvals go to the chat that follows its task (spec §7.1).
   const service = new KanbanService({
     db,
@@ -161,10 +224,15 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     // task is waiting on (spec §6.3, §16), and a board's own max_running is held inside the gateway's.
     ...(settings.kanban === undefined ? {} : { maxRunning: settings.kanban.maxRunning }),
     ...(settings.kanban?.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: settings.kanban.maxRunningPerRole }),
-    // As the gateway's: the operator's files, read at each preview and start (spec §21.1).
+    // As the gateway's: the operator's files, read at each preview and start (workflows spec §1).
     workflowsDir: join(settings.home, 'workflows'),
+    ...(people === undefined ? {} : { people }),
   });
-  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, close: () => db.close() };
+  const seen = (): SeenPerson[] | undefined =>
+    appId === undefined
+      ? undefined
+      : peopleOf(db, appId).map((p) => ({ unionId: p.unionId, name: p.name, talk: talk?.includes(p.openId) === true }));
+  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, close: () => db.close() };
 }
 
 /** A write the gateway held the lock through, every retry: not this command's fault. */

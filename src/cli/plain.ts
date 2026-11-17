@@ -70,11 +70,26 @@ export function boardsText(summaries: readonly BoardSummary[]): string[] {
   });
 }
 
-/** `mt kanban task list` (spec §9.1): one board's tasks, as chat lists them, every one rather than the first 30. */
+/**
+ * How long a task has been in its status, as the task list's `age` says it (kanban
+ * spec §22.3): whole minutes under an hour, whole hours under a day, whole days after.
+ */
+export function ageText(ms: number): string {
+  const minutes = Math.floor(Math.max(0, ms) / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+
+/**
+ * `mt kanban task list` (spec §9.1): one board's tasks, as chat lists them, every one rather than the first 30,
+ * each with its age in its status, from `since`, else its creation, to `now` by this terminal's clock (kanban spec §22.3).
+ */
 export function listText(
   entries: readonly BoardEntry[],
   filter: DisplayStatus | 'all' | undefined,
   board: string,
+  ages: { since: ReadonlyMap<string, number>; now: number },
 ): string[] {
   const shown = listed(entries, filter);
   const on = `on board ${line(board, 80)}`;
@@ -85,8 +100,21 @@ export function listText(
         : `no ${filter === 'all' ? '' : `${filter} `}tasks ${on}`,
     ];
   }
-  const rows = shown.map((e) => [e.task.taskId, e.status, who(e.task.assignee), line(e.task.title, 120)]);
-  return table([['task', 'status', 'assignee', 'title'], ...rows]);
+  const rows = shown.map((e) => [
+    e.task.taskId,
+    e.status,
+    ageText(ages.now - (ages.since.get(e.task.taskId) ?? e.task.createdAt)),
+    who(e.task.assignee),
+    line(e.task.title, 120),
+  ]);
+  return table([['task', 'status', 'age', 'assignee', 'title'], ...rows]);
+}
+
+/** `mt kanban people` (kanban spec §22.2): each person this bot has seen, by name, with their principal and talk tier. */
+export function peopleText(seen: readonly { unionId: string; name: string | null; talk: boolean }[]): string[] {
+  if (seen.length === 0) return ['no people yet: the gateway learns a person once they have used /kanban, or been @-mentioned in it'];
+  const rows = seen.map((p) => [p.name === null ? '(no name)' : line(p.name, 80), `lark:${line(p.unionId, 80)}`, p.talk ? 'talk' : 'no']);
+  return table([['name', 'person', 'talk'], ...rows]);
 }
 
 /** `mt kanban task show` (spec §9.1): what chat's shows, the task's board always named. */
@@ -133,7 +161,7 @@ export function showText(view: TaskView, gates: readonly GateRow[]): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Workflows (spec §21.6, §21.10)
+// Workflows (workflows spec §6, §10)
 // ---------------------------------------------------------------------------
 
 /** A role or a person, as a DAG names them. */
@@ -143,7 +171,7 @@ function named(name: string | null): string {
 }
 
 /**
- * `mt kanban workflow preview` (spec §21.6): what a start would make, as chat's
+ * `mt kanban workflow preview` (workflows spec §6): what a start would make, as chat's
  * preview says it, a line a task with its ref, its title, its assignee, its
  * parents' refs and how many gates it has, and that nothing was made.
  */
@@ -163,7 +191,7 @@ export function previewText(name: string, board: string, lines: readonly Preview
   ];
 }
 
-/** A start's or an apply's answer (spec §21.6): the instance, then every task, uncut, with its ref, title and assignee. */
+/** A start's or an apply's answer (workflows spec §6): the instance, then every task, uncut, with its ref, title and assignee. */
 export function madeText(
   made: { instance: { instanceId: string; name: string | null; board: string; source: string }; tasks: readonly { taskId: string; ref: string; task: { title: string; assignee: Assignee | null } }[]; existing: boolean },
 ): string[] {
@@ -177,7 +205,7 @@ export function madeText(
   return [head, ...table(rows).map((r) => `  ${r}`)];
 }
 
-/** `apply --dry-run`'s answer (spec §21.6): what the apply would make, a line a task in preview's columns, each followed by its gates' commands, masked; or the instance its key made. */
+/** `apply --dry-run`'s answer (workflows spec §6): what the apply would make, a line a task in preview's columns, each followed by its gates' commands, masked; or the instance its key made. */
 export function dryRunText(
   dry: { existing: boolean; instanceId: string | null; board: string; tasks: readonly { ref: string; title: string; assignee: string | null; parents: readonly string[]; gates: readonly { command: string; timeout_s: number }[] }[] },
 ): string[] {
@@ -204,7 +232,7 @@ export function dryRunText(
   return out;
 }
 
-/** `mt kanban workflow list` (spec §21.10): every usable workflow with its params and description, and each broken one with why. */
+/** `mt kanban workflow list` (workflows spec §10): every usable workflow with its params and description, and each broken one with why. */
 export function workflowsText(
   list: { usable: readonly { name: string; description: string | undefined }[]; broken: readonly { name: string; problem: string }[] },
   params: (name: string) => string,
@@ -221,7 +249,7 @@ function when(ms: number): string {
   return `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 }
 
-/** `mt kanban workflow instances [all]` (spec §21.10): a board's instances, newest first, every one rather than 30. */
+/** `mt kanban workflow instances [all]` (workflows spec §10): a board's instances, newest first, every one rather than 30. */
 export function instancesText(
   summaries: readonly { instance: { instanceId: string; name: string | null; createdBy: string; createdAt: number }; status: string; done: number; total: number; blocked: number }[],
   opts: { board: string; all: boolean; total: number; read: number },
@@ -242,7 +270,7 @@ export function instancesText(
   return [...table([['instance', 'workflow', 'status', 'members', 'by', 'when'], ...rows]), ...past];
 }
 
-/** `mt kanban workflow show` (spec §21.10): the instance, every member by step, and its related tasks apart, uncut. */
+/** `mt kanban workflow show` (workflows spec §10): the instance, every member by step, and its related tasks apart, uncut. */
 export function instanceText(view: {
   instance: { instanceId: string; name: string | null; board: string; createdBy: string; createdVia: { kind: string }; createdAt: number; dag: { params: Readonly<Record<string, string | readonly string[]>> } };
   description: string | undefined;

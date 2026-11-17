@@ -5,11 +5,11 @@ import { MASK, redactKnownSecrets } from '../secrets.js';
 import { BIDI } from '../text.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
 import { WORKER_LIMITS } from './limits.js';
-import { checkTask, isRecord, type TaskFacts } from './task-checks.js';
+import { checkTask, isRecord, NO_MENTIONS, type TaskFacts } from './task-checks.js';
 import { CONTRACT_FIELDS, GATE_LIMITS, type Contract, type CreatedVia, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
 /**
- * The DAG (spec §21.5): the tasks a start or an apply makes, and their links, as
+ * The DAG (workflows spec §5): the tasks a start or an apply makes, and their links, as
  * one JSON document. Whatever path made it -- a workflow's expansion, a file at
  * the terminal, an agent's `apply-dag` -- an instance is made from a DAG, and
  * stores the DAG it was made from. Pure: what needs the database, the board and
@@ -42,7 +42,7 @@ export const DAG_LIMITS = {
   rawBytes: 4 * 1024 * 1024,
 } as const;
 
-/** Where a DAG came from, which decides where its gates may come from (spec §21.5). */
+/** Where a DAG came from, which decides where its gates may come from (workflows spec §5). */
 export type DagSource = 'terminal' | 'expansion' | 'run';
 
 export type ParamValue = string | string[];
@@ -172,7 +172,7 @@ function wholeOrNull(value: unknown, place: string): Result<{ value: number | nu
   return { ok: true, value: value as number };
 }
 
-/** The params a DAG records (spec §21.5): each named in the param grammar, text or a list of text, 64 KiB together. */
+/** The params a DAG records (workflows spec §5): each named in the param grammar, text or a list of text, 64 KiB together. */
 export function paramsShape(raw: unknown, place = 'params'): Result<{ params: Record<string, ParamValue> }> {
   if (raw === undefined) return { ok: true, params: {} };
   if (!isRecord(raw)) return refuse('invalid', `${place} is an object of text and lists of text`);
@@ -195,7 +195,7 @@ export function paramsShape(raw: unknown, place = 'params'): Result<{ params: Re
   return { ok: true, params };
 }
 
-/** The settings a run's DAG may not set but at their defaults, as its `create` takes none of them (spec §21.5). */
+/** The settings a run's DAG may not set but at their defaults, as its `create` takes none of them (workflows spec §5). */
 const RUN_DEFAULTS = { priority: 0, failure_limit: null, retry_on_crash: 'always', max_runtime_s: null } as const;
 
 /** One task's shape, with every default filled in; `refs` holds the refs of the tasks before it. */
@@ -329,7 +329,7 @@ function taskShape(raw: unknown, i: number, refs: ReadonlySet<string>, from: Dag
 }
 
 /**
- * A DAG's shape (spec §21.5): its format, every key known, every type, every
+ * A DAG's shape (workflows spec §5): its format, every key known, every type, every
  * string well formed, the refs and parents, where its gates came from, and from
  * a run the settings it may not set; then its canonical form, measured. Every
  * default filled in, so the DAG it answers is what the canonical form writes.
@@ -392,7 +392,7 @@ export function checkDagShape(raw: unknown, from: DagSource): Result<ShapedDag> 
 }
 
 /**
- * A DAG read from text (spec §21.5): parsed as JSON, then shaped. Text with a
+ * A DAG read from text (workflows spec §5): parsed as JSON, then shaped. Text with a
  * byte order mark, which a strict decoding keeps, is not JSON.
  */
 export function readDag(text: string, from: DagSource): Result<ShapedDag> {
@@ -439,7 +439,7 @@ function canonicalObject(dag: Dag): Record<string, unknown> {
   };
 }
 
-/** The canonical form (spec §21.5): compact JSON, unmasked, what a DAG is measured and hashed by on every path. */
+/** The canonical form (workflows spec §5): compact JSON, unmasked, what a DAG is measured and hashed by on every path. */
 export function canonicalDag(dag: Dag): string {
   return JSON.stringify(canonicalObject(dag));
 }
@@ -450,7 +450,7 @@ export function dagFile(dag: Dag): string {
 }
 
 /**
- * The DAG as an instance stores it (spec §21.7): every text masked, value by
+ * The DAG as an instance stores it (workflows spec §7): every text masked, value by
  * value, as an event payload is, but its gates' commands, stored as written, as
  * `kanban_gates` stores them. Names, refs and steps identify, and are kept.
  */
@@ -478,17 +478,17 @@ export function maskDag(dag: Dag): Dag {
   };
 }
 
-/** A task as a refusal names it (spec §21.6): its ref, its step when that is not its ref, and its item. */
+/** A task as a refusal names it (workflows spec §6): its ref, its step when that is not its ref, and its item. */
 export function taskPlace(t: Pick<DagTask, 'ref' | 'step' | 'item'>): string {
   return `${t.ref}${t.step === t.ref ? '' : `, step ${t.step}`}${t.item === null ? '' : `, item ${shown(t.item)}`}`;
 }
 
-/** What a title may not hold: a line break or any other control character, and a bidi control (spec §21.2). */
+/** What a title may not hold: a line break or any other control character, and a bidi control (workflows spec §2). */
 export function titleRefused(text: string): boolean {
   return /[\p{Cc}\u2028\u2029]/u.test(text) || new RegExp(BIDI.source).test(text);
 }
 
-/** How the tasks of a DAG are checked (spec §21.6 step 2): who makes them, and whether a person may be named. */
+/** How the tasks of a DAG are checked (workflows spec §6 step 2): who makes them, and whether a person may be named. */
 export interface DagCheck {
   facts: TaskFacts;
   createdBy: string;
@@ -503,12 +503,12 @@ function certainWorkspace(t: DagTask, roles: ReadonlyMap<string, Role>): string 
 }
 
 /**
- * Each task of a shaped DAG checked as `create` checks it (spec §21.6 step 2),
+ * Each task of a shaped DAG checked as `create` checks it (workflows spec §6 step 2),
  * each gate as `addGate`, plus every name and item holding no known secret, a
  * title of one line, `task new`'s sizes, and a task whose parents certainly work
  * in different workspaces refused. The first failure refuses the whole DAG,
- * naming the task. A person is checked by `facts.canTalk`; at the terminal,
- * which has no talk check, any person is refused.
+ * naming the task. A person is checked by `facts.canTalk`, at the terminal as
+ * elsewhere; an @-mention there is refused, as no message carries it.
  */
 export function checkDagTasks(dag: Dag, check: DagCheck): Refusal | undefined {
   const byRef = new Map(dag.tasks.map((t) => [t.ref, t]));
@@ -534,22 +534,15 @@ export function checkDagTasks(dag: Dag, check: DagCheck): Refusal | undefined {
     }
     for (const key of ['assignee', 'reviewer', 'workspace'] as const) {
       const v = t[key];
-      // Names are stored unmasked, as they identify: one holding a secret is refused (spec §21.2).
+      // Names are stored unmasked, as they identify: one holding a secret is refused (workflows spec §2).
       if (v !== null && redactKnownSecrets(v) !== v) return no('invalid', `its ${key} holds a known secret, and a name is stored as written`);
     }
     if (t.item !== null && redactKnownSecrets(t.item) !== t.item) {
       return no('invalid', 'its item holds a known secret: an item labels its task, and two differing only in a secret would be one label');
     }
-    if (terminal) {
-      for (const v of [t.assignee, t.reviewer]) {
-        if (v !== null && v.includes(':')) {
-          return no(
-            'person_not_assignable',
-            `${shown(v)} is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier`,
-          );
-        }
-      }
-    }
+    // A person is checked as chat checks one, by `facts.canTalk`, wherever the DAG comes from (kanban spec §22.2);
+    // at the terminal, an @-mention has no message to be resolved from.
+    if (terminal && [t.assignee, t.reviewer].some((v) => v?.startsWith('@') === true)) return no('invalid', NO_MENTIONS);
     const checked = checkTask(
       {
         title: t.title,

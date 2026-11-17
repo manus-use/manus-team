@@ -1,20 +1,22 @@
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { listed, previewLines, whenMade } from '../kanban/chat-render.js';
-import { boardSetting, isPerson, LIST_FILTERS, tooBig, type NewTaskCommand } from '../kanban/chat-parse.js';
+import { boardSetting, LIST_FILTERS, tooBig, type NewTaskCommand } from '../kanban/chat-parse.js';
+import { CHAT_ID, NEEDS_BOT, THREAD_ID, chatRefused } from '../core/lark-ids.js';
 import { DAG_LIMITS, checkDagShape, checkDagTasks, dagFile } from '../kanban/dag.js';
+import { NO_MENTIONS } from '../kanban/task-checks.js';
 import { WORKFLOW_MESSAGE_BYTES, type KanbanService, type WorkflowMade } from '../kanban/service.js';
 import { expand, listWorkflows, paramsLine, readWorkflow, usableMessage } from '../kanban/workflow.js';
 import { maskAll, NUDGE, workerSocketPath } from '../kanban/socket.js';
-import { DEFAULT_BOARD, type BoardRow, type Contract, type Refusal, type Waiting } from '../kanban/types.js';
+import { DEFAULT_BOARD, type BoardRow, type Contract, type CreatedVia, type Follow, type Refusal, type Waiting } from '../kanban/types.js';
 import { WORKER_LIMITS } from '../kanban/limits.js';
 import { visible } from '../names.js';
 import { parse, UsageError } from './args.js';
-import { loadOperator, operatorName, withBoard } from './gate.js';
+import { loadOperator, operatorName, personHint, withBoard, type BoardAccess, type OpenOptions, type PeopleMissing } from './gate.js';
 import { ask } from './kanban.js';
 import type { MtIo } from './mt.js';
 import { BIDI, decodeUtf8, INVISIBLE } from '../text.js';
-import { boardsText, dryRunText, instanceText, instancesText, line, listText, madeText, previewText, showText, who, workflowsText } from './plain.js';
+import { boardsText, dryRunText, instanceText, instancesText, line, listText, madeText, peopleText, previewText, showText, who, workflowsText } from './plain.js';
 
 /**
  * The operator's `mt kanban task …` and `mt kanban board …` (spec §2.6): chat's
@@ -136,8 +138,8 @@ async function act(
   io: MtIo,
   json: boolean,
   what: string,
-  fn: (service: KanbanService, by: string) => Outcome,
-  opts: { workflows?: boolean } = {},
+  fn: (service: KanbanService, by: string, board: BoardAccess) => Outcome,
+  opts: { workflows?: boolean; check?: OpenOptions['check'] } = {},
 ): Promise<number> {
   const no = (code: string, message: string): number => {
     if (json) io.out(jsonLine({ ok: false, code, message }));
@@ -147,19 +149,27 @@ async function act(
   let outcome: Outcome | undefined;
   let home = '';
   let enabled: boolean | undefined = true;
+  let missing: PeopleMissing | undefined;
   const code = withBoard(
     io,
     what,
     (board) => {
       home = board.home;
       enabled = board.kanbanEnabled;
-      outcome = fn(board.service, operatorName(io));
+      missing = board.peopleMissing;
+      outcome = fn(board.service, operatorName(io), board);
       return 0;
     },
-    { refuse: no, unsetNote: 'those values are not masked here', ...(opts.workflows === true ? { workflows: true } : {}) },
+    {
+      refuse: no,
+      unsetNote: 'those values are not masked here',
+      ...(opts.workflows === true ? { workflows: true } : {}),
+      ...(opts.check === undefined ? {} : { check: opts.check }),
+    },
   );
   if (outcome === undefined) return code;
-  if (!outcome.ok) return no(outcome.code, outcome.message);
+  // A person refused in chat's words, with how a terminal finds ids; or what this shell lacks to check one (kanban spec §22.2).
+  if (!outcome.ok) return no(outcome.code, personHint(outcome, missing));
   const done: Done = outcome;
   let nudged: boolean | undefined;
   if (done.nudge === true && enabled !== true) {
@@ -253,15 +263,96 @@ function early(io: MtIo, json: boolean, code: string, message: string): number {
 }
 
 /**
- * A person is given work from chat, by @-mention, where the gateway can check
- * they have talk tier (spec §4.2): a terminal has no allowlist to check against.
+ * A name starting with `@` where a person may go (kanban spec §22.2): a mention
+ * is resolved from the message Lark delivers, which a terminal has not got. A
+ * person is `lark:<union_id>`, checked by the service as chat checks one.
  */
-function personRefused(name: string): Outcome | undefined {
-  if (!isPerson(name)) return undefined;
-  return refused({
-    code: 'person_not_assignable',
-    message: `${JSON.stringify(name)} is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier`,
-  });
+function mentionRefused(name: string): Outcome | undefined {
+  return name.startsWith('@') ? refused({ code: 'invalid', message: NO_MENTIONS }) : undefined;
+}
+
+/** `--chat` and `--thread`: a chat a terminal names to follow what it makes (kanban spec §22.1, workflows spec §18.1). */
+const FOLLOW_FLAGS = { chat: { type: 'string' }, thread: { type: 'string' } } as const;
+
+/** The chat and the thread the flags name, `''` at chat scope. */
+interface ChatFlags {
+  chat: string;
+  thread: string;
+}
+
+/** A chat that follows something, as an answer says it: the thread null at chat scope. */
+type Follows = { chat: string; thread: string | null } | null;
+
+/** The operator, as the service namespaces a key for them. */
+const OPERATOR: CreatedVia = { kind: 'operator' };
+
+/** `--chat` and `--thread`, checked for shape as `mt cron add --chat` checks a chat; undefined without `--chat`. */
+function chatFlags(values: { chat?: string | undefined; thread?: string | undefined }): ChatFlags | undefined {
+  const { chat, thread } = values;
+  if (chat === undefined) {
+    if (thread !== undefined) throw new UsageError('--thread needs --chat: it names a thread of that chat');
+    return undefined;
+  }
+  if (!CHAT_ID.test(chat)) throw new UsageError(`--chat takes a chat id as Lark gives one, oc_…, not ${JSON.stringify(chat)}`);
+  if (thread !== undefined && !THREAD_ID.test(thread)) throw new UsageError(`--thread takes a thread id as Lark gives one, omt_…, not ${JSON.stringify(thread)}`);
+  return { chat, thread: thread ?? '' };
+}
+
+/**
+ * What a `--chat` needs of the settings, checked before the board is opened, so
+ * a repeat by key is refused too: the bot's app id, and a chat in a non-empty
+ * `auth.chats` (kanban spec §22.1).
+ */
+function chatCheck(flags: ChatFlags | undefined): OpenOptions['check'] {
+  if (flags === undefined) return undefined;
+  return (settings) => {
+    if (settings.appId === undefined) return { code: 'invalid', message: NEEDS_BOT };
+    const outside = chatRefused(flags.chat, settings.chats ?? []);
+    return outside === undefined ? undefined : { code: 'invalid', message: outside };
+  };
+}
+
+/**
+ * The follow for something not made yet: at chat scope, or in a thread with the
+ * root the board knows for it, as the notifier finds one (spec §19.7). A thread
+ * with none is refused: a terminal has no message to reply to, and opens none.
+ */
+function followFor(service: KanbanService, board: BoardAccess, flags: ChatFlags): Follow | Outcome {
+  const appId = board.appId ?? '';
+  if (flags.thread === '') return { appId, chatId: flags.chat, threadId: '', rootId: null };
+  const root = service.threadRoot({ channel: 'lark', appId, conversationId: flags.chat, threadId: flags.thread });
+  if (root === undefined) {
+    return refused({
+      code: 'invalid',
+      message: `no root is known for thread ${flags.thread} in ${flags.chat}: the board learns a thread's root when a task is made in it from chat; give --chat alone to follow from the chat`,
+    });
+  }
+  return { appId, chatId: flags.chat, threadId: flags.thread, rootId: root };
+}
+
+/**
+ * The follow a command passes, or a refusal: none without `--chat`, and none
+ * for a key that has made its task or instance already, which is answered
+ * before its thread's root is looked up (kanban spec §22.1).
+ */
+function followOrRefusal(service: KanbanService, board: BoardAccess, flags: ChatFlags | undefined, key: string | undefined, what: 'task' | 'instance'): Follow | Outcome | undefined {
+  if (flags === undefined || (key !== undefined && service.keyMade(key, OPERATOR, what))) return undefined;
+  return followFor(service, board, flags);
+}
+
+/** What a new task's or instance's answer says follows it: the chat named, as passed. */
+function followsOf(follow: Follow | undefined): Follows {
+  return follow === undefined ? null : { chat: follow.chatId, thread: follow.threadId === '' ? null : follow.threadId };
+}
+
+/** A task's stored subscription of this bot: what a repeat's answer names, never the `--chat` given now. */
+function storedFollows(service: KanbanService, board: BoardAccess, taskId: string | undefined): Follows {
+  return board.appId === undefined || taskId === undefined ? null : service.followOf(taskId, board.appId);
+}
+
+/** `chat oc_… follows <what>`, with its thread, for an answer's line. */
+function followsText(f: NonNullable<Follows>, what: string): string {
+  return `chat ${f.chat} follows ${what}${f.thread === null ? '' : `, in thread ${f.thread}`}`;
 }
 
 /** One task id, and nothing else. */
@@ -353,8 +444,10 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
     body: text,
     'body-file': text,
     key: text,
+    ...FOLLOW_FLAGS,
   });
   const json = values.json === true;
+  const flags = chatFlags(values);
   const words = positionals.join(' ');
   // One line, as chat's title is: a line break, a control character or a bidi
   // control is refused, not silently changed. Checked before trimming, so a
@@ -395,48 +488,60 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
     throw new UsageError('a key is one line, with no control characters and no bidi controls');
   }
   const key = values.key?.trim();
-  return act(io, json, 'mt kanban task new', (service, by) => {
-    for (const name of [command.assignee, command.reviewer]) {
-      const person = name === undefined ? undefined : personRefused(name);
-      if (person !== undefined) return person;
-    }
-    const r = service.create({
-      board,
-      title: command.title,
-      ...(command.body === '' ? {} : { body: command.body }),
-      contract: command.contract,
-      ...(command.assignee === undefined ? {} : { assignee: command.assignee }),
-      ...(command.reviewer === undefined ? {} : { reviewer: command.reviewer }),
-      ...(command.workspace === undefined ? {} : { workspace: command.workspace }),
-      ...(command.parents.length === 0 ? {} : { parents: command.parents }),
-      ...(key === undefined ? {} : { idempotencyKey: key }),
-      createdBy: by,
-      createdVia: { kind: 'operator' },
-    });
-    if (!r.ok) return refused(r);
-    const { task } = r;
-    // The key's task, made by an earlier run of the command: nothing changed, so no nudge.
-    if (r.existing) {
+  return act(
+    io,
+    json,
+    'mt kanban task new',
+    (service, by, b) => {
+      for (const name of [command.assignee, command.reviewer]) {
+        const mention = name === undefined ? undefined : mentionRefused(name);
+        if (mention !== undefined) return mention;
+      }
+      const follow = followOrRefusal(service, b, flags, key, 'task');
+      if (follow !== undefined && 'ok' in follow) return follow;
+      const r = service.create({
+        board,
+        title: command.title,
+        ...(command.body === '' ? {} : { body: command.body }),
+        contract: command.contract,
+        ...(command.assignee === undefined ? {} : { assignee: command.assignee }),
+        ...(command.reviewer === undefined ? {} : { reviewer: command.reviewer }),
+        ...(command.workspace === undefined ? {} : { workspace: command.workspace }),
+        ...(command.parents.length === 0 ? {} : { parents: command.parents }),
+        ...(key === undefined ? {} : { idempotencyKey: key }),
+        createdBy: by,
+        createdVia: { kind: 'operator' },
+        ...(follow === undefined ? {} : { follow }),
+      });
+      if (!r.ok) return refused(r);
+      const { task } = r;
+      // The key's task, made by an earlier run of the command: nothing changed, so no nudge.
+      if (r.existing) {
+        const follows = storedFollows(service, b, task.taskId);
+        return {
+          ok: true,
+          lines: [
+            `task ${task.taskId} already exists with key ${line(key ?? '', 80)}: ${line(task.title)}` +
+              `${task.phase === 'archived' ? ' (archived)' : ''}, on board ${line(task.board, 80)}; nothing new was created` +
+              `${follows === null ? '' : `; ${followsText(follows, 'it')}`}`,
+          ],
+          // Nothing changed, so the gateway was not asked to look.
+          json: { task_id: task.taskId, board: task.board, existing: true, nudged: false, follows },
+        };
+      }
+      const whom = task.assignee === null ? `nobody yet (mt kanban task assign ${task.taskId} <role|lark:<union_id>> gives it to someone)` : who(task.assignee);
+      const where = task.workspace === null ? '' : `, in ${line(task.workspace, 80)}`;
+      const follows = followsOf(follow);
       return {
         ok: true,
-        lines: [
-          `task ${task.taskId} already exists with key ${line(key ?? '', 80)}: ${line(task.title)}` +
-            `${task.phase === 'archived' ? ' (archived)' : ''}, on board ${line(task.board, 80)}; nothing new was created`,
-        ],
-        // Nothing changed, so the gateway was not asked to look.
-        json: { task_id: task.taskId, board: task.board, existing: true, nudged: false },
+        lines: [`created ${task.taskId}: ${line(task.title)}, for ${whom}${where}, on board ${line(task.board, 80)}${follows === null ? '' : `; ${followsText(follows, 'it')}`}`],
+        json: { task_id: task.taskId, board: task.board, existing: false, follows },
+        nudge: true,
+        ...(key === undefined ? {} : { keyed: true }),
       };
-    }
-    const whom = task.assignee === null ? `nobody yet (mt kanban task assign ${task.taskId} <role> gives it to someone)` : who(task.assignee);
-    const where = task.workspace === null ? '' : `, in ${line(task.workspace, 80)}`;
-    return {
-      ok: true,
-      lines: [`created ${task.taskId}: ${line(task.title)}, for ${whom}${where}, on board ${line(task.board, 80)}`],
-      json: { task_id: task.taskId, board: task.board, existing: false },
-      nudge: true,
-      ...(key === undefined ? {} : { keyed: true }),
-    };
-  });
+    },
+    { check: chatCheck(flags) },
+  );
 }
 
 /** `mt kanban task list [<status>|all] [--board <name>]` (spec §9.1): one board's tasks, `default`'s unless named. */
@@ -452,14 +557,18 @@ function list(rest: readonly string[], io: MtIo): Promise<number> {
     const missing = noSuchBoard(service, board);
     if (missing !== undefined) return missing;
     const entries = service.list(board);
+    // When each changed phase, in milliseconds as every --json time is; the plain list's age is the readable form.
+    const since = service.phaseSince(board);
     const tasks = listed(entries, filter).map((e) => ({
       task_id: e.task.taskId,
       status: e.status,
       title: e.task.title,
       assignee: e.task.assignee?.name ?? null,
       assignee_kind: e.task.assignee?.kind ?? null,
+      created_at: e.task.createdAt,
+      status_since: since.get(e.task.taskId) ?? e.task.createdAt,
     }));
-    return { ok: true, lines: listText(entries, filter, board), json: { board, tasks } };
+    return { ok: true, lines: listText(entries, filter, board, { since, now: Date.now() }), json: { board, tasks } };
   });
 }
 
@@ -523,7 +632,7 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
           waiting_on_role: roleWait === undefined ? null : { role: roleWait.role, max_running: roleWait.maxRunning },
           // Every reason a pass skips it, in the order the pass checks them; empty for none.
           waiting: (r.view.waiting ?? []).map(waitingJson),
-          // The workflow's instance it is a member of (spec §21.10), or null.
+          // The workflow's instance it is a member of (workflows spec §10), or null.
           workflow:
             r.view.member === undefined
               ? null
@@ -547,18 +656,21 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** `mt kanban task assign <task> <role>`: an undecided run ends `superseded`, and the gateway's pass cancels its turn. */
+/**
+ * `mt kanban task assign <task> <role|lark:<union_id>>`: an undecided run ends `superseded`, and the gateway's
+ * pass cancels its turn. A person is checked as `task new` checks one (kanban spec §22.2).
+ */
 function assign(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [taskId, role, extra] = positionals;
   const name = role?.trim();
   if (taskId === undefined || name === undefined || name === '' || extra !== undefined) {
-    throw new UsageError('kanban task assign takes a task id and a role');
+    throw new UsageError('kanban task assign takes a task id, and a role or a person, lark:<union_id>');
   }
   const board = boardFlag(values.board);
   return act(io, values.json === true, 'mt kanban task assign', (service, by) => {
-    const person = personRefused(name);
-    if (person !== undefined) return person;
+    const mention = mentionRefused(name);
+    if (mention !== undefined) return mention;
     const guard = offBoard(service, board, taskId);
     if (guard !== undefined) return guard;
     const now = service.show(taskId);
@@ -718,8 +830,32 @@ function task(args: readonly string[], io: MtIo): Promise<number> {
   }
 }
 
-/** `mt kanban task …`, `board …` and `workflow …`, outside a board run: the operator's. */
+/**
+ * `mt kanban people [--json]` (kanban spec §22.2): who this bot has seen, as a
+ * terminal names them, `lark:<union_id>`, and whether they have talk tier by
+ * the open_id last seen. A union_id is in no message a person sees, so this is
+ * how an operator finds one.
+ */
+function people(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, JSON_FLAG);
+  if (positionals.length > 0) throw new UsageError('kanban people takes no arguments');
+  return act(io, values.json === true, 'mt kanban people', (_service, _by, board) => {
+    const seen = board.seen();
+    if (seen === undefined) return refused({ code: 'no_bot', message: 'there is no bot to list people for: this shell finds no lark.appId or LARK_APP_ID' });
+    if (board.peopleMissing === 'owner' && values.json !== true) {
+      io.err('mt: this shell finds no auth.owner or MT_OWNER_OPEN_ID, so nobody is shown with talk tier');
+    }
+    return {
+      ok: true,
+      lines: peopleText(seen),
+      json: { people: seen.map((p) => ({ principal: `lark:${p.unionId}`, union_id: p.unionId, name: p.name, talk: p.talk })) },
+    };
+  });
+}
+
+/** `mt kanban task …`, `board …`, `workflow …` and `people`, outside a board run: the operator's. */
 export async function operatorCommand(command: string, rest: readonly string[], io: MtIo): Promise<number> {
+  if (command === 'people') return people(rest, io);
   if (command === 'board') return board(rest, io);
   if (command === 'task') return task(rest, io);
   if (command === 'workflow') return workflow(rest, io);
@@ -727,13 +863,13 @@ export async function operatorCommand(command: string, rest: readonly string[], 
 }
 
 // ---------------------------------------------------------------------------
-// Workflows (spec §21.6, §21.10)
+// Workflows (workflows spec §6, §10)
 // ---------------------------------------------------------------------------
 
 /** The verbs of `mt kanban workflow`. */
 export const WORKFLOW_COMMANDS: readonly string[] = ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive'];
 
-/** `--param key=value`, repeated, each split at its first `=` (spec §21.6); the shell has already removed the quotes. */
+/** `--param key=value`, repeated, each split at its first `=` (workflows spec §6); the shell has already removed the quotes. */
 function paramPairs(values: readonly string[] | undefined): { key: string; value: string }[] {
   return (values ?? []).map((p) => {
     const eq = p.indexOf('=');
@@ -758,7 +894,7 @@ function jsonFile(value: unknown): string {
   return JSON.stringify(maskAll(value), null, 2).replace(UNSAFE_IN_JSON, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
-/** A start's or an apply's answer in the worker's shape (spec §21.6). */
+/** A start's or an apply's answer in the worker's shape (workflows spec §6). */
 function madeJson(made: WorkflowMade): Record<string, unknown> {
   return {
     instance_id: made.instance.instanceId,
@@ -771,16 +907,18 @@ function madeJson(made: WorkflowMade): Record<string, unknown> {
 }
 
 /**
- * `mt kanban workflow preview <name> [--board] [--param k=v]… [--json]` (spec
- * §21.6): loaded exactly as `openBoard` loads, opening no database; every check
- * a start makes but the board's, the people's and the key's, a person refused as
- * at the terminal. `--json` writes the DAG file alone on stdout; a refusal goes
- * to stderr, so it never leaves half a file.
+ * `mt kanban workflow preview <name> [--board] [--param k=v]… [--json]` (workflows spec
+ * §6): loaded exactly as `openBoard` loads, opening no database; every check
+ * a start makes but the board's, the people's and the key's. A person in the
+ * grammar passes, as `people` is in the database, and is said on stderr to be
+ * checked at the start (§18.3). `--json` writes the DAG file alone on stdout; a
+ * refusal goes to stderr, so it never leaves half a file.
  */
 function preview(rest: readonly string[], io: MtIo): number {
-  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, param: { type: 'string', multiple: true } });
+  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, ...FOLLOW_FLAGS, param: { type: 'string', multiple: true } });
   const [name, extra] = positionals;
   if (name === undefined || extra !== undefined) throw new UsageError('kanban workflow preview takes a workflow name');
+  if (values.chat !== undefined || values.thread !== undefined) throw new UsageError("--chat is start's and apply's: a preview makes nothing to follow");
   const pairs = paramPairs(values.param);
   const boardName = boardFlag(values.board) ?? DEFAULT_BOARD;
   const json = values.json === true;
@@ -791,37 +929,63 @@ function preview(rest: readonly string[], io: MtIo): number {
   const loaded = loadOperator(io, 'mt kanban workflow preview', { refuse: no, unsetNote: 'those values are not masked here' });
   if (typeof loaded === 'number') return loaded;
   const { settings, team } = loaded;
-  // As openBoard's service judges a task: supervised roles accepted, and no person, as no talk check is here.
+  // As openBoard's service judges a task, supervised roles accepted; the preview's facts alone take every person,
+  // whom a start and an apply check against the database (workflows spec §18.3).
   const facts = { roles: team.roles, workspaces: new Set(team.workspaces.keys()), supervisedRoles: true };
+  const anyone = { ...facts, canTalk: () => true };
   const dir = join(settings.home, 'workflows');
   const read = readWorkflow(dir, name, facts);
   if (!read.ok) {
     return no(read.code, read.code === 'unknown_workflow' ? usableMessage(read.message, listWorkflows(dir, facts).usable, WORKFLOW_MESSAGE_BYTES) : read.message);
   }
-  const expanded = expand(read.workflow, { from: 'terminal', pairs }, boardName);
+  const expanded = expand(read.workflow, { from: 'terminal', pairs }, boardName, undefined, 'operator');
   if (!expanded.ok) return no(expanded.code, expanded.message);
   const shaped = checkDagShape(expanded.dag, 'expansion');
   if (!shaped.ok) return no(shaped.code, shaped.message);
-  const refused = checkDagTasks(shaped.dag, { facts, createdBy: operatorName(io), createdVia: { kind: 'operator' } });
+  const refused = checkDagTasks(shaped.dag, { facts: anyone, createdBy: operatorName(io), createdVia: { kind: 'operator' } });
   if (refused !== undefined) return no(refused.code, refused.message);
+  const people = new Set(shaped.dag.tasks.flatMap((t) => [t.assignee, t.reviewer]).filter((v): v is string => v !== null && v.includes(':')));
+  for (const person of people) {
+    io.err(`mt: ${line(person, 200)} is checked at the start, against the people this gateway knows; mt kanban workflow apply --dry-run on this preview's --json checks it now`);
+  }
   if (json) io.out(jsonFile(JSON.parse(dagFile(shaped.dag))));
   else for (const l of previewText(name, boardName, previewLines(shaped.dag))) io.out(l);
   return 0;
 }
 
-/** `mt kanban workflow start <name> [--board] [--param k=v]… [--key] [--json]` (spec §21.6). */
+/**
+ * A start's or an apply's answer, with who follows its tasks (workflows spec §18.2): the chat named, sent the
+ * start's reply; for a repeat, the first member's stored subscription, sent nothing.
+ */
+function madeAnswer(service: KanbanService, board: BoardAccess, r: WorkflowMade, follow: Follow | undefined, key: string | undefined): Done {
+  const follows = r.existing ? storedFollows(service, board, r.tasks[0]?.taskId) : followsOf(follow);
+  const said = follows === null ? [] : [r.existing ? followsText(follows, 'its tasks') : `${followsText(follows, 'its tasks')}, and is sent the start's reply`];
+  return {
+    ok: true,
+    lines: [...madeText(r), ...said],
+    json: { ...madeJson(r), follows },
+    nudge: !r.existing,
+    ...(key === undefined ? {} : { keyed: true }),
+    makes: 'instance',
+  };
+}
+
+/** `mt kanban workflow start <name> [--board] [--param k=v]… [--key] [--chat [--thread]] [--json]` (workflows spec §6, §18.1). */
 function start(rest: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, param: { type: 'string', multiple: true }, key: { type: 'string' } });
+  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, ...FOLLOW_FLAGS, param: { type: 'string', multiple: true }, key: { type: 'string' } });
   const [name, extra] = positionals;
   if (name === undefined || extra !== undefined) throw new UsageError('kanban workflow start takes a workflow name');
   const pairs = paramPairs(values.param);
   const boardName = boardFlag(values.board) ?? DEFAULT_BOARD;
   const key = keyFlag(values.key);
+  const flags = chatFlags(values);
   return act(
     io,
     values.json === true,
     'mt kanban workflow start',
-    (service, by) => {
+    (service, by, b) => {
+      const follow = followOrRefusal(service, b, flags, key, 'instance');
+      if (follow !== undefined && 'ok' in follow) return follow;
       const r = service.startWorkflow({
         workflow: name,
         params: { from: 'terminal', pairs },
@@ -829,15 +993,16 @@ function start(rest: readonly string[], io: MtIo): Promise<number> {
         createdBy: by,
         createdVia: { kind: 'operator' },
         board: boardName,
+        ...(follow === undefined ? {} : { follow }),
       });
       if (!r.ok) return refused(r);
-      return { ok: true, lines: madeText(r), json: madeJson(r), nudge: !r.existing, ...(key === undefined ? {} : { keyed: true }), makes: 'instance' };
+      return madeAnswer(service, b, r, follow, key);
     },
-    { workflows: true },
+    { workflows: true, check: chatCheck(flags) },
   );
 }
 
-/** A DAG file read as `--body-file` reads a body (spec §21.6): a regular file, or `-` for stdin, up to 4 MiB, strictly as UTF-8, as JSON. */
+/** A DAG file read as `--body-file` reads a body (workflows spec §6): a regular file, or `-` for stdin, up to 4 MiB, strictly as UTF-8, as JSON. */
 async function dagOf(file: string, io: MtIo, json: boolean): Promise<unknown | number> {
   const max = DAG_LIMITS.rawBytes;
   let bytes: Uint8Array | undefined;
@@ -867,50 +1032,59 @@ async function dagOf(file: string, io: MtIo, json: boolean): Promise<unknown | n
   }
 }
 
-/** `mt kanban workflow apply <dag.json|-> [--key] [--dry-run] [--json]` (spec §21.6): the DAG's board, else `default`. */
+/** `mt kanban workflow apply <dag.json|-> [--key] [--dry-run] [--chat [--thread]] [--json]` (workflows spec §6, §18.1): the DAG's board, else `default`. */
 async function applyFile(rest: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(rest, { ...JSON_FLAG, key: { type: 'string' }, 'dry-run': { type: 'boolean' } });
+  const { values, positionals } = parse(rest, { ...JSON_FLAG, ...FOLLOW_FLAGS, key: { type: 'string' }, 'dry-run': { type: 'boolean' } });
   const [file, extra] = positionals;
   if (file === undefined || extra !== undefined) throw new UsageError('kanban workflow apply takes a DAG file, or - for stdin');
   const json = values.json === true;
   const key = keyFlag(values.key);
   const dryRun = values['dry-run'] === true;
+  const flags = chatFlags(values);
   const dag = await dagOf(file, io, json);
   if (typeof dag === 'number') return dag;
   return act(
     io,
     json,
     'mt kanban workflow apply',
-    (service, by) => {
+    (service, by, b) => {
+      const follow = followOrRefusal(service, b, flags, key, 'instance');
+      if (follow !== undefined && 'ok' in follow) return follow;
       const r = service.applyDag({
         dag,
         ...(key === undefined ? {} : { idempotencyKey: key }),
         ...(dryRun ? { dryRun: true } : {}),
         createdBy: by,
         createdVia: { kind: 'operator' },
+        ...(follow === undefined ? {} : { follow }),
       });
       if (!r.ok) return refused(r);
-      if (!('dryRun' in r)) {
-        return { ok: true, lines: madeText(r), json: madeJson(r), nudge: !r.existing, ...(key === undefined ? {} : { keyed: true }), makes: 'instance' };
-      }
-      // Nothing written, so no nudge (spec §21.6).
+      if (!('dryRun' in r)) return madeAnswer(service, b, r, follow, key);
+      // Nothing written, so no nudge (workflows spec §6); who would follow, or for its key's instance who does.
+      const member = r.instanceId === null ? undefined : service.instance(r.instanceId);
+      const follows = r.existing ? storedFollows(service, b, member?.ok === true ? member.view.members[0]?.taskId : undefined) : followsOf(follow);
+      const said =
+        follows === null
+          ? []
+          : [r.existing ? followsText(follows, 'its tasks') : `chat ${follows.chat} would follow its tasks${follows.thread === null ? '' : `, in thread ${follows.thread}`}, and be sent the start's reply`];
       return {
         ok: true,
-        lines: dryRunText(r),
+        lines: [...dryRunText(r), ...said],
         json: {
           dry_run: true,
           existing: r.existing,
           ...(r.instanceId === null ? {} : { instance_id: r.instanceId }),
           board: r.board,
           tasks: r.tasks.map((t) => ({ ref: t.ref, step: t.step, item: t.item, gates: t.gates })),
+          follows,
         },
       };
     },
-    { workflows: true },
+    { workflows: true, check: chatCheck(flags) },
   );
 }
 
-/** `mt kanban workflow list` (spec §21.10): the files as they are now. */
+/** `mt kanban workflow list` (workflows spec §10): the files as they are now. */
 function listWorkflowFiles(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, JSON_FLAG);
   if (positionals.length > 0) throw new UsageError('kanban workflow list takes no arguments');
@@ -938,7 +1112,7 @@ function listWorkflowFiles(rest: readonly string[], io: MtIo): Promise<number> {
   );
 }
 
-/** `mt kanban workflow instances [all] [--board]` (spec §21.10): `default`'s unless named. */
+/** `mt kanban workflow instances [all] [--board]` (workflows spec §10): `default`'s unless named. */
 function instances(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [word, extra] = positionals;
@@ -975,7 +1149,7 @@ function instances(rest: readonly string[], io: MtIo): Promise<number> {
   );
 }
 
-/** With `--board`, a refusal unless the board exists and the instance is on it (spec §21.10). */
+/** With `--board`, a refusal unless the board exists and the instance is on it (workflows spec §10). */
 function instanceOffBoard(service: KanbanService, board: string | undefined, instanceId: string): Outcome | undefined {
   if (board === undefined) return undefined;
   const missing = noSuchBoard(service, board);
@@ -988,7 +1162,7 @@ function instanceOffBoard(service: KanbanService, board: string | undefined, ins
   return undefined;
 }
 
-/** `mt kanban workflow show <instance> [--board] [--dag] [--json]` (spec §21.10): everything, uncut; `--dag` the stored DAG. */
+/** `mt kanban workflow show <instance> [--board] [--dag] [--json]` (workflows spec §10): everything, uncut; `--dag` the stored DAG. */
 function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, { ...BOARD_FLAGS, dag: { type: 'boolean' } });
   const [instanceId, extra] = positionals;
@@ -1006,7 +1180,7 @@ function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
       const r = service.instance(instanceId);
       if (!r.ok) return refused(r);
       const v = r.view;
-      // What was made, masked: never the hash (spec §21.7).
+      // What was made, masked: never the hash (workflows spec §7).
       if (values.dag === true) dagText = jsonFile(v.instance.dag);
       return {
         ok: true,
@@ -1047,7 +1221,7 @@ function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** `mt kanban workflow archive <instance> [--board]` (spec §21.10): every member, in one transaction; the gateway's pass cancels the runs it decided. */
+/** `mt kanban workflow archive <instance> [--board]` (workflows spec §10): every member, in one transaction; the gateway's pass cancels the runs it decided. */
 function archiveInstance(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [instanceId, extra] = positionals;
