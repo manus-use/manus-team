@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
@@ -16,10 +16,11 @@ import { migrate, openDb, type Db } from '../src/db/open.js';
 import { createSession } from '../src/db/sessions.js';
 import { createTurn, setTurnState } from '../src/db/turns.js';
 import { parseKanban } from '../src/kanban/chat-parse.js';
-import { gateEnv } from '../src/kanban/gates.js';
+import { gateEnv, spawnGate } from '../src/kanban/gates.js';
+import { writeMtShim } from '../src/kanban/shim.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { hashToken, mintToken } from '../src/kanban/token.js';
-import { WorkerApi } from '../src/kanban/worker.js';
+import { WORKER_COMMANDS, WorkerApi } from '../src/kanban/worker.js';
 import { checkWorkflow, type WorkflowFacts } from '../src/kanban/workflow.js';
 import { clearSecrets } from '../src/secrets.js';
 import { loadTeam, type Team } from '../src/team.js';
@@ -36,7 +37,7 @@ import { ALICE, VIA } from './helpers/kanban.js';
  * through the checker `mt workflow check` uses, a `/kanban workflow` line
  * through chat's parser and a real start, a `/cron add` through chat's `/cron`,
  * an `mt` command through `mt` itself, a cron script calling `mt` as a fire
- * runs it, and an agent's JSON through the handler it is sent to. Nothing here
+ * runs it, by /bin/sh through the gateway's launcher, and an agent's JSON through the handler it is sent to. Nothing here
  * touches ~/.manus-team: every home is a temporary directory.
  */
 
@@ -57,6 +58,7 @@ const EXPECTED_MARKERS = [
   'kanban-agent start-workflow',
   'kanban-agent create',
   'cron daily-digest chat',
+  'cron daily-digest-monday chat',
   'cron daily-digest terminal',
   'cron health-check chat',
   'cron health-check terminal',
@@ -195,36 +197,6 @@ function shellWords(text: string): string[] {
   }
   if (inWord) words.push(word);
   return words;
-}
-
-/** The ISO week of an instant, as `date +%G` and `date +%V` print it, in UTC. */
-function isoWeek(at: number): { year: number; week: number } {
-  const d = new Date(at);
-  const thursday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  thursday.setUTCDate(thursday.getUTCDate() + 4 - (thursday.getUTCDay() || 7));
-  const year = thursday.getUTCFullYear();
-  return { year, week: Math.ceil(((thursday.getTime() - Date.UTC(year, 0, 1)) / 86_400_000 + 1) / 7) };
-}
-
-/** A script with each `$(date +…)` put in as the shell would at NOW: %G, %V, %Y, %m, %d. */
-function withDates(script: string): string {
-  const { year, week } = isoWeek(NOW);
-  const d = new Date(NOW);
-  const two = (n: number): string => String(n).padStart(2, '0');
-  const parts: Record<string, string> = {
-    G: String(year),
-    V: two(week),
-    Y: String(d.getUTCFullYear()),
-    m: two(d.getUTCMonth() + 1),
-    d: two(d.getUTCDate()),
-  };
-  return script.replace(/\$\(date \+([^)]*)\)/g, (_m, fmt: string) =>
-    fmt.replace(/%([A-Za-z])/g, (_p, c: string) => {
-      const v = parts[c];
-      if (v === undefined) throw new Error(`the test fills in no %${c}`);
-      return v;
-    }),
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -503,8 +475,8 @@ describe('/cron add and mt cron add', () => {
         n += 1;
       }
     }
-    // Six in docs/examples.md, two in the guide, one in the README.
-    expect(n).toBeGreaterThanOrEqual(9);
+    // Seven in docs/examples.md, two in the guide, one in the README.
+    expect(n).toBeGreaterThanOrEqual(10);
   });
 
   it('each mt cron add is added by mt, on the day the examples were written', async () => {
@@ -527,49 +499,91 @@ describe('/cron add and mt cron add', () => {
     expect(n).toBeGreaterThanOrEqual(6);
   });
 
-  it("each script calling mt runs as a fire runs it: with no agent's variables, mt found by HOME alone, and allowed", async () => {
-    // A home of its own: a start the other tests made with the same key would be answered before any check.
-    const h = await makeHome();
-    for (const w of workflowsOf('docs/examples.md')) writeFileSync(join(h.home, 'workflows', `${w.name}.yaml`), w.block.body);
-    const scripts: { block: Block; script: string }[] = [];
-    for (const b of blocks.get('docs/examples.md') ?? []) {
-      if (b.body.startsWith('/cron add ')) {
-        const parsed = parseAdd(b.body.slice('/cron add '.length));
-        if (parsed.ok && parsed.command.fields.script !== undefined) scripts.push({ block: b, script: parsed.command.fields.script });
+  it(
+    "each script calling mt runs as a fire runs it: by /bin/sh in the workspace, through the gateway's launcher, with no agent's variables, and allowed",
+    async () => {
+      // A home of its own: a start the other tests made with the same key would be answered before any check.
+      const h = await makeHome();
+      for (const w of workflowsOf('docs/examples.md')) writeFileSync(join(h.home, 'workflows', `${w.name}.yaml`), w.block.body);
+      // The launcher the gateway writes at each start: this build's mt, by this node.
+      writeMtShim(h.home);
+      const scripts: { block: Block; script: string }[] = [];
+      for (const b of blocks.get('docs/examples.md') ?? []) {
+        if (b.body.startsWith('/cron add ')) {
+          const parsed = parseAdd(b.body.slice('/cron add '.length));
+          if (parsed.ok && parsed.command.fields.script !== undefined) scripts.push({ block: b, script: parsed.command.fields.script });
+        }
+        for (const c of commandsOf(b.body).filter((x) => x.command.startsWith('mt cron add '))) {
+          const words = shellWords(c.command);
+          const at = words.indexOf('--script');
+          if (at !== -1) scripts.push({ block: b, script: words[at + 1] ?? '' });
+        }
       }
-      for (const c of commandsOf(b.body).filter((x) => x.command.startsWith('mt cron add '))) {
-        const words = shellWords(c.command);
-        const at = words.indexOf('--script');
-        if (at !== -1) scripts.push({ block: b, script: words[at + 1] ?? '' });
+      const withMt = scripts.filter((s) => s.script.includes(`${LAUNCHER} `));
+      // The board review and the weekly workflow, each in chat and at the terminal.
+      expect(withMt).toHaveLength(4);
+      // A fire's script gets the role's environment from the gateway's, which, inside the gateway, has these too.
+      const gateway = {
+        PATH: process.env['PATH'],
+        HOME: h.root,
+        TMPDIR: process.env['TMPDIR'],
+        MT_KANBAN_RUN: 'r_x',
+        MT_KANBAN_TOKEN: 't',
+        MT_KANBAN_SOCKET: '/s',
+        MT_CRON_TOKEN: 'c',
+        MT_CRON_FIRE: '1',
+      };
+      const worker = h.team.roles.get('worker') as NonNullable<ReturnType<Team['roles']['get']>>;
+      const env = gateEnv(worker, gateway);
+      expect(Object.keys(env).filter((k) => k.startsWith('MT_'))).toEqual([]);
+      // Never the real home: under /bin/sh, ~ is HOME, here the temporary root.
+      expect(env['HOME']).toBe(h.root);
+      const run = async (s: { block: Block; script: string }, cwd: string): Promise<string> => {
+        const exit = await spawnGate(s.script, { cwd, env, timeoutMs: 60_000 });
+        expect(exit.exitCode, `${where(s.block)}: ${exit.output}`).toBe(0);
+        return exit.output;
+      };
+      const answerOf = (output: string): { ok: boolean; instance_id?: string; existing?: boolean } =>
+        JSON.parse(output.split('\n').find((l) => l.startsWith('{')) ?? 'null');
+
+      // The board review, twice in one workspace: the second sees the first's list as last week's.
+      const open = await h.mt(['kanban', 'task', 'new', 'Fix the flaky export', '--board', 'web-app', '--assignee', 'worker', '--json']);
+      const openId = (JSON.parse(open.out) as { task_id: string }).task_id;
+      for (const s of withMt.filter((x) => x.script.includes('task list'))) {
+        const cwd = mkdtempSync(join(h.root, 'ws-review-'));
+        const first = await run(s, cwd);
+        expect(first, where(s.block)).toMatch(/Last week:\nnone yet\nThis week:\n\{"ok":true,"board":"web-app","tasks":\[/);
+        const thisWeek = first.slice(first.indexOf('This week:\n') + 'This week:\n'.length).trim();
+        const second = await run(s, cwd);
+        const lastWeek = second.slice(second.indexOf('Last week:\n') + 'Last week:\n'.length, second.indexOf('This week:')).trim();
+        expect(lastWeek, where(s.block)).toBe(thisWeek);
+        expect(thisWeek, where(s.block)).toContain(openId);
+        expect(readFileSync(join(cwd, '.board-review', 'last.json'), 'utf8').trim()).toBe(thisWeek);
       }
-    }
-    const withMt = scripts.filter((s) => s.script.startsWith(`${LAUNCHER} `));
-    // The board review and the weekly workflow, each in chat and at the terminal.
-    expect(withMt).toHaveLength(4);
-    // A fire's script gets the role's environment from the gateway's, which, inside the gateway, has these too.
-    const gateway = { PATH: process.env['PATH'], HOME: h.root, MT_KANBAN_RUN: 'r_x', MT_KANBAN_TOKEN: 't', MT_KANBAN_SOCKET: '/s', MT_CRON_TOKEN: 'c', MT_CRON_FIRE: '1' };
-    const env = gateEnv(h.team.roles.get('worker') as NonNullable<ReturnType<Team['roles']['get']>>, gateway);
-    expect(Object.keys(env).filter((k) => k.startsWith('MT_'))).toEqual([]);
-    vi.stubEnv('HOME', h.root);
-    // Never the real home: mt finds ~/.manus-team by HOME, here the temporary one.
-    expect(homedir()).toBe(h.root);
-    const instances = new Map<string, string>();
-    for (const s of withMt) {
-      const words = shellWords(withDates(s.script));
-      const r = await h.mt(words.slice(1), env);
-      expect(r.code, `${where(s.block)}: ${r.out}${r.err}`).toBe(0);
-      const answer = JSON.parse(r.out) as { ok: boolean; instance_id?: string; existing?: boolean };
-      expect(answer.ok, where(s.block)).toBe(true);
-      if (words.includes('start')) {
-        // The same week's key: the second start makes nothing, and answers with the first's instance.
-        const key = words[words.indexOf('--key') + 1] ?? '';
-        expect(key).toBe(`weekly-${isoWeek(NOW).year}-${String(isoWeek(NOW).week).padStart(2, '0')}`);
-        const before = instances.get(key);
-        if (before === undefined) instances.set(key, answer.instance_id ?? '');
-        else expect(answer, where(s.block)).toMatchObject({ existing: true, instance_id: before });
+
+      // The weekly start: every run in the same week answers with the first's instance.
+      const instances = new Set<string>();
+      let runs = 0;
+      for (const s of withMt.filter((x) => x.script.includes('workflow start'))) {
+        for (let i = 0; i < 2; i += 1) {
+          const answer = answerOf(await run(s, join(h.root, 'ws', 'worker')));
+          expect(answer.ok, where(s.block)).toBe(true);
+          if (runs > 0) expect(answer.existing, where(s.block)).toBe(true);
+          instances.add(answer.instance_id ?? '');
+          runs += 1;
+        }
       }
-    }
-    expect(instances.size).toBe(1);
+      expect(runs).toBe(4);
+      expect(instances.size).toBe(1);
+    },
+    120_000,
+  );
+
+  it('refuses at the terminal the starts docs/examples.md says need chat, as a person cannot be given work there', async () => {
+    const h = docHome.get('docs/examples.md') as Home;
+    const r = await h.mt(['kanban', 'workflow', 'start', 'content-pipeline', '--param', 'topic=x', '--param', 'approver=lark:on_x', '--json']);
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.out)).toMatchObject({ ok: false, code: 'person_not_assignable' });
   });
 });
 
@@ -606,6 +620,21 @@ describe("an agent's JSON", () => {
       if (typeof v === 'string' && v.endsWith('…')) expect(String(r[k]), k).toMatch(new RegExp(`^${v.slice(0, -1)}`));
       else expect(r[k], k).toEqual(v);
     }
+  });
+
+  it("the triage role.md names worker commands, and the people the triage JSON gives work to", () => {
+    const b = (blocks.get('docs/examples.md') ?? []).find((x) => x.marker === 'role.md triage') as Block;
+    const commands = [...b.body.matchAll(/`mt kanban ([a-z-]+)/g)].map((m) => m[1] ?? '');
+    expect(commands.length).toBeGreaterThanOrEqual(2);
+    for (const c of commands) expect(WORKER_COMMANDS as readonly string[], c).toContain(c);
+    const ids = new Set([...b.body.matchAll(/lark:on_[A-Za-z0-9_-]+/g)].map((m) => m[0]));
+    const start = json('kanban-agent start-workflow') as { params: { approver: string } };
+    const task = json('kanban-agent create') as { assignee: string };
+    expect(ids).toContain(start.params.approver);
+    expect(ids).toContain(task.assignee);
+    // Dana approves posts, and Sam takes what no workflow fits, in the role and in the JSON alike.
+    expect(b.body).toContain(`approver\` Dana Wu, ${start.params.approver}`);
+    expect(b.body).toContain(`Sam Park, ${task.assignee}`);
   });
 
   it("the triage agent's start.json and task.json are taken by the worker API, from a triage run", async () => {
