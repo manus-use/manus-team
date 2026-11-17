@@ -22,6 +22,7 @@ import {
   SOCKET_PATH_MAX,
   claimSocketPath,
   listenWorker,
+  lockDatabase,
   lockGateway,
   workerSocketPath,
   type WorkerServer,
@@ -387,3 +388,41 @@ describe('the gateway lock', () => {
   });
 });
 
+
+describe('the database lock', () => {
+  const db = () => join(root, 'data', 'team.db');
+  const lockPath = () => `${db()}.lock`;
+
+  it('is <db>.lock beside the database, holding our pid, with its directory left as the operator made it', () => {
+    mkdirSync(join(root, 'data'), { mode: 0o755 });
+    chmodSync(join(root, 'data'), 0o755);
+    const lock = lockDatabase(db());
+    expect(lock.path).toBe(lockPath());
+    expect(readFileSync(lockPath(), 'utf8')).toBe(`${process.pid}\n`);
+    expect(statSync(lockPath()).mode & 0o777).toBe(0o600);
+    expect(statSync(join(root, 'data')).mode & 0o777).toBe(0o755);
+    expect(readdirSync(join(root, 'data'))).toEqual(['team.db.lock']);
+    lock.release();
+    expect(existsSync(lockPath())).toBe(false);
+  });
+
+  it('refuses a database another live gateway holds, naming the database lock, its path and the pid', () => {
+    mkdirSync(join(root, 'data'));
+    writeFileSync(lockPath(), `${process.ppid}\n`);
+    expect(() => lockDatabase(db())).toThrow(
+      `another gateway (pid ${process.ppid}) holds the database lock ${lockPath()}: two homes name the database ${db()}, and only one gateway may run cron jobs on it`,
+    );
+    writeFileSync(lockPath(), `${deadPid()}\n`);
+    lockDatabase(db()).release();
+  });
+
+  it('refuses a lock that is a symlink or a directory, in the database lock’s words', () => {
+    mkdirSync(join(root, 'data'));
+    writeFileSync(join(root, 'elsewhere'), `${deadPid()}\n`);
+    symlinkSync(join(root, 'elsewhere'), lockPath());
+    expect(() => lockDatabase(db())).toThrow(`${lockPath()} is not a file of its own (a symlink); refusing to use it as the database lock`);
+    unlinkSync(lockPath());
+    mkdirSync(lockPath());
+    expect(() => lockDatabase(db())).toThrow(`${lockPath()} is not a file of its own; refusing to use it as the database lock`);
+  });
+});

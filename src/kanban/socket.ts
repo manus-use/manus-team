@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { createConnection, createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { redactKnownSecrets } from '../secrets.js';
 import { decodeUtf8 } from '../text.js';
 
@@ -131,22 +131,26 @@ export interface GatewayLock {
   release(): void;
 }
 
-/** The pid a lock file names, or undefined for one that names none. Refuses what is not a file of its own. */
-export function lockHolder(path: string): number | undefined {
+/**
+ * The pid a lock file names, or undefined for one that names none. Refuses what
+ * is not a file of its own, naming the lock as `what`: the gateway lock, or the
+ * database lock (the cron spec, §4.1).
+ */
+export function lockHolder(path: string, what = 'the gateway lock'): number | undefined {
   let fd: number;
   try {
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return undefined;
-    if (code === 'ELOOP') throw new Error(`${path} is not a file of its own (a symlink); refusing to use it as the gateway lock`);
+    if (code === 'ELOOP') throw new Error(`${path} is not a file of its own (a symlink); refusing to use it as ${what}`);
     throw err;
   }
   try {
     const st = fstatSync(fd);
-    if (!st.isFile()) throw new Error(`${path} is not a file of its own; refusing to use it as the gateway lock`);
+    if (!st.isFile()) throw new Error(`${path} is not a file of its own; refusing to use it as ${what}`);
     const me = uid();
-    if (me !== undefined && st.uid !== me) throw new Error(`${path} belongs to another user; refusing to use it as the gateway lock`);
+    if (me !== undefined && st.uid !== me) throw new Error(`${path} belongs to another user; refusing to use it as ${what}`);
     const buf = Buffer.alloc(32);
     const text = buf.subarray(0, readSync(fd, buf, 0, buf.length, 0)).toString('utf8').trim();
     const pid = /^[0-9]{1,10}$/.test(text) ? Number(text) : 0;
@@ -184,6 +188,35 @@ export function lockGateway(home: string): GatewayLock {
   const dir = join(home, 'run');
   privateDir(dir, 'the gateway lock');
   const path = join(dir, 'gateway.pid');
+  return takeLock(path, 'the gateway lock', (holder) => `another gateway (pid ${holder}) is running on ${home}: stop it first, or give this one another MT_HOME (${path})`, `another gateway may be starting on ${home}`);
+}
+
+/**
+ * Take the database for this gateway's scheduler (the cron spec, §4.1):
+ * `<db>.lock`, beside the database file, with the gateway lock's checks and its
+ * link-in, but not made private: the database's directory is the operator's,
+ * and not the gateway's to chmod. A database named by two homes is refused at
+ * the second gateway's start, rather than ticked by two schedulers.
+ */
+export function lockDatabase(dbPath: string): GatewayLock {
+  const path = `${dbPath}.lock`;
+  return takeLock(
+    path,
+    'the database lock',
+    (holder) => `another gateway (pid ${holder}) holds the database lock ${path}: two homes name the database ${dbPath}, and only one gateway may run cron jobs on it`,
+    `another gateway may be starting on ${dbPath}`,
+  );
+}
+
+/**
+ * A lock file at `path`, holding this process's pid, written whole beside its
+ * place and linked in. A lock naming another live process is refused with
+ * `busy`; one whose process is gone, or that names none, is stale and taken
+ * over; one naming this process is already ours, and only the holder that
+ * created it removes it on release.
+ */
+function takeLock(path: string, what: string, busy: (holder: number) => string, racing: string): GatewayLock {
+  const dir = dirname(path);
   // Only the call that created the file removes it: a second holder in this
   // process, which found the lock naming us already, must not take it from the first.
   const held = (created: boolean): GatewayLock => ({
@@ -191,7 +224,7 @@ export function lockGateway(home: string): GatewayLock {
     release() {
       if (!created) return;
       try {
-        if (lockHolder(path) === process.pid) unlinkSync(path);
+        if (lockHolder(path, what) === process.pid) unlinkSync(path);
       } catch {
         // Not ours to remove, or gone already; either way, nothing of ours is left.
       }
@@ -199,7 +232,7 @@ export function lockGateway(home: string): GatewayLock {
   });
   // Twice at most: a stale lock removed, then ours linked in. A third means another gateway is starting too.
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const staging = join(dir, `.gateway.pid-${randomUUID()}`);
+    const staging = join(dir, `.${basename(path)}-${randomUUID()}`);
     try {
       writeFileSync(staging, `${process.pid}\n`, { mode: 0o600, flag: 'wx' });
       linkSync(staging, path);
@@ -209,18 +242,16 @@ export function lockGateway(home: string): GatewayLock {
     } finally {
       rmSync(staging, { force: true });
     }
-    const holder = lockHolder(path);
+    const holder = lockHolder(path, what);
     if (holder === process.pid) return held(false);
-    if (holder !== undefined && alive(holder)) {
-      throw new Error(`another gateway (pid ${holder}) is running on ${home}: stop it first, or give this one another MT_HOME (${path})`);
-    }
+    if (holder !== undefined && alive(holder)) throw new Error(busy(holder));
     try {
       unlinkSync(path);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
   }
-  throw new Error(`${path}: the gateway lock keeps being taken; another gateway may be starting on ${home}`);
+  throw new Error(`${path}: ${what} keeps being taken; ${racing}`);
 }
 
 /**
