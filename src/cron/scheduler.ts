@@ -110,10 +110,53 @@ export interface CronSchedulerDeps {
   packages?: PackagesInUse;
   /** Sweep the rendered packages at boot, as the dispatcher's boot does when the board is on (§13). */
   sweepRendersAtBoot?: boolean;
-  /** The socket and the shim a fire's agent finds the gateway's mt through (§7.2). */
+  /** The socket and the shim a fire's agent finds the gateway's mt through (§7.2); a script, the shim alone (§5.1). */
   worker?: WorkerAccess;
+  /** The gateway's home, config file and database, which a fire's script is given (§5.1); absent, none are. */
+  scriptHome?: ScriptHome;
   /** Mints a fire's token, `MT_CRON_TOKEN`, held while it runs (§7.2); absent, a fire gets none. */
   tokens?: CronTokens;
+}
+
+/**
+ * Where the gateway's files are, as it resolved them (§5.1): its home, the config
+ * file it read, if any, and the database it opened. Its own dep, not
+ * `WorkerAccess`'s, which is the socket's and the launcher's.
+ */
+export interface ScriptHome {
+  home: string;
+  configPath: string | undefined;
+  dbPath: string;
+}
+
+/** A PATH that finds the gateway's `mt` launcher first, then the role's own PATH, else the gateway's (§7.2). */
+function mtFirst(role: Role, worker: WorkerAccess): string {
+  const rest = role.agent.env['PATH'] ?? worker.path;
+  return rest === undefined || rest === '' ? worker.mtDir : `${worker.mtDir}${delimiter}${rest}`;
+}
+
+/**
+ * A fire's script's environment (§5.1): its role's, as a gate's (`gateEnv`),
+ * then `PATH` with the gateway's `mt` launcher first, and `MT_HOME`, `MT_CONFIG`
+ * and `MT_DB` the gateway's, set after the role's, so plain `mt` in a script
+ * opens exactly this gateway's files. None is an agent's variable, so the
+ * script is a terminal: the operator's commands work in it.
+ */
+export function scriptEnv(
+  role: Role,
+  env: Readonly<Record<string, string | undefined>>,
+  worker: WorkerAccess | undefined,
+  home: ScriptHome | undefined,
+): Record<string, string> {
+  const out = gateEnv(role, env);
+  if (worker !== undefined) out['PATH'] = mtFirst(role, worker);
+  if (home !== undefined) {
+    out['MT_HOME'] = home.home;
+    if (home.configPath === undefined) delete out['MT_CONFIG'];
+    else out['MT_CONFIG'] = home.configPath;
+    out['MT_DB'] = home.dbPath;
+  }
+  return out;
 }
 
 /** Where a fire's session is bound (§5.2): the cron channel, at the job and the fire. */
@@ -702,14 +745,14 @@ export class CronScheduler {
     });
   }
 
-  /** The job's script, as a gate runs (§5.1): in the workspace, with the role's environment, killed at its limit. */
+  /** The job's script, as a gate runs (§5.1): in the workspace, with the role's environment and the gateway's mt and home, killed at its limit. */
   async #script(entry: Entry, job: JobRow, role: Role): Promise<GateExit> {
     const cwd = this.#deps.workspaceDirs.get(job.workspace);
     const runner = this.#deps.runner ?? spawnGate;
     if (cwd === undefined) return { exitCode: null, signal: null, timedOut: false, output: `workspace ${job.workspace} has no directory` };
     return runner(job.script ?? '', {
       cwd,
-      env: gateEnv(role, this.#deps.env ?? process.env),
+      env: scriptEnv(role, this.#deps.env ?? process.env, this.#deps.worker, this.#deps.scriptHome),
       timeoutMs: SCRIPT_TIMEOUT_MS,
       signal: entry.abort.signal,
     }).catch((err: unknown): GateExit => ({ exitCode: null, signal: null, timedOut: false, output: `the script could not run: ${message(err)}` }));
@@ -746,8 +789,7 @@ export class CronScheduler {
   #workerEnv(role: Role): Record<string, string> {
     const worker = this.#deps.worker;
     if (worker === undefined) return {};
-    const rest = role.agent.env['PATH'] ?? worker.path;
-    return { MT_KANBAN_SOCKET: worker.socket, PATH: rest === undefined || rest === '' ? worker.mtDir : `${worker.mtDir}${delimiter}${rest}` };
+    return { MT_KANBAN_SOCKET: worker.socket, PATH: mtFirst(role, worker) };
   }
 
   /** The turn has ended (§5.5): read from its terminal, unless marked, archiving, or stopped. */

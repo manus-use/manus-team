@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { ConfigError, loadConfig, type Env, type GatewayConfig } from './config.js';
 import { loadGatewayEnv, type GatewayEnvFile } from './gateway-env.js';
 import { loadTeam, teamSecrets, type Team } from './team.js';
@@ -430,6 +430,12 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       // With the board off, its dispatcher's boot does not sweep the rendered packages.
       sweepRendersAtBoot: !config.kanban.enabled,
       worker: access,
+      // A script's plain mt opens exactly the gateway's files, resolved, as the script runs in a workspace (§5.1).
+      scriptHome: {
+        home: config.home,
+        configPath: config.configPath === undefined ? undefined : resolve(config.configPath),
+        dbPath: resolve(config.dbPath),
+      },
       tokens,
     });
     const s = scheduler;
