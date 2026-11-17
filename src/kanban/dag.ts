@@ -5,7 +5,7 @@ import { MASK, redactKnownSecrets } from '../secrets.js';
 import { BIDI } from '../text.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
 import { WORKER_LIMITS } from './limits.js';
-import { checkTask, isRecord, type TaskFacts } from './task-checks.js';
+import { checkTask, isRecord, NO_MENTIONS, type TaskFacts } from './task-checks.js';
 import { CONTRACT_FIELDS, GATE_LIMITS, type Contract, type CreatedVia, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
 /**
@@ -507,8 +507,8 @@ function certainWorkspace(t: DagTask, roles: ReadonlyMap<string, Role>): string 
  * each gate as `addGate`, plus every name and item holding no known secret, a
  * title of one line, `task new`'s sizes, and a task whose parents certainly work
  * in different workspaces refused. The first failure refuses the whole DAG,
- * naming the task. A person is checked by `facts.canTalk`; at the terminal,
- * which has no talk check, any person is refused.
+ * naming the task. A person is checked by `facts.canTalk`, at the terminal as
+ * elsewhere; an @-mention there is refused, as no message carries it.
  */
 export function checkDagTasks(dag: Dag, check: DagCheck): Refusal | undefined {
   const byRef = new Map(dag.tasks.map((t) => [t.ref, t]));
@@ -540,16 +540,9 @@ export function checkDagTasks(dag: Dag, check: DagCheck): Refusal | undefined {
     if (t.item !== null && redactKnownSecrets(t.item) !== t.item) {
       return no('invalid', 'its item holds a known secret: an item labels its task, and two differing only in a secret would be one label');
     }
-    if (terminal) {
-      for (const v of [t.assignee, t.reviewer]) {
-        if (v !== null && v.includes(':')) {
-          return no(
-            'person_not_assignable',
-            `${shown(v)} is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier`,
-          );
-        }
-      }
-    }
+    // A person is checked as chat checks one, by `facts.canTalk`, wherever the DAG comes from (kanban spec §22.2);
+    // at the terminal, an @-mention has no message to be resolved from.
+    if (terminal && [t.assignee, t.reviewer].some((v) => v?.startsWith('@') === true)) return no('invalid', NO_MENTIONS);
     const checked = checkTask(
       {
         title: t.title,

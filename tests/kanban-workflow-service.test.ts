@@ -189,18 +189,16 @@ describe('startWorkflow', () => {
     for (const t of r.tasks) expect(t.task).toMatchObject({ board: 'default', createdFromTask: planner.taskId });
   });
 
-  it('refuses any person at the terminal, and one without talk tier from chat', () => {
+  it('checks a person at the terminal as from chat: taken with talk tier, refused without', () => {
     const owned = 'params:\n  owner: { required: true }\nsteps:\n  a: { title: A, assignee: "{{owner}}" }\n';
     writeFileSync(join(dir, 'owned.yaml'), owned);
     const params = { from: 'json', params: { owner: BOB } } as const;
-    expect(start({ workflow: 'owned', params, createdVia: OPERATOR, createdBy: 'operator:me' })).toEqual({
-      ok: false,
-      code: 'person_not_assignable',
-      message: 'a: "lark:on_bob" is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier',
-    });
+    expect(made(start({ workflow: 'owned', params, createdVia: OPERATOR, createdBy: 'operator:me' })).tasks[0]?.task.assignee).toEqual({ kind: 'human', name: BOB });
     expect(made(start({ workflow: 'owned', params })).tasks[0]?.task.assignee).toEqual({ kind: 'human', name: BOB });
     talks.clear();
-    expect(start({ workflow: 'owned', params })).toMatchObject({ ok: false, code: 'person_not_assignable', message: expect.stringMatching(/^a: "lark:on_bob" cannot be given work: being assigned/) });
+    for (const via of [{}, { createdVia: OPERATOR, createdBy: 'operator:me' }]) {
+      expect(start({ workflow: 'owned', params, ...via })).toMatchObject({ ok: false, code: 'person_not_assignable', message: expect.stringMatching(/^a: "lark:on_bob" cannot be given work: being assigned/) });
+    }
   });
 });
 

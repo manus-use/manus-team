@@ -7,8 +7,8 @@ import type { Role } from '../roles.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { DAG_FORMAT, DAG_LIMITS, titleRefused, type Dag, type DagTask, type ParamValue } from './dag.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
-import { assignable, isRecord, type TaskFacts } from './task-checks.js';
-import { GATE_LIMITS, type Contract, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
+import { assignable, isRecord, NO_MENTIONS, type TaskFacts } from './task-checks.js';
+import { GATE_LIMITS, type Contract, type CreatedVia, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
 export { checkDagShape, readDag } from './dag.js';
 
@@ -684,8 +684,11 @@ function titleParams(w: Workflow): Set<string> {
  * list's items trimmed, none empty or twice or holding a known secret, the
  * sizes, a value landing in a title on one line, and `@` resolved only in a
  * param that lands in a person field. What a refusal says names the param.
+ * With no `personOf`, an `@` in a person field is refused as the start's
+ * `via` is told: at the terminal, that it has no mentions (kanban spec §22.2);
+ * from a run, that a person is given work from chat.
  */
-export function paramValues(w: Workflow, given: GivenParams, personOf?: PersonOf): Result<{ values: Map<string, ParamValue> }> {
+export function paramValues(w: Workflow, given: GivenParams, personOf?: PersonOf, via?: CreatedVia['kind']): Result<{ values: Map<string, ParamValue> }> {
   const declared = new Map(w.params.map((p) => [p.name, p]));
   const takes = w.params.length === 0 ? 'it takes none' : `it takes ${w.params.map((p) => p.name).join(', ')}`;
   const unknown = (key: string): Refusal => refuse('invalid', `workflow ${w.name} takes no param ${said(key)} (${takes})`);
@@ -747,6 +750,7 @@ export function paramValues(w: Workflow, given: GivenParams, personOf?: PersonOf
     if (persons.has(p.name) && personOf === undefined) {
       // At the terminal or from a run, no message carries a mention to resolve `@Name` by.
       const at = texts.find((t) => t.startsWith('@'));
+      if (at !== undefined && via === 'operator') return refuse('invalid', NO_MENTIONS);
       if (at !== undefined) {
         return refuse(
           'person_not_assignable',
@@ -802,8 +806,8 @@ function nameGiven(value: string, place: string, spec: NameSpec, kind: 'person' 
  * in as written, and not read again for braces. The DAG is shaped, measured and
  * its tasks checked by the caller, as any DAG is.
  */
-export function expand(w: Workflow, given: GivenParams, board: string, personOf?: PersonOf): Result<{ dag: Dag }> {
-  const params = paramValues(w, given, personOf);
+export function expand(w: Workflow, given: GivenParams, board: string, personOf?: PersonOf, via?: CreatedVia['kind']): Result<{ dag: Dag }> {
+  const params = paramValues(w, given, personOf, via);
   if (!params.ok) return params;
   const values = params.values;
   const textOf = (name: string): string => {

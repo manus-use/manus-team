@@ -115,11 +115,11 @@ describe('mt kanban workflow preview', () => {
     expect([count('kanban_tasks'), count('kanban_workflow_instances')]).toEqual([0, 0]);
   });
 
-  it('writes a refusal on stderr and nothing on stdout, and refuses a person as at the terminal', async () => {
+  it('writes a refusal on stderr and nothing on stdout, and leaves a person to the start, saying so', async () => {
     expect(await mt(['preview', 'vendor-eval', '--param', 'topic=x', '--json'])).toEqual({ code: 1, out: '', err: 'mt: workflow vendor-eval needs param vendors' });
     writeFileSync(join(f.home, 'workflows', 'ask.yaml'), 'params:\n  owner: { required: true }\nsteps:\n  ask: { title: Ask, assignee: "{{owner}}" }\n');
     expect((await mt(['preview', 'ask', '--param', 'owner=lark:on_bob'])).err).toBe(
-      'mt: ask: "lark:on_bob" is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier',
+      'mt: lark:on_bob is checked at the start, against the people this gateway knows; mt kanban workflow apply --dry-run checks it now',
     );
     expect((await mt(['preview', 'nope'])).err).toMatch(/^mt: there is no workflow nope; the usable ones are /);
     expect((await mt(['preview', 'vendor-eval', '--param', 'topic'])).code).toBe(2);

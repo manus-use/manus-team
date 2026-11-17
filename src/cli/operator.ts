@@ -1,8 +1,9 @@
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { listed, previewLines, whenMade } from '../kanban/chat-render.js';
-import { boardSetting, isPerson, LIST_FILTERS, tooBig, type NewTaskCommand } from '../kanban/chat-parse.js';
+import { boardSetting, LIST_FILTERS, tooBig, type NewTaskCommand } from '../kanban/chat-parse.js';
 import { DAG_LIMITS, checkDagShape, checkDagTasks, dagFile } from '../kanban/dag.js';
+import { NO_MENTIONS } from '../kanban/task-checks.js';
 import { WORKFLOW_MESSAGE_BYTES, type KanbanService, type WorkflowMade } from '../kanban/service.js';
 import { expand, listWorkflows, paramsLine, readWorkflow, usableMessage } from '../kanban/workflow.js';
 import { maskAll, NUDGE, workerSocketPath } from '../kanban/socket.js';
@@ -10,7 +11,7 @@ import { DEFAULT_BOARD, type BoardRow, type Contract, type Refusal, type Waiting
 import { WORKER_LIMITS } from '../kanban/limits.js';
 import { visible } from '../names.js';
 import { parse, UsageError } from './args.js';
-import { loadOperator, operatorName, withBoard } from './gate.js';
+import { loadOperator, operatorName, personHint, withBoard, type PeopleMissing } from './gate.js';
 import { ask } from './kanban.js';
 import type { MtIo } from './mt.js';
 import { BIDI, decodeUtf8, INVISIBLE } from '../text.js';
@@ -147,19 +148,22 @@ async function act(
   let outcome: Outcome | undefined;
   let home = '';
   let enabled: boolean | undefined = true;
+  let missing: PeopleMissing | undefined;
   const code = withBoard(
     io,
     what,
     (board) => {
       home = board.home;
       enabled = board.kanbanEnabled;
+      missing = board.peopleMissing;
       outcome = fn(board.service, operatorName(io));
       return 0;
     },
     { refuse: no, unsetNote: 'those values are not masked here', ...(opts.workflows === true ? { workflows: true } : {}) },
   );
   if (outcome === undefined) return code;
-  if (!outcome.ok) return no(outcome.code, outcome.message);
+  // A person refused in chat's words, with how a terminal finds ids; or what this shell lacks to check one (kanban spec §22.2).
+  if (!outcome.ok) return no(outcome.code, personHint(outcome, missing));
   const done: Done = outcome;
   let nudged: boolean | undefined;
   if (done.nudge === true && enabled !== true) {
@@ -253,15 +257,12 @@ function early(io: MtIo, json: boolean, code: string, message: string): number {
 }
 
 /**
- * A person is given work from chat, by @-mention, where the gateway can check
- * they have talk tier (spec §4.2): a terminal has no allowlist to check against.
+ * A name starting with `@` where a person may go (kanban spec §22.2): a mention
+ * is resolved from the message Lark delivers, which a terminal has not got. A
+ * person is `lark:<union_id>`, checked by the service as chat checks one.
  */
-function personRefused(name: string): Outcome | undefined {
-  if (!isPerson(name)) return undefined;
-  return refused({
-    code: 'person_not_assignable',
-    message: `${JSON.stringify(name)} is a person: give a person work from chat, by @-mention, where the gateway can check they have talk tier`,
-  });
+function mentionRefused(name: string): Outcome | undefined {
+  return name.startsWith('@') ? refused({ code: 'invalid', message: NO_MENTIONS }) : undefined;
 }
 
 /** One task id, and nothing else. */
@@ -397,8 +398,8 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
   const key = values.key?.trim();
   return act(io, json, 'mt kanban task new', (service, by) => {
     for (const name of [command.assignee, command.reviewer]) {
-      const person = name === undefined ? undefined : personRefused(name);
-      if (person !== undefined) return person;
+      const mention = name === undefined ? undefined : mentionRefused(name);
+      if (mention !== undefined) return mention;
     }
     const r = service.create({
       board,
@@ -547,18 +548,21 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** `mt kanban task assign <task> <role>`: an undecided run ends `superseded`, and the gateway's pass cancels its turn. */
+/**
+ * `mt kanban task assign <task> <role|lark:<union_id>>`: an undecided run ends `superseded`, and the gateway's
+ * pass cancels its turn. A person is checked as `task new` checks one (kanban spec §22.2).
+ */
 function assign(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [taskId, role, extra] = positionals;
   const name = role?.trim();
   if (taskId === undefined || name === undefined || name === '' || extra !== undefined) {
-    throw new UsageError('kanban task assign takes a task id and a role');
+    throw new UsageError('kanban task assign takes a task id, and a role or a person, lark:<union_id>');
   }
   const board = boardFlag(values.board);
   return act(io, values.json === true, 'mt kanban task assign', (service, by) => {
-    const person = personRefused(name);
-    if (person !== undefined) return person;
+    const mention = mentionRefused(name);
+    if (mention !== undefined) return mention;
     const guard = offBoard(service, board, taskId);
     if (guard !== undefined) return guard;
     const now = service.show(taskId);
@@ -773,9 +777,10 @@ function madeJson(made: WorkflowMade): Record<string, unknown> {
 /**
  * `mt kanban workflow preview <name> [--board] [--param k=v]… [--json]` (workflows spec
  * §6): loaded exactly as `openBoard` loads, opening no database; every check
- * a start makes but the board's, the people's and the key's, a person refused as
- * at the terminal. `--json` writes the DAG file alone on stdout; a refusal goes
- * to stderr, so it never leaves half a file.
+ * a start makes but the board's, the people's and the key's. A person in the
+ * grammar passes, as `people` is in the database, and is said on stderr to be
+ * checked at the start (§18.3). `--json` writes the DAG file alone on stdout; a
+ * refusal goes to stderr, so it never leaves half a file.
  */
 function preview(rest: readonly string[], io: MtIo): number {
   const { values, positionals } = parse(rest, { ...BOARD_FLAGS, param: { type: 'string', multiple: true } });
@@ -791,19 +796,25 @@ function preview(rest: readonly string[], io: MtIo): number {
   const loaded = loadOperator(io, 'mt kanban workflow preview', { refuse: no, unsetNote: 'those values are not masked here' });
   if (typeof loaded === 'number') return loaded;
   const { settings, team } = loaded;
-  // As openBoard's service judges a task: supervised roles accepted, and no person, as no talk check is here.
+  // As openBoard's service judges a task, supervised roles accepted; the preview's facts alone take every person,
+  // whom a start and an apply check against the database (workflows spec §18.3).
   const facts = { roles: team.roles, workspaces: new Set(team.workspaces.keys()), supervisedRoles: true };
+  const anyone = { ...facts, canTalk: () => true };
   const dir = join(settings.home, 'workflows');
   const read = readWorkflow(dir, name, facts);
   if (!read.ok) {
     return no(read.code, read.code === 'unknown_workflow' ? usableMessage(read.message, listWorkflows(dir, facts).usable, WORKFLOW_MESSAGE_BYTES) : read.message);
   }
-  const expanded = expand(read.workflow, { from: 'terminal', pairs }, boardName);
+  const expanded = expand(read.workflow, { from: 'terminal', pairs }, boardName, undefined, 'operator');
   if (!expanded.ok) return no(expanded.code, expanded.message);
   const shaped = checkDagShape(expanded.dag, 'expansion');
   if (!shaped.ok) return no(shaped.code, shaped.message);
-  const refused = checkDagTasks(shaped.dag, { facts, createdBy: operatorName(io), createdVia: { kind: 'operator' } });
+  const refused = checkDagTasks(shaped.dag, { facts: anyone, createdBy: operatorName(io), createdVia: { kind: 'operator' } });
   if (refused !== undefined) return no(refused.code, refused.message);
+  const people = new Set(shaped.dag.tasks.flatMap((t) => [t.assignee, t.reviewer]).filter((v): v is string => v !== null && v.includes(':')));
+  for (const person of people) {
+    io.err(`mt: ${line(person, 200)} is checked at the start, against the people this gateway knows; mt kanban workflow apply --dry-run checks it now`);
+  }
   if (json) io.out(jsonFile(JSON.parse(dagFile(shaped.dag))));
   else for (const l of previewText(name, boardName, previewLines(shaped.dag))) io.out(l);
   return 0;

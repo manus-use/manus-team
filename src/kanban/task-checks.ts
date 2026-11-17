@@ -61,6 +61,13 @@ function refuse(code: Refusal['code'], message: string): Refusal {
 /** A person's principal, as channels identify them. */
 const PERSON = /^lark:[A-Za-z0-9_-]+$/;
 
+/**
+ * What the terminal says of a name starting with `@` where a person may go
+ * (kanban spec §22.2): a mention is resolved from the message Lark delivers,
+ * which a terminal has not got.
+ */
+export const NO_MENTIONS = 'there are no @-mentions at the terminal: a person is lark:<union_id>, which mt kanban people lists';
+
 /** A refusal unless createdVia is one of the three shapes, with text fields. */
 function createdViaRefused(via: unknown): Refusal | undefined {
   const fine =

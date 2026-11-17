@@ -1224,7 +1224,8 @@ export class KanbanService {
     if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
     const read = this.#workflow(req.workflow);
     if (!read.ok) return read;
-    const expanded = expand(read.workflow, req.params, onBoard, req.personOf);
+    // The start's kind, for an `@` with no mention to resolve it by: the terminal's refusal, or a run's (workflows spec §18.3).
+    const expanded = expand(read.workflow, req.params, onBoard, req.personOf, req.createdVia?.kind);
     if (!expanded.ok) return expanded;
     const shaped = checkDagShape(expanded.dag, 'expansion');
     if (!shaped.ok) return shaped;
