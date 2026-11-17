@@ -374,15 +374,16 @@ CREATE INDEX idx_cron_fires_pending ON cron_fires(delivery) WHERE delivery = 'pe
   after; kept, the sessions of a five-minute job would grow the events table by a session every
   five minutes for ever, which the 50-fire bound exists to prevent.
 
-  **Only a session nothing else can reach is deleted.** A fire's session is deleted only when every
-  binding it has, revoked or not, is on the `cron` channel; one with any other binding is left, and
+  **Only a session nothing else can reach is deleted.** A fire's session is deleted only when it is
+  owned by `CRON_OWNER` and every binding it has, revoked or not, is on the `cron` channel, none of
+  them live; one owned by anyone else, or with any other binding, is left, and
   only the fire's row is dropped. `bindingsForSession` returns only live bindings, and a fire's own
   is revoked by its archive, so the check reads every row of `channel_bindings` for the session,
   revoked ones included, with a read of its own in `db/cron.ts`. That case is closed off where it would start: **`registry.attach`
   refuses a session whose `ownerPrincipal` is `CRON_OWNER`'s**, the principal `cron`, defined as
   `KANBAN_OWNER` is in the dispatcher (`src/kanban/dispatcher.ts`) but in a leaf module of its own,
   `src/cron/owner.ts`, which imports nothing, so the registry can import it without a cycle through
-  the scheduler. Its message, "session s_… is a cron fire's; mt cron show c_… has what it did",
+  the scheduler. Its message, "session s_… is a cron fire's; /cron show c_… in its chat, or mt cron show c_…, has what it did",
   takes the `c_…` from `cron_fires`, by the session's id (`session_id`, recorded by
   `attachFireSession`): a fire's binding is revoked once it is archived, and `bindingsForSession`
   would not find it; and a session with no fire row left says only that it is a cron fire's. In `attach` itself, so `/attach` and any
