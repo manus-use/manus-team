@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { CHAT_ID } from '../core/lark-ids.js';
 import type { CronDelivery, CronRefusal, FireRow, JobRow } from '../db/cron.js';
 import { lastResult } from '../db/cron.js';
 import { openDb, type Db } from '../db/open.js';
@@ -34,9 +35,6 @@ export const CRON_USAGE = [
   "an agent's commands, which work only in an agent's shell, where the gateway sets MT_CRON_TOKEN (or a board run's MT_KANBAN_RUN and MT_KANBAN_TOKEN) and MT_KANBAN_SOCKET:",
   `  mt cron <${CRON_COMMANDS.join('|')}> < input.json`,
 ].join('\n');
-
-/** A chat id as Lark gives one: checked for shape, not for whether the bot is in it (§6.2). */
-const CHAT_ID = /^oc_[A-Za-z0-9]{1,64}$/;
 
 /** The database's version, for a database not migrated to cron's tables yet. */
 function version(db: Db): number {
