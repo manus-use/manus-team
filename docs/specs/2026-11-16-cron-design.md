@@ -523,7 +523,8 @@ In order, each step's failure noted and the rest going on:
    order of `run_requested_at`. For each:
    - **A fire of the job still running**: a due slot is recorded `skipped_running` and the next
      run advanced (`skipFire`); a stamp waits for a later tick.
-   - **Too late** (§4.3): recorded `skipped_missed`, advanced, and noted.
+   - **Too late** (§4.3): recorded `skipped_missed`, advanced, and noted; if the newest slot at or
+     before now is still fresh, the skip advances to it and it is taken on as below.
    - **At `cron.max_running`** fires: the job waits, its next run unchanged, for a later tick.
    - **Otherwise** it is fired: `startFire`, in one transaction, re-reads the job, checks that its
      `next_run_at` is still the slot this tick read (or its stamp still set), that no fire of it
@@ -548,7 +549,12 @@ missed. For a clock time that is `nextRun(now)`; for a fixed period it is the sa
 A due job is late by `now − next_run_at`. A recurring job is fired if that is at most **half its
 period**, and a one-off if it is at most **one hour**; otherwise the slot is skipped,
 `skipped_missed`, with one log line naming the job, the slot and how many slots were skipped, and
-nothing posted. A recurring job's period is:
+nothing posted for it. **The newest slot is still fired if it is fresh**: when the due slot is too
+late, the newest slot at or before now (`latestSlot`) is found, and if it is late by at most half
+its own period, the slots before it are the one skip and the newest is fired, as in §4.2 step 4;
+otherwise every slot is skipped. So a daily brief at 10:00, its gateway down from 09:00 one day to
+10:10 the next, records the first day's slot missed and posts the second's. A recurring job's
+period is:
 
 - for a fixed period, the period;
 - for a clock time, the time from the missed slot to the slot after it, in its zone.
@@ -568,7 +574,8 @@ restart could miss a reminder set for its minute.
 
 **Several slots missed** are one skip: one `skipped_missed` row, its `scheduled_at` the first
 slot missed, its `error` saying how many were, so a five-minute job down for a day records one
-row, not 288.
+row, not 288. A newest slot that is fired is not counted among them: the skip advances the job to
+it, and the fire that follows advances it past now.
 
 ### 4.4 A restart
 
@@ -836,6 +843,11 @@ or points it elsewhere. There is no letting go of a chat as the notifier's (kanb
 one chat, and its own history is the record the notifier's cursors are. An outage longer than the
 adapter's retries loses that fire's post the same way (§15).
 
+**A send under way when the gateway stops** is not a send that failed: after `stop()`, a send
+that throws leaves the delivery `pending`, so the next boot sends it again with the same uuids.
+The shutdown waits for the scheduler's sends, under the drain's bound and with the notices and
+cards, before the adapter disconnects; one the disconnect still fails is the next boot's.
+
 ### 5.7 Failure, and the pause
 
 A fire ending `script_failed`, `agent_failed`, `timed_out` or `skipped_unavailable` adds one to the
@@ -1011,8 +1023,10 @@ the session has a turn open**:
   one open turn past `pending`, as the actor runs one at a time, and its recorded tier; a turn
   with none recorded, or recorded at talk tier, is refused `needs_operator` (§6.3).
 - **Passed** as `MT_CRON_TOKEN`, with `MT_KANBAN_SOCKET`, the gateway's one socket under the name
-  it already has, and `PATH` with `$MT_HOME/bin` first, as a run's (kanban §7.2). So, with
-  `cron.enabled` set, every chat session's agent finds the gateway's `mt` first on its `PATH`.
+  it already has, and `PATH` with `$MT_HOME/bin` first, as a run's (kanban §7.2): then the
+  session's role's own `PATH`, if its `agent.env` sets one, else the gateway's, the role read from
+  the session's `agent_id`. So, with `cron.enabled` set, every chat session's agent finds the
+  gateway's `mt` first on its `PATH`, and keeps the rest of the `PATH` its role gave it.
 - **Scoped** to `mt cron` and that chat: a request with it is the agent's `add`, `list`, `pause` or
   `remove`, nothing on the board, and its job delivers to the binding's chat.
 - **Usable** while the session has a turn open (`openTurns`), the session is still bound where the
@@ -1304,7 +1318,8 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   either's; the lock, the socket and the shim when `kanban.enabled` or `cron.enabled` is set; the
   socket's handler dispatching by envelope (§7.4), the nudge to both; `boot()` after the
   dispatcher's, `start()` after the notifier's, `stop()` with the dispatcher's and before the
-  registry closes the actors (§5.4), and `idle()` in the shutdown's drain; the database's lock
+  registry closes the actors (§5.4), and `idle()` in the shutdown's drain, before the adapter
+  disconnects for a send under way (§5.6), and after the actors close for an archive; the database's lock
   with the home's, released after the database closes; `$MT_HOME/run/gateway.tz` written once the
   home is held; the startup line (§10).
 - **`src/cli/mt.ts`**: the `cron` group, chosen by the shell (§6.4); `inBoardRun` renamed

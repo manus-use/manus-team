@@ -890,7 +890,7 @@ script: gh pr list --json number,title,createdAt
 ```
 
 The schedule is always quoted: a five-field cron expression (`0 9 * * 1-5`), `every 2h`,
-`every day 09:00`, `every monday 09:00`, or a one-off, `in 30m` or `2026-11-17 09:00`. The
+`every day 09:00`, `every monday 09:00`, or a one-off, `in 30m` or `2026-12-01 09:00`. The
 shortest period is 5 minutes. A job runs in its zone (`tz:`, else the gateway's), and keeps
 it. `/cron list`, `/cron show <id>`, `pause`, `resume`, `run` and `remove` act on this chat's
 jobs only. Its role's agent must be unsupervised.
