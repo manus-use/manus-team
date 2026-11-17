@@ -73,6 +73,20 @@ export type CreatedVia =
   | { kind: 'operator' };
 
 /**
+ * A chat the terminal names to follow what it makes (kanban spec §22.1,
+ * workflows spec §18.1): this bot's app id, the chat, and the thread, `''` at
+ * chat scope, with its root, the message every send in it replies to, null at
+ * chat scope. Beside `createdVia`, which stays the operator's: a terminal's
+ * task is not recorded as a chat's.
+ */
+export interface Follow {
+  appId: string;
+  chatId: string;
+  threadId: string;
+  rootId: string | null;
+}
+
+/**
  * Who is reporting. A run reports through its token (plan C3); a person through
  * chat (plan D). Who may act is checked by the caller; what the rows allow, here.
  *
@@ -392,4 +406,6 @@ export interface CreateRequest {
   createdVia: CreatedVia;
   /** The board it goes on (spec §16): chat's is the chat's board. A run's task's follow-ups go on its board, whatever this says. */
   board?: string;
+  /** The chat that follows it, named at the terminal (kanban spec §22.1); the operator's alone. */
+  follow?: Follow;
 }

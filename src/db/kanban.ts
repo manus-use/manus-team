@@ -20,6 +20,7 @@ import type {
   Contract,
   CreatedVia,
   EndedOutcome,
+  Follow,
   GateRow,
   Phase,
   Refusal,
@@ -305,10 +306,18 @@ export interface NewTask {
   createdVia: CreatedVia;
   /** The board it goes on (spec §16); `default` unless given. */
   board?: string;
+  /** The chat a terminal named to follow it (kanban spec §22.1), checked by the service. */
+  follow?: Follow;
 }
 
 /**
  * Create a task, linked to its parents, in one transaction.
+ *
+ * A task with a `follow` gets one more event, after `created`:
+ * `task_created_followed`, the "Created" line the notifier posts to that chat,
+ * as a terminal has no Lark client to post it (kanban spec §22.1). A
+ * workflow's members never get one: their instance's `workflow_started` names
+ * them all.
  *
  * A repeated idempotency key returns the existing task and changes nothing:
  * creation is retried by everything that can create -- Lark redelivers a
@@ -350,6 +359,7 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
       if (p.board !== board) return refuse('other_board', onOtherBoard(parent, p.board, board));
     }
     const taskId = insertTask(d, { ...t, board, createdFromTask, parents }, now);
+    if (t.follow !== undefined) record(d, { taskId, kind: 'task_created_followed', actor: t.createdBy, payload: { by: t.createdBy } }, now);
     return { ok: true, task: mustGet(d, taskId), existing: false };
   });
 }
@@ -399,7 +409,7 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
   );
   const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
   for (const parent of parents) link.run(parent, taskId, now);
-  subscribe(d, taskId, t.createdVia, createdFromTask, now);
+  subscribe(d, taskId, t.createdVia, createdFromTask, now, t.follow);
   record(
     d,
     {
@@ -428,15 +438,19 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
  * The chats that follow a new task (spec §9.4, §7.3): the chat it was created
  * in; or, for a task a run created, every chat following the creating run's
  * task, so whoever follows that task hears about its follow-ups too, in its
- * thread, with its root (spec §19.4). Each cursor starts at 0: every event of the
- * new task is newer than that. A root is written only with a thread: at chat
- * scope it comes from `threadSubscription` alone.
+ * thread, with its root (spec §19.4); or, for a terminal's, the chat it named,
+ * `follow`, in Lark, for this bot (kanban spec §22.1). Each cursor starts at 0:
+ * every event of the new task is newer than that. A root is written only with a
+ * thread: at chat scope it comes from `threadSubscription` alone.
  */
-function subscribe(d: Db, taskId: string, via: CreatedVia, createdFromTask: string | null, now: number): void {
+function subscribe(d: Db, taskId: string, via: CreatedVia, createdFromTask: string | null, now: number, follow?: Follow): void {
   const insert = d.prepare(
     `INSERT OR IGNORE INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, root_message_id, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
+  if (follow !== undefined) {
+    insert.run(taskId, 'lark', follow.appId, follow.chatId, follow.threadId, follow.threadId === '' ? null : follow.rootId, now);
+  }
   if (via.kind === 'chat') {
     const root = via.threadId === '' || via.rootId === undefined || via.rootId === '' ? null : via.rootId;
     insert.run(taskId, via.channel, via.appId, via.conversationId, via.threadId, root, now);

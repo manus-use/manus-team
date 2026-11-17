@@ -21,13 +21,16 @@ import {
   runsOf,
   statusOf,
   taskView,
+  threadRootOf,
   type BoardEntry,
   type BoardSummary,
   type CardReading,
   type InstanceRow,
   type MemberRow,
   type TaskView,
+  type ThreadAt,
 } from '../db/kanban-read.js';
+import { CHAT_ID, THREAD_ID } from '../core/lark-ids.js';
 import { buildEnv } from '../driver/env.js';
 import { nameProblem, visible } from '../names.js';
 import { redactKnownSecrets } from '../secrets.js';
@@ -323,6 +326,28 @@ const CHAT_KEY = 'lark:';
 const OPERATOR_KEY = 'operator:';
 
 /**
+ * Why a `follow` is refused (kanban spec §22.1, workflows spec §18.1), or
+ * undefined: only the terminal names a chat, as a chat follows what is made in
+ * it and a run's work follows its task's chats; and it names one in Lark's
+ * shapes, for a bot, with a thread's root, and none at chat scope.
+ */
+function followRefused(follow: unknown, via: CreatedVia): Refusal | undefined {
+  if (follow === undefined) return undefined;
+  if (via?.kind !== 'operator') {
+    return board.refuse('invalid', "only the terminal names a chat to follow what it makes: a chat follows what is made in it, and a run's work its task's chats");
+  }
+  if (!isRecord(follow) || !isText(follow.appId) || follow.appId === '' || !isText(follow.chatId) || !CHAT_ID.test(follow.chatId)) {
+    return board.refuse('invalid', "a chat to follow is the bot's app id and a chat id, oc_…");
+  }
+  const { threadId, rootId } = follow;
+  if (!isText(threadId) || (threadId !== '' && !THREAD_ID.test(threadId))) return board.refuse('invalid', 'a thread to follow in is a thread id, omt_…, or none');
+  if (threadId === '' ? rootId !== null : !isText(rootId) || rootId === '') {
+    return board.refuse('invalid', 'a thread is followed with its root message, and a chat with none');
+  }
+  return undefined;
+}
+
+/**
  * A report refused while another on the task runs its gates: what to look at
  * meanwhile, typed as its reporter types it -- in chat for a person, the worker
  * CLI's own command for a run's agent, as its prompt names it.
@@ -438,6 +463,8 @@ export class KanbanService {
     // The checks a task gets however it is made (workflows spec §15), then its key, which reads the database.
     const checked = checkTask(req, this.#facts());
     if (!checked.ok) return checked;
+    const follow = followRefused(req.follow, req.createdVia);
+    if (follow !== undefined) return follow;
     const key = this.#idempotencyKey(req.idempotencyKey, req.createdVia);
     if (!key.ok) return key;
     return board.createTask(
@@ -458,9 +485,19 @@ export class KanbanService {
         createdBy: req.createdBy,
         createdVia: req.createdVia,
         ...(req.board === undefined ? {} : { board: req.board }),
+        ...(req.follow === undefined ? {} : { follow: req.follow }),
       },
       this.#clock.now(),
     );
+  }
+
+  /**
+   * The root of a thread, as the notifier finds it (spec §19.7): the message a
+   * subscription in it recorded, or undefined for none, or at chat scope. The
+   * terminal's `--thread` follows only a thread whose root is known (kanban spec §22.1).
+   */
+  threadRoot(at: ThreadAt): string | undefined {
+    return threadRootOf(this.#db, at);
   }
 
   assign(taskId: string, assignee: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {

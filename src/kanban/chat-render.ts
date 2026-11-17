@@ -423,7 +423,8 @@ export function blocksTask(event: KanbanEvent): boolean {
  * people: the one line that says who a person's card went to, when it went by
  * direct message (spec §19.5), named in plain text, never mentioned -- a card in
  * the task's thread says it itself, and a claim is no notice, as only the send
- * knows where the card went -- and a card that could not be sent.
+ * knows where the card went -- and a card that could not be sent. A task a
+ * terminal made for a chat to follow is announced there by its "Created" line.
  */
 export function renderNotice(
   event: KanbanEvent,
@@ -503,6 +504,11 @@ export function renderNotice(
     }
     case 'stranded':
       return `Stranded: ${name}. Nobody can be given it: ${label(text(p, 'reason'), 500)}`;
+    case 'task_created_followed': {
+      // The "Created" line of a task a terminal made (kanban spec §22.1), from the task as it is now, as every notice.
+      const whose = task.assignee === null ? 'nobody yet' : whom(task.assignee, opts.nameOf);
+      return `Created ${id(task.taskId)} **${label(task.title)}**, for ${whose}, by ${label(text(p, 'by'), 80)} from a terminal.`;
+    }
     default:
       return undefined;
   }
