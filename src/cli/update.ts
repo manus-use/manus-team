@@ -413,9 +413,11 @@ class Update {
     this.view = serviceView(this.io, deps.service);
     this.checkout = realpathOr(deps.service.checkout);
     this.node = deps.service.node;
-    // This shell's, never a board run's, and nothing git or npm starts may prompt.
+    // This shell's, never an agent's (no MT_KANBAN_* and no MT_CRON_*), and nothing git or npm starts may prompt.
     const env: Record<string, string | undefined> = {};
-    for (const [name, value] of Object.entries(io.env)) if (!name.startsWith('MT_KANBAN_')) env[name] = value;
+    for (const [name, value] of Object.entries(io.env)) {
+      if (!name.startsWith('MT_KANBAN_') && !name.startsWith('MT_CRON_')) env[name] = value;
+    }
     this.shellEnv = { ...env, GIT_TERMINAL_PROMPT: '0' };
     // This shell's secrets, as the .env's are once read: an exported LARK_APP_SECRET is masked in what a failure shows.
     addSecrets(Object.entries(this.shellEnv).flatMap(([name, value]) => (isSecretName(name) && value !== undefined && value !== '' ? [value] : [])));
