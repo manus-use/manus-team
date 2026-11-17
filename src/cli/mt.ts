@@ -102,6 +102,7 @@ const USAGE = [
   '  mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>] [--json]',
   '  mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--json]',
   '  mt kanban workflow archive <instance> [--board <name>] [--json]',
+  '  mt kanban people [--json]',
   "the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
   `  mt kanban <${WORKER_COMMANDS.join('|')}> < input.json`,
   CRON_USAGE,
@@ -143,7 +144,7 @@ function gate(argv: readonly string[], io: MtIo): number {
  * The operator's groups (spec §2.6), which refuse to run in an agent's shell.
  * Every other `mt kanban <command>` is the worker CLI's (spec §7.3).
  */
-const OPERATOR_GROUPS: readonly string[] = ['task', 'board', 'gate', 'workflow'];
+const OPERATOR_GROUPS: readonly string[] = ['task', 'board', 'gate', 'workflow', 'people'];
 
 /** The subcommands whose name a run's refusal gives: `mt kanban board set`, not just `mt kanban board`. */
 const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
@@ -151,6 +152,7 @@ const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
   board: ['list', 'create', 'set', 'archive', 'use'],
   gate: ['add', 'list', 'remove'],
   workflow: ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive'],
+  people: [],
 };
 
 /**

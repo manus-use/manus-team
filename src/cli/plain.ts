@@ -89,6 +89,13 @@ export function listText(
   return table([['task', 'status', 'assignee', 'title'], ...rows]);
 }
 
+/** `mt kanban people` (kanban spec §22.2): each person this bot has seen, by name, with their principal and talk tier. */
+export function peopleText(seen: readonly { unionId: string; name: string | null; talk: boolean }[]): string[] {
+  if (seen.length === 0) return ['no people yet: the gateway learns a person once they have used /kanban, or been @-mentioned in it'];
+  const rows = seen.map((p) => [p.name === null ? '(no name)' : line(p.name, 80), `lark:${line(p.unionId, 80)}`, p.talk ? 'talk' : 'no']);
+  return table([['name', 'person', 'talk'], ...rows]);
+}
+
 /** `mt kanban task show` (spec §9.1): what chat's shows, the task's board always named. */
 export function showText(view: TaskView, gates: readonly GateRow[]): string[] {
   const { task } = view;

@@ -11,11 +11,11 @@ import { DEFAULT_BOARD, type BoardRow, type Contract, type Refusal, type Waiting
 import { WORKER_LIMITS } from '../kanban/limits.js';
 import { visible } from '../names.js';
 import { parse, UsageError } from './args.js';
-import { loadOperator, operatorName, personHint, withBoard, type PeopleMissing } from './gate.js';
+import { loadOperator, operatorName, personHint, withBoard, type BoardAccess, type PeopleMissing } from './gate.js';
 import { ask } from './kanban.js';
 import type { MtIo } from './mt.js';
 import { BIDI, decodeUtf8, INVISIBLE } from '../text.js';
-import { boardsText, dryRunText, instanceText, instancesText, line, listText, madeText, previewText, showText, who, workflowsText } from './plain.js';
+import { boardsText, dryRunText, instanceText, instancesText, line, listText, madeText, peopleText, previewText, showText, who, workflowsText } from './plain.js';
 
 /**
  * The operator's `mt kanban task …` and `mt kanban board …` (spec §2.6): chat's
@@ -137,7 +137,7 @@ async function act(
   io: MtIo,
   json: boolean,
   what: string,
-  fn: (service: KanbanService, by: string) => Outcome,
+  fn: (service: KanbanService, by: string, board: BoardAccess) => Outcome,
   opts: { workflows?: boolean } = {},
 ): Promise<number> {
   const no = (code: string, message: string): number => {
@@ -156,7 +156,7 @@ async function act(
       home = board.home;
       enabled = board.kanbanEnabled;
       missing = board.peopleMissing;
-      outcome = fn(board.service, operatorName(io));
+      outcome = fn(board.service, operatorName(io), board);
       return 0;
     },
     { refuse: no, unsetNote: 'those values are not masked here', ...(opts.workflows === true ? { workflows: true } : {}) },
@@ -722,8 +722,32 @@ function task(args: readonly string[], io: MtIo): Promise<number> {
   }
 }
 
-/** `mt kanban task …`, `board …` and `workflow …`, outside a board run: the operator's. */
+/**
+ * `mt kanban people [--json]` (kanban spec §22.2): who this bot has seen, as a
+ * terminal names them, `lark:<union_id>`, and whether they have talk tier by
+ * the open_id last seen. A union_id is in no message a person sees, so this is
+ * how an operator finds one.
+ */
+function people(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, JSON_FLAG);
+  if (positionals.length > 0) throw new UsageError('kanban people takes no arguments');
+  return act(io, values.json === true, 'mt kanban people', (_service, _by, board) => {
+    const seen = board.seen();
+    if (seen === undefined) return refused({ code: 'no_bot', message: 'there is no bot to list people for: this shell finds no lark.appId or LARK_APP_ID' });
+    if (board.peopleMissing === 'owner' && values.json !== true) {
+      io.err('mt: this shell finds no auth.owner or MT_OWNER_OPEN_ID, so nobody is shown with talk tier');
+    }
+    return {
+      ok: true,
+      lines: peopleText(seen),
+      json: { people: seen.map((p) => ({ principal: `lark:${p.unionId}`, union_id: p.unionId, name: p.name, talk: p.talk })) },
+    };
+  });
+}
+
+/** `mt kanban task …`, `board …`, `workflow …` and `people`, outside a board run: the operator's. */
 export async function operatorCommand(command: string, rest: readonly string[], io: MtIo): Promise<number> {
+  if (command === 'people') return people(rest, io);
   if (command === 'board') return board(rest, io);
   if (command === 'task') return task(rest, io);
   if (command === 'workflow') return workflow(rest, io);

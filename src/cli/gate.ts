@@ -3,6 +3,7 @@ import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { loadTeamSettings, type Env, type TeamSettings } from '../config.js';
 import { openDb } from '../db/open.js';
+import { peopleOf } from '../db/people.js';
 import { PeopleDirectory } from '../kanban/people.js';
 import { KanbanService } from '../kanban/service.js';
 import type { GateRow } from '../kanban/types.js';
@@ -96,7 +97,20 @@ export interface BoardAccess {
   kanbanEnabled: boolean | undefined;
   /** Why the service has no people, so a person cannot be checked here; undefined when it has them. */
   peopleMissing: PeopleMissing | undefined;
+  /**
+   * The people this bot has seen, each with talk tier by this shell's allowlist,
+   * none with an owner missing: `mt kanban people`'s (kanban spec §22.2).
+   * Undefined with no app id, as there is no bot to list them for.
+   */
+  seen(): SeenPerson[] | undefined;
   close(): void;
+}
+
+/** A person as `mt kanban people` lists them. */
+export interface SeenPerson {
+  unionId: string;
+  name: string | null;
+  talk: boolean;
 }
 
 /** What `assignable` says of a person when the service has no talk check: right for a board not in Lark, wrong beside a gateway that is. */
@@ -204,7 +218,11 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     workflowsDir: join(settings.home, 'workflows'),
     ...(people === undefined ? {} : { people }),
   });
-  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, peopleMissing, close: () => db.close() };
+  const seen = (): SeenPerson[] | undefined =>
+    appId === undefined
+      ? undefined
+      : peopleOf(db, appId).map((p) => ({ unionId: p.unionId, name: p.name, talk: talk?.includes(p.openId) === true }));
+  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, peopleMissing, seen, close: () => db.close() };
 }
 
 /** A write the gateway held the lock through, every retry: not this command's fault. */
