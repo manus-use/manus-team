@@ -31,6 +31,17 @@ import { WorkerApi } from './kanban/worker.js';
 import { TaskDirectories } from './kanban/worktree.js';
 import { listWorkflows, workflowLines } from './kanban/workflow.js';
 import type { Channel } from './channel/types.js';
+import { CronChat } from './cron/chat.js';
+import { CronScheduler } from './cron/scheduler.js';
+import { processZone } from './cron/schedule.js';
+import { CronService } from './cron/service.js';
+import { CronTokens } from './cron/tokens.js';
+import { CronApi } from './cron/worker.js';
+import { writeGatewayZone } from './cron/zone-file.js';
+import { jobCounts } from './db/cron.js';
+import { lockDatabase } from './kanban/socket.js';
+import { SinkChannel } from './kanban/sink.js';
+import { PackagesInUse } from './render/native.js';
 
 /**
  * Wiring, and the boot order.
@@ -62,6 +73,21 @@ export interface Gateway {
   readonly cards: CardPoster | undefined;
   /** `/kanban` and the board cards' buttons, when `kanban.enabled` is set. */
   readonly chat: KanbanChat | undefined;
+  /** The cron scheduler, when `cron.enabled` is set. */
+  readonly cron: CronScheduler | undefined;
+}
+
+/**
+ * The cron startup line (the cron spec, §10), after the board's, or none: cron
+ * off with no jobs says nothing.
+ */
+export function cronLine(cron: { enabled: boolean; maxRunning: number; idleTimeoutS: number; tz?: string }, counts: { active: number; paused: number }, zone: string): string | undefined {
+  if (!cron.enabled) return counts.active === 0 ? undefined : `cron: off (cron.enabled is unset); ${counts.active} active job(s) do not fire`;
+  return (
+    `cron: ${counts.active} active job(s), ${counts.paused} paused; up to ${cron.maxRunning} fire(s) at once, ` +
+    `each stopped after ${cron.idleTimeoutS} s with no activity; new jobs in ${zone} (from ${cron.tz === undefined ? "this process's zone" : 'cron.tz'}), ` +
+    'and every job keeps its own zone'
+  );
 }
 
 /**
@@ -205,6 +231,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     );
   }
   note(`schema at version ${version} (${config.dbPath})`);
+  // The zone new jobs get (the cron spec, §2.2): cron.tz, else this process's.
+  const zone = config.cron.tz ?? processZone();
 
   // Before anything can open a session in one. A name whose directory moved would
   // orphan the provider sessions opened there (spec §2.3).
@@ -244,20 +272,25 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     allowMentionAll: config.auth.allowMentionAll,
   });
 
-  // The registry asks the dispatcher, which needs the registry, so it is read late.
+  // The registry asks the dispatcher and the scheduler, which need the registry, so they are read late.
   let dispatcher: Dispatcher | undefined;
+  let scheduler: CronScheduler | undefined;
+  let tokens: CronTokens | undefined;
   const registry = new SessionRegistry({
     db,
     drivers,
     // A chat's session posts to Lark; a kanban run's into the sink (spec §2.4 item 4),
-    // which forwards a supervised agent's approval cards to the chat following its task (spec §7.1).
+    // which forwards a supervised agent's approval cards to the chat following its task (spec §7.1);
+    // a cron fire's into a sink of its own, which forwards nothing (the cron spec, §5.2).
     channels: new Map<string, Channel>([
       [adapter.id, adapter],
       ['kanban', new KanbanSink(undefined, { db, channels: new Map<string, Channel>([[adapter.id, adapter]]), appId: config.lark.appId })],
+      ['cron', new SinkChannel('cron', { subject: (jobId) => `cron job ${jobId}` })],
     ]),
-    envFor: (sessionId) => dispatcher?.envFor(sessionId),
-    argsFor: (sessionId) => dispatcher?.argsFor(sessionId),
-    pinned: (sessionId) => dispatcher?.pinned(sessionId) ?? false,
+    // A run's, else a fire's, else a chat session's cron token (the cron spec, §7).
+    envFor: (sessionId, key) => dispatcher?.envFor(sessionId) ?? scheduler?.envFor(sessionId) ?? tokens?.envFor(sessionId, key),
+    argsFor: (sessionId) => dispatcher?.argsFor(sessionId) ?? scheduler?.argsFor(sessionId),
+    pinned: (sessionId) => (dispatcher?.pinned(sessionId) ?? false) || (scheduler?.pinned(sessionId) ?? false),
     // A kanban run in a task's own directory works there, as recorded when it was made (spec §18).
     workspaces: new NamedWorkspaces(team.workspaces, (id) => worktreeOf(db, id)),
     appId: config.lark.appId,
@@ -273,6 +306,13 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   let cards: CardPoster | undefined;
   let workerServer: WorkerServer | undefined;
   let lock: GatewayLock | undefined;
+  let dbLock: GatewayLock | undefined;
+  // The socket and the shim, for a run's agent and a cron agent alike (spec §7.2, the cron spec §7).
+  const socket = workerSocketPath(config.home);
+  const access = { socket, mtDir: join(config.home, 'bin'), path: process.env['PATH'] };
+  // One set of the rendered packages in use, the dispatcher's runs' and the scheduler's fires' (the cron spec, §5.2).
+  const packages = new PackagesInUse();
+  let boardApi: WorkerApi | undefined;
   if (config.kanban.enabled) {
     const { failureLimit, transientLimit, transientCooldownS } = config.kanban;
     // Who the gateway has seen in Lark: how a person named by principal is checked for talk tier (spec §4.2).
@@ -300,7 +340,6 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       // So /kanban task show can say a task is waiting on its role's limit (spec §6.3).
       ...(config.kanban.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: config.kanban.maxRunningPerRole }),
     });
-    const socket = workerSocketPath(config.home);
     dispatcher = new Dispatcher({
       db,
       service,
@@ -311,10 +350,11 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       note,
       // Outside every workspace: none may contain the home (spec §2.3).
       renderRoot: join(config.home, 'rendered'),
+      packages,
       // How a run reports (spec §7.2): through the socket, with this build's mt
       // first on its PATH. Both are in the home too.
       // Written in start(), once the home is held: a refused second gateway must not rewrite the first one's.
-      worker: { socket, mtDir: join(config.home, 'bin'), path: process.env['PATH'] },
+      worker: access,
       nameOf: (principal) => people.nameOf(principal),
       // In the home too, outside every workspace's repository (spec §18). Git gets what an agent gets.
       workdirs: new TaskDirectories({
@@ -326,12 +366,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       }),
     });
     // A worker's create, link or report can make a task claimable.
-    const api = new WorkerApi({ db, service, changed: () => dispatcher?.pass(), nameOf: (principal) => people.nameOf(principal) });
-    // One handler, by envelope; a nudge's throttle is its own (the cron spec, §7.4).
-    worker = {
-      handler: new SocketHandler({ board: (request, signal) => api.handle(request, signal === undefined ? {} : { signal }), nudged: () => dispatcher?.pass() }),
-      socket,
-    };
+    boardApi = new WorkerApi({ db, service, changed: () => dispatcher?.pass(), nameOf: (principal) => people.nameOf(principal) });
     // /kanban in chat (spec §9.1): through the same service, with the router's tiers.
     kanbanChat = new KanbanChat({
       service,
@@ -373,6 +408,54 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     if (isolated.length > 0) note(`kanban: each task in ${isolated.join(', ')} gets a directory of its own`);
   }
 
+  // Opt in: off unless cron.enabled is set (the cron spec, §10). Chat runs as before
+  // without it: no token, no changed PATH, and `/cron` says cron is off.
+  let cronApi: CronApi | undefined;
+  let cronChat: CronChat | undefined;
+  if (config.cron.enabled) {
+    const cronService = new CronService({ db, roles: team.roles, workspaces: new Set(team.workspaces.keys()), zone });
+    tokens = new CronTokens({ db, worker: access });
+    scheduler = new CronScheduler({
+      db,
+      service: cronService,
+      sessions: registry,
+      channels: new Map<string, Channel>([[adapter.id, adapter]]),
+      appId: config.lark.appId,
+      settings: config.cron,
+      note,
+      roles: team.roles,
+      workspaceDirs: team.workspaces,
+      renderRoot: join(config.home, 'rendered'),
+      packages,
+      // With the board off, its dispatcher's boot does not sweep the rendered packages.
+      sweepRendersAtBoot: !config.kanban.enabled,
+      worker: access,
+      tokens,
+    });
+    const s = scheduler;
+    cronApi = new CronApi({ db, service: cronService, tokens, appId: config.lark.appId, changed: () => s.tick() });
+    cronChat = new CronChat({ db, service: cronService, hasTier: (principal, tier) => authorizer.hasTier(principal, tier), changed: () => s.tick() });
+  }
+  const cronNote = cronLine(config.cron, jobCounts(db), zone);
+  if (cronNote !== undefined) note(cronNote);
+
+  // One handler, by envelope; a nudge's throttle is its own, and asks for both (the cron spec, §7.4).
+  if (boardApi !== undefined || cronApi !== undefined) {
+    const board = boardApi;
+    const cron = cronApi;
+    worker = {
+      handler: new SocketHandler({
+        ...(board === undefined ? {} : { board: (request, signal) => board.handle(request, signal === undefined ? {} : { signal }) }),
+        ...(cron === undefined ? {} : { cron: (request) => cron.handle(request) }),
+        nudged: () => {
+          dispatcher?.pass();
+          scheduler?.tick();
+        },
+      }),
+      socket,
+    };
+  }
+
   const router = new Router({
     db,
     registry,
@@ -381,6 +464,9 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     channelId: adapter.id,
     appId: config.lark.appId,
     ...(kanbanChat === undefined ? {} : { kanban: kanbanChat }),
+    ...(cronChat === undefined ? {} : { cron: cronChat }),
+    // Each turn's sender's tier, against its session's cron token (the cron spec, §7.1).
+    ...(tokens === undefined ? {} : { cronTurns: tokens }),
     note,
   });
 
@@ -402,6 +488,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     get chat() {
       return kanbanChat;
     },
+    cron: scheduler,
 
     async start(): Promise<void> {
       // First, the home's lock and then the worker socket's path: a second gateway
@@ -411,10 +498,15 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       if (worker !== undefined) {
         lock = lockGateway(config.home);
         try {
+          // With cron on, the database's own lock too: a database two homes name is ticked by one (the cron spec, §4.1).
+          if (scheduler !== undefined) dbLock = lockDatabase(config.dbPath);
           await claimSocketPath(worker.socket);
           // Only once the home is this gateway's: the mt a run finds on its PATH (spec §7.2).
           writeMtShim(config.home);
+          // And the zone it gives new jobs, for the terminal's mt cron (the cron spec, §2.2).
+          if (scheduler !== undefined) writeGatewayZone(config.home, zone);
         } catch (err) {
+          dbLock?.release();
           lock.release();
           throw err;
         }
@@ -426,6 +518,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       note(`reconciled ${findings.length} session(s) needing attention`);
       // Then every run the restart killed is closed, before anything can claim (spec §8.4).
       await dispatcher?.boot();
+      // Then every fire the restart left open, after the board's boot (the cron spec, §4.4).
+      await scheduler?.boot();
       // Then the socket, before the first pass can start a run that would report to it.
       if (worker !== undefined) {
         const { handler, socket } = worker;
@@ -439,6 +533,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       note(`connected as ${adapter.botOpenId ?? 'unknown bot identity'}`);
       // Once connected: its first round catches up on what the chats missed while the gateway was down.
       notifier?.start();
+      // And the first tick, which sends what is pending and fires what came due while down.
+      scheduler?.start();
       // And sends the cards of people's runs that a stop left unsent.
       cards?.start();
 
@@ -486,6 +582,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       if (housekeeping !== undefined) clearInterval(housekeeping);
       // No more claims; the runs still open are ended by the next boot.
       dispatcher?.stop();
+      // No more fires, and the running ones marked stopping before the actors close: the next boot ends them interrupted.
+      scheduler?.stop();
       // No more notices, nor cards; what was not sent is sent by the next boot, from the board.
       notifier?.stop();
       cards?.stop();
@@ -535,8 +633,12 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       if ((await dispatcher?.idle(SHUTDOWN_DRAIN_MS)) === false) {
         note('kanban: stopped with run work still pending; anything it still writes is dropped, and the next boot ends those runs');
       }
+      if ((await scheduler?.idle(SHUTDOWN_DRAIN_MS)) === false) {
+        note('cron: stopped with a fire\'s archive still pending; the next boot ends the fire interrupted');
+      }
       db.close();
-      // Last: until here, this gateway still had the home's sessions and runs.
+      // Last: until here, this gateway still had the home's sessions and runs, and the database's fires.
+      dbLock?.release();
       lock?.release();
     },
   };
