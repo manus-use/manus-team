@@ -29,6 +29,7 @@ import {
   renderList,
   renderPreview,
   renderStarted,
+  startedReply,
   renderWorkflows,
   renderReviewCard,
   renderShow,
@@ -550,7 +551,7 @@ export class KanbanChat {
   }
 
   #started(made: WorkflowMade, where: 'thread' | 'chat'): string {
-    return renderStarted(made, where, (a) => this.#whom(a));
+    return renderStarted(startedReply(made), where, (a) => this.#whom(a));
   }
 
   /**

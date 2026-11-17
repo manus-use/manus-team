@@ -268,7 +268,7 @@ export class Notifier {
       const key = `sub:${sub.id}`;
       if (this.#held(key)) continue;
       try {
-        pending.push(this.#read(sub));
+        pending.push(this.#read(sub, c.target.threadId !== '' && c.target.root !== undefined ? 'thread' : 'chat'));
         // A pause for a read that failed is over; one for a cursor that did not move lasts until it moves.
         if (this.#backoff.get(key)?.advance !== true) this.#backoff.delete(key);
       } catch (err) {
@@ -372,8 +372,8 @@ export class Notifier {
       .map((e) => unblockButton(this.#deps.appId, e));
   }
 
-  /** A subscription's events past its cursor, and the notices among them. */
-  #read(sub: SubscriptionRow): Pending {
+  /** A subscription's events past its cursor, and the notices among them, worded for a thread with a root or for the chat. */
+  #read(sub: SubscriptionRow, where: 'thread' | 'chat'): Pending {
     const task = getTask(this.#deps.db, sub.taskId);
     if (task === undefined) throw new TaskGone(`task ${sub.taskId} is not on the board`);
     const events = eventsAfter(this.#deps.db, sub.taskId, sub.cursor, ROUND_EVENTS);
@@ -382,6 +382,7 @@ export class Notifier {
       const text = renderNotice(event, task, {
         blockRecurrenceLimit: this.#deps.blockRecurrenceLimit,
         runAssignee: (runId) => getRun(this.#deps.db, runId)?.assignee,
+        where,
         ...(this.#deps.nameOf === undefined ? {} : { nameOf: this.#deps.nameOf }),
       });
       if (text !== undefined) notices.push({ event, text });

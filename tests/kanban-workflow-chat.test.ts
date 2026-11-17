@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getInstance, getTask, subscriptionsOf } from '../src/db/kanban-read.js';
 import { createBoard } from '../src/db/kanban.js';
 import { KanbanChat } from '../src/kanban/chat.js';
-import { WORKFLOW_REPLY_MAX, renderInstance, renderStarted } from '../src/kanban/chat-render.js';
+import { WORKFLOW_REPLY_MAX, renderInstance, renderStarted, startedReply } from '../src/kanban/chat-render.js';
 import { PeopleDirectory } from '../src/kanban/people.js';
 import { KanbanService } from '../src/kanban/service.js';
 import type { TaskRow } from '../src/kanban/types.js';
@@ -191,7 +191,7 @@ describe("a start's reply", () => {
     const tasks = Array.from({ length: 100 }, (_, i) => ({
       task: { taskId: `k_${String(i).padStart(12, '0')}`, title: `${'T'.repeat(500)} number ${i}`, assignee: { kind: 'role', name: 'worker' }, reviewer: null } as unknown as TaskRow,
     }));
-    const text = renderStarted({ instance: { instanceId: 'w_aaaaaaaaaaaa', name: 'big', board: 'default' }, tasks }, 'thread', (a) => `role ${a.name}`);
+    const text = renderStarted(startedReply({ instance: { instanceId: 'w_aaaaaaaaaaaa', name: 'big', board: 'default' }, tasks }), 'thread', (a) => `role ${a.name}`);
     const lines = text.split('\n');
     expect(text.length).toBeLessThan(WORKFLOW_REPLY_MAX);
     const listed = lines.filter((l) => l.startsWith('- '));

@@ -69,6 +69,7 @@ import {
   type CommentRow,
   type CreateRequest,
   type CreatedVia,
+  type Follow,
   type GateRow,
   type Phase,
   type Refusal,
@@ -199,6 +200,8 @@ export interface StartRequest {
   createdVia: CreatedVia;
   /** Chat's board, or the terminal's `--board`, else `default`; a run's is its task's, whatever this says. */
   board?: string;
+  /** The chat that follows every member, named at the terminal (workflows spec §18.1); the operator's alone. */
+  follow?: Follow;
 }
 
 /** A DAG to make (workflows spec §6), parsed but not yet checked: the terminal's file, or a run's `apply-dag` input without its own keys. */
@@ -209,6 +212,8 @@ export interface ApplyRequest {
   dryRun?: boolean;
   createdBy: string;
   createdVia: CreatedVia;
+  /** As a start's: not a key of the DAG, so its hash is the same wherever it is heard (workflows spec §18.1). */
+  follow?: Follow;
 }
 
 /** What a start or an apply made, or found made with its key: the instance, and its members with their tasks. */
@@ -1292,6 +1297,8 @@ export class KanbanService {
   startWorkflow(req: StartRequest): Result<WorkflowMade> {
     if (!isRecord(req)) return board.refuse('invalid', 'a start is an object');
     if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
+    const follow = followRefused(req.follow, req.createdVia);
+    if (follow !== undefined) return follow;
     const on = this.#boardFor(req.createdVia, req.board);
     if (!on.ok) return on;
     const key = this.#idempotencyKey(req.idempotencyKey, req.createdVia);
@@ -1302,7 +1309,15 @@ export class KanbanService {
     if (!shaped.ok) return shaped;
     const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
-    return this.#write(shaped, { name: shaped.workflow.name, source: 'start', board: on.board, key: key.key, createdBy: req.createdBy, createdVia: req.createdVia });
+    return this.#write(shaped, {
+      name: shaped.workflow.name,
+      source: 'start',
+      board: on.board,
+      key: key.key,
+      createdBy: req.createdBy,
+      createdVia: req.createdVia,
+      ...(req.follow === undefined ? {} : { follow: req.follow }),
+    });
   }
 
   /**
@@ -1316,6 +1331,8 @@ export class KanbanService {
     if (!isRecord(req)) return board.refuse('invalid', 'an apply is an object');
     const shaped = checkDagShape(req.dag, req.createdVia?.kind === 'run' ? 'run' : 'terminal');
     if (!shaped.ok) return shaped;
+    const follow = followRefused(req.follow, req.createdVia);
+    if (follow !== undefined) return follow;
     const on = this.#boardFor(req.createdVia, shaped.dag.board);
     if (!on.ok) return on;
     if (on.run !== undefined && shaped.dag.board !== null && shaped.dag.board !== on.board) {
@@ -1335,7 +1352,15 @@ export class KanbanService {
     const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
     if (req.dryRun === true) return { ok: true, dryRun: true, existing: false, instanceId: null, board: on.board, tasks: shaped.dag.tasks };
-    return this.#write(shaped, { name: shaped.dag.workflow, source: 'apply', board: on.board, key: key.key, createdBy: req.createdBy, createdVia: req.createdVia });
+    return this.#write(shaped, {
+      name: shaped.dag.workflow,
+      source: 'apply',
+      board: on.board,
+      key: key.key,
+      createdBy: req.createdBy,
+      createdVia: req.createdVia,
+      ...(req.follow === undefined ? {} : { follow: req.follow }),
+    });
   }
 
   /** A key's instance, read-only (workflows spec §6 step 0): the repeat's answer, or why the key is another's; undefined for a key not used. */
@@ -1350,7 +1375,7 @@ export class KanbanService {
   /** The one transaction (workflows spec §6 step 3). */
   #write(
     shaped: ShapedDag,
-    i: { name: string | null; source: 'start' | 'apply'; board: string; key: string | null; createdBy: string; createdVia: CreatedVia },
+    i: { name: string | null; source: 'start' | 'apply'; board: string; key: string | null; createdBy: string; createdVia: CreatedVia; follow?: Follow },
   ): Result<WorkflowMade> {
     const r = board.applyDag(
       this.#db,
@@ -1363,6 +1388,7 @@ export class KanbanService {
         createdBy: i.createdBy,
         createdVia: i.createdVia,
         idempotencyKey: i.key,
+        ...(i.follow === undefined ? {} : { follow: i.follow }),
       },
       this.#members(shaped.dag),
       this.#clock.now(),

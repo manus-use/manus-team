@@ -2080,7 +2080,12 @@ export interface NewInstance {
   createdVia: CreatedVia;
   /** Namespaced as a task's (spec §3.1), or null for none. */
   idempotencyKey: string | null;
+  /** The chat a terminal named to follow every member (workflows spec §18.1), beside the DAG, not in it. */
+  follow?: Follow;
 }
+
+/** The members a `workflow_started` payload lists: the start's reply lists at most 30 (workflows spec §9, §18.2). */
+const STARTED_TASKS = 30;
 
 /** One of the DAG's tasks, as the writer makes it: its fields, its member fields, its parents as earlier positions, and its gates. */
 export interface NewMember {
@@ -2140,7 +2145,11 @@ export function keyRefused(
  * masked but for its gates; then each task through `insertTask`, with its
  * subscriptions and its `created` event carrying the instance, its links, its
  * gates through `insertGate`, and its member row. A refusal, or a member's
- * repeated ref, rolls everything back: all of it is made, or none.
+ * repeated ref, rolls everything back: all of it is made, or none. With a
+ * `follow`, every member's insert subscribes it, and one `workflow_started` on
+ * the first member, after the member rows, holds the start's reply for the
+ * notifier to post (workflows spec §18.2): the facts, not the text, which the
+ * notifier makes, masked and worded as every notice is.
  */
 export function applyDag(db: Db, instance: NewInstance, members: readonly NewMember[], now: number): Result<AppliedDag> {
   return tx(db, (d) => {
@@ -2192,7 +2201,16 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
       });
       const taskId = insertTask(
         d,
-        { ...m.task, board, createdFromTask, parents, idempotencyKey: null, createdBy: instance.createdBy, createdVia: instance.createdVia },
+        {
+          ...m.task,
+          board,
+          createdFromTask,
+          parents,
+          idempotencyKey: null,
+          createdBy: instance.createdBy,
+          createdVia: instance.createdVia,
+          ...(instance.follow === undefined ? {} : { follow: instance.follow }),
+        },
         now,
         { workflow: instanceId, workflowName: instance.name, ref: m.ref, step: m.step, item: m.item },
       );
@@ -2203,6 +2221,33 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
       }
       member.run(taskId, instanceId, m.ref, m.step, m.item === null ? null : mask(m.item), position);
       ids.push(taskId);
+    }
+    const first = ids[0];
+    if (instance.follow !== undefined && first !== undefined) {
+      const human = (a: Assignee | null | undefined): boolean => a?.kind === 'human';
+      record(
+        d,
+        {
+          taskId: first,
+          kind: 'workflow_started',
+          actor: instance.createdBy,
+          payload: {
+            workflow: instanceId,
+            workflowName: instance.name,
+            board,
+            by: instance.createdBy,
+            count: members.length,
+            people: members.some((m) => human(m.task.assignee) || human(m.task.reviewer)),
+            tasks: members.slice(0, STARTED_TASKS).map((m, i) => ({
+              taskId: ids[i],
+              title: m.task.title,
+              assignee: m.task.assignee?.name ?? null,
+              assigneeKind: m.task.assignee?.kind ?? null,
+            })),
+          },
+        },
+        now,
+      );
     }
     const made = getInstance(d, instanceId);
     if (made === undefined) throw new Error(`instance ${instanceId} vanished inside its own transaction`);
