@@ -1076,11 +1076,15 @@ recommend one; draft, review, publish. A **workflow** is that graph written once
 the gateway's host, and started as often as needed. **Starting** it makes one **instance**,
 `w_…`: every task and every link of the graph, at once, in one go, or none of them.
 
+Six workflows ready to copy, from a weekly report to a triage step that routes requests, are in
+[examples.md](examples.md), part 1.
+
 ### The file
 
 One YAML file a workflow, at `~/.manus-team/workflows/<name>.yaml`, named as a role is:
 lowercase letters, digits and `-`. This is `vendor-eval.yaml`:
 
+<!-- example: workflow vendor-eval -->
 ```yaml
 description: Shortlist vendors, evaluate each in parallel, then recommend one
 params:
@@ -1651,6 +1655,7 @@ The graph of recipe 1, a brief, three prototypes in parallel and a recommendatio
 all three, kept as a workflow file on the gateway's host and made from a shell there. The file,
 `~/.manus-team/workflows/caching.yaml`:
 
+<!-- example: workflow caching -->
 ```yaml
 description: A brief, three prototypes in parallel, and a recommendation
 params:
@@ -2031,6 +2036,9 @@ A cron job is not a task. It is a schedule, a role and a prompt: at each time th
 opens a fresh session of the role, gives it the prompt, and posts the answer to the chat the
 job was made in. Nothing reports, nothing is reviewed, and the board does not see it. Cron is
 on when the operator sets `cron.enabled: true` in config.yaml and restarts the gateway.
+
+Cron jobs ready to copy, from a daily digest to a workflow started on a schedule, are in
+[examples.md](examples.md), part 2.
 
 ### Making one in chat
 
