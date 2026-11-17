@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { appendEvent } from '../src/db/events.js';
 import { createSession } from '../src/db/sessions.js';
-import { LAST_OUTPUT_CHARS, hadSideEffects, lastTurnOf, toolCallsOf } from '../src/kanban/session-log.js';
+import { LAST_OUTPUT_CHARS, hadSideEffects, lastTurnOf, toolCallsOf, turnText } from '../src/kanban/session-log.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import type { NewEvent } from '../src/types.js';
 import { testDb, type TestDb } from './helpers/db.js';
@@ -162,5 +162,20 @@ describe('lastTurnOf', () => {
     addSecrets(['sk-live-1234567890']);
     log(submitted('t_1'), said('t_1', 'key is sk-live-'), said('t_1', '1234567890; then sk-live-12'));
     expect(lastTurnOf(h.db, S).output).toBe(`key is ${MASK}; then `);
+  });
+});
+
+describe('turnText', () => {
+  it("gives the last turn's whole answer, uncut, masked as lastTurnOf masks it, which cuts it", () => {
+    addSecrets(['sk-live-1234567890']);
+    const long = `${'a'.repeat(LAST_OUTPUT_CHARS * 5)}END`;
+    log(submitted('t_1'), said('t_1', 'old'), submitted('t_2'), said('t_2', 'key is sk-live-'), said('t_2', `1234567890 ${long}`), failed('t_2', 'boom'));
+    const whole = turnText(h.db, S);
+    expect(whole).toEqual({ errors: ['boom'], output: `key is ${MASK} ${long}` });
+    expect(lastTurnOf(h.db, S)).toEqual({ errors: ['boom'], output: whole.output.slice(-LAST_OUTPUT_CHARS) });
+  });
+
+  it('is empty for a session that has had no turn', () => {
+    expect(turnText(h.db, S)).toEqual({ errors: [], output: '' });
   });
 });
