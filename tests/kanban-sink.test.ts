@@ -4,7 +4,7 @@ import { createSession } from '../src/db/sessions.js';
 import { bindSession } from '../src/db/bindings.js';
 import { lastSeq, readEvents } from '../src/db/events.js';
 import { getApproval } from '../src/db/approvals.js';
-import { FORWARDED_MAX, KANBAN_CHANNEL, KanbanSink } from '../src/kanban/sink.js';
+import { FORWARDED_MAX, KANBAN_CHANNEL, KanbanSink, SinkChannel } from '../src/kanban/sink.js';
 import type { BindingKey } from '../src/types.js';
 import { FakeChannel } from './helpers/channel.js';
 import { FakeDriver } from './helpers/driver.js';
@@ -35,6 +35,21 @@ describe('KanbanSink', () => {
     await sink.updateApprovalCard('m', { action: 'a', choice: 'b', answeredBy: 'c' });
     // A run's session is in no group.
     await expect(sink.chatMembers('k_1')).rejects.toThrow('has no members to read');
+  });
+
+  it('is a sink under any id it is given, which with no forwarding refuses an approval card naming its subject', async () => {
+    const sink = new SinkChannel('cron', { now: () => NOW, subject: (jobId) => `cron job ${jobId}` });
+    expect(sink.id).toBe('cron');
+    expect(await sink.sendText({ chatId: 'c_1', threadId: '7' }, 'hello', 'u1')).toEqual({ messageId: 'cron:u1', deduped: false });
+    expect(await sink.openCard({ chatId: 'c_1', threadId: '7' }, 'starting', 'u2')).toMatchObject({ messageId: 'cron:u2', createdAt: NOW });
+    expect(await sink.sendCard({ chatId: 'c_1', threadId: '7' }, { markdown: 'x', buttons: [] }, 'u3')).toEqual({ messageId: 'cron:u3', deduped: false });
+    await expect(
+      sink.sendApprovalCard({ chatId: 'c_1', threadId: '7' }, { approvalId: 'a_1', action: 'write', options: [], nonce: 'n' } as never, 'u4'),
+    ).rejects.toThrow('cron job c_1 asked for approval, and this gateway forwards no approval card to a chat');
+    await expect(sink.chatMembers('c_1')).rejects.toThrow('a session bound on the cron channel is in no chat');
+    await expect(new KanbanSink(() => NOW).sendApprovalCard({ chatId: 'k_1', threadId: 'r_1' }, {} as never, 'u5')).rejects.toThrow(
+      'task k_1 asked for approval, and this gateway forwards no approval card to a chat',
+    );
   });
 
   it("lets a run's turn complete with every event in the session log", async () => {
