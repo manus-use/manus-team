@@ -31,6 +31,10 @@
  *   kanban-body run `mt kanban show`; when the task's body is a worker command and
  *               its JSON, `start-workflow {…}` or `apply-dag {…}`, run it, writing
  *               its answer to `asked.log` beside the log; then report complete
+ *   cron        in a chat turn whose prompt is `cron-add {…}`, run `mt cron add`
+ *               with that JSON and answer with its answer; in a cron fire, answer
+ *               `[nothing to report]` when the job's prompt says QUIET, hang when
+ *               it says SLOW, and otherwise `Fired: ` and the job's prompt
  *
  * Every invocation appends its argv to `FAKE_CLI_LOG` as one JSON line. That file
  * is how a test sees the composed prompt -- which is the whole of this driver's
@@ -325,6 +329,26 @@ switch (MODE) {
       delta('Next I will report.');
       summary('completed', 'Next I will report.');
     }
+    break;
+  }
+
+  case 'cron': {
+    const add = /^cron-add (\{[\s\S]*\})$/.exec(prompt.trim());
+    if (add !== null) {
+      const r = spawnSync('mt', ['cron', 'add'], { input: add[1], encoding: 'utf8', timeout: 30_000 });
+      delta(`added: ${r.stdout.trim()}`);
+      summary('completed', 'added');
+      break;
+    }
+    const job = /The job's prompt: (.*)/.exec(prompt)?.[1] ?? '';
+    if (job.includes('SLOW')) {
+      delta('working');
+      setInterval(() => {}, 1_000);
+      break;
+    }
+    const answer = job.includes('QUIET') ? '[nothing to report]' : `Fired: ${job}`;
+    delta(answer);
+    summary('completed', answer);
     break;
   }
 
