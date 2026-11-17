@@ -767,8 +767,8 @@ always be read, and the instance keeps the workflow's name when it has one.
 - **Each task still writes its own `created` event**, with the instance, step and item added to the
   payload: `workflow`, the instance's id `w_…`, `workflowName`, its name or null, `ref`, `step` and
   `item`; and each gate its `gate_added`. Every change to a task writes one (kanban spec §3.4): a
-  subscription's cursor, `show`'s history and a worker's prior context all read a task's own events,
-  and a task with no `created` would be the one task whose history starts in the middle. `workflow`,
+  subscription's cursor and a worker's prior context read a task's own events, and a task with no
+  `created` would be the one task whose events start in the middle. `workflow`,
   `workflowName`, `ref` and `step` join `BOARD_KEYS`, as they identify; `item` is a param's text,
   and is masked. `created` is no notice (kanban spec §9.4), so a start of 100 tasks sends no
   notices, only its reply.
@@ -1312,8 +1312,9 @@ mt kanban workflow apply <dag.json|-> [--key <k>] [--dry-run] --chat oc_… [--t
 ```
 
 - **Checked as `task new`'s** (kanban spec §22.1): the chat's shape, `mt cron add --chat`'s; this
-  bot's app id from the settings, refused without one in cron's words; a thread's shape, only with
-  `--chat`, and its root by `threadRootOf`, a thread with no root known refused. The shapes are
+  bot's app id from the settings, refused without one in cron's words; a chat outside a non-empty
+  `auth.chats` refused, in the same words as there; a thread's shape, only with `--chat`, and its
+  root by `threadRootOf`, a thread with no root known refused. The shapes are
   checked before the board is opened, the root once it is.
 - **Every member follows the chat**: the writer's `applyDag` gives each task's insert the
   instance's `follow`, which `subscribe()` writes, in the one transaction (§8), as a chat start's
@@ -1329,7 +1330,8 @@ mt kanban workflow apply <dag.json|-> [--key <k>] [--dry-run] --chat oc_… [--t
   a preview makes nothing to follow".
 - **A repeat by key** is answered at step 0 (§6), `existing: true`, before the flags are looked at:
   no subscription is added and no reply posted, whatever `--chat` names now, as a repeat makes
-  nothing.
+  nothing. Its answer's `follows` is what the instance was made with, read from its first member's
+  stored subscription of this bot, or `null` with none, never the flag given now.
 - **The terminal only.** `startWorkflow` and `applyDag` refuse `follow` unless `createdVia` is
   `{kind: operator}`, `invalid`; the worker's `start-workflow` schema and `apply-dag`'s DAG have no
   such field. A run's start is followed by its task's chats already (§9).
@@ -1364,9 +1366,9 @@ as an event of the instance's first member**, for these reasons:
 after the member rows: **`workflow_started`, on the member at position 0**, its actor the
 instance's creator, its payload `workflow` (the instance's id), `workflowName`, `board`, `by` (who
 started it), `count` (its members), `people` (whether any member names a person as assignee or
-reviewer), and `tasks`, the first 30 members in position order, each `taskId`, `title` and
-`assignee` (`{kind, name}`, or null): the reply lists at most 30 (§9), so the payload holds no more,
-at most about 20 KiB. It is masked on write as every payload is, `workflow` and `workflowName`
+reviewer), and `tasks`, the first 30 members in position order, each `taskId`, `title`, `assignee`
+(its name, or null) and `assigneeKind` (`role`, `human`, or null), flat as a task row keeps them:
+the reply lists at most 30 (§9), so the payload holds no more, at most about 20 KiB. It is masked on write as every payload is, `workflow` and `workflowName`
 being in `BOARD_KEYS` already (§8). An event belongs to a task (§7), and the first member's one
 subscription is the `follow`, so the event reaches exactly the chat named, once.
 
@@ -1375,15 +1377,18 @@ own renderer, from the payload alone: it never reads the workflow tables, so the
 (§0) holds, the notifier reading one event of a task as it reads any. Its words are the thread's
 when the subscription it goes to is in a thread with a root, else the chat's (§9). Its first line
 names who started it, as nobody in the chat typed it: "operator:alice started vendor-eval from a
-terminal as `w_…`, 5 tasks:". It is held to the reply's bounds, 30 lines and under 3,800
-characters (§9), and a notice batch takes at most 3,800 characters (`BATCH_CHARS`), so it never
-splits. It comes before any notice of its members, as its event is written before the
-dispatcher is told (§6 step 4). In the first member's `task show` history it is one line, "started
-workflow w_… from a terminal, as its first task". With `kanban.enabled` off no notifier runs, so the
-reply waits, as the tasks do, until the board is on; the terminal's answer already says it is off.
+terminal as `w_…`, 5 tasks:". It is held to the reply's own bounds, 30 lines and under 3,800
+characters (§9), and it is **never cut**: the notifier takes a batch's first notice whole, its
+`BATCH_CHARS` bounding only the notices added after it, so the reply goes as one message or with
+the notices that fit beside it, never split. It comes before any notice of its members, as its
+event is written before the dispatcher is told (§6 step 4). With `kanban.enabled` off no notifier
+runs, so the reply waits, as the tasks do, until the board is on; the terminal's answer already
+says it is off. A workflow's members get no `task_created_followed` (kanban spec §22.1): this reply
+names them all.
 
 **The terminal's answer** adds `chat oc_… follows its tasks, and is sent this reply` (`, in thread
-omt_…`), and `--json` adds `"follows": {"chat", "thread"}`, null without `--chat`.
+omt_…`), and `--json` adds `"follows": {"chat", "thread"}`, null without `--chat`; for a repeat,
+the stored subscription (§18.1).
 
 ### 18.3 A person from the terminal
 
@@ -1397,11 +1402,22 @@ omt_…`), and `--json` adds `"follows": {"chat", "thread"}`, null without `--ch
   task's refusal does (§6), and the terminal adds the hint that `mt kanban people` lists the people
   this gateway knows.
 - **No @-mentions at the terminal.** A value starting with `@` in a param that lands in a person
-  field is refused `invalid`, with the hint; one that lands only in text is text, as typed, as in
-  chat (§6).
+  field is refused `invalid` at the terminal, with the hint, "there are no @-mentions at the
+  terminal: a person is lark:<union_id>, which mt kanban people lists"; one that lands only in text
+  is text, as typed, as in chat (§6). **A run's `start-workflow` keeps today's refusal**,
+  `person_not_assignable`, "… is a person: give a person work from chat, by @-mention, where the
+  gateway can check they have talk tier": an agent has no `mt kanban people`, and its refusal is
+  unchanged. The branch is on the start's `createdVia`, where `paramValues` (`src/kanban/workflow.ts`)
+  refuses an `@` with no `personOf` today: `{kind: operator}` gets the terminal's `invalid` and
+  hint, `{kind: run}` the existing refusal. The expansion is given the start's `createdVia` kind for
+  this, beside its `GivenParams`, whose `from: 'terminal'` and `from: 'json'` say the same today but
+  would not if a path were added.
 - **The preview does not check a person.** It opens no database (§6), and `people` is in the
   database, as the board and the key are, which a preview already leaves to `apply --dry-run` and
-  `apply`. So a person in the grammar passes the preview's checks, and the preview says on stderr,
+  `apply`. So a person in the grammar passes the preview's checks: **only the preview's facts** get
+  `canTalk: () => true`, built in the preview's own function in `src/cli/operator.ts`; a start and
+  an apply, `--dry-run` included, always check with the service's facts, whose talk check is the
+  `PeopleDirectory`'s, or absent, refusing every person. The preview says on stderr,
   for each: "lark:… is checked at the start, against the people this gateway knows; mt kanban
   workflow apply --dry-run checks it now". Opening the database for this one read would make the
   preview's rule "no database, unless", for a check the start makes anyway.
@@ -1425,17 +1441,19 @@ omt_…`), and `--json` adds `"follows": {"chat", "thread"}`, null without `--ch
 
 ### 18.5 Wiring
 
-- **`src/cli/operator.ts`**: `--chat` and `--thread` on `start` and `apply`, refused on `preview`;
-  `follow` passed; the answer's `follows`; the preview's facts accepting a person in the grammar,
+- **`src/cli/operator.ts`**: `--chat` and `--thread` on `start` and `apply`, refused on `preview`,
+  `auth.chats` checked; `follow` passed; the answer's `follows`, the stored subscription for a
+  repeat; the preview's facts accepting a person in the grammar,
   with its stderr line; an `@` person refused with the hint, and the hint on `person_not_assignable`.
 - **`src/kanban/service.ts`**: `StartRequest.follow` and the apply request's, refused unless from
   the operator; the dry run's answer saying who would follow.
 - **`src/db/kanban.ts`**: `applyDag` giving each member's insert the `follow`, and writing
   `workflow_started` on the first member.
-- **`src/kanban/dag.ts`**: the terminal's refusal of every person removed.
+- **`src/kanban/dag.ts`**: the terminal's refusal of every person removed. **`src/kanban/workflow.ts`**:
+  the `@` refusal branching on the start's `createdVia`.
 - **`src/kanban/chat-render.ts`**: `renderStarted` given who started it, and the payload's task
-  shape, which the chat's reply builds from its rows; `renderNotice` rendering `workflow_started`;
-  its history line. **`src/kanban/notices.ts`**: the subscription's thread and root passed to the
+  shape, which the chat's reply builds from its rows; `renderNotice` rendering `workflow_started`.
+  **`src/kanban/notices.ts`**: the subscription's thread and root passed to the
   renderer, for the words.
 - **`docs/examples.md`**: example 6's script passes `--chat oc_xxx` to `mt kanban workflow start`,
   its prompt no longer asks the agent to post the instance, which the reply does, and its reviewer
@@ -1446,16 +1464,19 @@ omt_…`), and `--json` adds `"follows": {"chat", "thread"}`, null without `--ch
 
 - **`--chat`**: every member's subscription in the apply's transaction, at chat scope and in a
   thread with its root; a thread with none refused; a malformed chat or thread and no app id refused
-  before the board is opened; `preview --chat` a usage error; `apply --dry-run --chat` writing
+  before the board is opened; a chat outside a non-empty `auth.chats` refused; a repeat's `follows`
+  the stored subscription, or `null`; `preview --chat` a usage error; `apply --dry-run --chat` writing
   nothing and saying who would follow; a repeat by key adding no subscription and no second event;
   `follow` refused by the service from chat and from a run; a DAG with a `chat` key refused.
 - **The reply**: one `workflow_started` on the first member, with the payload's keys, 30 tasks of
   100, masked; none without `--chat`, none for a chat's start or a run's; the notifier sending it
-  once, in the chat's words at chat scope and the thread's in a thread, under 3,800 characters for
-  100 tasks of 512-byte titles, before a member's first notice; resent after a restart with the
+  once and never cut, in the chat's words at chat scope and the thread's in a thread, under 3,800
+  characters for 100 tasks of 512-byte titles, before a member's first notice; no
+  `task_created_followed` on any member; resent after a restart with the
   same uuid; the notifier reading no workflow table to render it.
 - **People**: a person in a param, the file and a DAG accepted with talk tier and refused without,
-  naming the ref, with the hint; `@` in a person field refused, in a text field kept; the preview
+  naming the ref, with the hint; `@` in a person field refused `invalid` with the hint at the
+  terminal and `person_not_assignable` from a run, in a text field kept; the preview
   accepting a person with its stderr line, and `apply --dry-run` refusing one without talk tier.
 
 ### 18.7 Limits
@@ -1478,3 +1499,13 @@ ids exist only inside the writer's transaction; the payload's first 30 tasks, as
 same wherever it is heard; `--dry-run` checking the flags and `preview` refusing them; a repeat
 adding nothing; the service refusing `follow` from anyone but the operator; no hold, as nothing
 moves; and the preview leaving people unchecked, with a line on stderr, as it opens no database.
+*Amended on 2026-11-17.* With the kanban spec's §22, after the first review and three decisions of
+the user's: (A) a person at the terminal's `task assign` too, which leaves this section as it was;
+(B) a terminal's `task new --chat` posting a "Created" line by its own `task_created_followed`
+event, which a workflow's members never get, their reply naming them; (C) a chat outside a
+non-empty `auth.chats` refused for `start` and `apply` (§18.1). The review also found, and this
+revision takes: a repeat's `follows` the stored subscription; the payload's tasks flat, `assignee`
+and `assigneeKind`; the reply never cut, not "at most 3,800" by the batch; no `task show` history,
+which does not exist, so its line and its wiring go, and §8's reason no longer names one; the `@`
+refusal branching on `createdVia`, a run's keeping `person_not_assignable`; and only the
+preview's facts accepting every person.

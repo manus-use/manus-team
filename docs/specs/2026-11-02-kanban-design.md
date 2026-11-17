@@ -566,7 +566,7 @@ fresh install) has no registrations. A deployment with no config file (environme
                               [--chat <chat_id> [--thread <thread_id>]]                                     # --chat: §22.1
   mt kanban task list [<status>|all] [--board <name>]                                                       # its times: §22.3
   mt kanban people                                                                                          # §22.2
-  mt kanban task show|stop|archive <task> · assign <task> <role> · link <parent> <child>   [--board <name>]
+  mt kanban task show|stop|archive <task> · assign <task> <role> · link <parent> <child>   [--board <name>]   # assign: a person too, §22.2
   mt kanban task unblock <task> [comment…] · comment <task> <text…>                       [--board <name>]
   mt kanban workflow list · instances [all] · show <w_…> [--dag] · archive <w_…>           [--board <name>]   # workflows spec §10
   mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]… [--json]                         # workflows spec §6
@@ -2215,7 +2215,7 @@ branch.
 | **U. Updating a deployed gateway** | `mt update`, `--check` and `--yes`, refused in a board run's shell (§20); the checkout `mt` runs from, which must be the one the service's unit records, readable, and the top of a git worktree, on a branch with an upstream, clean with no operation under way, an ancestor of its upstream after a `git fetch`, with no ignored file at a path the commits add; the service's state read at step 2; the commits, a new or changed migration, whether `npm ci` runs, the open agent runs counted read-only on the database the service would open, and whether the service is restarted, shown before a question asked only at a terminal; the service's pid and the database's `user_version` recorded at step 3 and checked before the backup and any going back; `git merge --ff-only`, `npm ci` only when `package.json` or `package-lock.json` changed, and `npm run build`, with the service's node and the npm beside it, named by path in every printed command; `mt service check`, install's check as a command with the unit's `PATH`, the gateway's module graph and `better-sqlite3`'s native module loaded, run by the new build as the preflight, with no unit doing a hand-run gateway's check itself (`mt role check`'s loads and `loadStartup`, stand-ins only for names unset), and printing the database's version; going back by `git reset --keep`, `npm ci` if one ran and the build; the online backup in one step to `$MT_HOME/backups`, owner-only, `journal_mode` `delete`, checked, at step 3's version, the last five and the newest of each version kept; `migrate()` refusing a database newer than the build, as a configuration error with exit 78; the steps forward when the version moved, the steps back when only the pid did; `state()`'s unreadable result; a warning for `MT_SCHEMA_DIR`; the restart by `mt service restart`'s code, a stopped service left stopped, confirmed by `connected as` after the schema line within 60 seconds, else the log's tail and the steps back; a lock per checkout and per home, never cleared automatically; SIGINT, SIGHUP and SIGTERM, EPIPE and EIO; git and npm detached, in batch mode, with time limits; exit 3; §17's `check`, `install`'s closing line and the README's "Deploying" naming `mt update` | §17's `mt service`; independent of the board's plans |
 | **T. Workflows** | workflow files under `$MT_HOME/workflows`, parsed with the role files' `yaml` parser and checks, an unknown key an error (workflows spec §1); params, substitution in text fields and checked names, never in gates (workflows spec §2); for_each, fan-in on every task, all to all, at most 100 tasks (workflows spec §3); the checks in `src/kanban/workflow.ts`, `mt workflow check`, the startup lines and `mt service check`'s warnings, the file read at each start (workflows spec §4); the DAG, format 1, its refs, its canonical form of at most 192 KiB from a run and 1 MiB elsewhere, and gates only from the terminal or an expansion of the operator's file (workflows spec §5); `preview` and `start` in chat and at the terminal, `preview --json` writing the DAG, `apply` and `apply --dry-run` at the terminal, the worker's `mt kanban start-workflow` and `apply-dag`, with its `dry_run`, `unknown_workflow`, the tiers, the board, the keys with the DAG's hash, and the stored DAG (workflows spec §6); migration `009`, `kanban_workflow_instances` and `kanban_workflow_tasks` (workflows spec §7); `applyDag`, `archiveWorkflow` and `threadSubscriptions` in `db/kanban.ts`, with `createTask`'s, `addGate`'s and `archive`'s writes shared, each task's `created` event carrying the instance, and WRITERS.md's rows (workflows spec §8); the subscriptions, the one reply cut to fit, the instance's thread and every member held (workflows spec §9); `list`, `instances`, `show` and `archive`, the derived status (workflows spec §10); the README's and the guide's workflows, with the example, the deciding step, the fan-out's one-at-a-time in a shared workspace (workflows spec §12), and Recipe 3's planner making its graph with `apply-dag` | L |
 | **S. Cron jobs** | specified in its own document, [`2026-11-16-cron-design.md`](2026-11-16-cron-design.md): scheduled agent turns beside the board, migration `010` | L |
-| **V. From a terminal: chats, people, times** | `--chat <chat_id> [--thread <thread_id>]` on `mt kanban task new`, `mt kanban workflow start` and `apply`, checked as `mt cron add --chat` checks a chat, a thread taken only with the root plan L knows for it (`threadRootOf`), writing the subscription a chat start would, at the terminal only (§22.1); a workflow's start reply queued as a `workflow_started` event on its first member, which the notifier posts (workflows spec §18); `lark:<union_id>` as an assignee or reviewer at the terminal, checked for talk tier from the config's owner and `auth.talk` and the `people` table, refused `person_not_assignable` in chat's words with a hint, and `mt kanban people` (§22.2); `created_at` and `status_since` in `mt kanban task list --json`, and an `age` column (§22.3); a cron script's `PATH` starting with `$MT_HOME/bin`, and its `MT_HOME`, `MT_CONFIG` and `MT_DB` the gateway's (cron spec §5.1); the guide, the README and `docs/examples.md` going back to plain `mt`, example 6 with `--chat`, and the weekly review by age. No migration | S, T |
+| **V. From a terminal: chats, people, times** | `--chat <chat_id> [--thread <thread_id>]` on `mt kanban task new`, `mt kanban workflow start` and `apply`, checked as `mt cron add --chat` checks a chat, a chat outside a non-empty `auth.chats` refused there and in `mt cron add` and `edit`, a thread taken only with the root plan L knows for it (`threadRootOf`), writing the subscription a chat start would, at the terminal only, and a one-line "Created" queued as a `task_created_followed` event (§22.1); a workflow's start reply queued as a `workflow_started` event on its first member, which the notifier posts (workflows spec §18); `lark:<union_id>` as an assignee or reviewer at the terminal, `task assign` included, checked for talk tier from the config's owner and `auth.talk` and the `people` table, refused `person_not_assignable` in chat's words with a hint, and `mt kanban people` (§22.2); `created_at` and `status_since` in `mt kanban task list --json`, in milliseconds, and an `age` column (§22.3); a cron script's `PATH` starting with `$MT_HOME/bin`, and its `MT_HOME`, `MT_CONFIG` and `MT_DB` the gateway's (cron spec §5.1); the guide, the README and `docs/examples.md` going back to plain `mt`, example 6 with `--chat`, and the weekly review by age. No migration | S, T |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D2, nothing can deliver a card to a person, so **plans C and D1 refuse human assignees and
@@ -4076,15 +4076,22 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
   member's. So `CreateRequest` gains `follow?: { appId, chatId, threadId, rootId }`, which
   `subscribe()` writes when it is set, and `createdVia` stays `{kind: operator}`.
 - **The chat's format is `mt cron add --chat`'s**, and checked the same way: `oc_` and 1 to 64
-  letters and digits (`CHAT_ID`, moved from `src/cli/cron.ts` to a module both import), for shape
-  only, not for whether the bot is in the chat, which a terminal with no Lark client cannot ask;
-  and the bot's app id from the settings, `lark.appId` or `LARK_APP_ID`, as `TeamSettings.appId`
-  gives it, refused without one in cron's words: "--chat needs the bot: set lark.appId in the
-  config file, or LARK_APP_ID". A chat the bot is not in is found by the notifier, which lets the
-  conversation go and says so once in the log (§9.4), as a cron job's delivery there fails in its
-  history (cron spec §5.6). `auth.chats` is not consulted, as `mt cron add --chat` does not
-  consult it: it bounds which chats may drive the bot, and the operator choosing where the board
-  posts is not one driving it.
+  letters and digits (`CHAT_ID`, moved from `src/cli/cron.ts` to `src/core/lark-ids.ts`, which
+  `src/cli/cron.ts`, the operator's front and `KanbanService` all import, so nothing in
+  `src/kanban/` imports from `src/cli/`), for shape only, not for whether the bot is in the chat,
+  which a terminal with no Lark client cannot ask; and the bot's app id from the settings,
+  `lark.appId` or `LARK_APP_ID`, as `TeamSettings.appId` gives it, refused without one in cron's
+  words: "--chat needs the bot: set lark.appId in the config file, or LARK_APP_ID". A chat the bot
+  is not in is found by the notifier, which lets the conversation go and says so once in the log
+  (§9.4), as a cron job's delivery there fails in its history (cron spec §5.6).
+- **A chat outside `auth.chats` is refused**, when that list is not empty: `invalid`, "oc_… is not
+  in auth.chats, so this gateway does not act in it: add it there, or name a chat that is". The
+  list is `MT_ALLOW_CHATS` or `auth.chats`, as `loadConfig` reads it, which `teamSettingsFrom`
+  reads into `TeamSettings.chats` by the same helper. *Why:* the gateway admits no message from a
+  chat outside the list (`Authorizer.admits`), so a chat there would hear notices it could not
+  answer: its `/kanban task show` and its Unblock button would reach nobody. An empty list means
+  any chat, as it does for the gateway. The same check is made by `mt cron add --chat` and `mt
+  cron edit --chat` (cron spec §6.2), so a terminal names no chat the gateway ignores.
 - **`--thread omt_…`** puts the subscription in that thread of the chat: `omt_` and 1 to 64
   letters and digits, checked for shape, and only with `--chat`. **The thread's root is plan L's**:
   `threadRootOf` (`src/db/kanban-read.ts`), the root a subscription in that thread already
@@ -4102,10 +4109,20 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
   its command message, which becomes the task's thread (§19.1). A terminal sends no message, so it
   has nothing to open a thread on: `--chat` alone follows from the chat, its notices in the main
   timeline and a person's card by direct message, as for a task created in a direct message.
-- **No "Created" message is posted.** The chat hears the task's notices from its first one on, and
-  each names the task and its id. A workflow's start is different: its reply is posted
-  (workflows spec §18), as up to 100 tasks' notices with no instance named would not tell the
-  chat what they belong to.
+- **A "Created" line is posted**, by the notifier, as the workflow's start reply is (workflows spec
+  §18.2): `createTask`, when the task has a `follow`, writes one more event in its transaction,
+  after `created`: **`task_created_followed`**, its actor the creator, its payload `by`. The
+  notifier renders it in one line from the task as it renders every notice, "Created `k_…`
+  **<title>**, for role worker, by operator:alice from a terminal.", in the chat's or the thread's
+  conversation, before any other notice of the task, as its event comes first. A workflow's
+  members never get one: their instance's `workflow_started` names them all. *Why a kind of its
+  own, not `workflow_started` made generic:* the two say different things from different
+  payloads: one line about the task it is on, and a whole instance's reply standing on its first
+  member; one kind for both would need a field saying which, which is a kind under another name,
+  and each renderer would have to test it. *Why queued, as the workflow's:* the terminal has no
+  Lark client, and the notifier's cursors already deliver at least once, deduplicated, and catch
+  up after a restart (workflows spec §18.2). `created` stays no notice, so a chat's own task,
+  answered by its reply, is not told twice.
 - **The terminal only.** `--chat` is an operator's flag, and the operator's commands are refused
   in an agent's shell (§2.6); a cron script runs with no agent's variable (cron spec §5.1), so it is
   a terminal. `KanbanService.create` refuses `follow` unless `createdVia` is `{kind: operator}`,
@@ -4114,21 +4131,26 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
   chat agent's `mt` has no board commands; a field that let an agent name any chat would let it
   post the board's notices into chats nobody asked it to.
 - **A repeat by `--key`** answers the task its first run made, `existing: true`, before anything
-  is written (§3.1), so a second `--chat`, the same or another, adds no subscription. The first
-  command's chat is the task's.
+  is written (§3.1), so a second `--chat`, the same or another, adds no subscription and posts no
+  "Created" line. The first command's chat is the task's, and the answer says so: its `follows` is
+  the task's stored subscription of this bot, or `null` with none, never the `--chat` given now.
 - **The board** is `--board`, else `default`, as before: `--chat` does not choose the chat's board
   (§16.4). A chat follows a task on any board, and its `/kanban task show` finds it by id, naming
   its board (§16.4). A board chosen by the chat named would be a second way to say `--board`.
 - **The answer** adds where the task is followed: `created k_…: <title>, for role worker, on board
   default; chat oc_… follows it` (`, in thread omt_…`), and `--json` adds `"follows": {"chat",
-  "thread"}`, `null` without `--chat`. With `kanban.enabled` off the subscription is written all
-  the same, and the notices wait, as the task does, until the board is on.
+  "thread"}`, `null` without `--chat`; for a repeat, the stored subscription (above). With
+  `kanban.enabled` off the subscription and the event are written all the same, and the "Created"
+  line and the notices wait, as the task does, until the board is on.
 
 ### 22.2 A person from the terminal
 
 - **`lark:<union_id>` is taken as an assignee or a reviewer** by `mt kanban task new`
-  (`--assignee`, `--reviewer`), and by a workflow's params and an applied DAG (workflows spec
-  §18). The front's `personRefused` (`src/cli/operator.ts`) no longer refuses one in `task new`.
+  (`--assignee`, `--reviewer`), as an assignee by `mt kanban task assign <task> <role|lark:…>`, and
+  by a workflow's params and an applied DAG (workflows spec §18). The front's `personRefused`
+  (`src/cli/operator.ts`) goes: `assign` checks a person through `KanbanService.assign`, which
+  asks `assignable` with the same facts as `create`, so `task new` and `task assign` judge a
+  person alike.
 - **It is checked as chat checks a person named by principal** (§4.2): `assignable`
   (`src/kanban/task-checks.ts`) with a talk check, so the person must be in `people` for this
   bot's app, and the open_id the gateway last saw them with must be in the talk allowlist.
@@ -4141,8 +4163,14 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
   the same names, with the same precedence, into `TeamSettings.talk`, present only when an owner
   is set, since a gateway with none does not start. The operator's commands load their settings
   through `withGatewayFile` (§2.5), so a value only in the gateway's `.env` is seen. Without an
-  app id or an owner, the service has no `people`, and a person is refused, saying which this
-  shell lacks.
+  app id or an owner, the service has no `people`, and `assignable` refuses a person with its own
+  message for that case, "cannot be given work yet: nothing can deliver a task card to a person
+  until the board is in Lark", which is wrong at a terminal beside a gateway that is in Lark. So
+  `BoardAccess` says what this shell lacked, and the front, for a `person_not_assignable` from a
+  service whose facts had no talk check (`canTalk` undefined), replaces the message with one that
+  names it: "lark:on_… cannot be checked for talk tier here: this shell finds no lark.appId or
+  LARK_APP_ID, which the people this bot has seen are kept by", or "…: this shell finds no
+  auth.owner or MT_OWNER_OPEN_ID, without which there is no talk allowlist to check against".
 - **Refused `person_not_assignable` in chat's words**, the message `assignable` gives chat and
   agents, unchanged, "cannot be given work: being assigned lets a person report on the task, which
   needs talk tier, and this gateway does not know them to have it -- a person is known once they
@@ -4168,17 +4196,20 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
   card, from the gateway's card poster (§9.2), which checks talk tier again at the send (§4.2):
   in the thread of the task's subscription when there is one with a root and the person is a
   member (§19.2), else by direct message.
-- **`mt kanban task assign`** stays a role's (§2.6): plan V lifts the refusal where a task is
-  made, which is what the approved design names.
+- **`mt kanban task assign`** takes a person too, checked as `task new` checks one (the user's
+  decision): its usage becomes `assign <task> <role|lark:<union_id>>`, its refusal the same words
+  and hint, and the card goes as for any person's run once the task is claimed.
 
 ### 22.3 Times in the task list
 
 - **`mt kanban task list --json` gives two times a task**: `created_at`, when it was made, and
-  `status_since`, when its phase last changed, each an ISO time in UTC (`toISOString`, as
-  `2026-11-17T08:30:00.000Z`). ISO because the reader is a script or an agent's prompt, for which
-  a number of milliseconds is no date; UTC because a board has no zone. The other `--json` times
-  (`task show`'s comments, `workflow instances`) stay milliseconds, so no script reading them
-  breaks.
+  `status_since`, when its phase last changed, each in **milliseconds since the epoch**, as every
+  other `--json` time of the operator's commands is (`task show`'s comments, `workflow instances`
+  and `show`). *A decision.* The approved design said ISO times; but `created_at` is already a
+  number of milliseconds in `workflow instances --json` and in `task show --json`'s comments, and
+  one name with two forms in one tool's output is a trap for every script that reads two of them.
+  The readable form is the plain output's `age` column (below), which is what a person and an
+  agent's prompt read; a script that needs a date computes it from the number.
 - **`status_since` is the phase's**, the one stored state (§4.1): todo, ready and running are
   derived from other rows and move with no event of the task's (a parent done, a claim), so "since
   when ready" has no row to read. The display statuses blocked, review, done and archived are
@@ -4206,8 +4237,12 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
 - **`--chat` with a chat the bot is not in**: the task is made and followed; the notifier's first
   send is refused, the conversation is let go of until a restart, and the log says so once (§9.4).
 - **`--thread` for a thread the board has never seen**: refused, nothing made.
+- **`--chat` naming a chat outside a non-empty `auth.chats`**: refused, nothing made; with the
+  list empty, any chat is taken.
+- **`task assign` of a claimed task to a person**: its run is ended as for any reassignment, and the
+  person's card goes at their run's claim, as for a task made for them.
 - **A key repeated with another `--chat`**: the first task, `existing: true`, followed only by the
-  first chat.
+  first chat, its answer naming that chat, and no second "Created" line.
 - **A person in `people` whose open_id has since left `auth.talk`**: refused at the terminal; one
   removed after the task was made gets no card at the send (§4.2).
 - **The talk list edited and the gateway not restarted**: the terminal reads the file now, the
@@ -4223,25 +4258,32 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
 
 - **`src/cli/operator.ts`**: `--chat` and `--thread` on `task new`, their shapes checked before the
   board is opened, the root looked up through the service, `follow` passed to `create`; the answer's
-  `follows`; `personRefused` dropped from `task new` and kept for `task assign`; an `@` name refused
-  with the hint; the hint added to `person_not_assignable`; `people`, a new group with no verb;
-  `task list --json`'s two times.
-- **`src/cli/lark-ids.ts`**, new: `CHAT_ID` and `THREAD_ID`, and the app id's refusal, which
-  `src/cli/cron.ts` imports in place of its own.
+  `follows`, the stored subscription for a repeat; `auth.chats` checked; `personRefused` dropped,
+  from `task new` and `task assign`; an `@` name refused with the hint; the hint added to
+  `person_not_assignable`, and the message replaced when the service had no people; `people`, a
+  new group with no verb; `task list --json`'s two times.
+- **`src/core/lark-ids.ts`**, new: `CHAT_ID` and `THREAD_ID`, which `src/cli/cron.ts` imports in
+  place of its own, and the operator's front and `KanbanService` import to check a `follow`; no
+  module of `src/kanban/` imports `src/cli/`.
 - **`src/cli/mt.ts`**: `people` in `OPERATOR_GROUPS`, refused in an agent's shell, and `USAGE`.
 - **`src/cli/gate.ts`**: `openBoard` gives the service `people` when the settings have an app id
-  and an owner.
-- **`src/config.ts`**: `TeamSettings.talk`, read by `teamSettingsFrom` as `loadConfig` reads
-  `auth.allowTalk`, from one helper both call, so the two cannot drift.
+  and an owner, and `BoardAccess` says which was missing when not.
+- **`src/config.ts`**: `TeamSettings.talk` and `TeamSettings.chats`, read by `teamSettingsFrom` as
+  `loadConfig` reads `auth.allowTalk` and `auth.allowChats`, from helpers both call, so the two
+  cannot drift.
 - **`src/kanban/types.ts`, `src/kanban/service.ts`**: `CreateRequest.follow`, refused unless from
   the operator, and checked for shape; `KanbanService.threadRoot(at)`, a read.
-- **`src/db/kanban.ts`**: `subscribe()` writes `follow`. **`src/db/kanban-read.ts`**: the phase
+- **`src/db/kanban.ts`**: `subscribe()` writes `follow`, and `createTask` writes
+  `task_created_followed` after `created` when it is set, but for a workflow's members.
+  **`src/kanban/chat-render.ts`**: `renderNotice` renders `task_created_followed`.
+  **`src/db/kanban-read.ts`**: the phase
   times of a board's tasks. **`src/db/people.ts`**: `peopleOf`.
 - **`src/cli/plain.ts`**: the `age` column, and `mt kanban people`'s table.
 - **Documents**: the guide's terminal section, the README's commands, and `docs/examples.md`:
-  example 3, the weekly board review, back to tasks open more than 7 days or blocked, read from
-  `status_since`, with no file kept between fires; example 6 passing `--chat`; the scripts calling
-  plain `mt` (cron spec §5.1).
+  example 3, the weekly board review, back to tasks blocked or open for 7 days or more, its script
+  plain `mt kanban task list --board web-app`, whose `age` column the agent reads (`7d` or more),
+  with no file kept between fires; example 6 passing `--chat`, and a person as its reviewer; the
+  scripts calling plain `mt` (cron spec §5.1).
 
 ### 22.6 Testing
 
@@ -4249,30 +4291,42 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
   scope; with `--thread`, the root `threadRootOf` gives, and refused with none known; a malformed
   chat or thread, `--thread` without `--chat`, and no app id refused before the board is opened;
   `follow` refused by the service from chat and from a run; a key repeated with another chat
-  answering the first task and adding no row; the plain and `--json` answers; refused in an agent's
-  shell; the notifier sending the task's first notice to the chat, and a person's card in the
-  thread for a member, through the existing card poster's tests' fakes.
+  answering the first task, adding no row and no event, its `follows` the stored subscription, or
+  `null` for a task made without one; a chat outside a non-empty `auth.chats` refused, any chat
+  with an empty list; the plain and `--json` answers; refused in an agent's shell; one
+  `task_created_followed` after `created`, none without `--chat` and none for a workflow's member;
+  the notifier sending the "Created" line first, then the task's notices, in the chat's and the
+  thread's conversation, and resending it after a restart with the same uuid; a person's card in
+  the thread for a member, through the existing card poster's tests' fakes.
 - **People**: a person known with talk tier accepted, unknown refused, known without talk tier
   refused, each in chat's words with the hint; the owner only in the `.env` counted; no app id or no
-  owner refused, saying which; `@Alice` refused with its hint; `mt kanban people` sorted, masked,
-  `talk` and `no`, `--json`, and refused in an agent's shell; `task assign` still refusing a
-  person; `TeamSettings.talk` equal to `loadConfig`'s `allowTalk` for each mix of the environment
-  and the file.
-- **Times**: `created_at` and `status_since` in ISO; `status_since` moved by each of the nine
+  owner refused, in the message naming which, never "until the board is in Lark"; `@Alice` refused
+  with its hint; `mt kanban people` sorted, masked, `talk` and `no`, `--json`, and refused in an
+  agent's shell; `task assign` taking a person with talk tier and refusing one without, in the
+  same words; `TeamSettings.talk` and `chats` equal to `loadConfig`'s `allowTalk` and
+  `allowChats` for each mix of the environment and the file.
+- **Times**: `created_at` and `status_since` in milliseconds; `status_since` moved by each of the nine
   kinds, and not by a `dependency` block, a claim, a comment or a link; one query for the board,
   whatever its size; `age` in minutes, hours and days at their bounds.
 
 ### 22.7 Limits
 
 - **No thread opened from a terminal**, and none followed whose root the board does not know.
-- **No "Created" message for a terminal's task**; the chat hears its notices only.
-- **No check that the bot is in the chat**, nor of `auth.chats`, as for `mt cron add --chat`.
+- **No check that the bot is in the chat**, as for `mt cron add --chat`.
 - **`/kanban follow`**, a chat following a task already made, is not built: a task's chat is
   chosen when it is made.
-- **`task assign` takes a role only** at the terminal.
 - **The terminal judges talk tier by its own reading of the configuration**, as it judges roles
   (workflows spec §17).
 - **`status_since` is a phase's time**: how long a task has been ready, or running, is not said.
+- **A hand-run gateway's shell-only settings are not seen by its scripts' `mt`.** A gateway run
+  by hand may have settings only in its shell, `LARK_APP_ID`, `MT_OWNER_OPEN_ID`, `MT_ALLOW_TALK`,
+  `MT_ALLOW_CHATS` and the other `MT_*` overrides; a cron script gets the gateway's `MT_HOME`,
+  `MT_CONFIG` and `MT_DB` (cron spec §5.1), and reads the files and the home's `.env`, but nothing
+  else of that shell. Its `mt` may then lack the app id, so refuse `--chat` and every person, or
+  read another talk list. It fails safe: what it lacks it refuses, and a person it accepts against
+  a list the gateway does not hold is refused their card at the send, where the card poster checks
+  talk tier again (§4.2). An installed service has nothing in its shell but `PATH`, `MT_HOME` and
+  the `.env` (`mt service install`), so its scripts see what it sees.
 
 *Added on 2026-11-17.* The user chose: `--chat oc_… [--thread omt_…]` on `mt kanban task new`,
 `mt kanban workflow start` and `mt kanban workflow apply`, the chat following the new task or
@@ -4299,3 +4353,16 @@ a group of its own, refused in an agent's shell, listing the principal, the name
 `task assign` left a role's; `status_since` as the phase's, from the nine kinds that set one, a
 `dependency` block excluded; ISO in UTC, the other `--json` times left in milliseconds; and the age
 in minutes, hours or days.
+*Amended on 2026-11-17.* The user decided three things after the first review: (A) `mt kanban
+task assign` at the terminal takes a person, checked as `task new` checks one, so `personRefused`
+goes (§22.2); (B) `task new --chat` posts a one-line "Created" message to the chat, queued as a
+`task_created_followed` event the notifier sends, a kind of its own rather than the workflow's
+made generic, and a repeat by key posts nothing (§22.1); (C) `--chat` is refused for a chat not
+in a non-empty `auth.chats`, for `task new`, `workflow start` and `apply`, and for `mt cron add
+--chat` and `mt cron edit --chat` (cron spec §6.2), `TeamSettings` gaining `chats`. The first
+review also found, and this revision takes: `created_at` and `status_since` in milliseconds, not
+ISO, as every other `--json` time, the plain output's `age` being the readable form and the
+cookbook's review reading it; a repeat's `follows` the stored subscription, not the flag; the
+message for a service with no people naming the missing setting; `CHAT_ID` and `THREAD_ID` in
+`src/core/lark-ids.ts`, imported by the cron CLI and the board's service alike; and the limit on a
+hand-run gateway's shell-only settings, which its scripts' `mt` does not see.
