@@ -946,7 +946,7 @@ function preview(rest: readonly string[], io: MtIo): number {
   if (refused !== undefined) return no(refused.code, refused.message);
   const people = new Set(shaped.dag.tasks.flatMap((t) => [t.assignee, t.reviewer]).filter((v): v is string => v !== null && v.includes(':')));
   for (const person of people) {
-    io.err(`mt: ${line(person, 200)} is checked at the start, against the people this gateway knows; mt kanban workflow apply --dry-run checks it now`);
+    io.err(`mt: ${line(person, 200)} is checked at the start, against the people this gateway knows; mt kanban workflow apply --dry-run on this preview's --json checks it now`);
   }
   if (json) io.out(jsonFile(JSON.parse(dagFile(shaped.dag))));
   else for (const l of previewText(name, boardName, previewLines(shaped.dag))) io.out(l);

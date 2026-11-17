@@ -1422,7 +1422,7 @@ the stored subscription (§18.1).
   an apply, `--dry-run` included, always check with the service's facts, whose talk check is the
   `PeopleDirectory`'s, or absent, refusing every person. The preview says on stderr,
   for each: "lark:… is checked at the start, against the people this gateway knows; mt kanban
-  workflow apply --dry-run checks it now". Opening the database for this one read would make the
+  workflow apply --dry-run on this preview's --json checks it now". Opening the database for this one read would make the
   preview's rule "no database, unless", for a check the start makes anyway.
 - **Cards** go as for any task (kanban spec §22.2): a member followed in a thread with a root may
   get its person's card there (kanban spec §19.2).

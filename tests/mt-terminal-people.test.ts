@@ -155,7 +155,7 @@ describe('a person in a workflow at the terminal', () => {
     const r = await kanban(['workflow', 'preview', 'ask', '--param', 'owner=lark:on_bob']);
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/^ask would make 1 task, on board default:\n {2}ask {2}Ask x {2}lark:on_bob/);
-    expect(r.err).toBe('mt: lark:on_bob is checked at the start, against the people this gateway knows; mt kanban workflow apply --dry-run checks it now');
+    expect(r.err).toBe("mt: lark:on_bob is checked at the start, against the people this gateway knows; mt kanban workflow apply --dry-run on this preview's --json checks it now");
     const json = await kanban(['workflow', 'preview', 'ask', '--param', 'owner=lark:on_bob', '--json']);
     expect(JSON.parse(json.out).tasks[0].assignee).toBe('lark:on_bob');
     expect(json.err).toBe(r.err);

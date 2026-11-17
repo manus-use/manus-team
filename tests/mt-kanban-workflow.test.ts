@@ -119,7 +119,7 @@ describe('mt kanban workflow preview', () => {
     expect(await mt(['preview', 'vendor-eval', '--param', 'topic=x', '--json'])).toEqual({ code: 1, out: '', err: 'mt: workflow vendor-eval needs param vendors' });
     writeFileSync(join(f.home, 'workflows', 'ask.yaml'), 'params:\n  owner: { required: true }\nsteps:\n  ask: { title: Ask, assignee: "{{owner}}" }\n');
     expect((await mt(['preview', 'ask', '--param', 'owner=lark:on_bob'])).err).toBe(
-      'mt: lark:on_bob is checked at the start, against the people this gateway knows; mt kanban workflow apply --dry-run checks it now',
+      "mt: lark:on_bob is checked at the start, against the people this gateway knows; mt kanban workflow apply --dry-run on this preview's --json checks it now",
     );
     expect((await mt(['preview', 'nope'])).err).toMatch(/^mt: there is no workflow nope; the usable ones are /);
     expect((await mt(['preview', 'vendor-eval', '--param', 'topic'])).code).toBe(2);

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { noticeBatchUuid } from '../src/core/ids.js';
 import { eventsOf, subscriptionsOf } from '../src/db/kanban-read.js';
-import { renderStarted, startedReply, WORKFLOW_REPLY_MAX } from '../src/kanban/chat-render.js';
+import { renderNotice, renderStarted, startedReply, WORKFLOW_REPLY_MAX } from '../src/kanban/chat-render.js';
 import { Notifier } from '../src/kanban/notices.js';
 import { KanbanService, type WorkflowMade } from '../src/kanban/service.js';
 import type { CreatedVia, Follow, Result, TaskRow } from '../src/kanban/types.js';
@@ -224,5 +224,16 @@ describe('renderStarted', () => {
     const r = made(start(undefined));
     const text = renderStarted(startedReply(r), 'chat', (a) => `role ${a.name}`);
     expect(text.split('\n')[0]).toBe(`Started vendor-eval as \`${r.instance.instanceId}\`, 4 tasks:`);
+  });
+
+  it("names the operator as the starter of a payload with no by, never an empty name", () => {
+    const r = made(start(CHAT));
+    const first = r.tasks[0]?.task;
+    if (first === undefined) throw new Error('no task');
+    const event = eventsOf(h.db, first.taskId).find((e) => e.kind === 'workflow_started');
+    if (event === undefined) throw new Error('no workflow_started');
+    const { by: _by, ...rest } = event.payload as Record<string, unknown>;
+    const text = renderNotice({ ...event, payload: rest }, first, { blockRecurrenceLimit: 2 }) ?? '';
+    expect(text.split('\n')[0]).toBe(`the operator started vendor-eval from a terminal as \`${r.instance.instanceId}\`, 4 tasks:`);
   });
 });

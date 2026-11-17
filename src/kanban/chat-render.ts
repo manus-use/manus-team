@@ -803,7 +803,7 @@ function startedOf(p: Record<string, unknown>): StartedReply {
     tasks,
     count: typeof p['count'] === 'number' ? p['count'] : tasks.length,
     people: p['people'] === true,
-    by: text(p, 'by'),
+    by: text(p, 'by') || 'the operator',
   };
 }
 

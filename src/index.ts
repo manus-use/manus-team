@@ -308,8 +308,10 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   let lock: GatewayLock | undefined;
   let dbLock: GatewayLock | undefined;
   // The socket and the shim, for a run's agent and a cron agent alike (spec §7.2, the cron spec §7).
-  const socket = workerSocketPath(config.home);
-  const access = { socket, mtDir: join(config.home, 'bin'), path: process.env['PATH'] };
+  // Resolved, as a script runs in a workspace: a relative MT_HOME never gives it a relative PATH entry or home.
+  const home = resolve(config.home);
+  const socket = workerSocketPath(home);
+  const access = { socket, mtDir: join(home, 'bin'), path: process.env['PATH'] };
   // One set of the rendered packages in use, the dispatcher's runs' and the scheduler's fires' (the cron spec, §5.2).
   const packages = new PackagesInUse();
   let boardApi: WorkerApi | undefined;
@@ -432,7 +434,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       worker: access,
       // A script's plain mt opens exactly the gateway's files, resolved, as the script runs in a workspace (§5.1).
       scriptHome: {
-        home: config.home,
+        home,
         configPath: config.configPath === undefined ? undefined : resolve(config.configPath),
         dbPath: resolve(config.dbPath),
       },
