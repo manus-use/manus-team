@@ -700,6 +700,7 @@ describe('loadTeamSettings', () => {
       workspaces: c.workspaces,
       agent: c.agent,
       kanban: { maxRunning: c.kanban.maxRunning, maxRunningFrom: 'maxLiveSessions' },
+      appId: c.lark.appId,
     });
     // kanban.enabled is unset: absent here, off there.
     expect(s.kanbanEnabled).toBeUndefined();

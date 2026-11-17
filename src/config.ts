@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { checkZone } from './cron/schedule.js';
 import { KNOWN_DRIVERS, type KnownDriver } from './driver/registry.js';
 import { BIDI } from './text.js';
 
@@ -123,7 +124,34 @@ export interface GatewayConfig {
 
   /** The board's dispatcher and breaker (spec §6, §8). */
   kanban: KanbanSettings;
+
+  /** The cron scheduler (the cron spec, §10). */
+  cron: CronConfig;
 }
+
+/**
+ * The `cron:` section (the cron spec, §10): snake case and file only, as the
+ * `kanban:` section's keys are, since `MT_CRON_*` names are an agent's own
+ * environment (§7) and a setting under that prefix would read as one.
+ */
+export interface CronConfig {
+  /** Run the scheduler. Off by default: chat runs exactly as before. */
+  enabled: boolean;
+  /** Fires at once, 1 to 16. */
+  maxRunning: number;
+  /** A fire's turn with no activity this long is cancelled, 60 to 86,400 s. */
+  idleTimeoutS: number;
+  /** The zone a job gets when none is given, as Intl names it; absent, the process's own. */
+  tz?: string;
+}
+
+export const CRON_DEFAULTS: Omit<CronConfig, 'tz'> = { enabled: false, maxRunning: 2, idleTimeoutS: 600 };
+
+/** The section's numeric keys, the setting each sets, and its bounds. */
+const CRON_NUMBERS = {
+  max_running: { setting: 'maxRunning', min: 1, max: 16 },
+  idle_timeout_s: { setting: 'idleTimeoutS', min: 60, max: 86_400 },
+} as const;
 
 /**
  * A workspace written as `{ path, isolated: true }` (spec §18): each of its tasks
@@ -259,6 +287,13 @@ export interface TeamSettings {
   /** The file read, or undefined for an environment-only deployment. */
   configPath: string | undefined;
   dbPath: string;
+  /**
+   * `cron.enabled` and `cron.tz` as the config sets them: so `mt cron` can say
+   * cron is off, and give a job the gateway's zone (the cron spec, §2.2).
+   */
+  cron?: { enabled?: boolean; tz?: string };
+  /** The bot's app id, `LARK_APP_ID` or `lark.appId`, when either is set: where `mt cron --chat` delivers from. */
+  appId?: string;
   /**
    * `kanban.enabled` as the config sets it, absent when it does not (the board is
    * then off): so the operator's `mt kanban` can say the board is off, and why.
@@ -396,6 +431,12 @@ export function loadConfig(
       nudgeLimit: file.kanban.nudgeLimit ?? KANBAN_DEFAULTS.nudgeLimit,
       blockRecurrenceLimit: file.kanban.blockRecurrenceLimit ?? KANBAN_DEFAULTS.blockRecurrenceLimit,
     },
+    cron: {
+      enabled: file.cron.enabled ?? CRON_DEFAULTS.enabled,
+      maxRunning: file.cron.maxRunning ?? CRON_DEFAULTS.maxRunning,
+      idleTimeoutS: file.cron.idleTimeoutS ?? CRON_DEFAULTS.idleTimeoutS,
+      ...(file.cron.tz === undefined ? {} : { tz: file.cron.tz }),
+    },
   };
 }
 
@@ -481,6 +522,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     ...(maxRunningFrom === undefined ? {} : { maxRunningFrom }),
     ...(file.kanban.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: file.kanban.maxRunningPerRole }),
   };
+  const appId = envString(env, 'LARK_APP_ID') ?? file.lark.appId;
   const perRole = limits.maxRunningPerRole;
   if (perRole !== undefined && perRole > maxRunning) {
     // As a board's own max_running is held inside the gateway's (spec §16.6).
@@ -494,6 +536,10 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     configPath: text === undefined ? undefined : path,
     dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'team.db'),
     ...(file.kanban.enabled === undefined ? {} : { kanbanEnabled: file.kanban.enabled }),
+    ...(appId === undefined ? {} : { appId }),
+    ...(file.cron.enabled === undefined && file.cron.tz === undefined
+      ? {}
+      : { cron: { ...(file.cron.enabled === undefined ? {} : { enabled: file.cron.enabled }), ...(file.cron.tz === undefined ? {} : { tz: file.cron.tz }) } }),
     workspaces,
     ...(Object.keys(file.isolated).length === 0 ? {} : { isolated: file.isolated }),
     agent,
@@ -764,6 +810,7 @@ interface FileConfig {
     maskExempt: readonly string[];
   };
   kanban: { enabled?: boolean } & Partial<Record<(typeof KANBAN_NUMBERS)[keyof typeof KANBAN_NUMBERS], number>>;
+  cron: { enabled?: boolean; maxRunning?: number; idleTimeoutS?: number; tz?: string };
 }
 
 function emptyFile(): FileConfig {
@@ -794,6 +841,7 @@ function emptyFile(): FileConfig {
       maskExempt: [],
     },
     kanban: {},
+    cron: {},
   };
 }
 
@@ -823,6 +871,7 @@ function parseFile(path: string, text: string): FileConfig {
   const authRaw = subsection(path, root, 'auth');
   const agentRaw = subsection(path, root, 'agent');
   const kanbanRaw = subsection(path, root, 'kanban');
+  const cronRaw = subsection(path, root, 'cron');
 
   reject(path, '', root, [
     'workspace',
@@ -834,6 +883,7 @@ function parseFile(path: string, text: string): FileConfig {
     'auth',
     'agent',
     'kanban',
+    'cron',
   ]);
   reject(path, 'lark', larkRaw, ['appId', 'domain']);
   reject(path, 'auth', authRaw, [
@@ -854,6 +904,7 @@ function parseFile(path: string, text: string): FileConfig {
     'maskExempt',
   ]);
   reject(path, 'kanban', kanbanRaw, ['enabled', ...Object.keys(KANBAN_NUMBERS)]);
+  reject(path, 'cron', cronRaw, ['enabled', ...Object.keys(CRON_NUMBERS), 'tz']);
 
   out.workspace = str(path, 'workspace', root['workspace']);
   const workspaces = workspaceEntries(path, root['workspaces']);
@@ -898,6 +949,21 @@ function parseFile(path: string, text: string): FileConfig {
     const max = KANBAN_MAXIMA[key as keyof typeof KANBAN_NUMBERS];
     if (n > max) throw new ConfigError(`${path}: kanban.${key} must be at most ${max}, got ${n}`);
     out.kanban[setting] = n;
+  }
+
+  const cronEnabled = bool(path, 'cron.enabled', cronRaw['enabled']);
+  if (cronEnabled !== undefined) out.cron.enabled = cronEnabled;
+  for (const [key, { setting, min, max }] of Object.entries(CRON_NUMBERS)) {
+    const n = positiveInt(path, `cron.${key}`, cronRaw[key]);
+    if (n === undefined) continue;
+    if (n < min || n > max) throw new ConfigError(`${path}: cron.${key} must be from ${min} to ${max}, got ${n}`);
+    out.cron[setting] = n;
+  }
+  const tz = str(path, 'cron.tz', cronRaw['tz']);
+  if (tz !== undefined) {
+    const zone = checkZone(tz);
+    if (!zone.ok) throw new ConfigError(`${path}: cron.tz: ${zone.message}`);
+    out.cron.tz = zone.zone;
   }
 
   return out;

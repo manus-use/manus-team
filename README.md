@@ -643,6 +643,7 @@ a running gateway, through the board's own service, and take effect at once.
 | `/stop`, `/cancel` | operate | Cancel the current turn |
 | `/help` | talk | List commands |
 | `/kanban <command>` | talk; operate to change the board | The task board, below. Never refused because this chat's session is busy |
+| `/cron <command>` | talk; operate to change a job | Scheduled jobs, below. Never refused because this chat's session is busy |
 | `/cd <path>` | operate | Declared, and honestly unavailable in this build — every session shares the one configured workspace |
 
 Approvals are answered by clicking a card button, never by typing: the agent's blocked
@@ -872,6 +873,49 @@ Before setting `kanban.enabled: true` on a live tenant, run the rest of the smok
 end of docs/plans/2026-11-05-plan-d2-kanban-people.md, after the steps that must pass before
 deploying this build at all (see "Sending to Lark" above). It is the section "Before turning
 the board on: a smoke test against Lark".
+
+### Cron jobs
+
+A cron job is a turn the gateway types for you, on a clock: at its time the gateway opens a
+fresh session of the job's role, gives it the job's prompt, and posts the answer to the chat
+that made the job. Nothing reports and nothing is reviewed; the board knows nothing of it.
+Turn it on with `cron.enabled: true` in config.yaml (see config.example.yaml) and a restart.
+
+From chat, at operate tier:
+
+```text
+/cron add "every weekday 09:00" worker List the open PRs and how old they are.
+name: Daily PRs
+script: gh pr list --json number,title,createdAt
+```
+
+The schedule is always quoted: a five-field cron expression (`0 9 * * 1-5`), `every 2h`,
+`every day 09:00`, `every monday 09:00`, or a one-off, `in 30m` or `2026-12-01 09:00`. The
+shortest period is 5 minutes. A job runs in its zone (`tz:`, else the gateway's), and keeps
+it. `/cron list`, `/cron show <id>`, `pause`, `resume`, `run` and `remove` act on this chat's
+jobs only. Its role's agent must be unsupervised.
+
+From a terminal, as the operator, with every flag, scripts included:
+
+```text
+mt cron add "every day 09:00" worker "Summarise yesterday's merged PRs." --chat oc_xxx --tz Asia/Shanghai
+mt cron edit c_xxx --schedule "every weekday 09:00" --no-script
+mt cron show c_xxx
+```
+
+Each fire runs the job's script first, if it has one, in the workspace with the role's
+environment, killed after 120 s, and puts its output in the prompt with the job's previous
+result. An answer of exactly `[nothing to report]` is not posted. A fire whose session is
+quiet for `cron.idle_timeout_s` is stopped; a fire that fails three times in a row pauses its
+job, and says how to resume it. A slot missed by more than half its period (a one-off, by more
+than an hour), the gateway being down, is skipped, not fired late.
+
+An agent adds a job with `mt cron add < job.json`, `{"schedule": "...", "prompt": "..."}`,
+from its own shell, where the gateway sets `MT_CRON_TOKEN`: a chat agent's job posts to its
+chat, and is accepted only during a turn an operator asked for; a board run's posts to its
+task's chat. An agent never sets a script, and pauses or removes only the jobs it made. Once
+cron is on, a chat agent's shell is an agent's: the operator's `mt kanban`, `mt service`,
+`mt update` and `mt cron` commands are refused there, and none reads the gateway's `.env`.
 
 ## Repo layout
 

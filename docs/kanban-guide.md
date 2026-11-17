@@ -4,6 +4,7 @@ This guide is for people on the team who drive the manus-team board from Lark: o
 create and steer tasks, and the people tasks and reviews are given to. It starts with one task
 for one agent and builds up to chains, fan-out and review. Section 12 is on workflows, graphs
 written once and started many times, and section 13 has recipes for whole graphs of tasks.
+Section 15 is on cron jobs, which run beside the board on a clock.
 
 A task is any work, not only code: research, writing a document, a script, an ops chore. It is
 given to a **role**, whose agent runs it in a **workspace** (a directory on the gateway's host),
@@ -2023,3 +2024,71 @@ priority and then age decide. A board at its own `max_running` gives up its turn
 - Steer with a comment; stop only when the agent is going the wrong way.
 - Unblock with a comment that answers the question the block asked.
 - Never put a secret in a task, a comment or a gate. Put it in the role's `.env`.
+
+## 15. Cron jobs
+
+A cron job is not a task. It is a schedule, a role and a prompt: at each time the gateway
+opens a fresh session of the role, gives it the prompt, and posts the answer to the chat the
+job was made in. Nothing reports, nothing is reviewed, and the board does not see it. Cron is
+on when the operator sets `cron.enabled: true` in config.yaml and restarts the gateway.
+
+### Making one in chat
+
+```text
+/cron add "every weekday 09:00" worker List the open PRs in the web repository, oldest first.
+name: Daily PRs
+tz: Asia/Shanghai
+```
+
+The schedule is in quotes, then the role, then the prompt, which may run over several lines.
+`name:`, `tz:` and `script:` lines are optional, each once. The answer names the job:
+
+```text
+Added c_8f2k1m0q4x7z, *Daily PRs*: every weekday 09:00 (Asia/Shanghai), next 2026-11-18 09:00, as worker, posting here.
+```
+
+Made in a thread, the job posts in that thread. Its schedule is a cron expression
+(`0 9 * * 1-5`), `every 30m`, `every 2h`, `every day 09:00`, `every monday 09:00`, or a
+one-off: `in 30m`, or a time, `2026-11-18 09:00`. The shortest period is 5 minutes.
+
+### What a fire posts
+
+Each answer comes with a header: the job's name, its time and how long it took.
+
+```text
+**Daily PRs** · 2026-11-18 09:00 Asia/Shanghai · 3m 12s
+Two open PRs: #12, fix the parser (3 days), and #14, docs (1 day).
+```
+
+An agent that has nothing to say answers exactly `[nothing to report]`, and nothing is
+posted. Write that into the prompt when quiet days are the usual case: "If no PR is older
+than a week, answer [nothing to report]". A failed fire is one line; three in a row pause the
+job, with the line saying how to resume it.
+
+Each fire's prompt carries the job's previous result, so a job can say what changed since
+yesterday. A script, set by an operator, runs first, and its output goes in the prompt:
+
+```text
+/cron add "every day 08:30" worker Say which of these builds failed, and why.
+script: ./tools/last-builds.sh
+```
+
+### Seeing and changing jobs
+
+`/cron list` and `/cron show <id>` are anyone's; `pause`, `resume`, `run` (fire once now) and
+`remove` are an operator's. Each sees only this chat's jobs. There is no edit in chat: an
+operator changes a job at the terminal, `mt cron edit c_… --schedule "every day 10:00"`, or
+you remove it and add it again.
+
+### An agent's job
+
+A chat agent can add a job for you, from its shell, with `mt cron add < job.json` and
+`{"schedule": "every day 09:00", "prompt": "..."}`, when an operator asked it in that turn:
+asked by someone at talk tier, it is refused, and says so. A board run's agent can add one
+too, posting to its task's chat. The job runs as the agent's own role, with no script; the
+agent may pause or remove only the jobs it made.
+
+An agent's add is judged by the turn running when it arrives, so a process the agent left
+running in the background could keep retrying until an operator's turn runs, and its add would
+then pass. The tokens keep an agent's ordinary use of `mt cron` in its own chat and its own jobs;
+they are cooperative, not a lock.

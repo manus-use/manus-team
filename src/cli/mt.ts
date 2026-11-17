@@ -4,13 +4,15 @@ import { redactKnownSecrets } from '../secrets.js';
 import { parse, refuse, UsageError } from './args.js';
 import { jsonLine } from './operator.js';
 import { LIST_FILTERS } from '../kanban/chat-parse.js';
-import { gateAdd, gateList, gateRemove, inBoardRun, runShellRefusal } from './gate.js';
+import { gateAdd, gateList, gateRemove, hasBoardRun, inAgentRun, runShellRefusal } from './gate.js';
 import { WORKER_COMMANDS } from '../kanban/worker.js';
 import { kanbanCommand, NOT_IN_A_RUN } from './kanban.js';
 import { operatorCommand, TASK_COMMANDS } from './operator.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
 import { SERVICE_USAGE, serviceCommand, type ServiceDeps } from './service.js';
 import { updateCommand, type UpdateDeps } from './update.js';
+import { CRON_USAGE, cronAgent, cronOperator } from './cron.js';
+import { CRON_COMMANDS } from '../cron/worker.js';
 import { workflowCheck } from './workflow.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
 
@@ -31,7 +33,7 @@ import { workspaceAdd, workspaceList } from './workspace.js';
  * `/kanban` commands, the exception to writing files only. They write the
  * board's database, through the board's own service, and after a change ask the
  * gateway for a dispatcher pass, a request that needs no token and does nothing
- * else. They refuse to run in a board run's shell.
+ * else. They refuse to run in an agent's shell.
  */
 
 export type Git = (args: readonly string[]) => Promise<{ code: number; stderr: string }>;
@@ -102,6 +104,7 @@ const USAGE = [
   '  mt kanban workflow archive <instance> [--board <name>] [--json]',
   "the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
   `  mt kanban <${WORKER_COMMANDS.join('|')}> < input.json`,
+  CRON_USAGE,
 ].join('\n');
 
 function expectNothing(positionals: readonly string[], what: string): void {
@@ -137,7 +140,7 @@ function gate(argv: readonly string[], io: MtIo): number {
 }
 
 /**
- * The operator's groups (spec §2.6), which refuse to run in a board run's shell.
+ * The operator's groups (spec §2.6), which refuse to run in an agent's shell.
  * Every other `mt kanban <command>` is the worker CLI's (spec §7.3).
  */
 const OPERATOR_GROUPS: readonly string[] = ['task', 'board', 'gate', 'workflow'];
@@ -151,7 +154,7 @@ const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * The operator's command refused in a board run's shell, before its command
+ * The operator's command refused in an agent's shell, before its command
  * line is parsed or its stdin read: an agent gets the refusal, whatever it
  * typed, and nothing waits on its input. In JSON when `--json` is among the
  * words, as the command itself would answer.
@@ -160,11 +163,12 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
   const sub = rest[0];
   const named = command !== undefined && sub !== undefined && SUBCOMMANDS[command]?.includes(sub) === true;
   const what = ['mt kanban', ...(command === undefined ? [] : [command]), ...(named ? [sub] : [])].join(' ');
-  // A run starts a workflow, or applies a DAG of its own, with the worker's commands (spec §21.6).
+  // A run starts a workflow, or applies a DAG of its own, with the worker's commands (spec §21.6):
+  // said only in a board run's shell, the only one those commands work in.
   const message =
-    command === 'workflow'
-      ? `${runShellRefusal(what)}; a board run starts a workflow with mt kanban start-workflow, and makes a DAG of its own with mt kanban apply-dag`
-      : runShellRefusal(what);
+    command === 'workflow' && hasBoardRun(io.env)
+      ? `${runShellRefusal(what, io.env)}; a board run starts a workflow with mt kanban start-workflow, and makes a DAG of its own with mt kanban apply-dag`
+      : runShellRefusal(what, io.env);
   // A preview's stdout is the DAG file it writes: its refusal goes to stderr, as the preview's own do.
   const json = command !== 'gate' && rest.includes('--json') && !(command === 'workflow' && sub === 'preview');
   if (json) io.out(jsonLine({ ok: false, code: 'operator_command', message }));
@@ -174,7 +178,7 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
 
 /**
  * Whose `mt kanban <command>` this is. `task`, `board` and `gate` are the
- * operator's, refused in a board run's shell. A worker's name is the worker
+ * operator's, refused in an agent's shell. A worker's name is the worker
  * CLI's in any shell, so an agent's `show`, `comment` and `link` are always the
  * worker's; outside a run it says it needs one, before looking at its
  * arguments, and for those three that the operator's is under `task`. Any other
@@ -184,12 +188,13 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
  */
 async function kanban(command: string | undefined, rest: readonly string[], io: MtIo): Promise<number> {
   if (command !== undefined && OPERATOR_GROUPS.includes(command)) {
-    if (inBoardRun(io.env)) return refuseInRun(command, rest, io);
+    if (inAgentRun(io.env)) return refuseInRun(command, rest, io);
     const operator = withGatewayFile(io);
     return command === 'gate' ? gate(rest, operator) : await operatorCommand(command, rest, operator);
   }
   const workers = command !== undefined && (WORKER_COMMANDS as readonly string[]).includes(command);
-  if (inBoardRun(io.env)) return await kanbanCommand(command, rest, io);
+  // The worker's routing stays a board run's: a chat turn's or a fire's shell has no run to report for.
+  if (hasBoardRun(io.env)) return await kanbanCommand(command, rest, io);
   // An operator's task command's name is the operator's hint: `mt kanban show k_1` needs `task`.
   const operators = command !== undefined && TASK_COMMANDS.includes(command);
   if (workers) {
@@ -205,12 +210,12 @@ async function kanban(command: string | undefined, rest: readonly string[], io: 
  * `io` for a command that loads the gateway's settings: its environment this
  * shell's over the gateway's .env, as the gateway's is over the file, so the
  * command sees what the gateway sees. The file's secrets are masked from here
- * on. A refused file is a ConfigError, as it stops the gateway. Never in a
- * board run's shell: that is an agent's, and gets nothing of the file, so
- * there the command sees that shell alone.
+ * on. A refused file is a ConfigError, as it stops the gateway. Never in an
+ * agent's shell, a board run's, a chat turn's or a fire's: it gets nothing of
+ * the file, so there the command sees that shell alone.
  */
 export function withGatewayFile(io: MtIo): MtIo {
-  if (inBoardRun(io.env)) return io;
+  if (inAgentRun(io.env)) return io;
   const loaded = loadGatewayEnv(io.env);
   return { ...io, env: loaded.env, shellEnv: io.env, gatewayEnv: loaded.file };
 }
@@ -273,14 +278,26 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       );
     }
     if (group === 'kanban') return await kanban(command, rest, io);
+    if (group === 'cron') {
+      // Two grammars told apart by the shell (the cron spec, §6.4): an agent's gets its four
+      // commands, with JSON on stdin, whatever follows them, and the operator's are refused
+      // before their arguments are read.
+      if (inAgentRun(io.env)) {
+        if (command !== undefined && (CRON_COMMANDS as readonly string[]).includes(command)) {
+          return await cronAgent(command, rest, io);
+        }
+        return refuse(io, runShellRefusal(['mt cron', ...(command === undefined ? [] : [command])].join(' '), io.env));
+      }
+      return await cronOperator(command, rest, withGatewayFile(io));
+    }
     if (group === 'service') {
       // An agent restarting or removing the gateway would end its own run, and every other.
-      if (inBoardRun(io.env)) return refuse(io, runShellRefusal('mt service'));
+      if (inAgentRun(io.env)) return refuse(io, runShellRefusal('mt service', io.env));
       return await serviceCommand(argv.slice(1), io);
     }
     if (group === 'update') {
       // As mt service: an agent updating the gateway would end its own run, and every other.
-      if (inBoardRun(io.env)) return refuse(io, runShellRefusal('mt update'));
+      if (inAgentRun(io.env)) return refuse(io, runShellRefusal('mt update', io.env));
       return await updateCommand(argv.slice(1), io);
     }
     if (group === 'workspace' && command === 'list') {

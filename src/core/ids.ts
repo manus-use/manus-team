@@ -65,6 +65,11 @@ export function newWorkflowId(): string {
   return `w_${randomToken(12)}`;
 }
 
+/** A cron job (the cron spec, §2). Opaque, as a task's id is. */
+export function newCronJobId(): string {
+  return `c_${randomToken(12)}`;
+}
+
 /**
  * A per-process boot id, minted once at import time.
  *
@@ -130,6 +135,17 @@ export function noticeBatchUuid(appId: string, pairs: ReadonlyArray<readonly [nu
  */
 export function boardCardUuid(appId: string, runId: string): string {
   const canonical = [appId, 'kanban-card', runId].join(SEP);
+  return createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 50);
+}
+
+/**
+ * The `uuid` of one message of a cron fire's delivery (the cron spec, §5.6): its
+ * part, from 0, of the fire's answer, or its one line. Derived from the fire,
+ * whose id is never reused, so a fire sent again after a restart is the same
+ * messages, and two fires are never taken for one.
+ */
+export function cronUuid(appId: string, jobId: string, fireId: number, part: number): string {
+  const canonical = [appId, jobId, fireId, part].join(SEP);
   return createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 50);
 }
 

@@ -262,13 +262,13 @@ describe('mt kanban apply-dag and mt kanban workflow in a run\'s shell', () => {
       code: 1,
       out: '',
       err:
-        "mt: mt kanban workflow start is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or MT_KANBAN_TOKEN set. " +
+        "mt: mt kanban workflow start is an operator's command, not an agent's; this shell has MT_KANBAN_RUN set. " +
         'Run it from your own shell; a board run starts a workflow with mt kanban start-workflow, and makes a DAG of its own with mt kanban apply-dag',
     });
     const json = await mt(['kanban', 'workflow', 'apply', 'dag.json', '--json']);
     expect(JSON.parse(json.out)).toMatchObject({ ok: false, code: 'operator_command' });
     // A preview's stdout is a DAG file: its refusal goes to stderr, with --json too.
     const preview = await mt(['kanban', 'workflow', 'preview', 'vendor-eval', '--param', 'topic=x', '--json']);
-    expect(preview).toMatchObject({ code: 1, out: '', err: expect.stringMatching(/^mt: mt kanban workflow preview is an operator's command, not a board run's/) });
+    expect(preview).toMatchObject({ code: 1, out: '', err: expect.stringMatching(/^mt: mt kanban workflow preview is an operator's command, not an agent's/) });
   });
 });

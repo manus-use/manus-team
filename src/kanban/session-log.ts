@@ -86,7 +86,13 @@ export interface LastTurn {
   output: string;
 }
 
-export function lastTurnOf(db: Db, sessionId: string): LastTurn {
+/**
+ * The session's last turn, whole: its errors, and everything the agent said in
+ * it, joined, a trailing prefix of a known secret withheld, and masked, never
+ * cut. A cron fire's answer is read so (the cron spec, §5.5), the same for its
+ * first send and a resend after a restart; `lastTurnOf` cuts it.
+ */
+export function turnText(db: Db, sessionId: string): LastTurn {
   const events = eventsOf(db, sessionId);
   const turnId = events.findLast((e) => e.type === 'turn_submitted')?.turnId ?? null;
   if (turnId === null) return { errors: [], output: '' };
@@ -101,6 +107,12 @@ export function lastTurnOf(db: Db, sessionId: string): LastTurn {
       said += text(event.payload, 'text') ?? '';
     }
   }
+  return { errors, output: redactKnownSecrets(withholdSecretPrefix(said)) };
+}
+
+/** The session's last turn, its output cut to its last LAST_OUTPUT_CHARS, as a run's `last_output`. */
+export function lastTurnOf(db: Db, sessionId: string): LastTurn {
+  const turn = turnText(db, sessionId);
   // Masked before it is cut, so the cut cannot leave the end of a secret showing.
-  return { errors, output: tailChars(redactKnownSecrets(withholdSecretPrefix(said)), LAST_OUTPUT_CHARS) };
+  return { errors: turn.errors, output: tailChars(turn.output, LAST_OUTPUT_CHARS) };
 }

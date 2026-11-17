@@ -278,13 +278,14 @@ describe('running gates', () => {
 
   it("gives a gate its role's environment and the agent allowlist, never the gateway's secrets or a run's", () => {
     const implementer = role('implementer', {
-      agent: { ...role('implementer').agent, env: { API_KEY: 'sk-role-1', MT_KANBAN_SOCKET: '/somewhere' } },
+      agent: { ...role('implementer').agent, env: { API_KEY: 'sk-role-1', MT_KANBAN_SOCKET: '/somewhere', MT_CRON_FIRE: '7' } },
     });
     const parent = {
       PATH: '/usr/bin',
       HOME: '/home/mt',
       LARK_APP_SECRET: 'lark-secret',
       MT_KANBAN_TOKEN: 'a-token',
+      MT_CRON_TOKEN: 'a-cron-token',
       SOMETHING_ELSE: 'x',
     };
     expect(gateEnv(implementer, parent)).toEqual({ PATH: '/usr/bin', HOME: '/home/mt', API_KEY: 'sk-role-1' });

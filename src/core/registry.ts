@@ -9,6 +9,8 @@ import {
 } from '../db/bindings.js';
 import { endTurn, openTurns } from '../db/turns.js';
 import { parkOverdue, pendingForSession } from '../db/approvals.js';
+import { fireBySession } from '../db/cron.js';
+import { CRON_PRINCIPAL } from '../cron/owner.js';
 import type { Channel, SendTarget } from '../channel/types.js';
 import type { Driver } from '../driver/types.js';
 import type { BindingKey, Principal, SessionRow, SessionState } from '../types.js';
@@ -91,14 +93,16 @@ export interface SessionRegistryDeps {
    * §2.4 item 3). Plan C's dispatcher holds a run's environment in memory only.
    * Asked before anything is retired to make room, so it may throw to refuse the
    * build: a run's session rebuilt with its environment gone (spec §2.4 item 3).
+   * Given the binding key the actor is built for, as `actorFor` has it: a chat
+   * session's cron token is scoped to that place (the cron spec, §7.1).
    */
-  envFor?: (sessionId: string) => Readonly<Record<string, string>> | undefined;
+  envFor?: (sessionId: string, key: BindingKey) => Readonly<Record<string, string>> | undefined;
   /**
    * Extra arguments for a session's agent, asked on every actor build, after
    * `envFor`: a kanban run's `--agent <role>` when its role was rendered as a
    * native agent package (plan R). Held by the dispatcher, as the environment is.
    */
-  argsFor?: (sessionId: string) => readonly string[] | undefined;
+  argsFor?: (sessionId: string, key: BindingKey) => readonly string[] | undefined;
   /**
    * Sessions never retired as idle to make room: an open kanban run's (spec §2.4
    * item 3), so it cannot be rebuilt between one turn and the next. The registry
@@ -183,8 +187,8 @@ export class SessionRegistry {
     }
     // With the checks, before #makeRoom: the dispatcher refuses a run's session
     // whose environment did not survive a restart (spec §2.4 item 3).
-    const env = this.#deps.envFor?.(sessionId);
-    const args = this.#deps.argsFor?.(sessionId);
+    const env = this.#deps.envFor?.(sessionId, key);
+    const args = this.#deps.argsFor?.(sessionId, key);
 
     await this.#makeRoom();
 
@@ -400,6 +404,18 @@ export class SessionRegistry {
     if (session === undefined) return { ok: false, reason: `No session ${sessionId}.` };
     if (session.state === 'terminated') {
       return { ok: false, reason: `Session ${sessionId} has ended.` };
+    }
+    // A cron fire's session is deleted with its fire (the cron spec, §3.2): bound into a chat, its
+    // later turns would go with it. Its job is read from the fire, as its own binding is revoked.
+    if (session.ownerPrincipal === CRON_PRINCIPAL) {
+      const fire = fireBySession(this.#deps.db, sessionId);
+      return {
+        ok: false,
+        reason:
+          fire === undefined
+            ? `Session ${sessionId} is a cron fire's.`
+            : `Session ${sessionId} is a cron fire's; /cron show ${fire.jobId} in its chat, or mt cron show ${fire.jobId}, has what it did.`,
+      };
     }
 
     const now = this.#clock.now();

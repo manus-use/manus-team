@@ -884,13 +884,38 @@ class Service {
     const lockPath = join(t.mtHome, 'run', 'gateway.pid');
     const pid = this.lockPid();
     if (pid === undefined) {
-      io.out(`pid lock: ${lockPath} names no running gateway (it is taken only with kanban.enabled)`);
+      io.out(`pid lock: ${lockPath} names no running gateway (it is taken only with kanban.enabled or cron.enabled)`);
     } else if (pid === state.pid) {
       io.out(`pid lock: ${lockPath} names pid ${pid}, the service's`);
     } else {
       io.out(`pid lock: ${lockPath} names pid ${pid}, not the service's: another gateway holds the home; stop it`);
     }
+    // With cron.enabled, the database's own lock too (the cron spec, §4.1, §11).
+    const database = this.databaseLock();
+    if (database !== undefined) {
+      if (database.pid === undefined) io.out(`database lock: ${database.path} names no running gateway`);
+      else if (database.pid === state.pid) io.out(`database lock: ${database.path} names pid ${database.pid}, the service's`);
+      else io.out(`database lock: ${database.path} names pid ${database.pid}, not the service's: another gateway holds the database; stop it`);
+    }
     return state.running ? 0 : 1;
+  }
+
+  /** `<db>.lock` and the live pid it names, when the configuration sets cron.enabled; undefined otherwise. */
+  private databaseLock(): { path: string; pid: number | undefined } | undefined {
+    let settings: ReturnType<typeof loadTeamSettings>;
+    try {
+      settings = loadTeamSettings({ MT_HOME: this.t.mtHome, ...readGatewayEnv({ MT_HOME: this.t.mtHome }).values }, undefined, { unsetPassEnv: [] });
+    } catch {
+      return undefined;
+    }
+    if (settings.cron?.enabled !== true) return undefined;
+    const path = `${settings.dbPath}.lock`;
+    try {
+      const pid = lockHolder(path, 'the database lock');
+      return { path, pid: pid !== undefined && this.deps.alive(pid) ? pid : undefined };
+    } catch {
+      return { path, pid: undefined };
+    }
   }
 
   async logs(lines: number, follow: boolean): Promise<number> {

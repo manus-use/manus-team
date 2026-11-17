@@ -27,6 +27,10 @@ import type {
  * channel this gateway has not got, cannot have anyone asked: sending fails, and
  * the actor releases the request as cancelled, the honest outcome. Without
  * forwarding -- a sink built without it -- every approval card fails so.
+ *
+ * `SinkChannel` is the sink itself, taking its channel id: the `kanban`
+ * channel's is a `KanbanSink`, and a cron fire's session is bound on a sink of
+ * its own that forwards nothing (the cron spec, §5.2).
  */
 export const KANBAN_CHANNEL = 'kanban';
 
@@ -64,24 +68,36 @@ class DiscardedCard implements CardSession {
   async finish(_text: string): Promise<void> {}
 }
 
-export class KanbanSink implements Channel {
-  readonly id = KANBAN_CHANNEL;
+export interface SinkOptions {
+  now?: () => number;
+  /** Where a run's approval cards go; absent, every approval card fails. */
+  forward?: ApprovalForwarding;
+  /** What asked, named by the conversation its session is bound at: `task <id>` unless given. */
+  subject?: (conversationId: string) => string;
+}
+
+/** A channel whose posts go nowhere, bound under its own id (spec §2.4 item 4). */
+export class SinkChannel implements Channel {
+  readonly id: string;
   readonly #now: () => number;
   readonly #forward: ApprovalForwarding | undefined;
+  readonly #subject: (conversationId: string) => string;
   /** The channel each forwarded approval card went to, by its message, for its redraw. */
   readonly #forwarded = new Map<string, Channel>();
 
-  constructor(now: () => number = Date.now, forward?: ApprovalForwarding) {
-    this.#now = now;
-    this.#forward = forward;
+  constructor(id: string, opts: SinkOptions = {}) {
+    this.id = id;
+    this.#now = opts.now ?? Date.now;
+    this.#forward = opts.forward;
+    this.#subject = opts.subject ?? ((conversationId) => `task ${conversationId}`);
   }
 
   async sendText(_target: SendTarget, _text: string, uuid: string): Promise<SendResult> {
-    return { messageId: `kanban:${uuid}`, deduped: false };
+    return { messageId: `${this.id}:${uuid}`, deduped: false };
   }
 
   async openCard(_target: SendTarget, _initialText: string, uuid: string): Promise<CardSession> {
-    return new DiscardedCard(`kanban:${uuid}`, this.#now());
+    return new DiscardedCard(`${this.id}:${uuid}`, this.#now());
   }
 
   /** A run's session is bound at (task, run), so the target's chat is the task. */
@@ -89,10 +105,10 @@ export class KanbanSink implements Channel {
     const taskId = target.chatId;
     const forward = this.#forward;
     if (forward === undefined) {
-      throw new Error(`task ${taskId} asked for approval, and this gateway forwards no approval card to a chat`);
+      throw new Error(`${this.#subject(taskId)} asked for approval, and this gateway forwards no approval card to a chat`);
     }
     const sub = subscriptionsOf(forward.db, taskId).find((s) => s.appId === forward.appId);
-    if (sub === undefined) throw new Error(`task ${taskId} asked for approval, and no chat follows it to be asked`);
+    if (sub === undefined) throw new Error(`${this.#subject(taskId)} asked for approval, and no chat follows it to be asked`);
     const channel = forward.channels.get(sub.channel);
     if (channel === undefined) {
       throw new Error(`task ${taskId} asked for approval, and the chat that follows it is on channel ${sub.channel}, which this gateway has not got`);
@@ -128,7 +144,7 @@ export class KanbanSink implements Channel {
 
   /** A run's session posts no board card; one would be discarded, as its other cards are. */
   async sendCard(_target: SendTarget, _view: CardView, uuid: string): Promise<SendResult> {
-    return { messageId: `kanban:${uuid}`, deduped: false };
+    return { messageId: `${this.id}:${uuid}`, deduped: false };
   }
 
   async updateCard(_messageId: string, _view: CardView): Promise<void> {}
@@ -139,6 +155,13 @@ export class KanbanSink implements Channel {
 
   /** A run's session is in no group, so it has no members: never asked, as it posts no board card. */
   async chatMembers(_chatId: string): Promise<ChatMembers> {
-    throw new Error("a run's session is in no chat, and has no members to read");
+    throw new Error(`a session bound on the ${this.id} channel is in no chat, and has no members to read`);
+  }
+}
+
+/** The `kanban` channel's sink, which forwards a run's approval cards when built with forwarding (spec §7.1). */
+export class KanbanSink extends SinkChannel {
+  constructor(now: () => number = Date.now, forward?: ApprovalForwarding) {
+    super(KANBAN_CHANNEL, { now, ...(forward === undefined ? {} : { forward }) });
   }
 }

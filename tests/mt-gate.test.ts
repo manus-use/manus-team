@@ -103,8 +103,7 @@ describe('mt kanban gate', () => {
         code: 1,
         out: '',
         err:
-          "mt: mt kanban gate add is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or " +
-          'MT_KANBAN_TOKEN set. Run it from your own shell',
+          `mt: mt kanban gate add is an operator's command, not an agent's; this shell has ${name} set. Run it from your own shell`,
       });
     }
     expect(gatesOf(gateway, taskId)).toEqual([]);

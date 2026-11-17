@@ -7,7 +7,7 @@ import { listWorkflows, paramsLine, readWorkflow, type Workflow, type WorkflowFa
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { loadTeam, teamSecrets } from '../team.js';
 import { refuse } from './args.js';
-import { inBoardRun } from './gate.js';
+import { inAgentRun } from './gate.js';
 import type { MtIo } from './mt.js';
 
 /**
@@ -36,8 +36,8 @@ function okLine(w: Workflow): string {
 }
 
 export function workflowCheck(only: string | undefined, io: MtIo): number {
-  // As roleCheck reads it (spec §2.6): never the gateway's .env in a board run's shell.
-  const run = inBoardRun(io.env);
+  // As roleCheck reads it (spec §2.6): never the gateway's .env in an agent's shell.
+  const run = inAgentRun(io.env);
   let env: Env = io.env;
   const unset: string[] = [];
   let facts: WorkflowFacts;
@@ -59,7 +59,7 @@ export function workflowCheck(only: string | undefined, io: MtIo): number {
     io.err(`mt: ${[...new Set(unset)].join(', ')} not set in this shell, so a gate holding those values cannot be refused here`);
   }
   if (run) {
-    io.out("note: this is a board run's shell, which reads neither the gateway's .env nor its secrets, so a gate holding one of them cannot be refused here");
+    io.out("note: this is an agent's shell, which reads neither the gateway's .env nor its secrets, so a gate holding one of them cannot be refused here");
   }
   const say = (line: string): void => io.out(redactKnownSecrets(line));
   if (only !== undefined) {

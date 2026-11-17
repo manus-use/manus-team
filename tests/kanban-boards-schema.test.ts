@@ -49,7 +49,7 @@ describe('migration 006', () => {
        VALUES ('r_old', 'k_old', 1, 'work', 'role', 'implementer', jsonb('{}'), ?)`,
     ).run(NOW);
 
-    expect(migrate(db, SCHEMA_DIR)).toBe(9);
+    expect(migrate(db, SCHEMA_DIR)).toBe(10);
 
     expect(getTask(db, 'k_old')).toMatchObject({ taskId: 'k_old', title: 'from before boards', phase: 'open', board: 'default' });
     expect(db.prepare('SELECT run_id, task_id FROM kanban_runs').all()).toEqual([{ run_id: 'r_old', task_id: 'k_old' }]);

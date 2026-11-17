@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CONTEXT_BUDGET_BYTES, PIECE_BYTES, composeNudge, composePrompt, type RunBrief } from '../src/kanban/prompt.js';
+import { CONTEXT_BUDGET_BYTES, PIECE_BYTES, composeNudge, composePrompt, roleSections, type RunBrief } from '../src/kanban/prompt.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import type { RunRow, TaskRow } from '../src/kanban/types.js';
 import { AGENT, NOW, VIA } from './helpers/kanban.js';
@@ -113,6 +113,25 @@ describe('composePrompt', () => {
     // Everything after the role and the skills is what an injected prompt has.
     const injected = composePrompt(brief({ roleMd: 'You change code in this repository.\n' }));
     expect(injected.slice(injected.indexOf('# How to work'))).toBe(native);
+  });
+
+  it('starts with roleSections, the role and skills a cron fire is given the same way', () => {
+    const skills = [{ name: 'testing', description: 'How to test here', dir: '/r/skills/testing', path: '/r/skills/testing/SKILL.md' }];
+    const sections = roleSections('  You change code here.\n', skills);
+    expect(sections).toEqual([
+      '# Your role',
+      '',
+      'You change code here.',
+      '',
+      '# Skills',
+      '',
+      "Read a skill's SKILL.md when it applies to what you are doing:",
+      '- testing: How to test here (/r/skills/testing/SKILL.md)',
+      '',
+    ]);
+    expect(composePrompt(brief({ roleMd: '  You change code here.\n', skills })).startsWith(`${sections.join('\n')}\n# How to work`)).toBe(true);
+    expect(roleSections('  \n', [])).toEqual([]);
+    expect(roleSections(undefined, skills)[0]).toBe('# Skills');
   });
 
   it('leaves out the role and skills a role does not have', () => {

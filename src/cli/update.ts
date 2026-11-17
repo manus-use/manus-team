@@ -5,6 +5,7 @@ import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { ConfigError, loadTeamSettings, type Env, type TeamSettings } from '../config.js';
 import { backupDatabase } from '../db/backup.js';
+import { runningFireCount } from '../db/cron.js';
 import { hasBoard, openAgentRunCount } from '../db/kanban-read.js';
 import { openDbReadOnly, type Db } from '../db/open.js';
 import { isSecretName, loadGatewayEnv } from '../gateway-env.js';
@@ -22,7 +23,7 @@ import { UNCHANGED_STEPS, UpdateLock, readUpdateLock, type UpdateLockState, type
  * changes anything, goes back by itself while going back is safe, keeps the
  * way back once it is not, and says where it stopped.
  *
- * 1. Refused in a board run's shell, by `runMt`.
+ * 1. Refused in an agent's shell, by `runMt`.
  * 2. Check: the two locks; the checkout this mt runs from, which the service
  *    must run; the service's state; a branch with an upstream; clean; then
  *    `git fetch`, and the branch an ancestor of its upstream.
@@ -413,9 +414,11 @@ class Update {
     this.view = serviceView(this.io, deps.service);
     this.checkout = realpathOr(deps.service.checkout);
     this.node = deps.service.node;
-    // This shell's, never a board run's, and nothing git or npm starts may prompt.
+    // This shell's, never an agent's (no MT_KANBAN_* and no MT_CRON_*), and nothing git or npm starts may prompt.
     const env: Record<string, string | undefined> = {};
-    for (const [name, value] of Object.entries(io.env)) if (!name.startsWith('MT_KANBAN_')) env[name] = value;
+    for (const [name, value] of Object.entries(io.env)) {
+      if (!name.startsWith('MT_KANBAN_') && !name.startsWith('MT_CRON_')) env[name] = value;
+    }
     this.shellEnv = { ...env, GIT_TERMINAL_PROMPT: '0' };
     // This shell's secrets, as the .env's are once read: an exported LARK_APP_SECRET is masked in what a failure shows.
     addSecrets(Object.entries(this.shellEnv).flatMap(([name, value]) => (isSecretName(name) && value !== undefined && value !== '' ? [value] : [])));
@@ -806,14 +809,23 @@ class Update {
     if (this.willRestart && runs !== undefined && runs > 0) {
       this.say(`${plural(runs, 'agent run')} ${runs === 1 ? 'is' : 'are'} open: the restart interrupts them, and they are retried as retry_on_crash allows`);
     }
+    // And the cron fires under way (the cron spec, §11): their slots are not fired again.
+    const fires = this.db === undefined ? 0 : runningFireCount(this.db);
+    if (this.willRestart && fires > 0) {
+      this.say(
+        fires === 1
+          ? '1 cron fire is running: the restart interrupts it, and its chat is told; it is not run again'
+          : `${fires} cron fires are running: the restart interrupts them, and their chats are told; they are not run again`,
+      );
+    }
     if (this.willRestart) {
       this.say(`the service is running (pid ${this.servicePid ?? 'unknown'}) and is restarted`);
     } else if (this.installed) {
       this.say('the service is stopped, and is not started: the update stops after the backup');
     } else {
       this.say('no service is installed: the update stops after the backup, and the gateway is yours to restart');
-      if (settings.kanbanEnabled !== true) {
-        this.say('kanban is off, so a gateway started by hand holds no lock to find: stop one that runs before going on');
+      if (settings.kanbanEnabled !== true && settings.cron?.enabled !== true) {
+        this.say('kanban and cron are off, so a gateway started by hand holds no lock to find: stop one that runs before going on');
       }
     }
 

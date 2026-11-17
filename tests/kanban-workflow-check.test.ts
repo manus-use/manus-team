@@ -127,7 +127,7 @@ describe('mt workflow check', () => {
     const r = await f.run(['workflow', 'check'], { env: { MT_KANBAN_RUN: 'r_1', MT_KANBAN_TOKEN: 'tok' } });
     expect(r.code).toBe(0);
     expect(r.out.split('\n')).toEqual([
-      "note: this is a board run's shell, which reads neither the gateway's .env nor its secrets, so a gate holding one of them cannot be refused here",
+      "note: this is an agent's shell, which reads neither the gateway's .env nor its secrets, so a gate holding one of them cannot be refused here",
       'vendor-eval: ok, 3 steps; params: topic (required), vendors (list, required), reviewer (default reviewer)',
     ]);
   });

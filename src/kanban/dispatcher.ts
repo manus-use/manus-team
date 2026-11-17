@@ -14,7 +14,7 @@ import {
 } from '../db/kanban-read.js';
 import { getSession } from '../db/sessions.js';
 import { isWorktreeId } from '../db/workspaces.js';
-import { nativeFor, renderNative, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
+import { nativeFor, PackagesInUse, renderNative, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
 import { roleLimit, type Role } from '../roles.js';
 import { addSecrets, removeSecrets } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
@@ -89,6 +89,12 @@ export interface DispatcherDeps {
    * prompt.
    */
   renderRoot?: string;
+  /**
+   * The rendered packages in use, shared with the cron scheduler (the cron spec,
+   * §5.2): an open run's is held here while it runs, and the sweep after a render
+   * keeps every package held. Absent, the dispatcher keeps a set of its own.
+   */
+  packages?: PackagesInUse;
   /**
    * How a run reaches the worker API (spec §7.2): the socket it is given as
    * `MT_KANBAN_SOCKET`, and the directory of the `mt` shim, put first on its
@@ -183,6 +189,8 @@ export class Dispatcher {
   readonly #note: (line: string) => void;
   /** Open agent runs this process started, by session id. */
   readonly #open = new Map<string, OpenRun>();
+  /** The packages open runs use, and the cron scheduler's fires, when it shares the set. */
+  readonly #packages: PackagesInUse;
   /** Runs being started or waited on, so a test or a shutdown can wait for them. */
   readonly #inflight = new Set<Promise<void>>();
   /** What the last pass found nobody could be given, and why: the sweep's stranded candidates. */
@@ -195,6 +203,7 @@ export class Dispatcher {
   constructor(deps: DispatcherDeps) {
     this.#deps = deps;
     this.#clock = deps.clock ?? systemClock;
+    this.#packages = deps.packages ?? new PackagesInUse();
     const note = deps.note ?? (() => undefined);
     // A note is told, never relied on: one that throws must not end a pass or
     // leave a run's promise rejected with nobody to catch it.
@@ -697,7 +706,11 @@ export class Dispatcher {
       // deliberate: its agent dies with the gateway, so nothing is left to report
       // with the token, and the next boot ends the run (spec §8.4).
       await handle.closing?.catch(() => undefined);
-      if (handle.sessionId !== undefined) this.#open.delete(handle.sessionId);
+      if (handle.sessionId !== undefined) {
+        const packageDir = this.#open.get(handle.sessionId)?.packageDir;
+        if (packageDir !== undefined) this.#packages.release(packageDir);
+        this.#open.delete(handle.sessionId);
+      }
       if (token !== undefined) removeSecrets([token]);
     }
   }
@@ -760,6 +773,7 @@ export class Dispatcher {
       seenComment: 0,
     });
     this.#open.set(sessionId, open);
+    if (open.packageDir !== undefined) this.#packages.hold(open.packageDir);
 
     let terminal: TurnTerminal | 'decided';
     let thrown: string | undefined;
@@ -911,10 +925,8 @@ export class Dispatcher {
       );
       return undefined;
     }
-    const inUse = new Set([rendered.dir]);
-    for (const open of this.#open.values()) if (open.packageDir !== undefined) inUse.add(open.packageDir);
     try {
-      sweepRole(root, role.name, inUse);
+      sweepRole(root, role.name, this.#packages.keeping(rendered.dir));
     } catch (err) {
       this.#note(`kanban: sweeping the old packages of role ${role.name} failed: ${message(err)}`);
     }

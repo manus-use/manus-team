@@ -17,7 +17,9 @@ import type { GateRow } from './types.js';
  * (driver/env.ts), and the role's own values -- its agent's base environment,
  * `.env` and `passEnv`. Never the gateway's own environment, which holds its Lark
  * secret, and never a run's: no `MT_KANBAN_TOKEN`, no `MT_KANBAN_SOCKET`. A test
- * suite has no business reporting on the board.
+ * suite has no business reporting on the board. Nor a cron token: no
+ * `MT_CRON_*` (the cron spec, §5.1), so a gate run from an agent's shell never
+ * carries one.
  *
  * **Its output is masked** (spec §10.1) before it is cut to its last
  * GATE_OUTPUT_BYTES, so a cut cannot leave the start of a secret showing. The
@@ -134,12 +136,12 @@ export function rawTail(all: Buffer): string {
 
 /**
  * A gate's environment: the allowlist an agent gets from the gateway's own
- * environment, and its role's values. Nothing named `MT_KANBAN_*`, whatever put
- * it there.
+ * environment, and its role's values. Nothing named `MT_KANBAN_*` or
+ * `MT_CRON_*`, whatever put it there.
  */
 export function gateEnv(role: Role, parent: Readonly<Record<string, string | undefined>>): Record<string, string> {
   const env = buildEnv(parent, role.agent.env);
-  for (const key of Object.keys(env)) if (key.startsWith('MT_KANBAN_')) delete env[key];
+  for (const key of Object.keys(env)) if (key.startsWith('MT_KANBAN_') || key.startsWith('MT_CRON_')) delete env[key];
   return env;
 }
 

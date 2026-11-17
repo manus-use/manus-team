@@ -144,3 +144,18 @@ agent:
 #   # no max_running of its own. Unset, a role has no limit of its own. May not
 #   # be above max_running.
 #   max_running_per_role: 2
+
+# Cron jobs (docs/specs/2026-11-16-cron-design.md): a schedule, a role, a prompt
+# and an optional script, fired by the gateway into a fresh session of the role,
+# its answer posted to the chat that made the job. Off by default: with it off,
+# no chat session's agent gets a token or a changed PATH, and /cron says cron is
+# off. Snake case, and set in this file only.
+# cron:
+#   enabled: true
+#   # Fires at once, apart from the board's runs; from 1 to 16.
+#   max_running: 2
+#   # A fire's turn with no activity this long is cancelled; from 60 to 86400.
+#   idle_timeout_s: 600
+#   # The zone a job gets when none is given; unset, the gateway's own. Every
+#   # job keeps the zone it was given.
+#   tz: Asia/Shanghai

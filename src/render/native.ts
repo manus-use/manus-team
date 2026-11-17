@@ -193,6 +193,31 @@ function holds(dir: string, files: readonly PackageFile[]): boolean {
 }
 
 /**
+ * The rendered packages in use (the cron spec, §5.2): an open run's, which the
+ * dispatcher holds, and a running cron fire's, which the scheduler holds. Both
+ * report to one, so the sweep after either's render keeps every package an
+ * agent of the other still runs. Counted, as two runs may run one package.
+ */
+export class PackagesInUse {
+  readonly #held = new Map<string, number>();
+
+  hold(dir: string): void {
+    this.#held.set(dir, (this.#held.get(dir) ?? 0) + 1);
+  }
+
+  release(dir: string): void {
+    const left = (this.#held.get(dir) ?? 0) - 1;
+    if (left > 0) this.#held.set(dir, left);
+    else this.#held.delete(dir);
+  }
+
+  /** What a sweep after a render keeps: the package just rendered, and every one in use. */
+  keeping(rendered: string): Set<string> {
+    return new Set([rendered, ...this.#held.keys()]);
+  }
+}
+
+/**
  * Remove a role's packages other than those in `keep` -- the one just rendered,
  * and those of runs still open -- and any staging left by a process that died
  * mid-write. A role's newest package therefore stays until its next render.

@@ -629,6 +629,18 @@ describe('mt service status on macOS', () => {
     const r = await fx.run(['service', 'status']);
     expect(r.code).toBe(1);
     expect(r.out).toMatch(/^installed: no/m);
+    expect(r.out).toMatch(/^pid lock: .*names no running gateway \(it is taken only with kanban\.enabled or cron\.enabled\)$/m);
+    expect(r.out).not.toMatch(/^database lock:/m);
+  });
+
+  it('says what the database lock names, with cron.enabled', async () => {
+    fx = fixture();
+    notLoaded(fx);
+    writeFileSync(join(fx.mtHome, 'config.yaml'), `${readFileSync(join(fx.mtHome, 'config.yaml'), 'utf8')}cron:\n  enabled: true\n`);
+    writeFileSync(join(fx.mtHome, 'team.db.lock'), '777\n', { mode: 0o600 });
+    fx.alive.add(777);
+    const r = await fx.run(['service', 'status']);
+    expect(r.out).toMatch(new RegExp(`^database lock: ${join(fx.mtHome, 'team.db.lock')} names pid 777, not the service's: another gateway holds the database; stop it$`, 'm'));
   });
 });
 

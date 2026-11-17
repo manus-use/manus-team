@@ -5,10 +5,9 @@ import { boardSetting, isPerson, LIST_FILTERS, tooBig, type NewTaskCommand } fro
 import { DAG_LIMITS, checkDagShape, checkDagTasks, dagFile } from '../kanban/dag.js';
 import { WORKFLOW_MESSAGE_BYTES, type KanbanService, type WorkflowMade } from '../kanban/service.js';
 import { expand, listWorkflows, paramsLine, readWorkflow, usableMessage } from '../kanban/workflow.js';
-import { maskAll, workerSocketPath } from '../kanban/socket.js';
+import { maskAll, NUDGE, workerSocketPath } from '../kanban/socket.js';
 import { DEFAULT_BOARD, type BoardRow, type Contract, type Refusal, type Waiting } from '../kanban/types.js';
 import { WORKER_LIMITS } from '../kanban/limits.js';
-import { NUDGE } from '../kanban/worker.js';
 import { visible } from '../names.js';
 import { parse, UsageError } from './args.js';
 import { loadOperator, operatorName, withBoard } from './gate.js';
@@ -24,7 +23,7 @@ import { boardsText, dryRunText, instanceText, instancesText, line, listText, ma
  * board's database beside a running gateway, through `KanbanService`, as `mt
  * kanban gate` does, and record who acted as `operator:<login>`.
  *
- * **Never the worker's.** These refuse to run in a board run's shell. The
+ * **Never the worker's.** These refuse to run in an agent's shell. The
  * worker's commands (spec §7.3), `mt kanban show`, `comment`, `link` and the
  * rest, are named without a group, take no arguments and read JSON on stdin;
  * these are under `task`, and take their task and text as arguments.

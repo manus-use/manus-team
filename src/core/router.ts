@@ -17,7 +17,7 @@ import type {
 } from '../types.js';
 import type { Authorizer } from '../policy/auth.js';
 import { parseCommand, renderHelp, type CommandSpec } from './commands.js';
-import { replyUuid } from './ids.js';
+import { replyUuid, turnIdempotencyKey } from './ids.js';
 import { LaneShed, Lanes } from './lane.js';
 import { MailboxFull, SessionHeld, type SessionActor } from './session-actor.js';
 import { canMutate } from './status.js';
@@ -102,6 +102,14 @@ export interface RouterDeps {
   appId: string;
   /** The board's commands; absent when `kanban.enabled` is off, and `/kanban` says so. */
   kanban?: KanbanCommands;
+  /**
+   * Told of each turn just before it is submitted, with the key the actor will
+   * give it and whether its sender has operate tier: a chat agent's `mt cron add`
+   * is judged by its running turn's (the cron spec, §7.1). `CronTokens`, with cron on.
+   */
+  cronTurns?: { turnSubmitted(sessionId: string, idempotencyKey: string, operate: boolean): void };
+  /** `/cron` (the cron spec, §6.1); absent when `cron.enabled` is off, and `/cron` says so. `CronChat`. */
+  cron?: { run(arg: string, message: InboundMessage, key: BindingKey): Promise<string> };
   clock?: Clock;
   note?: (line: string) => void;
 }
@@ -109,6 +117,10 @@ export interface RouterDeps {
 /** What `/kanban` says on a gateway whose board is off. */
 export const KANBAN_OFF =
   'The task board is off on this gateway. An operator turns it on with `kanban.enabled: true` in config.yaml, and a restart.';
+
+/** What `/cron` says on a gateway whose cron is off. */
+export const CRON_OFF =
+  'Cron jobs are off on this gateway. An operator turns them on with `cron.enabled: true` in config.yaml, and a restart.';
 
 /** Reasons we stay silent rather than explain ourselves. See `#shouldExplain`. */
 const SILENT_REASONS: ReadonlySet<RejectReason> = new Set<RejectReason>([
@@ -226,6 +238,11 @@ export class Router {
 
     let queued: Promise<unknown>;
     try {
+      this.#deps.cronTurns?.turnSubmitted(
+        session.id,
+        turnIdempotencyKey(message.appId, message.messageId),
+        this.#deps.authorizer.hasTier(message.sender, 'operate'),
+      );
       queued = actor.submit({
         messageId: message.messageId,
         appId: message.appId,
@@ -484,6 +501,23 @@ export class Router {
         // masked once more, for what was not: ids, names, the board's own words.
         await this.#reply(target, message, 'kanban', redactKnownSecrets(answer.quoted ?? answer.text));
         if (answer.thread !== undefined) this.#threaded(answer.thread, key, message.messageId, undefined);
+        return;
+      }
+
+      case 'cron': {
+        const cron = this.#deps.cron;
+        let text: string;
+        if (cron === undefined) text = CRON_OFF;
+        else {
+          try {
+            text = await cron.run(arg, message, key);
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            this.#note(`cron command in ${message.messageId} failed: ${redactKnownSecrets(detail)}`);
+            text = `Cron could not do that: ${label(detail, 600)}`;
+          }
+        }
+        await this.#reply(target, message, 'cron', redactKnownSecrets(text));
         return;
       }
 
