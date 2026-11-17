@@ -9,6 +9,8 @@ import {
 } from '../db/bindings.js';
 import { endTurn, openTurns } from '../db/turns.js';
 import { parkOverdue, pendingForSession } from '../db/approvals.js';
+import { fireBySession } from '../db/cron.js';
+import { CRON_PRINCIPAL } from '../cron/owner.js';
 import type { Channel, SendTarget } from '../channel/types.js';
 import type { Driver } from '../driver/types.js';
 import type { BindingKey, Principal, SessionRow, SessionState } from '../types.js';
@@ -402,6 +404,18 @@ export class SessionRegistry {
     if (session === undefined) return { ok: false, reason: `No session ${sessionId}.` };
     if (session.state === 'terminated') {
       return { ok: false, reason: `Session ${sessionId} has ended.` };
+    }
+    // A cron fire's session is deleted with its fire (the cron spec, §3.2): bound into a chat, its
+    // later turns would go with it. Its job is read from the fire, as its own binding is revoked.
+    if (session.ownerPrincipal === CRON_PRINCIPAL) {
+      const fire = fireBySession(this.#deps.db, sessionId);
+      return {
+        ok: false,
+        reason:
+          fire === undefined
+            ? `Session ${sessionId} is a cron fire's.`
+            : `Session ${sessionId} is a cron fire's; mt cron show ${fire.jobId} has what it did.`,
+      };
     }
 
     const now = this.#clock.now();
