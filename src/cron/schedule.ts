@@ -39,6 +39,7 @@ export const ONE_OFF_GRACE_MS = 3_600_000;
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+const SEARCH_DAYS = SEARCH_YEARS * 366 + 2;
 
 /** A cron expression's matching values, each field as a sorted list. */
 export interface CronFields {
@@ -72,6 +73,7 @@ export type Schedule =
   | { kind: 'wall'; text: string; wall: Wall };
 
 export type Parsed = { ok: true; schedule: Schedule } | { ok: false; message: string };
+export type Planned = { ok: true; at: number } | { ok: false; message: string };
 
 /** The three forms, for a refusal of anything else. */
 export const FORMS =
@@ -431,7 +433,127 @@ export function isoWithOffset(tz: string, instant: number): string {
   return `${w.y}-${two(w.mo)}-${two(w.d)}T${two(w.h)}:${two(w.mi)}:${two(w.s)}${sign}${two(Math.trunc(Math.abs(offset) / 60))}:${two(Math.abs(offset) % 60)}`;
 }
 
+// ---------------------------------------------------------------------------
+// The next run
+
+/** What a search walked: for the test that it goes a day at a time. */
+export interface SearchStats {
+  days: number;
+  times: number;
+}
+
+function dayMatches(f: CronFields, y: number, mo: number, d: number): boolean {
+  if (!f.months.has(mo)) return false;
+  const dom = f.days.has(d);
+  const dow = f.weekdays.has(new Date(Date.UTC(y, mo - 1, d)).getUTCDay());
+  // Both restricted: either; otherwise both, an unrestricted one matching every day (cron(5), Vixie's `*`).
+  return f.anyDay || f.anyWeekday ? dom && dow : dom || dow;
+}
+
+/**
+ * The least mapped instant after `after` of the wall times a cron expression
+ * matches in `tz`, within SEARCH_YEARS; undefined when there is none (§2.2).
+ */
+export function nextRun(fields: CronFields, tz: string, after: number, stats?: SearchStats): number | undefined {
+  const start = wallOf(tz, after);
+  const day = new Date(Date.UTC(start.y, start.mo - 1, start.d));
+  for (let i = 0; i < SEARCH_DAYS; i += 1, day.setUTCDate(day.getUTCDate() + 1)) {
+    if (stats !== undefined) stats.days += 1;
+    const y = day.getUTCFullYear();
+    const mo = day.getUTCMonth() + 1;
+    const d = day.getUTCDate();
+    if (!dayMatches(fields, y, mo, d)) continue;
+    for (const h of fields.hours) {
+      if (i === 0 && h < start.h) continue;
+      for (const mi of fields.minutes) {
+        // Earlier on the first day maps before `after`: the clocks never go back past it.
+        if (i === 0 && h === start.h && mi < start.mi) continue;
+        if (stats !== undefined) stats.times += 1;
+        const { instant } = toInstant(tz, { y, mo, d, h, mi, s: 0 });
+        if (instant > after) return instant;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The next run of a job just added, resumed, or given a new schedule or zone
+ * (§2.1, §2.5), or why it has none: a cron expression whose next time is
+ * SEARCH_YEARS away, a one-off in the past or more than 365 days ahead, or a
+ * wall-clock one-off in a gap of its zone.
+ */
+export function firstRun(s: Schedule, tz: string, now: number): Planned {
+  switch (s.kind) {
+    case 'cron': {
+      const at = nextRun(s.fields, tz, now);
+      return at === undefined ? refused(`${s.text} never comes: it has no time in the next ${SEARCH_YEARS} years`) : { ok: true, at };
+    }
+    case 'every':
+      return { ok: true, at: now + s.periodMs };
+    case 'in':
+      return { ok: true, at: now + s.afterMs };
+    case 'at':
+    case 'wall': {
+      let at: number;
+      if (s.kind === 'at') at = s.instant;
+      else {
+        const mapped = toInstant(tz, s.wall);
+        if (mapped.gap) return refused(`${s.text} does not happen in ${tz}: the clocks go forward over it`);
+        at = mapped.instant;
+      }
+      if (at <= now) return refused(`${s.text} is in the past`);
+      if (at - now > MAX_AHEAD_MS) return refused(`${s.text} is more than 365 days ahead`);
+      return { ok: true, at };
+    }
+  }
+}
+
 /** Whether a schedule happens once: its job is done once it has fired or been skipped. */
 export function isOneOff(s: Schedule): boolean {
   return s.kind === 'in' || s.kind === 'at' || s.kind === 'wall';
+}
+
+/**
+ * The next run after the slot `slot` was fired or skipped at `now` (§4.2): the
+ * first slot after now, of the same grid for a fixed period, `slot + k·p`;
+ * undefined for a one-off, which is then done, and for a cron expression with
+ * no time left in its search.
+ */
+export function runAfter(s: Schedule, tz: string, slot: number, now: number): number | undefined {
+  if (s.kind === 'every') return slot + (Math.floor(Math.max(0, now - slot) / s.periodMs) + 1) * s.periodMs;
+  if (s.kind === 'cron') return nextRun(s.fields, tz, Math.max(now, slot));
+  return undefined;
+}
+
+/**
+ * A recurring schedule's period at a slot (§4.3): a fixed period's own; for a
+ * clock time, the time from the slot to the one after it, in its zone. A
+ * one-off has none, and is given its grace.
+ */
+export function periodAt(s: Schedule, tz: string, slot: number): number {
+  if (s.kind === 'every') return s.periodMs;
+  if (s.kind === 'cron') return (nextRun(s.fields, tz, slot) ?? slot + SEARCH_YEARS * 366 * DAY) - slot;
+  return ONE_OFF_GRACE_MS;
+}
+
+/**
+ * How late a slot may be and still be fired (§4.3): half its period for a
+ * recurring schedule, and ONE_OFF_GRACE_MS, an hour, for a one-off.
+ */
+export function lateLimit(s: Schedule, tz: string, slot: number): number {
+  return isOneOff(s) ? ONE_OFF_GRACE_MS : periodAt(s, tz, slot) / 2;
+}
+
+/** The most slots `missedSlots` counts before it says so. */
+export const MISSED_COUNT_MAX = 10_000;
+
+/** How many slots fell in `[slot, now]`: one skip says it of a job down for a while (§4.3); at most MISSED_COUNT_MAX. */
+export function missedSlots(s: Schedule, tz: string, slot: number, now: number): number {
+  if (now < slot) return 0;
+  if (s.kind === 'every') return Math.min(MISSED_COUNT_MAX, Math.floor((now - slot) / s.periodMs) + 1);
+  if (s.kind !== 'cron') return 1;
+  let n = 1;
+  for (let at = nextRun(s.fields, tz, slot); at !== undefined && at <= now && n < MISSED_COUNT_MAX; at = nextRun(s.fields, tz, at)) n += 1;
+  return n;
 }
