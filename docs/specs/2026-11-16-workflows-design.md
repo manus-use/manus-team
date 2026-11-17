@@ -444,7 +444,8 @@ mt kanban apply-dag < dag.json          # a run: a DAG of its own, with no gates
 ```
 
 The verbs are the same in chat and at the terminal, and the terminal takes `--board` with
-`preview` and `start`, `--key` with `start` and `apply`, and `--json` with each.
+`preview` and `start`, `--key` with `start` and `apply`, and `--json` with each; plan V adds
+`--chat` and `--thread` to `start` and `apply` (§18).
 
 **Preview** reads the file (§4), checks the params against it, substitutes and expands, and shows
 the DAG it would make, the same in chat and at the terminal: a readable summary, one line a task,
@@ -465,7 +466,8 @@ absent, when a person is refused as at the terminal; it reads no database. No ch
 reads the isolated workspaces, so they are not among the facts. `create`, `previewWorkflow` and the
 terminal's preview all call it, so one function judges a task however it is made (§15). What
 needs the database, the board's being there and live and the key, is `apply --dry-run`'s and
-`apply`'s; a person is refused, as a terminal start refuses one.
+`apply`'s; a person is refused, as a terminal start refuses one. (Plan V checks a person at the
+terminal's start and apply, and leaves the preview's unchecked: §18.)
 
 **`preview --json`** at the terminal prints the DAG file itself instead (§5), and nothing else
 on stdout: JSON with two-space indents and keys in the order of §5, so two previews of one file
@@ -562,7 +564,8 @@ split.
 - **at the terminal**, the operator, as `mt kanban task new`, recorded as `operator:<login>`:
   `preview`, `start` and `apply`, with or without `--dry-run`. As there, only roles are given work:
   a terminal reads no Lark settings, so a person, in a param, the file or a DAG, is refused
-  (`person_not_assignable`, kanban spec §2.6);
+  (`person_not_assignable`, kanban spec §2.6). Plan V lifts this: a person is checked for talk
+  tier there as chat checks one (§18.3);
 - **from an agent's run**, `start-workflow` and `apply-dag`, allowed as `mt kanban create` is
   (kanban spec §7.3), with the run's token, in the run's scope (kanban spec §7.2): before the run is
   decided, and after its own report, until it closes. The tasks are recorded as created from the
@@ -661,7 +664,7 @@ the worker API's own):
 | `invalid` | from a run, a field `start-workflow` does not take, as `badInput` refuses one for every worker command; a DAG of another format, with an unknown key, a ref missing, repeated or of other characters, a parent not earlier in it, not UTF-8; from a run, gates, a setting `create` does not take, a `workflow` name or params; a gate command holding the mask `••••`; the file is broken (§4), a param unknown, missing, of the wrong type, given twice, or with a character a title refuses, an item empty, repeated or holding a secret, a name holding a secret, a key reused for another workflow or another DAG, or used by a start for an apply or the reverse, or in another's namespace, 101 tasks |
 | `too_large` | a DAG's canonical form past 192 KiB from a run or 1 MiB elsewhere, the params past 64 KiB, a value or an item past 8 KiB, a list past 100 items, a task's field past `task new`'s limits after substitution |
 | `unknown_role`, `supervised_role`, `unknown_workspace` | a name, in the file or from a param, as `create` refuses it, naming the step and item |
-| `person_not_assignable` | a person without talk tier, or any person at the terminal (kanban spec §2.6) |
+| `person_not_assignable` | a person without talk tier, or any person at the terminal (kanban spec §2.6), which plan V narrows to a person without talk tier there too (§18.3) |
 | `unknown_board`, `board_archived` | the board, as for `task new` (kanban spec §16.4) |
 | `other_board` | the key's instance is on another board (kanban spec §16.5); from a run, a DAG naming a board not its task's |
 | `no_board` | at the terminal, no database, or one not yet migrated (§7) |
@@ -789,7 +792,8 @@ transaction:
 - **a chat start**: every task is subscribed to the chat, as a task from `task new` is, so the
   starting chat follows every task. 100 tasks are 100 rows, one transaction;
 - **a terminal start**: `{kind: operator}`, which no chat follows (kanban spec §2.6), so no
-  subscription;
+  subscription; with plan V's `--chat`, every task is subscribed to that chat, and the reply is
+  posted there by the notifier (§18);
 - **a run's start**: each task gets every subscription of the run's task, as a follow-up does
   (kanban spec §9.4), with its thread and root (kanban spec §19.4).
 
@@ -1290,3 +1294,187 @@ plan's review was folded in. The user chose to skip a dot-entry in the workflows
 as `discoverRoles` does, a badly named file, an entry that is not a regular `.yaml` file and a
 symlink still reported. The reviewer accepted the plan's reading that a step is written below its
 parents, a parent written after its child refused by the check, now in §4.
+
+## 18. From a terminal: chats and people
+
+The kanban spec's §22 gives the terminal's `mt kanban task new` a chat that follows its task and a
+person by principal. A workflow started or applied at a terminal needs both more: an instance of
+many tasks that no chat follows is heard by nobody, and a workflow whose reviewer is a person could
+not be started from a script at all, which is why the cookbook's weekly workflow names a role.
+Built by plan V (kanban spec §12). This section amends §6 (the terminal's flags, who may, the
+refusals) and §9 (who hears, and the reply).
+
+### 18.1 `--chat` on start and apply
+
+```
+mt kanban workflow start <name> [--board <name>] [--param k=v]… [--key <k>] --chat oc_… [--thread omt_…]
+mt kanban workflow apply <dag.json|-> [--key <k>] [--dry-run] --chat oc_… [--thread omt_…]
+```
+
+- **Checked as `task new`'s** (kanban spec §22.1): the chat's shape, `mt cron add --chat`'s; this
+  bot's app id from the settings, refused without one in cron's words; a thread's shape, only with
+  `--chat`, and its root by `threadRootOf`, a thread with no root known refused. The shapes are
+  checked before the board is opened, the root once it is.
+- **Every member follows the chat**: the writer's `applyDag` gives each task's insert the
+  instance's `follow`, which `subscribe()` writes, in the one transaction (§8), as a chat start's
+  every task is subscribed to its chat (§9). A task still has at most one subscription per bot:
+  a terminal's task has no other.
+- **Not a key of the DAG.** Where an instance is heard is the caller's, not part of what is made:
+  one DAG file, kept beside a script, may be applied by different callers to different chats, and
+  its hash (§5), which tells a repeat from another DAG, must not change with where it is heard. So
+  `NewInstance` gains `follow` beside `createdVia`, and a DAG with a `chat` key is refused as any
+  unknown key is (§5).
+- **`apply --dry-run`** takes both flags, makes the same checks, writes nothing, and its answer
+  adds who would follow. **`preview`** takes neither, a usage error, "--chat is start's and apply's:
+  a preview makes nothing to follow".
+- **A repeat by key** is answered at step 0 (§6), `existing: true`, before the flags are looked at:
+  no subscription is added and no reply posted, whatever `--chat` names now, as a repeat makes
+  nothing.
+- **The terminal only.** `startWorkflow` and `applyDag` refuse `follow` unless `createdVia` is
+  `{kind: operator}`, `invalid`; the worker's `start-workflow` schema and `apply-dag`'s DAG have no
+  such field. A run's start is followed by its task's chats already (§9).
+- **No thread is opened, and nothing is held.** A chat start in a group at chat scope is answered
+  in a thread on its command, and its members are held until their subscriptions move there (§9).
+  A terminal sends no message to open a thread on, and its subscriptions are written where they
+  stay, so there is no move to wait for.
+
+### 18.2 The start's reply, posted by the notifier
+
+*A decision.* The terminal has no Lark client, so it cannot send the reply itself. Two ways were
+open: the reply queued in the database for the gateway to send, as a notice, or the subscription
+alone written, the chat's first message being the gateway's first notice. **The reply is queued,
+as an event of the instance's first member**, for these reasons:
+
+- **The chat must be told what it follows.** With the subscription alone, the chat first hears of
+  the instance when one task is done, maybe hours later, as one task's line with no instance id to
+  `show`, and a 100-task instance's notices arrive with nothing to tie them together. The reply
+  names the instance and every task, as a chat start's does; the approved design asks for it.
+- **The events and the notifier are already an outbox**, with all an outbox needs: at least once,
+  from a cursor written in the gateway's own transaction; a batch's uuid from its (subscription,
+  event) pairs, so a resend after a restart shows once; a chat that cannot be reached let go of and
+  said once; the catch-up after an outage (kanban spec §9.4). A table of its own would need a
+  writer, a sender beside the notifier's, and each of those rules again, for one message an
+  instance.
+- **The text cannot be made at the terminal.** A member's id is made inside the writer's
+  transaction (`newTaskId`, in `insertTask`), so a complete reply exists only there; and rendered
+  at the send, it is masked and worded as every notice is. So the event holds the facts, and the
+  notifier makes the text.
+
+**How.** When the instance has a `follow`, `applyDag` writes one more event in its transaction,
+after the member rows: **`workflow_started`, on the member at position 0**, its actor the
+instance's creator, its payload `workflow` (the instance's id), `workflowName`, `board`, `by` (who
+started it), `count` (its members), `people` (whether any member names a person as assignee or
+reviewer), and `tasks`, the first 30 members in position order, each `taskId`, `title` and
+`assignee` (`{kind, name}`, or null): the reply lists at most 30 (§9), so the payload holds no more,
+at most about 20 KiB. It is masked on write as every payload is, `workflow` and `workflowName`
+being in `BOARD_KEYS` already (§8). An event belongs to a task (§7), and the first member's one
+subscription is the `follow`, so the event reaches exactly the chat named, once.
+
+**The notifier renders it** with `renderStarted` (`src/kanban/chat-render.ts`), the chat start's
+own renderer, from the payload alone: it never reads the workflow tables, so the kernel's seam
+(§0) holds, the notifier reading one event of a task as it reads any. Its words are the thread's
+when the subscription it goes to is in a thread with a root, else the chat's (§9). Its first line
+names who started it, as nobody in the chat typed it: "operator:alice started vendor-eval from a
+terminal as `w_…`, 5 tasks:". It is held to the reply's bounds, 30 lines and under 3,800
+characters (§9), and a notice batch takes at most 3,800 characters (`BATCH_CHARS`), so it never
+splits. It comes before any notice of its members, as its event is written before the
+dispatcher is told (§6 step 4). In the first member's `task show` history it is one line, "started
+workflow w_… from a terminal, as its first task". With `kanban.enabled` off no notifier runs, so the
+reply waits, as the tasks do, until the board is on; the terminal's answer already says it is off.
+
+**The terminal's answer** adds `chat oc_… follows its tasks, and is sent this reply` (`, in thread
+omt_…`), and `--json` adds `"follows": {"chat", "thread"}`, null without `--chat`.
+
+### 18.3 A person from the terminal
+
+- **`lark:<union_id>` is taken at the terminal** wherever a person may go: a param that lands in a
+  person field (`--param owner=lark:on_…`, §2), a person the file writes, and a DAG's `assignee` or
+  `reviewer` (§5). Each is checked at step 2 (§6) by `checkDagTasks` (`src/kanban/dag.ts`) with the
+  service's facts, whose talk check plan V gives the terminal's service (kanban spec §22.2): known
+  in `people` for this bot's app, and at talk tier by the open_id last seen. The `terminal` rule in
+  `checkDagTasks` that refused every person there goes.
+- **A refusal** is `person_not_assignable` in chat's words, naming the ref, step and item as any
+  task's refusal does (§6), and the terminal adds the hint that `mt kanban people` lists the people
+  this gateway knows.
+- **No @-mentions at the terminal.** A value starting with `@` in a param that lands in a person
+  field is refused `invalid`, with the hint; one that lands only in text is text, as typed, as in
+  chat (§6).
+- **The preview does not check a person.** It opens no database (§6), and `people` is in the
+  database, as the board and the key are, which a preview already leaves to `apply --dry-run` and
+  `apply`. So a person in the grammar passes the preview's checks, and the preview says on stderr,
+  for each: "lark:… is checked at the start, against the people this gateway knows; mt kanban
+  workflow apply --dry-run checks it now". Opening the database for this one read would make the
+  preview's rule "no database, unless", for a check the start makes anyway.
+- **Cards** go as for any task (kanban spec §22.2): a member followed in a thread with a root may
+  get its person's card there (kanban spec §19.2).
+
+### 18.4 The cases
+
+- **A start from a cron script with `--chat` and `--key`, run twice in a week**: one instance, each
+  member followed once, one reply; the second start answers `existing: true`.
+- **The gateway down at the start**: the reply is posted when it comes back, in the notifier's
+  catch-up, before its members' notices.
+- **The first member archived before the reply is sent**: the reply is sent, as an archived task's
+  pending notices are.
+- **A chat the bot is not in**: the instance is made; the notifier lets the conversation go (kanban
+  spec §9.4).
+- **A person who loses talk tier between `apply --dry-run` and `apply`**: refused at the apply, as
+  §14 says for chat.
+- **A DAG naming a person, previewed and applied**: the preview notes the person unchecked; the
+  apply checks them.
+
+### 18.5 Wiring
+
+- **`src/cli/operator.ts`**: `--chat` and `--thread` on `start` and `apply`, refused on `preview`;
+  `follow` passed; the answer's `follows`; the preview's facts accepting a person in the grammar,
+  with its stderr line; an `@` person refused with the hint, and the hint on `person_not_assignable`.
+- **`src/kanban/service.ts`**: `StartRequest.follow` and the apply request's, refused unless from
+  the operator; the dry run's answer saying who would follow.
+- **`src/db/kanban.ts`**: `applyDag` giving each member's insert the `follow`, and writing
+  `workflow_started` on the first member.
+- **`src/kanban/dag.ts`**: the terminal's refusal of every person removed.
+- **`src/kanban/chat-render.ts`**: `renderStarted` given who started it, and the payload's task
+  shape, which the chat's reply builds from its rows; `renderNotice` rendering `workflow_started`;
+  its history line. **`src/kanban/notices.ts`**: the subscription's thread and root passed to the
+  renderer, for the words.
+- **`docs/examples.md`**: example 6's script passes `--chat oc_xxx` to `mt kanban workflow start`,
+  its prompt no longer asks the agent to post the instance, which the reply does, and its reviewer
+  may be a person, `--param reviewer=lark:on_…`; "a workflow started from a terminal is followed by
+  no chat" becomes what `--chat` changes.
+
+### 18.6 Testing
+
+- **`--chat`**: every member's subscription in the apply's transaction, at chat scope and in a
+  thread with its root; a thread with none refused; a malformed chat or thread and no app id refused
+  before the board is opened; `preview --chat` a usage error; `apply --dry-run --chat` writing
+  nothing and saying who would follow; a repeat by key adding no subscription and no second event;
+  `follow` refused by the service from chat and from a run; a DAG with a `chat` key refused.
+- **The reply**: one `workflow_started` on the first member, with the payload's keys, 30 tasks of
+  100, masked; none without `--chat`, none for a chat's start or a run's; the notifier sending it
+  once, in the chat's words at chat scope and the thread's in a thread, under 3,800 characters for
+  100 tasks of 512-byte titles, before a member's first notice; resent after a restart with the
+  same uuid; the notifier reading no workflow table to render it.
+- **People**: a person in a param, the file and a DAG accepted with talk tier and refused without,
+  naming the ref, with the hint; `@` in a person field refused, in a text field kept; the preview
+  accepting a person with its stderr line, and `apply --dry-run` refusing one without talk tier.
+
+### 18.7 Limits
+
+- **No thread opened from a terminal**, no hold, and no thread followed whose root the board does
+  not know (kanban spec §22.1).
+- **No reply for a repeat by key**, and no second chat for an instance once made.
+- **The preview leaves people unchecked**, as it leaves the board and the key.
+- **No `--chat` for an agent's start or DAG**: a run's are followed by its task's chats.
+
+*Added on 2026-11-17.* The user chose, with the kanban spec's §22: `--chat oc_… [--thread omt_…]`
+on `mt kanban workflow start` and `apply`, every member following the chat, the start's reply
+posted there; `lark:<union_id>` at the terminal in params and an applied DAG, checked as chat
+checks one, with no @-mentions; and cron example 6 passing `--chat`. The main agent decided: the
+reply queued as a `workflow_started` event on the first member, which the notifier renders with
+the chat start's renderer from the payload alone, rather than the subscription alone, as the chat
+must be told what it follows, the events and the notifier already deliver at least once, and the
+ids exist only inside the writer's transaction; the payload's first 30 tasks, as the reply lists
+30; the first line naming who started it; `follow` beside the DAG, not in it, so its hash is the
+same wherever it is heard; `--dry-run` checking the flags and `preview` refusing them; a repeat
+adding nothing; the service refusing `follow` from anyone but the operator; no hold, as nothing
+moves; and the preview leaving people unchecked, with a line on stderr, as it opens no database.
