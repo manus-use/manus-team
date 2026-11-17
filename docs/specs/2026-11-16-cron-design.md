@@ -115,7 +115,9 @@ decimal, with no sign.
   (`s + p` when that is past now). An edit of anything else leaves the next run where it was. So
   a job that fires late, or is skipped, keeps its grid, and only a person's change of when it runs
   moves it. `every 1d` is 24 hours, and moves by an hour against the wall clock across a change of
-  daylight saving time; `every day 09:00` does not.
+  daylight saving time; `every day 09:00` does not. The period is one word: `every 2 h`, an
+  `every` of three words whose second is a number, is refused with "write every 2h, with no
+  space", not read as a day and a time.
 
 **Once:**
 
@@ -159,7 +161,9 @@ a gateway never started on this home, it falls back to its own shell's zone and 
 Europe/Berlin, this shell's zone, as no gateway has recorded its own; --tz names another". Stored
 on the job, so a job means the same after the gateway moves to another zone or another machine. A
 zone is checked by building an `Intl.DateTimeFormat` with it, which refuses an unknown one, and
-stored as `resolvedOptions()` names it, so `utc` is `UTC`. Node's own ICU is the only source of
+stored as `resolvedOptions()` names it, so `utc` is `UTC`. An offset such as `+05:30`, which
+`Intl` takes, is refused first, as no IANA zone: it has no daylight saving time, and is not what a
+zone name promises. Node's own ICU is the only source of
 zone rules; a gateway on a Node whose ICU is older than a change in a zone's rules fires by the
 old ones.
 
@@ -308,7 +312,11 @@ CREATE INDEX idx_cron_jobs_chat ON cron_jobs(delivery_channel, delivery_account,
 - **`idempotency_key`** makes an add that is repeated one job: `lark:<message_id>` from chat, as
   `/kanban task new`'s is, so a redelivered message cannot add a job twice; `--key` at the
   terminal; `idempotency_key` in an agent's JSON, prefixed with its creator (`run:<id>:<key>`,
-  `session:<id>:<key>`), so one agent's key never answers another's job.
+  `session:<id>:<key>`), so one agent's key never answers another's job. A repeated key is
+  answered with its job before the add is checked again (`CronService.add`, and `addJob` in its
+  transaction), so a retry is not refused for what has changed since, a one-off's time now past
+  or a role since removed. A key whose job was removed, and not yet purged, is refused, "the job
+  of that key was removed", so a retry does not bring back a job someone removed.
 - **The pending stamp**, `run_requested_at`, is a run asked for and not yet fired (§4.5).
 
 ### 3.2 `cron_fires`
@@ -575,7 +583,11 @@ Before the channel connects, after the board's boot (kanban §8.4), `CronSchedul
 2. **Every session still bound on the `cron` channel is archived**, as the dispatcher archives the
    board's leftovers (kanban §8.4 step 4, `#archiveLeftovers`), so none is resumed: a fire's whose
    archive was cut by the stop, and one whose archive was rejected while its fire ended anyway
-   (§4.2).
+   (§4.2). Once archived, a session no fire names any more is deleted, as a pruned fire's is
+   (§3.2), by `deleteLeftoverCronSession`, when every binding it ever had is on the `cron`
+   channel and none is live: a removed job's fire whose archive was rejected is purged with its
+   job while its session is still bound, and nothing else would delete that session. A session a
+   fire still names is kept, for its history and its send, until the prune or the purge.
 3. **Pending stamps older than an hour are dropped**, noted: a run asked for while the gateway was
    down for a day is not wanted the moment it starts.
 
@@ -897,6 +909,9 @@ mt cron pause <id> | resume <id> | run <id> | remove <id> [--json]
   is in it, which only a send can tell (§5.6).
 - **The zone** used when `--tz` is not given is the gateway's, from `cron.tz` or
   `$MT_HOME/run/gateway.tz`, and only with neither this shell's, which the answer then says (§2.2).
+  With `--json`, an add given no `--tz` that makes a job says where its zone came from, as
+  `zone_source`: `"cron.tz"`, `"gateway"` or `"shell"`. A retried key's answer has none, as its
+  job took its zone at its first add.
 - **A database with no `cron_jobs`**, one not yet migrated by a gateway of this build, is refused
   as `mt update` treats one with no `kanban_runs` as "no board" (kanban §20.3): "the database is at version 9;
   start the gateway of this build once to migrate it".
@@ -1004,8 +1019,10 @@ the session has a turn open**:
   token was minted (`resolveBinding`, which a `/new` changes), and the token is the session's
   newest. Between turns, a process the agent left behind gets `unauthorized`.
 - **Expired** when the session's actor is built again, which mints its successor; when the
-  gateway stops, as it lives only in memory; and by bound: at most 1,000 are held, the oldest
-  dropped first (`BoundedMap`), which only an actor idle through a thousand later builds misses. A
+  gateway stops, as it lives only in memory; and by bound: at most 1,000 chat tokens are held, the
+  oldest dropped first, which only an actor idle through a thousand later builds misses. A fire's
+  token is not counted, nor dropped for room: fires are bounded by `max_running`, and each token
+  is dropped when its fire ends, so chat churn cannot take one from under a running fire. A
   token leaves the masker when it is replaced or dropped.
 
 ### 7.2 A fire's token
@@ -1459,6 +1476,9 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
 - **No edits from chat, and no workspace named there** (§6.1); and **no agent may pause the job
   its own fire runs for** (§6.3), a seam kept for later (§1).
 - **No name lookup**: jobs are named by id in every command, since names are not unique.
+- **An agent's add is judged by the turn running when it arrives** (§7.1): a process the agent
+  left in the background, holding the token, can retry until an operator's turn runs, and its add
+  then passes. The tokens are cooperative scoping, not confinement (§7.4, §8).
 - **No history beyond 50 fires a job**, and none of a removed job: a pruned fire's session goes
   with it (§3.2).
 - **The terminal's default zone is its own shell's** only when `cron.tz` is unset and no gateway

@@ -108,7 +108,7 @@ export class SinkChannel implements Channel {
       throw new Error(`${this.#subject(taskId)} asked for approval, and this gateway forwards no approval card to a chat`);
     }
     const sub = subscriptionsOf(forward.db, taskId).find((s) => s.appId === forward.appId);
-    if (sub === undefined) throw new Error(`task ${taskId} asked for approval, and no chat follows it to be asked`);
+    if (sub === undefined) throw new Error(`${this.#subject(taskId)} asked for approval, and no chat follows it to be asked`);
     const channel = forward.channels.get(sub.channel);
     if (channel === undefined) {
       throw new Error(`task ${taskId} asked for approval, and the chat that follows it is on channel ${sub.channel}, which this gateway has not got`);

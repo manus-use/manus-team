@@ -624,7 +624,7 @@ export function roleSections(roleMd: string | undefined, skills: readonly Skill[
 }
 
 export function composePrompt(b: RunBrief): string {
-  // A native run's role.md and skills are its agent's own already (plan R).
+  // A native run's role.md and skills are its agent's own already.
   const head = b.native === true ? [] : roleSections(b.roleMd, b.skills);
   head.push('# How to work', '', b.kind === 'work' ? WORK_PROTOCOL : REVIEW_PROTOCOL, '', PRECEDENCE, '');
   return `${head.join('\n')}\n${told(b)}\n`;

@@ -2087,3 +2087,8 @@ A chat agent can add a job for you, from its shell, with `mt cron add < job.json
 asked by someone at talk tier, it is refused, and says so. A board run's agent can add one
 too, posting to its task's chat. The job runs as the agent's own role, with no script; the
 agent may pause or remove only the jobs it made.
+
+An agent's add is judged by the turn running when it arrives, so a process the agent left
+running in the background could keep retrying until an operator's turn runs, and its add would
+then pass. The tokens keep an agent's ordinary use of `mt cron` in its own chat and its own jobs;
+they are cooperative, not a lock.
