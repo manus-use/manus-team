@@ -52,7 +52,7 @@ session's turns (§7); the tiers and limits (§8); the `cron:` section of `confi
 | Chaining one job's result into another's prompt | A fire's prompt already carries its own job's previous result (§5.3), read from `cron_fires`; another job's is the same read |
 | A job that wakes a board task, or makes one | A fire's agent is an ordinary agent: told to, it can ask a person, and a board run already makes tasks. A cron fire gets no board token (§7.2) |
 | Delivery to several chats, or to a person by direct message | `cron_jobs` holds one delivery; a second table of targets would replace its columns |
-| Replies to a cron delivery continuing the fire's session | The fire's session is archived, never deleted (§5.2); its binding is the one a reply would need |
+| Replies to a cron delivery continuing the fire's session | A reply would need the fire's session kept, which §3.2's deletion with a pruned fire rules out today; keeping the sessions of fires a chat may answer, and binding a reply there, is the change |
 | Supervised roles | Refused at add (§2.3). The sink would have to forward approval cards to the job's chat, as `KanbanSink` forwards a task's (kanban §7.1) |
 | A fire pausing its own job, so a job can end itself | A fire's token already names its job (§7.2); `pause` would accept that one job for it, as `not_yours` refuses it today (§6.3) |
 | A web view of jobs | The jobs and fires are two tables, read by `mt cron list --json` |
@@ -364,8 +364,17 @@ CREATE INDEX idx_cron_fires_pending ON cron_fires(delivery) WHERE delivery = 'pe
   require first: its `events`, `turns`, `channel_bindings` (already revoked), `approvals` and
   `snapshots`. A fire's log is its evidence while its fire is in the history, and nothing reads it
   after; kept, the sessions of a five-minute job would grow the events table by a session every
-  five minutes for ever, which the 50-fire bound exists to prevent. Only a session bound on the
-  `cron` channel at that fire is deleted, so a chat's session is never touched.
+  five minutes for ever, which the 50-fire bound exists to prevent.
+
+  **Only a session nothing else can reach is deleted.** A fire's session is deleted only when every
+  binding it has, revoked or not, is on the `cron` channel; one with any other binding is left, and
+  only the fire's row is dropped. That case is closed off where it would start: `/attach` refuses a
+  session owned by the `cron` principal ("session s_… is a cron fire's; mt cron show c_… has what
+  it did"), as `registry.attach` (`core/registry.ts`) accepts any session not terminated, an
+  archived fire's included, and would otherwise bind a fire's session into a chat, whose later
+  turns would then be deleted with the fire. The binding check stays as the backstop for a session
+  bound elsewhere before this rule, or by a path not yet thought of: a chat's session is never
+  deleted by cron, because no session with a chat's binding ever is.
 
 ### 3.3 The writer, `db/cron.ts`
 
@@ -413,8 +422,11 @@ are the gateway's (architecture §11).
 **The locks.** The gateway takes `$MT_HOME/run/gateway.pid` (kanban §17, `lockGateway`) when
 `cron.enabled` is set, as it does today when `kanban.enabled` is: a second gateway on the home is
 refused before it reconciles anything. With `cron.enabled` it also takes **`<db>.lock`, beside the
-database file**, by the same code (written whole and linked in, holding the pid, stale when its
-process is gone, released last at the stop): a database relocated with `db:` can be named by two
+database file**, with the checks `lockHolder` makes of the home's (opened `O_NOFOLLOW`, a regular
+file, of the gateway's own uid, else refused) and the same link-in (written whole beside it, linked
+into place, holding the pid, stale when its process is gone, released last at the stop), but
+without `privateDir`: the database's directory is the operator's, made by `createGateway`'s
+`mkdir`, and is not the gateway's to chmod. a database relocated with `db:` can be named by two
 homes, and the home's lock alone would let both tick it. The second gateway is refused naming the
 database and the pid holding it. Two homes sharing one database are unsupported for cron; the lock
 makes that a refusal at start rather than two schedulers. The compare-and-set of §4.2 and the
@@ -432,8 +444,13 @@ In order, each step's failure noted and the rest going on:
 
 1. **Removed jobs** with a running fire have it stopped: a script still running is aborted
    through its signal, killing its group (§5.1), and an agent's turn is cancelled (§5.4's cancel);
-   the fire ends `interrupted`, "the job was removed", with `delivery` `none`. Those with none
-   running are deleted with their fires and the fires' sessions (`purgeRemoved`, §3.2).
+   the fire ends `interrupted`, "the job was removed", with `delivery` `none`, **only once
+   `registry.archive` of its session has resolved**: the actor is then closed and its agent gone,
+   so nothing writes to the session after the fire's end lets the job be purged. Those with none
+   running are deleted with their fires and the fires' sessions (`purgeRemoved`, §3.2), but a job
+   with a fire still in this process's in-flight set (below) is skipped by `purgeRemoved`'s caller
+   until it leaves the set: a fire ended in the database whose actor is still closing, or whose
+   send is still going, is not deleted from under them.
 2. **Idle limits** of running fires are checked (§5.4).
 3. **Pending deliveries** are sent (§5.6), but those of fires in this process's in-flight set: a
    fire that has just recorded its outcome and is sending is not sent a second time beside itself.
@@ -643,7 +660,8 @@ event.
 memory, so the turn's end is not taken for a failure of its own; then `actor.cancel()`. A turn that
 ignores the cancel for one more tick has its session released, which ends its process, as a board
 run that ignored its cancel is (kanban §8.5), and **the fire then ends `timed_out` itself**, by the
-tick that released it, without waiting for the turn's submit promise: a release resolves that
+tick that released it, once the session's `registry.archive` has resolved, so no actor of it is
+left to write, and without waiting for the turn's submit promise: a release resolves that
 promise only if the actor's close ends the turn, and a fire waiting on it could hold its
 `max_running` slot for ever. When the promise settles later it finds the fire ended and does
 nothing. The partial answer is not posted: the chat is told in one line (§5.6), and the fire's
@@ -864,12 +882,17 @@ environment, because a run's shell had both and the same names meant two things 
 shell has both, since an agent's shell refuses the operator's commands outright, so a name means
 one thing in any shell; and the names, `mt cron add` for both, are the design's.
 
-**A fire's shell is a run's.** `MT_CRON_FIRE` set is, for every operator command's refusal
-(`inBoardRun` in `src/cli/gate.ts`, renamed `inAgentRun`, with every caller, `mt.ts`'s and
-`src/cli/role.ts`'s reading of the gateway's `.env` among them), what `MT_KANBAN_RUN` is: an unsupervised agent nobody
-watches, which must not act as the operator by accident with `mt kanban task new`, `mt service`
-or `mt update`. A chat turn's shell is refused only the operator's `mt cron`: a person is
-directing that agent, and what it may run today is unchanged but for that.
+**Every agent's shell is a run's.** `inBoardRun` (`src/cli/gate.ts`) is renamed `inAgentRun` and
+is true with `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN`, `MT_CRON_TOKEN` or `MT_CRON_FIRE` set: a board
+run's, a chat turn's and a fire's shell alike. Every operator command's refusal uses it, the
+board's groups in `mt kanban` (`mt.ts`'s `kanban`), `mt service`, `mt update` and `mt cron`'s
+operator commands, and so do the skips of the gateway's `.env` (`withGatewayFile` in `mt.ts`,
+`src/cli/role.ts`'s check and `src/cli/workflow.ts`'s `workflowCheck`), so no agent's shell is
+given the file's secrets. An agent, chat's included, must not act as the operator by accident,
+and the token in its environment is how its shell is now known. The worker routing in `mt kanban`
+(`mt.ts`, which sends a worker's command to the socket in a run's shell) stays on `MT_KANBAN_*`
+alone: a chat turn's or a fire's shell has no board run to report for, and its `mt kanban show`
+says it needs one, as any shell's does.
 
 ---
 
@@ -1160,7 +1183,8 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   scheduler (§5.2).
 - **`src/kanban/gates.ts`**: `gateEnv` drops `MT_CRON_*` too; **`src/cli/update.ts`**: its shell
   environment drops `MT_CRON_*` beside `MT_KANBAN_*` (§5.1).
-- **`src/kanban/socket.ts`**: `lockGateway`'s code also taking `<db>.lock` (§4.1); the nudge's
+- **`src/kanban/socket.ts`**: `lockGateway`'s link-in and `lockHolder`'s checks also taking
+  `<db>.lock`, without `privateDir` (§4.1); the nudge's
   throttle moved from `WorkerApi` to the socket's handler (§7.4).
 - **`src/cron/prompt.ts`**, pure: the fire's prompt (§5.3), the header, the outcome lines and the
   split (§5.6).
@@ -1181,7 +1205,11 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
 - **`src/core/ids.ts`**: `newCronJobId()`, `cronUuid()`.
 - **`src/config.ts`**: the `cron:` section (§10), `tz` among it, `CRON_DEFAULTS`, its bounds.
 - **`src/index.ts`**: the scheduler and `CronTokens` built when `cron.enabled` is set; the
-  registry's `envFor` as the dispatcher's, else the scheduler's, else the tokens'; `pinned` as
+  registry's `envFor` as the dispatcher's, else the scheduler's, else the tokens'; its `argsFor` as
+  the dispatcher's, else the scheduler's; the scheduler given `renderRoot`, `$MT_HOME/rendered`,
+  as the dispatcher is today, whether or not the board is on; boot's `sweepRoles` of the rendered
+  packages run by the scheduler's `boot()` when the board is off and cron is on, as the
+  dispatcher's boot runs it otherwise; `pinned` as
   either's; the lock, the socket and the shim when `kanban.enabled` or `cron.enabled` is set; the
   socket's handler dispatching by envelope (§7.4), the nudge to both; `boot()` after the
   dispatcher's, `start()` after the notifier's, `stop()` with the dispatcher's and before the
@@ -1189,8 +1217,10 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   with the home's, released after the database closes; `$MT_HOME/run/gateway.tz` written once the
   home is held; the startup line (§10).
 - **`src/cli/mt.ts`**: the `cron` group, chosen by the shell (§6.4); `inBoardRun` renamed
-  `inAgentRun` and taking `MT_CRON_FIRE`, in `src/cli/gate.ts` and every caller, `src/cli/role.ts`
-  among them (§6.4); `USAGE`.  **`src/cli/cron.ts`**: the operator's
+  `inAgentRun` in `src/cli/gate.ts`, taking `MT_CRON_TOKEN` and `MT_CRON_FIRE`, for every refusal
+  and `.env` skip (`mt.ts`'s `kanban` and `withGatewayFile`, `src/cli/role.ts`, `src/cli/workflow.ts`),
+  the worker routing in `mt.ts`'s `kanban` kept on `MT_KANBAN_*` (§6.4); `USAGE`.
+  **`src/core/router.ts`** also: `/attach` refusing a session owned by the `cron` principal (§3.2). **`src/cli/cron.ts`**: the operator's
   commands and the agent's, the latter through the socket as `src/cli/kanban.ts` sends.
   **`src/cli/service.ts`**: `status`'s lock lines. **`src/cli/update.ts`**: the running fires' line
   (§11).
@@ -1221,7 +1251,9 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   making `pending` deliveries only for jobs with one, not removed; `skipFire` counting a
   `skipped_unavailable` and pausing at 3; `purgeRemoved` sparing a job with a running fire; a fire
   pruned past 50 and a purged job deleting their sessions, events, turns and bindings and no chat
-  session's; the delivery checks with an account missing.
+  session's, a fire's session with a binding on another channel left and only its row dropped; the
+  delivery checks with an account missing; `<db>.lock` refused as a symlink, a directory or
+  another user's file, and its directory's mode left as it was.
 - **Unit, the scheduler**, with a fake clock, a fake driver and a recording channel: due, late
   within half a period fired, past it skipped with one row for many slots; a one-off within an
   hour and past it; `max_running` holding a job, and a held job then skipped as late; a running
@@ -1230,7 +1262,8 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   `interrupted`, archiving leftover `cron` bindings, and the first tick sending pending deliveries
   but none of a fire in flight; stop during a script killing it, and stop during a turn marking it
   stopping, recording nothing, and leaving the fire for the next boot, which ends it `interrupted`
-  with no failure counted; a removal aborting a running script; a second gateway refused by
+  with no failure counted; a removal aborting a running script, its fire ended only after its
+  session's archive resolved, and its job not purged while the fire is in flight; a second gateway refused by
   `<db>.lock` from another home; `gateway.tz` written at start.
 - **Unit, a fire**: the script's environment (the role's values, no `MT_CRON_TOKEN`, no
   `MT_KANBAN_*`, not the gateway's), its directory, its timeout killing its group, its output
@@ -1261,8 +1294,10 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   lines among them, a field twice refused; each command's tier, a sender with no union_id; another
   chat's id unknown; `/cron` with cron off; the terminal's flags, `--no-script`, `--no-chat`, its
   zone line, `--json`, an unmigrated database; `mt cron` in each kind of shell, the operator's
-  refused in an agent's, the agent's usage hint outside one; `mt kanban task new` and `mt service`
-  refused in a fire's shell and allowed in a chat turn's; the agent's JSON strict, `script`
+  refused in an agent's, the agent's usage hint outside one; `mt kanban task new`, `mt service`,
+  `mt update` and the operator's `mt cron` refused in a board run's, a chat turn's and a fire's
+  shell, the gateway's `.env` not read in any of them, and `mt kanban show` in a chat turn's shell
+  saying it needs a run; `/attach` of a fire's session refused; the agent's JSON strict, `script`
   refused with its reason, a `role` field refused, the job running as the session's or the run's
   role, `not_yours`, a supervised own role refused, an idempotency key per creator; `/cron edit`
   and a `workspace:` line answered as unknown in chat; the terminal's zone from `cron.tz`, then
@@ -1294,6 +1329,14 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   refused at its start by `<db>.lock` (§4.1).
 - **Fires are not held to the board's one run per workspace**, so a fire can work in a checkout a
   board run is changing, as a chat session can (§1).
+- **A chat agent's `mt` changes once cron is on.** With `cron.enabled` set, every chat session's
+  agent has `MT_CRON_TOKEN`, so its shell is an agent's (§6.4): the operator's `mt kanban` groups,
+  `mt service`, `mt update` and `mt cron` are refused there, and the role and workflow checks no
+  longer read the gateway's `.env`, where with cron off a chat agent could run them all. Chosen so
+  that no agent acts as the operator by accident, and none is handed the `.env`'s secrets by a
+  check; an operator who wants a chat agent to restart or update the gateway runs those commands
+  at a terminal. It is not a boundary: the agent runs as the gateway's user, and can unset the
+  variable.
 - **No edits from chat, and no workspace named there** (§6.1); and **no agent may pause the job
   its own fire runs for** (§6.3), a seam kept for later (§1).
 - **No name lookup**: jobs are named by id in every command, since names are not unique.
@@ -1380,3 +1423,16 @@ delivery, `skipFire` recording and counting `skipped_unavailable`, `MT_CRON_*` d
 `gateEnv` and `mt update`, the rename of `inBoardRun` reaching `role.ts`, `kanban_off` and the
 nudge's throttle at the socket, a removal aborting a script, the account in the delivery checks,
 and §6.2's reference to kanban §20.3.
+*Amended on 2026-11-17, again.* A second review found, and this revision takes: that `/attach`
+accepts an archived session, so an operator could bind a fire's session into a chat whose turns
+its pruning would then delete; so `/attach` refuses a session owned by the `cron` principal, and a
+fire's session is deleted only when every binding it has is on the `cron` channel, else only the
+fire's row (§3.2); that a removed or idle-released fire could be ended, and its job purged, while
+its actor still ran; so such a fire ends only once its session's archive has resolved, and the
+purge skips a job with a fire in flight (§4.2, §5.4); that a chat turn's shell could still run the
+operator's commands; so `inAgentRun` counts `MT_CRON_TOKEN`, every refusal and `.env` skip uses it,
+the worker routing stays on `MT_KANBAN_*`, and the limits say what that changes for a chat agent
+(§6.4, §15); and, among the minor points, that a reply to a delivery needs a kept session, which
+the pruning rules out (§1); the database's lock taken with `lockHolder`'s checks and the link-in,
+without `privateDir` (§4.1); and the registry's `argsFor`, the scheduler's `renderRoot` and boot's
+`sweepRoles` with only cron on, in the wiring (§13).
