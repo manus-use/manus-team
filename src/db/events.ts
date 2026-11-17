@@ -131,6 +131,17 @@ export function lastEventOfType(db: Db, sessionId: string, type: EventType): Eve
   return row === undefined ? undefined : decode(row);
 }
 
+/**
+ * When the session's newest event was appended, unix ms, or undefined for none:
+ * a cron fire's last sign of life, which its idle limit reads (the cron spec, §5.4).
+ */
+export function lastEventAt(db: Db, sessionId: string): number | undefined {
+  const row = db
+    .prepare<[string], { ts: number }>('SELECT ts FROM events WHERE session_id = ? ORDER BY seq DESC LIMIT 1')
+    .get(sessionId);
+  return row?.ts;
+}
+
 export function lastSeq(db: Db, sessionId: string): number {
   const row = db
     .prepare<[string], { last_seq: number }>('SELECT last_seq FROM sessions WHERE id = ?')
