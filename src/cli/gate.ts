@@ -3,6 +3,7 @@ import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { loadTeamSettings, type Env, type TeamSettings } from '../config.js';
 import { openDb } from '../db/open.js';
+import { PeopleDirectory } from '../kanban/people.js';
 import { KanbanService } from '../kanban/service.js';
 import type { GateRow } from '../kanban/types.js';
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
@@ -80,13 +81,45 @@ export function runShellRefusal(what: string, env: Env): string {
 /** How an operator's command says it refused, and its exit code: on stderr, or as JSON for `--json`. */
 export type Refuse = (code: string, message: string) => number;
 
+/**
+ * What this shell's settings lack for the terminal to check a person's talk
+ * tier (kanban spec §22.2): the bot's app id, by which `people` keeps who it has
+ * seen, or an owner, without which there is no talk allowlist.
+ */
+export type PeopleMissing = 'appId' | 'owner';
+
 export interface BoardAccess {
   service: KanbanService;
   /** The gateway's home, where its socket is (spec §7.2). */
   home: string;
   /** `kanban.enabled` as the config sets it, undefined when it does not: the board runs only when it is true. */
   kanbanEnabled: boolean | undefined;
+  /** Why the service has no people, so a person cannot be checked here; undefined when it has them. */
+  peopleMissing: PeopleMissing | undefined;
   close(): void;
+}
+
+/** What `assignable` says of a person when the service has no talk check: right for a board not in Lark, wrong beside a gateway that is. */
+const NO_PEOPLE = 'cannot be given work yet: nothing can deliver a task card to a person until the board is in Lark';
+
+/** What the terminal says in its place, naming the setting this shell lacks. */
+const MISSING: Readonly<Record<PeopleMissing, string>> = {
+  appId: 'cannot be checked for talk tier here: this shell finds no lark.appId or LARK_APP_ID, which the people this bot has seen are kept by',
+  owner: 'cannot be checked for talk tier here: this shell finds no auth.owner or MT_OWNER_OPEN_ID, without which there is no talk allowlist to check against',
+};
+
+/** How a terminal finds a person's id, added to chat's words for a person it refused (kanban spec §22.2). */
+export const PEOPLE_HINT = 'mt kanban people lists the people this gateway knows, with their union_ids and whether they have talk tier';
+
+/**
+ * A refusal's message as the terminal says it: for a person the service could
+ * not check, the setting this shell lacks; for one it refused, chat's words and
+ * how to find a person's id. Any other refusal as it is.
+ */
+export function personHint(r: { code: string; message: string }, missing: PeopleMissing | undefined): string {
+  if (r.code !== 'person_not_assignable') return r.message;
+  if (missing !== undefined && r.message.includes(NO_PEOPLE)) return r.message.replace(NO_PEOPLE, MISSING[missing]);
+  return `${r.message}; ${PEOPLE_HINT}`;
 }
 
 export interface OpenOptions {
@@ -149,6 +182,12 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     const has = opts.workflows === true ? 'no workflows yet' : 'no board yet';
     return no('no_board', `the database at ${settings.dbPath} has ${has}: start the gateway once, so it is migrated`);
   }
+  // Chat's own check of a person, against the same table (kanban spec §22.2): the people this bot has
+  // seen, and the talk allowlist this shell's settings give, as the gateway's authorizer holds it.
+  const { appId, talk } = settings;
+  const peopleMissing: PeopleMissing | undefined = appId === undefined ? 'appId' : talk === undefined ? 'owner' : undefined;
+  const people =
+    appId === undefined || talk === undefined ? undefined : new PeopleDirectory({ db, appId, canTalk: (openId) => talk.includes(openId) });
   // As the gateway builds its own: a supervised role's approvals go to the chat that follows its task (spec §7.1).
   const service = new KanbanService({
     db,
@@ -163,8 +202,9 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     ...(settings.kanban?.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: settings.kanban.maxRunningPerRole }),
     // As the gateway's: the operator's files, read at each preview and start (workflows spec §1).
     workflowsDir: join(settings.home, 'workflows'),
+    ...(people === undefined ? {} : { people }),
   });
-  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, close: () => db.close() };
+  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, peopleMissing, close: () => db.close() };
 }
 
 /** A write the gateway held the lock through, every retry: not this command's fault. */
