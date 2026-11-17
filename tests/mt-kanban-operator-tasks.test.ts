@@ -200,7 +200,7 @@ describe('mt kanban task new', () => {
     });
     const json = await mt(['task', 'new', 'Nightly', 'report', '--key', 'nightly-1', '--json']);
     // A repeat changes nothing, so it sends no nudge, and says so.
-    expect(JSON.parse(json.out)).toEqual({ ok: true, task_id: taskId, board: 'default', existing: true, nudged: false });
+    expect(JSON.parse(json.out)).toEqual({ ok: true, task_id: taskId, board: 'default', existing: true, nudged: false, follows: null });
     const fresh = await mt(['task', 'new', 'Weekly', '--key', 'weekly-1', '--json']);
     expect(JSON.parse(fresh.out)).toMatchObject({ ok: true, board: 'default', existing: false });
     expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 2 });

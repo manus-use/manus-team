@@ -95,6 +95,8 @@ export interface BoardAccess {
   home: string;
   /** `kanban.enabled` as the config sets it, undefined when it does not: the board runs only when it is true. */
   kanbanEnabled: boolean | undefined;
+  /** The bot's app id, as this shell's settings give it: the account of a chat `--chat` names (kanban spec §22.1). */
+  appId: string | undefined;
   /** Why the service has no people, so a person cannot be checked here; undefined when it has them. */
   peopleMissing: PeopleMissing | undefined;
   /**
@@ -143,6 +145,12 @@ export interface OpenOptions {
   unsetNote?: string;
   /** The workflow commands need the workflows' tables too (workflows spec §7): a database not migrated to them is refused. */
   workflows?: boolean;
+  /**
+   * What the command checks of the settings before the database is opened, a
+   * refusal or undefined: `--chat`'s app id and `auth.chats` (kanban spec §22.1),
+   * so they refuse even a repeat by key.
+   */
+  check?: (settings: TeamSettings) => { code: string; message: string } | undefined;
 }
 
 /**
@@ -173,6 +181,8 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   const loaded = loadOperator(io, what, opts);
   if (typeof loaded === 'number') return loaded;
   const { settings, team } = loaded;
+  const early = opts.check?.(settings);
+  if (early !== undefined) return no(early.code, early.message);
   if (!existsSync(settings.dbPath)) {
     return no('no_board', `there is no board at ${settings.dbPath}: the gateway creates its database when it first starts`);
   }
@@ -222,7 +232,7 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     appId === undefined
       ? undefined
       : peopleOf(db, appId).map((p) => ({ unionId: p.unionId, name: p.name, talk: talk?.includes(p.openId) === true }));
-  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, peopleMissing, seen, close: () => db.close() };
+  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, close: () => db.close() };
 }
 
 /** A write the gateway held the lock through, every retry: not this command's fault. */

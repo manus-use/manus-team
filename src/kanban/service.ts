@@ -12,6 +12,7 @@ import {
   getInstance,
   getRun,
   getTask,
+  getTaskByKey,
   instanceByKey,
   instancesOn,
   memberOf,
@@ -20,6 +21,7 @@ import {
   relatedTasks,
   runsOf,
   statusOf,
+  subscriptionsOf,
   taskView,
   threadRootOf,
   type BoardEntry,
@@ -503,6 +505,28 @@ export class KanbanService {
    */
   threadRoot(at: ThreadAt): string | undefined {
     return threadRootOf(this.#db, at);
+  }
+
+  /**
+   * Whether a key has made its task, or its instance, already: the terminal
+   * looks a thread's root up only for what is not made yet, so a repeat is
+   * answered even once its thread's root is lost (kanban spec §22.1). Namespaced
+   * as `create` and a start namespace it; false for a key they would refuse.
+   */
+  keyMade(key: string, via: CreatedVia, what: 'task' | 'instance'): boolean {
+    const k = this.#idempotencyKey(key, via);
+    if (!k.ok || k.key === null) return false;
+    return what === 'task' ? getTaskByKey(this.#db, k.key) !== undefined : instanceByKey(this.#db, k.key) !== undefined;
+  }
+
+  /**
+   * The chat that follows a task for this bot, as stored: its first Lark
+   * subscription, the thread null at chat scope; null with none. A repeat's
+   * answer names it, never the `--chat` given now (kanban spec §22.1).
+   */
+  followOf(taskId: string, appId: string): { chat: string; thread: string | null } | null {
+    const s = subscriptionsOf(this.#db, taskId).find((x) => x.channel === 'lark' && x.appId === appId);
+    return s === undefined ? null : { chat: s.conversationId, thread: s.threadId === '' ? null : s.threadId };
   }
 
   assign(taskId: string, assignee: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
