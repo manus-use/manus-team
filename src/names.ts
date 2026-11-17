@@ -30,7 +30,7 @@ export const RESERVED_BOARD_NAMES: ReadonlySet<string> = new Set(['none', 'all']
 
 /**
  * Why `name` is not a valid role, workspace or board name, or undefined if it is.
- * A workflow, and its steps and params, are named in the same grammar (spec §21.1).
+ * A workflow, and its steps and params, are named in the same grammar (workflows spec §1).
  */
 export function nameProblem(kind: 'role' | 'workspace' | 'board' | 'workflow' | 'step' | 'param', name: string): string | undefined {
   if (kind === 'board' && RESERVED_BOARD_NAMES.has(name)) {

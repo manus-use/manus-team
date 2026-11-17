@@ -8,7 +8,7 @@ import { ALICE, WORKSPACES, newTask } from './helpers/kanban.js';
 
 /**
  * `holdsSecret`, in a module of its own that the service and a workflow's checks
- * both import (spec §21.15): the forms a shell would run as the secret, and
+ * both import (workflows spec §15): the forms a shell would run as the secret, and
  * `addGate`'s refusal through it, unchanged.
  */
 

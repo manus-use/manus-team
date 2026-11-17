@@ -307,7 +307,7 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
 }
 
 /**
- * A member's line in `task show` (spec §21.10): its instance, its step and its
+ * A member's line in `task show` (workflows spec §10): its instance, its step and its
  * item, in chat and at the terminal in the same words.
  */
 export function memberLine(
@@ -676,7 +676,7 @@ export function unblockButton(appId: string, event: KanbanEvent): CardButton {
 }
 
 // ---------------------------------------------------------------------------
-// Workflows (spec §21.9, §21.10)
+// Workflows (workflows spec §9, §10)
 // ---------------------------------------------------------------------------
 
 /** How long a reply about a workflow may be: under 3,800 characters, the notices' own bound, as Lark takes 4,000 in one message. */
@@ -691,7 +691,7 @@ const WORKFLOW_TITLE_MAX = 80;
 /**
  * `head` and as many of `lines` as fit, then `more(n)` for the `n` left out,
  * then `tail`: at most `WORKFLOW_REPLY_TASKS` lines, dropped from the end until
- * the whole is under `WORKFLOW_REPLY_MAX` (spec §21.9).
+ * the whole is under `WORKFLOW_REPLY_MAX` (workflows spec §9).
  */
 export function fitted(head: readonly string[], lines: readonly string[], tail: readonly string[], more: (n: number) => string): string {
   let kept = Math.min(lines.length, WORKFLOW_REPLY_TASKS);
@@ -701,7 +701,7 @@ export function fitted(head: readonly string[], lines: readonly string[], tail: 
   return render(kept);
 }
 
-/** One task of a DAG, as a preview says it, in chat and at the terminal alike (spec §21.6). */
+/** One task of a DAG, as a preview says it, in chat and at the terminal alike (workflows spec §6). */
 export interface PreviewLine {
   ref: string;
   title: string;
@@ -715,12 +715,12 @@ export function previewLines(dag: { tasks: readonly { ref: string; title: string
   return dag.tasks.map((t) => ({ ref: t.ref, title: t.title, assignee: t.assignee, parents: t.parents, gates: t.gates.length }));
 }
 
-/** A DAG's name as a reply says it: its workflow's, or "(no workflow)" for one with none (spec §21.10). */
+/** A DAG's name as a reply says it: its workflow's, or "(no workflow)" for one with none (workflows spec §10). */
 export function workflowName(name: string | null): string {
   return name ?? '(no workflow)';
 }
 
-/** `/kanban workflow preview` (spec §21.9): what a start would make, one line a task, and that nothing was made. */
+/** `/kanban workflow preview` (workflows spec §9): what a start would make, one line a task, and that nothing was made. */
 export function renderPreview(
   name: string,
   dag: { board: string | null; tasks: readonly { ref: string; title: string; assignee: string | null; parents: readonly string[]; gates: readonly unknown[] }[] },
@@ -742,7 +742,7 @@ export function renderPreview(
 }
 
 /**
- * A start's reply (spec §21.9): the instance, one line a task in position order
+ * A start's reply (workflows spec §9): the instance, one line a task in position order
  * with its id, its title and its assignee, and who hears, in the words of the
  * thread or of the chat.
  */
@@ -774,7 +774,7 @@ export function renderStarted(
   );
 }
 
-/** `/kanban workflow list` (spec §21.10): each usable workflow with its description and params, and each that is not with why. */
+/** `/kanban workflow list` (workflows spec §10): each usable workflow with its description and params, and each that is not with why. */
 export function renderWorkflows(list: {
   usable: readonly { name: string; description: string | undefined }[];
   broken: readonly { name: string; problem: string }[];
@@ -806,7 +806,7 @@ export function makerText(createdBy: string, nameOf: (principal: string) => stri
 }
 
 /**
- * An instance's members done of its total (spec §21.10), as chat and the terminal
+ * An instance's members done of its total (workflows spec §10), as chat and the terminal
  * say it. An archived member counts as finished, so an archived instance's are
  * "finished", never "done", which its members are not.
  */
@@ -814,7 +814,7 @@ export function membersDone(s: { status: string; done: number; total: number }):
   return `${s.done} of ${s.total} ${s.status === 'archived' ? 'finished' : 'done'}`;
 }
 
-/** `/kanban workflow instances [all]` (spec §21.10): the board's instances, newest first, at most 30 lines. */
+/** `/kanban workflow instances [all]` (workflows spec §10): the board's instances, newest first, at most 30 lines. */
 export function renderInstances(
   summaries: readonly { instance: { instanceId: string; name: string | null; createdBy: string; createdAt: number }; status: string; done: number; total: number; blocked: number }[],
   opts: { board: string; all: boolean; total: number; read: number; nameOf: (principal: string) => string | undefined },
@@ -864,7 +864,7 @@ function paramsLine(params: ReadonlyArray<readonly [string, string | readonly st
   return line;
 }
 
-/** `/kanban workflow show` (spec §21.10): the instance, its steps' tasks in position order, its related tasks apart, cut to fit. */
+/** `/kanban workflow show` (workflows spec §10): the instance, its steps' tasks in position order, its related tasks apart, cut to fit. */
 export function renderInstance(
   view: {
     instance: { instanceId: string; name: string | null; board: string; createdBy: string; createdVia: { kind: string }; createdAt: number; dag: { params: Readonly<Record<string, string | readonly string[]>> } };

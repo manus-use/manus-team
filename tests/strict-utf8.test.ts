@@ -10,7 +10,7 @@ import { listenWorker, type WorkerServer } from '../src/kanban/socket.js';
 import { decodeUtf8 } from '../src/text.js';
 
 /**
- * Text read strictly as UTF-8 (spec §21.5): every worker command's stdin, the
+ * Text read strictly as UTF-8 (workflows spec §5): every worker command's stdin, the
  * operator's body from a file or stdin, and a request to the worker socket.
  * Bytes that are not UTF-8 are refused, never read with U+FFFD in their place,
  * and a byte order mark is kept, so JSON with one is not JSON.

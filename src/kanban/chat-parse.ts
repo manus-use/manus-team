@@ -76,14 +76,14 @@ export type KanbanCommand =
   | BoardCommand
   | WorkflowCommand;
 
-/** A param as chat gives it (spec §21.6): its key, its value, and whether it was quoted, which keeps a list's item whole. */
+/** A param as chat gives it (workflows spec §6): its key, its value, and whether it was quoted, which keeps a list's item whole. */
 export interface ParamPair {
   key: string;
   value: string;
   quoted: boolean;
 }
 
-/** `/kanban workflow …` (spec §21.10): the workflow files, a chat board's instances, and a start or its preview. */
+/** `/kanban workflow …` (workflows spec §10): the workflow files, a chat board's instances, and a start or its preview. */
 export type WorkflowCommand =
   | { verb: 'workflow list' }
   | { verb: 'workflow instances'; all: boolean }
@@ -294,7 +294,7 @@ const TASK_TAKES = `\`/kanban task\` takes ${TASK_VERBS.slice(0, -1).join(', ')}
  * `workflow`, and its verb. The router gives the whole argument, newlines kept:
  * `/kanban task new` and `/kanban task comment` take several lines. `mentions`
  * are the names the message's @-mentions show, which a param's value starting
- * with `@` is matched against, as such a name may hold spaces (spec §21.6).
+ * with `@` is matched against, as such a name may hold spaces (workflows spec §6).
  */
 export function parseKanban(arg: string, mentions: readonly string[] = []): ParsedKanban {
   // One kind of line break from here on: a pasted CRLF, or a lone CR, is a newline.
@@ -531,7 +531,7 @@ function parseNew(text: string): ParsedKanban {
 /** What `/kanban workflow` says with no verb, or one it does not take. */
 const WORKFLOW_TAKES = `\`/kanban workflow\` takes ${WORKFLOW_VERBS.map((v) => `\`${USAGE[`workflow ${v}`]}\``).join(', ')}.`;
 
-/** `/kanban workflow list|instances [all]|show <id>|archive <id>|preview <name> …|start <name> …` (spec §21.10). */
+/** `/kanban workflow list|instances [all]|show <id>|archive <id>|preview <name> …|start <name> …` (workflows spec §10). */
 function parseWorkflow(text: string, mentions: readonly string[]): ParsedKanban {
   const [rawVerb, rest] = shift(text.replace(START_ZW, '$1'));
   const verb = rawVerb.toLowerCase();
@@ -563,11 +563,11 @@ function parseWorkflow(text: string, mentions: readonly string[]): ParsedKanban 
   }
 }
 
-/** The quotes a value may open with, and the ones each may close with: a typed `"` may arrive as `“` or `”`, either side (spec §21.6). */
+/** The quotes a value may open with, and the ones each may close with: a typed `"` may arrive as `“` or `”`, either side (workflows spec §6). */
 const QUOTES: Readonly<Record<string, readonly string[]>> = { '"': ['"', '”'], '“': ['”', '"'], '”': ['”', '"'] };
 
 /**
- * A preview's or a start's params (spec §21.6): `key=value` pairs separated by
+ * A preview's or a start's params (workflows spec §6): `key=value` pairs separated by
  * spaces, tabs or line breaks, each split at its first `=`, the key in the
  * param grammar. A value runs to the next space, or is quoted, with no escape;
  * an unquoted value, or an item of it after a comma, starting with `@` takes

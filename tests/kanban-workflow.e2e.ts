@@ -28,7 +28,7 @@ import { testDb, type TestDb } from './helpers/db.js';
 import { role } from './helpers/dispatch.js';
 
 /**
- * Workflows end to end (spec §21.16): a workflow started from a fake chat in a
+ * Workflows end to end (workflows spec §16): a workflow started from a fake chat in a
  * group, its steps run by the fake CLI agent through the real socket in their
  * order, its notices in the instance's thread; a deciding step starting a second
  * workflow through `mt kanban start-workflow`; a planner applying a graph with

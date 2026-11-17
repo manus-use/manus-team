@@ -3,7 +3,7 @@ import type { Role } from '../roles.js';
 import { CONTRACT_FIELDS, type Assignee, type Contract, type CreateRequest, type Refusal, type Result } from './types.js';
 
 /**
- * The checks a task gets before it is made (spec §21.15): `KanbanService.create`'s,
+ * The checks a task gets before it is made (workflows spec §15): `KanbanService.create`'s,
  * moved out of the service with their messages unchanged, so that one function
  * judges a task however it is made -- by `create`, by a workflow's start or
  * apply, and by the terminal's preview, which opens no database. Pure: the team

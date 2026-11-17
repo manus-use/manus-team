@@ -103,7 +103,7 @@ type Field =
   | { kind: 'json' }
   | { kind: 'ids' }
   | { kind: 'contract' }
-  /** A workflow's params (spec §21.6): an object of text and lists of text, within their sizes. */
+  /** A workflow's params (workflows spec §6): an object of text and lists of text, within their sizes. */
   | { kind: 'params' };
 
 const text = (max: number, required = true): Field => ({ kind: 'text', max, required });
@@ -129,7 +129,7 @@ const SCHEMAS: Record<WorkerCommand, Readonly<Record<string, Field>>> = {
   },
   link: { parent_id: name(), child_id: name() },
   'start-workflow': { workflow: name(), params: { kind: 'params' }, idempotency_key: name(false) },
-  // A DAG, read by the DAG's own checks (spec §21.5) rather than this flat schema; its two keys of its own are taken off first.
+  // A DAG, read by the DAG's own checks (workflows spec §5) rather than this flat schema; its two keys of its own are taken off first.
   'apply-dag': {},
 };
 
@@ -426,7 +426,7 @@ export class WorkerApi {
         return r.ok ? { ok: true, added: r.added } : refusal(r);
       }
       case 'start-workflow': {
-        // On the run's task's board, whatever else, created from its task (spec §21.6).
+        // On the run's task's board, whatever else, created from its task (workflows spec §6).
         const key = str('idempotency_key');
         const r = this.#service.startWorkflow({
           workflow: str('workflow') ?? '',
@@ -438,7 +438,7 @@ export class WorkerApi {
         return r.ok ? madeAnswer(r) : refusal(r);
       }
       case 'apply-dag': {
-        // Its own two keys, beside the DAG's, are taken off before the DAG is checked (spec §21.6).
+        // Its own two keys, beside the DAG's, are taken off before the DAG is checked (workflows spec §6).
         const { idempotency_key: key, dry_run: dryRun, ...dag } = input;
         if (key !== undefined && key !== null && (typeof key !== 'string' || bytes(key) > WORKER_LIMITS.name)) {
           return refused('invalid', `idempotency_key is text, of at most ${WORKER_LIMITS.name} bytes`);
@@ -558,7 +558,7 @@ function refusal(r: { ok: false; code: RefusalCode; message: string; gate?: Fail
   };
 }
 
-/** A start's or an apply's answer (spec §21.6): the instance, and each task with its ref, so an agent finds the task it named. */
+/** A start's or an apply's answer (workflows spec §6): the instance, and each task with its ref, so an agent finds the task it named. */
 function madeAnswer(r: WorkflowMade): WorkerResponse {
   return {
     ok: true,

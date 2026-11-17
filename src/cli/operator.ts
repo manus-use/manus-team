@@ -523,7 +523,7 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
           waiting_on_role: roleWait === undefined ? null : { role: roleWait.role, max_running: roleWait.maxRunning },
           // Every reason a pass skips it, in the order the pass checks them; empty for none.
           waiting: (r.view.waiting ?? []).map(waitingJson),
-          // The workflow's instance it is a member of (spec §21.10), or null.
+          // The workflow's instance it is a member of (workflows spec §10), or null.
           workflow:
             r.view.member === undefined
               ? null
@@ -727,13 +727,13 @@ export async function operatorCommand(command: string, rest: readonly string[], 
 }
 
 // ---------------------------------------------------------------------------
-// Workflows (spec §21.6, §21.10)
+// Workflows (workflows spec §6, §10)
 // ---------------------------------------------------------------------------
 
 /** The verbs of `mt kanban workflow`. */
 export const WORKFLOW_COMMANDS: readonly string[] = ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive'];
 
-/** `--param key=value`, repeated, each split at its first `=` (spec §21.6); the shell has already removed the quotes. */
+/** `--param key=value`, repeated, each split at its first `=` (workflows spec §6); the shell has already removed the quotes. */
 function paramPairs(values: readonly string[] | undefined): { key: string; value: string }[] {
   return (values ?? []).map((p) => {
     const eq = p.indexOf('=');
@@ -758,7 +758,7 @@ function jsonFile(value: unknown): string {
   return JSON.stringify(maskAll(value), null, 2).replace(UNSAFE_IN_JSON, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
-/** A start's or an apply's answer in the worker's shape (spec §21.6). */
+/** A start's or an apply's answer in the worker's shape (workflows spec §6). */
 function madeJson(made: WorkflowMade): Record<string, unknown> {
   return {
     instance_id: made.instance.instanceId,
@@ -771,8 +771,8 @@ function madeJson(made: WorkflowMade): Record<string, unknown> {
 }
 
 /**
- * `mt kanban workflow preview <name> [--board] [--param k=v]… [--json]` (spec
- * §21.6): loaded exactly as `openBoard` loads, opening no database; every check
+ * `mt kanban workflow preview <name> [--board] [--param k=v]… [--json]` (workflows spec
+ * §6): loaded exactly as `openBoard` loads, opening no database; every check
  * a start makes but the board's, the people's and the key's, a person refused as
  * at the terminal. `--json` writes the DAG file alone on stdout; a refusal goes
  * to stderr, so it never leaves half a file.
@@ -809,7 +809,7 @@ function preview(rest: readonly string[], io: MtIo): number {
   return 0;
 }
 
-/** `mt kanban workflow start <name> [--board] [--param k=v]… [--key] [--json]` (spec §21.6). */
+/** `mt kanban workflow start <name> [--board] [--param k=v]… [--key] [--json]` (workflows spec §6). */
 function start(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, { ...BOARD_FLAGS, param: { type: 'string', multiple: true }, key: { type: 'string' } });
   const [name, extra] = positionals;
@@ -837,7 +837,7 @@ function start(rest: readonly string[], io: MtIo): Promise<number> {
   );
 }
 
-/** A DAG file read as `--body-file` reads a body (spec §21.6): a regular file, or `-` for stdin, up to 4 MiB, strictly as UTF-8, as JSON. */
+/** A DAG file read as `--body-file` reads a body (workflows spec §6): a regular file, or `-` for stdin, up to 4 MiB, strictly as UTF-8, as JSON. */
 async function dagOf(file: string, io: MtIo, json: boolean): Promise<unknown | number> {
   const max = DAG_LIMITS.rawBytes;
   let bytes: Uint8Array | undefined;
@@ -867,7 +867,7 @@ async function dagOf(file: string, io: MtIo, json: boolean): Promise<unknown | n
   }
 }
 
-/** `mt kanban workflow apply <dag.json|-> [--key] [--dry-run] [--json]` (spec §21.6): the DAG's board, else `default`. */
+/** `mt kanban workflow apply <dag.json|-> [--key] [--dry-run] [--json]` (workflows spec §6): the DAG's board, else `default`. */
 async function applyFile(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, { ...JSON_FLAG, key: { type: 'string' }, 'dry-run': { type: 'boolean' } });
   const [file, extra] = positionals;
@@ -893,7 +893,7 @@ async function applyFile(rest: readonly string[], io: MtIo): Promise<number> {
       if (!('dryRun' in r)) {
         return { ok: true, lines: madeText(r), json: madeJson(r), nudge: !r.existing, ...(key === undefined ? {} : { keyed: true }), makes: 'instance' };
       }
-      // Nothing written, so no nudge (spec §21.6).
+      // Nothing written, so no nudge (workflows spec §6).
       return {
         ok: true,
         lines: dryRunText(r),
@@ -910,7 +910,7 @@ async function applyFile(rest: readonly string[], io: MtIo): Promise<number> {
   );
 }
 
-/** `mt kanban workflow list` (spec §21.10): the files as they are now. */
+/** `mt kanban workflow list` (workflows spec §10): the files as they are now. */
 function listWorkflowFiles(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, JSON_FLAG);
   if (positionals.length > 0) throw new UsageError('kanban workflow list takes no arguments');
@@ -938,7 +938,7 @@ function listWorkflowFiles(rest: readonly string[], io: MtIo): Promise<number> {
   );
 }
 
-/** `mt kanban workflow instances [all] [--board]` (spec §21.10): `default`'s unless named. */
+/** `mt kanban workflow instances [all] [--board]` (workflows spec §10): `default`'s unless named. */
 function instances(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [word, extra] = positionals;
@@ -975,7 +975,7 @@ function instances(rest: readonly string[], io: MtIo): Promise<number> {
   );
 }
 
-/** With `--board`, a refusal unless the board exists and the instance is on it (spec §21.10). */
+/** With `--board`, a refusal unless the board exists and the instance is on it (workflows spec §10). */
 function instanceOffBoard(service: KanbanService, board: string | undefined, instanceId: string): Outcome | undefined {
   if (board === undefined) return undefined;
   const missing = noSuchBoard(service, board);
@@ -988,7 +988,7 @@ function instanceOffBoard(service: KanbanService, board: string | undefined, ins
   return undefined;
 }
 
-/** `mt kanban workflow show <instance> [--board] [--dag] [--json]` (spec §21.10): everything, uncut; `--dag` the stored DAG. */
+/** `mt kanban workflow show <instance> [--board] [--dag] [--json]` (workflows spec §10): everything, uncut; `--dag` the stored DAG. */
 function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, { ...BOARD_FLAGS, dag: { type: 'boolean' } });
   const [instanceId, extra] = positionals;
@@ -1006,7 +1006,7 @@ function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
       const r = service.instance(instanceId);
       if (!r.ok) return refused(r);
       const v = r.view;
-      // What was made, masked: never the hash (spec §21.7).
+      // What was made, masked: never the hash (workflows spec §7).
       if (values.dag === true) dagText = jsonFile(v.instance.dag);
       return {
         ok: true,
@@ -1047,7 +1047,7 @@ function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** `mt kanban workflow archive <instance> [--board]` (spec §21.10): every member, in one transaction; the gateway's pass cancels the runs it decided. */
+/** `mt kanban workflow archive <instance> [--board]` (workflows spec §10): every member, in one transaction; the gateway's pass cancels the runs it decided. */
 function archiveInstance(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [instanceId, extra] = positionals;

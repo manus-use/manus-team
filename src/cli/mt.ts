@@ -163,7 +163,7 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
   const sub = rest[0];
   const named = command !== undefined && sub !== undefined && SUBCOMMANDS[command]?.includes(sub) === true;
   const what = ['mt kanban', ...(command === undefined ? [] : [command]), ...(named ? [sub] : [])].join(' ');
-  // A run starts a workflow, or applies a DAG of its own, with the worker's commands (spec §21.6):
+  // A run starts a workflow, or applies a DAG of its own, with the worker's commands (workflows spec §6):
   // said only in a board run's shell, the only one those commands work in.
   const message =
     command === 'workflow' && hasBoardRun(io.env)
@@ -257,7 +257,7 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       return roleCheck(name, io);
     }
     if (group === 'workflow' && command === 'check') {
-      // Files only, and no authority: any shell, a board run's included (spec §21.4).
+      // Files only, and no authority: any shell, a board run's included (workflows spec §4).
       const [name, extra] = parse(rest, {}).positionals;
       if (extra !== undefined) throw new UsageError('workflow check takes at most one name');
       return workflowCheck(name, io);

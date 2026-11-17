@@ -671,7 +671,7 @@ class Service {
     // The npm the native load's advice names is found as the service's PATH finds it.
     const gateway = await this.loadModules(recorded.path);
     // The build's own startup, as the service starts it, each unset passEnv name given a stand-in:
-    // for its warnings, the workflows it would find unusable (spec §21.4).
+    // for its warnings, the workflows it would find unusable (workflows spec §4).
     const loadStartup = gateway['loadStartup'];
     if (typeof loadStartup === 'function') {
       addSecrets([STAND_IN]);
@@ -747,7 +747,7 @@ class Service {
   }
 
   /**
-   * The startup's workflow lines that say something is wrong (spec §21.4), as
+   * The startup's workflow lines that say something is wrong (workflows spec §4), as
    * warnings: a broken workflow, or an entry that is no workflow. The gateway
    * would start, so the check does not fail on them. The summary line, which
    * names the usable ones, is the gateway's note, not a warning. A build from

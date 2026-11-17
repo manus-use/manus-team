@@ -133,7 +133,7 @@ export function showText(view: TaskView, gates: readonly GateRow[]): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Workflows (spec §21.6, §21.10)
+// Workflows (workflows spec §6, §10)
 // ---------------------------------------------------------------------------
 
 /** A role or a person, as a DAG names them. */
@@ -143,7 +143,7 @@ function named(name: string | null): string {
 }
 
 /**
- * `mt kanban workflow preview` (spec §21.6): what a start would make, as chat's
+ * `mt kanban workflow preview` (workflows spec §6): what a start would make, as chat's
  * preview says it, a line a task with its ref, its title, its assignee, its
  * parents' refs and how many gates it has, and that nothing was made.
  */
@@ -163,7 +163,7 @@ export function previewText(name: string, board: string, lines: readonly Preview
   ];
 }
 
-/** A start's or an apply's answer (spec §21.6): the instance, then every task, uncut, with its ref, title and assignee. */
+/** A start's or an apply's answer (workflows spec §6): the instance, then every task, uncut, with its ref, title and assignee. */
 export function madeText(
   made: { instance: { instanceId: string; name: string | null; board: string; source: string }; tasks: readonly { taskId: string; ref: string; task: { title: string; assignee: Assignee | null } }[]; existing: boolean },
 ): string[] {
@@ -177,7 +177,7 @@ export function madeText(
   return [head, ...table(rows).map((r) => `  ${r}`)];
 }
 
-/** `apply --dry-run`'s answer (spec §21.6): what the apply would make, a line a task in preview's columns, each followed by its gates' commands, masked; or the instance its key made. */
+/** `apply --dry-run`'s answer (workflows spec §6): what the apply would make, a line a task in preview's columns, each followed by its gates' commands, masked; or the instance its key made. */
 export function dryRunText(
   dry: { existing: boolean; instanceId: string | null; board: string; tasks: readonly { ref: string; title: string; assignee: string | null; parents: readonly string[]; gates: readonly { command: string; timeout_s: number }[] }[] },
 ): string[] {
@@ -204,7 +204,7 @@ export function dryRunText(
   return out;
 }
 
-/** `mt kanban workflow list` (spec §21.10): every usable workflow with its params and description, and each broken one with why. */
+/** `mt kanban workflow list` (workflows spec §10): every usable workflow with its params and description, and each broken one with why. */
 export function workflowsText(
   list: { usable: readonly { name: string; description: string | undefined }[]; broken: readonly { name: string; problem: string }[] },
   params: (name: string) => string,
@@ -221,7 +221,7 @@ function when(ms: number): string {
   return `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 }
 
-/** `mt kanban workflow instances [all]` (spec §21.10): a board's instances, newest first, every one rather than 30. */
+/** `mt kanban workflow instances [all]` (workflows spec §10): a board's instances, newest first, every one rather than 30. */
 export function instancesText(
   summaries: readonly { instance: { instanceId: string; name: string | null; createdBy: string; createdAt: number }; status: string; done: number; total: number; blocked: number }[],
   opts: { board: string; all: boolean; total: number; read: number },
@@ -242,7 +242,7 @@ export function instancesText(
   return [...table([['instance', 'workflow', 'status', 'members', 'by', 'when'], ...rows]), ...past];
 }
 
-/** `mt kanban workflow show` (spec §21.10): the instance, every member by step, and its related tasks apart, uncut. */
+/** `mt kanban workflow show` (workflows spec §10): the instance, every member by step, and its related tasks apart, uncut. */
 export function instanceText(view: {
   instance: { instanceId: string; name: string | null; board: string; createdBy: string; createdVia: { kind: string }; createdAt: number; dag: { params: Readonly<Record<string, string | readonly string[]>> } };
   description: string | undefined;

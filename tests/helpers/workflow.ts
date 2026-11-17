@@ -1,9 +1,9 @@
 /**
- * Building blocks for tests of workflows (spec §21): the example of the spec, as
+ * Building blocks for tests of workflows (workflows spec): the example of the spec, as
  * a file, and a home's workflows directory to write files into.
  */
 
-/** The example of spec §21.1, as written there. */
+/** The example of workflows spec §1, as written there. */
 export const VENDOR_EVAL = `description: Shortlist vendors, evaluate each in parallel, then recommend one
 params:
   topic:    { required: true, description: what is being bought }

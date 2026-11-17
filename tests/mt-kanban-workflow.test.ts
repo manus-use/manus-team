@@ -14,7 +14,7 @@ import { mtFixture, type MtFixture } from './helpers/mt.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
- * The operator's workflow commands (spec §21.6, §21.10): `mt kanban workflow
+ * The operator's workflow commands (workflows spec §6, §10): `mt kanban workflow
  * preview`, with `--json` writing the DAG file, `start`, `apply` and `apply
  * --dry-run`, `list`, `instances`, `show` with `--dag`, and `archive`; their
  * plain and `--json` answers, the nudge, and an unmigrated database.

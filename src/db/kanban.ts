@@ -123,7 +123,7 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'packageHash',
   'seedDropped',
   'board',
-  // A workflow's instance, its name, and a member's ref and step (spec §21.8); its item is a param's text, and masked.
+  // A workflow's instance, its name, and a member's ref and step (workflows spec §8); its item is a param's text, and masked.
   'workflow',
   'workflowName',
   'ref',
@@ -362,8 +362,8 @@ interface TaskInsert extends NewTask {
 }
 
 /**
- * The insert every task is made by, `createTask`'s and a workflow's alike (spec
- * §21.8): the row, its links, its subscriptions and its `created` event, whose
+ * The insert every task is made by, `createTask`'s and a workflow's alike (workflows spec
+ * §8): the row, its links, its subscriptions and its `created` event, whose
  * payload gains `payload`'s keys. Inside the caller's transaction, which has
  * checked everything; answers the new task's id.
  */
@@ -468,7 +468,7 @@ export function advanceSubscription(db: Db, subscriptionId: number, cursor: numb
 
 /**
  * Move the tasks' subscriptions at a chat into the thread their "Created" reply
- * opened (spec §19.4, §21.9): each one's `thread_id` from '' to the thread's,
+ * opened (spec §19.4, workflows spec §9): each one's `thread_id` from '' to the thread's,
  * and its root to the command message, all in one transaction: one task for
  * `/kanban task new`, every member of an instance for a workflow's start. Only
  * a subscription of these tasks, at this chat, for this bot, still at chat
@@ -560,8 +560,8 @@ export function addGate(
 }
 
 /**
- * The insert every gate is added by, `addGate`'s and a workflow's alike (spec
- * §21.8): GATE_LIMITS checked against the task's gates so far, inside the
+ * The insert every gate is added by, `addGate`'s and a workflow's alike (workflows spec
+ * §8): GATE_LIMITS checked against the task's gates so far, inside the
  * caller's transaction, then the row and its `gate_added` event, whose payload
  * gains `payload`'s keys.
  */
@@ -1907,7 +1907,7 @@ export function archive(
 }
 
 /**
- * The body every archive runs, `archive`'s and a workflow's alike (spec §21.8),
+ * The body every archive runs, `archive`'s and a workflow's alike (workflows spec §8),
  * inside the caller's transaction, on a task not yet archived: its open run
  * superseded if undecided, the task archived, keeping the time it was done, and
  * its `archived` event, whose payload gains `payload`'s keys.
@@ -2051,7 +2051,7 @@ export function countSubmission(db: Db, runId: string, now: number): Result<{ n:
 }
 
 // ---------------------------------------------------------------------------
-// Workflows (spec §21.7, §21.8)
+// Workflows (workflows spec §7, §8)
 // ---------------------------------------------------------------------------
 
 /** An instance to make: its name, its checked DAG and that DAG's hash, unmasked, and who makes it, how. */
@@ -2090,7 +2090,7 @@ export interface AppliedDag {
 }
 
 /**
- * Why a key's instance is not this start's or apply's (spec §21.6 step 0), or
+ * Why a key's instance is not this start's or apply's (workflows spec §6 step 0), or
  * undefined when it is a repeat: another board's is `other_board`; another
  * kind's, another workflow's, or another DAG's, `invalid`, naming it.
  */
@@ -2120,7 +2120,7 @@ export function keyRefused(
 }
 
 /**
- * Make a checked DAG on the board, in one transaction (spec §21.8): the board
+ * Make a checked DAG on the board, in one transaction (workflows spec §8): the board
  * worked out (a run's task's for a run), the key looked up again, the guard
  * against two racing, the board checked live; then the instance with its DAG,
  * masked but for its gates; then each task through `insertTask`, with its
@@ -2183,7 +2183,7 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
         { workflow: instanceId, workflowName: instance.name, ref: m.ref, step: m.step, item: m.item },
       );
       for (const gate of m.gates) {
-        // The apply put it on the task, for whoever made the instance (spec §21.8).
+        // The apply put it on the task, for whoever made the instance (workflows spec §8).
         const added = insertGate(d, taskId, gate, instance.createdBy, now, { workflow: instanceId });
         if (!added.ok) return refuse(added.code, `${m.ref}: ${added.message}`);
       }
@@ -2197,7 +2197,7 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
 }
 
 /**
- * Archive an instance (spec §21.8, §21.10): every member not already archived,
+ * Archive an instance (workflows spec §8, §10): every member not already archived,
  * in one transaction, through `archiveIn`, each `archived` event carrying the
  * instance. Answers the members it archived, and the runs it decided, whose
  * turns the caller cancels; none for an instance wholly archived already.

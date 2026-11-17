@@ -14,7 +14,7 @@ import { ALICE, NOW, VIA, claimed, newTask } from './helpers/kanban.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
- * A start, a preview and an apply through the service (spec §21.6): the key
+ * A start, a preview and an apply through the service (workflows spec §6): the key
  * looked up first, the file read now, the checks, the one transaction, the
  * board in each path, the keys in their namespaces, a dry run, and what changes
  * between a preview and its apply.

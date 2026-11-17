@@ -18,6 +18,8 @@
 
 **Spec:** `docs/specs/2026-11-16-cron-design.md`, all of it, as amended on 2026-11-17 five times.
 
+> **Note, 2026-11-17.** The kanban spec's §21, which this plan cites as "spec §21.N", has since moved into `docs/specs/2026-11-16-workflows-design.md`, renumbered from 1: §21.N is §N there. The references below are left as they were written.
+
 ---
 
 ## Ground rules

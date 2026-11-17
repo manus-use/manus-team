@@ -145,7 +145,7 @@ export function loadStartup(env: Env = process.env): { config: GatewayConfig; te
 }
 
 /**
- * The workflow check's lines (spec §21.4): notes, as a broken workflow does not
+ * The workflow check's lines (workflows spec §4): notes, as a broken workflow does not
  * stop the gateway; only it is unusable. With the team as the gateway's service
  * judges it, supervised roles accepted. `mt service check` prints them too.
  */
@@ -167,7 +167,7 @@ function startupWorkflows(config: GatewayConfig, team: Team): string[] {
 /** How long a shutdown waits for the dispatcher's work before it closes the database. */
 const SHUTDOWN_DRAIN_MS = 5_000;
 
-/** What `loadStartup` found beside the config and the team: the workflow check's lines, noted after the roles' (spec §21.4). */
+/** What `loadStartup` found beside the config and the team: the workflow check's lines, noted after the roles' (workflows spec §4). */
 export interface StartupNotes {
   workflows?: readonly string[];
 }

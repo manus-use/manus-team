@@ -18,7 +18,7 @@ import { role } from './helpers/dispatch.js';
 import { ALICE, VIA } from './helpers/kanban.js';
 
 /**
- * The DAG (spec §21.5): its shape, every default, the canonical form and its
+ * The DAG (workflows spec §5): its shape, every default, the canonical form and its
  * hash, the sizes, where gates may come from, what a run's DAG may not set, and
  * each task checked as create checks it.
  */
@@ -31,7 +31,7 @@ beforeEach(() => {
 });
 afterEach(() => clearSecrets());
 
-/** The example of §21.5, written out in full, as an expansion writes it. */
+/** The example of workflows spec §5, written out in full, as an expansion writes it. */
 function example(): Record<string, unknown> {
   const task = (ref: string, step: string, item: string | null, title: string, parents: string[], extra: Record<string, unknown> = {}) => ({
     ref,

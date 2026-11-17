@@ -4,7 +4,7 @@ import { GATE_LIMITS } from './types.js';
 
 /**
  * What a gate's command may hold (spec §7.7, §10.1): shared by `KanbanService`'s
- * `addGate` and a workflow's checks (spec §21.4), so the pure workflow module
+ * `addGate` and a workflow's checks (workflows spec §4), so the pure workflow module
  * need not import the service.
  */
 
@@ -25,7 +25,7 @@ export function holdsSecret(command: string): boolean {
 
 /**
  * Why a gate a workflow or a DAG puts on a task could not be added, as `addGate`
- * would refuse it (spec §21.4, §21.5), or undefined: a command, not blank, with
+ * would refuse it (workflows spec §4, §5), or undefined: a command, not blank, with
  * no NUL, of at most 4 KiB, holding neither the mask nor a known secret, and a
  * timeout from 1 to 600 s. Said after the gate's place, as `<place> <problem>`.
  */

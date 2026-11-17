@@ -8,7 +8,7 @@ import { role } from './helpers/dispatch.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
- * A workflow's params and its expansion into a DAG (spec §21.2, §21.3, §21.5):
+ * A workflow's params and its expansion into a DAG (workflows spec §2, §3, §5):
  * each path's params, the defaults, the sizes, substitution once in every text
  * field, names checked as names, @ resolved only for a person field, for_each,
  * all to all, and the hundred tasks.

@@ -571,7 +571,7 @@ export interface TaskView {
    * the service's `show`, which knows the isolated workspaces.
    */
   workdir?: { path: string | null; branch: string | null; first?: true };
-  /** The workflow's instance the task is a member of (spec §21.10), with its step and item; absent for a task that is none's. */
+  /** The workflow's instance the task is a member of (workflows spec §10), with its step and item; absent for a task that is none's. */
   member?: { instanceId: string; name: string | null; step: string; item: string | null };
 }
 
@@ -591,7 +591,7 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
   const children = childrenOf(db, taskId);
   const runs = runsOf(db, taskId);
   const undecided = runs.find((r) => r.outcome === null);
-  // Read only when the members table is there: a database not yet migrated has none (spec §21.7).
+  // Read only when the members table is there: a database not yet migrated has none (workflows spec §7).
   const member = memberOf(db, taskId);
   return {
     task,
@@ -903,10 +903,10 @@ export function hasBoard(db: Db): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Workflows (spec §21.7, §21.10)
+// Workflows (workflows spec §7, §10)
 // ---------------------------------------------------------------------------
 
-/** One start of a workflow, or one apply of a DAG (spec §21.7). */
+/** One start of a workflow, or one apply of a DAG (workflows spec §7). */
 export interface InstanceRow {
   instanceId: string;
   /** The workflow's name, or null for a DAG with none. */
@@ -958,7 +958,7 @@ const MEMBER_COLS = 'task_id, instance_id, ref, step, item, position';
 
 /**
  * An instance found by its key, with the hash of its DAG's canonical form,
- * unmasked: how a repeated key tells the same DAG from another (spec §21.6). Only
+ * unmasked: how a repeated key tells the same DAG from another (workflows spec §6). Only
  * `keyRefused` reads the hash; it is never printed, so no `InstanceRow` holds it.
  */
 export interface KeyedInstance {
@@ -984,7 +984,7 @@ function decodeMember(r: MemberRaw): MemberRow {
   return { taskId: r.task_id, instanceId: r.instance_id, ref: r.ref, step: r.step, item: r.item, position: r.position };
 }
 
-/** Whether the database has the workflows' tables: one not yet migrated to 009 has none (spec §21.7). */
+/** Whether the database has the workflows' tables: one not yet migrated to 009 has none (workflows spec §7). */
 export function hasWorkflows(db: Db): boolean {
   return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kanban_workflow_tasks'").get() !== undefined;
 }
@@ -1052,7 +1052,7 @@ export function memberPhases(db: Db, board: string, limit: number): Map<string, 
 
 /**
  * The instance a task is a member of, with the instance's workflow name, for
- * `task show`'s line (spec §21.10); undefined for a task that is none's, and on
+ * `task show`'s line (workflows spec §10); undefined for a task that is none's, and on
  * a database not yet migrated, which has no members table.
  */
 export function memberOf(db: Db, taskId: string): (MemberRow & { name: string | null }) | undefined {
@@ -1067,7 +1067,7 @@ export function memberOf(db: Db, taskId: string): (MemberRow & { name: string | 
   return row === undefined ? undefined : { ...decodeMember(row), name: row.name };
 }
 
-/** A board's instances, newest first, at most `limit` (spec §21.10), and how many it has in all. */
+/** A board's instances, newest first, at most `limit` (workflows spec §10), and how many it has in all. */
 export function instancesOn(db: Db, board: string, limit: number): { instances: InstanceRow[]; total: number } {
   const instances = db
     .prepare<[string, number], InstanceRaw>(
@@ -1080,7 +1080,7 @@ export function instancesOn(db: Db, board: string, limit: number): { instances: 
 }
 
 /**
- * An instance's related tasks (spec §21.10): tasks that are not its members and
+ * An instance's related tasks (workflows spec §10): tasks that are not its members and
  * have a member as a parent, or as their `created_from_task`, oldest first.
  */
 export function relatedTasks(db: Db, instanceId: string): TaskRow[] {

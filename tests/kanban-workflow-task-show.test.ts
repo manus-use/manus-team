@@ -15,7 +15,7 @@ import { mtFixture, type MtFixture } from './helpers/mt.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
- * `task show` of a member (spec §21.10): one line, its instance, step and item,
+ * `task show` of a member (workflows spec §10): one line, its instance, step and item,
  * in chat and at the terminal, and `workflow` in `--json`; nothing for a task
  * that is no member, and `mt kanban task show` working on a database not yet
  * migrated to the workflows' tables.

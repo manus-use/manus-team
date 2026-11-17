@@ -16,7 +16,7 @@ import { NOW } from './helpers/kanban.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
- * `/kanban workflow …` in chat (spec §21.6, §21.9, §21.10): the tiers, a start's
+ * `/kanban workflow …` in chat (workflows spec §6, §9, §10): the tiers, a start's
  * reply in its two wordings and its thread, every member held and moved in one
  * call, the reply cut to fit, @-mentions, the preview, and list, instances,
  * show and archive.

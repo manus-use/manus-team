@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 /**
- * `String.prototype.isWellFormed`, which the DAG's checks use (spec §21.5), is
+ * `String.prototype.isWellFormed`, which the DAG's checks use (workflows spec §5), is
  * in the build's lib: `ES2024.String` beside `ES2023`. A lone surrogate, which
  * JSON's `\ud800` escape can give, is no text.
  */

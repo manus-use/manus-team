@@ -57,7 +57,7 @@ export function inAgentRun(env: Env): boolean {
 
 /**
  * A board run's shell alone: where `mt kanban <command>` is the worker CLI's,
- * sent to the socket, and where a run starts a workflow (spec §7.3, §21.6). A
+ * sent to the socket, and where a run starts a workflow (spec §7.3, workflows spec §6). A
  * chat turn's or a fire's shell has no run to report for.
  */
 export function hasBoardRun(env: Env): boolean {
@@ -94,7 +94,7 @@ export interface OpenOptions {
   refuse?: Refuse;
   /** What a `passEnv` name unset in this shell means for the command; a gate's refusal of a secret, unless given. */
   unsetNote?: string;
-  /** The workflow commands need the workflows' tables too (spec §21.7): a database not migrated to them is refused. */
+  /** The workflow commands need the workflows' tables too (workflows spec §7): a database not migrated to them is refused. */
   workflows?: boolean;
 }
 
@@ -102,7 +102,7 @@ export interface OpenOptions {
  * The gateway's settings and team, loaded as the gateway loads them, with the
  * secrets it would register, and the passEnv names this shell leaves unset said
  * on stderr; or why not, already said. What `openBoard` does before it opens the
- * database, and all the terminal's workflow preview does, which opens none (spec §21.6).
+ * database, and all the terminal's workflow preview does, which opens none (workflows spec §6).
  */
 export function loadOperator(io: MtIo, what: string, opts: OpenOptions = {}): { settings: TeamSettings; team: Team } | number {
   const no = opts.refuse ?? ((_code: string, message: string) => refuse(io, message));
@@ -136,7 +136,7 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   } catch (err) {
     return no('failed', failed(err));
   }
-  // The table the command needs: the board's, or for the workflow commands the workflows' (spec §21.7).
+  // The table the command needs: the board's, or for the workflow commands the workflows' (workflows spec §7).
   const table = opts.workflows === true ? 'kanban_workflow_instances' : 'kanban_gates';
   try {
     migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
@@ -161,7 +161,7 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     // task is waiting on (spec §6.3, §16), and a board's own max_running is held inside the gateway's.
     ...(settings.kanban === undefined ? {} : { maxRunning: settings.kanban.maxRunning }),
     ...(settings.kanban?.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: settings.kanban.maxRunningPerRole }),
-    // As the gateway's: the operator's files, read at each preview and start (spec §21.1).
+    // As the gateway's: the operator's files, read at each preview and start (workflows spec §1).
     workflowsDir: join(settings.home, 'workflows'),
   });
   return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, close: () => db.close() };
