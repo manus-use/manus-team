@@ -1314,8 +1314,8 @@ mt kanban workflow apply <dag.json|-> [--key <k>] [--dry-run] --chat oc_… [--t
 - **Checked as `task new`'s** (kanban spec §22.1): the chat's shape, `mt cron add --chat`'s; this
   bot's app id from the settings, refused without one in cron's words; a chat outside a non-empty
   `auth.chats` refused, in the same words as there; a thread's shape, only with `--chat`, and its
-  root by `threadRootOf`, a thread with no root known refused. The shapes are
-  checked before the board is opened, the root once it is.
+  root by `threadRootOf`, a thread with no root known refused. The shapes, the app id and
+  `auth.chats` are checked before the board is opened, the root after step 0 (below).
 - **Every member follows the chat**: the writer's `applyDag` gives each task's insert the
   instance's `follow`, which `subscribe()` writes, in the one transaction (§8), as a chat start's
   every task is subscribed to its chat (§9). A task still has at most one subscription per bot:
@@ -1328,9 +1328,12 @@ mt kanban workflow apply <dag.json|-> [--key <k>] [--dry-run] --chat oc_… [--t
 - **`apply --dry-run`** takes both flags, makes the same checks, writes nothing, and its answer
   adds who would follow. **`preview`** takes neither, a usage error, "--chat is start's and apply's:
   a preview makes nothing to follow".
-- **A repeat by key** is answered at step 0 (§6), `existing: true`, before the flags are looked at:
+- **A repeat by key** is answered at step 0 (§6), `existing: true`, before the root is looked up:
   no subscription is added and no reply posted, whatever `--chat` names now, as a repeat makes
-  nothing. Its answer's `follows` is what the instance was made with, read from its first member's
+  nothing. **The order:** the chat's and the thread's shapes, the app id and `auth.chats` are
+  checked first, before the board is opened, so they refuse even a repeat, a chat that has left
+  `auth.chats` since included; then step 0's key lookup; then, for a start or apply that is not a
+  repeat, the thread's root. Its answer's `follows` is what the instance was made with, read from its first member's
   stored subscription of this bot, or `null` with none, never the flag given now.
 - **The terminal only.** `startWorkflow` and `applyDag` refuse `follow` unless `createdVia` is
   `{kind: operator}`, `invalid`; the worker's `start-workflow` schema and `apply-dag`'s DAG have no

@@ -4132,7 +4132,10 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
   post the board's notices into chats nobody asked it to.
 - **A repeat by `--key`** answers the task its first run made, `existing: true`, before anything
   is written (§3.1), so a second `--chat`, the same or another, adds no subscription and posts no
-  "Created" line. The first command's chat is the task's, and the answer says so: its `follows` is
+  "Created" line. **The order:** the chat's and the thread's shapes, the app id and `auth.chats`
+  are checked first, before the board is opened, so they refuse even a repeat, a chat that has
+  left `auth.chats` since included; then the key is looked up; then, for a task not already made,
+  the thread's root, so a repeat whose thread has lost its root is still answered. The first command's chat is the task's, and the answer says so: its `follows` is
   the task's stored subscription of this bot, or `null` with none, never the `--chat` given now.
 - **The board** is `--board`, else `default`, as before: `--chat` does not choose the chat's board
   (§16.4). A chat follows a task on any board, and its `/kanban task show` finds it by id, naming
@@ -4289,7 +4292,9 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
 
 - **`--chat`**: the subscription written in the task's transaction, for the bot's app, at chat
   scope; with `--thread`, the root `threadRootOf` gives, and refused with none known; a malformed
-  chat or thread, `--thread` without `--chat`, and no app id refused before the board is opened;
+  chat or thread, `--thread` without `--chat`, no app id, and a chat outside a non-empty
+  `auth.chats` refused before the board is opened, a repeat by key included; the root looked up
+  only after the key, a repeat answered without it;
   `follow` refused by the service from chat and from a run; a key repeated with another chat
   answering the first task, adding no row and no event, its `follows` the stored subscription, or
   `null` for a task made without one; a chat outside a non-empty `auth.chats` refused, any chat
@@ -4323,10 +4328,17 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
   `MT_ALLOW_CHATS` and the other `MT_*` overrides; a cron script gets the gateway's `MT_HOME`,
   `MT_CONFIG` and `MT_DB` (cron spec §5.1), and reads the files and the home's `.env`, but nothing
   else of that shell. Its `mt` may then lack the app id, so refuse `--chat` and every person, or
-  read another talk list. It fails safe: what it lacks it refuses, and a person it accepts against
-  a list the gateway does not hold is refused their card at the send, where the card poster checks
-  talk tier again (§4.2). An installed service has nothing in its shell but `PATH`, `MT_HOME` and
+  read another talk list. For people and the app id it fails safe: what it lacks it refuses, and
+  a person it accepts against a list the gateway does not hold is refused their card at the send,
+  where the card poster checks talk tier again (§4.2). **Not for `MT_ALLOW_CHATS`**: one set only in
+  the gateway's shell leaves the script's `mt` with an empty `auth.chats`, which means any chat, so
+  its `--chat` can name a chat the gateway does not answer, and the board's notices go where
+  nobody can act on them. An installed service has nothing in its shell but `PATH`, `MT_HOME` and
   the `.env` (`mt service install`), so its scripts see what it sees.
+- **A script runs in its job's workspace**, which the role's agents write to (cron spec §5.1). A
+  script that runs files from there acts with whatever those files say, operator powers included,
+  `mt kanban task new --chat` and a person's work among them; keep a job's script outside the
+  workspace, under `$MT_HOME` for example.
 
 *Added on 2026-11-17.* The user chose: `--chat oc_… [--thread omt_…]` on `mt kanban task new`,
 `mt kanban workflow start` and `mt kanban workflow apply`, the chat following the new task or

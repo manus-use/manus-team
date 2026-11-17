@@ -666,9 +666,15 @@ A fire with a script runs it first, before any session is made:
     the two locations, `LARK_APP_ID`, `MT_OWNER_OPEN_ID`, `MT_ALLOW_TALK`, `MT_ALLOW_CHATS` and the
     other overrides, are not seen by its scripts' `mt`. A script's `mt kanban task new --chat` may
     then be refused for want of the app id, and a person refused or checked against another talk
-    list. It fails safe: what it lacks it refuses, and a person it accepts that the gateway would
-    not is refused their card at the send, where the card poster checks talk tier again (kanban
-    §4.2, §22.7). Put such settings in the config file or the `.env`, where both read them.
+    list. For people and the app id it fails safe: what it lacks it refuses, and a person it
+    accepts that the gateway would not is refused their card at the send, where the card poster
+    checks talk tier again (kanban §4.2, §22.7). **Not for `MT_ALLOW_CHATS`**: one set only in the
+    gateway's shell leaves the script's `mt` with an empty `auth.chats`, which means any chat, so
+    its `--chat` can name a chat the gateway does not answer, and notices go where nobody can act on
+    them. Put such settings in the config file or the `.env`, where both read them.
+  - **The workspace's files.** A script runs in the job's workspace, which the role's agents write
+    to. A script that runs files from there acts with whatever those files say, operator powers
+    included; keep a job's script outside the workspace, under `$MT_HOME` for example.
 
   **None of the four marks an agent's shell.** An agent's shell is told by `AGENT_VARIABLES`
   (`MT_KANBAN_RUN`, `MT_KANBAN_TOKEN`, `MT_CRON_TOKEN`, `MT_CRON_FIRE`, §6.4), which `gateEnv` still
@@ -969,7 +975,9 @@ mt cron pause <id> | resume <id> | run <id> | remove <id> [--json]
   The gateway admits no message from such a chat, so a job posting there would post where nobody
   can `/cron show` it, pause it or answer it. An empty list means any chat, as for the gateway. A
   job made before plan V that delivers to such a chat is left as it is: the check is on what the
-  terminal names, not a sweep. `CHAT_ID` moves to `src/core/lark-ids.ts`, which the board's service
+  terminal names, not a sweep. The check is `delivery()`'s, which runs before the add, so `mt cron
+  add --key k --chat oc_…` repeated after that chat has left `auth.chats` is refused, not answered
+  with the job the key made. `CHAT_ID` moves to `src/core/lark-ids.ts`, which the board's service
   imports too (kanban §22.5).
 - **The zone** used when `--tz` is not given is the gateway's, from `cron.tz` or
   `$MT_HOME/run/gateway.tz`, and only with neither this shell's, which the answer then says (§2.2).
