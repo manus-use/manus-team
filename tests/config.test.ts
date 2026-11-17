@@ -701,6 +701,8 @@ describe('loadTeamSettings', () => {
       agent: c.agent,
       kanban: { maxRunning: c.kanban.maxRunning, maxRunningFrom: 'maxLiveSessions' },
       appId: c.lark.appId,
+      talk: c.auth.allowTalk,
+      chats: c.auth.allowChats,
     });
     // kanban.enabled is unset: absent here, off there.
     expect(s.kanbanEnabled).toBeUndefined();
