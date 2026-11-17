@@ -368,7 +368,9 @@ ask.
 ```
 
 The `lark:on_…` ids are examples: use your people's. `/kanban task show` of a task given to a
-person prints theirs, and each must be known to the gateway and have talk tier.
+person prints theirs, and each must be known to the gateway and have talk tier. They are in the
+role, not in a param, because a param used only in a body or a contract never turns an
+@-mention into a person's id: only one that lands in `assignee` or `reviewer` does.
 
 The workflow:
 
@@ -399,7 +401,9 @@ Start it from chat:
 /kanban workflow start triage-and-route request="a post on how we cut build times in half"
 ```
 
-or from a terminal, as it names no person:
+or from a terminal, as it names no person. Started there, no chat follows the triage task, nor
+the workflow it starts, so nobody is told how either goes: watch them with `mt kanban workflow
+show w_…`, or start it from chat if a group should hear.
 
 <!-- example: start triage-and-route terminal -->
 ```
@@ -421,7 +425,7 @@ For a request no workflow fits, it creates a task for a person instead, with thi
 
 <!-- example: kanban-agent create -->
 ```json
-{"title": "Look into the request for a second office printer", "body": "No workflow fits: it is a purchase. The request: a second printer for the third floor.", "assignee": "lark:on_2f6b81"}
+{"title": "Look into the request for a second office printer", "body": "No workflow fits: it is a purchase. The request: a second printer for the third floor.", "assignee": "lark:on_2f6b81", "idempotency_key": "route"}
 ```
 
 Either way it writes `decision.md`, and its report is refused until the gate finds it. The tasks
@@ -461,23 +465,38 @@ are kept in its history only.
 
 Use it when a team wants to know each morning what changed, without reading the log.
 
+Two jobs, as Monday's look back covers the weekend: Tuesday to Friday at 09:00 the last 24
+hours, and Monday at 09:00 the last 72. A single `every weekday 09:00` job with
+`--since=yesterday` would miss, on a Monday, Friday after 09:00 and the whole weekend.
+
 <!-- example: cron daily-digest chat -->
 ```text
-/cron add "every weekday 09:00" worker Summarise yesterday's commits to the web repository below for the team: what changed, in at most five lines, grouped by area. If there are none, answer [nothing to report].
+/cron add "0 9 * * 2-5" worker Summarise the commits to the web repository below, from the last day, for the team: what changed, in at most five lines, grouped by area. If there are none, answer [nothing to report].
 name: Yesterday in web
 tz: Asia/Shanghai
-script: git -C /srv/repos/web log --since=yesterday --oneline --no-merges
+script: git -C /srv/repos/web log --since='24 hours ago' --oneline --no-merges
 ```
+
+<!-- example: cron daily-digest-monday chat -->
+```text
+/cron add "every monday 09:00" worker Summarise the commits to the web repository below, from Friday morning on, for the team: what changed, in at most five lines, grouped by area. If there are none, answer [nothing to report].
+name: The weekend in web
+tz: Asia/Shanghai
+script: git -C /srv/repos/web log --since='72 hours ago' --oneline --no-merges
+```
+
+The first at the terminal; the Monday one is the same, with its own schedule, prompt, name and
+`--since`:
 
 <!-- example: cron daily-digest terminal -->
 ```
-mt cron add "every weekday 09:00" worker \
-    "Summarise yesterday's commits to the web repository below for the team: what changed, in at most five lines, grouped by area. If there are none, answer [nothing to report]." \
+mt cron add "0 9 * * 2-5" worker \
+    "Summarise the commits to the web repository below, from the last day, for the team: what changed, in at most five lines, grouped by area. If there are none, answer [nothing to report]." \
     --name "Yesterday in web" --tz Asia/Shanghai --chat oc_xxx \
-    --script 'git -C /srv/repos/web log --since=yesterday --oneline --no-merges'
+    --script "git -C /srv/repos/web log --since='24 hours ago' --oneline --no-merges"
 ```
 
-What happens: each weekday at 09:00 the script lists the last day's commits, and the agent
+What happens: each morning the script lists the commits since the last digest, and the agent
 summarises them. On a day with none, the answer is `[nothing to report]`, and nothing is posted.
 For a folder of documents instead of a repository, the script could be `find docs -type f
 -mtime -1`, run in the role's workspace.
@@ -517,26 +536,30 @@ Use it to have someone look over the board each week for work that is stuck.
 
 <!-- example: cron board-review chat -->
 ```text
-/cron add "every friday 16:00" worker Below are the open tasks on the board web-app, as JSON. List each blocked task, with its id, title and assignee. Then list each task that was also open in your previous result, as stale. One line each. If nothing is blocked or stale, answer [nothing to report].
+/cron add "every friday 16:00" worker Below are last week's and this week's open tasks on the board web-app, each as JSON. List each task blocked this week, with its id, title and assignee. Then list each task open in both lists, as stale. One line each. If nothing is blocked or stale, answer [nothing to report].
 name: Board review
-script: ~/.manus-team/bin/mt kanban task list --board web-app --json
+script: mkdir -p .board-review && ~/.manus-team/bin/mt kanban task list --board web-app --json > .board-review/now.json && echo 'Last week:' && (cat .board-review/last.json 2>/dev/null || echo 'none yet') && echo 'This week:' && cat .board-review/now.json && mv .board-review/now.json .board-review/last.json
 ```
 
 <!-- example: cron board-review terminal -->
 ```
 mt cron add "every friday 16:00" worker \
-    "Below are the open tasks on the board web-app, as JSON. List each blocked task, with its id, title and assignee. Then list each task that was also open in your previous result, as stale. One line each. If nothing is blocked or stale, answer [nothing to report]." \
+    "Below are last week's and this week's open tasks on the board web-app, each as JSON. List each task blocked this week, with its id, title and assignee. Then list each task open in both lists, as stale. One line each. If nothing is blocked or stale, answer [nothing to report]." \
     --name "Board review" --chat oc_xxx \
-    --script '~/.manus-team/bin/mt kanban task list --board web-app --json'
+    --script "mkdir -p .board-review && ~/.manus-team/bin/mt kanban task list --board web-app --json > .board-review/now.json && echo 'Last week:' && (cat .board-review/last.json 2>/dev/null || echo 'none yet') && echo 'This week:' && cat .board-review/now.json && mv .board-review/now.json .board-review/last.json"
 ```
 
 What happens: each Friday at 16:00 the script lists the board's open tasks, each with its id,
-status, title and assignee. Each fire's prompt also carries the job's previous result, so the
-agent can tell which tasks were open a week ago too. The list says no task's age, which is why
-"stale" here means "open last week as well".
+status, title and assignee, and keeps the list in the job's workspace, as
+`.board-review/last.json`. It prints the list it kept a week ago, `none yet` the first time,
+beside this week's, so the agent can tell which tasks were open both times. The list says no
+task's age, which is why "stale" here means "open last week as well". A `/cron run` in the
+middle of the week keeps its own list too, and the next Friday compares with that one.
 
 **The pattern:** the script reads the board, because a fire's agent cannot: in its shell the
-operator's `mt kanban` commands are refused. The previous result gives the job a memory.
+operator's `mt kanban` commands are refused. And the script keeps the state from one week to
+the next, in a file: the job's previous result holds only what the agent last said, here the
+tasks it flagged, not the whole board.
 
 ### 4. One-off reminders
 
@@ -629,7 +652,9 @@ reports`.
 What happens: each Monday at 09:00 the script starts weekly-report as the operator, with the
 week filled in, such as `2026-W47`. `--key weekly-2026-47` makes the start safe to repeat: a
 second start that week, from `/cron run` or a retry, makes nothing and answers with the same
-instance and `"existing": true`. The agent posts the id. That post is how the chat hears of it:
+instance and `"existing": true`. `date` runs on the gateway's host, in its zone, not in the
+job's `tz`, so near midnight on a Sunday the two can disagree about the week. The agent posts
+the id. That post is how the chat hears of it:
 a workflow started from a terminal is followed by no chat, so its tasks' notices go nowhere, and
 `/kanban workflow show w_…` is how the chat follows it.
 
