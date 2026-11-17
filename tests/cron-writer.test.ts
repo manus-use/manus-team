@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cronUuid, newCronJobId } from '../src/core/ids.js';
 import { bindSession, revokeBindingsAt } from '../src/db/bindings.js';
@@ -98,6 +100,13 @@ describe('addJob', () => {
     const a = newJob(h.db, { idempotencyKey: 'lark:om_1' });
     const r = addJob2({ idempotencyKey: 'lark:om_1', name: 'another' });
     expect(r).toMatchObject({ ok: true, existing: true, job: { jobId: a.jobId, name: 'Daily PRs' } });
+  });
+
+  it('refuses a key whose job was removed, adding nothing', () => {
+    const a = newJob(h.db, { idempotencyKey: 'lark:om_9' });
+    expect(removeJob(h.db, a.jobId, NOW).ok).toBe(true);
+    expect(addJob2({ idempotencyKey: 'lark:om_9' })).toEqual({ ok: false, code: 'state', message: 'the job of that key was removed' });
+    expect(h.db.prepare('SELECT count(*) AS n FROM cron_jobs').get()).toEqual({ n: 1 });
   });
 
   it('counts 50 active jobs a gateway and 10 a chat, in its transaction; pausing frees a place and resuming takes one', () => {
@@ -310,6 +319,40 @@ describe('the prune, sparing what can still be reached', () => {
     expect(purgeRemoved(h.db)).toEqual([job.jobId]);
     expect(getFire(h.db, id)).toBeUndefined();
     expect(count('sessions', 'id = ?', session)).toBe(1);
+  });
+});
+
+describe("the delete of a cron fire's session, and the foreign keys on sessions", () => {
+  /** Every TypeScript file under src, by its path from the repository, with its comments taken out. */
+  function sources(dir = 'src'): Array<[string, string]> {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((e): Array<[string, string]> => {
+      const path = join(dir, e.name);
+      if (e.isDirectory()) return sources(path);
+      if (!e.name.endsWith('.ts')) return [];
+      // Its code only: a comment may name a column it does not write.
+      return [[path, readFileSync(path, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')]];
+    });
+  }
+
+  it('has nothing that writes parent_session_id, fork_of_session_id, workspaces.lock_holder, or a kanban run\'s session but the dispatcher', () => {
+    const all = sources();
+    for (const column of ['parent_session_id', 'fork_of_session_id', 'lock_holder']) {
+      expect(all.filter(([, text]) => text.includes(column)).map(([path]) => path), column).toEqual([]);
+    }
+    expect(all.filter(([, text]) => /(UPDATE|INSERT INTO)\s+kanban_runs\b[^`']*\bsession_id\b/.test(text)).map(([path]) => path)).toEqual([join('src', 'db', 'kanban.ts')]);
+    // A run's session is attached by the dispatcher alone, through the service, to the session it made for the run on the kanban channel.
+    expect(all.filter(([, text]) => /\.attachSession\(/.test(text)).map(([path]) => path).sort()).toEqual([join('src', 'kanban', 'dispatcher.ts'), join('src', 'kanban', 'service.ts')]);
+  });
+
+  it("deletes a pruned fire's session under the foreign keys, none of them naming it", () => {
+    expect(h.db.pragma('foreign_keys', { simple: true })).toBe(1);
+    const job = newJob(h.db);
+    const id = fire(job, job.nextRunAt ?? 0);
+    const session = fireSession(job.jobId, id);
+    endFire(h.db, { fireId: id, outcome: 'nothing', message: false }, NOW);
+    removeJob(h.db, job.jobId, NOW);
+    expect(purgeRemoved(h.db)).toEqual([job.jobId]);
+    expect(count('sessions', 'id = ?', session)).toBe(0);
   });
 });
 

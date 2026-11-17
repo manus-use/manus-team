@@ -1,11 +1,13 @@
 import { newCronJobId } from '../core/ids.js';
 import {
   CRON_LIMITS,
+  KEY_REMOVED,
   addJob,
   cronRefuse,
   editJob,
   firesOf,
   getJob,
+  jobByKey,
   listJobs,
   pauseJob,
   removeJob,
@@ -183,9 +185,15 @@ export class CronService {
     return undefined;
   }
 
-  /** Add a job (§2): its schedule's next run from now, as an active job, or the job its key made. */
+  /** Add a job (§2): its schedule's next run from now, as an active job, or the job its key made; refused if that one was removed. */
   add(req: AddRequest): CronResult<{ job: JobRow; existing: boolean }> {
     const now = this.#clock.now();
+    // A retry is answered before its add is checked again: by now its one-off may be past, or its role gone (§3.1).
+    if (req.idempotencyKey !== undefined) {
+      const existing = jobByKey(this.#db, req.idempotencyKey);
+      if (existing?.state === 'removed') return cronRefuse('state', KEY_REMOVED);
+      if (existing !== undefined) return { ok: true, job: existing, existing: true };
+    }
     const text = this.#textRefused({ prompt: req.prompt, ...(req.name === undefined ? {} : { name: req.name }), ...(req.script === undefined ? {} : { script: req.script }) });
     if (text !== undefined) return text;
     const zone = this.#zoneOf(req.tz);

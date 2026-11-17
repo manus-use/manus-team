@@ -73,6 +73,19 @@ describe('CronService.add', () => {
     const a = added({ idempotencyKey: 'lark:om_1' });
     expect(service.add({ ...base, idempotencyKey: 'lark:om_1', prompt: 'Other.' })).toMatchObject({ ok: true, existing: true, job: { jobId: a.jobId } });
   });
+
+  it('answers a retried key with its job before checking the add again, which may no longer pass', () => {
+    const a = added({ schedule: '2026-11-17 12:00', idempotencyKey: 'lark:om_2' });
+    clock.advance(4 * 3_600_000);
+    expect(service.add({ ...base, schedule: '2026-11-17 12:00', idempotencyKey: 'lark:om_2' })).toMatchObject({ ok: true, existing: true, job: { jobId: a.jobId } });
+    expect(service.add({ ...base, schedule: '2026-11-17 12:00', idempotencyKey: 'lark:om_3' })).toMatchObject({ ok: false, code: 'invalid' });
+  });
+
+  it('refuses a key whose job was removed', () => {
+    const a = added({ idempotencyKey: 'lark:om_4' });
+    expect(service.remove(a.jobId).ok).toBe(true);
+    expect(service.add({ ...base, idempotencyKey: 'lark:om_4' })).toEqual({ ok: false, code: 'state', message: 'the job of that key was removed' });
+  });
 });
 
 describe('CronService: scope, states and edits', () => {

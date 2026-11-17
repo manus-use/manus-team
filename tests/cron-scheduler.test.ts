@@ -217,6 +217,31 @@ describe('a removal', () => {
     expect(getFire(h.t.db, fireId)).toBeUndefined();
   });
 
+  it('leaves no actor live for a fire removed while its actor was being made', async () => {
+    const h = harness();
+    const j = h.add();
+    const actorFor = h.registry.actorFor.bind(h.registry);
+    let go = (): void => undefined;
+    const gate = new Promise<void>((resolve) => (go = resolve));
+    h.registry.actorFor = async (sessionId, key) => {
+      await gate;
+      return actorFor(sessionId, key);
+    };
+    h.clock.advance(HOUR);
+    await h.tick();
+    const fire = runningFire(h.t.db, j.jobId);
+    const sessionId = fire?.sessionId ?? '';
+    expect(sessionId).not.toBe('');
+    removeJob(h.t.db, j.jobId, h.clock.now());
+    await h.tick();
+    await h.scheduler.idle();
+    expect(getFire(h.t.db, fire?.fireId ?? 0)).toMatchObject({ outcome: 'interrupted' });
+    go();
+    for (let i = 0; i < 20; i += 1) await new Promise((r) => setImmediate(r));
+    expect(h.registry.liveActor(sessionId)).toBeUndefined();
+    expect(h.driver.starts).toEqual([]);
+  });
+
   it('ends the fire interrupted even when its archive is rejected, and lets it leave the in-flight set', async () => {
     const h = harness();
     const j = h.add();
@@ -274,6 +299,57 @@ describe('a restart', () => {
     ]);
   });
 
+  it("deletes at boot the session of a removed job's fire whose archive was refused, once the boot has archived it", async () => {
+    const first = harness();
+    const j = first.add();
+    const held = holdsTurn(first.driver);
+    first.clock.advance(HOUR);
+    await first.tick();
+    const fire = runningFire(first.t.db, j.jobId);
+    const sessionId = fire?.sessionId ?? '';
+    // The archive refused before it revoked anything: the session stays bound on the cron channel.
+    const archive = first.registry.archive.bind(first.registry);
+    first.registry.archive = async () => {
+      first.registry.archive = archive;
+      throw new Error('the agent would not close');
+    };
+    removeJob(first.t.db, j.jobId, first.clock.now());
+    await first.tick();
+    await first.scheduler.idle();
+    await first.tick();
+    expect(getJob(first.t.db, j.jobId)).toBeUndefined();
+    expect(getSession(first.t.db, sessionId)).toBeDefined();
+    first.scheduler.stop();
+    await first.registry.closeAll();
+    held.end('cancelled');
+
+    const second = harness({ t: first.t, clock: first.clock });
+    open.splice(open.indexOf(first), 1);
+    await second.scheduler.boot();
+    expect(bindingsOnChannel(second.t.db, 'cron', 'cli_app')).toEqual([]);
+    expect(getSession(second.t.db, sessionId)).toBeUndefined();
+    for (const table of ['events', 'turns', 'channel_bindings']) {
+      expect(second.t.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE session_id = ?`).get(sessionId)).toEqual({ n: 0 });
+    }
+  });
+
+  it("keeps at boot the session of a fire still recorded, for its history and its send", async () => {
+    const first = harness();
+    const j = first.add();
+    const held = holdsTurn(first.driver);
+    first.clock.advance(HOUR);
+    await first.tick();
+    const sessionId = runningFire(first.t.db, j.jobId)?.sessionId ?? '';
+    first.scheduler.stop();
+    await first.registry.closeAll();
+    held.end('failed');
+    const second = harness({ t: first.t, clock: first.clock });
+    open.splice(open.indexOf(first), 1);
+    await second.scheduler.boot();
+    expect(bindingsOnChannel(second.t.db, 'cron', 'cli_app')).toEqual([]);
+    expect(getSession(second.t.db, sessionId)).toMatchObject({ state: 'archived' });
+  });
+
   it('sends a pending answer again from the session log, the same parts with the same uuids, 20,000 characters included', async () => {
     const h = harness();
     const j = h.add();
@@ -326,6 +402,20 @@ describe('an unavailable role', () => {
       '**Daily PRs** · 2026-11-17 11:00 Asia/Shanghai: skipped: role worker is not configured',
       `**Daily PRs** · 2026-11-17 12:00 Asia/Shanghai: skipped: role worker is not configured\nPaused after 3 failures in a row. \`/cron resume ${j.jobId}\` in this chat, or \`mt cron resume ${j.jobId}\`, starts it again.`,
     ]);
+  });
+});
+
+describe('a schedule that cannot be read', () => {
+  it('is noted once for its job however many ticks find it due, and fires nothing', async () => {
+    const h = harness();
+    const j = h.add();
+    h.t.db.prepare("UPDATE cron_jobs SET schedule = 'every now and then' WHERE job_id = ?").run(j.jobId);
+    for (let i = 0; i < 3; i += 1) {
+      h.clock.advance(HOUR);
+      await h.tick();
+    }
+    expect(h.notes.filter((n) => n.startsWith(`cron: job ${j.jobId}'s schedule cannot be read`))).toHaveLength(1);
+    expect(firesOf(h.t.db, j.jobId)).toEqual([]);
   });
 });
 

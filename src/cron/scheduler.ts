@@ -7,6 +7,7 @@ import { bindingsOnChannel } from '../db/bindings.js';
 import {
   CRON_CHANNEL,
   attachFireSession,
+  deleteLeftoverCronSession,
   dropStaleStamps,
   dueJobs,
   endFire,
@@ -168,6 +169,8 @@ export class CronScheduler {
   readonly #inflight = new Set<Promise<void>>();
   /** Fires whose message is being sent: a second ask for one, from any path, waits for none and sends nothing. */
   readonly #sending = new Set<number>();
+  /** Jobs whose schedule was noted as unreadable, so it is said once. */
+  readonly #unreadable = new Set<string>();
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
   #ticking = false;
@@ -243,6 +246,13 @@ export class CronScheduler {
       } catch {
         // Not quoted: it can carry an agent's stderr.
         this.#note(`cron: archiving session ${b.sessionId} failed after a restart`);
+        continue;
+      }
+      try {
+        // A purged job's fire whose own archive was refused: no fire names the session, so nothing else deletes it.
+        if (deleteLeftoverCronSession(this.#deps.db, b.sessionId)) this.#note(`cron: session ${b.sessionId}, of no recorded fire, deleted after a restart`);
+      } catch (err) {
+        this.#note(`cron: deleting session ${b.sessionId} after a restart failed: ${message(err)}`);
       }
     }
     try {
@@ -497,7 +507,11 @@ export class CronScheduler {
   #schedule(job: JobRow): Schedule | undefined {
     const parsed = parseSchedule(job.schedule);
     if (parsed.ok) return parsed.schedule;
-    this.#note(`cron: job ${job.jobId}'s schedule cannot be read: ${parsed.message}`);
+    // Once per job per process: it stays due, and a tick comes every TICK_MS.
+    if (!this.#unreadable.has(job.jobId)) {
+      this.#unreadable.add(job.jobId);
+      this.#note(`cron: job ${job.jobId}'s schedule cannot be read: ${parsed.message}`);
+    }
     return undefined;
   }
 
@@ -605,7 +619,12 @@ export class CronScheduler {
     entry.sessionId = sessionId;
     attachFireSession(this.#deps.db, entry.fireId, sessionId);
     const actor = await this.#deps.sessions.actorFor(sessionId, entry.key);
-    if (this.#stopped || entry.mark !== undefined || entry.archiving) return;
+    if (this.#stopped) return;
+    if (entry.mark !== undefined || entry.archiving) {
+      // Marked or archived while its actor was made: the archive's release found none, so this one is closed here.
+      void this.#deps.sessions.release(sessionId).catch(() => undefined);
+      return;
+    }
     let terminal: TurnTerminal;
     let thrown: string | undefined;
     try {

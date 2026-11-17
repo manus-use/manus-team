@@ -412,11 +412,15 @@ export interface NewJob {
   idempotencyKey: string | null;
 }
 
-/** Add an active job, or answer the one its key already made (§3.1). The limits are counted here. */
+/** A retried add whose key's job was removed since: not made again, as the remover meant. */
+export const KEY_REMOVED = 'the job of that key was removed';
+
+/** Add an active job, or answer the one its key already made (§3.1), unless that one was removed. The limits are counted here. */
 export function addJob(db: Db, job: NewJob, now: number): CronResult<{ job: JobRow; existing: boolean }> {
   return txImmediate(db, (d) => {
     if (job.idempotencyKey !== null) {
       const existing = jobByKey(d, job.idempotencyKey);
+      if (existing?.state === 'removed') return cronRefuse('state', KEY_REMOVED);
       if (existing !== undefined) return { ok: true, job: existing, existing: true };
     }
     const over = limitRefused(d, chatOf(job.delivery), undefined);
@@ -625,16 +629,40 @@ function pruneIn(d: Db, jobId: string): void {
  */
 function deleteFireIn(d: Db, fire: FireRow): void {
   d.prepare('DELETE FROM cron_fires WHERE fire_id = ?').run(fire.fireId);
-  const sessionId = fire.sessionId;
-  if (sessionId === null) return;
+  if (fire.sessionId !== null) deleteCronSessionIn(d, fire.sessionId);
+}
+
+/**
+ * A cron session, with everything that hangs on it, when every binding it ever
+ * had is on the `cron` channel and none is live; else nothing. True if deleted.
+ */
+function deleteCronSessionIn(d: Db, sessionId: string): boolean {
   const channels = bindingChannelsEver(d, sessionId);
-  if (channels.some((c) => c !== CRON_CHANNEL)) return;
+  if (channels.some((c) => c !== CRON_CHANNEL)) return false;
   // Still bound anywhere, its own archive not yet done: something can still reach it.
-  if (d.prepare('SELECT 1 FROM channel_bindings WHERE session_id = ? AND revoked_at IS NULL').get(sessionId) !== undefined) return;
+  if (d.prepare('SELECT 1 FROM channel_bindings WHERE session_id = ? AND revoked_at IS NULL').get(sessionId) !== undefined) return false;
+  // The other foreign keys on sessions are never set for a cron session, so the delete cannot fail on one:
+  // sessions.parent_session_id and fork_of_session_id and workspaces.lock_holder are written by nothing,
+  // and kanban_runs.session_id only by the dispatcher, for a run's own session (tests/cron-writer.test.ts).
   for (const table of ['events', 'turns', 'channel_bindings', 'approvals', 'snapshots']) {
     d.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(sessionId);
   }
   d.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+  return true;
+}
+
+/**
+ * After the boot's archive of a session left bound on the cron channel (§4.4):
+ * the session deleted as a pruned fire's is, if no fire names it any more. So a
+ * removed job's fire whose archive was refused, purged with its job while the
+ * session was still bound, does not leave the session for ever. A fire still
+ * recorded keeps it, for its history and its send, until the prune or the purge.
+ */
+export function deleteLeftoverCronSession(db: Db, sessionId: string): boolean {
+  return txImmediate(db, (d) => {
+    if (d.prepare('SELECT 1 FROM cron_fires WHERE session_id = ?').get(sessionId) !== undefined) return false;
+    return deleteCronSessionIn(d, sessionId);
+  });
 }
 
 export interface StartFire extends Expected {
