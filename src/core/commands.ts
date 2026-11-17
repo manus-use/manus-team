@@ -125,6 +125,19 @@ export const COMMANDS: readonly CommandSpec[] = [
     usage: '/kanban <command>',
   },
   {
+    name: 'cron',
+    // Talk, because listing a chat's jobs is; each command that changes one checks operator tier itself.
+    tier: 'talk',
+    needsSession: false,
+    effect: 'immediate',
+    // `/cron add` takes field lines and a prompt across lines.
+    multiline: true,
+    // It never touches this chat's session, so a busy one does not refuse it.
+    mutating: false,
+    summary: 'Scheduled jobs: `/cron help` lists its commands.',
+    usage: '/cron <command>',
+  },
+  {
     name: 'help',
     tier: 'talk',
     needsSession: false,
