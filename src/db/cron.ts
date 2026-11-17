@@ -551,7 +551,7 @@ export interface Expected {
   schedule: string;
   tz: string;
   /** The next run to advance to after this slot; undefined for a one-off, which is then done. */
-  next?: number;
+  next?: number | undefined;
 }
 
 /** Whether the job is still as the scheduler read it; else a refusal saying it moved. */
@@ -699,11 +699,12 @@ export function attachFireSession(db: Db, fireId: number, sessionId: string): vo
   });
 }
 
-const FAILURES: readonly FireOutcome[] = ['script_failed', 'agent_failed', 'timed_out'];
+const FAILURES: readonly FireOutcome[] = ['script_failed', 'agent_failed', 'timed_out', 'skipped_unavailable'];
 
 export interface EndFire {
   fireId: number;
-  outcome: 'posted' | 'nothing' | 'script_failed' | 'agent_failed' | 'timed_out' | 'interrupted';
+  /** `skipped_unavailable` for a fire whose role's role.md could not be read once it had started (§5.2). */
+  outcome: 'posted' | 'nothing' | 'script_failed' | 'agent_failed' | 'timed_out' | 'skipped_unavailable' | 'interrupted';
   error?: string;
   result?: string;
   /** There is a message to post, if the job has somewhere to post it. */
