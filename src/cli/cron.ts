@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { CHAT_ID } from '../core/lark-ids.js';
+import { CHAT_ID, NEEDS_BOT, chatRefused } from '../core/lark-ids.js';
 import type { CronDelivery, CronRefusal, FireRow, JobRow } from '../db/cron.js';
 import { lastResult } from '../db/cron.js';
 import { openDb, type Db } from '../db/open.js';
@@ -46,6 +46,8 @@ interface Opened {
   db: Db;
   home: string;
   appId: string | undefined;
+  /** `auth.chats` as this shell's settings give it: a `--chat` outside it, when it is not empty, is refused. */
+  chats: readonly string[];
   enabled: boolean | undefined;
   /** Where the zone a job gets when none is given came from: the config's cron.tz, the gateway's record, or this shell. */
   zoneSource: 'cron.tz' | 'gateway' | 'shell';
@@ -71,7 +73,7 @@ function open(io: MtIo, what: string, refuseAs: (code: string, message: string) 
   const zone = configured ?? recorded ?? processZone();
   const zoneSource = configured !== undefined ? 'cron.tz' : recorded !== undefined ? 'gateway' : 'shell';
   const service = new CronService({ db, roles: team.roles, workspaces: new Set(team.workspaces.keys()), zone });
-  return { service, db, home: settings.home, appId: settings.appId, enabled: settings.cron?.enabled, zoneSource };
+  return { service, db, home: settings.home, appId: settings.appId, chats: settings.chats ?? [], enabled: settings.cron?.enabled, zoneSource };
 }
 
 function jobJson(job: JobRow): Record<string, unknown> {
@@ -170,8 +172,12 @@ export async function cronOperator(command: string | undefined, rest: readonly s
   const o = open(io, what, no);
   if (typeof o === 'number') return o;
   try {
-    const delivery = (chat: string): CronDelivery | number =>
-      o.appId === undefined ? no('invalid', '--chat needs the bot: set lark.appId in the config file, or LARK_APP_ID') : { channel: 'lark', account: o.appId, chat, thread: '', root: null };
+    // Before the add or the edit, so a repeated key naming a chat that has left auth.chats is refused too (§6.2).
+    const delivery = (chat: string): CronDelivery | number => {
+      if (o.appId === undefined) return no('invalid', NEEDS_BOT);
+      const outside = chatRefused(chat, o.chats);
+      return outside === undefined ? { channel: 'lark', account: o.appId, chat, thread: '', root: null } : no('invalid', outside);
+    };
     let changed: JobRow | undefined;
     let lines: string[] = [];
     let out: Record<string, unknown> = {};
