@@ -369,9 +369,12 @@ CREATE INDEX idx_cron_fires_pending ON cron_fires(delivery) WHERE delivery = 'pe
   **Only a session nothing else can reach is deleted.** A fire's session is deleted only when every
   binding it has, revoked or not, is on the `cron` channel; one with any other binding is left, and
   only the fire's row is dropped. That case is closed off where it would start: **`registry.attach`
-  refuses a session whose `ownerPrincipal` is `CRON_OWNER`'s**, the principal `cron`, exported by
-  the scheduler as `KANBAN_OWNER` is by the dispatcher (`src/kanban/dispatcher.ts`), with "session
-  s_… is a cron fire's; mt cron show c_… has what it did". In `attach` itself, so `/attach` and any
+  refuses a session whose `ownerPrincipal` is `CRON_OWNER`'s**, the principal `cron`, defined as
+  `KANBAN_OWNER` is in the dispatcher (`src/kanban/dispatcher.ts`) but in a leaf module of its own,
+  `src/cron/owner.ts`, which imports nothing, so the registry can import it without a cycle through
+  the scheduler. Its message, "session s_… is a cron fire's; mt cron show c_… has what it did",
+  takes the `c_…` from the session's binding on the `cron` channel, whose conversation is the
+  job's id (§5.2). In `attach` itself, so `/attach` and any
   later caller get it: today `attach` (`core/registry.ts`) accepts any session not terminated, an
   archived fire's included, and would bind a fire's session into a chat, whose later
   turns would then be deleted with the fire. The binding check stays as the backstop for a session
@@ -446,13 +449,24 @@ work is synchronous up to each fire's start; the fires run on in the background.
 
 In order, each step's failure noted and the rest going on:
 
-1. **Removed jobs** with a running fire have it stopped: a script still running is aborted
-   through its signal, killing its group (§5.1), and an agent's turn is cancelled (§5.4's cancel);
-   the fire ends `interrupted`, "the job was removed", with `delivery` `none`, **once the archive
-   of its session has settled** (below). Those with none running are deleted with their fires and
+1. **Removed jobs** with a running fire not yet marked (below) have it marked to end
+   `interrupted` and stopped: a script still running is aborted through its signal, killing its
+   group (§5.1), with no `script_failed` recorded or posted, and an agent's turn is cancelled
+   (§5.4's cancel); the fire ends `interrupted`, "the job was removed", with `delivery` `none`,
+   **once the archive of its session has settled** (below), or at once for a fire stopped during
+   its script, which has no session yet. Those with none running are deleted with their fires and
    the fires' sessions (`purgeRemoved`, §3.2), but a job with a fire still in this process's
    in-flight set (below) is skipped by `purgeRemoved`'s caller until it leaves the set: a fire
    whose actor is still closing, or whose send is still going, is not deleted from under them.
+
+   **One entry, one ending.** Each running fire has one entry in memory, as an open run has in the
+   dispatcher (its `cancelling` and `released`): the outcome it is marked to end with, `timed_out`
+   or `interrupted`, or none; and an `archiving` flag. A removal and the idle check skip a fire
+   already marked; the turn-end path and the script path do nothing for a marked fire; and only
+   the stopped fire's archive ends it, once, with the outcome it was marked with. So a removal
+   whose cancel makes the turn end, or whose release closes the actor and ends the turn, is ended
+   once, `interrupted`, after exactly one archive, and a fire is never ended by both a turn's end
+   and a stop.
 
    **A stopped fire's archive** (a removal's, or an idle release's, §5.4) runs in the background,
    never awaited by the tick: `registry.archive` of the fire's session, which closes its actor
@@ -462,7 +476,9 @@ In order, each step's failure noted and the rest going on:
    ended anyway, as the dispatcher closes a run whose archive failed (kanban §7.4). A binding left
    so is archived by the next boot's sweep of leftovers (§4.4 step 2), as the dispatcher's
    `#archiveLeftovers` does a run's. Either way the fire ends, so it always leaves the in-flight
-   set.
+   set. An archive that settles after `stop()` records nothing: the fire is left open, for the
+   next boot to end `interrupted` (§4.4), as any fire under way at a stop is (§5.4). `idle(boundMs)`
+   waits for the pending archives, within its bound, before the database closes.
 2. **Idle limits** of running fires are checked (§5.4).
 3. **Pending deliveries** are sent (§5.6), but those of fires in this process's in-flight set: a
    fire that has just recorded its outcome and is sending is not sent a second time beside itself.
@@ -588,6 +604,8 @@ A fire with a script runs it first, before any session is made:
 - **It fails** when it exits non-zero, is killed by a signal, times out, or cannot start. The
   fire then ends `script_failed`, its error the exit or signal and the last 300 characters of the
   output, masked; the agent is not run, and the chat is told in one line (§5.6).
+- **A removal** aborts it the same way: the fire is marked `interrupted` first, so the script's
+  ending is not a `script_failed`, and nothing is posted (§4.2).
 - **The gateway stopping** aborts it, through its signal, as a report's gates are: the fire is
   left open, and the next start ends it `interrupted`.
 
@@ -675,15 +693,16 @@ design asks; a hung one is.
 **Its precision is the tick's**: a fire is cancelled between 600 and 630 seconds after its last
 event.
 
-**The cancel** is the board's (kanban §8.5): the fire is first marked to end `timed_out`, in
-memory, so the turn's end is not taken for a failure of its own; then `actor.cancel()`. A turn that
+**The cancel** is the board's (kanban §8.5): the fire is first marked to end `timed_out`, in its
+entry (§4.2), unless it is marked already, so the turn's end is not taken for a failure of its
+own; then `actor.cancel()`. A turn that
 ignores the cancel for one more tick has its session released, which ends its process, as a board
 run that ignored its cancel is (kanban §8.5), and **the fire then ends `timed_out` itself**, by the
 tick that released it, once the archive of its session has settled, in the background, resolved
 or rejected (§4.2), and without waiting for the turn's submit promise: a release resolves that
 promise only if the actor's close ends the turn, and a fire waiting on it could hold its
-`max_running` slot for ever. When the promise settles later it finds the fire ended and does
-nothing. The partial answer is not posted: the chat is told in one line (§5.6), which is sent
+`max_running` slot for ever. When the promise settles, before or after, it finds the fire marked
+and does nothing: a turn the cancel did end is not recorded either, and the archive ends the fire. The partial answer is not posted: the chat is told in one line (§5.6), which is sent
 before the fire leaves the in-flight set (§4.2), and the fire's session has it.
 
 **A gateway stop during the turn.** `stop()` marks every running fire **stopping**, in memory,
@@ -720,7 +739,8 @@ a fire reads `turnText`. Thoughts and tool calls are not the answer.
 **How the turn ended**, read from its terminal as the dispatcher reads a run's (kanban §7.4):
 `completed` gives the answer above; `failed`, `ambiguous`, or `cancelled` by anything but the
 scheduler is `agent_failed`, its error the turn's `agent_error` texts, masked; a cancel the
-scheduler asked for is the outcome it recorded first, `timed_out` or `interrupted`.
+scheduler asked for is the outcome it marked first, `timed_out` or `interrupted` (§4.2), and the
+fire is ended by its archive, not by the turn's end.
 
 ### 5.6 Delivery, and the header
 
@@ -913,9 +933,9 @@ and the token in its environment is how its shell is now known. The worker routi
 alone: a chat turn's or a fire's shell has no board run to report for, and its `mt kanban show`
 says it needs one, as any shell's does.
 
-**The refusal names what it found.** `runShellRefusal` says "… is an operator's command, not an
-agent's: this is an agent's shell: MT_CRON_TOKEN is set. Run it from your own shell", naming the
-first of `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN`, `MT_CRON_TOKEN` and `MT_CRON_FIRE` it found, where
+**The refusal names what it found.** `runShellRefusal(what, env)` takes the shell's environment
+as a parameter, and says "… is an operator's command, not an agent's; this shell has
+MT_CRON_TOKEN set. Run it from your own shell", naming the first of `MT_KANBAN_RUN`, `MT_KANBAN_TOKEN`, `MT_CRON_TOKEN` and `MT_CRON_FIRE` it found, where
 today it says "a board run's" and names the first two together. `refuseInRun`'s hint for the
 `workflow` group, to start a workflow with `mt kanban start-workflow` or apply a DAG with `mt
 kanban apply-dag`, is added only in a board run's shell (`MT_KANBAN_RUN` or `MT_KANBAN_TOKEN`
@@ -1248,10 +1268,11 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   `inAgentRun` in `src/cli/gate.ts`, taking `MT_CRON_TOKEN` and `MT_CRON_FIRE`, for every refusal
   and `.env` skip (`mt.ts`'s `kanban` and `withGatewayFile`, `src/cli/role.ts`, `src/cli/workflow.ts`),
   the worker routing in `mt.ts`'s `kanban` kept on `MT_KANBAN_*` (§6.4); `USAGE`.
-  `runShellRefusal` naming the variable it found, `refuseInRun`'s workflow hint for a board run
+  `runShellRefusal(what, env)`, taking the environment to name the variable it found, `refuseInRun`'s workflow hint for a board run
   only, and `workflowCheck`'s note (§6.4).
-- **`src/core/registry.ts`**: `attach` refusing a session whose `ownerPrincipal` is
-  `CRON_OWNER`'s, exported by the scheduler as `KANBAN_OWNER` is by the dispatcher (§3.2).
+- **`src/cron/owner.ts`**, a leaf module importing nothing: `CRON_OWNER`, the principal `cron`.
+  **`src/core/registry.ts`**: `attach` refusing a session whose `ownerPrincipal` is
+  `CRON_OWNER`'s, its message naming the job from the session's `cron` binding (§3.2).
 - **`src/cli/cron.ts`**: the operator's commands and the agent's, the latter through the socket as
   `src/cli/kanban.ts` sends.
 - **`src/cli/service.ts`**: `status`'s lock lines.
@@ -1294,8 +1315,14 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   `interrupted`, archiving leftover `cron` bindings, and the first tick sending pending deliveries
   but none of a fire in flight; stop during a script killing it, and stop during a turn marking it
   stopping, recording nothing, and leaving the fire for the next boot, which ends it `interrupted`
-  with no failure counted; a removal aborting a running script, its fire ended only after its
-  session's archive resolved, and its job not purged while the fire is in flight; a second gateway refused by
+  with no failure counted; a removal during a script aborting it, with no `script_failed` recorded
+  or posted, its fire ended at once as it has no session; a removal during a turn whose cancel or
+  close ends the turn, ended once, `interrupted`, after exactly one archive, its fire ended only
+  after that archive settled, and its job not purged while the fire is in flight; an idle check
+  and a removal skipping a fire already marked; a rejected archive, for a removal and for an
+  idle release, the fire still ending with its marked outcome, the release's line still sent,
+  the fire leaving the in-flight set, and its binding swept by the next boot; an archive settling
+  after `stop()` recording nothing, and `idle()` waiting for it; a second gateway refused by
   `<db>.lock` from another home; `gateway.tz` written at start.
 - **Unit, a fire**: the script's environment (the role's values, no `MT_CRON_TOKEN`, no
   `MT_KANBAN_*`, not the gateway's), its directory, its timeout killing its group, its output
@@ -1332,8 +1359,10 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   saying it needs a run; each refusal naming the variable it found, the workflow hint only in a
   board run's shell, and `workflowCheck`'s note saying an agent's shell; `mt role list`,
   `mt role create`, `mt workspace add` and `mt workspace list` in a chat turn's shell with cron on
-  not reading the gateway's `.env`, and a role whose `passEnv` names a variable set only in that
-  file failing as a configuration error, "names X, which is not set in the environment";
+  not reading the gateway's `.env`: with `MT_WORKSPACE` set only there, failing "a workspace is
+  required", and with `MT_AGENT_COMMAND` set only there, `mt role list` showing the role
+  `default` from `config.yaml`'s `agent:` block instead; an unset `passEnv` name not throwing, as
+  they pass `unsetPassEnv: []`;
   `registry.attach` of a session owned by `CRON_OWNER` refused, through `/attach` and directly; the agent's JSON strict, `script`
   refused with its reason, a `role` field refused, the job running as the session's or the run's
   role, `not_yours`, a supervised own role refused, an idempotency key per creator; `/cron edit`
@@ -1371,9 +1400,15 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   `mt service`, `mt update` and `mt cron` are refused there, and the role and workflow checks no
   longer read the gateway's `.env`, where with cron off a chat agent could run them all. Nor do
   `mt role list`, `mt role create`, `mt workspace add` and `mt workspace list`, which load the
-  gateway's settings through `withGatewayFile`: there they see the agent's shell alone, so a
-  configuration naming a variable set only in the `.env`, a `passEnv` name say, fails as
-  `config.ts` says of any unset one ("… names X, which is not set in the environment"). Chosen so
+  gateway's settings through `withGatewayFile`: there they see the agent's shell alone. They pass
+  `unsetPassEnv: []`, so an unset `passEnv` name never throws; what changes is the `MT_*` settings
+  set only in the `.env`. With `MT_WORKSPACE` only there, they fail "a workspace is required"
+  (`teamSettingsFrom` in `config.ts`); with `MT_AGENT_COMMAND` or another `MT_AGENT_*` only
+  there, `mt role list` shows the role `default` as `config.yaml`'s `agent:` block makes it,
+  not as the gateway runs it. For example, a home whose `.env` sets `MT_WORKSPACE=/srv/work` and
+  whose `config.yaml` names no workspace: `mt workspace list` works at a terminal, and in a chat
+  agent's shell fails "a workspace is required". `MT_OWNER_OPEN_ID` is read only by `loadConfig`,
+  which none of the four calls, so an owner only in the `.env` changes nothing for them. Chosen so
   that no agent acts as the operator by accident, and none is handed the `.env`'s secrets by a
   check; an operator who wants a chat agent to restart or update the gateway runs those commands
   at a terminal. It is not a boundary: the agent runs as the gateway's user, and can unset the
@@ -1487,3 +1522,15 @@ agent's shell changes `mt role` and `mt workspace` there too, now named in the l
 (§14, §15); that the refusals name the variable found and an agent's shell, the workflow hint for a
 board run only (§6.4); that the attach refusal belongs in `registry.attach`, by `CRON_OWNER`
 (§3.2, §13); and the database lock's words, and a capital and the wiring's bullets.
+*Amended on 2026-11-17, a fourth time.* A fourth review found, and this revision takes: that a
+stopped fire could be ended, or archived, twice, by its turn's end and by its stop; so each fire
+has one entry with the outcome it is marked to end with and an `archiving` flag, as an open run
+has `cancelling` and `released`, a marked fire is skipped by a removal and the idle check and
+ignored by the turn-end and script paths, and only its archive ends it, once; a removal during
+the script aborts it with no `script_failed` (§4.2, §5.1, §5.4, §5.5); that the `.env` not read in
+an agent's shell changes the four `mt role` and `mt workspace` commands through the `MT_*`
+settings only there, `MT_WORKSPACE` and `MT_AGENT_*`, not through `passEnv`, which they never
+throw on (§14, §15); `CRON_OWNER` in a leaf module, the attach message's job id from the cron
+binding (§3.2); the rejected archives and a fire stopped in its script, in the tests (§14); an
+archive settling after the stop recording nothing, and `idle()` waiting for archives (§4.2); and
+the refusal's words, with `runShellRefusal` given the environment (§6.4, §13).
