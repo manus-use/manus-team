@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getRun, getTask, runsOf } from '../src/db/kanban-read.js';
+import { PackagesInUse } from '../src/render/native.js';
 import { loadRoleDir, type Role } from '../src/roles.js';
 import { completes, dispatchHarness, holds, reportComplete, role, until, type DispatchHarness } from './helpers/dispatch.js';
 
@@ -150,6 +151,35 @@ describe('Dispatcher: native rendering', () => {
     h.dispatcher.pass();
     await h.dispatcher.idle();
     expect(agent.starts[2]?.env?.['BYTESEC_LOCAL_APM_PATH']).toBe(b);
+    expect(packages()).toEqual([b.slice(-64)]);
+  });
+
+  it('keeps a package held in the shared set, as a running cron fire holds its own, and sweeps it once released', async () => {
+    const r = implementer();
+    const packagesInUse = new PackagesInUse();
+    const h = harness({ roles: [r], renderRoot: root, packages: packagesInUse });
+    const agent = h.driver('implementer');
+    h.create({ title: 'first', workspace: 'web' });
+    completes(h, agent);
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+    const a = agent.starts[0]?.env?.['BYTESEC_LOCAL_APM_PATH'] ?? '';
+    // Another holder, as the cron scheduler is while a fire runs this package.
+    packagesInUse.hold(a);
+
+    writeFileSync(r.roleMdPath ?? '', 'You change code, and you test it.\n');
+    h.create({ title: 'second', workspace: 'web' });
+    completes(h, agent);
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
+    const b = agent.starts[1]?.env?.['BYTESEC_LOCAL_APM_PATH'] ?? '';
+    expect(packages()).toEqual([a, b].map((d) => d.slice(-64)).sort());
+
+    packagesInUse.release(a);
+    h.create({ title: 'third', workspace: 'web' });
+    completes(h, agent);
+    h.dispatcher.pass();
+    await h.dispatcher.idle();
     expect(packages()).toEqual([b.slice(-64)]);
   });
 

@@ -8,6 +8,7 @@ import { KanbanService, type CreateRequest, type People, type ReportChecks } fro
 import { KanbanSink } from '../../src/kanban/sink.js';
 import type { RunRow, TaskRow } from '../../src/kanban/types.js';
 import type { Workdirs } from '../../src/kanban/worktree.js';
+import type { PackagesInUse } from '../../src/render/native.js';
 import type { Role } from '../../src/roles.js';
 import type { TurnTerminal } from '../../src/types.js';
 import { FakeChannel } from './channel.js';
@@ -78,6 +79,8 @@ export interface HarnessOptions {
   renderRoot?: string;
   /** The socket and the mt directory a run is given; absent, neither is. */
   worker?: WorkerAccess;
+  /** The rendered packages in use, shared with a cron scheduler; absent, the dispatcher's own. */
+  packages?: PackagesInUse;
   /** How the service runs gates and reads commits; absent, it does neither. */
   checks?: ReportChecks;
   /** Who the board may give work to; absent, no person. */
@@ -152,6 +155,7 @@ export function dispatchHarness(opts: HarnessOptions = {}): DispatchHarness {
     clock,
     note: (line) => notes.push(line),
     ...(opts.renderRoot === undefined ? {} : { renderRoot: opts.renderRoot }),
+    ...(opts.packages === undefined ? {} : { packages: opts.packages }),
     ...(opts.worker === undefined ? {} : { worker: opts.worker }),
     ...(opts.workdirs === undefined ? {} : { workdirs: opts.workdirs }),
   });
