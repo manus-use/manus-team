@@ -661,11 +661,13 @@ For a walk-through with messages to paste, from one task to chains, fan-out and 
 recipes for whole graphs of tasks: parallel branches, build, review and release, a planner role
 that writes the graph, a DAG applied from a terminal, rerouting around a failed task, and two
 boards.
+Workflows and cron jobs ready to copy are in [docs/examples.md](docs/examples.md).
 
 **Workflows.** A graph of tasks the team runs again and again is written once, as a file,
 `$MT_HOME/workflows/<name>.yaml`: a list of steps, each a task to make, with `parents` between
 them, `for_each` to make one task an item of a list, and params filled into their text.
 
+<!-- example: workflow vendor-eval -->
 ```yaml
 description: Shortlist vendors, evaluate each in parallel, then recommend one
 params:
@@ -933,6 +935,7 @@ install.sh              build, make the home, put mt on PATH, optionally install
 schema/                 migrations; the event log is the system of record
 docs/architecture.md    full design document
 docs/specs/             the Lark channel design
+docs/examples.md        workflows and cron jobs, ready to copy
 docs/testing/           crash matrix for the durability contract
 ```
 
