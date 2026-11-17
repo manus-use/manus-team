@@ -368,13 +368,16 @@ CREATE INDEX idx_cron_fires_pending ON cron_fires(delivery) WHERE delivery = 'pe
 
   **Only a session nothing else can reach is deleted.** A fire's session is deleted only when every
   binding it has, revoked or not, is on the `cron` channel; one with any other binding is left, and
-  only the fire's row is dropped. That case is closed off where it would start: **`registry.attach`
+  only the fire's row is dropped. `bindingsForSession` returns only live bindings, and a fire's own
+  is revoked by its archive, so the check reads every row of `channel_bindings` for the session,
+  revoked ones included, with a read of its own in `db/cron.ts`. That case is closed off where it would start: **`registry.attach`
   refuses a session whose `ownerPrincipal` is `CRON_OWNER`'s**, the principal `cron`, defined as
   `KANBAN_OWNER` is in the dispatcher (`src/kanban/dispatcher.ts`) but in a leaf module of its own,
   `src/cron/owner.ts`, which imports nothing, so the registry can import it without a cycle through
   the scheduler. Its message, "session s_… is a cron fire's; mt cron show c_… has what it did",
-  takes the `c_…` from the session's binding on the `cron` channel, whose conversation is the
-  job's id (§5.2). In `attach` itself, so `/attach` and any
+  takes the `c_…` from `cron_fires`, by the session's id (`session_id`, recorded by
+  `attachFireSession`): a fire's binding is revoked once it is archived, and `bindingsForSession`
+  would not find it; and a session with no fire row left says only that it is a cron fire's. In `attach` itself, so `/attach` and any
   later caller get it: today `attach` (`core/registry.ts`) accepts any session not terminated, an
   archived fire's included, and would bind a fire's session into a chat, whose later
   turns would then be deleted with the fire. The binding check stays as the backstop for a session
@@ -453,20 +456,40 @@ In order, each step's failure noted and the rest going on:
    `interrupted` and stopped: a script still running is aborted through its signal, killing its
    group (§5.1), with no `script_failed` recorded or posted, and an agent's turn is cancelled
    (§5.4's cancel); the fire ends `interrupted`, "the job was removed", with `delivery` `none`,
-   **once the archive of its session has settled** (below), or at once for a fire stopped during
-   its script, which has no session yet. Those with none running are deleted with their fires and
+   **once the archive of its session has settled** (below), or at once for a fire with no session
+   yet: the start path re-checks the mark after each `await` (the script's end, the render, the
+   role.md read) and just before `registry.create`, so a fire marked meanwhile never makes a
+   session. A fire already marked `timed_out` and not yet archived when its job is removed keeps
+   its mark, and has its `delivery` set to `none`: its job is gone, and its line has no one to
+   tell. Those with none running are deleted with their fires and
    the fires' sessions (`purgeRemoved`, §3.2), but a job with a fire still in this process's
    in-flight set (below) is skipped by `purgeRemoved`'s caller until it leaves the set: a fire
    whose actor is still closing, or whose send is still going, is not deleted from under them.
 
    **One entry, one ending.** Each running fire has one entry in memory, as an open run has in the
-   dispatcher (its `cancelling` and `released`): the outcome it is marked to end with, `timed_out`
-   or `interrupted`, or none; and an `archiving` flag. A removal and the idle check skip a fire
-   already marked; the turn-end path and the script path do nothing for a marked fire; and only
-   the stopped fire's archive ends it, once, with the outcome it was marked with. So a removal
-   whose cancel makes the turn end, or whose release closes the actor and ends the turn, is ended
-   once, `interrupted`, after exactly one archive, and a fire is never ended by both a turn's end
-   and a stop.
+   dispatcher (its `cancelling` and `released`): `mark`, the outcome it is marked to end with,
+   `timed_out` or `interrupted`, or none; and `archiving`. Its changes, completely:
+
+   - (a) **Every path that starts an archive sets `archiving` first, and does nothing if it is
+     set already**: the turn-end path for an unmarked fire, a removal, an idle release, and (c)
+     below. So a fire's session is archived exactly once.
+   - (b) **A removal** of a fire neither marked nor archiving sets `mark` to `interrupted`,
+     cancels the turn (or aborts the script), and starts the archive at once, right after the
+     cancel, so the actor's close does not wait on a turn that may ignore the cancel.
+   - (c) **When the turn of a fire that is marked but not archiving ends**, its turn-end path
+     records nothing of the turn and starts the archive, which ends the fire with the marked
+     outcome. This is how an idle cancel that works ends its fire: the turn ends from the cancel,
+     and the fire ends `timed_out`, after one archive.
+   - (d) **A removal, and the idle check's marking, skip a fire that is marked or archiving.** The
+     idle release (§5.4) still runs on a fire marked `timed_out` and not yet archiving, a tick
+     after its cancel; it starts the archive by (a).
+   - **The archive's settling** ends the fire, once, with `mark` if one is set, else with the
+     outcome the turn-end path read from the turn (§5.5). A script path that ends for a marked fire
+     does nothing but (c)'s start of the archive, or for a fire with no session, the ending itself.
+
+   So a removal whose cancel makes the turn end, or whose release closes the actor and ends the
+   turn, is ended once, `interrupted`, after exactly one archive, and a fire is never ended by both
+   a turn's end and a stop.
 
    **A stopped fire's archive** (a removal's, or an idle release's, §5.4) runs in the background,
    never awaited by the tick: `registry.archive` of the fire's session, which closes its actor
@@ -694,15 +717,16 @@ design asks; a hung one is.
 event.
 
 **The cancel** is the board's (kanban §8.5): the fire is first marked to end `timed_out`, in its
-entry (§4.2), unless it is marked already, so the turn's end is not taken for a failure of its
-own; then `actor.cancel()`. A turn that
-ignores the cancel for one more tick has its session released, which ends its process, as a board
-run that ignored its cancel is (kanban §8.5), and **the fire then ends `timed_out` itself**, by the
-tick that released it, once the archive of its session has settled, in the background, resolved
-or rejected (§4.2), and without waiting for the turn's submit promise: a release resolves that
+entry (§4.2), unless it is marked or archiving already, so the turn's end is not taken for a
+failure of its own; then `actor.cancel()`. **A turn the cancel ends** finds the fire marked and
+not archiving, and starts the archive (§4.2 (c)), which ends the fire `timed_out`. **A turn that
+ignores the cancel** for one more tick has its session released, which ends its process, as a
+board run that ignored its cancel is (kanban §8.5): the release starts the archive (§4.2 (a)), and
+**the fire then ends `timed_out` itself** once the archive has settled, in the background,
+resolved or rejected, without waiting for the turn's submit promise: a release resolves that
 promise only if the actor's close ends the turn, and a fire waiting on it could hold its
-`max_running` slot for ever. When the promise settles, before or after, it finds the fire marked
-and does nothing: a turn the cancel did end is not recorded either, and the archive ends the fire. The partial answer is not posted: the chat is told in one line (§5.6), which is sent
+`max_running` slot for ever. When the promise settles after the archive has started, it finds the
+fire archiving and does nothing. The partial answer is not posted: the chat is told in one line (§5.6), which is sent
 before the fire leaves the in-flight set (§4.2), and the fire's session has it.
 
 **A gateway stop during the turn.** `stop()` marks every running fire **stopping**, in memory,
@@ -1316,13 +1340,20 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   but none of a fire in flight; stop during a script killing it, and stop during a turn marking it
   stopping, recording nothing, and leaving the fire for the next boot, which ends it `interrupted`
   with no failure counted; a removal during a script aborting it, with no `script_failed` recorded
-  or posted, its fire ended at once as it has no session; a removal during a turn whose cancel or
+  or posted, its fire ended at once as it has no session, and a removal between the script and
+  `registry.create` making no session; an idle cancel that ends the turn still ending the fire
+  `timed_out`, after exactly one archive; an idle cancel the turn ignores, released a tick later,
+  one archive too; a fire marked `timed_out` then removed, ending `timed_out` with `delivery`
+  `none`; a removal during a turn whose cancel or
   close ends the turn, ended once, `interrupted`, after exactly one archive, its fire ended only
   after that archive settled, and its job not purged while the fire is in flight; an idle check
   and a removal skipping a fire already marked; a rejected archive, for a removal and for an
   idle release, the fire still ending with its marked outcome, the release's line still sent,
   the fire leaving the in-flight set, and its binding swept by the next boot; an archive settling
-  after `stop()` recording nothing, and `idle()` waiting for it; a second gateway refused by
+  after `stop()` recording nothing, leaving the fire open for the boot's `interrupted`, so a fire
+  marked `timed_out` before the stop is ended `interrupted` by design, and `idle()` waiting for
+  it; a fire's session deleted only when every binding it has, revoked ones read too, is on the
+  `cron` channel; the attach refusal naming the job from `cron_fires`; a second gateway refused by
   `<db>.lock` from another home; `gateway.tz` written at start.
 - **Unit, a fire**: the script's environment (the role's values, no `MT_CRON_TOKEN`, no
   `MT_KANBAN_*`, not the gateway's), its directory, its timeout killing its group, its output
@@ -1360,8 +1391,11 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   board run's shell, and `workflowCheck`'s note saying an agent's shell; `mt role list`,
   `mt role create`, `mt workspace add` and `mt workspace list` in a chat turn's shell with cron on
   not reading the gateway's `.env`: with `MT_WORKSPACE` set only there, failing "a workspace is
-  required", and with `MT_AGENT_COMMAND` set only there, `mt role list` showing the role
-  `default` from `config.yaml`'s `agent:` block instead; an unset `passEnv` name not throwing, as
+  required"; with `MT_AGENT_COMMAND` only there and no `agent:` block or `roles/default/`,
+  failing "there is no role default", and with a block, `mt role list` showing the block's
+  `default`; with `MT_AGENT_UNSUPERVISED` only there, a check failing at a terminal passing in the
+  agent's shell; with `MT_MAX_LIVE_SESSIONS` only there, the per-role bound checked against the
+  file's limit; an unset `passEnv` name not throwing, as
   they pass `unsetPassEnv: []`;
   `registry.attach` of a session owned by `CRON_OWNER` refused, through `/attach` and directly; the agent's JSON strict, `script`
   refused with its reason, a `role` field refused, the job running as the session's or the run's
@@ -1403,9 +1437,13 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   gateway's settings through `withGatewayFile`: there they see the agent's shell alone. They pass
   `unsetPassEnv: []`, so an unset `passEnv` name never throws; what changes is the `MT_*` settings
   set only in the `.env`. With `MT_WORKSPACE` only there, they fail "a workspace is required"
-  (`teamSettingsFrom` in `config.ts`); with `MT_AGENT_COMMAND` or another `MT_AGENT_*` only
-  there, `mt role list` shows the role `default` as `config.yaml`'s `agent:` block makes it,
-  not as the gateway runs it. For example, a home whose `.env` sets `MT_WORKSPACE=/srv/work` and
+  (`teamSettingsFrom` in `config.ts`). With `MT_AGENT_COMMAND` only there, and no `agent:` block
+  and no `roles/default/`, they fail "there is no role default" (`loadTeam`, `src/team.ts`); with
+  an `agent:` block, `mt role list` shows the role `default` as the block makes it, not as the
+  gateway runs it; and with `MT_AGENT_ARGS`, `MT_AGENT_DRIVER` or `MT_AGENT_UNSUPERVISED` only
+  there, a check that fails at a terminal, as the gateway would find it, can pass in an agent's
+  shell. With `MT_MAX_LIVE_SESSIONS` only there, the `max_running_per_role` bound is checked
+  against the file's `maxLiveSessions`, or 8, rather than the gateway's. For example, a home whose `.env` sets `MT_WORKSPACE=/srv/work` and
   whose `config.yaml` names no workspace: `mt workspace list` works at a terminal, and in a chat
   agent's shell fails "a workspace is required". `MT_OWNER_OPEN_ID` is read only by `loadConfig`,
   which none of the four calls, so an owner only in the `.env` changes nothing for them. Chosen so
@@ -1534,3 +1572,15 @@ throw on (§14, §15); `CRON_OWNER` in a leaf module, the attach message's job i
 binding (§3.2); the rejected archives and a fire stopped in its script, in the tests (§14); an
 archive settling after the stop recording nothing, and `idle()` waiting for archives (§4.2); and
 the refusal's words, with `runShellRefusal` given the environment (§6.4, §13).
+*Amended on 2026-11-17, a fifth time.* A fifth review found, and this revision takes: that a
+timed-out fire whose cancel worked was never ended, its turn's end doing nothing for a marked fire
+and no release following; so the entry's changes are stated completely, every path that starts an
+archive setting `archiving` first, a removal archiving at once after its cancel, the turn's end of
+a marked fire not yet archiving starting the archive that ends it, and marking skipping a fire
+marked or archiving, the idle release still running on a fire marked `timed_out` (§4.2, §5.4);
+that the deletion check and the attach message read revoked bindings, so the check reads every
+binding row and the message the job from `cron_fires` (§3.2); a fire with no session yet, the start
+path re-checking its mark before `registry.create` (§4.2); a fire marked `timed_out` and then
+removed, with no delivery (§4.2); the two cases of `mt role list` and `MT_MAX_LIVE_SESSIONS` in an
+agent's shell (§14, §15); and a test that an archive settled after the stop leaves the fire for the
+boot's `interrupted` (§14).
