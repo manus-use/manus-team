@@ -355,7 +355,7 @@ describe('the task commands', () => {
     const taskId = created((await mt(['task', 'new', 'Work', '--assignee', 'default'])).out);
     const later = (await mt(['task', 'new', 'Later'])).out;
     const child = created(later);
-    expect(later).toBe(`created ${child}: Later, for nobody yet (mt kanban task assign ${child} <role> gives it to someone), on board default`);
+    expect(later).toBe(`created ${child}: Later, for nobody yet (mt kanban task assign ${child} <role|lark:<union_id>> gives it to someone), on board default`);
     nudges = 0;
     const run = claimed(gateway, taskId);
 

@@ -529,7 +529,7 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
           json: { task_id: task.taskId, board: task.board, existing: true, nudged: false, follows },
         };
       }
-      const whom = task.assignee === null ? `nobody yet (mt kanban task assign ${task.taskId} <role> gives it to someone)` : who(task.assignee);
+      const whom = task.assignee === null ? `nobody yet (mt kanban task assign ${task.taskId} <role|lark:<union_id>> gives it to someone)` : who(task.assignee);
       const where = task.workspace === null ? '' : `, in ${line(task.workspace, 80)}`;
       const follows = followsOf(follow);
       return {
