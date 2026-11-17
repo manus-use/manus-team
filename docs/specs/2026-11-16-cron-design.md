@@ -537,13 +537,15 @@ missed. For a clock time that is `nextRun(now)`; for a fixed period it is the sa
 
 ### 4.3 Late, and missed
 
-A due job is late by `now − next_run_at`. It is fired if that is at most **half its period**, and
-otherwise skipped, `skipped_missed`, with one log line naming the job, the slot and how many slots
-were skipped, and nothing posted. Its period is:
+A due job is late by `now − next_run_at`. A recurring job is fired if that is at most **half its
+period**, and a one-off if it is at most **one hour**; otherwise the slot is skipped,
+`skipped_missed`, with one log line naming the job, the slot and how many slots were skipped, and
+nothing posted. A recurring job's period is:
 
 - for a fixed period, the period;
-- for a clock time, the time from the missed slot to the slot after it, in its zone;
-- for a one-off, **one hour**.
+- for a clock time, the time from the missed slot to the slot after it, in its zone.
+
+A one-off is fired up to one hour late.
 
 The same rule at every tick, whether the gateway was down, the machine asleep, or the job held at
 `cron.max_running`: one rule is one thing to test, and a job fired three hours late is wrong
@@ -551,7 +553,7 @@ whatever made it late. Half the period is the design's; it keeps a missed daily 
 still mostly fresh, and a five-minute probe from firing on stale grounds. Hermes clamps it to
 between two minutes and two hours; not taken, as the design gives the rule unclamped.
 
-A one-off's period was not defined by the design: one hour is chosen, because a one-off is
+A one-off's grace was not defined by the design: one hour is chosen, because a one-off is
 usually a reminder a person asked for, late is worth more than lost within an hour, and a
 restart for an update takes less. Hermes's two minutes were considered and not taken: a deploy's
 restart could miss a reminder set for its minute.
@@ -1392,7 +1394,8 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   `mt role create`, `mt workspace add` and `mt workspace list` in a chat turn's shell with cron on
   not reading the gateway's `.env`: with `MT_WORKSPACE` set only there, failing "a workspace is
   required"; with `MT_AGENT_COMMAND` only there and no `agent:` block or `roles/default/`,
-  failing "there is no role default", and with a block, `mt role list` showing the block's
+  `mt role list` saying "no roles: create one with mt role create <name>" and `mt role create`
+  failing "there is no role default to copy from", and with a block, `mt role list` showing the block's
   `default`; with `MT_AGENT_UNSUPERVISED` only there, a check failing at a terminal passing in the
   agent's shell; with `MT_MAX_LIVE_SESSIONS` only there, the per-role bound checked against the
   file's limit; an unset `passEnv` name not throwing, as
@@ -1438,7 +1441,9 @@ skipped as missed and per stamp dropped (§4.3, §4.4), each naming the job.
   `unsetPassEnv: []`, so an unset `passEnv` name never throws; what changes is the `MT_*` settings
   set only in the `.env`. With `MT_WORKSPACE` only there, they fail "a workspace is required"
   (`teamSettingsFrom` in `config.ts`). With `MT_AGENT_COMMAND` only there, and no `agent:` block
-  and no `roles/default/`, they fail "there is no role default" (`loadTeam`, `src/team.ts`); with
+  and no `roles/default/`, `mt role list`, which reads role names only, says "no roles: create one
+  with mt role create <name>", `mt role create` fails "there is no role default to copy from", and
+  the two workspace commands, which load no roles, are unchanged; with
   an `agent:` block, `mt role list` shows the role `default` as the block makes it, not as the
   gateway runs it; and with `MT_AGENT_ARGS`, `MT_AGENT_DRIVER` or `MT_AGENT_UNSUPERVISED` only
   there, a check that fails at a terminal, as the gateway would find it, can pass in an agent's
@@ -1584,3 +1589,9 @@ path re-checking its mark before `registry.create` (§4.2); a fire marked `timed
 removed, with no delivery (§4.2); the two cases of `mt role list` and `MT_MAX_LIVE_SESSIONS` in an
 agent's shell (§14, §15); and a test that an archive settled after the stop leaves the fire for the
 boot's `interrupted` (§14).
+*Amended on 2026-11-17, with plan S.* The plan's review found, and this revision takes: that a
+one-off's grace is one hour, not half of one, so §4.3 gives a one-off its own limit rather than a
+period; and, as an erratum, that with `MT_AGENT_COMMAND` only in the `.env` `mt role list` says
+"no roles: create one with mt role create <name>" and `mt role create` fails "there is no role
+default to copy from", as the code does, rather than both failing "there is no role default"
+(§14, §15).

@@ -42,7 +42,7 @@
 Each has its reason. Where the code and the spec disagree, the code is the fact, and the decision says which reading keeps the spec's intent; those are listed again under "Where the code forced a reading" below.
 
 1. **The refusal's words change before the predicate widens** (Task 1, then Task 2): with the old words, a chat turn's shell, refused by the wider `inAgentRun`, would have been told it had `MT_KANBAN_RUN` or `MT_KANBAN_TOKEN` set.
-2. **A one-off's half hour.** §4.3 gives a one-off a period of one hour, and a late slot is fired within half its period, so a one-off fires up to 30 minutes late and is skipped after; §12's "a stop of an hour" fires an `in 30m` job added just before it, late by 30 minutes. `ONE_OFF_PERIOD_MS` is the hour.
+2. **A one-off's grace is an hour.** §4.3 fires a recurring slot up to half its period late, and a one-off up to one hour late (`ONE_OFF_GRACE_MS`), through `lateLimit`; §12's "a stop of an hour" fires an `in 30m` job added just before it, and a stop of two hours skips it.
 3. **The first slot after now is strictly after it.** §2.1's `s + ceil((now − s) / p) · p` is `now` itself when `now` is on the grid; `runAfter` takes `s + (floor((now − s) / p) + 1) · p`, the first slot of the grid after now, which is the same everywhere else.
 4. **A schedule is stored as written, trimmed, and read again at each use.** Parsing is cheap, and a stored parse would be a second copy of the grammar to migrate.
 5. **The compare-and-set compares the schedule and the zone too.** `startFire`, `skipFire` and `scheduleAfter` refuse when the job's `next_run_at`, `schedule` or `tz` differ from what the scheduler read, so an edit that kept the same next run cannot be advanced on the old schedule.
@@ -71,6 +71,7 @@ From spec §15, kept as it says: no script-only jobs, no chaining, no per-job mo
 - **`mt role list` loads no team, and the workspace commands no roles.** §15 says that with `MT_AGENT_COMMAND` only in the `.env`, and no `agent:` block or `roles/default/`, the four commands fail "there is no role default". In the code, `mt role list` lists names only and says `no roles: create one with mt role create <name>`, `mt role create` fails `there is no role default to copy from`, and `mt workspace add` and `list` are unchanged. Task 2's tests state what the code does; the intent, that no agent's shell reads the `.env`, holds for all four.
 - **`BoundedMap` says nothing of what it drops.** §7.1 bounds the tokens with it, and has a dropped token leave the masker; `CronTokens` keeps its own insertion-ordered map, at most 1,000, removing each dropped token from the masker.
 - **§3.3's list of writes has none for §4.4 step 3.** `dropStaleStamps` drops the stamps older than an hour at a start. `scheduleAfter`, which advances a job without a fire, has no caller in the tick as §4.2 lists it; it is kept as the writer's, tested, and shares its compare and its advance with `startFire` and `skipFire`.
+- **A pending fire, and a live binding, are never pruned.** §3.2 prunes a job's fires past its newest 50 with their sessions; a fire whose delivery is still `pending` is spared, as its send rebuilds its message from its session's log, and a session that still has a live binding keeps its rows, only the fire's row being dropped, as something can still reach it.
 - **`endFire` records `skipped_unavailable`** for a fire that started and then found its role's role.md unreadable: §5.2 reads role.md after the script, once the fire has started, and `skipFire` records only skips that never start. The failure is counted by `endFire`, which §3.3's "exactly two places" allows.
 - **`lockHolder` named only the gateway lock.** It takes the lock's name, `the gateway lock` by default, so the database lock is refused in its own words; `lockGateway` and `lockDatabase` share `takeLock`.
 - **`WorkerApi` held the nudge and its `stop()`.** The throttle moves to `SocketHandler` (§7.4), which also has the `stop()` the gateway calls; `NUDGE` and `NUDGE_INTERVAL_MS` move to `socket.ts`, re-exported from `worker.ts`, and `tests/mt-operator.e2e.ts`, which nudged a bare `WorkerApi`, is given the handler.
@@ -111,7 +112,7 @@ From spec §15, kept as it says: no script-only jobs, no chaining, no per-job mo
 | `tests/mt-agent-shell.test.ts`, `tests/cron-schedule.test.ts`, `tests/cron-next-run.test.ts`, `tests/cron-schema.test.ts`, `tests/cron-writer.test.ts`, `tests/cron-service.test.ts`, `tests/cron-prompt.test.ts`, `tests/cron-scheduler.test.ts`, `tests/cron-fire.test.ts`, `tests/cron-tokens.test.ts`, `tests/cron-worker.test.ts`, `tests/cron-chat.test.ts`, `tests/cron-config.test.ts`, `tests/mt-cron.test.ts`, `tests/cron-attach.test.ts`, `tests/cron-startup.test.ts`, `tests/cron.e2e.ts` (create) | |
 | `tests/kanban-workflow-worker.test.ts`, `tests/mt-kanban-operator.test.ts`, `tests/mt-gate.test.ts`, `tests/mt-kanban-operator-tasks.test.ts`, `tests/mt-update-check.test.ts`, `tests/kanban-workflow-check.test.ts`, `tests/kanban-sink.test.ts`, `tests/kanban-prompt.test.ts`, `tests/kanban-dispatch-native.test.ts`, `tests/kanban-session-log.test.ts`, `tests/kanban-gates.test.ts`, `tests/mt-update-apply.test.ts`, `tests/gateway-startup.test.ts`, `tests/kanban-boards-schema.test.ts`, `tests/kanban-schema.test.ts`, `tests/kanban-thread-roots.test.ts`, `tests/kanban-workflow-schema.test.ts`, `tests/kanban-worktree-schema.test.ts`, `tests/kanban-socket.test.ts`, `tests/kanban-worker-nudge.test.ts`, `tests/mt-operator.e2e.ts`, `tests/gateway-env.test.ts`, `tests/config.test.ts`, `tests/mt-service.test.ts`, `tests/mt-update-show.test.ts` (modify) | the refusal's words, the schema's version, the nudge at the handler, the new names |
 
-Running counts, unit then end to end: Task 1 2198 / 168, Task 2 2206 / 168, Task 3 2207 / 168, Task 4 2208 / 168, Task 5 2209 / 168, Task 6 2211 / 168, Task 7 2212 / 168, Task 8 2298 / 168, Task 9 2313 / 168, Task 10 2319 / 168, Task 11 2339 / 168, Task 12 2342 / 168, Task 13 2349 / 168, Task 14 2356 / 168, Task 15 2370 / 168, Task 16 2387 / 168, Task 17 2394 / 168, Task 18 2404 / 168, Task 19 2412 / 168, Task 20 2423 / 168, Task 21 2429 / 168, Task 22 2431 / 168, Task 23 2435 / 168, Task 24 2437 / 168, Task 25 2437 / 171, Task 26 2437 / 171.
+Running counts, unit then end to end: Task 1 2198 / 168, Task 2 2206 / 168, Task 3 2207 / 168, Task 4 2208 / 168, Task 5 2209 / 168, Task 6 2211 / 168, Task 7 2212 / 168, Task 8 2298 / 168, Task 9 2314 / 168, Task 10 2320 / 168, Task 11 2342 / 168, Task 12 2345 / 168, Task 13 2352 / 168, Task 14 2359 / 168, Task 15 2374 / 168, Task 16 2391 / 168, Task 17 2398 / 168, Task 18 2408 / 168, Task 19 2416 / 168, Task 20 2427 / 168, Task 21 2433 / 168, Task 22 2435 / 168, Task 23 2439 / 168, Task 24 2441 / 168, Task 25 2441 / 171, Task 26 2441 / 171.
 
 How §14's tests map to the tasks: the grammar (Task 8); the next run and the periods (Task 9); the schema, the writer, its checks, limits, retention, failures, purge and the deletion of sessions (Tasks 10, 11); `<db>.lock` (Task 12, and from another home through the gateway in Task 23); the scheduler: due, late, missed, one-offs, `max_running`, a running fire's slot, stamps, removal, boot, pending deliveries, a stop during a turn, rejected archives (Task 15); a fire: the script, the role's files, native renders and the shared set, the idle limit, the release, a mark then a removal, an archive after a stop, the answer (Task 16); the tokens, the tier per turn, the key given to `envFor` (Task 17); the agents' JSON, the envelopes, `cron_off`, `kanban_off` and the nudge (Task 18); `/cron` (Task 19); the configuration (Task 20); `mt cron` and the agent's shells (Tasks 2, 21); the attach refusal (Task 22); the startup lines and `gateway.tz` (Task 23); `mt service status` and `mt update` (Task 24); end to end (Task 25).
 
@@ -1923,8 +1924,8 @@ export const MIN_PERIOD_MS = 5 * 60_000;
 export const MAX_AHEAD_MS = 365 * 24 * 3_600_000;
 /** How far the next run of a cron expression is looked for: 29 February can be eight years from the last one, across 2100. */
 export const SEARCH_YEARS = 8;
-/** A one-off's period, for the lateness rule (§4.3). */
-export const ONE_OFF_PERIOD_MS = 3_600_000;
+/** How late a one-off is still fired (§4.3): a reminder late is worth more than one lost, within an hour. */
+export const ONE_OFF_GRACE_MS = 3_600_000;
 
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
@@ -2345,7 +2346,7 @@ git commit -m "Add the cron schedule's grammar, a pure module: five-field cron e
 - Create: `tests/cron-next-run.test.ts`
 - Modify: `src/cron/schedule.ts`
 
-Spec §2.1, §2.2, §4.2, §4.3, §14. `toInstant` maps a wall time to its instant (once; the earlier of two; the change's in a gap); `nextRun` walks the zone's calendar a day at a time, then a matching day's hours and minutes, counting what it walked when asked (`SearchStats`); `firstRun` is the next run of a job just added, resumed, or given a new schedule or zone, refusing a schedule that never comes, a one-off in the past or more than 365 days ahead, and a wall-clock one-off the clocks skip; `runAfter` is the next run after a slot, on the grid for a fixed period; `periodAt` the period of §4.3; `missedSlots` how many slots a skip covers. Tested against fixed instants in New York across both changes of 2026, London, Lord Howe, Kathmandu and UTC.
+Spec §2.1, §2.2, §4.2, §4.3, §14. `toInstant` maps a wall time to its instant (once; the earlier of two; the change's in a gap); `nextRun` walks the zone's calendar a day at a time, then a matching day's hours and minutes, counting what it walked when asked (`SearchStats`); `firstRun` is the next run of a job just added, resumed, or given a new schedule or zone, refusing a schedule that never comes, a one-off in the past or more than 365 days ahead, and a wall-clock one-off the clocks skip; `runAfter` is the next run after a slot, on the grid for a fixed period; `periodAt` the period of §4.3, and `lateLimit` how late a slot may be, half its period or a one-off's hour (`ONE_OFF_GRACE_MS`); `missedSlots` how many slots a skip covers. Tested against fixed instants in New York across both changes of 2026, London, Lord Howe, Kathmandu and UTC.
 
 - [ ] **Step 9.1: Write the tests.**
 
@@ -2356,6 +2357,7 @@ import { describe, expect, it } from 'vitest';
 import {
   MISSED_COUNT_MAX,
   firstRun,
+  lateLimit,
   missedSlots,
   nextRun,
   parseSchedule,
@@ -2511,13 +2513,20 @@ describe('runAfter: a fixed period keeps its grid', () => {
 });
 
 describe('periodAt and missedSlots', () => {
-  it('is the period, the time to the next slot in the zone, or an hour for a one-off', () => {
+  it('is the period, or the time to the next slot in the zone; a one-off has its grace', () => {
     expect(periodAt(schedule('every 30m'), NY, 0)).toBe(30 * MIN);
     expect(periodAt(schedule('0 9 * * *'), NY, utc(2026, 11, 17, 14))).toBe(DAY);
     // The day the clocks go forward is 23 hours long.
     expect(periodAt(schedule('0 9 * * *'), NY, utc(2026, 3, 7, 14))).toBe(23 * HOUR);
     expect(periodAt(schedule('0 9 * * 1-5'), 'UTC', utc(2026, 11, 20, 9))).toBe(3 * DAY);
     expect(periodAt(schedule('in 30m'), NY, 0)).toBe(HOUR);
+  });
+
+  it('lets a slot be half its period late, and a one-off an hour', () => {
+    expect(lateLimit(schedule('every 30m'), NY, 0)).toBe(15 * MIN);
+    expect(lateLimit(schedule('0 9 * * *'), NY, utc(2026, 11, 17, 14))).toBe(12 * HOUR);
+    expect(lateLimit(schedule('in 30m'), NY, 0)).toBe(HOUR);
+    expect(lateLimit(schedule('2026-12-01 09:00'), NY, 0)).toBe(HOUR);
   });
 
   it('counts the slots a job missed, from its first', () => {
@@ -2530,7 +2539,7 @@ describe('periodAt and missedSlots', () => {
 });
 ```
 
-- [ ] **Step 9.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/cron-next-run.test.ts`. Expected: `Tests  14 failed | 1 passed (15)`; the first failure: `TypeError: (0 , nextRun) is not a function`
+- [ ] **Step 9.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/cron-next-run.test.ts`. Expected: `Tests  15 failed | 1 passed (16)`; the first failure: `TypeError: (0 , nextRun) is not a function`
 
 - [ ] **Step 9.3: Implement.**
 
@@ -2676,14 +2685,22 @@ export function runAfter(s: Schedule, tz: string, slot: number, now: number): nu
 }
 
 /**
- * The period that decides whether a slot is late (§4.3): a fixed period's own;
- * for a clock time, the time from the slot to the one after it, in its zone;
- * for a one-off, an hour.
+ * A recurring schedule's period at a slot (§4.3): a fixed period's own; for a
+ * clock time, the time from the slot to the one after it, in its zone. A
+ * one-off has none, and is given its grace.
  */
 export function periodAt(s: Schedule, tz: string, slot: number): number {
   if (s.kind === 'every') return s.periodMs;
   if (s.kind === 'cron') return (nextRun(s.fields, tz, slot) ?? slot + SEARCH_YEARS * 366 * DAY) - slot;
-  return ONE_OFF_PERIOD_MS;
+  return ONE_OFF_GRACE_MS;
+}
+
+/**
+ * How late a slot may be and still be fired (§4.3): half its period for a
+ * recurring schedule, and ONE_OFF_GRACE_MS, an hour, for a one-off.
+ */
+export function lateLimit(s: Schedule, tz: string, slot: number): number {
+  return isOneOff(s) ? ONE_OFF_GRACE_MS : periodAt(s, tz, slot) / 2;
 }
 
 /** The most slots `missedSlots` counts before it says so. */
@@ -2700,7 +2717,7 @@ export function missedSlots(s: Schedule, tz: string, slot: number, now: number):
 }
 ```
 
-- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2313 passed (2313)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 9.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2314 passed (2314)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 9.5: Commit.**
 
@@ -3024,7 +3041,7 @@ CREATE UNIQUE INDEX idx_cron_fires_running ON cron_fires(job_id)
 CREATE INDEX idx_cron_fires_pending ON cron_fires(delivery) WHERE delivery = 'pending';
 ```
 
-- [ ] **Step 10.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2319 passed (2319)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 10.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2320 passed (2320)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 10.5: Commit.**
 
@@ -3042,7 +3059,7 @@ git commit -m "Add migration 010, cron_jobs and cron_fires, with a job's next ru
 - Create: `src/db/cron.ts`, `tests/cron-writer.test.ts`, `tests/helpers/cron.ts`
 - Modify: `src/core/ids.ts`, `src/db/WRITERS.md`, `src/db/events.ts`
 
-Spec §3.2, §3.3, §5.6, §5.7, §8, §14. `src/db/cron.ts` is the only writer of both tables and their reads: `addJob`, `editJob`, `pauseJob`, `resumeJob`, `removeJob`, `requestRun`, `startFire`, `skipFire`, `attachFireSession`, `endFire`, `markDelivered`, `interruptOpenFires`, `purgeRemoved`, `scheduleAfter`, and `dropStaleStamps` for §4.4 step 3. Every write is one `txImmediate`; the limits are counted inside `addJob`, `resumeJob` and `editJob`; `startFire` and `skipFire` compare the job to what the scheduler read; the failures are counted in `endFire` and `skipFire` alone; a fire pruned past 50, or a purged job's, takes its session and that session's events, turns, bindings, approvals and snapshots, when every binding it ever had, revoked ones read too, is on the `cron` channel. `db/events.ts` gains `lastEventAt`, `core/ids.ts` `newCronJobId` and `cronUuid`. `src/db/WRITERS.md` gains the two tables' rows, and the session tables' rows are amended for a pruned fire's session.
+Spec §3.2, §3.3, §5.6, §5.7, §8, §14. `src/db/cron.ts` is the only writer of both tables and their reads: `addJob`, `editJob`, `pauseJob`, `resumeJob`, `removeJob`, `requestRun`, `startFire`, `skipFire`, `attachFireSession`, `endFire`, `markDelivered`, `interruptOpenFires`, `purgeRemoved`, `scheduleAfter`, and `dropStaleStamps` for §4.4 step 3. Every write is one `txImmediate`; the limits are counted inside `addJob`, `resumeJob` and `editJob`; `startFire` and `skipFire` compare the job to what the scheduler read; the failures are counted in `endFire` and `skipFire` alone; a fire pruned past 50, or a purged job's, takes its session and that session's events, turns, bindings, approvals and snapshots, when every binding it ever had, revoked ones read too, is on the `cron` channel and none is still live; a fire whose delivery is `pending` is never pruned. `db/events.ts` gains `lastEventAt`, `core/ids.ts` `newCronJobId` and `cronUuid`. `src/db/WRITERS.md` gains the two tables' rows, and the session tables' rows are amended for a pruned fire's session.
 
 - [ ] **Step 11.1: Write the tests.**
 
@@ -3326,6 +3343,44 @@ describe('endFire', () => {
   });
 });
 
+describe('the prune, sparing what can still be reached', () => {
+  it("keeps a fire whose delivery is pending past the newest 50, with its session", () => {
+    const job = newJob(h.db);
+    let first = 0;
+    let session = '';
+    for (let i = 0; i < CRON_LIMITS.history + 1; i += 1) {
+      const now = getJob(h.db, job.jobId) as JobRow;
+      const id = fire(now, now.nextRunAt ?? 0);
+      if (i === 0) {
+        first = id;
+        session = fireSession(job.jobId, id);
+      }
+      endFire(h.db, { fireId: id, outcome: i === 0 ? 'posted' : 'nothing', message: i === 0 }, now.nextRunAt ?? 0);
+    }
+    expect(getFire(h.db, first)?.delivery).toBe('pending');
+    expect(firesOf(h.db, job.jobId, 100)).toHaveLength(CRON_LIMITS.history + 1);
+    expect(count('sessions', 'id = ?', session)).toBe(1);
+    markDelivered(h.db, first, 'sent');
+    const now = getJob(h.db, job.jobId) as JobRow;
+    endFire(h.db, { fireId: fire(now, now.nextRunAt ?? 0), outcome: 'nothing', message: false }, NOW);
+    expect(getFire(h.db, first)).toBeUndefined();
+    expect(count('sessions', 'id = ?', session)).toBe(0);
+  });
+
+  it('keeps the session of a pruned or purged fire that is still bound, and drops only its row', () => {
+    const job = newJob(h.db);
+    const id = fire(job, job.nextRunAt ?? 0);
+    const session = fireSession(job.jobId, id);
+    // Bound again on the cron channel, not yet archived.
+    bindSession(h.db, { channel: 'cron', appId: 'cli_app', conversationId: job.jobId, threadId: String(id) }, session, NOW + 2);
+    endFire(h.db, { fireId: id, outcome: 'posted', message: false }, NOW);
+    removeJob(h.db, job.jobId, NOW);
+    expect(purgeRemoved(h.db)).toEqual([job.jobId]);
+    expect(getFire(h.db, id)).toBeUndefined();
+    expect(count('sessions', 'id = ?', session)).toBe(1);
+  });
+});
+
 describe('interruptOpenFires and the stamps', () => {
   it('ends every open fire interrupted, to be said only for a job with a delivery, not removed, with no failure counted', () => {
     const told = newJob(h.db);
@@ -3521,7 +3576,7 @@ with:
 | `kanban_workflow_tasks` | `db/kanban.ts` | Added by `applyDag`, one row a task it made, in its transaction; never added later, changed or removed: a member is exactly what the apply made (spec §21.7). `item` is masked on write. Read by the workflow commands and by `task show`'s one line, and by nothing in the kernel. |
 | `snapshots` | none yet | Nothing writes it. And `db/cron.ts`, which deletes a cron fire's session and its rows when the fire is pruned or its job purged (cron spec §3.2), and never writes them otherwise. |
 | `cron_jobs` | `db/cron.ts` | Added by `addJob` (migration 010). `next_run_at` is advanced in the transaction that records a fire or a skip (`startFire`, `skipFire`), or by `scheduleAfter`, compared to the value the scheduler read, so one slot fires at most once whatever reads it (cron spec §4.2); `state` moves only by the named writes, `pauseJob`, `resumeJob`, `removeJob`, a one-off's fire or skip, and a pause at three failures in `endFire` and `skipFire`; `failures` is written by those two alone; `run_requested_at` set by `requestRun`, cleared by a run's fire or skip, a removal and `dropStaleStamps`. The prompt and name are masked on write, the script never; `created_via`'s values masked. `removed` rows are deleted by `purgeRemoved` once no fire of theirs runs. Written by the gateway and by the terminal's `mt cron`, each through `CronService`; `addJob`, `resumeJob` and `editJob` count the limits of §8 inside their transactions. |
-| `cron_fires` | `db/cron.ts` | Inserted by `startFire` and `skipFire`; `session_id` written once, by `attachFireSession`; `ended_at` and `outcome` written once, by `endFire` or `interruptOpenFires`; `delivery` moved from `pending` by `markDelivered` only; a job's fires past its newest 50 deleted in `endFire` and `skipFire`, and every fire of a purged job by `purgeRemoved`, each with its session when every binding that session has had is on the `cron` channel. `error` and `result` masked on write and cut, to 2 and 8 KiB. |
+| `cron_fires` | `db/cron.ts` | Inserted by `startFire` and `skipFire`; `session_id` written once, by `attachFireSession`; `ended_at` and `outcome` written once, by `endFire` or `interruptOpenFires`; `delivery` moved from `pending` by `markDelivered` only; a job's fires past its newest 50 deleted in `endFire` and `skipFire`, but one whose delivery is `pending`, and every fire of a purged job by `purgeRemoved`, each with its session when every binding that session has had is on the `cron` channel and none of them is still live. `error` and `result` masked on write and cut, to 2 and 8 KiB. |
 ```
 
 In `src/db/WRITERS.md`, replace:
@@ -4134,11 +4189,14 @@ export function scheduleAfter(db: Db, e: Expected, now: number): CronResult<{ jo
   });
 }
 
-/** A job's fires past its newest 50, and their sessions (§3.2). */
+/**
+ * A job's fires past its newest 50, and their sessions (§3.2); never one whose
+ * message is still to be sent, which its send rebuilds from its session's log.
+ */
 function pruneIn(d: Db, jobId: string): void {
   const old = d
     .prepare<[string, string, number], FireRaw>(
-      `SELECT ${FIRE_COLS} FROM cron_fires WHERE job_id = ? AND ended_at IS NOT NULL
+      `SELECT ${FIRE_COLS} FROM cron_fires WHERE job_id = ? AND ended_at IS NOT NULL AND delivery != 'pending'
         AND fire_id NOT IN (SELECT fire_id FROM cron_fires WHERE job_id = ? ORDER BY fire_id DESC LIMIT ?)`,
     )
     .all(jobId, jobId, CRON_LIMITS.history)
@@ -4157,6 +4215,8 @@ function deleteFireIn(d: Db, fire: FireRow): void {
   if (sessionId === null) return;
   const channels = bindingChannelsEver(d, sessionId);
   if (channels.some((c) => c !== CRON_CHANNEL)) return;
+  // Still bound anywhere, its own archive not yet done: something can still reach it.
+  if (d.prepare('SELECT 1 FROM channel_bindings WHERE session_id = ? AND revoked_at IS NULL').get(sessionId) !== undefined) return;
   for (const table of ['events', 'turns', 'channel_bindings', 'approvals', 'snapshots']) {
     d.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(sessionId);
   }
@@ -4360,7 +4420,7 @@ export function lastEventAt(db: Db, sessionId: string): number | undefined {
 export function lastSeq(db: Db, sessionId: string): number {
 ```
 
-- [ ] **Step 11.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2339 passed (2339)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 11.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2342 passed (2342)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 11.5: Commit.**
 
@@ -4607,7 +4667,7 @@ with:
   throw new Error(`${path}: ${what} keeps being taken; ${racing}`);
 ```
 
-- [ ] **Step 12.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2342 passed (2342)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 12.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2345 passed (2345)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 12.5: Commit.**
 
@@ -5096,7 +5156,7 @@ export class CronService {
 }
 ```
 
-- [ ] **Step 13.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2349 passed (2349)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 13.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2352 passed (2352)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 13.5: Commit.**
 
@@ -5447,7 +5507,7 @@ export function isNothing(answer: string): boolean {
 }
 ```
 
-- [ ] **Step 14.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2356 passed (2356)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 14.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2359 passed (2359)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 14.5: Commit.**
 
@@ -5465,7 +5525,7 @@ git commit -m "Add a cron fire's words, a pure module: its prompt's parts in ord
 - Create: `src/cron/scheduler.ts`, `tests/cron-scheduler.test.ts`
 - Modify: `src/db/cron.ts`, `tests/helpers/cron.ts`
 
-Spec §4, §5.2, §5.5, §5.6, §12, §14. `src/cron/scheduler.ts`, `CronScheduler`: `boot()` (§4.4), `start()`, `stop()`, `tick()` and `idle()`, and the tick's four steps: removed jobs' fires stopped and the jobs purged, but those still in flight; idle limits (the next task); pending deliveries sent, but those of fires in flight; due jobs and stamps, each fired, skipped as running, missed (one row for many slots) or unavailable, or held at `max_running`. A fire is a session of its role bound on the `cron` channel at the job and the fire, owned by `CRON_OWNER`, given the prompt as its one turn; its one entry holds its mark and `archiving` as §4.2 lists their changes, and it is ended once, when its archive settles. Its message is built from its record and its session's log, with `cronUuid`'s uuids. `endFire` takes `skipped_unavailable` too, for a fire whose role.md cannot be read once it has started (next task). `tests/helpers/cron.ts` gains `cronHarness`, over the real writer, registry and actors, a fake driver and the fake chat, on a fake clock.
+Spec §4, §5.2, §5.5, §5.6, §12, §14. `src/cron/scheduler.ts`, `CronScheduler`: `boot()` (§4.4), `start()`, `stop()`, `tick()` and `idle()`, and the tick's four steps: removed jobs' fires stopped and the jobs purged, but those still in flight; idle limits (the next task); pending deliveries sent, but those of fires in flight; due jobs and stamps, each fired, skipped as running, missed (one row for many slots) or unavailable, or held at `max_running`. A fire is a session of its role bound on the `cron` channel at the job and the fire, owned by `CRON_OWNER`, given the prompt as its one turn; its one entry holds its mark and `archiving` as §4.2 lists their changes, and it is ended once, when its archive settles. Its message is built from its record and its session's log, with `cronUuid`'s uuids, and sent once at a time whoever asks (`#sending`). `endFire` takes `skipped_unavailable` too, for a fire whose role.md cannot be read once it has started (next task). `tests/helpers/cron.ts` gains `cronHarness`, over the real writer, registry and actors, a fake driver and the fake chat, on a fake clock.
 
 - [ ] **Step 15.1: Write the tests.**
 
@@ -5569,9 +5629,9 @@ describe('a due job', () => {
   it('gives a one-off an hour: fired within it and done, skipped past it and done', async () => {
     const h = harness();
     const late = h.add({ schedule: 'in 30m' });
-    const fine = h.add({ schedule: 'in 1h' });
-    // Late by 55 and 25 minutes: half a one-off's hour is 30.
-    h.clock.advance(85 * MIN);
+    const fine = h.add({ schedule: 'in 40m' });
+    // Late by 65 and 55 minutes: a one-off is fired up to an hour late.
+    h.clock.advance(95 * MIN);
     await h.tick();
     await h.scheduler.idle();
     expect(firesOf(h.t.db, late.jobId).map((f) => f.outcome)).toEqual(['skipped_missed']);
@@ -5613,6 +5673,28 @@ describe('a due job', () => {
     held.end('completed');
     await h.scheduler.idle();
     expect(firesOf(h.t.db, j.jobId).map((f) => f.outcome)).toEqual(['skipped_running', 'posted']);
+  });
+});
+
+describe('a send', () => {
+  it('is made once for a fire however many paths ask for it at once', async () => {
+    const h = harness();
+    const j = h.add();
+    const later = cronHarness({ t: h.t, clock: h.clock, roles: [role('other')] });
+    h.lark.hold();
+    later.lark.hold();
+    h.clock.advance(HOUR);
+    // The skip sends its line; the ticks and a nudge's tick right after find it pending and in its send.
+    later.scheduler.tick();
+    later.scheduler.tick();
+    later.scheduler.tick();
+    for (let i = 0; i < 10; i += 1) await new Promise((r) => setImmediate(r));
+    later.lark.release();
+    await later.scheduler.idle();
+    later.scheduler.stop();
+    expect(later.lark.texts.map((t) => t.text)).toEqual(['**Daily PRs** · 2026-11-17 10:00 Asia/Shanghai: skipped: role worker is not configured']);
+    expect(firesOf(h.t.db, j.jobId)[0]?.delivery).toBe('sent');
+    h.lark.release();
   });
 });
 
@@ -6034,7 +6116,7 @@ import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, TurnTerminal } from '../types.js';
 import { CRON_OWNER } from './owner.js';
 import { answerMessages, composeFirePrompt, isNothing, outcomeLine } from './prompt.js';
-import { isOneOff, missedSlots, parseSchedule, periodAt, runAfter, type Schedule } from './schedule.js';
+import { isOneOff, lateLimit, missedSlots, parseSchedule, runAfter, type Schedule } from './schedule.js';
 import type { CronService } from './service.js';
 
 /**
@@ -6126,6 +6208,8 @@ export class CronScheduler {
   readonly #entries = new Map<number, Entry>();
   /** Work in the background: fires, sends and archives, so `idle()` can wait for it. */
   readonly #inflight = new Set<Promise<void>>();
+  /** Fires whose message is being sent: a second ask for one, from any path, waits for none and sends nothing. */
+  readonly #sending = new Set<number>();
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
   #ticking = false;
@@ -6329,9 +6413,20 @@ export class CronScheduler {
 
   /**
    * Send a fire's message, built from its record and its session's log, with
-   * its uuids, then mark it sent or failed. Never throws.
+   * its uuids, then mark it sent or failed, once at a time whoever asks: its
+   * end, a skip, a tick or a nudge. Never throws.
    */
   async #send(fireId: number): Promise<void> {
+    if (this.#sending.has(fireId)) return;
+    this.#sending.add(fireId);
+    try {
+      await this.#sendOnce(fireId);
+    } finally {
+      this.#sending.delete(fireId);
+    }
+  }
+
+  async #sendOnce(fireId: number): Promise<void> {
     const fire = getFire(this.#deps.db, fireId);
     if (fire === undefined || fire.delivery !== 'pending') return;
     const job = getJob(this.#deps.db, fire.jobId);
@@ -6375,7 +6470,7 @@ export class CronScheduler {
     const now = this.#clock.now();
     if (next === null || next >= now) return next;
     const schedule = parseSchedule(job.schedule);
-    if (!schedule.ok || now - next <= periodAt(schedule.schedule, job.tz, next) / 2) return next;
+    if (!schedule.ok || now - next <= lateLimit(schedule.schedule, job.tz, next)) return next;
     return runAfter(schedule.schedule, job.tz, next, now) ?? null;
   }
 
@@ -6423,7 +6518,7 @@ export class CronScheduler {
       skipFire(this.#deps.db, { ...expected, scheduledAt: slot, outcome: 'skipped_running' }, now);
       return;
     }
-    if (now - slot > periodAt(schedule, job.tz, slot) / 2) {
+    if (now - slot > lateLimit(schedule, job.tz, slot)) {
       const n = missedSlots(schedule, job.tz, slot, now);
       const said = `${n} slot${n === 1 ? '' : 's'} missed`;
       skipFire(this.#deps.db, { ...expected, scheduledAt: slot, outcome: 'skipped_missed', error: said }, now);
@@ -6658,7 +6753,7 @@ export interface EndFire {
   outcome: 'posted' | 'nothing' | 'script_failed' | 'agent_failed' | 'timed_out' | 'skipped_unavailable' | 'interrupted';
 ```
 
-- [ ] **Step 15.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2370 passed (2370)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 15.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2374 passed (2374)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 15.5: Commit.**
 
@@ -7080,7 +7175,7 @@ with:
     ...opts.deps,
 ```
 
-- [ ] **Step 16.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/cron-fire.test.ts tests/cron-scheduler.test.ts`. Expected: `Tests  13 failed | 18 passed (31)`; the first failure: `AssertionError: expected [] to have a length of 1 but got +0`
+- [ ] **Step 16.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/cron-fire.test.ts tests/cron-scheduler.test.ts`. Expected: `Tests  13 failed | 19 passed (32)`; the first failure: `AssertionError: expected [] to have a length of 1 but got +0`
 
 - [ ] **Step 16.3: Implement.**
 
@@ -7512,7 +7607,7 @@ export function scriptFailure(exit: GateExit): string {
 }
 ```
 
-- [ ] **Step 16.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2387 passed (2387)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 16.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2391 passed (2391)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 16.5: Commit.**
 
@@ -8055,7 +8150,7 @@ export class CronTokens {
 }
 ```
 
-- [ ] **Step 17.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2394 passed (2394)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 17.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2398 passed (2398)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 17.5: Commit.**
 
@@ -8885,7 +8980,7 @@ with:
     if (!isRecord(raw)) return refused('bad_request', 'a request is a JSON object');
 ```
 
-- [ ] **Step 18.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2404 passed (2404)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 18.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2408 passed (2408)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 18.5: Commit.**
 
@@ -9438,7 +9533,7 @@ export class CronChat {
 }
 ```
 
-- [ ] **Step 19.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2412 passed (2412)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 19.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2416 passed (2416)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 19.5: Commit.**
 
@@ -9772,7 +9867,7 @@ export function readGatewayZone(home: string): string | undefined {
 }
 ```
 
-- [ ] **Step 20.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2423 passed (2423)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 20.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2427 passed (2427)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 20.5: Commit.**
 
@@ -9790,7 +9885,7 @@ git commit -m "Add the cron: section to config.yaml, off by default, with max_ru
 - Create: `src/cli/cron.ts`, `tests/mt-cron.test.ts`
 - Modify: `src/cli/mt.ts`, `src/config.ts`, `tests/config.test.ts`, `tests/gateway-env.test.ts`
 
-Spec §6.2, §6.4, §13, §14. `src/cli/cron.ts`: the operator's `add`, `list`, `show`, `edit`, `pause`, `resume`, `run` and `remove`, through `loadOperator` and `CronService`, as `operator:<login>`, plain text or `--json`, a nudge after each change, a database without `cron_jobs` refused with its version, the zone `cron.tz`, else `gateway.tz`, else this shell's, which it says; and the agent's four, JSON on stdin to the socket with the shell's token (a board run's with its run). `mt.ts` chooses by the shell: in an agent's shell the four take no arguments, and every other `mt cron` is refused before its arguments are read; elsewhere, `add` with no arguments is the operator's usage, with a line saying the JSON form works only in an agent's shell. `TeamSettings` gains `appId`, for `--chat`'s delivery. `tests/gateway-env.test.ts` exempts `MT_CRON_*` beside `MT_KANBAN_*`, as an agent's own names, and `tests/config.test.ts` expects `appId`.
+Spec §6.2, §6.4, §13, §14. `src/cli/cron.ts`: the operator's `add`, `list`, `show`, `edit`, `pause`, `resume`, `run` and `remove`, through `loadOperator` and `CronService`, as `operator:<login>`, plain text or `--json`, a nudge after each change, a database without `cron_jobs` refused with its version, the zone `cron.tz`, else `gateway.tz`, else this shell's, which it says; and the agent's four, JSON on stdin to the socket with the shell's token (a board run's with its run). `mt.ts` chooses by the shell: in an agent's shell the four are the agent's whatever follows them, answered `bad_request` for any argument, and every other `mt cron` is refused before its arguments are read; elsewhere, `add` with no arguments is the operator's usage, with a line saying the JSON form works only in an agent's shell. `TeamSettings` gains `appId`, for `--chat`'s delivery. `tests/gateway-env.test.ts` exempts `MT_CRON_*` beside `MT_KANBAN_*`, as an agent's own names, and `tests/config.test.ts` expects `appId`.
 
 - [ ] **Step 21.1: Write the tests.**
 
@@ -9939,12 +10034,17 @@ describe("mt cron in an agent's shell", () => {
   it("refuses the operator's commands before their arguments are read, naming the variable", async () => {
     setup();
     const env = { MT_CRON_TOKEN: 'x'.repeat(43), MT_KANBAN_SOCKET: '/nowhere.sock' };
-    expect(await fx.run(['cron', 'add', 'every 2h', 'default', 'x'], { env })).toEqual({
+    expect(await fx.run(['cron', 'edit', 'c_1', '--prompt', 'x'], { env })).toEqual({
       code: 1,
       out: '',
-      err: "mt: mt cron add is an operator's command, not an agent's; this shell has MT_CRON_TOKEN set. Run it from your own shell",
+      err: "mt: mt cron edit is an operator's command, not an agent's; this shell has MT_CRON_TOKEN set. Run it from your own shell",
     });
     expect((await fx.run(['cron', 'show', 'c_1'], { env })).err).toMatch(/^mt: mt cron show is an operator's command/);
+    // One of the agent's four, with words after it: the agent's, which takes none.
+    const listed = await fx.run(['cron', 'list', '--json'], { env });
+    expect(listed.code).toBe(2);
+    expect(JSON.parse(listed.out)).toEqual({ ok: false, code: 'bad_request', message: 'mt cron list takes no arguments here: its input is JSON on stdin' });
+    expect(JSON.parse((await fx.run(['cron', 'add', 'every 2h', 'default', 'x'], { env })).out)).toMatchObject({ ok: false, code: 'bad_request' });
     expect((await fx.run(['cron', 'list'], { env: { MT_KANBAN_RUN: 'r_1', MT_KANBAN_TOKEN: 't' } })).out).toMatch(/"code":"(unreachable|not_in_a_run)"/);
   });
 
@@ -10382,9 +10482,10 @@ with:
     if (group === 'kanban') return await kanban(command, rest, io);
     if (group === 'cron') {
       // Two grammars told apart by the shell (the cron spec, §6.4): an agent's gets its four
-      // commands, with JSON on stdin, and the operator's are refused before their arguments are read.
+      // commands, with JSON on stdin, whatever follows them, and the operator's are refused
+      // before their arguments are read.
       if (inAgentRun(io.env)) {
-        if (command !== undefined && (CRON_COMMANDS as readonly string[]).includes(command) && rest.length === 0) {
+        if (command !== undefined && (CRON_COMMANDS as readonly string[]).includes(command)) {
           return await cronAgent(command, rest, io);
         }
         return refuse(io, runShellRefusal(['mt cron', ...(command === undefined ? [] : [command])].join(' '), io.env));
@@ -10420,7 +10521,7 @@ with:
     ...((envString(env, 'LARK_APP_ID') ?? file.lark.appId) === undefined ? {} : { appId: envString(env, 'LARK_APP_ID') ?? file.lark.appId ?? '' }),
 ```
 
-- [ ] **Step 21.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2429 passed (2429)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 21.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2433 passed (2433)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 21.5: Commit.**
 
@@ -10546,7 +10647,7 @@ with:
 
 ```
 
-- [ ] **Step 22.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2431 passed (2431)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 22.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2435 passed (2435)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 22.5: Commit.**
 
@@ -11052,7 +11153,7 @@ with:
       dbLock?.release();
 ```
 
-- [ ] **Step 23.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2435 passed (2435)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 23.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2439 passed (2439)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 23.5: Commit.**
 
@@ -11291,7 +11392,7 @@ export function runningFireCount(db: Db): number {
 
 ```
 
-- [ ] **Step 24.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2437 passed (2437)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 24.4: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2441 passed (2441)`. Run `npx vitest run --project e2e`. Expected: `Tests  168 passed (168)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 24.5: Commit.**
 
@@ -11476,8 +11577,9 @@ function inChat(text: string): InboundMessage {
   };
 }
 
+/** Wait for `ok`, polling, for up to about 30 s: a loaded machine starts the fake agent slowly. */
 async function until(what: string, ok: () => boolean): Promise<void> {
-  for (let i = 0; i < 400; i += 1) {
+  for (let i = 0; i < 1200; i += 1) {
     if (ok()) return;
     await new Promise((r) => setTimeout(r, 25));
   }
@@ -11588,7 +11690,7 @@ with:
 
 - [ ] **Step 25.2: Run it.** Run `npx vitest run --project e2e tests/cron.e2e.ts`. Expected: `Tests  3 passed (3)`: everything it drives is in place, so it passes as written.
 
-- [ ] **Step 25.3: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2437 passed (2437)`. Run `npx vitest run --project e2e`. Expected: `Tests  171 passed (171)`. Run `npm run typecheck`. Expected: no errors.
+- [ ] **Step 25.3: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2441 passed (2441)`. Run `npx vitest run --project e2e`. Expected: `Tests  171 passed (171)`. Run `npm run typecheck`. Expected: no errors.
 
 - [ ] **Step 25.4: Commit.**
 
@@ -11666,8 +11768,8 @@ Each fire runs the job's script first, if it has one, in the workspace with the 
 environment, killed after 120 s, and puts its output in the prompt with the job's previous
 result. An answer of exactly `[nothing to report]` is not posted. A fire whose session is
 quiet for `cron.idle_timeout_s` is stopped; a fire that fails three times in a row pauses its
-job, and says how to resume it. A slot missed by more than half its period, the gateway being
-down, is skipped, not fired late.
+job, and says how to resume it. A slot missed by more than half its period (a one-off, by more
+than an hour), the gateway being down, is skipped, not fired late.
 
 An agent adds a job with `mt cron add < job.json`, `{"schedule": "...", "prompt": "..."}`,
 from its own shell, where the gateway sets `MT_CRON_TOKEN`: a chat agent's job posts to its
@@ -11794,7 +11896,7 @@ too, posting to its task's chat. The job runs as the agent's own role, with no s
 agent may pause or remove only the jobs it made.
 ````
 
-- [ ] **Step 26.2: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2437 passed (2437)`. Run `npx vitest run --project e2e`. Expected: `Tests  171 passed (171)`. Run `npm run typecheck`. Expected: no errors. `git diff dad6b5e -- README.md docs/kanban-guide.md config.example.yaml | grep "^+" | grep -c "—"` prints `0`.
+- [ ] **Step 26.2: Run everything.** Run `npx vitest run --project unit`. Expected: `Tests  2441 passed (2441)`. Run `npx vitest run --project e2e`. Expected: `Tests  171 passed (171)`. Run `npm run typecheck`. Expected: no errors. `git diff dad6b5e -- README.md docs/kanban-guide.md config.example.yaml | grep "^+" | grep -c "—"` prints `0`.
 
 - [ ] **Step 26.3: Commit.**
 
@@ -11808,7 +11910,7 @@ git commit -m "Document cron jobs: the README's chat command, account and termin
 
 ## Done when
 
-- `npx vitest run --project unit` gives `Tests  2437 passed (2437)`. `npx vitest run --project e2e` gives `Tests  171 passed (171)`, run twice. `npm run typecheck` and `npm run build` report no errors. All under Node 22, in the worktree.
+- `npx vitest run --project unit` gives `Tests  2441 passed (2441)`. `npx vitest run --project e2e` gives `Tests  171 passed (171)`, run twice. `npm run typecheck` and `npm run build` report no errors. All under Node 22, in the worktree.
 - `git grep -n -i "p[g]w" -- . ':!package-lock.json'` prints nothing, and `git diff dad6b5e -- 'src/*.ts' 'src/**/*.ts' README.md docs/kanban-guide.md config.example.yaml | grep "^+" | grep -c "—"` prints `0`.
 - A schedule is read, refused and computed across both changes of daylight saving time (`tests/cron-schedule.test.ts`, `tests/cron-next-run.test.ts`).
 - The writer fires one slot once, counts the limits and the failures in its transactions, and deletes a pruned fire's session only when the cron channel alone bound it (`tests/cron-schema.test.ts`, `tests/cron-writer.test.ts`).
@@ -11820,7 +11922,7 @@ git commit -m "Document cron jobs: the README's chat command, account and termin
 
 For the user, once the plan is built and merged, on the real host, with the real Lark tenant and Mac. Run each command as the gateway's user. `<node>` is `~/.nvm/versions/node/v22.15.0/bin/node`, and `<mt>` is `<node> <checkout>/dist/mt.js`: never a bare `node`, `npm` or `mt`. Every build runs under the same Node: `PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH npm run build`. The items need a group the bot is in, you an operator there, a second person at talk tier, and the role `worker`, unsupervised.
 
-0. **Back up first.** Stop the service and back up the database, as this build's first start migrates it to version 10: `<mt> service stop && sqlite3 ~/.manus-team/team.db ".backup /tmp/team-v9.db"`. Build (`cd <checkout> && PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH npm run build`). Add to `~/.manus-team/config.yaml`:
+0. **Back up first.** This build's first start migrates the database to version 10. Find the file the gateway uses: `db:` in `~/.manus-team/config.yaml`, else `MT_DB` in `~/.manus-team/.env` or the service's environment, else `~/.manus-team/team.db`. Stop the service, `<mt> service stop`, and back it up with SQLite's own backup, `sqlite3 <db> ".backup /tmp/team-v9.db"` (`/usr/bin/sqlite3` on macOS); with no `sqlite3`, copy it while the gateway is stopped: `cp <db> /tmp/team-v9.db`, and its `-wal` file beside it if there is one. Build (`cd <checkout> && PATH=~/.nvm/versions/node/v22.15.0/bin:$PATH npm run build`). Add to `~/.manus-team/config.yaml`:
 
    ```yaml
    cron:
