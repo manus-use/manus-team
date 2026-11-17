@@ -414,7 +414,7 @@ export class SessionRegistry {
         reason:
           fire === undefined
             ? `Session ${sessionId} is a cron fire's.`
-            : `Session ${sessionId} is a cron fire's; mt cron show ${fire.jobId} has what it did.`,
+            : `Session ${sessionId} is a cron fire's; /cron show ${fire.jobId} in its chat, or mt cron show ${fire.jobId}, has what it did.`,
       };
     }
 

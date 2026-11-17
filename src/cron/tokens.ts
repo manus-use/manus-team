@@ -1,9 +1,12 @@
 import { delimiter } from 'node:path';
+import { roleOfSession } from '../core/registry.js';
 import { resolveBinding } from '../db/bindings.js';
 import type { Db } from '../db/open.js';
+import { getSession } from '../db/sessions.js';
 import { openTurns } from '../db/turns.js';
 import type { WorkerAccess } from '../kanban/dispatcher.js';
 import { hashToken, mintToken, TOKEN_PATTERN } from '../kanban/token.js';
+import type { Role } from '../roles.js';
 import { addSecrets, removeSecrets } from '../secrets.js';
 import type { BindingKey } from '../types.js';
 
@@ -33,12 +36,15 @@ export interface CronTokensDeps {
   db: Db;
   /** How an agent reaches the socket, and the shim's directory first on its PATH (§7.1). */
   worker?: WorkerAccess;
+  /** The roles, for a session's role's own PATH, as a run's and a fire's (§7.1). */
+  roles?: ReadonlyMap<string, Role>;
   max?: number;
 }
 
 export class CronTokens {
   readonly #db: Db;
   readonly #worker: WorkerAccess | undefined;
+  readonly #roles: ReadonlyMap<string, Role>;
   readonly #max: number;
   /** By hash, in the order minted. */
   readonly #byHash = new Map<string, Held>();
@@ -52,6 +58,7 @@ export class CronTokens {
   constructor(deps: CronTokensDeps) {
     this.#db = deps.db;
     this.#worker = deps.worker;
+    this.#roles = deps.roles ?? new Map();
     this.#max = deps.max ?? MAX_TOKENS;
   }
 
@@ -78,11 +85,16 @@ export class CronTokens {
     if (held.kind === 'chat' && this.#newest.get(held.sessionId) === hash) this.#newest.delete(held.sessionId);
   }
 
-  /** The socket and PATH an agent's token goes with. */
-  #access(path: string | undefined): Record<string, string> {
+  /**
+   * The socket, and a PATH that finds the gateway's mt first: the shim's
+   * directory, then the session's role's own PATH if its agent.env sets one,
+   * else the gateway's, as a run's and a fire's.
+   */
+  #access(sessionId: string): Record<string, string> {
     const worker = this.#worker;
     if (worker === undefined) return {};
-    const rest = path ?? worker.path;
+    const role = this.#roles.get(roleOfSession(getSession(this.#db, sessionId)?.agentId ?? ''));
+    const rest = role?.agent.env['PATH'] ?? worker.path;
     return { MT_KANBAN_SOCKET: worker.socket, PATH: rest === undefined || rest === '' ? worker.mtDir : `${worker.mtDir}${delimiter}${rest}` };
   }
 
@@ -91,7 +103,7 @@ export class CronTokens {
    * scoped to the place the actor is built for, its predecessor expired. None
    * for a session bound anywhere but the Lark channel.
    */
-  envFor(sessionId: string, key: BindingKey, path?: string): Readonly<Record<string, string>> | undefined {
+  envFor(sessionId: string, key: BindingKey): Readonly<Record<string, string>> | undefined {
     if (key.channel !== 'lark') return undefined;
     const previous = this.#newest.get(sessionId);
     if (previous !== undefined) {
@@ -101,7 +113,7 @@ export class CronTokens {
     const token = mintToken();
     this.#hold({ kind: 'chat', token, sessionId, key });
     this.#newest.set(sessionId, hashToken(token));
-    return { ...this.#access(path), MT_CRON_TOKEN: token };
+    return { ...this.#access(sessionId), MT_CRON_TOKEN: token };
   }
 
   /** A fire's token, held while the fire runs (§7.2). */
@@ -109,11 +121,6 @@ export class CronTokens {
     const token = mintToken();
     this.#hold({ kind: 'fire', token, fireId, jobId });
     return token;
-  }
-
-  /** The socket and PATH a fire's agent gets, beside its token. */
-  fireAccess(path: string | undefined): Record<string, string> {
-    return this.#access(path);
   }
 
   /** A token that stops working: a fire's that ended. */

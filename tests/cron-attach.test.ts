@@ -22,7 +22,7 @@ describe("a cron fire's session", () => {
     await h.tick();
     await h.scheduler.idle();
     const sessionId = firesOf(h.t.db, job.jobId)[0]?.sessionId ?? '';
-    expect(await h.registry.attach(KEY, sessionId)).toEqual({ ok: false, reason: `Session ${sessionId} is a cron fire's; mt cron show ${job.jobId} has what it did.` });
+    expect(await h.registry.attach(KEY, sessionId)).toEqual({ ok: false, reason: `Session ${sessionId} is a cron fire's; /cron show ${job.jobId} in its chat, or mt cron show ${job.jobId}, has what it did.` });
     const router = new Router({ db: h.t.db, registry: h.registry, authorizer: new Authorizer(defaultAuthConfig('ou_owner')), channel: h.lark, channelId: 'lark', appId: 'cli_app' });
     const message: InboundMessage = {
       messageId: 'om_attach',
@@ -40,7 +40,7 @@ describe("a cron fire's session", () => {
       createTime: NOW,
     };
     await router.onMessage(message);
-    expect(h.lark.texts.at(-1)?.text).toMatch(/is a cron fire's; mt cron show c\\_[0-9a-z]+ has what it did\.$/);
+    expect(h.lark.texts.at(-1)?.text).toMatch(/is a cron fire's; \/cron show c\\_[0-9a-z]+ in its chat, or mt cron show c\\_[0-9a-z]+, has what it did\.$/);
   });
 
   it('says only that it is a cron fire’s when no fire row is left, and a chat session is attached as before', async () => {

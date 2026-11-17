@@ -41,7 +41,7 @@ import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, TurnTerminal } from '../types.js';
 import { CRON_OWNER } from './owner.js';
 import { SCRIPT_PROMPT_BYTES, answerMessages, composeFirePrompt, isNothing, outcomeLine } from './prompt.js';
-import { isOneOff, lateLimit, missedSlots, parseSchedule, runAfter, type Schedule } from './schedule.js';
+import { isOneOff, lateLimit, latestSlot, missedSlots, parseSchedule, runAfter, type Schedule } from './schedule.js';
 import type { CronService } from './service.js';
 import type { CronTokens } from './tokens.js';
 
@@ -454,6 +454,11 @@ export class CronScheduler {
       }
       markDelivered(this.#deps.db, fireId, 'sent');
     } catch {
+      // Stopped under it, the channel going: left pending, so the next boot sends it again with the same uuids (§5.6).
+      if (this.#stopped) {
+        this.#note(`cron: stopped while posting fire ${fireId} of job ${job.jobId}; the next boot posts it again`);
+        return;
+      }
       // Not quoted: a refusal can quote the message.
       markDelivered(this.#deps.db, fireId, 'failed');
       this.#note(`cron: posting fire ${fireId} of job ${job.jobId} failed; its result is in the job's history`);
@@ -472,7 +477,8 @@ export class CronScheduler {
 
   /**
    * The next run a line names: the job's, unless the gateway was down past it
-   * and this tick will skip it as too late, when it is the slot after (§4.3).
+   * and this tick will skip it as too late, when it is the newest slot if this
+   * tick fires it, else the slot after (§4.3).
    */
   #nextShown(job: JobRow): number | null {
     const next = job.nextRunAt;
@@ -480,6 +486,9 @@ export class CronScheduler {
     if (next === null || next >= now) return next;
     const schedule = parseSchedule(job.schedule);
     if (!schedule.ok || now - next <= lateLimit(schedule.schedule, job.tz, next)) return next;
+    // The newest slot, if it is fresh, is fired by this tick in its place (§4.3).
+    const latest = latestSlot(schedule.schedule, job.tz, next, now);
+    if (latest > next && now - latest <= lateLimit(schedule.schedule, job.tz, latest)) return latest;
     return runAfter(schedule.schedule, job.tz, next, now) ?? null;
   }
 
@@ -517,27 +526,27 @@ export class CronScheduler {
 
   #dueJob(job: JobRow, now: number): void {
     const schedule = this.#schedule(job);
-    const slot = job.nextRunAt;
-    if (schedule === undefined || slot === null) return;
-    const expected = {
-      jobId: job.jobId,
-      trigger: 'schedule' as const,
-      slot,
-      schedule: job.schedule,
-      tz: job.tz,
-      ...(isOneOff(schedule) ? {} : { next: runAfter(schedule, job.tz, slot, now) }),
-    };
+    const due = job.nextRunAt;
+    if (schedule === undefined || due === null) return;
+    const base = { jobId: job.jobId, trigger: 'schedule' as const, schedule: job.schedule, tz: job.tz };
+    const after = isOneOff(schedule) ? {} : { next: runAfter(schedule, job.tz, due, now) };
     if (runningFire(this.#deps.db, job.jobId) !== undefined) {
-      skipFire(this.#deps.db, { ...expected, scheduledAt: slot, outcome: 'skipped_running' }, now);
+      skipFire(this.#deps.db, { ...base, ...after, slot: due, scheduledAt: due, outcome: 'skipped_running' }, now);
       return;
     }
-    if (now - slot > lateLimit(schedule, job.tz, slot)) {
-      const n = missedSlots(schedule, job.tz, slot, now);
+    let slot = due;
+    if (now - due > lateLimit(schedule, job.tz, due)) {
+      // Too late (§4.3): the slots missed are one skip, but the newest at or before now is fired if it is still fresh.
+      const latest = latestSlot(schedule, job.tz, due, now);
+      const fresh = latest > due && now - latest <= lateLimit(schedule, job.tz, latest);
+      const n = missedSlots(schedule, job.tz, due, now) - (fresh ? 1 : 0);
       const said = `${n} slot${n === 1 ? '' : 's'} missed`;
-      skipFire(this.#deps.db, { ...expected, scheduledAt: slot, outcome: 'skipped_missed', error: said }, now);
-      this.#note(`cron: job ${job.jobId} skipped its slot at ${new Date(slot).toISOString()} as too late: ${said}`);
-      return;
+      const skipped = skipFire(this.#deps.db, { ...base, ...(fresh ? { next: latest } : after), slot: due, scheduledAt: due, outcome: 'skipped_missed', error: said }, now);
+      this.#note(`cron: job ${job.jobId} skipped its slot at ${new Date(due).toISOString()} as too late: ${said}`);
+      if (!fresh || !skipped.ok) return;
+      slot = latest;
     }
+    const expected = { ...base, ...after, slot };
     if (runningFires(this.#deps.db).length >= this.#deps.settings.maxRunning) return;
     const unavailable = this.#deps.service.unavailable(job.role, job.workspace);
     if (unavailable !== undefined) {

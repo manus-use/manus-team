@@ -3,6 +3,7 @@ import {
   MISSED_COUNT_MAX,
   firstRun,
   lateLimit,
+  latestSlot,
   missedSlots,
   nextRun,
   parseSchedule,
@@ -180,5 +181,19 @@ describe('periodAt and missedSlots', () => {
     expect(missedSlots(schedule('0 9 * * *'), 'UTC', slot, slot + 3 * DAY + HOUR)).toBe(4);
     expect(missedSlots(schedule('in 30m'), 'UTC', slot, slot + DAY)).toBe(1);
     expect(missedSlots(schedule('every 5m'), 'UTC', slot, slot + 400 * DAY)).toBe(MISSED_COUNT_MAX);
+  });
+
+  it('finds the newest slot at or before now, the due slot when none is after it', () => {
+    const slot = utc(2026, 11, 17, 9);
+    expect(latestSlot(schedule('every 5m'), 'UTC', slot, slot + DAY + 3 * MIN)).toBe(slot + DAY);
+    expect(latestSlot(schedule('every 5m'), 'UTC', slot, slot + 3 * MIN)).toBe(slot);
+    expect(latestSlot(schedule('0 9 * * *'), 'UTC', slot, slot + 3 * DAY + HOUR)).toBe(slot + 3 * DAY);
+    expect(latestSlot(schedule('0 9 * * *'), 'UTC', slot, slot + 3 * DAY)).toBe(slot + 3 * DAY);
+    // A five-minute job down for a year walks only the last hour.
+    expect(latestSlot(schedule('*/5 * * * *'), 'UTC', slot, slot + 365 * DAY + 30_000)).toBe(slot + 365 * DAY);
+    // Newer than a year back: a leap day's slot, four years on.
+    const leap = utc(2028, 2, 29, 9);
+    expect(latestSlot(schedule('0 9 29 2 *'), 'UTC', leap, leap + 5 * 365 * DAY)).toBe(utc(2032, 2, 29, 9));
+    expect(latestSlot(schedule('in 30m'), 'UTC', slot, slot + DAY)).toBe(slot);
   });
 });

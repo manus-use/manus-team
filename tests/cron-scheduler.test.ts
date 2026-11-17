@@ -82,14 +82,43 @@ describe('a due job', () => {
     await h.tick();
     await h.scheduler.idle();
     expect(firesOf(h.t.db, j.jobId).map((f) => f.outcome)).toEqual(['posted']);
-    // Down for a day: one skip, from the first slot missed, saying how many.
-    h.clock.advance(24 * HOUR);
+    // Down for a day, and the newest slot too late as well: one skip, from the first slot missed, saying how many.
+    h.clock.advance(24 * HOUR + 2 * MIN);
     await h.tick();
     await h.scheduler.idle();
     const [skip] = firesOf(h.t.db, j.jobId);
     expect(skip).toMatchObject({ outcome: 'skipped_missed', scheduledAt: NOW + 2 * HOUR, error: '24 slots missed', startedAt: null, delivery: 'none' });
     expect(job(h, j.jobId).nextRunAt).toBe(NOW + 26 * HOUR);
     expect(h.notes.some((n) => n.startsWith(`cron: job ${j.jobId} skipped its slot`) && n.endsWith('24 slots missed'))).toBe(true);
+  });
+
+  it('fires the newest slot of an hourly job down for hours if it is fresh, the ones before it one skip', async () => {
+    const h = harness();
+    const j = h.add();
+    // Down from 09:00 to 15:20: 10:00 to 14:00 missed, 15:00 late by 20 minutes, within half the hour.
+    h.clock.advance(6 * HOUR + 20 * MIN);
+    await h.tick();
+    await h.scheduler.idle();
+    const [fired, skip] = firesOf(h.t.db, j.jobId);
+    expect(skip).toMatchObject({ outcome: 'skipped_missed', scheduledAt: NOW + HOUR, error: '5 slots missed', startedAt: null, delivery: 'none' });
+    expect(fired).toMatchObject({ outcome: 'posted', scheduledAt: NOW + 6 * HOUR, trigger: 'schedule' });
+    expect(job(h, j.jobId).nextRunAt).toBe(NOW + 7 * HOUR);
+    expect(h.lark.texts).toHaveLength(1);
+    expect(h.notes.some((n) => n.startsWith(`cron: job ${j.jobId} skipped its slot`) && n.endsWith('5 slots missed'))).toBe(true);
+  });
+
+  it("fires today's daily brief after a downtime that took yesterday's, which is recorded missed", async () => {
+    const h = harness();
+    // Asia/Shanghai: down from Nov 17 09:00 to Nov 18 10:10.
+    const j = h.add({ schedule: 'every day 10:00' });
+    h.clock.advance(25 * HOUR + 10 * MIN);
+    await h.tick();
+    await h.scheduler.idle();
+    const [fired, skip] = firesOf(h.t.db, j.jobId);
+    expect(skip).toMatchObject({ outcome: 'skipped_missed', scheduledAt: NOW + HOUR, error: '1 slot missed' });
+    expect(fired).toMatchObject({ outcome: 'posted', scheduledAt: NOW + 25 * HOUR });
+    expect(h.lark.texts.map((t) => t.text)).toEqual([expect.stringMatching(/^\*\*Daily PRs\*\* · 2026-11-18 10:00 Asia\/Shanghai/)]);
+    expect(job(h, j.jobId).nextRunAt).toBe(NOW + 49 * HOUR);
   });
 
   it('gives a one-off an hour: fired within it and done, skipped past it and done', async () => {
@@ -161,6 +190,36 @@ describe('a send', () => {
     expect(later.lark.texts.map((t) => t.text)).toEqual(['**Daily PRs** · 2026-11-17 10:00 Asia/Shanghai: skipped: role worker is not configured']);
     expect(firesOf(h.t.db, j.jobId)[0]?.delivery).toBe('sent');
     h.lark.release();
+  });
+
+  it('under way when the gateway stops is left pending, and the next boot sends it with the same uuids', async () => {
+    const first = harness();
+    const j = first.add();
+    answers(first.driver, 'Two open.');
+    first.lark.hold();
+    first.clock.advance(HOUR);
+    await first.tick();
+    for (let i = 0; i < 20 && first.lark.texts.length === 0; i += 1) await new Promise((r) => setImmediate(r));
+    expect(first.lark.calls).toContain('sendText');
+    // Stopped mid-send: the adapter's disconnect fails the send.
+    first.scheduler.stop();
+    first.lark.failNext('sendText', new Error('the connection is closed'));
+    first.lark.release();
+    await first.scheduler.idle();
+    const fire = firesOf(first.t.db, j.jobId)[0];
+    expect(fire).toMatchObject({ outcome: 'posted', delivery: 'pending' });
+
+    const second = harness({ t: first.t, clock: first.clock });
+    open.splice(open.indexOf(first), 1);
+    await second.scheduler.boot();
+    second.scheduler.start();
+    for (let i = 0; i < 20; i += 1) await new Promise((r) => setImmediate(r));
+    await second.scheduler.idle();
+    second.scheduler.stop();
+    expect(second.lark.texts).toEqual([
+      { target: { chatId: 'oc_team', threadId: '' }, text: expect.stringMatching(/Two open\.$/), uuid: cronUuid('cli_app', j.jobId, fire?.fireId ?? 0, 0) },
+    ]);
+    expect(getFire(second.t.db, fire?.fireId ?? 0)?.delivery).toBe('sent');
   });
 });
 
@@ -290,10 +349,11 @@ describe('a restart', () => {
     for (let i = 0; i < 20; i += 1) await new Promise((r) => setImmediate(r));
     await second.scheduler.idle();
     const told = second.lark.texts.filter((t) => t.text.includes('interrupted by a gateway restart'));
+    // 11:00 is too late at 12:00, and 12:00 is fresh: this tick fires it, so the line names it.
     expect(told).toEqual([
       {
         target: { chatId: 'oc_team', threadId: '' },
-        text: `**Daily PRs** · 2026-11-17 10:00 Asia/Shanghai: interrupted by a gateway restart; it runs again at ${'2026-11-17 13:00'}`,
+        text: `**Daily PRs** · 2026-11-17 10:00 Asia/Shanghai: interrupted by a gateway restart; it runs again at ${'2026-11-17 12:00'}`,
         uuid: cronUuid('cli_app', j.jobId, fire?.fireId ?? 0, 0),
       },
     ]);

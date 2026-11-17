@@ -554,6 +554,29 @@ export function lateLimit(s: Schedule, tz: string, slot: number): number {
   return isOneOff(s) ? ONE_OFF_GRACE_MS : periodAt(s, tz, slot) / 2;
 }
 
+/** The windows back from now `latestSlot` searches a clock time's slots in, widest last. */
+const LATEST_WINDOWS_MS = [HOUR, DAY, 32 * DAY, 367 * DAY, Infinity];
+
+/**
+ * The newest slot at or before `now` of a recurring schedule, from the slot
+ * `slot` that is due (§4.3): `slot` itself when none falls after it. For a
+ * clock time, the slots are walked from the start of the narrowest window
+ * back from now that holds one, so a job down for long walks few. A one-off
+ * has only its slot.
+ */
+export function latestSlot(s: Schedule, tz: string, slot: number, now: number): number {
+  if (now <= slot) return slot;
+  if (s.kind === 'every') return slot + Math.floor((now - slot) / s.periodMs) * s.periodMs;
+  if (s.kind !== 'cron') return slot;
+  for (const window of LATEST_WINDOWS_MS) {
+    const from = Math.max(slot, now - window);
+    let latest = from === slot ? slot : undefined;
+    for (let at = nextRun(s.fields, tz, from); at !== undefined && at <= now; at = nextRun(s.fields, tz, at)) latest = at;
+    if (latest !== undefined) return latest;
+  }
+  return slot;
+}
+
 /** The most slots `missedSlots` counts before it says so. */
 export const MISSED_COUNT_MAX = 10_000;
 

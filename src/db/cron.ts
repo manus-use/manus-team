@@ -1,5 +1,6 @@
 import type { Db } from './open.js';
 import { txImmediate } from './open.js';
+import { CRON_PRINCIPAL } from '../cron/owner.js';
 import { redactKnownSecrets } from '../secrets.js';
 
 /**
@@ -633,10 +634,14 @@ function deleteFireIn(d: Db, fire: FireRow): void {
 }
 
 /**
- * A cron session, with everything that hangs on it, when every binding it ever
- * had is on the `cron` channel and none is live; else nothing. True if deleted.
+ * A cron session, with everything that hangs on it, when it is owned by `cron`,
+ * every binding it ever had is on the `cron` channel and none is live; else
+ * nothing. True if deleted.
  */
 function deleteCronSessionIn(d: Db, sessionId: string): boolean {
+  // Owned by cron, as a fire's is made (CRON_OWNER): a session a chat made is never deleted here, bound or not.
+  const owner = d.prepare<[string], { owner_principal: string }>('SELECT owner_principal FROM sessions WHERE id = ?').get(sessionId);
+  if (owner?.owner_principal !== CRON_PRINCIPAL) return false;
   const channels = bindingChannelsEver(d, sessionId);
   if (channels.some((c) => c !== CRON_CHANNEL)) return false;
   // Still bound anywhere, its own archive not yet done: something can still reach it.

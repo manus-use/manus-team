@@ -7,6 +7,7 @@ import {
   CRON_LIMITS,
   addJob,
   attachFireSession,
+  deleteLeftoverCronSession,
   dropStaleStamps,
   dueJobs,
   editJob,
@@ -342,6 +343,21 @@ describe("the delete of a cron fire's session, and the foreign keys on sessions"
     expect(all.filter(([, text]) => /(UPDATE|INSERT INTO)\s+kanban_runs\b[^`']*\bsession_id\b/.test(text)).map(([path]) => path)).toEqual([join('src', 'db', 'kanban.ts')]);
     // A run's session is attached by the dispatcher alone, through the service, to the session it made for the run on the kanban channel.
     expect(all.filter(([, text]) => /\.attachSession\(/.test(text)).map(([path]) => path).sort()).toEqual([join('src', 'kanban', 'dispatcher.ts'), join('src', 'kanban', 'service.ts')]);
+  });
+
+  it('never deletes a session not owned by cron, even one with no bindings that a pruned fire names', () => {
+    const job = newJob(h.db);
+    const id = fire(job, job.nextRunAt ?? 0);
+    createSession(h.db, { id: 's_chat', agentId: 'default', workspaceId: 'default', ownerPrincipal: 'on_alice' }, NOW);
+    attachFireSession(h.db, id, 's_chat');
+    expect(deleteLeftoverCronSession(h.db, 's_chat')).toBe(false);
+    endFire(h.db, { fireId: id, outcome: 'nothing', message: false }, NOW);
+    removeJob(h.db, job.jobId, NOW);
+    expect(purgeRemoved(h.db)).toEqual([job.jobId]);
+    expect(getFire(h.db, id)).toBeUndefined();
+    expect(count('sessions', 'id = ?', 's_chat')).toBe(1);
+    expect(deleteLeftoverCronSession(h.db, 's_chat')).toBe(false);
+    expect(count('sessions', 'id = ?', 's_chat')).toBe(1);
   });
 
   it("deletes a pruned fire's session under the foreign keys, none of them naming it", () => {

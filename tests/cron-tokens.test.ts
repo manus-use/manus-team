@@ -12,6 +12,7 @@ import { SessionRegistry } from '../src/core/registry.js';
 import { NamedWorkspaces } from '../src/core/workspace.js';
 import { FakeChannel } from './helpers/channel.js';
 import { cronHarness, holdsTurn, type CronHarness } from './helpers/cron.js';
+import { role } from './helpers/dispatch.js';
 import { FakeDriver } from './helpers/driver.js';
 import { testDb, type TestDb } from './helpers/db.js';
 
@@ -47,6 +48,16 @@ describe("a chat session's token", () => {
     const env = tokens.envFor('s_chat', KEY);
     expect(env).toEqual({ MT_KANBAN_SOCKET: '/home/run/kanban.sock', PATH: '/home/bin:/usr/bin', MT_CRON_TOKEN: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
     expect(tokens.envFor('s_chat', { ...KEY, channel: 'kanban' })).toBeUndefined();
+  });
+
+  it("puts the shim before the session's role's own PATH, if its agent.env sets one", () => {
+    createSession(h.db, { id: 's_ops', agentId: 'ops', workspaceId: 'default', ownerPrincipal: 'on_alice' }, NOW);
+    const ops = role('ops');
+    const roles = new Map([['ops', { ...ops, agent: { ...ops.agent, env: { PATH: '/opt/ops/bin' } } }]]);
+    const tokens = new CronTokens({ db: h.db, worker: WORKER, roles });
+    expect(tokens.envFor('s_ops', KEY)?.['PATH']).toBe('/home/bin:/opt/ops/bin');
+    // A role without one, or a session whose role is gone, gets the gateway's.
+    expect(tokens.envFor('s_chat', KEY)?.['PATH']).toBe('/home/bin:/usr/bin');
   });
 
   it('works during a turn, and not between turns, after /new, or once the actor is built again', () => {

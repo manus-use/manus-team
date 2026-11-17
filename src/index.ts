@@ -414,7 +414,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   let cronChat: CronChat | undefined;
   if (config.cron.enabled) {
     const cronService = new CronService({ db, roles: team.roles, workspaces: new Set(team.workspaces.keys()), zone });
-    tokens = new CronTokens({ db, worker: access });
+    tokens = new CronTokens({ db, worker: access, roles: team.roles });
     scheduler = new CronScheduler({
       db,
       service: cronService,
@@ -525,7 +525,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
         const { handler, socket } = worker;
         // A report still running its gates when the gateway stops is told so, and answered.
         workerServer = await listenWorker(socket, (request, signal) => handler.handle(request, signal), { note });
-        note(`kanban: runs report through ${socket}`);
+        // Named by what is on: a board's runs report through it, a cron agent reaches the gateway through it.
+        note(boardApi === undefined ? `cron: agents reach the gateway through ${socket}` : `kanban: runs report through ${socket}`);
       }
 
       await adapter.connect();
@@ -602,13 +603,15 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       worker?.handler.stop();
       // A notice being sent finishes while the channel is still connected; bounded by the drain, not a
       // send's 30 s, so a hung send never holds the stop: its batch goes again after the next boot.
-      // Together, under one bound: the notices, the cards, and the card presses being
-      // worked on, whose redraws need the channel.
-      const [notices, sent, pressed] = await Promise.all([
+      // Together, under one bound: the notices, the cards, the card presses being
+      // worked on, whose redraws need the channel, and a cron fire's message being
+      // posted, which a send failed by the disconnect leaves pending for the next boot.
+      const [notices, sent, pressed, , posted] = await Promise.all([
         notifier?.idle(SHUTDOWN_DRAIN_MS),
         cards?.idle(SHUTDOWN_DRAIN_MS),
         kanbanChat?.idle(SHUTDOWN_DRAIN_MS),
         inbound.idle(SHUTDOWN_DRAIN_MS),
+        scheduler?.idle(SHUTDOWN_DRAIN_MS),
       ]);
       // Past the bound, the database closes under whatever is still in flight: its write is dropped.
       if (notices === false) {
@@ -620,6 +623,9 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       if (pressed === false) {
         note('kanban: stopped with a card press still being worked on; anything it still writes is dropped, and its card may not show the outcome');
       }
+      if (posted === false) {
+        note('cron: stopped with a fire\'s message still being posted; it stays pending, and the next boot posts it again with the same uuids');
+      }
       await adapter.disconnect().catch((err: unknown) => {
         note(`disconnect failed: ${err instanceof Error ? err.message : String(err)}`);
       });
@@ -627,13 +633,14 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       // channel -- so this runs after disconnect only because the SDK's send path
       // survives it; a failed final write is logged, not fatal.
       await registry.closeAll();
-      // Then what the dispatcher still has running -- an archive, a close -- so
-      // none of it touches the database after it is closed. Bounded: a start that
-      // never returns is never drained, and must not hold the shutdown.
-      if ((await dispatcher?.idle(SHUTDOWN_DRAIN_MS)) === false) {
+      // Then what the dispatcher and the scheduler still have running -- an archive, a
+      // close -- so none of it touches the database after it is closed. Together, under
+      // one bound: a start that never returns is never drained, and must not hold the shutdown.
+      const [runs, fires] = await Promise.all([dispatcher?.idle(SHUTDOWN_DRAIN_MS), scheduler?.idle(SHUTDOWN_DRAIN_MS)]);
+      if (runs === false) {
         note('kanban: stopped with run work still pending; anything it still writes is dropped, and the next boot ends those runs');
       }
-      if ((await scheduler?.idle(SHUTDOWN_DRAIN_MS)) === false) {
+      if (fires === false) {
         note('cron: stopped with a fire\'s archive still pending; the next boot ends the fire interrupted');
       }
       db.close();
