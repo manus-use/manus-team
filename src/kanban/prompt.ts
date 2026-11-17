@@ -605,15 +605,27 @@ function told(b: RunBrief): string {
   return `${atLine > 0 ? head.slice(0, atLine) : head}${end}`;
 }
 
-export function composePrompt(b: RunBrief): string {
+/**
+ * A role's own instructions at the head of a prompt (spec §7.1): "# Your role",
+ * its role.md as written, trimmed and never cut, then "# Skills", each skill's
+ * name, description and SKILL.md path; each section ends with a blank line, and
+ * a blank role.md or no skills gives none. A run's prompt and a cron fire's both
+ * start with these (the cron spec, §5.2), so the two cannot drift.
+ */
+export function roleSections(roleMd: string | undefined, skills: readonly Skill[]): string[] {
   const head: string[] = [];
-  const injected = b.native !== true;
-  if (injected && b.roleMd !== undefined && b.roleMd.trim() !== '') head.push('# Your role', '', b.roleMd.trim(), '');
-  if (injected && b.skills.length > 0) {
+  if (roleMd !== undefined && roleMd.trim() !== '') head.push('# Your role', '', roleMd.trim(), '');
+  if (skills.length > 0) {
     head.push('# Skills', '', 'Read a skill\'s SKILL.md when it applies to what you are doing:');
-    for (const s of b.skills) head.push(`- ${s.name}: ${s.description} (${s.path})`);
+    for (const s of skills) head.push(`- ${s.name}: ${s.description} (${s.path})`);
     head.push('');
   }
+  return head;
+}
+
+export function composePrompt(b: RunBrief): string {
+  // A native run's role.md and skills are its agent's own already (plan R).
+  const head = b.native === true ? [] : roleSections(b.roleMd, b.skills);
   head.push('# How to work', '', b.kind === 'work' ? WORK_PROTOCOL : REVIEW_PROTOCOL, '', PRECEDENCE, '');
   return `${head.join('\n')}\n${told(b)}\n`;
 }
