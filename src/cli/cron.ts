@@ -49,8 +49,8 @@ interface Opened {
   home: string;
   appId: string | undefined;
   enabled: boolean | undefined;
-  /** Where the zone a job gets came from, when it is this shell's. */
-  shellZone: boolean;
+  /** Where the zone a job gets when none is given came from: the config's cron.tz, the gateway's record, or this shell. */
+  zoneSource: 'cron.tz' | 'gateway' | 'shell';
 }
 
 /** The gateway's settings and team, its database with the cron tables, and a service over them; or why not, said. */
@@ -68,10 +68,12 @@ function open(io: MtIo, what: string, refuseAs: (code: string, message: string) 
     db.close();
     return refuseAs('no_cron', `the database is at version ${v}; start the gateway of this build once to migrate it`);
   }
-  const recorded = settings.cron?.tz ?? readGatewayZone(settings.home);
-  const zone = recorded ?? processZone();
+  const configured = settings.cron?.tz;
+  const recorded = configured === undefined ? readGatewayZone(settings.home) : undefined;
+  const zone = configured ?? recorded ?? processZone();
+  const zoneSource = configured !== undefined ? 'cron.tz' : recorded !== undefined ? 'gateway' : 'shell';
   const service = new CronService({ db, roles: team.roles, workspaces: new Set(team.workspaces.keys()), zone });
-  return { service, db, home: settings.home, appId: settings.appId, enabled: settings.cron?.enabled, shellZone: recorded === undefined };
+  return { service, db, home: settings.home, appId: settings.appId, enabled: settings.cron?.enabled, zoneSource };
 }
 
 function jobJson(job: JobRow): Record<string, unknown> {
@@ -225,12 +227,13 @@ export async function cronOperator(command: string | undefined, rest: readonly s
           ...(values.key === undefined ? {} : { idempotencyKey: `operator:${values.key}` }),
         });
         if (!r.ok) return refusal(r);
-        if (values.tz === undefined && o.shellZone && !json) {
+        if (values.tz === undefined && o.zoneSource === 'shell' && !json) {
           io.err(`mt: times in ${r.job.tz}, this shell's zone, as no gateway has recorded its own; --tz names another`);
         }
         changed = r.existing ? undefined : r.job;
         lines = [`${r.existing ? 'already added, as' : 'added'} ${r.job.jobId}: next ${when(r.job, r.job.nextRunAt)}`, ...describeJob(r.job)];
-        out = { job: jobJson(r.job), existing: r.existing };
+        // Where the zone came from, for a new job given no --tz: a retry's job took its zone at its first add.
+        out = { job: jobJson(r.job), existing: r.existing, ...(values.tz === undefined && !r.existing ? { zone_source: o.zoneSource } : {}) };
         break;
       }
       case 'edit': {

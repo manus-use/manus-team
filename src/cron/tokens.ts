@@ -20,7 +20,7 @@ import type { BindingKey } from '../types.js';
  * judged by the turn that is running.
  */
 
-/** Tokens held at most; the oldest is dropped first (§7.1). */
+/** Chat tokens held at most; the oldest is dropped first (§7.1). A fire's is not counted. */
 export const MAX_TOKENS = 1_000;
 /** Turns' tiers kept per session, as the actor's mailbox holds at most 32. */
 export const TURNS_KEPT = 32;
@@ -42,6 +42,8 @@ export class CronTokens {
   readonly #max: number;
   /** By hash, in the order minted. */
   readonly #byHash = new Map<string, Held>();
+  /** The chat tokens among them. */
+  #chats = 0;
   /** A chat session's newest token's hash. */
   readonly #newest = new Map<string, string>();
   /** A session's turns' tiers, by the turn's idempotency key: true for operate. */
@@ -53,18 +55,25 @@ export class CronTokens {
     this.#max = deps.max ?? MAX_TOKENS;
   }
 
+  /**
+   * Held, and the oldest chat tokens dropped past the cap. Only chat tokens are
+   * counted: a fire's is bounded by max_running and dropped when its fire ends,
+   * and chat churn must not evict one from under its running fire.
+   */
   #hold(held: Held): void {
     const hash = hashToken(held.token);
     addSecrets([held.token]);
     this.#byHash.set(hash, held);
+    if (held.kind === 'chat') this.#chats += 1;
     for (const [oldest, h] of this.#byHash) {
-      if (this.#byHash.size <= this.#max) break;
-      this.#drop(oldest, h);
+      if (this.#chats <= this.#max) break;
+      if (h.kind === 'chat') this.#drop(oldest, h);
     }
   }
 
   #drop(hash: string, held: Held): void {
-    this.#byHash.delete(hash);
+    if (!this.#byHash.delete(hash)) return;
+    if (held.kind === 'chat') this.#chats -= 1;
     removeSecrets([held.token]);
     if (held.kind === 'chat' && this.#newest.get(held.sessionId) === hash) this.#newest.delete(held.sessionId);
   }

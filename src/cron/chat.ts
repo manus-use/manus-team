@@ -139,9 +139,10 @@ export class CronChat {
   }
 
   #run(arg: string, message: InboundMessage, key: BindingKey): string {
-    const [word = '', ...restWords] = arg.split(/[ \t]+/);
-    const verb = word.split('\n')[0]?.toLowerCase() ?? '';
-    const rest = arg.slice(word.length).replace(/^[ \t]+/, '');
+    // The verb ends at any white space, a newline too; the rest starts at what follows it.
+    const head = /^\s*(\S*)\s*/.exec(arg)?.[0] ?? '';
+    const verb = head.trim().toLowerCase();
+    const rest = arg.slice(head.length);
     if (verb === '' || verb === 'help') return this.#help();
     if (verb === 'edit') return 'There is no `/cron edit`: a job is changed at the terminal, with `mt cron edit`, or removed and added again here.';
     if (!(verb in TIERS)) return `Unknown \`/cron\` command \`${forDisplay(verb)}\`. ${this.#help()}`;
@@ -152,7 +153,8 @@ export class CronChat {
       if (by === undefined) return NO_UNION_ID;
     }
     const scope: CronChatScope = { channel: key.channel, account: key.appId, chat: key.conversationId };
-    const jobId = (restWords[0] ?? '').trim();
+    // From the first line only: what follows on later lines is not part of the id.
+    const jobId = (rest.split('\n')[0] ?? '').trim().split(/\s+/)[0] ?? '';
     switch (v) {
       case 'add':
         return this.#add(rest, message, key, by ?? '');

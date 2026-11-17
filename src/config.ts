@@ -522,6 +522,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     ...(maxRunningFrom === undefined ? {} : { maxRunningFrom }),
     ...(file.kanban.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: file.kanban.maxRunningPerRole }),
   };
+  const appId = envString(env, 'LARK_APP_ID') ?? file.lark.appId;
   const perRole = limits.maxRunningPerRole;
   if (perRole !== undefined && perRole > maxRunning) {
     // As a board's own max_running is held inside the gateway's (spec §16.6).
@@ -535,7 +536,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     configPath: text === undefined ? undefined : path,
     dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'team.db'),
     ...(file.kanban.enabled === undefined ? {} : { kanbanEnabled: file.kanban.enabled }),
-    ...((envString(env, 'LARK_APP_ID') ?? file.lark.appId) === undefined ? {} : { appId: envString(env, 'LARK_APP_ID') ?? file.lark.appId ?? '' }),
+    ...(appId === undefined ? {} : { appId }),
     ...(file.cron.enabled === undefined && file.cron.tz === undefined
       ? {}
       : { cron: { ...(file.cron.enabled === undefined ? {} : { enabled: file.cron.enabled }), ...(file.cron.tz === undefined ? {} : { tz: file.cron.tz }) } }),

@@ -157,6 +157,14 @@ describe('/cron', () => {
     expect(await say(r, `/cron remove ${jobId}`)).toBe(`Removed \`${jobId}\`; a fire under way is stopped.`);
   });
 
+  it('reads a newline after the verb as a space, and a job id from the first line only', async () => {
+    const r = router();
+    expect(await say(r, '/cron add\n"every 2h" worker Check.\nname: Checks')).toMatch(/^Added `c_[0-9a-z]+`, \*Checks\*: every 2h/);
+    const jobId = listJobs(h.db)[0]?.jobId ?? '';
+    expect(await say(r, `/cron show ${jobId}\nplease`)).toMatch(/^`c_.*\nrole worker, workspace default/);
+    expect(await say(r, `/cron pause\n${jobId}`)).toBe(`Paused \`${jobId}\`. \`/cron resume ${jobId}\` starts it again.`);
+  });
+
   it('answers /cron edit and an unknown command, and says cron is off when it is', async () => {
     const r = router();
     expect(await say(r, '/cron edit c_1 --prompt x')).toMatch(/^There is no `\/cron edit`/);

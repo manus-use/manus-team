@@ -313,6 +313,12 @@ export function parseSchedule(text: string): Parsed {
       return typeof ms === 'string' ? refused(ms) : { ok: true, schedule: { kind: 'every', text: trimmed, periodMs: ms } };
     }
     if (words.length !== 3) return refused(FORMS);
+    // `every 2 h`: a period with a space in it, not a day and a time.
+    if (/^[0-9]+$/.test(words[1] ?? '')) {
+      const n = words[1] ?? '';
+      const unit = (words[2] ?? '').charAt(0).toLowerCase();
+      return refused(/^[mhd]$/.test(unit) ? `write every ${n}${unit}, with no space` : `write every ${n}h, every ${n}m or every ${n}d, with no space`);
+    }
     const expr = clockTime(words[1] ?? '', words[2] ?? '');
     if (typeof expr === 'string') return refused(expr);
     const fields = cronFields(expr);
@@ -359,10 +365,13 @@ function formatter(tz: string): Intl.DateTimeFormat {
 
 /**
  * An IANA zone as Intl names it, or why not (§2.2): `utc` is `UTC`. Checked by
- * building a formatter with it, which refuses an unknown one.
+ * building a formatter with it, which refuses an unknown one; an offset, which
+ * Intl would take, is refused first.
  */
 export function checkZone(tz: string): { ok: true; zone: string } | { ok: false; message: string } {
   if (tz.trim() === '' || Buffer.byteLength(tz, 'utf8') > 64) return refused(`${JSON.stringify(tz)} is not a time zone: name one as the IANA database does, as Asia/Shanghai`);
+  // Intl takes an offset as a zone, but an offset has no daylight saving and is no IANA name (§2.2).
+  if (/^[+-]\d/.test(tz.trim())) return refused(`${JSON.stringify(tz)} is an offset, not a time zone: name one as the IANA database does, as Asia/Shanghai`);
   try {
     return { ok: true, zone: new Intl.DateTimeFormat('en-US', { timeZone: tz }).resolvedOptions().timeZone };
   } catch {

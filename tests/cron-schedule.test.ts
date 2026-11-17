@@ -197,6 +197,12 @@ describe('parseSchedule: ISO times', () => {
     expect(refusal(text)).toBe(message);
   });
 
+  it('refuses a period written with a space, saying how to write it', () => {
+    expect(refusal('every 2 h')).toBe('write every 2h, with no space');
+    expect(refusal('every 30 minutes')).toBe('write every 30m, with no space');
+    expect(refusal('every 3 weeks')).toBe('write every 3h, every 3m or every 3d, with no space');
+  });
+
   it('refuses a schedule over 100 bytes', () => {
     expect(refusal(`0 9 * * ${'1,'.repeat(50)}1`)).toBe('a schedule is at most 100 bytes');
   });
@@ -211,6 +217,12 @@ describe('checkZone', () => {
       message: '"Mars/Olympus" is not a time zone: name one as the IANA database does, as Asia/Shanghai',
     });
     expect(checkZone('').ok).toBe(false);
+  });
+
+  it('refuses an offset, which is no IANA zone', () => {
+    for (const tz of ['+05:30', '-08:00', '+8']) {
+      expect(checkZone(tz)).toEqual({ ok: false, message: `${JSON.stringify(tz)} is an offset, not a time zone: name one as the IANA database does, as Asia/Shanghai` });
+    }
   });
 });
 

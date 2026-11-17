@@ -65,6 +65,20 @@ describe('mt cron, the operator', () => {
     expect((await fx.run(['cron', 'add', 'every 5h', 'default', 'Check.', '--tz', 'UTC', '--json'])).out).toMatch(/"tz":"UTC"/);
   });
 
+  it("says in --json where an add's zone came from: cron.tz, the gateway's record, or this shell; none for --tz or a retried key", async () => {
+    setup([]);
+    const source = async (...extra: string[]) => JSON.parse((await fx.run(['cron', 'add', 'every 2h', 'default', 'Check.', '--json', ...extra])).out).zone_source;
+    expect(await source()).toBe('shell');
+    writeGatewayZone(fx.home, 'America/New_York');
+    expect(await source('--key', 'k1')).toBe('gateway');
+    expect(await source('--key', 'k1')).toBeUndefined();
+    expect(await source('--tz', 'UTC')).toBeUndefined();
+    fx.cleanup();
+    db.close();
+    setup();
+    expect(await source()).toBe('cron.tz');
+  });
+
   it('edits, with --no-script and --no-chat, pauses, resumes, runs and removes', async () => {
     setup();
     addSecrets(['sk-live-1234567890']);

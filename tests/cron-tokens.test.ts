@@ -101,6 +101,16 @@ describe("a fire's token", () => {
     expect(redactKnownSecrets(token)).toBe(token);
   });
 
+  it('is never dropped to make room for chat tokens, however many are minted', () => {
+    const tokens = new CronTokens({ db: h.db, max: 3 });
+    const fire = tokens.mintFire(7, 'c_1');
+    const first = tokens.envFor('s_0', KEY)?.['MT_CRON_TOKEN'] ?? '';
+    for (let i = 1; i <= 5; i += 1) tokens.envFor(`s_${i}`, KEY);
+    expect(tokens.lookup(fire)).toEqual({ kind: 'fire', token: fire, fireId: 7, jobId: 'c_1' });
+    expect(redactKnownSecrets(fire)).toBe(MASK);
+    expect(redactKnownSecrets(first)).toBe(first);
+  });
+
   it('reaches the fire’s agent as MT_CRON_TOKEN with MT_CRON_FIRE, and leaves the masker when the fire ends', async () => {
     const tokens = new CronTokens({ db: h.db });
     const c: CronHarness = cronHarness({ t: h, deps: { tokens } });
