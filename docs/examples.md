@@ -463,7 +463,7 @@ Two facts shape the scripts below:
 
 A script runs in the job's workspace, which the role's agents write to: keep the script itself
 outside it, under `$MT_HOME` for example, so it never runs what an agent left there. A gateway
-run by hand passes its scripts nothing of its own shell but those three: a setting only in that
+run by hand passes its scripts none of its own settings but those three: a setting only in its
 shell, such as `MT_ALLOW_CHATS`, belongs in the config file or the `.env`, where both read it.
 
 From chat each job is a `/cron add`, at operator tier; from a terminal, `mt cron add`, with
@@ -545,7 +545,7 @@ Use it to have someone look over the board each week for work that is stuck.
 
 <!-- example: cron board-review chat -->
 ```text
-/cron add "every friday 16:00" worker Below are the open tasks on the board web-app, each with its status and its age in that status. List each task that is blocked, and each whose age is 7d or more, with its id, title, assignee and age. One line each. If there are none, answer [nothing to report].
+/cron add "every friday 16:00" worker Below are the open tasks on the board web-app, each with its status and its age, how long since it was made, sent back, blocked or put in review. List each task that is blocked, and each whose age is 7d or more, with its id, title, assignee and age. One line each. If there are none, answer [nothing to report].
 name: Board review
 script: mt kanban task list --board web-app
 ```
@@ -553,16 +553,16 @@ script: mt kanban task list --board web-app
 <!-- example: cron board-review terminal -->
 ```
 mt cron add "every friday 16:00" worker \
-    "Below are the open tasks on the board web-app, each with its status and its age in that status. List each task that is blocked, and each whose age is 7d or more, with its id, title, assignee and age. One line each. If there are none, answer [nothing to report]." \
+    "Below are the open tasks on the board web-app, each with its status and its age, how long since it was made, sent back, blocked or put in review. List each task that is blocked, and each whose age is 7d or more, with its id, title, assignee and age. One line each. If there are none, answer [nothing to report]." \
     --name "Board review" --chat oc_xxx \
     --script "mt kanban task list --board web-app"
 ```
 
 What happens: each Friday at 16:00 the script lists the board's open tasks, a line each, with
-its id, its status, its `age`, how long it has been in that status (`45m`, `5h`, `3d`), its
-assignee and its title. The agent flags what is blocked, and what has sat for a week or more.
-Nothing is kept between fires: the age is the board's, from the time each task last changed
-status, so a `/cron run` in the middle of the week sees the same ages a Friday would.
+its id, its status, its `age`, how long since it was made, sent back, blocked or put in review
+(`45m`, `5h`, `3d`), its assignee and its title. The agent flags what is blocked, and what has
+sat for a week or more. Nothing is kept between fires: the age is the board's, from the time
+each task's phase last changed, so a `/cron run` in the middle of the week sees the same ages a Friday would.
 
 **The pattern:** the script reads the board, because a fire's agent cannot: in its shell the
 operator's `mt kanban` commands are refused. The board's own times say what is stale, so the

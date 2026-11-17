@@ -1062,8 +1062,8 @@ mt kanban task new "Book the venue for the offsite" --assignee lark:on_5d1e7a --
   would not answer there. Without `--chat`, no chat follows the task, so nobody is told when it
   is done or blocks: look with `mt kanban task show`. The board is still `--board`, whatever the
   chat. With `--key`, a second run answers the first task and names the chat that follows it.
-- `task list` has an `age` column, how long each task has been in its status, `45m`, `5h` or
-  `3d`; `--json` gives each task's `created_at` and `status_since`, in milliseconds.
+- `task list` has an `age` column, the time since each task's phase last changed (todo, ready
+  and running count as one, from when it was made or sent back), `45m`, `5h` or `3d`; `--json` gives each task's `created_at` and `status_since`, in milliseconds.
 - After a change, the running gateway is told to look for work at once, and to stop the agent
   of a run the change ended. If no gateway answers, `mt` says so, and why; the change stands,
   and the gateway acts on it at its next sweep, or when it next starts. Do not run the command

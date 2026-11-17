@@ -580,7 +580,8 @@ a running gateway, through the board's own service, and take effect at once.
   `workflow start` and `apply` take `--chat` and `--thread` too: every task of the instance is
   followed, and the start's reply is posted there. `task list --json` gives each task's
   `created_at` and `status_since`, in milliseconds, and the plain list an `age` column, the
-  time in its status: `45m`, `5h`, `3d`. Each
+  time since its phase last changed (todo, ready and running count as one, from when it was made
+  or sent back): `45m`, `5h`, `3d`. Each
   prints plain text, or with `--json` one line of JSON, `{"ok": true, ...}` or
   `{"ok": false, "code": "...", "message": "..."}`; each exits 0 when done, 1 when refused, and
   2 for a wrong command line, said on stderr. After `task new`, `assign`, `unblock`, `stop`,

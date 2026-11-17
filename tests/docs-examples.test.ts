@@ -561,7 +561,7 @@ describe('/cron add and mt cron add', () => {
       const answerOf = (output: string): { ok: boolean; instance_id?: string; existing?: boolean; follows?: unknown } =>
         JSON.parse(output.split('\n').find((l) => l.startsWith('{')) ?? 'null');
 
-      // The board review: the board's list, each task's age in its status between its status and its assignee, and no file kept.
+      // The board review: the board's list, each task's age since its phase last changed between its status and its assignee, and no file kept.
       const open = await h.mt(['kanban', 'task', 'new', 'Fix the flaky export', '--board', 'web-app', '--assignee', 'worker', '--json']);
       const openId = (JSON.parse(open.out) as { task_id: string }).task_id;
       for (const s of withMt.filter((x) => x.script.includes('task list'))) {
