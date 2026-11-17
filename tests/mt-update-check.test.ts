@@ -20,7 +20,7 @@ describe('mt update refuses before anything changes', () => {
     fx = await updateFake();
     const r = await fx.update(['--check'], { env: { MT_KANBAN_RUN: 'r_1' } });
     expect(r.code).toBe(1);
-    expect(r.err).toMatch(/^mt: mt update is an operator's command, not a board run's/);
+    expect(r.err).toMatch(/^mt: mt update is an operator's command, not an agent's/);
     expect(fx.runs).toEqual([]);
   });
 

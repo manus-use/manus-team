@@ -163,8 +163,8 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
   // A run starts a workflow, or applies a DAG of its own, with the worker's commands (spec §21.6).
   const message =
     command === 'workflow'
-      ? `${runShellRefusal(what)}; a board run starts a workflow with mt kanban start-workflow, and makes a DAG of its own with mt kanban apply-dag`
-      : runShellRefusal(what);
+      ? `${runShellRefusal(what, io.env)}; a board run starts a workflow with mt kanban start-workflow, and makes a DAG of its own with mt kanban apply-dag`
+      : runShellRefusal(what, io.env);
   // A preview's stdout is the DAG file it writes: its refusal goes to stderr, as the preview's own do.
   const json = command !== 'gate' && rest.includes('--json') && !(command === 'workflow' && sub === 'preview');
   if (json) io.out(jsonLine({ ok: false, code: 'operator_command', message }));
@@ -275,12 +275,12 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
     if (group === 'kanban') return await kanban(command, rest, io);
     if (group === 'service') {
       // An agent restarting or removing the gateway would end its own run, and every other.
-      if (inBoardRun(io.env)) return refuse(io, runShellRefusal('mt service'));
+      if (inBoardRun(io.env)) return refuse(io, runShellRefusal('mt service', io.env));
       return await serviceCommand(argv.slice(1), io);
     }
     if (group === 'update') {
       // As mt service: an agent updating the gateway would end its own run, and every other.
-      if (inBoardRun(io.env)) return refuse(io, runShellRefusal('mt update'));
+      if (inBoardRun(io.env)) return refuse(io, runShellRefusal('mt update', io.env));
       return await updateCommand(argv.slice(1), io);
     }
     if (group === 'workspace' && command === 'list') {

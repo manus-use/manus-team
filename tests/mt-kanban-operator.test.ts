@@ -151,8 +151,7 @@ describe('mt kanban board', () => {
         code: 1,
         out: '',
         err:
-          "mt: mt kanban board create is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or " +
-          'MT_KANBAN_TOKEN set. Run it from your own shell',
+          `mt: mt kanban board create is an operator's command, not an agent's; this shell has ${name} set. Run it from your own shell`,
       });
     }
     expect(boardsOf(gateway).map((b) => b.name)).toEqual(['default']);

@@ -59,7 +59,7 @@ export function workflowCheck(only: string | undefined, io: MtIo): number {
     io.err(`mt: ${[...new Set(unset)].join(', ')} not set in this shell, so a gate holding those values cannot be refused here`);
   }
   if (run) {
-    io.out("note: this is a board run's shell, which reads neither the gateway's .env nor its secrets, so a gate holding one of them cannot be refused here");
+    io.out("note: this is an agent's shell, which reads neither the gateway's .env nor its secrets, so a gate holding one of them cannot be refused here");
   }
   const say = (line: string): void => io.out(redactKnownSecrets(line));
   if (only !== undefined) {

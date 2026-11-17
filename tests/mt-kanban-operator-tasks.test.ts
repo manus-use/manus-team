@@ -462,15 +462,14 @@ describe("in a board run's shell", () => {
     for (const argv of [['task', 'new', 'x'], ['task', 'list'], ['task', 'assign', 'k_1', 'default'], ['task', 'unblock', 'k_1'], ['task', 'stop', 'k_1'], ['task', 'archive', 'k_1']]) {
       const r = await mt(argv, { env: RUN });
       expect(r.code).toBe(1);
-      expect(r.err).toMatch(/is an operator's command, not a board run's/);
+      expect(r.err).toMatch(/is an operator's command, not an agent's/);
     }
     expect(gateway.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 0 });
   });
 
   it('refuses before reading its command line or stdin: a wrong one, a body on stdin, a gate, in JSON with --json', async () => {
     const said = (what: string) =>
-      `mt: ${what} is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or MT_KANBAN_TOKEN set. ` +
-      'Run it from your own shell';
+      `mt: ${what} is an operator's command, not an agent's; this shell has MT_KANBAN_RUN set. Run it from your own shell`;
     let read = false;
     const out: string[] = [];
     const err: string[] = [];
@@ -511,8 +510,7 @@ describe("in a board run's shell", () => {
 
   it("refuses mt kanban task, with or without a verb, and names the verb it was given", async () => {
     const said = (what: string) =>
-      `mt: ${what} is an operator's command, not a board run's: this shell has MT_KANBAN_RUN or MT_KANBAN_TOKEN set. ` +
-      'Run it from your own shell';
+      `mt: ${what} is an operator's command, not an agent's; this shell has MT_KANBAN_RUN set. Run it from your own shell`;
     expect(await mt(['task'], { env: RUN })).toEqual({ code: 1, out: '', err: said('mt kanban task') });
     expect(await mt(['task', 'show', 'k_1'], { env: RUN })).toEqual({ code: 1, out: '', err: said('mt kanban task show') });
     expect(await mt(['task', 'comment', 'k_1', 'hi'], { env: RUN })).toEqual({ code: 1, out: '', err: said('mt kanban task comment') });
