@@ -5,6 +5,7 @@ import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { ConfigError, loadTeamSettings, type Env, type TeamSettings } from '../config.js';
 import { backupDatabase } from '../db/backup.js';
+import { runningFireCount } from '../db/cron.js';
 import { hasBoard, openAgentRunCount } from '../db/kanban-read.js';
 import { openDbReadOnly, type Db } from '../db/open.js';
 import { isSecretName, loadGatewayEnv } from '../gateway-env.js';
@@ -808,14 +809,23 @@ class Update {
     if (this.willRestart && runs !== undefined && runs > 0) {
       this.say(`${plural(runs, 'agent run')} ${runs === 1 ? 'is' : 'are'} open: the restart interrupts them, and they are retried as retry_on_crash allows`);
     }
+    // And the cron fires under way (the cron spec, §11): their slots are not fired again.
+    const fires = this.db === undefined ? 0 : runningFireCount(this.db);
+    if (this.willRestart && fires > 0) {
+      this.say(
+        fires === 1
+          ? '1 cron fire is running: the restart interrupts it, and its chat is told; it is not run again'
+          : `${fires} cron fires are running: the restart interrupts them, and their chats are told; they are not run again`,
+      );
+    }
     if (this.willRestart) {
       this.say(`the service is running (pid ${this.servicePid ?? 'unknown'}) and is restarted`);
     } else if (this.installed) {
       this.say('the service is stopped, and is not started: the update stops after the backup');
     } else {
       this.say('no service is installed: the update stops after the backup, and the gateway is yours to restart');
-      if (settings.kanbanEnabled !== true) {
-        this.say('kanban is off, so a gateway started by hand holds no lock to find: stop one that runs before going on');
+      if (settings.kanbanEnabled !== true && settings.cron?.enabled !== true) {
+        this.say('kanban and cron are off, so a gateway started by hand holds no lock to find: stop one that runs before going on');
       }
     }
 

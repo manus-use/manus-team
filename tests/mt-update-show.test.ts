@@ -2,8 +2,10 @@ import { chmodSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { readUpdateLock } from '../src/cli/update-lock.js';
-import { openDb } from '../src/db/open.js';
+import { runningFireCount, startFire } from '../src/db/cron.js';
+import { openDb, openDbReadOnly } from '../src/db/open.js';
 import { clearSecrets } from '../src/secrets.js';
+import { newJob } from './helpers/cron.js';
 import { ALICE, claimed, newTask } from './helpers/kanban.js';
 import { SECRET } from './helpers/service.js';
 import { NEW, OLD, TOP, updateFake, type UpdateFake } from './helpers/update.js';
@@ -143,6 +145,25 @@ describe('mt update --check', () => {
     expect(r.out).toContain('2 agent runs are open: the restart interrupts them, and they are retried as retry_on_crash allows');
   });
 
+  it('counts the cron fires under way, which the restart interrupts, and none on a database without the cron tables', async () => {
+    fx = await updateFake();
+    const db = openDb(fx.dbPath);
+    try {
+      expect((await fx.update(['--check'])).out).not.toContain('cron fire');
+      const job = newJob(db);
+      startFire(db, { jobId: job.jobId, trigger: 'schedule', slot: job.nextRunAt ?? 0, schedule: job.schedule, tz: job.tz, scheduledAt: job.nextRunAt ?? 0, maxRunning: 2 }, job.nextRunAt ?? 0);
+    } finally {
+      db.close();
+    }
+    expect((await fx.update(['--check'])).out).toContain('1 cron fire is running: the restart interrupts it, and its chat is told; it is not run again');
+    const read = openDbReadOnly(fx.dbPath);
+    expect(read === undefined ? -1 : runningFireCount(read)).toBe(1);
+    read?.close();
+    const bare = openDb(join(fx.root, 'bare.db'));
+    expect(runningFireCount(bare)).toBe(0);
+    bare.close();
+  });
+
   it('says a stopped service is not started, and that the update stops after the backup', async () => {
     fx = await updateFake({ service: 'stopped' });
     const r = await fx.update(['--check']);
@@ -154,7 +175,7 @@ describe('mt update --check', () => {
     fx = await updateFake({ service: 'none' });
     const r = await fx.update(['--check']);
     expect(r.out).toContain('no service is installed: the update stops after the backup, and the gateway is yours to restart');
-    expect(r.out).toContain('kanban is off, so a gateway started by hand holds no lock to find: stop one that runs before going on');
+    expect(r.out).toContain('kanban and cron are off, so a gateway started by hand holds no lock to find: stop one that runs before going on');
   });
 
   it("finds the database as the service would, never from this shell's MT_DB", async () => {

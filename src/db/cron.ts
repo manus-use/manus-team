@@ -307,6 +307,16 @@ export function runningFire(db: Db, jobId: string): FireRow | undefined {
   return r === undefined ? undefined : decodeFire(r);
 }
 
+/**
+ * How many fires are under way, on a database read as `mt update` reads it
+ * (the cron spec, §11): 0 for one without the cron tables.
+ */
+export function runningFireCount(db: Db): number {
+  const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cron_fires'").get();
+  if (table === undefined) return 0;
+  return db.prepare<[], { n: number }>('SELECT count(*) AS n FROM cron_fires WHERE started_at IS NOT NULL AND ended_at IS NULL').get()?.n ?? 0;
+}
+
 export function runningFires(db: Db): FireRow[] {
   return db
     .prepare<[], FireRaw>(`SELECT ${FIRE_COLS} FROM cron_fires WHERE started_at IS NOT NULL AND ended_at IS NULL ORDER BY fire_id`)
