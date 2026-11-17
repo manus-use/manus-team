@@ -135,25 +135,8 @@ const SCHEMAS: Record<WorkerCommand, Readonly<Record<string, Field>>> = {
 
 const ENVELOPE = ['run', 'token', 'command', 'input'];
 
-/**
- * The one request that needs no token (spec §7.3, §10): it asks for a
- * dispatcher pass and does nothing else. An operator's `mt kanban` sends it after
- * a change made beside the gateway, so the change is acted on at once rather
- * than at the next sweep. It names nothing and changes nothing, and a pass is
- * what the sweep does every minute anyway, so whoever can reach the socket
- * gains nothing by it. Throttled: a nudge's pass runs on the next tick, and at
- * most one in each NUDGE_INTERVAL_MS; a nudge inside that window asks for one
- * more at its end, which every later nudge in it shares, so the last is never
- * lost and a loop of them runs ten passes a second at most.
- */
-export const NUDGE = { nudge: true } as const;
-
-/** The least time between two passes nudges asked for. */
-export const NUDGE_INTERVAL_MS = 100;
-
-function isNudge(raw: Record<string, unknown>): boolean {
-  return raw['nudge'] === true && Object.keys(raw).length === 1;
-}
+/** The one request that needs no token: its throttle is the socket handler's (the cron spec, §7.4). */
+export { NUDGE, NUDGE_INTERVAL_MS } from './socket.js';
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -284,12 +267,6 @@ export class WorkerApi {
   readonly #service: KanbanService;
   readonly #changed: () => void;
   readonly #nameOf: ((principal: string) => string | undefined) | undefined;
-  /** When the last pass a nudge asked for ran, by `Date.now()`. */
-  #lastNudgePass = Number.NEGATIVE_INFINITY;
-  /** The pass a nudge asked for, waiting to run: the nudges after it until then ask for nothing more. */
-  #nudgePending: (() => void) | undefined;
-  /** Stopped with the gateway: a nudge asks for nothing more. */
-  #stopped = false;
 
   constructor(deps: WorkerApiDeps) {
     this.#db = deps.db;
@@ -303,32 +280,6 @@ export class WorkerApi {
         // The change is made; looking for work is the dispatcher's, and its sweep looks again.
       }
     };
-  }
-
-  /** A pending nudge's pass is dropped, and no nudge asks for one again: the gateway is stopping. */
-  stop(): void {
-    this.#stopped = true;
-    this.#nudgePending?.();
-    this.#nudgePending = undefined;
-  }
-
-  /** A pass for a nudge: on the next tick, or at the end of the window since the last one (NUDGE_INTERVAL_MS). */
-  #nudge(): void {
-    if (this.#stopped || this.#nudgePending !== undefined) return;
-    const run = (): void => {
-      this.#nudgePending = undefined;
-      this.#lastNudgePass = Date.now();
-      this.#changed();
-    };
-    const wait = this.#lastNudgePass + NUDGE_INTERVAL_MS - Date.now();
-    if (wait <= 0) {
-      const next = setImmediate(run);
-      this.#nudgePending = () => clearImmediate(next);
-    } else {
-      const later = setTimeout(run, wait);
-      later.unref();
-      this.#nudgePending = () => clearTimeout(later);
-    }
   }
 
   /**
@@ -346,10 +297,6 @@ export class WorkerApi {
 
   async #handle(raw: unknown, opts: HandleOptions): Promise<WorkerResponse> {
     if (!isRecord(raw)) return refused('bad_request', 'a request is a JSON object');
-    if (isNudge(raw)) {
-      this.#nudge();
-      return { ok: true };
-    }
     for (const key of Object.keys(raw)) {
       if (!ENVELOPE.includes(key)) return refused('bad_request', `a request has only ${ENVELOPE.join(', ')}`);
     }

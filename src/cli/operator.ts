@@ -5,10 +5,9 @@ import { boardSetting, isPerson, LIST_FILTERS, tooBig, type NewTaskCommand } fro
 import { DAG_LIMITS, checkDagShape, checkDagTasks, dagFile } from '../kanban/dag.js';
 import { WORKFLOW_MESSAGE_BYTES, type KanbanService, type WorkflowMade } from '../kanban/service.js';
 import { expand, listWorkflows, paramsLine, readWorkflow, usableMessage } from '../kanban/workflow.js';
-import { maskAll, workerSocketPath } from '../kanban/socket.js';
+import { maskAll, NUDGE, workerSocketPath } from '../kanban/socket.js';
 import { DEFAULT_BOARD, type BoardRow, type Contract, type Refusal, type Waiting } from '../kanban/types.js';
 import { WORKER_LIMITS } from '../kanban/limits.js';
-import { NUDGE } from '../kanban/worker.js';
 import { visible } from '../names.js';
 import { parse, UsageError } from './args.js';
 import { loadOperator, operatorName, withBoard } from './gate.js';

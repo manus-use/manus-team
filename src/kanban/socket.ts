@@ -472,3 +472,98 @@ export async function listenWorker(
     },
   };
 }
+
+/**
+ * The one request that needs no token (spec §7.3, §10): it asks for a
+ * dispatcher pass and a cron tick, and does nothing else. An operator's `mt`
+ * sends it after a change made beside the gateway, so the change is acted on at
+ * once rather than at the next sweep or tick. It names nothing and changes
+ * nothing, and both run on their own timers anyway, so whoever can reach the
+ * socket gains nothing by it.
+ */
+export const NUDGE = { nudge: true } as const;
+
+/** The least time between two passes nudges asked for. */
+export const NUDGE_INTERVAL_MS = 100;
+
+export interface SocketHandlers {
+  /** The board's worker API, `{run, token, command, input}`; absent with the board off. */
+  board?: (request: Record<string, unknown>, signal: AbortSignal | undefined) => unknown;
+  /** A cron command, `{cron, token, input}` or `{cron, run, token, input}`; absent with cron off. */
+  cron?: (request: Record<string, unknown>) => unknown;
+  /** What a nudge asks for: a dispatcher pass and a cron tick. Never throws into a request. */
+  nudged: () => void;
+}
+
+function isRequest(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * The socket's handler (the cron spec, §7.4): a request told by its envelope.
+ * The nudge's throttle is here, the one place that exists with either the board
+ * or cron on: a nudge's work runs on the next tick, and at most once in each
+ * NUDGE_INTERVAL_MS; a nudge inside that window asks for one more at its end,
+ * which every later nudge in it shares, so the last is never lost.
+ */
+export class SocketHandler {
+  readonly #handlers: SocketHandlers;
+  /** When the last nudge's work ran, by `Date.now()`. */
+  #last = Number.NEGATIVE_INFINITY;
+  /** The nudge's work waiting to run: the nudges after it until then ask for nothing more. */
+  #pending: (() => void) | undefined;
+  #stopped = false;
+
+  constructor(handlers: SocketHandlers) {
+    this.#handlers = handlers;
+  }
+
+  /** A pending nudge's work is dropped, and no nudge asks for any again: the gateway is stopping. */
+  stop(): void {
+    this.#stopped = true;
+    this.#pending?.();
+    this.#pending = undefined;
+  }
+
+  #nudge(): void {
+    if (this.#stopped || this.#pending !== undefined) return;
+    const run = (): void => {
+      this.#pending = undefined;
+      this.#last = Date.now();
+      try {
+        this.#handlers.nudged();
+      } catch {
+        // Looking for work is the dispatcher's and the scheduler's; their timers look again.
+      }
+    };
+    const wait = this.#last + NUDGE_INTERVAL_MS - Date.now();
+    if (wait <= 0) {
+      const next = setImmediate(run);
+      this.#pending = () => clearImmediate(next);
+    } else {
+      const later = setTimeout(run, wait);
+      later.unref();
+      this.#pending = () => clearTimeout(later);
+    }
+  }
+
+  async handle(raw: unknown, signal?: AbortSignal): Promise<unknown> {
+    if (!isRequest(raw)) return { ok: false, code: 'bad_request', message: 'a request is a JSON object' };
+    if (raw['nudge'] === true && Object.keys(raw).length === 1) {
+      this.#nudge();
+      return { ok: true };
+    }
+    if (Object.hasOwn(raw, 'cron')) {
+      const cron = this.#handlers.cron;
+      if (cron === undefined) {
+        return { ok: false, code: 'cron_off', message: 'cron is off on this gateway: an operator turns it on with cron.enabled: true in config.yaml, and a restart' };
+      }
+      return await cron(raw);
+    }
+    const board = this.#handlers.board;
+    if (board === undefined) {
+      return { ok: false, code: 'kanban_off', message: 'the task board is off on this gateway: an operator turns it on with kanban.enabled: true in config.yaml, and a restart' };
+    }
+    return await board(raw, signal);
+  }
+}

@@ -4,19 +4,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { KanbanService } from '../src/kanban/service.js';
-import { listenWorker, type WorkerServer } from '../src/kanban/socket.js';
-import { NUDGE, NUDGE_INTERVAL_MS, WorkerApi } from '../src/kanban/worker.js';
+import { listenWorker, NUDGE, NUDGE_INTERVAL_MS, SocketHandler, type WorkerServer } from '../src/kanban/socket.js';
+import { WorkerApi } from '../src/kanban/worker.js';
 import { ManualClock, testDb, type TestDb } from './helpers/db.js';
 import { DEFAULT_ROLES } from './helpers/dispatch.js';
 import { WORKSPACES } from './helpers/kanban.js';
 
 /**
  * The nudge (spec §7.3): the one request with no token, which asks for a
- * dispatcher pass and does nothing else.
+ * dispatcher pass and a cron tick and does nothing else, throttled at the
+ * socket's handler (the cron spec, §7.4).
  */
 
 let t: TestDb;
-let api: WorkerApi;
+let api: SocketHandler;
 let passes: number;
 
 beforeEach(() => {
@@ -28,7 +29,8 @@ beforeEach(() => {
     workspaces: WORKSPACES,
     clock: new ManualClock(),
   });
-  api = new WorkerApi({ db: t.db, service, changed: () => (passes += 1) });
+  const board = new WorkerApi({ db: t.db, service });
+  api = new SocketHandler({ board: (request) => board.handle(request), nudged: () => (passes += 1) });
 });
 
 afterEach(() => t.close());
@@ -78,7 +80,7 @@ describe('the nudge', () => {
     }
   });
 
-  it('runs no pass a nudge asked for once the API is stopped', async () => {
+  it('runs no pass a nudge asked for once the handler is stopped', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setImmediate', 'clearImmediate', 'Date'] });
     try {
       await api.handle({ ...NUDGE });

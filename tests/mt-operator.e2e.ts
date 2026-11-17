@@ -14,7 +14,7 @@ import { Dispatcher } from '../src/kanban/dispatcher.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { writeMtShim } from '../src/kanban/shim.js';
 import { KanbanSink } from '../src/kanban/sink.js';
-import { listenWorker, workerSocketPath, type WorkerServer } from '../src/kanban/socket.js';
+import { listenWorker, SocketHandler, workerSocketPath, type WorkerServer } from '../src/kanban/socket.js';
 import { WorkerApi } from '../src/kanban/worker.js';
 import { clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
@@ -113,7 +113,9 @@ async function gateway(mode: string): Promise<Gateway> {
   });
   const d = dispatcher;
   const api = new WorkerApi({ db: t.db, service, changed: () => d.pass() });
-  const server = await listenWorker(socket, (request, signal) => api.handle(request, { signal }));
+  // As the gateway's: the nudge is the socket handler's, the rest the board's (the cron spec, §7.4).
+  const handler = new SocketHandler({ board: (request, signal) => api.handle(request, signal === undefined ? {} : { signal }), nudged: () => d.pass() });
+  const server = await listenWorker(socket, (request, signal) => handler.handle(request, signal));
   g = { t, dispatcher, registry, server, dir, home, log };
   return g;
 }

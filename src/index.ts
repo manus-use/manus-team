@@ -26,7 +26,7 @@ import { writeMtShim } from './kanban/shim.js';
 import { CardPoster } from './kanban/cards.js';
 import { PeopleDirectory } from './kanban/people.js';
 import { KanbanSink } from './kanban/sink.js';
-import { claimSocketPath, listenWorker, lockGateway, workerSocketPath, type GatewayLock, type WorkerServer } from './kanban/socket.js';
+import { claimSocketPath, listenWorker, lockGateway, SocketHandler, workerSocketPath, type GatewayLock, type WorkerServer } from './kanban/socket.js';
 import { WorkerApi } from './kanban/worker.js';
 import { TaskDirectories } from './kanban/worktree.js';
 import { listWorkflows, workflowLines } from './kanban/workflow.js';
@@ -267,7 +267,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
 
   // Opt in: off unless kanban.enabled is set (spec §12). Chat runs as it always did
   // without it, and `/kanban` says the board is off.
-  let worker: { api: WorkerApi; socket: string } | undefined;
+  let worker: { handler: SocketHandler; socket: string } | undefined;
   let kanbanChat: KanbanChat | undefined;
   let notifier: Notifier | undefined;
   let cards: CardPoster | undefined;
@@ -326,7 +326,12 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       }),
     });
     // A worker's create, link or report can make a task claimable.
-    worker = { api: new WorkerApi({ db, service, changed: () => dispatcher?.pass(), nameOf: (principal) => people.nameOf(principal) }), socket };
+    const api = new WorkerApi({ db, service, changed: () => dispatcher?.pass(), nameOf: (principal) => people.nameOf(principal) });
+    // One handler, by envelope; a nudge's throttle is its own (the cron spec, §7.4).
+    worker = {
+      handler: new SocketHandler({ board: (request, signal) => api.handle(request, signal === undefined ? {} : { signal }), nudged: () => dispatcher?.pass() }),
+      socket,
+    };
     // /kanban in chat (spec §9.1): through the same service, with the router's tiers.
     kanbanChat = new KanbanChat({
       service,
@@ -423,9 +428,9 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       await dispatcher?.boot();
       // Then the socket, before the first pass can start a run that would report to it.
       if (worker !== undefined) {
-        const { api, socket } = worker;
+        const { handler, socket } = worker;
         // A report still running its gates when the gateway stops is told so, and answered.
-        workerServer = await listenWorker(socket, (request, signal) => api.handle(request, { signal }), { note });
+        workerServer = await listenWorker(socket, (request, signal) => handler.handle(request, signal), { note });
         note(`kanban: runs report through ${socket}`);
       }
 
@@ -496,7 +501,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       // them (spec §8.4), so the stop itself never fails a run.
       await workerServer?.close();
       // And a pass a nudge asked for, still waiting for its window: the dispatcher is stopped.
-      worker?.api.stop();
+      worker?.handler.stop();
       // A notice being sent finishes while the channel is still connected; bounded by the drain, not a
       // send's 30 s, so a hung send never holds the stop: its batch goes again after the next boot.
       // Together, under one bound: the notices, the cards, and the card presses being
