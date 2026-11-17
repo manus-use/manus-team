@@ -7,7 +7,7 @@ import { listWorkflows, paramsLine, readWorkflow, type Workflow, type WorkflowFa
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { loadTeam, teamSecrets } from '../team.js';
 import { refuse } from './args.js';
-import { inBoardRun } from './gate.js';
+import { inAgentRun } from './gate.js';
 import type { MtIo } from './mt.js';
 
 /**
@@ -36,8 +36,8 @@ function okLine(w: Workflow): string {
 }
 
 export function workflowCheck(only: string | undefined, io: MtIo): number {
-  // As roleCheck reads it (spec §2.6): never the gateway's .env in a board run's shell.
-  const run = inBoardRun(io.env);
+  // As roleCheck reads it (spec §2.6): never the gateway's .env in an agent's shell.
+  const run = inAgentRun(io.env);
   let env: Env = io.env;
   const unset: string[] = [];
   let facts: WorkflowFacts;

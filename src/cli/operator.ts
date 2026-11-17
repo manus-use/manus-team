@@ -24,7 +24,7 @@ import { boardsText, dryRunText, instanceText, instancesText, line, listText, ma
  * board's database beside a running gateway, through `KanbanService`, as `mt
  * kanban gate` does, and record who acted as `operator:<login>`.
  *
- * **Never the worker's.** These refuse to run in a board run's shell. The
+ * **Never the worker's.** These refuse to run in an agent's shell. The
  * worker's commands (spec §7.3), `mt kanban show`, `comment`, `link` and the
  * rest, are named without a group, take no arguments and read JSON on stdin;
  * these are under `task`, and take their task and text as arguments.

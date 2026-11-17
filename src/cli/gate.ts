@@ -28,10 +28,9 @@ import type { MtIo } from './mt.js';
  * there. A `passEnv` name unset in this shell
  * is said to be unchecked.
  *
- * **Not a security boundary.** They refuse a board run's environment
- * (`MT_KANBAN_RUN`, `MT_KANBAN_TOKEN`), so an agent does not define gates by
- * accident. An agent runs as the operator's user and could unset those, as it
- * could already edit config.yaml or a role's files.
+ * **Not a security boundary.** They refuse an agent's environment (`inAgentRun`),
+ * so an agent does not define gates by accident. An agent runs as the operator's
+ * user and could unset those, as it could already edit config.yaml or a role's files.
  */
 
 /** Who defined a gate from a shell: the operator, by their login. */
@@ -46,11 +45,22 @@ export function operatorName(io: MtIo): string {
 }
 
 /**
- * A board run's shell: the environment the gateway gives a run's agent (spec
- * §7.2). The operator's commands, `mt kanban task`, `board` and `gate`, refuse
- * to run in one.
+ * An agent's shell: a board run's (spec §7.2), a chat turn's or a cron fire's
+ * (the cron spec, §6.4, §7), known by the token in its environment. Every
+ * operator's command refuses to run in one, and none reads the gateway's .env
+ * there, so no agent acts as the operator by accident, or is handed the file's
+ * secrets.
  */
-export function inBoardRun(env: Env): boolean {
+export function inAgentRun(env: Env): boolean {
+  return AGENT_VARIABLES.some((name) => env[name] !== undefined);
+}
+
+/**
+ * A board run's shell alone: where `mt kanban <command>` is the worker CLI's,
+ * sent to the socket, and where a run starts a workflow (spec §7.3, §21.6). A
+ * chat turn's or a fire's shell has no run to report for.
+ */
+export function hasBoardRun(env: Env): boolean {
   return env['MT_KANBAN_RUN'] !== undefined || env['MT_KANBAN_TOKEN'] !== undefined;
 }
 
@@ -96,7 +106,7 @@ export interface OpenOptions {
  */
 export function loadOperator(io: MtIo, what: string, opts: OpenOptions = {}): { settings: TeamSettings; team: Team } | number {
   const no = opts.refuse ?? ((_code: string, message: string) => refuse(io, message));
-  if (inBoardRun(io.env)) {
+  if (inAgentRun(io.env)) {
     return no('operator_command', runShellRefusal(what, io.env));
   }
   const unset: string[] = [];

@@ -22,7 +22,7 @@ import { UNCHANGED_STEPS, UpdateLock, readUpdateLock, type UpdateLockState, type
  * changes anything, goes back by itself while going back is safe, keeps the
  * way back once it is not, and says where it stopped.
  *
- * 1. Refused in a board run's shell, by `runMt`.
+ * 1. Refused in an agent's shell, by `runMt`.
  * 2. Check: the two locks; the checkout this mt runs from, which the service
  *    must run; the service's state; a branch with an upstream; clean; then
  *    `git fetch`, and the branch an ancestor of its upstream.
