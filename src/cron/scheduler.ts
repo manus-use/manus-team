@@ -42,6 +42,7 @@ import { CRON_OWNER } from './owner.js';
 import { SCRIPT_PROMPT_BYTES, answerMessages, composeFirePrompt, isNothing, outcomeLine } from './prompt.js';
 import { isOneOff, lateLimit, missedSlots, parseSchedule, runAfter, type Schedule } from './schedule.js';
 import type { CronService } from './service.js';
+import type { CronTokens } from './tokens.js';
 
 /**
  * The scheduler (the cron spec, §4, §5): the one component that fires cron
@@ -110,6 +111,8 @@ export interface CronSchedulerDeps {
   sweepRendersAtBoot?: boolean;
   /** The socket and the shim a fire's agent finds the gateway's mt through (§7.2). */
   worker?: WorkerAccess;
+  /** Mints a fire's token, `MT_CRON_TOKEN`, held while it runs (§7.2); absent, a fire gets none. */
+  tokens?: CronTokens;
 }
 
 /** Where a fire's session is bound (§5.2): the cron channel, at the job and the fire. */
@@ -137,6 +140,8 @@ interface Entry {
   abort: AbortController;
   /** The native package its agent runs, held in the in-use set while it runs. */
   packageDir?: string;
+  /** Its token, in the masker until it leaves the set. */
+  token?: string | undefined;
   /** Its session's environment, held only here. */
   env: Record<string, string>;
   /** Its agent's own arguments. */
@@ -575,6 +580,7 @@ export class CronScheduler {
       leave: () => {
         if (!this.#entries.delete(fire.fireId)) return;
         if (entry.packageDir !== undefined) this.#packages.release(entry.packageDir);
+        if (entry.token !== undefined) this.#deps.tokens?.drop(entry.token);
         leave();
       },
     };
@@ -650,7 +656,13 @@ export class CronScheduler {
       return undefined;
     }
     const rendered = this.#render(entry, role, bytes);
-    entry.env = { ...rendered?.env, ...this.#workerEnv(role), MT_CRON_FIRE: String(entry.fireId) };
+    entry.token = this.#deps.tokens?.mintFire(entry.fireId, job.jobId);
+    entry.env = {
+      ...rendered?.env,
+      ...this.#workerEnv(role),
+      MT_CRON_FIRE: String(entry.fireId),
+      ...(entry.token === undefined ? {} : { MT_CRON_TOKEN: entry.token }),
+    };
     entry.args = rendered?.args ?? [];
     const previous = lastResult(this.#deps.db, job.jobId);
     return composeFirePrompt({

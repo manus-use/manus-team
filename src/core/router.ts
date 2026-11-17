@@ -17,7 +17,7 @@ import type {
 } from '../types.js';
 import type { Authorizer } from '../policy/auth.js';
 import { parseCommand, renderHelp, type CommandSpec } from './commands.js';
-import { replyUuid } from './ids.js';
+import { replyUuid, turnIdempotencyKey } from './ids.js';
 import { LaneShed, Lanes } from './lane.js';
 import { MailboxFull, SessionHeld, type SessionActor } from './session-actor.js';
 import { canMutate } from './status.js';
@@ -102,6 +102,12 @@ export interface RouterDeps {
   appId: string;
   /** The board's commands; absent when `kanban.enabled` is off, and `/kanban` says so. */
   kanban?: KanbanCommands;
+  /**
+   * Told of each turn just before it is submitted, with the key the actor will
+   * give it and whether its sender has operate tier: a chat agent's `mt cron add`
+   * is judged by its running turn's (the cron spec, §7.1). `CronTokens`, with cron on.
+   */
+  cronTurns?: { turnSubmitted(sessionId: string, idempotencyKey: string, operate: boolean): void };
   clock?: Clock;
   note?: (line: string) => void;
 }
@@ -226,6 +232,11 @@ export class Router {
 
     let queued: Promise<unknown>;
     try {
+      this.#deps.cronTurns?.turnSubmitted(
+        session.id,
+        turnIdempotencyKey(message.appId, message.messageId),
+        this.#deps.authorizer.hasTier(message.sender, 'operate'),
+      );
       queued = actor.submit({
         messageId: message.messageId,
         appId: message.appId,
