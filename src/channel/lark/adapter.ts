@@ -552,6 +552,68 @@ function byline(openId: string): object | undefined {
   };
 }
 
+/**
+ * The reply card's element ids (channel spec §4.5): one markdown element a part,
+ * named so each part's update goes to its own element.
+ */
+export const REPLY_ELEMENTS: Readonly<Record<keyof CardParts, string>> = { tools: 'tools', answer: 'answer', status: 'status' };
+
+/** The parts in reading order: the tool line, the answer, the status. */
+const REPLY_ORDER: ReadonlyArray<keyof CardParts> = ['tools', 'answer', 'status'];
+
+/**
+ * What a part with nothing to show is sent as: a zero-width space. Lark is never
+ * given an empty element, which it may refuse, and draws this as nothing.
+ */
+export const EMPTY_PART = '\u200b';
+
+/** The card's preview in the chat list while it streams. */
+export const REPLY_SUMMARY_OPEN = 'Working…';
+
+/** The longest preview a finished card is given, in characters, as the SDK's own streaming card cuts its. */
+const SUMMARY_MAX = 50;
+
+/** A part as an element's content: itself, or `EMPTY_PART`. */
+export function partContent(part: string): string {
+  return part === '' ? EMPTY_PART : part;
+}
+
+/**
+ * The reply card, in Lark's card schema 2.0 (channel spec §4.5): streaming, so
+ * Lark's client types each update, with the SDK's own streaming card's pace, one
+ * character every 70 ms, `fast` showing what is buffered when a new update
+ * comes; and three markdown elements, one a part, in reading order. The parts
+ * were escaped and masked by the renderer.
+ */
+export function replyCard(parts: CardParts): object {
+  return {
+    schema: '2.0',
+    config: {
+      update_multi: true,
+      streaming_mode: true,
+      summary: { content: REPLY_SUMMARY_OPEN },
+      streaming_config: {
+        print_frequency_ms: { default: 70 },
+        print_step: { default: 1 },
+        print_strategy: 'fast',
+      },
+    },
+    body: {
+      elements: REPLY_ORDER.map((part) => ({ tag: 'markdown', element_id: REPLY_ELEMENTS[part], content: partContent(parts[part]) })),
+    },
+  };
+}
+
+/**
+ * A finished card's preview in the chat list: the answer, else the status, else
+ * the tool line, on one line, cut to `SUMMARY_MAX` characters on a code point.
+ */
+export function replySummary(parts: CardParts): string {
+  const text = [parts.answer, parts.status, parts.tools].find((p) => p.trim() !== '') ?? '';
+  const chars = Array.from(text.replace(/\s+/g, ' ').trim());
+  return chars.length <= SUMMARY_MAX ? chars.join('') : `${chars.slice(0, SUMMARY_MAX - 1).join('')}…`;
+}
+
 /** The HTTP status of an error axios threw, if Lark answered at all. */
 function httpStatus(err: unknown): number | undefined {
   if (typeof err !== 'object' || err === null) return undefined;
