@@ -70,7 +70,8 @@ A person's tier is computed from three sources, every time it is asked for:
 3. **The person's active grant**, if any: one row of `tier_grants` with no `revoked_at`, of tier
    `talk` or `operate` (§3.1). A person has at most one active grant.
 
-Then, as one pure function, `tiersOf(lists, openId, grant)` in `src/policy/auth.ts`:
+Then, as one pure function, `tiersOf(lists, openId: string | null, grant)` in `src/policy/auth.ts`,
+an open_id of null matching no list (a person `people` does not hold, §4.3):
 
 - **talk** = the open_id is in `allowTalk`, **or** there is a grant (of either tier);
 - **operate** = talk, **and** (the open_id is in `allowOperate`, **or** the grant is `operate`).
@@ -172,7 +173,9 @@ UPDATE schema_version SET version = 11;
   keep in step (WRITERS.md, "one transaction per fact").
 - **`ended`** is `revoked` for a revocation, and `replaced` for a talk grant ended by an operate
   grant to the same person, in the same transaction that inserts it (§5.2): one active row a
-  person, so the unique index holds the rule "at most one active grant".
+  person, so the unique index holds the rule "at most one active grant". A row ended `replaced`
+  takes its `revoked_at`, `revoked_by`, `revoked_via` and `revoked_chat` from the operate grant's
+  `granted_*`, the same timestamp included, so the two rows say one change.
 - **No name is stored.** A grant shows the name `people` last holds for its union_id (§7), so a
   renamed person shows their new name, and the table holds no free text to mask.
 - **No foreign key to `people`.** `people` is keyed by `(app_id, union_id)` too, but a grant must
@@ -265,8 +268,9 @@ At once, everywhere a tier is checked, because each of these asks the `Authorize
 - **A person named by principal, in the gateway**: `PeopleDirectory.canTalk` (assignees and
   reviewers, kanban §4.2) and the card poster's check at each send (`CardPoster`, `canTalk`).
   `PeopleDeps.canTalk(openId)` becomes `canTalk(person: { openId: string | null; unionId: string
-  })`, so the gateway's callback gives the `Authorizer` a principal with its union_id, and a grant
-  is found. `PeopleDirectory.canTalk(principal)` calls it whether or not `people` has a row for the
+  })`. The gateway's callback calls `tiersOf` (§2.1) directly, with the configuration's lists and
+  the `GrantReader`'s `tierOf(person.unionId)`, the same two the `Authorizer` holds, rather than
+  `Authorizer.canTalk` with a principal made up for it, so a grant is found by its union_id. `PeopleDirectory.canTalk(principal)` calls it whether or not `people` has a row for the
   union_id, with `openId` null when it has none: the grant is found by the union_id, and the
   configuration's lists, which hold open_ids, then match nothing. *Why change the signature:*
   today's callback passes `unionId: null`, which would hide every grant from the board, and today's
@@ -762,7 +766,10 @@ counted once.
   user, and could unset the variable, edit `config.yaml`, or write `tier_grants` itself, as kanban
   §10 says of the board's operator commands.
 - **Other operator commands stay reachable from a chat agent's shell with cron off**, by the user's
-  choice (§6.3): `mt kanban task`, `mt service` and the rest, as today.
+  choice (§6.3): `mt kanban task`, `mt service` and the rest, as today. So with cron off a chat
+  agent's shell can still add a gate (`mt kanban gate add`), or change a cron script, whose command
+  runs `mt auth` in an operator's shell, as gates and scripts are (§6.3). That follows from the
+  user's choice, and is no stronger than unsetting the variable.
 - **The terminal judges by its own read of the configuration**, which may differ from the running
   gateway's until a restart (§5.1).
 - **A grant needs a union_id**: an app that cannot read user ids can grant nobody, and its people
