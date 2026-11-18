@@ -251,7 +251,7 @@ export class Authorizer {
       return {
         ok: false,
         reason: 'sender_not_allowed',
-        detail: 'You are not on the allowlist.',
+        detail: 'You do not have talk tier here.',
       };
     }
 
@@ -267,7 +267,7 @@ export class Authorizer {
       detail:
         tier === 'operate'
           ? 'That command changes session state and needs operator permission.'
-          : 'You are not on the allowlist.',
+          : 'You do not have talk tier here.',
     };
   }
 }

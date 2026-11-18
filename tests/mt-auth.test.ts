@@ -1,4 +1,4 @@
-import { copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { activeGrant, grantTier } from '../src/db/grants.js';
@@ -113,6 +113,10 @@ describe('mt auth grant', () => {
     db.close();
     rmSync(path);
     expect(await auth(['list'])).toEqual({ code: 1, out: '', err: `mt: there is no database at ${path}: the gateway creates it when it first starts` });
+    // A database that cannot be opened is a failure with its code, not a crash.
+    writeFileSync(path, 'not a database, only words in a file named like one\n'.repeat(200));
+    expect(await json(['list'])).toMatchObject({ ok: false, code: 'failed', message: expect.stringMatching(/^the database failed: /) });
+    expect(await auth(['grant', 'lark:on_carol', 'talk'])).toMatchObject({ code: 1, out: '', err: expect.stringMatching(/^mt: the database failed: /) });
   });
 
   it('takes a person and a tier, and nothing else', async () => {

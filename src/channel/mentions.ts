@@ -36,7 +36,7 @@ export function mentionedPerson(name: string, message: InboundMessage): Mentione
     };
   }
   if (found.some((m) => m.isBot === true)) {
-    return { ok: false, reason: 'bot', reply: `${label(name, 80)} is a bot, and a bot's tier is configuration's.` };
+    return { ok: false, reason: 'bot', reply: `${label(name, 80)} is a bot, and a bot is never given a tier here.` };
   }
   const unionId = unionIds[0];
   if (unionId === undefined) {

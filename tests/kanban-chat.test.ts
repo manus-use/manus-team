@@ -227,7 +227,7 @@ describe('people, named by @-mention', () => {
     );
     // A bot is not a person, and cannot be given work.
     expect(await say('task new t\nassignee: @Helper', OWNER, [{ key: '@_user_9', name: 'Helper', openId: 'ou_helper', unionId: null, isBot: true }])).toBe(
-      "@Helper is a bot, and a bot's tier is configuration's.",
+      '@Helper is a bot, and a bot is never given a tier here.',
     );
     expect(taskCount()).toBe(0);
   });
@@ -711,7 +711,7 @@ describe("a person's card", () => {
     expect(await press(run, 'done', BOB, 'x')).toBe('This card is for Alice Smith (lark:on\\_alice).');
     expect(await press(run, 'done', ALICE, 'x', { run: 'r_other' })).toBe('That button does not match the card it is on.');
     expect(await press(run, 'done', { openId: 'ou_stranger', unionId: 'on_stranger', displayName: 'S' }, 'x')).toBe(
-      'You are not on the allowlist.',
+      'You do not have talk tier here.',
     );
     await chat.idle(5_000);
     expect(redrawn).toEqual([]);

@@ -765,7 +765,7 @@ export class KanbanChat {
       return 'That button does not match the card it is on.';
     }
     const presser = action.operator;
-    if (!this.#deps.hasTier(presser, 'talk')) return 'You are not on the allowlist.';
+    if (!this.#deps.hasTier(presser, 'talk')) return 'You do not have talk tier here.';
     this.#deps.people.saw(seen(presser));
     const by = principalOf(presser);
     if (by === undefined) return NO_UNION_ID;

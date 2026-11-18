@@ -85,7 +85,14 @@ function open(io: MtIo): Opened | Outcome {
     return { ok: false, code: 'not_migrated', message: `there is no database at ${settings.dbPath}: the gateway creates it when it first starts` };
   }
   const db = openDb(settings.dbPath);
-  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tier_grants'").get() === undefined) {
+  let migrated: boolean;
+  try {
+    migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tier_grants'").get() !== undefined;
+  } catch (err) {
+    db.close();
+    throw err;
+  }
+  if (!migrated) {
     db.close();
     return { ok: false, code: 'not_migrated', message: `the database at ${settings.dbPath} has no tier grants yet: start the gateway once, so it is migrated` };
   }
@@ -253,18 +260,16 @@ export function authCommand(argv: readonly string[], io: MtIo): number {
   } else {
     throw new UsageError('auth takes grant, revoke or list');
   }
-  const opened = open(io);
+  let opened: Opened | Outcome | undefined;
   let outcome: Outcome;
-  if ('db' in opened) {
-    try {
-      outcome = run(opened);
-    } catch (err) {
-      outcome = { ok: false, code: 'failed', message: `the database failed: ${redactKnownSecrets(err instanceof Error ? err.message : String(err))}` };
-    } finally {
-      opened.db.close();
-    }
-  } else {
-    outcome = opened;
+  try {
+    // Opened in here, so a database that cannot be opened is `failed` as one that fails later is.
+    opened = open(io);
+    outcome = 'db' in opened ? run(opened) : opened;
+  } catch (err) {
+    outcome = { ok: false, code: 'failed', message: `the database failed: ${redactKnownSecrets(err instanceof Error ? err.message : String(err))}` };
+  } finally {
+    if (opened !== undefined && 'db' in opened) opened.db.close();
   }
   if (!outcome.ok) {
     if (json) io.out(jsonLine({ ok: false, code: outcome.code, message: outcome.message }));

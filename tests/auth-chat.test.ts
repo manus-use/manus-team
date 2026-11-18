@@ -149,9 +149,15 @@ describe('/auth grant', () => {
     expect(say('grant @Carol Wu talk', OWNER, [{ ...AT_CAROL, unionId: null }])).toBe(
       'Lark did not say who @Carol Wu is (no union_id came with the mention). Ask the operator to check the app can read user ids.',
     );
-    expect(say('grant @Carol Wu talk', OWNER, [AT_CAROL, { ...AT_CAROL, key: '@_user_9', unionId: 'on_other' }])).toMatch(/^More than one person mentioned is called @Carol Wu/);
+    // A grant takes no `lark:<union_id>`, so the ambiguous mention points at one mention or the terminal instead.
+    expect(say('grant @Carol Wu talk', OWNER, [AT_CAROL, { ...AT_CAROL, key: '@_user_9', unionId: 'on_other' }])).toBe(
+      'More than one person mentioned is called @Carol Wu; mention only one of them in the command, or use `mt auth grant` at the terminal.',
+    );
+    expect(say('revoke @Carol Wu', OWNER, [AT_CAROL, { ...AT_CAROL, key: '@_user_9', unionId: 'on_other' }])).toBe(
+      'More than one person mentioned is called @Carol Wu; say which with `lark:<union_id>`.',
+    );
     expect(say('grant @Helper talk', OWNER, [{ key: '@_user_7', name: 'Helper', openId: 'ou_helper', unionId: null, isBot: true }])).toBe(
-      "@Helper is a bot, and a bot's tier is configuration's.",
+      '@Helper is a bot, and a bot is never given a tier here.',
     );
     // Mentioned in a direct message, as Lark lets one be: granted.
     expect(say('grant @Carol Wu talk', OWNER, [AT_CAROL], 'p2p')).toMatch(/^Carol Wu now has talk tier/);

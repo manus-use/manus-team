@@ -399,7 +399,7 @@ configuration entry does; `auth.chats` still limits which.
 As today when a person loses talk tier, which until now took an edit and a restart:
 
 - **Their next message** is refused by `admits`, silently (`sender_not_allowed`), and their card
-  presses are refused, "You are not on the allowlist." (`KanbanChat`).
+  presses are refused, "You do not have talk tier here." (`KanbanChat`).
 - **A turn already admitted** runs to its end, with its queued turns: a message is authorized once,
   at admission, and the actor's mailbox is not re-judged. A cron token's per-turn tier is the one
   recorded at its submission (cron spec §7.1).
@@ -446,8 +446,8 @@ As today when a person loses talk tier, which until now took an edit and a resta
   `revoke` only, so no path reaches a grant with a typed id. *Why move it:* `/auth` works with the
   board off, and two copies of the same resolution would drift.
 - **A bot is not a person.** `admits`' `bot_sender` check comes first, as now, so a bot cannot type
-  `/auth` at all. A mention of a bot is refused by `mentionedPerson`, "is a bot, and a bot's tier is
-  configuration's", by the mention's `mentioned_type`, which the adapter's `mentionsOf` reads into
+  `/auth` at all. A mention of a bot is refused by `mentionedPerson`, "is a bot, and a bot is never
+  given a tier here", by the mention's `mentioned_type`, which the adapter's `mentionsOf` reads into
   `InboundMention.isBot`; a mention without the field is judged as today, and a bot's comes with no
   union_id anyway. `/kanban`'s callers get the refusal too, which is right for them: a bot cannot be
   given work.
@@ -664,8 +664,9 @@ counted once.
   (§6.1), and `mt auth list --json` gives each one's `by`.
 - **A mention of a bot, or of `@all`**: `@all` is not a mention (`InboundMessage.mentions` leaves it
   out); a bot comes with no union_id and is refused (§6.1).
-- **Two people mentioned with the same name**: refused, "say which with lark:<union_id>", which a
-  revoke takes; a grant cannot, so the operator mentions one person a command.
+- **Two people mentioned with the same name**: refused. A revoke says "say which with
+  lark:<union_id>", which it takes; a grant cannot, so it says "mention only one of them in the
+  command, or use `mt auth grant` at the terminal".
 - **A person mentioned who has never written to the bot**: granted; Lark gave their ids with the
   mention. They are noted in `people` then.
 - **A configuration entry also granted**: both count; revoking the grant leaves the entry (§5.2),

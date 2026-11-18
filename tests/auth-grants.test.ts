@@ -62,6 +62,7 @@ describe('Authorizer with grants', () => {
     expect(a.hasTier(person('ou_dan'), 'operate')).toBe(true);
     expect(a.admits(message(person('ou_carol')))).toEqual({ ok: true });
     expect(a.admitsTier(person('ou_carol'), 'operate')).toMatchObject({ ok: false, reason: 'insufficient_tier' });
+    expect(a.admitsTier(person('ou_erin'), 'talk')).toEqual({ ok: false, reason: 'insufficient_tier', detail: 'You do not have talk tier here.' });
   });
 
   it('never asks the reader about a principal with no union_id, and counts no grant for one', () => {

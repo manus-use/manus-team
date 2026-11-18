@@ -61,7 +61,7 @@ describe('mentionedPerson', () => {
     expect(mentionedPerson('@Helper', message([{ key: '@_user_1', name: 'Helper', openId: 'ou_helper', unionId: null, isBot: true }]))).toEqual({
       ok: false,
       reason: 'bot',
-      reply: "@Helper is a bot, and a bot's tier is configuration's.",
+      reply: '@Helper is a bot, and a bot is never given a tier here.',
     });
     expect(mentionedPerson('@Carol Wu', message([{ ...CAROL, isBot: false }]))).toMatchObject({ ok: true, unionId: 'on_carol' });
   });

@@ -1,4 +1,4 @@
-import { mentionedPerson } from '../channel/mentions.js';
+import { mentionedPerson, type MentionRefusal } from '../channel/mentions.js';
 import { sourceText, type GatewayConfig } from '../config.js';
 import { formatWall } from '../cron/schedule.js';
 import { activeGrants, grantTier, revokeGrant, talkGrantsMadeBy, type GrantRow } from '../db/grants.js';
@@ -82,10 +82,10 @@ interface Named {
   who: string;
 }
 
-/** Why a command names no one: the reply, and whether the message mentions no one by the name typed. */
+/** Why a command names no one: the reply, and the refusal it says. */
 interface Unnamed {
   refused: string;
-  notMentioned: boolean;
+  reason: MentionRefusal;
 }
 
 export class AuthChat {
@@ -133,7 +133,11 @@ export class AuthChat {
     const found = this.#mentioned(name, message);
     if ('refused' in found) {
       // In a direct message, a person can be @-mentioned only where Lark lets them be.
-      return message.chatType === 'p2p' && found.notMentioned
+      // A grant takes no `lark:<union_id>`, so a name two people share is settled by one mention, or at the terminal.
+      if (found.reason === 'ambiguous') {
+        return `More than one person mentioned is called ${label(name, 80)}; mention only one of them in the command, or use \`mt auth grant\` at the terminal.`;
+      }
+      return message.chatType === 'p2p' && found.reason === 'not_mentioned'
         ? `${found.refused} In a direct message, grant in a group they are in, or with \`mt auth grant\` at the terminal.`
         : found.refused;
     }
@@ -244,7 +248,7 @@ export class AuthChat {
   /** The person an `@Name` stands for, by the name Lark's mention showed; or why not. */
   #mentioned(name: string, message: InboundMessage): Named | Unnamed {
     const found = mentionedPerson(name, message);
-    if (!found.ok) return { refused: found.reply, notMentioned: found.reason === 'not_mentioned' };
+    if (!found.ok) return { refused: found.reply, reason: found.reason };
     return { unionId: found.unionId, openId: found.openId, who: label(found.name ?? name.slice(1).trim(), 80) };
   }
 
