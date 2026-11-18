@@ -101,6 +101,16 @@ export const COMMANDS: readonly CommandSpec[] = [
     summary: 'Cancel the current turn. Cancellation is a terminal, not a deletion.',
   },
   {
+    name: 'roles',
+    // Talk, as /sessions is: a person giving work to a role needs to know its name and what it is for.
+    tier: 'talk',
+    needsSession: false,
+    effect: 'immediate',
+    multiline: false,
+    mutating: false,
+    summary: 'The roles, what each is for, whether it can be given work, and its open runs.',
+  },
+  {
     name: 'status',
     tier: 'talk',
     needsSession: false,

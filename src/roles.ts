@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
@@ -301,6 +301,63 @@ function readRoleMd(dir: string): string | undefined {
     throw new ConfigError(`${path} cannot be read: ${(err as Error).message}`);
   }
   return path;
+}
+
+/** How much of `role.md` `/roles` reads, at most: its first line is what it shows. */
+export const ROLE_MD_PREFIX_BYTES = 8 * 1024;
+
+/** What `/roles` shows for a `role.md` it cannot read: anything not a regular file, or a read that fails. */
+export const ROLE_MD_UNREADABLE = '(role.md unreadable)';
+
+/** The longest start of `bytes` that ends on a whole UTF-8 character: a partial one at the end is dropped whole. */
+export function wholeUtf8(bytes: Uint8Array): Uint8Array {
+  // Back from the end over at most three continuation bytes, to the lead byte of the last character.
+  let lead = bytes.length - 1;
+  while (lead >= 0 && lead > bytes.length - 4 && ((bytes[lead] ?? 0) & 0xc0) === 0x80) lead -= 1;
+  if (lead < 0) return bytes;
+  const b = bytes[lead] ?? 0;
+  const size = b < 0x80 ? 1 : b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 1;
+  return lead + size > bytes.length ? bytes.subarray(0, lead) : bytes;
+}
+
+/**
+ * The first line of a role's `role.md` that is not empty, as `/roles` shows
+ * what a role is for (tier grants spec §13.2), read when asked: `^#+\s*`
+ * stripped, so a heading shows as its words. The file is checked first, as
+ * `readRoleMd` checks it at the start: a regular file, not a symbolic link;
+ * anything else, or a read that fails, is `ROLE_MD_UNREADABLE`. At most an
+ * 8 KiB prefix is read, and a line still going at its end is never shown, as
+ * a secret cut in two would reach the reply as its first half, unmasked:
+ * undefined then, as for a file with no line at all.
+ */
+export function roleMdFirstLine(path: string): string | undefined {
+  let fd: number | undefined;
+  let bytes: Uint8Array;
+  let size: number;
+  try {
+    if (!lstatSync(path).isFile()) return ROLE_MD_UNREADABLE;
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) return ROLE_MD_UNREADABLE;
+    size = stat.size;
+    const buffer = Buffer.alloc(ROLE_MD_PREFIX_BYTES);
+    const read = readSync(fd, buffer, 0, ROLE_MD_PREFIX_BYTES, 0);
+    bytes = buffer.subarray(0, read);
+  } catch {
+    return ROLE_MD_UNREADABLE;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+  const cut = bytes.length >= ROLE_MD_PREFIX_BYTES && size > bytes.length;
+  const lines = new TextDecoder().decode(cut ? wholeUtf8(bytes) : bytes).split(/\r?\n/);
+  for (const [i, text] of lines.entries()) {
+    const shown = text.trim().replace(/^#+\s*/, '');
+    if (shown === '') continue;
+    // The last piece of a cut prefix may go on past it.
+    if (cut && i === lines.length - 1) return undefined;
+    return shown;
+  }
+  return undefined;
 }
 
 /**

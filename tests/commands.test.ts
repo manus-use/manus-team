@@ -77,6 +77,17 @@ describe('the command table', () => {
     expect(parsed.arg).toBe('task new A task\nassignee: implementer');
   });
 
+  it('runs /auth and /roles at talk tier, one line, without a session and never refused mid-turn', () => {
+    for (const name of ['auth', 'roles']) {
+      const parsed = parseCommand(`/${name} list\nmore`);
+      if (parsed === undefined || !('spec' in parsed)) throw new Error(`/${name} did not parse`);
+      expect(parsed.spec).toMatchObject({ name, tier: 'talk', needsSession: false, mutating: false, multiline: false, effect: 'immediate' });
+      expect(parsed.arg).toBe('list');
+    }
+    expect(renderHelp()).toContain('`/auth <command>`');
+    expect(renderHelp()).toContain('`/roles`');
+  });
+
   it('has no /approve', () => {
     // The blocked permission RPC *is* the pending request. A chat verb would be a
     // second mutation path reachable only by users who can already click.

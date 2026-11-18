@@ -116,6 +116,11 @@ export interface RouterDeps {
    * `AuthChat`; absent only where a caller gives none, and `/auth` says so.
    */
   auth?: { run(arg: string, message: InboundMessage): string };
+  /**
+   * `/roles` (tier grants spec §13): the reply's text, synchronous, which the
+   * router masks. Absent where a caller gives none, and `/roles` says so.
+   */
+  roles?: () => string;
   clock?: Clock;
   note?: (line: string) => void;
 }
@@ -123,6 +128,9 @@ export interface RouterDeps {
 /** What `/kanban` says on a gateway whose board is off. */
 export const KANBAN_OFF =
   'The task board is off on this gateway. An operator turns it on with `kanban.enabled: true` in config.yaml, and a restart.';
+
+/** What `/roles` says where nothing was given to answer it. */
+export const ROLES_OFF = 'The roles cannot be listed here.';
 
 /** What `/auth` says where nothing was given to answer it. */
 export const AUTH_OFF = 'The tiers cannot be listed or changed here.';
@@ -527,6 +535,27 @@ export class Router {
           }
         }
         await this.#reply(target, message, 'cron', redactKnownSecrets(text));
+        return;
+      }
+
+      case 'roles': {
+        if (arg !== '') {
+          // A word after it reads as a filter, and a full list would look like one that matched everything.
+          await this.#reply(target, message, 'roles-usage', 'Usage: `/roles`, with nothing after it.');
+          return;
+        }
+        const roles = this.#deps.roles;
+        let text: string;
+        if (roles === undefined) text = ROLES_OFF;
+        else {
+          try {
+            text = roles();
+          } catch (err) {
+            this.#note(`roles command in ${message.messageId} failed: ${redactKnownSecrets(err instanceof Error ? err.message : String(err))}`);
+            text = 'Could not list the roles.';
+          }
+        }
+        await this.#reply(target, message, 'roles', redactKnownSecrets(text));
         return;
       }
 

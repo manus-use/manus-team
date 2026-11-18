@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ACK_EMOJI, AUTH_OFF, KANBAN_OFF, Router, continuityLine, type InboundCardAction, type KanbanCommands, type RouterDeps } from '../src/core/router.js';
+import { ACK_EMOJI, AUTH_OFF, KANBAN_OFF, ROLES_OFF, Router, continuityLine, type InboundCardAction, type KanbanCommands, type RouterDeps } from '../src/core/router.js';
 import { CARD_COALESCE_MS } from '../src/channel/card-writer.js';
 import { ChannelError } from '../src/channel/types.js';
 import { SessionRegistry } from '../src/core/registry.js';
@@ -87,6 +87,7 @@ function harness(
     authChat?: RouterDeps['auth'] | ((db: Db, authorizer: Authorizer) => RouterDeps['auth']);
     cronTurns?: RouterDeps['cronTurns'];
     withGrants?: boolean;
+    roles?: () => string;
   } = {},
 ): Harness {
   const t = testDb();
@@ -118,6 +119,7 @@ function harness(
     ...(opts.kanban === undefined ? {} : { kanban: opts.kanban }),
     ...(authChat === undefined ? {} : { auth: authChat }),
     ...(opts.cronTurns === undefined ? {} : { cronTurns: opts.cronTurns }),
+    ...(opts.roles === undefined ? {} : { roles: opts.roles }),
     clock,
     note: (line) => notes.push(line),
   });
@@ -822,6 +824,55 @@ describe('Router: /auth', () => {
     await h.router.onMessage(inGroup('as an operator', { sender: GUEST, mentions: [] }));
     await flush();
     expect(turns).toEqual([false, true]);
+  });
+});
+
+describe('Router: /roles', () => {
+  afterEach(() => clearSecrets());
+
+  it('is registered at talk tier, listed in /help, answered while the session is busy, and refused silently without talk', async () => {
+    let asked = 0;
+    const h = harness({ roles: () => (asked += 1, '**worker**: writes') });
+    await h.router.onMessage(msg({ text: '/help' }));
+    expect(lastReply(h)).toContain('`/roles`: The roles, what each is for, whether it can be given work, and its open runs. (anyone allowed)');
+    await working(h);
+    const message = msg({ text: '/roles' });
+    await h.router.onMessage(message);
+    expect(h.channel.texts.at(-1)).toMatchObject({ text: '**worker**: writes', uuid: replyUuid(APP, message.messageId, 'roles') });
+    const before = h.channel.texts.length;
+    await h.router.onMessage(msg({ text: '/roles', sender: GUEST }));
+    expect(h.channel.texts).toHaveLength(before);
+    expect(asked).toBe(1);
+  });
+
+  it('answers anything after it with the usage, keyed roles-usage, and lists nothing', async () => {
+    let asked = 0;
+    const h = harness({ roles: () => (asked += 1, 'the roles') });
+    const message = msg({ text: '/roles worker' });
+    await h.router.onMessage(message);
+    expect(h.channel.texts.at(-1)).toMatchObject({ text: 'Usage: `/roles`, with nothing after it.', uuid: replyUuid(APP, message.messageId, 'roles-usage') });
+    expect(asked).toBe(0);
+  });
+
+  it('says so with nothing to list them, masks the reply, and answers one that throws plainly, noting it masked', async () => {
+    const plain = harness();
+    await plain.router.onMessage(msg({ text: '/roles' }));
+    expect(lastReply(plain)).toBe(ROLES_OFF);
+    expect(ROLES_OFF).toBe('The roles cannot be listed here.');
+    addSecrets(['sk-roles-12345678']);
+    const masked = harness({ roles: () => 'holds sk-roles-12345678' });
+    await masked.router.onMessage(msg({ text: '/roles' }));
+    expect(lastReply(masked)).toBe(`holds ${MASK}`);
+    const h = harness({
+      roles: () => {
+        throw new Error('EACCES near sk-roles-12345678');
+      },
+    });
+    await h.router.onMessage(msg({ text: '/roles' }));
+    expect(lastReply(h)).toBe('Could not list the roles.');
+    const noted = h.notes.find((n) => n.includes('roles command in')) ?? '';
+    expect(noted).toContain(MASK);
+    expect(noted).not.toContain('sk-roles');
   });
 });
 
