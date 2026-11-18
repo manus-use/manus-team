@@ -1,7 +1,8 @@
 import type { Event } from '../types.js';
 import type { CardSession, Channel, SendTarget } from './types.js';
 import { CARD_GONE_CODES, ChannelError } from './types.js';
-import { renderCard } from './render.js';
+import { renderCard, type RenderedCard } from './render.js';
+import { backoffMs } from './lark/errors.js';
 import type { Clock } from '../time.js';
 import { systemClock } from '../time.js';
 
@@ -53,6 +54,18 @@ export const CARD_COALESCE_MS = 1000;
 export const CARD_FAILURE_LIMIT = 5;
 
 /**
+ * How long throttles may hold the card back before they count against
+ * `CARD_FAILURE_LIMIT`: 30 seconds of waiting, summed. A throttle says the card
+ * is fine and the platform is busy; five of them in a row, each answered at
+ * once, used to end a working card inside a few seconds and send the answer a
+ * second time as a plain message.
+ */
+export const CARD_THROTTLE_BUDGET_MS = 30_000;
+
+/** Lark's throttles: its rate-limit code, and HTTP 429 with no code of its own. */
+const THROTTLE_CODES: ReadonlySet<number> = new Set([99991400, 429]);
+
+/**
  * Card entities expire after 14 days. We rotate before the edge rather than at
  * it, because the failure at the edge is an update that silently stops landing.
  */
@@ -100,6 +113,12 @@ export class CardWriter {
   #cardTurn = 0;
   /** Consecutive failed writes. Reset by any success, checked against `CARD_FAILURE_LIMIT`. */
   #failures = 0;
+  /** Consecutive failed writes of any kind, throttles among them: the backoff's attempt. */
+  #attempts = 0;
+  /** Waiting spent on throttles since the last write that landed, against `CARD_THROTTLE_BUDGET_MS`. */
+  #throttledMs = 0;
+  /** No pass starts before this, by the clock: the wait after a failure. */
+  #notBefore = 0;
 
   constructor(deps: CardWriterDeps) {
     this.#deps = deps;
@@ -136,8 +155,9 @@ export class CardWriter {
 
   #schedule(): void {
     if (this.#inFlight || this.#timer !== undefined || this.#closed) return;
-    const elapsed = this.#clock.now() - this.#lastWriteAt;
-    const delay = Math.max(0, CARD_COALESCE_MS - elapsed);
+    const now = this.#clock.now();
+    const elapsed = now - this.#lastWriteAt;
+    const delay = Math.max(0, CARD_COALESCE_MS - elapsed, this.#notBefore - now);
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
       void this.#drain();
@@ -164,10 +184,24 @@ export class CardWriter {
       this.#rendered = target;
       this.#lastWriteAt = this.#clock.now();
       this.#failures = 0;
+      this.#attempts = 0;
+      this.#throttledMs = 0;
       this.#deps.onRendered(target);
     } catch (err) {
-      this.#failures += 1;
-      this.#note(`card write through ${target} failed (${this.#failures}): ${describe(err)}`);
+      // The next pass waits: what the platform said, else a backoff. Retried at
+      // once, a throttle is only met again, and a failing card spends the
+      // limit in five seconds.
+      this.#attempts += 1;
+      const wait = (err instanceof ChannelError ? err.retryAfterMs : undefined) ?? backoffMs(this.#attempts);
+      this.#notBefore = this.#clock.now() + wait;
+      const throttle = err instanceof ChannelError && THROTTLE_CODES.has(err.code);
+      if (throttle && this.#throttledMs < CARD_THROTTLE_BUDGET_MS) {
+        this.#throttledMs += wait;
+        this.#note(`card write through ${target} throttled, waiting ${Math.ceil(wait / 1000)}s: ${describe(err)}`);
+      } else {
+        this.#failures += 1;
+        this.#note(`card write through ${target} failed (${this.#failures}): ${describe(err)}`);
+      }
 
       if (err instanceof ChannelError && CARD_GONE_CODES.has(err.code)) {
         // The card is gone. Drop the session and let the next pass open a fresh
@@ -215,12 +249,16 @@ export class CardWriter {
     const had = this.#session;
     this.#session = undefined;
     this.#failures = 0;
+    this.#attempts = 0;
+    this.#throttledMs = 0;
+    this.#notBefore = 0;
     this.#rendered = target;
     this.#lastWriteAt = this.#clock.now();
 
+    let view: RenderedCard | undefined;
     try {
       // The parts joined: the plain message reads as the card did.
-      const view = renderCard(this.#deps.readEvents(0, target));
+      view = renderCard(this.#deps.readEvents(0, target));
       await this.#deps.channel.sendText(
         this.#deps.target,
         view.text,
@@ -229,6 +267,13 @@ export class CardWriter {
       this.#note(`gave up on the card through ${target}; sent it as a plain message`);
     } catch (err) {
       this.#note(`card and plain message both failed through ${target}: ${describe(err)}`);
+    }
+
+    // The card given up on is finished, as every card is: left streaming, it
+    // shows its typing cursor until Lark gives up on it. Best effort; it may
+    // be what was failing.
+    if (had !== undefined && view !== undefined && !this.#finished) {
+      await had.finish(view.parts).catch((e: unknown) => this.#note(`finishing the card given up on through ${target} failed: ${describe(e)}`));
     }
 
     // Done with this card whichever way that went. The next turn opens a new one;
