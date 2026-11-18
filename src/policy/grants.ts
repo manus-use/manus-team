@@ -148,9 +148,17 @@ function command(via: Words['via'], text: string): string {
   return via === 'chat' ? `\`/auth ${text}\`` : `mt auth ${text}`;
 }
 
-/** Where the tier a person has comes from, as a no-op says it. */
+/** Whether a person is an operator by `auth.operate` and their talk grant together: in the operate list alone, with a talk grant. */
+function listedWithTalkGrant(target: Target): boolean {
+  return target.sources.operate && !target.sources.talk && target.grant?.tier === 'talk';
+}
+
+/** Where the tier a person has comes from, as a no-op says it: both sources for operate by `auth.operate` and a talk grant. */
 function heldText(d: { tier: Tier; from: HeldFrom }, target: Target, w: Words): string {
   if (d.from === 'grant' && target.grant !== undefined) return `by a grant from ${w.held(target.grant)}`;
+  if (d.tier === 'operate' && target.grant !== undefined && listedWithTalkGrant(target)) {
+    return `${sourceText(w.from.operate)} with a talk grant from ${w.held(target.grant)}`;
+  }
   return sourceText(d.tier === 'operate' ? w.from.operate : w.from.talk);
 }
 
@@ -165,10 +173,14 @@ export function grantReply(d: GrantDecision, target: Target, w: Words): string {
       if (d.from === 'owner') return say(w.via, [`${w.who} is the owner, who has both tiers always`]);
       const has = `${w.who} already has ${d.tier} tier, ${heldText(d, target, w)}`;
       if (d.asked === 'talk' && d.tier === 'operate') {
-        return say(w.via, [
-          `${has}, which includes talk`,
-          ...(d.from === 'grant' ? ['To leave them talk alone, the owner revokes and grants talk again'] : []),
-        ]);
+        // Talk alone is a grant's to give, unless auth.operate makes any talk an operator's: then it is the configuration's.
+        const alone =
+          d.from === 'grant'
+            ? ['To leave them talk alone, the owner revokes and grants talk again']
+            : listedWithTalkGrant(target)
+              ? [`To leave them talk alone, the operator takes them out of ${w.from.operate} and restarts the gateway`]
+              : [];
+        return say(w.via, [`${has}, which includes talk`, ...alone]);
       }
       return say(w.via, [has]);
     }
@@ -189,12 +201,18 @@ export function revokeReply(d: RevokeDecision, target: Target, w: Words, made = 
   switch (d.outcome) {
     case 'revoked': {
       if (d.owner) return say(w.via, [`${w.who}'s ${d.grant} grant is revoked; they keep both tiers as the owner`]);
-      const left = d.left === null ? '' : `; they keep ${d.left} tier ${sourceText(d.left === 'operate' ? w.from.operate : w.from.talk)}`;
       const still =
         d.grant === 'operate' && made > 0
           ? [`They made ${made} talk grant${made === 1 ? '' : 's'} still in force; ${command(w.via, 'list')} shows them`]
           : [];
-      return say(w.via, [`${w.who} no longer has ${d.grant} tier: revoked by ${w.by}${left}`, ...still]);
+      // An operate grant to a person both lists make an operator: the grant ends, and their tier is the configuration's still.
+      if (d.grant === 'operate' && d.left === 'operate') {
+        return say(w.via, [`${w.who}'s operate grant is revoked by ${w.by}; their tier is unchanged, operate ${sourceText(w.from.operate)}`, ...still]);
+      }
+      // The talk grant that made a person in auth.operate alone an operator: with it goes their operate tier.
+      const operated = d.grant === 'talk' && d.left === null && target.sources.operate ? ', and so no longer operates' : '';
+      const left = d.left === null ? '' : `; they keep ${d.left} tier ${sourceText(d.left === 'operate' ? w.from.operate : w.from.talk)}`;
+      return say(w.via, [`${w.who} no longer has ${d.grant} tier${operated}: revoked by ${w.by}${left}`, ...still]);
     }
     case 'no_grant':
       return say(w.via, [`${w.who} has no grant to revoke`]);

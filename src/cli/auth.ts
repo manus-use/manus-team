@@ -179,12 +179,14 @@ function revoke(o: Opened, person: string, io: MtIo): Outcome {
   return { ok: true, lines: [message], json: { outcome: d.outcome, tier, principal } };
 }
 
-/** Where a person's tier comes from, as `mt auth list` says it. */
+/** Where a person's tier comes from, as `mt auth list` says it: the owner as the owner alone, as chat's list says them, whatever lists they are also in. */
 function sourcesText(e: TierEntry, o: Opened): string {
   const out: string[] = [];
   if (e.sources.owner) out.push('owner');
-  if (e.sources.talk) out.push(o.from.talk);
-  if (e.sources.operate) out.push(o.from.operate);
+  else {
+    if (e.sources.talk) out.push(o.from.talk);
+    if (e.sources.operate) out.push(o.from.operate);
+  }
   const g = e.grant;
   if (g !== undefined) {
     const where = g.grantedVia === 'chat' ? `in chat ${line(g.grantedChat ?? '', 80)}` : 'at the terminal';
@@ -209,6 +211,8 @@ function list(o: Opened, io: MtIo, json: boolean): Outcome {
     ok: true,
     lines: rows.length === 0 ? ['nobody has a tier'] : table([['name', 'person', 'tier', 'from'], ...rows]),
     json: {
+      // False when this shell finds no owner: the lists are then unknown, and the people are the grants alone.
+      config_known: s.owner !== undefined,
       people: entries.map((e) => ({
         principal: e.unionId === null ? null : `lark:${e.unionId}`,
         union_id: e.unionId,

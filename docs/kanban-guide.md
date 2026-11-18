@@ -106,7 +106,8 @@ mt auth revoke lark:on_5d1e7a
 
 `mt auth` judges by the config as your shell reads it, posts in no chat, and is refused in every
 agent's shell. `mt auth list --json` gives each person's tier, config entries and grant, with who
-made it and when.
+made it and when, and `config_known`, false when your shell finds no owner, so that only the grants
+are listed.
 
 ## 1. One task for a role
 

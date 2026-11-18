@@ -175,13 +175,13 @@ export class AuthChat {
     }
     if ('refused' in found) return found.refused;
     const named = found;
-    const sources = this.#deps.authorizer.sourcesOf(named.openId);
-    let target: Target = { sources, grant: undefined };
+    let target: Target = { sources: this.#deps.authorizer.sourcesOf(named.openId), grant: undefined };
     const r = revokeGrant(
       this.#deps.db,
       { appId: this.#deps.appId, unionId: named.unionId, by, via: 'chat', chat: message.chatId },
       (grant, actorGrant) => {
-        target = { sources, grant: held(grant) };
+        // A principal people holds no row for has no open_id but the grant's own, which the configuration's lists are matched by.
+        target = { sources: this.#deps.authorizer.sourcesOf(named.openId ?? grant?.openId ?? null), grant: held(grant) };
         return decideRevoke(this.#actor(message.sender, actorGrant), target);
       },
       this.#clock.now(),

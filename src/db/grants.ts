@@ -25,7 +25,7 @@ export interface GrantRow {
   grantId: number;
   appId: string;
   unionId: string;
-  /** As Lark gave it with the grant: a record of whom it was made for, never matched on. */
+  /** As Lark gave it with the grant: a record of whom it was made for, never matched on by a check; a chat revoke by principal of a person `people` does not hold finds their configuration lists by it. */
   openId: string;
   tier: Tier;
   /** `lark:<union_id>` or `operator:<login>`. */

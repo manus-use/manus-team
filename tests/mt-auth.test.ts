@@ -168,15 +168,17 @@ describe('mt auth list', () => {
     expect(r.code).toBe(0);
     expect(r.out.split('\n').map((l) => l.replace(/ +/g, ' '))).toEqual([
       'name person tier from',
-      'Alice lark:on_owner operate owner; auth.talk; auth.operate',
+      // The owner as chat's /auth list says them: from auth.owner, whatever lists they are also in.
+      'Alice lark:on_owner operate owner',
       'Bob lark:on_bob operate auth.talk; auth.operate',
       '(no name) lark:on_dan operate operate grant by lark:on_owner in chat oc_team, 2026-11-18 10:02',
       `Carol Wu lark:on_carol talk talk grant by ${ME} at the terminal, ${formatWall(ZONE, carolAt)}`,
       'Tess lark:on_tess talk auth.talk',
       'Olga lark:on_olga none auth.operate',
     ]);
-    const listed = (await json(['list'])) as { ok: boolean; people: unknown[] };
+    const listed = (await json(['list'])) as { ok: boolean; config_known: boolean; people: unknown[] };
     expect(listed.ok).toBe(true);
+    expect(listed.config_known).toBe(true);
     expect(listed.people).toContainEqual({
       principal: 'lark:on_dan',
       union_id: 'on_dan',
@@ -210,6 +212,8 @@ describe('mt auth list', () => {
     const r = await auth(['list']);
     expect(r.err).toBe('mt: this shell finds no auth.owner or MT_OWNER_OPEN_ID, so only the grants are shown');
     expect(r.out.split('\n')).toHaveLength(2);
+    // A script reading --json learns the same: the lists are unknown, so the people are the grants alone.
+    expect(await json(['list'])).toMatchObject({ ok: true, config_known: false, people: [{ principal: 'lark:on_carol', config: { talk: false, operate: false } }] });
   });
 });
 

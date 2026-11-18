@@ -114,7 +114,10 @@ owner's, for that reason.
   not change for this bot; `notePerson` replaces it if Lark ever sends another. A grant, keyed by
   union_id, is unaffected; the configuration's lists, which hold open_ids, follow whatever the
   operator typed. The grant's own `open_id` column is a record of whom it was made for, as Lark
-  gave them then, and is never matched on.
+  gave them then, and is never matched on by a check. Its one use: a chat revoke by
+  `lark:<union_id>` of a person `people` holds no row for finds their configuration lists by it, so
+  that the talk grant of a person in `auth.operate` alone is still the owner's to revoke (§5.2). A
+  revoke judged by it can only be refused more, never let through more.
 - **When the gateway's app id changes**, a different bot, every person has another open_id, the
   configuration's lists must be redone, and the grants of the old app id count for nothing: they
   are not deleted, and the startup line says how many there are (§8.4). *Why not carry them over:*
@@ -351,7 +354,10 @@ In this order, the first that applies deciding:
 - **Granting a tier the person already has**: a no-op, said so, with where it comes from: "already
   has talk tier, <talk source>", or "…, by a grant from Alice on 2026-11-18". Talk to
   an operator is a no-op too, since operate includes talk (§2.1); the reply says that to leave them
-  talk alone, the owner revokes and grants talk again. *Why no downgrade by `grant talk`:* the same
+  talk alone, the owner revokes and grants talk again. A person in `auth.operate` alone whose talk
+  grant makes them an operator is said with both sources, "already has operate tier, <operate
+  source> with a talk grant from Alice on 2026-11-18"; for them, talk alone is the configuration's,
+  so the reply says the operator takes them out of `auth.operate` and restarts the gateway. *Why no downgrade by `grant talk`:* the same
   words would mean "make sure they have talk" from an operator and "take operate away" from the
   owner, and a command that means two things by who types it is a surprise for one of them.
 - **Granting operate to a person with a talk grant**: the owner's or the terminal's, and it
@@ -462,7 +468,10 @@ As today when a person loses talk tier, which until now took an edit and a resta
   - "Carol now has talk tier, granted by Alice. `/auth revoke @Carol` takes it back."
   - "Carol now has operate tier, in place of talk, granted by Alice."
   - "Carol no longer has talk tier: revoked by Bob." or "…: revoked by Bob; they keep talk tier
-    <talk source>."
+    <talk source>." An operate grant to a person both lists make an operator: "Carol's operate
+    grant is revoked by Alice; their tier is unchanged, operate <operate source>." The talk grant
+    of a person in `auth.operate` alone, which the owner or the terminal revokes: "Olga no longer
+    has talk tier, and so no longer operates: revoked by Alice."
   - For a person whose operate grant is revoked, who may have granted talk while an operator, the
     count of the talk grants they made that are still active is added: "They made 2 talk grants
     still in force; /auth list shows them." *Why say it:* those grants stay (§9), and the owner
@@ -505,7 +514,8 @@ mt auth list [--json]
   "already" | "no_grant", "tier": "talk" | "operate" | null, "principal": "lark:<union_id>"}`, the
   tier being the one the person has afterwards; a refusal `{"ok": false, "code", "message"}`, its
   code one of `no_bot`, `no_owner`, `not_migrated`, `unknown_person`, `open_id`, `invalid`,
-  `is_owner`, `from_config` and `operator_command` (in an agent's shell, §6.3).
+  `is_owner`, `from_config`, `operator_command` (in an agent's shell, §6.3) and `failed`, the
+database failing as the command reads or writes it, its message the error's, masked.
 - **No announcement.** A terminal's grant is made in no chat (§1). The running gateway sees it at
   its next check (§4.1), with no nudge.
 - **The owner and the lists** come from `TeamSettings` (§4.3). With no owner set, `grant` and
@@ -593,7 +603,7 @@ for an unseen configuration entry), the tier, and the sources, "owner", "auth.ta
 limit on lines. `--json`:
 
 ```json
-{"ok": true, "people": [
+{"ok": true, "config_known": true, "people": [
   {"principal": "lark:on_c", "union_id": "on_c", "open_id": "ou_c", "name": "Carol",
    "tier": "talk", "owner": false, "config": {"talk": false, "operate": false},
    "grant": {"tier": "talk", "by": "lark:on_b", "via": "chat", "chat_id": "oc_x", "at": 1795000000000}}
@@ -602,7 +612,11 @@ limit on lines. `--json`:
 
 `principal`, `union_id` and `name` null for a configuration entry `people` does not hold; `tier`
 `"talk"`, `"operate"` or null; `grant` null with none; `at` in milliseconds, as `task list --json`
-gives times (kanban §22.3). Active grants only: the history is the table's (§1).
+gives times (kanban §22.3). Active grants only: the history is the table's (§1). `config_known` is
+false when this shell finds no `auth.owner` or `MT_OWNER_OPEN_ID`: the lists are then unknown, so
+the people are the grants alone, each with `config` false, as the words say on stderr ("only the
+grants are shown"). The owner's line names "owner" alone, whatever lists they are also in, as
+`/auth list`'s "Owner: …, from auth.owner" does.
 
 ### 8.3 `mt kanban people`
 

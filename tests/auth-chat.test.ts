@@ -201,6 +201,13 @@ describe('/auth revoke', () => {
     say('grant @Olga talk', OWNER, [AT_OLGA]);
     expect(say('revoke @Olga', BOB, [AT_OLGA])).toBe('Olga is in auth.operate: their talk grant is what makes them an operator, so only the owner revokes it.');
     expect(say('revoke @Carol Wu', TESS, [AT_CAROL])).toBe('`/auth revoke` needs operator permission.');
+    // By principal, for a person people has no row for: their sources are found by the grant's own open_id.
+    grantTier(t.db, { appId: 'cli_app', unionId: 'on_olga2', openId: 'ou_olga', tier: 'talk', by: 'lark:on_owner', via: 'chat', chat: 'oc_team' }, () => ({ write: 'insert' as const }), 1);
+    expect(personOf(t.db, 'cli_app', 'on_olga2')).toBeUndefined();
+    expect(say('revoke lark:on_olga2', BOB)).toBe(
+      'lark:on\\_olga2 is in auth.operate: their talk grant is what makes them an operator, so only the owner revokes it.',
+    );
+    expect(activeGrant(t.db, 'cli_app', 'on_olga2')?.tier).toBe('talk');
     // A grant from before they were the owner.
     grantTier(t.db, { appId: 'cli_app', unionId: 'on_owner', openId: 'ou_owner', tier: 'talk', by: 'operator:x', via: 'terminal', chat: null }, () => ({ write: 'insert' as const }), 1);
     expect(say('revoke lark:on_owner', OWNER)).toBe("Alice's talk grant is revoked; they keep both tiers as the owner.");

@@ -135,6 +135,14 @@ describe('the words', () => {
     );
     expect(grantSays('owner', 'configOperate', 'talk')).toBe('Carol already has operate tier, from auth.operate in config.yaml, which includes talk.');
     expect(grantSays('owner', 'operateGrant', 'operate')).toBe('Carol already has operate tier, by a grant from Alice on 2026-11-18.');
+    // In auth.operate alone, an operator by their talk grant: both sources named, and the way to talk alone is the configuration's.
+    const listedWithTalk: Target = { sources: { ...NONE, operate: true }, grant: GRANT('talk') };
+    expect(grantReply(decideGrant('owner', listedWithTalk, 'talk'), listedWithTalk, words())).toBe(
+      'Carol already has operate tier, from auth.operate in config.yaml with a talk grant from Alice on 2026-11-18, which includes talk. To leave them talk alone, the operator takes them out of auth.operate and restarts the gateway.',
+    );
+    expect(grantReply(decideGrant('terminal', listedWithTalk, 'operate'), listedWithTalk, words('terminal', { ...FROM, operate: 'MT_ALLOW_OPERATE' }))).toBe(
+      'Carol already has operate tier, from MT_ALLOW_OPERATE with a talk grant from Alice on 2026-11-18',
+    );
     expect(grantSays('talk', 'none', 'talk')).toBe('`/auth grant` needs operator permission: an operator grants talk tier, and the owner operate.');
     expect(grantSays('operator', 'none', 'operate')).toBe('Only the owner grants operate tier: an operator cannot make another operator.');
     expect(grantSays('operator', 'operateOnly', 'talk', words('chat', { ...FROM, operate: 'MT_ALLOW_OPERATE' }))).toBe(
@@ -154,6 +162,16 @@ describe('the words', () => {
       'Carol no longer has operate tier: revoked by Bob; they made 1 talk grant still in force; mt auth list shows them',
     );
     expect(revokeSays('owner', TARGETS['operateGrant'] as Target, words(), 0)).toBe('Carol no longer has operate tier: revoked by Bob.');
+    // An operate grant to a person both lists make an operator: their tier is the configuration's, and stays.
+    const listedOperator: Target = { sources: { ...NONE, talk: true, operate: true }, grant: GRANT('operate') };
+    expect(revokeSays('owner', listedOperator)).toBe("Carol's operate grant is revoked by Bob; their tier is unchanged, operate from auth.operate in config.yaml.");
+    expect(revokeSays('terminal', listedOperator, words('terminal', { ...FROM, operate: 'MT_ALLOW_OPERATE' }), 1)).toBe(
+      "Carol's operate grant is revoked by Bob; their tier is unchanged, operate from MT_ALLOW_OPERATE; they made 1 talk grant still in force; mt auth list shows them",
+    );
+    // The talk grant that made a person in auth.operate alone an operator: they lose both.
+    const listedWithTalk: Target = { sources: { ...NONE, operate: true }, grant: GRANT('talk') };
+    expect(revokeSays('owner', listedWithTalk)).toBe('Carol no longer has talk tier, and so no longer operates: revoked by Bob.');
+    expect(revokeSays('terminal', listedWithTalk, words('terminal'))).toBe('Carol no longer has talk tier, and so no longer operates: revoked by Bob');
     expect(revokeSays('owner', { sources: { owner: true, talk: true, operate: true }, grant: GRANT('talk') })).toBe(
       "Carol's talk grant is revoked; they keep both tiers as the owner.",
     );
