@@ -113,8 +113,9 @@ export class FakeCard implements CardSession {
 
   async set(parts: CardParts): Promise<void> {
     this.#owner.calls.push('set');
-    // Before the gate, because the real adapter returns without reaching the
-    // network at all -- so this cannot fail, and cannot be held.
+    // Before the gate: on a card whose finish has landed, the real adapter
+    // returns without reaching the network at all, so this cannot fail, and
+    // cannot be held.
     if (this.#frozen) {
       this.droppedSets.push(cardText(parts));
       return;
@@ -127,11 +128,11 @@ export class FakeCard implements CardSession {
   async finish(parts: CardParts): Promise<void> {
     this.#owner.calls.push('finish');
     if (this.#frozen) return;
-    // Set before the gate: freezing is one-way in the real adapter, which marks
-    // the session closed and only then tries to deliver the final content. A
-    // failure there loses the last update, not the freeze.
-    this.#frozen = true;
+    // Set after the gate: the real adapter marks the session finished only once
+    // the finish has landed. A finish that failed rejects, leaves the card open,
+    // and is tried again by the writer's next pass.
     await this.#owner.gate('finish');
+    this.#frozen = true;
     this.finishes.push(cardText(parts));
     this.partFinishes.push(parts);
   }

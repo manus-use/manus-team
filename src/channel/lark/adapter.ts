@@ -1,5 +1,6 @@
 import { createLarkChannel, type LarkChannel } from '@larksuiteoapi/node-sdk';
 import {
+  CARD_GONE_CODES,
   ChannelError,
   type ApprovalCardSpec,
   type ApprovalOutcomeView,
@@ -326,36 +327,57 @@ export class LarkAdapter implements Channel {
       }
     };
 
+    // Every `set` and `finish` of the card, one after another: two at once would
+    // draw interleaved sequences, so the earlier could land late and be refused,
+    // or a write could turn streaming on again after the finish turned it off.
+    let tail: Promise<void> = Promise.resolve();
+    const serial = (f: () => Promise<void>): Promise<void> => {
+      const p = tail.then(f, f);
+      tail = p.then(
+        () => undefined,
+        () => undefined,
+      );
+      return p;
+    };
+
     return {
       messageId: sent.messageId,
       createdAt,
-      async set(parts: CardParts): Promise<void> {
-        // Inert once finished: streaming is off, and the card is done.
-        if (finished) return;
-        await write(parts);
-      },
-      async finish(parts: CardParts): Promise<void> {
-        // Idempotent once it has landed: teardown reaches this from the writer's
-        // normal terminal path and again from its shutdown path, and a second
-        // call must be inert rather than an error.
-        if (finished) return;
-        let failed: unknown;
-        try {
+      set(parts: CardParts): Promise<void> {
+        return serial(async () => {
+          // Inert once finished: streaming is off, and the card is done.
+          if (finished) return;
           await write(parts);
-        } catch (err) {
-          failed = err;
-        }
-        // Whether or not the write landed: a card left streaming shows its
-        // typing cursor until Lark gives up on it.
-        try {
-          await settings({ streaming_mode: false, summary: { content: replySummary(parts) } });
-        } catch {
-          // Best effort. The card keeps what it shows.
-        }
-        // Thrown, so the writer counts it, and finishes again or falls back: the
-        // last content is the answer's end, and it must not be lost in silence.
-        if (failed !== undefined) throw failed;
-        finished = true;
+        });
+      },
+      finish(parts: CardParts): Promise<void> {
+        return serial(async () => {
+          // Idempotent once it has landed: teardown reaches this from the writer's
+          // normal terminal path and again from its shutdown path, and a second
+          // call must be inert rather than an error.
+          if (finished) return;
+          let failed: unknown;
+          try {
+            await write(parts);
+          } catch (err) {
+            failed = err;
+          }
+          // Whether or not the write landed: a card left streaming shows its
+          // typing cursor until Lark gives up on it. Not for a card Lark no
+          // longer holds, which has no streaming to turn off.
+          const gone = failed instanceof ChannelError && CARD_GONE_CODES.has(failed.code);
+          if (!gone) {
+            try {
+              await settings({ streaming_mode: false, summary: { content: replySummary(parts) } });
+            } catch {
+              // Best effort. The card keeps what it shows.
+            }
+          }
+          // Thrown, so the writer counts it, and finishes again or falls back: the
+          // last content is the answer's end, and it must not be lost in silence.
+          if (failed !== undefined) throw failed;
+          finished = true;
+        });
       },
     };
   }
@@ -645,11 +667,28 @@ export function replyCard(parts: CardParts): object {
 /**
  * A finished card's preview in the chat list: the answer, else the status, else
  * the tool line, on one line, cut to `SUMMARY_MAX` characters on a code point.
+ * The preview is plain text, so simple emphasis and backslash escapes are taken
+ * out first: `_Turn failed._` previews as `Turn failed.`.
  */
 export function replySummary(parts: CardParts): string {
   const text = [parts.answer, parts.status, parts.tools].find((p) => p.trim() !== '') ?? '';
-  const chars = Array.from(text.replace(/\s+/g, ' ').trim());
+  const chars = Array.from(plainPreview(text).replace(/\s+/g, ' ').trim());
   return chars.length <= SUMMARY_MAX ? chars.join('') : `${chars.slice(0, SUMMARY_MAX - 1).join('')}…`;
+}
+
+/**
+ * Markdown's simple emphasis taken out of `text`, a marker pair at a time (`**`,
+ * `~~`, `__`, then `*`, `` ` ``, `_`), an escaped marker left alone, and an
+ * underscore only at a word's edge, so `snake_case` keeps its own; then each
+ * backslash escape replaced by the character it escapes.
+ */
+function plainPreview(text: string): string {
+  return text
+    .replace(/(?<!\\)(\*\*|~~)(?=\S)(.+?)(?<=\S)(?<!\\)\1/g, '$2')
+    .replace(/(?<![\w\\])__(?=\S)(.+?)(?<=\S)(?<!\\)__(?!\w)/g, '$1')
+    .replace(/(?<!\\)([*`])(?=\S)(.+?)(?<=\S)(?<!\\)\1/g, '$2')
+    .replace(/(?<![\w\\])_(?=\S)(.+?)(?<=\S)(?<!\\)_(?!\w)/g, '$1')
+    .replace(/\\(.)/g, '$1');
 }
 
 /**

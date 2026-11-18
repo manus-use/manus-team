@@ -14,6 +14,9 @@ import { systemClock } from '../../src/time.js';
  * It keeps Lark's rules for a card, so an adapter that breaks one is refused as
  * Lark would refuse it, with Lark's code:
  *
+ * - a card made with an element of empty content: 10002; with two elements of
+ *   one id: 200621 (the code Lark gives a card JSON it will not take);
+ * - a card sent by reference that it does not hold: 200740;
  * - a sequence not above the card's last one taken: 300317;
  * - a card it does not hold: 200740; an element the card has not got: 300313;
  * - empty content: 10002;
@@ -22,7 +25,9 @@ import { systemClock } from '../../src/time.js';
  *   clock: 200850, and streaming is then off. Settings turning it on again start
  *   the ten minutes over.
  *
- * A refused call is recorded with `refused: true`.
+ * A refused call is recorded with `refused: true`. A call failed with
+ * `{ landed: true }` is taken, as Lark takes a call whose answer is lost, and
+ * then fails; it is recorded with `lost: true`, not `refused`.
  */
 
 export type CardkitApi = 'create' | 'content' | 'update' | 'settings' | 'send';
@@ -45,10 +50,26 @@ export interface CardkitCall {
   replyInThread?: boolean;
   /** Set when Lark refused the call. */
   refused?: true;
+  /** Set when Lark took the call but its answer was lost (`failNext(…, { landed: true })`). */
+  lost?: true;
 }
 
 /** A failure as Lark gives one: an Error is thrown, a code is answered in the body. */
 export type CardkitFailure = Error | { code: number; msg: string };
+
+/** How a queued failure is given. */
+export interface FailOptions {
+  /** Take the call first, as Lark took it, then fail: an answer lost on the way back. */
+  landed?: boolean;
+  /** Let this many calls to the api through first; the one after them fails. */
+  skip?: number;
+}
+
+interface QueuedFailure {
+  failure: CardkitFailure;
+  landed: boolean;
+  skip: number;
+}
 
 /** How long Lark keeps a card streaming after it was last turned on. */
 export const STREAMING_WINDOW_MS = 10 * 60 * 1000;
@@ -87,7 +108,8 @@ const OK: Answer = { code: 0, msg: 'ok', data: {} };
 
 export class FakeCardkit {
   readonly calls: CardkitCall[] = [];
-  readonly #failures = new Map<CardkitApi, CardkitFailure[]>();
+  readonly #failures = new Map<CardkitApi, QueuedFailure[]>();
+  readonly #holds = new Map<CardkitApi, Array<Promise<void>>>();
   readonly #cards = new Map<string, Card>();
   readonly #clock: Clock;
   #made = 0;
@@ -98,11 +120,48 @@ export class FakeCardkit {
     this.#clock = clock;
   }
 
-  /** Make the next call to `api` fail with `failure`, whatever the rules say. Queued, so N in a row work. */
-  failNext(api: CardkitApi, failure: CardkitFailure): void {
+  /**
+   * Make the next call to `api` fail with `failure`, whatever the rules say.
+   * Queued, so N in a row work. `skip` lets that many calls through first;
+   * `landed` applies the call, as Lark would take it, before failing it.
+   */
+  failNext(api: CardkitApi, failure: CardkitFailure, opts: FailOptions = {}): void {
     const queue = this.#failures.get(api) ?? [];
-    queue.push(failure);
+    queue.push({ failure, landed: opts.landed === true, skip: opts.skip ?? 0 });
     this.#failures.set(api, queue);
+  }
+
+  /**
+   * Hold the next call to `api` before Lark sees it, until the returned release
+   * is called: a request still on its way while others go out.
+   */
+  holdNext(api: CardkitApi): () => void {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queue = this.#holds.get(api) ?? [];
+    queue.push(held);
+    this.#holds.set(api, queue);
+    return release;
+  }
+
+  /** Wait out a hold placed on `api`'s next call, if any. */
+  async #gate(api: CardkitApi): Promise<void> {
+    const held = this.#holds.get(api)?.shift();
+    if (held !== undefined) await held;
+  }
+
+  /** The queued failure for this call of `api`, if it is the one to fail. */
+  #failure(api: CardkitApi): QueuedFailure | undefined {
+    const queue = this.#failures.get(api);
+    const head = queue?.[0];
+    if (head === undefined) return undefined;
+    if (head.skip > 0) {
+      head.skip -= 1;
+      return undefined;
+    }
+    return queue?.shift();
   }
 
   /** Lose a card, as Lark loses one that has expired or been withdrawn. */
@@ -140,19 +199,29 @@ export class FakeCardkit {
     return card !== undefined && card.streaming && this.#clock.now() - card.streamingSince <= STREAMING_WINDOW_MS;
   }
 
-  /** Record `call`, then answer it: a queued failure, else `rule`'s refusal, else `success`. */
-  #answer(call: CardkitCall, rule: () => Answer | undefined, success: Answer): Answer {
+  /**
+   * Record `call`, then answer it: a queued failure, else `rule`'s refusal, else
+   * `success`, once `apply` has taken the call. A failure queued as landed is
+   * answered after the rules pass and `apply` has run.
+   */
+  #answer(call: CardkitCall, rule: () => Answer | undefined, success: Answer, apply: () => void): Answer {
     this.calls.push(call);
-    const failure = this.#failures.get(call.api)?.shift();
-    if (failure !== undefined) {
+    const queued = this.#failure(call.api);
+    if (queued !== undefined && !queued.landed) {
       call.refused = true;
-      if (failure instanceof Error) throw failure;
-      return failure;
+      if (queued.failure instanceof Error) throw queued.failure;
+      return queued.failure;
     }
     const broken = rule();
     if (broken !== undefined) {
       call.refused = true;
       return broken;
+    }
+    apply();
+    if (queued !== undefined) {
+      call.lost = true;
+      if (queued.failure instanceof Error) throw queued.failure;
+      return queued.failure;
     }
     return success;
   }
@@ -172,21 +241,31 @@ export class FakeCardkit {
         v1: {
           card: {
             create: async (p: { data: { type: string; data: string } }) => {
+              await this.#gate('create');
               const cardId = `card_${this.#made + 1}`;
               const body = JSON.parse(p.data.data) as { config?: { streaming_mode?: boolean }; body: { elements: Array<{ element_id: string; content: string }> } };
-              const answer = this.#answer({ api: 'create', cardId, body }, () => undefined, { code: 0, msg: 'ok', data: { card_id: cardId } });
-              if (answer.code === 0) {
-                this.#made += 1;
-                this.#cards.set(cardId, {
-                  elements: new Map(body.body.elements.map((e) => [e.element_id, e.content])),
-                  last: 0,
-                  streaming: body.config?.streaming_mode === true,
-                  streamingSince: this.#clock.now(),
-                });
-              }
-              return answer;
+              const elements = body.body.elements;
+              return this.#answer(
+                { api: 'create', cardId, body },
+                () => {
+                  if (elements.some((e) => e.content === '')) return refusal(10002);
+                  if (new Set(elements.map((e) => e.element_id)).size !== elements.length) return refusal(200621);
+                  return undefined;
+                },
+                { code: 0, msg: 'ok', data: { card_id: cardId } },
+                () => {
+                  this.#made += 1;
+                  this.#cards.set(cardId, {
+                    elements: new Map(elements.map((e) => [e.element_id, e.content])),
+                    last: 0,
+                    streaming: body.config?.streaming_mode === true,
+                    streamingSince: this.#clock.now(),
+                  });
+                },
+              );
             },
             settings: async (p: { path: { card_id: string }; data: { settings: string; sequence: number; uuid?: string } }) => {
+              await this.#gate('settings');
               const body = JSON.parse(p.data.settings) as { config?: { streaming_mode?: boolean } };
               const call: CardkitCall = {
                 api: 'settings',
@@ -196,7 +275,7 @@ export class FakeCardkit {
                 body,
               };
               let card = undefined as Card | undefined;
-              const answer = this.#answer(
+              return this.#answer(
                 call,
                 () => {
                   const found = this.#sequenced(p.path.card_id, p.data.sequence);
@@ -205,22 +284,23 @@ export class FakeCardkit {
                   return undefined;
                 },
                 OK,
+                () => {
+                  if (card === undefined) return;
+                  card.last = p.data.sequence;
+                  const mode = body.config?.streaming_mode;
+                  if (mode === true) {
+                    card.streaming = true;
+                    card.streamingSince = this.#clock.now();
+                  } else if (mode === false) {
+                    card.streaming = false;
+                  }
+                },
               );
-              if (card !== undefined && answer.code === 0) {
-                card.last = p.data.sequence;
-                const mode = body.config?.streaming_mode;
-                if (mode === true) {
-                  card.streaming = true;
-                  card.streamingSince = this.#clock.now();
-                } else if (mode === false) {
-                  card.streaming = false;
-                }
-              }
-              return answer;
             },
           },
           cardElement: {
             content: async (p: { path: { card_id: string; element_id: string }; data: { content: string; sequence: number; uuid?: string } }) => {
+              await this.#gate('content');
               const call: CardkitCall = {
                 api: 'content',
                 cardId: p.path.card_id,
@@ -230,7 +310,7 @@ export class FakeCardkit {
                 ...(p.data.uuid === undefined ? {} : { uuid: p.data.uuid }),
               };
               let card = undefined as Card | undefined;
-              const answer = this.#answer(
+              return this.#answer(
                 call,
                 () => {
                   const found = this.#sequenced(p.path.card_id, p.data.sequence, p.path.element_id);
@@ -245,14 +325,15 @@ export class FakeCardkit {
                   return undefined;
                 },
                 OK,
+                () => {
+                  if (card === undefined) return;
+                  card.last = p.data.sequence;
+                  card.elements.set(p.path.element_id, p.data.content);
+                },
               );
-              if (card !== undefined && answer.code === 0) {
-                card.last = p.data.sequence;
-                card.elements.set(p.path.element_id, p.data.content);
-              }
-              return answer;
             },
             update: async (p: { path: { card_id: string; element_id: string }; data: { element: string; sequence: number; uuid?: string } }) => {
+              await this.#gate('update');
               const element = JSON.parse(p.data.element) as { content?: string };
               const call: CardkitCall = {
                 api: 'update',
@@ -264,7 +345,7 @@ export class FakeCardkit {
                 body: element,
               };
               let card = undefined as Card | undefined;
-              const answer = this.#answer(
+              return this.#answer(
                 call,
                 () => {
                   const found = this.#sequenced(p.path.card_id, p.data.sequence, p.path.element_id);
@@ -274,12 +355,12 @@ export class FakeCardkit {
                   return undefined;
                 },
                 OK,
+                () => {
+                  if (card === undefined) return;
+                  card.last = p.data.sequence;
+                  card.elements.set(p.path.element_id, element.content ?? '');
+                },
               );
-              if (card !== undefined && answer.code === 0) {
-                card.last = p.data.sequence;
-                card.elements.set(p.path.element_id, element.content ?? '');
-              }
-              return answer;
             },
           },
         },
@@ -287,8 +368,14 @@ export class FakeCardkit {
       im: {
         v1: {
           message: {
-            create: async (p: SendPayload) => this.#send('create', p.data.receive_id ?? '', p),
-            reply: async (p: SendPayload) => this.#send('reply', p.path?.message_id ?? '', p),
+            create: async (p: SendPayload) => {
+              await this.#gate('send');
+              return this.#send('create', p.data.receive_id ?? '', p);
+            },
+            reply: async (p: SendPayload) => {
+              await this.#gate('send');
+              return this.#send('reply', p.path?.message_id ?? '', p);
+            },
           },
         },
       },
@@ -297,7 +384,8 @@ export class FakeCardkit {
 
   #send(kind: 'create' | 'reply', to: string, p: SendPayload): Answer {
     const body = JSON.parse(p.data.content) as { data?: { card_id?: string } };
-    const answer = this.#answer(
+    const cardId = body.data?.card_id;
+    return this.#answer(
       {
         api: 'send',
         kind,
@@ -308,10 +396,11 @@ export class FakeCardkit {
         ...(body.data?.card_id === undefined ? {} : { cardId: body.data.card_id }),
         ...(p.data.reply_in_thread === undefined ? {} : { replyInThread: p.data.reply_in_thread }),
       },
-      () => undefined,
+      () => (cardId !== undefined && !this.#cards.has(cardId) ? refusal(200740) : undefined),
       { code: 0, msg: 'ok', data: { message_id: `om_${this.#messages + 1}` } },
+      () => {
+        this.#messages += 1;
+      },
     );
-    if (answer.code === 0) this.#messages += 1;
-    return answer;
   }
 }

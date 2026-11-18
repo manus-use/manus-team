@@ -48,8 +48,14 @@ describe('replySummary', () => {
   });
 
   it('previews the status when there is no answer, then the tool line', () => {
-    expect(replySummary({ tools: '✅ Bash', answer: '', status: '_Turn failed._' })).toBe('_Turn failed._');
+    expect(replySummary({ tools: '✅ Bash', answer: '', status: '_Turn failed._' })).toBe('Turn failed.');
     expect(replySummary({ tools: '✅ Bash', answer: '', status: '' })).toBe('✅ Bash');
+  });
+
+  it('takes out simple emphasis and backslash escapes, as a preview is plain text', () => {
+    expect(replySummary({ tools: '', answer: 'All **done**, `npm test` _passes_ ~~now~~.', status: '' })).toBe('All done, npm test passes now.');
+    expect(replySummary({ tools: '', answer: 'a \\<b\\> and 2 \\* 3', status: '' })).toBe('a <b> and 2 * 3');
+    expect(replySummary({ tools: '', answer: 'snake_case_name and \\*not bold\\*', status: '' })).toBe('snake_case_name and *not bold*');
   });
 
   it('cuts on a character, never half an emoji', () => {

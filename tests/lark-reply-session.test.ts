@@ -96,6 +96,13 @@ describe('LarkAdapter.openCard', () => {
     sent.kit.failNext('send', refused(230002));
     await expect(sent.a.openCard(CHAT, parts('Hi'), 'u')).rejects.toMatchObject({ code: 230002 });
   });
+
+  it('fails when Lark answers the making with no card id', async () => {
+    const { a, kit } = adapter();
+    kit.failNext('create', { code: 0, msg: 'ok' });
+    await expect(a.openCard(CHAT, parts('Hi'), 'u')).rejects.toMatchObject({ code: 0, retryable: false });
+    expect(kit.calls.map((c) => c.api)).toEqual(['create']);
+  });
 });
 
 describe('LarkAdapter card session', () => {
@@ -222,6 +229,70 @@ describe('LarkAdapter card session', () => {
     expect(kit.shown('card_1', 'answer')).toEqual(['a', 'ab']);
   });
 
+  it("fails the write with Lark's code when turning streaming on again is refused", async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('a'), 'u');
+    kit.failNext('content', { code: 300309, msg: 'streaming is closed' });
+    kit.failNext('settings', { code: 230020, msg: 'rate limited' });
+    await expect(card.set(parts('ab'))).rejects.toMatchObject({ code: 230020 });
+    expect(kit.calls.slice(2).map((c) => [c.api, c.refused === true])).toEqual([
+      ['content', true],
+      ['settings', true],
+    ]);
+  });
+
+  it('writes again only the parts that did not land when one of three fails', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('a', 't1', 's1'), 'u');
+    kit.failNext('content', { code: 230020, msg: 'rate limited' }, { skip: 1 });
+    await expect(card.set(parts('b', 't2', 's2'))).rejects.toMatchObject({ code: 230020 });
+    await card.set(parts('b', 't2', 's2'));
+    expect(updates(kit)).toEqual([
+      ['tools', 't2', 1],
+      ['answer', 'b', 2],
+      ['answer', 'b', 3],
+      ['status', 's2', 4],
+    ]);
+  });
+
+  it('writes again an update whose answer was lost though Lark took it, and Lark takes the resend', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('a'), 'u');
+    kit.failNext('content', new Error('socket hang up'), { landed: true });
+    await expect(card.set(parts('ab'))).rejects.toBeInstanceOf(ChannelError);
+    await card.set(parts('ab'));
+    expect(kit.calls.filter((c) => c.refused === true)).toEqual([]);
+    expect(kit.sequences('card_1')).toEqual([1, 2]);
+    expect(kit.shown('card_1', 'answer')).toEqual(['a', 'ab', 'ab']);
+  });
+
+  it('does not overlap a finish with a write still on its way, so nothing is refused and streaming ends off', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('a'), 'u');
+    const release = kit.holdNext('content');
+    const writing = card.set(parts('ab'));
+    const finishing = card.finish(parts('abc'));
+    await new Promise((resolve) => setImmediate(resolve));
+    release();
+    await Promise.all([writing, finishing]);
+    expect(kit.calls.filter((c) => c.refused === true)).toEqual([]);
+    expect(kit.calls.slice(2).map((c) => [c.api, c.sequence])).toEqual([
+      ['content', 1],
+      ['content', 2],
+      ['settings', 3],
+    ]);
+    expect(kit.shown('card_1', 'answer')).toEqual(['a', 'ab', 'abc']);
+    expect(kit.streaming('card_1')).toBe(false);
+  });
+
+  it('does not try to turn streaming off on a card Lark no longer holds', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('a'), 'u');
+    kit.forget('card_1');
+    await expect(card.finish(parts('ab'))).rejects.toMatchObject({ code: 200740 });
+    expect(kit.calls.slice(2).map((c) => c.api)).toEqual(['content']);
+  });
+
   it('keeps one sequence for the whole card, strictly increasing over every call', async () => {
     const { a, kit } = adapter();
     const card = await a.openCard(CHAT, parts('a', '• Read'), 'u');
@@ -229,5 +300,35 @@ describe('LarkAdapter card session', () => {
     await card.set(parts('abc', '✅ Read'));
     await card.finish(parts('abcd', '✅ Read ×2', '_Turn cancelled._'));
     expect(kit.sequences('card_1')).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+});
+
+describe('the fake cardkit client', () => {
+  // Its own rules, checked, as the tests above lean on them.
+  type Raw = {
+    cardkit: { v1: { card: { create: (p: object) => Promise<{ code?: number }> } } };
+    im: { v1: { message: { create: (p: object) => Promise<{ code?: number }> } } };
+  };
+  const raw = (kit: FakeCardkit): Raw => kit.lark.rawClient as unknown as Raw;
+  const make = (elements: Array<{ element_id: string; content: string }>): object => ({
+    data: { type: 'card_json', data: JSON.stringify({ schema: '2.0', body: { elements } }) },
+  });
+
+  it('refuses a card with an empty element, or two elements of one id, as Lark does', async () => {
+    const kit = new FakeCardkit(new ManualClock(NOW));
+    await expect(raw(kit).cardkit.v1.card.create(make([{ element_id: 'a', content: '' }]))).resolves.toMatchObject({ code: 10002 });
+    await expect(
+      raw(kit).cardkit.v1.card.create(make([{ element_id: 'a', content: 'x' }, { element_id: 'a', content: 'y' }])),
+    ).resolves.toMatchObject({ code: 200621 });
+    await expect(raw(kit).cardkit.v1.card.create(make([{ element_id: 'a', content: EMPTY_PART }]))).resolves.toMatchObject({ code: 0 });
+  });
+
+  it('refuses to send a card by reference that it does not hold', async () => {
+    const kit = new FakeCardkit(new ManualClock(NOW));
+    const send = raw(kit).im.v1.message.create({
+      params: { receive_id_type: 'chat_id' },
+      data: { receive_id: 'oc_team', msg_type: 'interactive', content: JSON.stringify({ type: 'card', data: { card_id: 'card_9' } }), uuid: 'u' },
+    });
+    await expect(send).resolves.toMatchObject({ code: 200740 });
   });
 });

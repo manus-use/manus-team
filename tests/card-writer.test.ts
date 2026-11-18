@@ -483,6 +483,36 @@ describe('CardWriter', () => {
     expect(h.rendered).toEqual([1]);
   });
 
+  it('waits for the write in flight before it finishes the card on the way out', async () => {
+    // Otherwise the finish overlaps the write on the same card.
+    const h = harness();
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    h.writer.want(h.chunk('b'));
+    h.channel.hold();
+    const pass = h.writer.flushNow();
+    const closing = h.writer.close();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.channel.calls).toEqual(['openCard', 'set']);
+    h.channel.release();
+    await Promise.all([pass, closing]);
+    expect(h.channel.calls).toEqual(['openCard', 'set', 'finish']);
+    expect(h.channel.lastCard?.partFinishes).toEqual([{ tools: '', answer: 'ab', status: '' }]);
+  });
+
+  it('finishes again on the next pass when a finish fails, the card still open', async () => {
+    const h = harness();
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    h.channel.failNext('finish', new ChannelError(230020, 'chat rate limit', true));
+    h.writer.want(h.end('completed'));
+    await h.writer.flushNow();
+    await h.writer.flushNow();
+    expect(h.channel.calls).toEqual(['openCard', 'finish', 'finish']);
+    expect(h.channel.lastCard?.partFinishes).toEqual([{ tools: '', answer: 'a', status: '' }]);
+    expect(h.channel.lastCard?.droppedSets).toEqual([]);
+  });
+
   it('freezes an un-frozen card on the way out', async () => {
     // Otherwise the typing indicator spins forever on a session nothing is running.
     const h = harness();

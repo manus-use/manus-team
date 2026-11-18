@@ -90,6 +90,8 @@ export class CardWriter {
   /** Highest seq actually rendered. */
   #rendered = 0;
   #inFlight = false;
+  /** Settles when the pass in flight ends. Unset with none in flight. */
+  #pass: Promise<void> | undefined;
   #timer: NodeJS.Timeout | undefined;
   #lastWriteAt = 0;
   #closed = false;
@@ -148,6 +150,10 @@ export class CardWriter {
     if (this.#wanted <= this.#rendered) return;
 
     this.#inFlight = true;
+    let passEnded!: () => void;
+    this.#pass = new Promise<void>((resolve) => {
+      passEnded = resolve;
+    });
     // Snapshotted before the await. `#wanted` may advance while we are writing;
     // that advance schedules the next pass, and must not silently change what
     // this pass claims to have rendered.
@@ -186,6 +192,8 @@ export class CardWriter {
       // rather than this stale one.
     } finally {
       this.#inFlight = false;
+      this.#pass = undefined;
+      passEnded();
       if (this.#wanted > this.#rendered && !this.#closed) this.#schedule();
     }
   }
@@ -293,6 +301,13 @@ export class CardWriter {
    * user looking at a partial answer with no indication more was coming.
    */
   async close(): Promise<void> {
+    if (this.#timer !== undefined) {
+      clearTimeout(this.#timer);
+      this.#timer = undefined;
+    }
+    // A pass in flight is waited for, or the finish below would overlap its
+    // write on the same card.
+    if (this.#pass !== undefined) await this.#pass;
     if (this.#timer !== undefined) {
       clearTimeout(this.#timer);
       this.#timer = undefined;
