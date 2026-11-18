@@ -1,5 +1,5 @@
 import type { Event } from '../types.js';
-import type { CardSession, Channel, SendTarget } from './types.js';
+import type { CardParts, CardSession, Channel, SendTarget } from './types.js';
 import { CARD_GONE_CODES, ChannelError } from './types.js';
 import { renderCard, type RenderedCard } from './render.js';
 import { backoffMs } from './lark/errors.js';
@@ -66,6 +66,15 @@ export const CARD_THROTTLE_BUDGET_MS = 30_000;
 const THROTTLE_CODES: ReadonlySet<number> = new Set([99991400, 429]);
 
 /**
+ * How long after the last write one that changes only the tool line waits,
+ * unless the turn is finishing: two seconds. Tool events come in bursts, each
+ * a request to Lark, and the tool line is the part a reader needs least soon;
+ * held, a burst is one write, and the card's request rate stays inside Lark's
+ * limits for the answer (channel spec §4.5).
+ */
+export const TOOL_LINE_DELAY_MS = 2_000;
+
+/**
  * Card entities expire after 14 days. We rotate before the edge rather than at
  * it, because the failure at the edge is an update that silently stops landing.
  */
@@ -108,9 +117,13 @@ export class CardWriter {
   #timer: NodeJS.Timeout | undefined;
   #lastWriteAt = 0;
   #closed = false;
+  /** Set by `close`: the last pass is not held for the tool line. */
+  #closing = false;
   #finished = false;
   /** The `turnStartSeq` the open card belongs to. Meaningless while `#session` is unset. */
   #cardTurn = 0;
+  /** The parts the open card was last given and took. Unset with no card. */
+  #shownParts: CardParts | undefined;
   /** Consecutive failed writes. Reset by any success, checked against `CARD_FAILURE_LIMIT`. */
   #failures = 0;
   /** Consecutive failed writes of any kind, throttles among them: the backoff's attempt. */
@@ -180,7 +193,8 @@ export class CardWriter {
     const target = this.#wanted;
 
     try {
-      await this.#write(target);
+      // Held, not failed: the pass that follows renders the newest state.
+      if (!(await this.#write(target))) return;
       this.#rendered = target;
       this.#lastWriteAt = this.#clock.now();
       this.#failures = 0;
@@ -282,7 +296,8 @@ export class CardWriter {
     this.#deps.onRendered(target);
   }
 
-  async #write(target: number): Promise<void> {
+  /** Write the render through `target`; false when it was held (`TOOL_LINE_DELAY_MS`). */
+  async #write(target: number): Promise<boolean> {
     // Read from seq 0, not from the cursor: a render is a full replacement of the
     // card, not an append to it, and the renderer needs the whole turn to produce
     // one. It scopes the result to the current turn itself.
@@ -319,6 +334,7 @@ export class CardWriter {
       );
       this.#session = session;
       this.#cardTurn = view.turnStartSeq;
+      this.#shownParts = view.parts;
       this.#deps.onCardChanged(session.messageId);
       // The initial text was already delivered by `openCard`, so a `set` here
       // would be a redundant round-trip -- but a finished view still has to be
@@ -327,7 +343,12 @@ export class CardWriter {
         await session.finish(view.parts);
         this.#finished = true;
       }
-      return;
+      return true;
+    }
+
+    if (!view.finished && !this.#closing && toolLineOnly(this.#shownParts, view.parts) && this.#clock.now() - this.#lastWriteAt < TOOL_LINE_DELAY_MS) {
+      this.#notBefore = this.#lastWriteAt + TOOL_LINE_DELAY_MS;
+      return false;
     }
 
     if (view.finished) {
@@ -336,6 +357,8 @@ export class CardWriter {
     } else {
       await session.set(view.parts);
     }
+    this.#shownParts = view.parts;
+    return true;
   }
 
   /**
@@ -350,6 +373,8 @@ export class CardWriter {
       clearTimeout(this.#timer);
       this.#timer = undefined;
     }
+    // The last pass writes what it has, a tool line among it, unheld.
+    this.#closing = true;
     // A pass in flight is waited for, or the finish below would overlap its
     // write on the same card.
     if (this.#pass !== undefined) await this.#pass;
@@ -393,6 +418,11 @@ export class CardWriter {
   get renderedThrough(): number {
     return this.#rendered;
   }
+}
+
+/** Whether `next` differs from `shown` in its tool line alone. */
+function toolLineOnly(shown: CardParts | undefined, next: CardParts): boolean {
+  return shown !== undefined && shown.answer === next.answer && shown.status === next.status && shown.tools !== next.tools;
 }
 
 /**

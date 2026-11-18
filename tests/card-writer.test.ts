@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CARD_FAILURE_LIMIT, CARD_MAX_AGE_MS, CARD_THROTTLE_BUDGET_MS, CardWriter } from '../src/channel/card-writer.js';
+import { CARD_FAILURE_LIMIT, CARD_MAX_AGE_MS, CARD_THROTTLE_BUDGET_MS, CardWriter, TOOL_LINE_DELAY_MS } from '../src/channel/card-writer.js';
 import { ChannelError } from '../src/channel/types.js';
 import type { Event, EventType } from '../src/types.js';
 import { FakeChannel } from './helpers/channel.js';
@@ -377,6 +377,47 @@ describe('CardWriter', () => {
     expect(card?.partFinishes).toEqual([{ tools: '', answer: 'ab', status: '' }]);
     // And the fake keeps the joined text, which the other tests read.
     expect(card?.sets).toEqual(['a', 'ab']);
+  });
+
+  it('holds a write that changes only the tool line until 2 s after the last one, but not one to the answer, nor the finish', async () => {
+    // Channel spec §4.5: tool events come in bursts, each a request to Lark.
+    const h = harness();
+    const tool = (status: string): number => {
+      const seq = h.log.length + 1;
+      h.log.push(ev(seq, 'tool_call', { toolCallId: 'c1', title: 'Bash', status }));
+      return seq;
+    };
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    h.writer.want(tool('in_progress'));
+    await h.writer.flushNow();
+    expect(h.channel.calls).toEqual(['openCard']);
+    expect(h.rendered).toEqual([1]);
+
+    h.clock.advance(TOOL_LINE_DELAY_MS);
+    await h.writer.flushNow();
+    expect(h.channel.calls).toEqual(['openCard', 'set']);
+    expect(h.channel.lastCard?.partSets.at(-1)?.tools).toBe('⏳ Bash');
+
+    h.writer.want(h.chunk('b'));
+    await h.writer.flushNow();
+    h.writer.want(tool('completed'));
+    h.writer.want(h.end('completed'));
+    await h.writer.flushNow();
+    expect(h.channel.calls).toEqual(['openCard', 'set', 'set', 'finish']);
+    expect(h.channel.lastCard?.partFinishes).toEqual([{ tools: '✅ Bash', answer: 'a\n\nb', status: '' }]);
+  });
+
+  it('does not hold the tool line on the way out', async () => {
+    const h = harness();
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    const seq = h.log.length + 1;
+    h.log.push(ev(seq, 'tool_call', { toolCallId: 'c1', title: 'Bash', status: 'completed' }));
+    h.writer.want(seq);
+    await h.writer.close();
+    expect(h.channel.calls).toEqual(['openCard', 'set', 'finish']);
+    expect(h.channel.lastCard?.partFinishes).toEqual([{ tools: '✅ Bash', answer: 'a', status: '' }]);
   });
 
   it('reports a swallowed failure instead of retrying in silence', async () => {
