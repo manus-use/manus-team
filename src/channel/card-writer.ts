@@ -211,6 +211,7 @@ export class CardWriter {
     this.#lastWriteAt = this.#clock.now();
 
     try {
+      // The parts joined: the plain message reads as the card did.
       const view = renderCard(this.#deps.readEvents(0, target));
       await this.#deps.channel.sendText(
         this.#deps.target,
@@ -251,7 +252,7 @@ export class CardWriter {
       if (newTurn && !this.#finished && existing !== undefined) {
         const before = renderCard(this.#deps.readEvents(0, view.turnStartSeq - 1));
         try {
-          await existing.finish(before.text);
+          await existing.finish(before.parts);
         } catch {
           // Best effort. Failing to tidy the old card must not cost the new one,
           // which is the card the answer is actually going onto.
@@ -260,7 +261,7 @@ export class CardWriter {
       this.#finished = false;
       session = await this.#deps.channel.openCard(
         view.replyTo === undefined ? this.#deps.target : { ...this.#deps.target, replyTo: view.replyTo },
-        view.text,
+        view.parts,
         this.#deps.sendUuid(target),
       );
       this.#session = session;
@@ -270,17 +271,17 @@ export class CardWriter {
       // would be a redundant round-trip -- but a finished view still has to be
       // frozen.
       if (view.finished) {
-        await session.finish(view.text);
+        await session.finish(view.parts);
         this.#finished = true;
       }
       return;
     }
 
     if (view.finished) {
-      await session.finish(view.text);
+      await session.finish(view.parts);
       this.#finished = true;
     } else {
-      await session.set(view.text);
+      await session.set(view.parts);
     }
   }
 
@@ -307,7 +308,7 @@ export class CardWriter {
     if (session !== undefined && !this.#finished) {
       const view = renderCard(this.#deps.readEvents(0, this.#rendered));
       try {
-        await session.finish(view.text);
+        await session.finish(view.parts);
         this.#finished = true;
       } catch {
         // Teardown is best-effort. A card that stays open is a cosmetic defect;

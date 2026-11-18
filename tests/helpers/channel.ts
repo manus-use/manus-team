@@ -1,7 +1,9 @@
+import { cardText } from '../../src/channel/render.js';
 import type {
   ApprovalCardSpec,
   ApprovalOutcomeView,
   CardButton,
+  CardParts,
   CardSession,
   CardView,
   Channel,
@@ -83,8 +85,12 @@ export interface ApprovalCall {
 export class FakeCard implements CardSession {
   readonly messageId: string;
   readonly createdAt: number;
+  /** Each set's and finish's parts, joined as the plain message joins them (`cardText`). */
   readonly sets: string[] = [];
   readonly finishes: string[] = [];
+  /** The parts themselves, index-aligned with `sets` and `finishes`. */
+  readonly partSets: CardParts[] = [];
+  readonly partFinishes: CardParts[] = [];
   /**
    * Writes the freeze swallowed.
    *
@@ -105,19 +111,20 @@ export class FakeCard implements CardSession {
     this.createdAt = createdAt;
   }
 
-  async set(text: string): Promise<void> {
+  async set(parts: CardParts): Promise<void> {
     this.#owner.calls.push('set');
     // Before the gate, because the real adapter returns without reaching the
     // network at all -- so this cannot fail, and cannot be held.
     if (this.#frozen) {
-      this.droppedSets.push(text);
+      this.droppedSets.push(cardText(parts));
       return;
     }
     await this.#owner.gate('set');
-    this.sets.push(text);
+    this.sets.push(cardText(parts));
+    this.partSets.push(parts);
   }
 
-  async finish(text: string): Promise<void> {
+  async finish(parts: CardParts): Promise<void> {
     this.#owner.calls.push('finish');
     if (this.#frozen) return;
     // Set before the gate: freezing is one-way in the real adapter, which marks
@@ -125,7 +132,8 @@ export class FakeCard implements CardSession {
     // failure there loses the last update, not the freeze.
     this.#frozen = true;
     await this.#owner.gate('finish');
-    this.finishes.push(text);
+    this.finishes.push(cardText(parts));
+    this.partFinishes.push(parts);
   }
 
   /** Last content the card was told to display, whether by set or finish. */
@@ -242,14 +250,15 @@ export class FakeChannel implements Channel {
     return this.#result(`om_text_${++this.#seq}`, target);
   }
 
-  async openCard(target: SendTarget, initialText: string, uuid: string): Promise<CardSession> {
+  async openCard(target: SendTarget, initial: CardParts, uuid: string): Promise<CardSession> {
     this.calls.push('openCard');
     await this.gate('openCard');
     const card = new FakeCard(this, `om_card_${++this.#seq}`, this.#clock.now());
     // The real adapter delivers the initial text as part of opening, so record it
     // the same way -- a test asserting on card content must not have to know
     // whether the first render arrived via open or via set.
-    card.sets.push(initialText);
+    card.sets.push(cardText(initial));
+    card.partSets.push(initial);
     this.cards.push(card);
     this.cardOpens.push({ target, uuid });
     return card;

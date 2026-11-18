@@ -357,6 +357,28 @@ describe('CardWriter', () => {
     expect(h.channel.calls).toEqual(['openCard', 'set', 'finish']);
   });
 
+  it('hands the card its parts, so the adapter can write each to its own element', async () => {
+    // Channel spec §4.5: the tool line and the answer are separate elements, so
+    // the writer passes the render's parts, not one text.
+    const h = harness();
+    h.submit('ask');
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    h.writer.want(h.chunk('b'));
+    await h.writer.flushNow();
+    h.writer.want(h.end('completed'));
+    await h.writer.flushNow();
+
+    const card = h.channel.lastCard;
+    expect(card?.partSets).toEqual([
+      { tools: '', answer: 'a', status: '' },
+      { tools: '', answer: 'ab', status: '' },
+    ]);
+    expect(card?.partFinishes).toEqual([{ tools: '', answer: 'ab', status: '' }]);
+    // And the fake keeps the joined text, which the other tests read.
+    expect(card?.sets).toEqual(['a', 'ab']);
+  });
+
   it('reports a swallowed failure instead of retrying in silence', async () => {
     const h = harness();
     h.writer.want(h.chunk('an answer nobody should log'));

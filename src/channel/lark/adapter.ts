@@ -4,6 +4,7 @@ import {
   type ApprovalCardSpec,
   type ApprovalOutcomeView,
   type CardButton,
+  type CardParts,
   type CardSession,
   type CardView,
   type Channel,
@@ -13,6 +14,7 @@ import {
   ONE_MESSAGE,
 } from '../types.js';
 import { forPlainText, truncate } from '../escape.js';
+import { cardText } from '../render.js';
 import { backoffMs, toChannelError } from './errors.js';
 import type { Clock } from '../../time.js';
 import { systemClock } from '../../time.js';
@@ -249,7 +251,7 @@ export class LarkAdapter implements Channel {
    * every path**, including failure, or `stream()` never settles and the card
    * shows a typing indicator forever.
    */
-  async openCard(target: SendTarget, initialText: string, _uuid: string): Promise<CardSession> {
+  async openCard(target: SendTarget, initial: CardParts, _uuid: string): Promise<CardSession> {
     const clock = this.#clock;
 
     let onController: (c: MarkdownStreamController) => void;
@@ -269,7 +271,7 @@ export class LarkAdapter implements Channel {
         target.chatId,
         {
           markdown: async (controller) => {
-            await controller.setContent(initialText);
+            await controller.setContent(cardText(initial));
             onController(controller);
             await held;
           },
@@ -301,22 +303,22 @@ export class LarkAdapter implements Channel {
     return {
       messageId: controller.messageId,
       createdAt,
-      async set(text: string): Promise<void> {
+      async set(parts: CardParts): Promise<void> {
         if (finished) return;
         try {
-          await controller.setContent(text);
+          await controller.setContent(cardText(parts));
         } catch (err) {
           throw toChannelError(err);
         }
       },
-      async finish(text: string): Promise<void> {
+      async finish(parts: CardParts): Promise<void> {
         // Idempotent: teardown reaches this from the writer's normal terminal
         // path and again from its shutdown path, and a second call must be inert
         // rather than an error.
         if (finished) return;
         finished = true;
         try {
-          await controller.setContent(text);
+          await controller.setContent(cardText(parts));
         } catch {
           // The content update failed, but the producer still has to be released.
           // Leaving it held would hang `stream()` and, with it, the card.

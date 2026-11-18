@@ -145,13 +145,13 @@ export interface CardSession {
   readonly createdAt: number;
 
   /**
-   * Replace the card's content.
+   * Replace the card's content, part by part.
    *
    * Full replacement, not append. Renders are computed from the log and are
    * idempotent, so a retry after an ambiguous failure re-sends the same state
    * rather than appending it twice.
    */
-  set(text: string): Promise<void>;
+  set(parts: CardParts): Promise<void>;
 
   /**
    * Final content, then freeze. Idempotent; must not throw on a second call.
@@ -163,7 +163,7 @@ export interface CardSession {
    * and keeps writing to it therefore loses every later write silently, which is
    * why the writer opens a new card per turn rather than reusing this one.
    */
-  finish(text: string): Promise<void>;
+  finish(parts: CardParts): Promise<void>;
 }
 
 export interface ApprovalCardSpec {
@@ -204,8 +204,8 @@ export interface Channel {
    */
   sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[]): Promise<SendResult>;
 
-  /** Open a streaming card. */
-  openCard(target: SendTarget, initialText: string, uuid: string): Promise<CardSession>;
+  /** Open a streaming card, showing `initial`. */
+  openCard(target: SendTarget, initial: CardParts, uuid: string): Promise<CardSession>;
 
   /** Post an approval card with one button per offered option. */
   sendApprovalCard(target: SendTarget, spec: ApprovalCardSpec, uuid: string): Promise<SendResult>;
