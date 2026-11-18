@@ -114,8 +114,9 @@ export interface BoardAccess {
   /** Why the service has no people, so a person cannot be checked here; undefined when it has them. */
   peopleMissing: PeopleMissing | undefined;
   /**
-   * The people this bot has seen, each with talk tier by this shell's allowlist,
-   * none with an owner missing: `mt kanban people`'s (kanban spec §22.2).
+   * The people this bot has seen, each with talk tier by this shell's allowlist
+   * or a grant, none with an owner missing: `mt kanban people`'s (kanban spec
+   * §22.2, tier grants spec §8.3).
    * Undefined with no app id, as there is no bot to list them for.
    */
   seen(): SeenPerson[] | undefined;
@@ -126,7 +127,10 @@ export interface BoardAccess {
 export interface SeenPerson {
   unionId: string;
   name: string | null;
+  /** Whether they can be given work: talk tier by this shell's lists, or by a grant (tier grants spec §8.3). */
   talk: boolean;
+  /** Where their talk tier comes from, the configuration winning when both give it; null with none. */
+  talkFrom: 'config' | 'grant' | null;
 }
 
 /** What `assignable` says of a person when the service has no talk check: right for a board not in Lark, wrong beside a gateway that is. */
@@ -253,7 +257,11 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   const seen = (): SeenPerson[] | undefined =>
     appId === undefined
       ? undefined
-      : peopleOf(db, appId).map((p) => ({ unionId: p.unionId, name: p.name, talk: talk?.includes(p.openId) === true }));
+      : peopleOf(db, appId).map((p) => {
+          // With no owner there is no talk list, and nobody is shown with talk tier.
+          const has = talk !== undefined && tiersOf(lists, p.openId, grantOf(p.unionId)).talk;
+          return { unionId: p.unionId, name: p.name, talk: has, talkFrom: !has ? null : talk.includes(p.openId) ? 'config' : 'grant' };
+        });
   return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, close: () => db.close() };
 }
 

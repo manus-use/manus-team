@@ -41,7 +41,7 @@ import { CronTokens } from './cron/tokens.js';
 import { CronApi } from './cron/worker.js';
 import { writeGatewayZone } from './cron/zone-file.js';
 import { jobCounts } from './db/cron.js';
-import { tierReader } from './db/grants.js';
+import { grantCounts, tierReader } from './db/grants.js';
 import { lockDatabase } from './kanban/socket.js';
 import { SinkChannel } from './kanban/sink.js';
 import { PackagesInUse } from './render/native.js';
@@ -91,6 +91,21 @@ export function cronLine(cron: { enabled: boolean; maxRunning: number; idleTimeo
     `each stopped after ${cron.idleTimeoutS} s with no activity; new jobs in ${zone} (from ${cron.tz === undefined ? "this process's zone" : 'cron.tz'}), ` +
     'and every job keeps its own zone'
   );
+}
+
+/**
+ * The grants' startup lines (tier grants spec §8.4), after the schema's: how
+ * many people this bot's active grants let in, by tier, and how many active
+ * grants are another app id's, which count for nothing here; none of either
+ * says nothing.
+ */
+export function grantLines(counts: { talk: number; operate: number; otherApps: number }): string[] {
+  const out: string[] = [];
+  if (counts.talk + counts.operate > 0) {
+    out.push(`auth: ${counts.talk} person(s) granted talk and ${counts.operate} operate, beside the configuration's; mt auth list shows who`);
+  }
+  if (counts.otherApps > 0) out.push(`auth: ${counts.otherApps} grant(s) are for another app id than lark.appId, and count for nothing here`);
+  return out;
 }
 
 /**
@@ -245,6 +260,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     );
   }
   note(`schema at version ${version} (${config.dbPath})`);
+  for (const line of grantLines(grantCounts(db, config.lark.appId))) note(line);
   // The zone new jobs get (the cron spec, §2.2): cron.tz, else this process's.
   const zone = config.cron.tz ?? processZone();
 

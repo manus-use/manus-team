@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { migrate, openDb, type Db } from '../src/db/open.js';
+import { grantTier } from '../src/db/grants.js';
 import { notePerson, peopleOf } from '../src/db/people.js';
 import { addSecrets, clearSecrets, MASK } from '../src/secrets.js';
 import { SCHEMA_DIR } from './helpers/db.js';
@@ -72,14 +73,31 @@ describe('mt kanban people', () => {
     expect(JSON.parse(r.out)).toEqual({
       ok: true,
       people: [
-        { principal: 'lark:on_ann', union_id: 'on_ann', name: 'Ann\u202E Wu', talk: false },
-        { principal: 'lark:on_bob', union_id: 'on_bob', name: 'Bob Li', talk: true },
-        { principal: 'lark:on_zed', union_id: 'on_zed', name: 'Bob Li', talk: false },
-        { principal: 'lark:on_owner', union_id: 'on_owner', name: 'Owner sk-live-1234567890', talk: true },
-        { principal: 'lark:on_quiet', union_id: 'on_quiet', name: null, talk: false },
+        { principal: 'lark:on_ann', union_id: 'on_ann', name: 'Ann\u202E Wu', talk: false, talk_from: null },
+        { principal: 'lark:on_bob', union_id: 'on_bob', name: 'Bob Li', talk: true, talk_from: 'config' },
+        { principal: 'lark:on_zed', union_id: 'on_zed', name: 'Bob Li', talk: false, talk_from: null },
+        { principal: 'lark:on_owner', union_id: 'on_owner', name: 'Owner sk-live-1234567890', talk: true, talk_from: 'config' },
+        { principal: 'lark:on_quiet', union_id: 'on_quiet', name: null, talk: false, talk_from: null },
       ],
     });
     expect(r.out).toContain('Ann\\u202e Wu');
+  });
+
+  it('counts a grant in the talk column, saying in --json where talk tier comes from, the configuration first', async () => {
+    setup();
+    const actor = { by: 'operator:alice', via: 'terminal' as const, chat: null };
+    grantTier(db, { appId: 'cli_app', unionId: 'on_zed', openId: 'ou_zed', tier: 'talk', ...actor }, () => ({ write: 'insert' as const }), 1);
+    grantTier(db, { appId: 'cli_app', unionId: 'on_bob', openId: 'ou_bob', tier: 'operate', ...actor }, () => ({ write: 'insert' as const }), 1);
+    grantTier(db, { appId: 'cli_other', unionId: 'on_ann', openId: 'ou_ann', tier: 'talk', ...actor }, () => ({ write: 'insert' as const }), 1);
+    expect((await fx.run(['kanban', 'people'])).out).toMatch(/^Bob Li +lark:on_zed +talk$/m);
+    const people = (JSON.parse((await fx.run(['kanban', 'people', '--json'])).out) as { people: Array<{ union_id: string; talk: boolean; talk_from: string | null }> }).people;
+    expect(people.map((p) => [p.union_id, p.talk, p.talk_from])).toEqual([
+      ['on_ann', false, null],
+      ['on_bob', true, 'config'],
+      ['on_zed', true, 'grant'],
+      ['on_owner', true, 'config'],
+      ['on_quiet', false, null],
+    ]);
   });
 
   it('says there is no bot to list for without an app id, and nobody has talk tier without an owner', async () => {

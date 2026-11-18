@@ -832,9 +832,9 @@ function task(args: readonly string[], io: MtIo): Promise<number> {
 
 /**
  * `mt kanban people [--json]` (kanban spec §22.2): who this bot has seen, as a
- * terminal names them, `lark:<union_id>`, and whether they have talk tier by
- * the open_id last seen. A union_id is in no message a person sees, so this is
- * how an operator finds one.
+ * terminal names them, `lark:<union_id>`, and whether they have talk tier, by
+ * the open_id last seen or by a grant, and from which (tier grants spec §8.3).
+ * A union_id is in no message a person sees, so this is how an operator finds one.
  */
 function people(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, JSON_FLAG);
@@ -848,7 +848,7 @@ function people(rest: readonly string[], io: MtIo): Promise<number> {
     return {
       ok: true,
       lines: peopleText(seen),
-      json: { people: seen.map((p) => ({ principal: `lark:${p.unionId}`, union_id: p.unionId, name: p.name, talk: p.talk })) },
+      json: { people: seen.map((p) => ({ principal: `lark:${p.unionId}`, union_id: p.unionId, name: p.name, talk: p.talk, talk_from: p.talkFrom })) },
     };
   });
 }
