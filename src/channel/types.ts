@@ -127,11 +127,9 @@ export interface CardParts {
 /**
  * A card being written to, as a session rather than a handle.
  *
- * This shape is dictated by what the platform actually offers. Feishu's streaming
- * card API is a *producer*: you hand it a callback and it owns the card's
- * lifecycle for the duration, handling throttling and the 30,000-character
- * element rollover itself. A create/update/close triple would either reimplement
- * that or fight it.
+ * The session holds what the card's updates need and nothing persists: the
+ * card's next sequence, and what each element was last given, so only a part
+ * that changed is written (channel spec §4.5).
  *
  * The consequence, stated plainly because it constrains recovery: a card session
  * cannot outlive the process that opened it. After a restart the old card can no
@@ -270,6 +268,8 @@ export class ChannelError extends Error {
 export const CARD_GONE_CODES: ReadonlySet<number> = new Set([
   230011, // message withdrawn
   200750, // card entity expired or not found
+  200740, // card entity not found
+  300311, // card entity no longer updatable
 ]);
 
 /**
