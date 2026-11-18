@@ -57,8 +57,9 @@ const indexes = (table: string): string[] =>
     .map((r) => r.name);
 
 describe('migration 010', () => {
-  it('is version 10, with both tables STRICT and their indexes', () => {
-    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(10);
+  it('is migrated past version 10, with both tables STRICT and their indexes', () => {
+    // 011 adds tier_grants.
+    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(11);
     const strict = h.db.prepare<[], { name: string; strict: number }>("SELECT name, strict FROM pragma_table_list WHERE name LIKE 'cron_%' ORDER BY name").all();
     expect(strict).toEqual([
       { name: 'cron_fires', strict: 1 },
@@ -126,7 +127,7 @@ describe('migration 010', () => {
         expect(migrate(d, only)).toBe(9);
         const task = newTask(d);
         const before = getTask(d, task.taskId);
-        expect(migrate(d, SCHEMA_DIR)).toBe(10);
+        expect(migrate(d, SCHEMA_DIR)).toBe(11);
         expect(getTask(d, task.taskId)).toEqual(before);
         expect(d.prepare('SELECT count(*) AS n FROM cron_jobs').get()).toEqual({ n: 0 });
       } finally {

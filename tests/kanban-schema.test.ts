@@ -65,8 +65,8 @@ function run(
 describe('migration 003', () => {
   it('creates every kanban table, all STRICT', () => {
     // 004 adds a column to kanban_comments and an index, 005 the people table, 006 the boards' two tables, 007 and 008 a column each,
-    // 009 the workflows' two tables.
-    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(10);
+    // 009 the workflows' two tables, 010 cron's, 011 tier_grants.
+    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(11);
     const tables = h.db
       .prepare<[], { name: string; strict: number }>(
         "SELECT name, strict FROM pragma_table_list WHERE name LIKE 'kanban_%' ORDER BY name",
