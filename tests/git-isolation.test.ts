@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { GIT_ISOLATION } from './helpers/git.js';
 
 /**
  * No test starts git itself: each goes through tests/helpers/git.ts, which
@@ -26,6 +27,11 @@ describe('git in tests', () => {
       .filter((path) => path !== HELPER && path !== 'tests/git-isolation.test.ts')
       .filter((path) => STARTS_GIT.test(readFileSync(join(ROOT, path), 'utf8')));
     expect(offenders).toEqual([]);
+  });
+
+  it("is isolated process-wide too, so git that source code starts with the process's environment reads no global or system file", () => {
+    expect(process.env['GIT_CONFIG_GLOBAL']).toBe(GIT_ISOLATION.GIT_CONFIG_GLOBAL);
+    expect(process.env['GIT_CONFIG_NOSYSTEM']).toBe(GIT_ISOLATION.GIT_CONFIG_NOSYSTEM);
   });
 
   it('catches each way of starting git', () => {
