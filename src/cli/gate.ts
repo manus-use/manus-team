@@ -2,13 +2,16 @@ import { existsSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { loadTeamSettings, type Env, type TeamSettings } from '../config.js';
+import { tierReader } from '../db/grants.js';
 import { openDb } from '../db/open.js';
 import { peopleOf } from '../db/people.js';
 import { PeopleDirectory } from '../kanban/people.js';
 import { KanbanService } from '../kanban/service.js';
+import { tiersOf } from '../policy/auth.js';
 import type { GateRow } from '../kanban/types.js';
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { loadTeam, teamSecrets, type Team } from '../team.js';
+import type { Tier } from '../types.js';
 import { refuse, table } from './args.js';
 import type { MtIo } from './mt.js';
 
@@ -188,6 +191,7 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   }
   let db: ReturnType<typeof openDb>;
   let migrated: unknown;
+  let granted: boolean;
   try {
     db = openDb(settings.dbPath);
   } catch (err) {
@@ -196,7 +200,10 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   // The table the command needs: the board's, or for the workflow commands the workflows' (workflows spec §7).
   const table = opts.workflows === true ? 'kanban_workflow_instances' : 'kanban_gates';
   try {
-    migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    const has = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
+    migrated = has.get(table);
+    // A database not yet migrated to 011 has no grants: the board reads it as having none (tier grants spec §4.3).
+    granted = has.get('tier_grants') !== undefined;
   } catch (err) {
     db.close();
     return no('failed', failed(err));
@@ -206,12 +213,16 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     const has = opts.workflows === true ? 'no workflows yet' : 'no board yet';
     return no('no_board', `the database at ${settings.dbPath} has ${has}: start the gateway once, so it is migrated`);
   }
-  // Chat's own check of a person, against the same table (kanban spec §22.2): the people this bot has
-  // seen, and the talk allowlist this shell's settings give, as the gateway's authorizer holds it.
+  // Chat's own check of a person, against the same tables (kanban spec §22.2, tier grants spec §4.3): the people
+  // this bot has seen, the lists this shell's settings give, as the gateway's authorizer holds them, and the grants.
   const { appId, talk } = settings;
+  const lists = { allowTalk: talk ?? [], allowOperate: settings.operate ?? [] };
   const peopleMissing: PeopleMissing | undefined = appId === undefined ? 'appId' : talk === undefined ? 'owner' : undefined;
+  const grantOf = appId !== undefined && granted ? tierReader(db, appId) : (): Tier | undefined => undefined;
   const people =
-    appId === undefined || talk === undefined ? undefined : new PeopleDirectory({ db, appId, canTalk: ({ openId }) => openId !== null && talk.includes(openId) });
+    appId === undefined || talk === undefined
+      ? undefined
+      : new PeopleDirectory({ db, appId, canTalk: (person) => tiersOf(lists, person.openId, grantOf(person.unionId)).talk });
   // As the gateway builds its own: a supervised role's approvals go to the chat that follows its task (spec §7.1).
   const service = new KanbanService({
     db,

@@ -321,6 +321,19 @@ export interface TeamSettings {
    */
   talk?: readonly string[];
   /**
+   * The owner, `MT_OWNER_OPEN_ID` or `auth.owner`, when either is set: whom
+   * `mt auth` judges as the owner, who cannot be revoked (tier grants spec §4.3).
+   */
+  owner?: string;
+  /**
+   * The operate list as the gateway builds `auth.allowOperate`: the owner and
+   * `MT_ALLOW_OPERATE` or `auth.operate`. Present only with an owner, as
+   * `talk` is: so `mt auth list` can say who operates.
+   */
+  operate?: readonly string[];
+  /** Where the owner and the two lists came from, as `loadConfig` records them, for the words that name a list. */
+  from?: ListSources;
+  /**
    * The chats the gateway acts in, `MT_ALLOW_CHATS` or `auth.chats`, as it
    * builds `auth.allowChats`; empty for any chat. A terminal's `--chat` names
    * none outside it (kanban spec §22.1, the cron spec §6.2).
@@ -394,7 +407,6 @@ export function loadConfig(
   const ownerOpenId = ownerOf(env, file) ?? fail('an owner is required: set auth.owner in the config file, or MT_OWNER_OPEN_ID');
   const team = teamSettingsFrom(env, located);
 
-  const allowOperate = envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate;
   const { maxLiveSessions, liveName, maxRunning, maxRunningFrom } = runningLimits(env, file);
   if (maxRunning > maxLiveSessions) {
     // A run is a session, and its actor is pinned while it is open (spec §6.3):
@@ -432,7 +444,7 @@ export function loadConfig(
       // The owner is always included. An allowlist that excludes the owner locks
       // out the only person who can fix it, and it is not editable from chat.
       allowTalk: talkOf(env, file, ownerOpenId),
-      allowOperate: unique([ownerOpenId, ...allowOperate]),
+      allowOperate: operateOf(env, file, ownerOpenId),
       allowChats: chatsOf(env, file),
       allowDirectMessages: envFlag(env, 'MT_ALLOW_DM') ?? file.auth.directMessages ?? true,
       // Default false. `@all` is a room-wide notification, not an instruction, and
@@ -504,6 +516,11 @@ function ownerOf(env: Env, file: FileConfig): string | undefined {
 /** The talk allowlist, `MT_ALLOW_TALK` else `auth.talk`, with the owner always first in it. */
 function talkOf(env: Env, file: FileConfig, owner: string): string[] {
   return unique([owner, ...(envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk)]);
+}
+
+/** The operate list, `MT_ALLOW_OPERATE` else `auth.operate`, with the owner always first in it. */
+function operateOf(env: Env, file: FileConfig, owner: string): string[] {
+  return unique([owner, ...(envList(env, 'MT_ALLOW_OPERATE') ?? file.auth.operate)]);
 }
 
 /** Which of the owner and the two lists the environment overrides: `ownerOf`'s, `talkOf`'s and `MT_ALLOW_OPERATE`'s precedence. */
@@ -591,7 +608,8 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'team.db'),
     ...(file.kanban.enabled === undefined ? {} : { kanbanEnabled: file.kanban.enabled }),
     ...(appId === undefined ? {} : { appId }),
-    ...(owner === undefined ? {} : { talk: talkOf(env, file, owner) }),
+    ...(owner === undefined ? {} : { owner, talk: talkOf(env, file, owner), operate: operateOf(env, file, owner) }),
+    from: listSources(env),
     chats: chatsOf(env, file),
     ...(file.cron.enabled === undefined && file.cron.tz === undefined
       ? {}
