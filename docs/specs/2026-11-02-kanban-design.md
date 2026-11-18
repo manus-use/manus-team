@@ -859,7 +859,10 @@ session status already follows (`core/status.ts`, channel spec §7), for the sam
   person a `/kanban` command mentions, and each person who presses a board card's button. A person
   named by principal alone — typed out in chat, or in an agent's `mt kanban create` or `review` —
   is checked through the `open_id` last seen with it; a principal the gateway has never seen cannot
-  be checked, and is refused.
+  be checked, and is refused. *Amended on 2026-11-18 by the tier grants spec,
+  [`2026-11-18-tier-grants-design.md`](2026-11-18-tier-grants-design.md) §4.3:* a person named by
+  principal has talk tier when the `open_id` `people` holds for them is in the talk list, **or**
+  their union_id has an active grant, which needs no row in `people`.
 - **Unassigned, or an assignee that does not resolve** (a role whose directory was removed or is
   now invalid, a role whose files cannot be read, a person the channel cannot reach), **or an agent task whose fixed
   workspace was removed from config**, or whose parents are in different workspaces and none was set
@@ -2188,7 +2191,7 @@ board.
 ## 12. Plans
 
 Separate implementation plans. Each ends with everything built so far working and tested. Order: A, A2, B, F, C1,
-C2, R, C3, C4, then D1 and D2, then G, then H, then W, then L, then U, then T, then S, then V; E is independent once B is done. B is delivered as B1 (roles and workspaces in
+C2, R, C3, C4, then D1 and D2, then G, then H, then W, then L, then U, then T, then S, then V, then X; E is independent once B is done. B is delivered as B1 (roles and workspaces in
 configuration), B2 (the session layer) and B3 (the `mt` commands). C is delivered as C1 (the board),
 C2 (agent runs), C3 (the worker CLI) and C4 (review, rework and gates), in that order; R comes
 between C2 and C3, so the runs C3 makes reportable already get their role natively. **Before F**,
@@ -2216,6 +2219,7 @@ branch.
 | **T. Workflows** | workflow files under `$MT_HOME/workflows`, parsed with the role files' `yaml` parser and checks, an unknown key an error (workflows spec §1); params, substitution in text fields and checked names, never in gates (workflows spec §2); for_each, fan-in on every task, all to all, at most 100 tasks (workflows spec §3); the checks in `src/kanban/workflow.ts`, `mt workflow check`, the startup lines and `mt service check`'s warnings, the file read at each start (workflows spec §4); the DAG, format 1, its refs, its canonical form of at most 192 KiB from a run and 1 MiB elsewhere, and gates only from the terminal or an expansion of the operator's file (workflows spec §5); `preview` and `start` in chat and at the terminal, `preview --json` writing the DAG, `apply` and `apply --dry-run` at the terminal, the worker's `mt kanban start-workflow` and `apply-dag`, with its `dry_run`, `unknown_workflow`, the tiers, the board, the keys with the DAG's hash, and the stored DAG (workflows spec §6); migration `009`, `kanban_workflow_instances` and `kanban_workflow_tasks` (workflows spec §7); `applyDag`, `archiveWorkflow` and `threadSubscriptions` in `db/kanban.ts`, with `createTask`'s, `addGate`'s and `archive`'s writes shared, each task's `created` event carrying the instance, and WRITERS.md's rows (workflows spec §8); the subscriptions, the one reply cut to fit, the instance's thread and every member held (workflows spec §9); `list`, `instances`, `show` and `archive`, the derived status (workflows spec §10); the README's and the guide's workflows, with the example, the deciding step, the fan-out's one-at-a-time in a shared workspace (workflows spec §12), and Recipe 3's planner making its graph with `apply-dag` | L |
 | **S. Cron jobs** | specified in its own document, [`2026-11-16-cron-design.md`](2026-11-16-cron-design.md): scheduled agent turns beside the board, migration `010` | L |
 | **V. From a terminal: chats, people, times** | `--chat <chat_id> [--thread <thread_id>]` on `mt kanban task new`, `mt kanban workflow start` and `apply`, checked as `mt cron add --chat` checks a chat, a chat outside a non-empty `auth.chats` refused there and in `mt cron add` and `edit`, a thread taken only with the root plan L knows for it (`threadRootOf`), writing the subscription a chat start would, at the terminal only, and a one-line "Created" queued as a `task_created_followed` event (§22.1); a workflow's start reply queued as a `workflow_started` event on its first member, which the notifier posts (workflows spec §18); `lark:<union_id>` as an assignee or reviewer at the terminal, `task assign` included, checked for talk tier from the config's owner and `auth.talk` and the `people` table, refused `person_not_assignable` in chat's words with a hint, and `mt kanban people` (§22.2); `created_at` and `status_since` in `mt kanban task list --json`, in milliseconds, and an `age` column (§22.3); a cron script's `PATH` starting with `$MT_HOME/bin`, and its `MT_HOME`, `MT_CONFIG` and `MT_DB` the gateway's (cron spec §5.1); the guide, the README and `docs/examples.md` going back to plain `mt`, example 6 with `--chat`, and the weekly review by age. No migration | S, T |
+| **X. Tier grants** | specified in its own document, [`2026-11-18-tier-grants-design.md`](2026-11-18-tier-grants-design.md): talk and operate tier granted from chat, `/auth grant @Name talk\|operate`, `/auth revoke` and `/auth list`, and at the terminal, `mt auth grant\|revoke lark:<union_id>` and `mt auth list [--json]`, refused in an agent's shell; migration `011`, `tier_grants`, keyed by app id and union_id, never deleted; grants counted beside `auth.owner`, `auth.talk` and `auth.operate` at each check, with no restart, the configuration and the owner never revoked; the owner granting operate, an operator talk only; `mt kanban people`'s talk column and the startup line counting grants; `config.example.yaml`'s "not editable from chat" comment updated; `/roles` at talk tier | V |
 | **F. Masking** | the registry and `redactKnownSecrets` (§10.1); masking inside the escapers (layer 1); trailing-prefix withholding in `renderCard`; masking session `events` and `approvals.payload` on write (layer 3). The kanban parts land in C1 (layer 3), C2 (layer 2) and C3 (worker tokens) | B (the resolved agent environments); best done before C, since it protects chat sessions too |
 
 Until plan D2, nothing can deliver a card to a person, so **plans C and D1 refuse human assignees and
@@ -4159,7 +4163,11 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
   bot's app, and the open_id the gateway last saw them with must be in the talk allowlist.
   `openBoard` (`src/cli/gate.ts`) gives its service a `PeopleDirectory` over the database it
   opened, with this bot's app id and a `canTalk(openId)` that reads the allowlist from the
-  settings, so the terminal's check is chat's own code, against the same table.
+  settings, so the terminal's check is chat's own code, against the same table. *Amended on
+  2026-11-18 by the tier grants spec,
+  [`2026-11-18-tier-grants-design.md`](2026-11-18-tier-grants-design.md) §4.3:* `canTalk` takes
+  the person's open_id, null when `people` holds none, and union_id, and counts their active
+  grant, read from the database the terminal opened; one not yet migrated to grants has none.
 - **How a terminal knows talk tier, with no gateway.** The allowlist is configuration: the owner,
   `MT_OWNER_OPEN_ID` or `auth.owner`, and `MT_ALLOW_TALK` or `auth.talk`, the owner always
   included, as `loadConfig` builds `auth.allowTalk`. `teamSettingsFrom` (`src/config.ts`) reads

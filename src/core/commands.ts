@@ -101,6 +101,16 @@ export const COMMANDS: readonly CommandSpec[] = [
     summary: 'Cancel the current turn. Cancellation is a terminal, not a deletion.',
   },
   {
+    name: 'roles',
+    // Talk, as /sessions is: a person giving work to a role needs to know its name and what it is for.
+    tier: 'talk',
+    needsSession: false,
+    effect: 'immediate',
+    multiline: false,
+    mutating: false,
+    summary: 'The roles, what each is for, whether it can be given work, and its open runs.',
+  },
+  {
     name: 'status',
     tier: 'talk',
     needsSession: false,
@@ -136,6 +146,19 @@ export const COMMANDS: readonly CommandSpec[] = [
     mutating: false,
     summary: 'Scheduled jobs: `/cron help` lists its commands.',
     usage: '/cron <command>',
+  },
+  {
+    name: 'auth',
+    // Talk, because listing who has a tier is; a grant and a revoke check their own
+    // tier, the owner's or an operator's (tier grants spec §5.1).
+    tier: 'talk',
+    needsSession: false,
+    effect: 'immediate',
+    multiline: false,
+    // It never touches this chat's session, so a busy one does not refuse it.
+    mutating: false,
+    summary: 'Who may talk to the agent and operate it: `/auth help` lists its commands.',
+    usage: '/auth <command>',
   },
   {
     name: 'help',

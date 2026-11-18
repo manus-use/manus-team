@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
@@ -12,6 +12,7 @@ import { clearSecrets } from '../src/secrets.js';
 import { SCHEMA_DIR } from './helpers/db.js';
 import { serviceFake, type ServiceFake } from './helpers/service.js';
 import { startupLines } from './helpers/update.js';
+import { GIT_ISOLATION, git as runGit } from './helpers/git.js';
 
 /**
  * `mt update` with real git, against a temporary bare origin (spec §20.14): a
@@ -47,8 +48,7 @@ const GIT_ENV = {
   GIT_AUTHOR_EMAIL: 'test@example.invalid',
   GIT_COMMITTER_NAME: 'Test',
   GIT_COMMITTER_EMAIL: 'test@example.invalid',
-  GIT_CONFIG_GLOBAL: '/dev/null',
-  GIT_CONFIG_NOSYSTEM: '1',
+  ...GIT_ISOLATION,
 };
 
 /** The fake npm: `ci` writes the installed tree's marker, `run build` a dist/ whose mt.js answers service check, failing when FAIL_BUILD is in the tree. */
@@ -71,11 +71,7 @@ async function fixture(): Promise<Fx> {
   const origin = join(root, 'origin.git');
   const seed = join(root, 'seed');
   const marks = join(root, 'marks');
-  const git = (cwd: string, ...args: string[]): string => {
-    const r = spawnSync('git', args, { cwd, env: { ...GIT_ENV, HOME: svc.home }, encoding: 'utf8' });
-    if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
-    return r.stdout.trim();
-  };
+  const git = (cwd: string, ...args: string[]): string => runGit(cwd, { ...GIT_ENV, HOME: svc.home }, ...args);
   git(root, 'init', '--quiet', '--bare', '-b', 'main', origin);
   git(root, 'clone', '--quiet', origin, seed);
   const commit = (message: string, files: Record<string, string>): string => {

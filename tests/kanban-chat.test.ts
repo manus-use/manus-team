@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CardView } from '../src/channel/types.js';
 import type { InboundCardAction } from '../src/core/router.js';
+import { activeGrant, grantTier, revokeGrant } from '../src/db/grants.js';
 import { commentsOf, eventsOf, gatesOf, getRun, getTask, subscriptionsOf } from '../src/db/kanban-read.js';
 import { KanbanChat } from '../src/kanban/chat.js';
 import { renderTaskCard } from '../src/kanban/chat-render.js';
@@ -49,14 +50,15 @@ let seq = 0;
 beforeEach(() => {
   clearSecrets();
   t = testDb();
-  const authorizer = new Authorizer({
-    ...defaultAuthConfig(OWNER.openId),
-    allowTalk: [OWNER.openId, GUEST.openId, ALICE.openId, BOB.openId],
-  });
+  // The configuration's lists, and this bot's grants, read at each check as the gateway reads them.
+  const authorizer = new Authorizer(
+    { ...defaultAuthConfig(OWNER.openId), allowTalk: [OWNER.openId, GUEST.openId, ALICE.openId, BOB.openId] },
+    { grants: { tierOf: (unionId) => activeGrant(t.db, 'cli_app', unionId)?.tier } },
+  );
   const people = new PeopleDirectory({
     db: t.db,
     appId: 'cli_app',
-    canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
+    canTalk: ({ openId, unionId }) => authorizer.canTalk({ openId: openId ?? '', unionId, displayName: null }),
   });
   exits = new Map();
   holds = new Map();
@@ -223,7 +225,30 @@ describe('people, named by @-mention', () => {
     expect(await say('task new t\nassignee: @Alice Smith', OWNER, [{ ...AT_ALICE, unionId: null }])).toMatch(
       /^Lark did not say who @Alice Smith is/,
     );
+    // A bot is not a person, and cannot be given work.
+    expect(await say('task new t\nassignee: @Helper', OWNER, [{ key: '@_user_9', name: 'Helper', openId: 'ou_helper', unionId: null, isBot: true }])).toBe(
+      '@Helper is a bot, and a bot is never given a tier here.',
+    );
     expect(taskCount()).toBe(0);
+  });
+
+  it('gives work to a person a grant lets in, whose card they can press, and refuses it once the grant is revoked', async () => {
+    grantTier(t.db, { appId: 'cli_app', unionId: 'on_carol', openId: 'ou_carol', tier: 'talk', by: 'lark:on_owner', via: 'chat', chat: 'oc_team' }, () => ({ write: 'insert' as const }), 1);
+    const taskId = created(await say('task new Check the vendors\nassignee: @Carol', OWNER, [AT_CAROL]));
+    expect(getTask(t.db, taskId)?.assignee).toEqual({ kind: 'human', name: 'lark:on_carol' });
+    const claim = service.claim(taskId);
+    if (!claim.ok) throw new Error(claim.message);
+    const card = renderTaskCard({ task: getTask(t.db, taskId)!, run: claim.run, parents: [] }, 'cli_app');
+    const value = card.buttons.find((b) => b.value['act'] === 'done')?.value ?? {};
+    const carol: Principal = { openId: 'ou_carol', unionId: 'on_carol', displayName: 'Carol' };
+    expect(await chat.card({ chatId: 'oc_dm', messageId: 'om_card', operator: carol, value, input: 'all answer' })).toBe(
+      `Completing \`${taskId}\`: the card shows how it goes.`,
+    );
+    expect(await chat.idle(5_000)).toBe(true);
+    expect(getRun(t.db, claim.run.runId)).toMatchObject({ outcome: 'completed', summary: 'all answer' });
+    // Revoked, Carol is a person without talk tier again, and is given no more work.
+    revokeGrant(t.db, { appId: 'cli_app', unionId: 'on_carol', by: 'lark:on_owner', via: 'chat', chat: 'oc_team' }, () => ({ write: 'end' as const }), 2);
+    expect(await say('task new Again\nassignee: @Carol', OWNER, [AT_CAROL])).toMatch(/^@Carol cannot be given work/);
   });
 
   it('assigns a task to a person, and says when they have it already', async () => {
@@ -686,7 +711,7 @@ describe("a person's card", () => {
     expect(await press(run, 'done', BOB, 'x')).toBe('This card is for Alice Smith (lark:on\\_alice).');
     expect(await press(run, 'done', ALICE, 'x', { run: 'r_other' })).toBe('That button does not match the card it is on.');
     expect(await press(run, 'done', { openId: 'ou_stranger', unionId: 'on_stranger', displayName: 'S' }, 'x')).toBe(
-      'You are not on the allowlist.',
+      'You do not have talk tier here.',
     );
     await chat.idle(5_000);
     expect(redrawn).toEqual([]);

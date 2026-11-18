@@ -7,6 +7,7 @@ import { LarkAdapter } from '../src/channel/lark/adapter.js';
 import type { Channel } from '../src/channel/types.js';
 import { loadConfig, type GatewayConfig } from '../src/config.js';
 import { cronUuid } from '../src/core/ids.js';
+import { resolveBinding } from '../src/db/bindings.js';
 import { firesOf, listJobs } from '../src/db/cron.js';
 import { createGateway, type Gateway } from '../src/index.js';
 import { clearSecrets } from '../src/secrets.js';
@@ -114,12 +115,12 @@ async function until(what: string, ok: () => boolean): Promise<void> {
   throw new Error(`gave up waiting for ${what}`);
 }
 
-function turnsSeen(): Array<{ fire: string | null; path: string | null }> {
+function turnsSeen(): Array<{ fire: string | null; path: string | null; marker: string | null }> {
   try {
     return readFileSync(join(root, 'cron-env.log'), 'utf8')
       .split('\n')
       .filter((l) => l !== '')
-      .map((l) => JSON.parse(l) as { fire: string | null; path: string | null });
+      .map((l) => JSON.parse(l) as { fire: string | null; path: string | null; marker: string | null });
   } catch {
     return [];
   }
@@ -137,8 +138,9 @@ describe('a cron job fired through createGateway', () => {
     await until('the job to be added', () => listJobs(db).length === 1);
     const [job] = listJobs(db);
     expect(job).toMatchObject({ name: 'PR count', role: 'default', createdBy: expect.stringMatching(/^session:s_/), delivery: { chat: 'oc_owner_dm' } });
-    // The chat turn's agent: the shim's directory, then the role's own PATH, not the gateway's.
-    expect(turnsSeen()).toEqual([{ fire: null, path: shimFirst }]);
+    // The chat turn's agent: the shim's directory, then the role's own PATH, not the gateway's; and its session's marker.
+    const chat = resolveBinding(db, { channel: 'lark', appId: 'cli_app', conversationId: 'oc_owner_dm', threadId: '' })?.sessionId;
+    expect(turnsSeen()).toEqual([{ fire: null, path: shimFirst, marker: chat }]);
 
     await say(`/cron run ${job?.jobId ?? ''}`);
     await until('the fire to be posted', () => firesOf(db, job?.jobId ?? '')[0]?.delivery === 'sent');
@@ -149,8 +151,9 @@ describe('a cron job fired through createGateway', () => {
     expect(posted[0]?.text).toMatch(/^\*\*PR count\*\* · run now · \d+s\nFired: Count the open PRs\.$/);
     expect(lark.texts.filter((m) => m.text.includes('Fired:'))).toHaveLength(1);
     expect(turnsSeen()).toEqual([
-      { fire: null, path: shimFirst },
-      { fire: String(fire?.fireId), path: shimFirst },
+      { fire: null, path: shimFirst, marker: chat },
+      { fire: String(fire?.fireId), path: shimFirst, marker: fire?.sessionId ?? 'none' },
     ]);
+    expect(fire?.sessionId).toMatch(/^s_/);
   });
 });

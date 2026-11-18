@@ -4,13 +4,14 @@ import { redactKnownSecrets } from '../secrets.js';
 import { parse, refuse, UsageError } from './args.js';
 import { jsonLine } from './operator.js';
 import { LIST_FILTERS } from '../kanban/chat-parse.js';
-import { gateAdd, gateList, gateRemove, hasBoardRun, inAgentRun, runShellRefusal } from './gate.js';
+import { gateAdd, gateList, gateRemove, hasBoardRun, inAgentRun, inAgentSession, runShellRefusal } from './gate.js';
 import { WORKER_COMMANDS } from '../kanban/worker.js';
 import { kanbanCommand, NOT_IN_A_RUN } from './kanban.js';
 import { operatorCommand, TASK_COMMANDS } from './operator.js';
 import { roleCheck, roleCreate, roleList } from './role.js';
 import { SERVICE_USAGE, serviceCommand, type ServiceDeps } from './service.js';
 import { updateCommand, type UpdateDeps } from './update.js';
+import { AUTH_USAGE, authCommand } from './auth.js';
 import { CRON_USAGE, cronAgent, cronOperator } from './cron.js';
 import { CRON_COMMANDS } from '../cron/worker.js';
 import { workflowCheck } from './workflow.js';
@@ -34,6 +35,12 @@ import { workspaceAdd, workspaceList } from './workspace.js';
  * board's database, through the board's own service, and after a change ask the
  * gateway for a dispatcher pass, a request that needs no token and does nothing
  * else. They refuse to run in an agent's shell.
+ *
+ * `mt auth` is the operator's too (tier grants spec §6.2): it writes the
+ * gateway's grants through their own writer, which the gateway reads at its
+ * next check, and refuses to run in any agent's shell before its arguments are
+ * read: by the agent variables, or by `MT_AGENT_SESSION`, which the gateway
+ * sets in every agent session, cron on or off.
  */
 
 export type Git = (args: readonly string[]) => Promise<{ code: number; stderr: string }>;
@@ -75,6 +82,7 @@ const USAGE = [
   '  mt workspace list',
   SERVICE_USAGE,
   '  mt update [--check | --yes]',
+  AUTH_USAGE,
   '  mt kanban board list [all] [--json]',
   '  mt kanban board create <name> [--json]',
   '  mt kanban board set <name> max_running <number|none> [--json]',
@@ -209,6 +217,15 @@ async function kanban(command: string | undefined, rest: readonly string[], io: 
   throw new UsageError(`unknown command: kanban${command === undefined ? '' : ` ${command}`}${hint}`);
 }
 
+/** `mt auth` in an agent's shell: refused, naming the variable that marks it, as JSON when `--json` is among its words. */
+function refuseAuth(command: string | undefined, rest: readonly string[], io: MtIo): number {
+  const named = command === 'grant' || command === 'revoke' || command === 'list';
+  const message = runShellRefusal(named ? `mt auth ${command}` : 'mt auth', io.env);
+  if (command === '--json' || rest.includes('--json')) io.out(jsonLine({ ok: false, code: 'operator_command', message }));
+  else refuse(io, message);
+  return 1;
+}
+
 /**
  * `io` for a command that loads the gateway's settings: its environment this
  * shell's over the gateway's .env, as the gateway's is over the file, so the
@@ -292,6 +309,12 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
         return refuse(io, runShellRefusal(['mt cron', ...(command === undefined ? [] : [command])].join(' '), io.env));
       }
       return await cronOperator(command, rest, withGatewayFile(io));
+    }
+    if (group === 'auth') {
+      // Refused in every agent's shell, a chat session's with cron off included, before its arguments are
+      // read, in JSON when asked (tier grants spec §6.3).
+      if (inAgentSession(io.env)) return refuseAuth(command, rest, io);
+      return authCommand(argv.slice(1), withGatewayFile(io));
     }
     if (group === 'service') {
       // An agent restarting or removing the gateway would end its own run, and every other.

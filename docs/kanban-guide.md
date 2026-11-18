@@ -46,8 +46,9 @@ where they say "They are sent it as a card, in a direct message, once it is read
 Runs have ids such as `r_…`. Wherever an example says `k_…`, use the id the chat gave you.
 
 **Who may do what.** The gateway decides your tier from `auth.talk` and `auth.operate` in its
-config. Anyone at talk tier may use the board's read commands; anything that changes the board
-needs operator tier, except a person's reports on their own task.
+config, or from a grant (see "Letting people in", below). Anyone at talk tier may use the
+board's read commands; anything that changes the board needs operator tier, except a person's
+reports on their own task.
 
 | Who | Commands |
 |---|---|
@@ -68,6 +69,45 @@ union_id, you can still list and show tasks, but the board refuses any change, a
 the operator to check the app can read user ids.
 
 `/kanban help` lists every command with who may run it.
+
+### Letting people in
+
+A tier comes from the gateway's config, `auth.talk` and `auth.operate`, or from a grant made in
+chat or at the terminal. A grant counts at once, with no restart, everywhere a tier is checked:
+messages, card buttons, `/kanban` and the people tasks are given to. It never removes a config
+entry or the owner. In a group the person is in, @-mention them, so Lark gives their ids:
+
+<!-- example: auth chat -->
+```text
+/auth grant @Carol Wu talk
+/auth grant @Carol Wu operate
+/auth revoke @Carol Wu
+/auth list
+```
+
+> Carol Wu now has talk tier, granted by Alice. `/auth revoke lark:on_…` takes it back.
+
+The reply is the announcement: everyone in the chat sees it. An operator grants and revokes
+talk; only the owner grants operate, or revokes an operate grant, so every operator is one the
+owner or the config made. A grant takes an @-mention only; `/auth revoke lark:<union_id>` takes
+the id `/auth list` shows, for someone who is no longer in the chat. Granting a tier a person
+has already is answered with where it comes from, and changes nothing. A revoked person is
+refused from their next message on; a turn already running finishes; their tasks stay assigned,
+and their next card is refused, so an operator reassigns them.
+
+At the terminal, as the owner, for a person the bot has seen (`mt kanban people` lists them):
+
+<!-- example: auth terminal -->
+```
+mt auth grant lark:on_5d1e7a operate
+mt auth list
+mt auth revoke lark:on_5d1e7a
+```
+
+`mt auth` judges by the config as your shell reads it, posts in no chat, and is refused in every
+agent's shell. `mt auth list --json` gives each person's tier, config entries and grant, with who
+made it and when, and `config_known`, false when your shell finds no owner, so that only the grants
+are listed.
 
 ## 1. One task for a role
 
@@ -452,7 +492,8 @@ The gateway must know a person, and they must have talk tier:
   them is known from that message. A person named as `lark:<union_id>` typed out, or by an agent,
   must already be known.
 - **Talk tier:** being assigned lets a person report on the task, so they need talk tier
-  (`auth.talk`). Otherwise the chat says, for example:
+  (`auth.talk`, or a grant, which needs no earlier message from them). Otherwise the chat says,
+  for example:
 
 > @Carol Wu cannot be given work: being assigned lets a person report on the task, which needs talk tier, and the gateway does not know them to have it.
 
@@ -1052,8 +1093,9 @@ mt kanban task new "Book the venue for the offsite" --assignee lark:on_5d1e7a --
   stdin.
 - A person is `lark:<union_id>`: `--assignee`, `--reviewer` and `task assign` take one, checked
   as chat checks one: known to this gateway, and at talk tier by the owner and `auth.talk` this
-  shell's settings give. `mt kanban people` lists the people the gateway knows, by name, with
-  their `lark:` ids and `talk` or `no`. There are no @-mentions here: `@Alice` is refused.
+  shell's settings give, or by a grant. `mt kanban people` lists the people the gateway knows, by
+  name, with their `lark:` ids and `talk` or `no`, a grant counted; `--json` says whether talk
+  tier comes from the config or a grant. There are no @-mentions here: `@Alice` is refused.
 - `--chat oc_…` makes that chat follow the task, as a chat follows a task made in it: the gateway
   posts it a line, "Created `k_…` **Book the venue for the offsite**, for Dana Wu, by
   operator:alice from a terminal.", then the task's notices. `--thread omt_…` puts them in a thread

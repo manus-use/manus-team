@@ -10,6 +10,7 @@ import { runGit, TaskDirectories } from '../src/kanban/worktree.js';
 import type { TaskRow } from '../src/kanban/types.js';
 import { testDb, type TestDb } from './helpers/db.js';
 import { claimantFor, NOW, newTask } from './helpers/kanban.js';
+import { git as testGit, gitEnv, gitSpawn } from './helpers/git.js';
 
 /**
  * A task's own directory against real git (spec §18): a worktree on its own
@@ -20,15 +21,13 @@ import { claimantFor, NOW, newTask } from './helpers/kanban.js';
 
 let dir: string;
 let t: TestDb;
-/** git's environment: a made-up home, so no test reads the real one's configuration. */
+/** git's environment: no global or system configuration, and a made-up home. */
 let env: Record<string, string>;
 let repo: string;
 let root: string;
 
 function git(cwd: string, ...args: string[]): string {
-  const r = spawnSync('git', args, { cwd, env, encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
-  return r.stdout.trim();
+  return testGit(cwd, env, ...args);
 }
 
 function commit(cwd: string, file: string, text: string): string {
@@ -76,7 +75,7 @@ async function made(d: TaskDirectories, task: TaskRow): Promise<string> {
 
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'mt-worktree-')));
-  env = { PATH: process.env['PATH'] ?? '/usr/bin:/bin', HOME: dir, GIT_CONFIG_NOSYSTEM: '1' };
+  env = gitEnv(dir);
   repo = join(dir, 'web');
   mkdirSync(repo);
   git(repo, 'init', '-q', '-b', 'main');
@@ -208,7 +207,7 @@ describe('a task with parents', () => {
     git(path, 'commit', '-q', '--no-edit');
     expect(await made(d, r.task)).toBe(path);
     expect(readFileSync(join(path, 'a.txt'), 'utf8')).toBe('from a\n');
-    for (const p of [a, b, c]) expect(spawnSync('git', ['merge-base', '--is-ancestor', `mt/${p.taskId}`, 'HEAD'], { cwd: path, env }).status).toBe(0);
+    for (const p of [a, b, c]) expect(gitSpawn(path, env, ['merge-base', '--is-ancestor', `mt/${p.taskId}`, 'HEAD']).status).toBe(0);
     // The base branch was never touched.
     expect(git(repo, 'log', '--format=%s', 'main')).toBe('write README');
   });
@@ -622,6 +621,8 @@ describe('a worktree a git worktree add finished after the gateway stopped', () 
   });
 
   it('is refused with an untracked file in it, though the global configuration hides untracked files', async () => {
+    // A global configuration of this test's own, in its made-up home.
+    env['GIT_CONFIG_GLOBAL'] = join(dir, '.gitconfig');
     git(repo, 'config', '--global', 'status.showUntrackedFiles', 'no');
     const task = claimed();
     const path = leftBy(task, `mt/${task.taskId}`);

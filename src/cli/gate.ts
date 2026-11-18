@@ -2,13 +2,17 @@ import { existsSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { loadTeamSettings, type Env, type TeamSettings } from '../config.js';
+import { tierReader } from '../db/grants.js';
 import { openDb } from '../db/open.js';
 import { peopleOf } from '../db/people.js';
 import { PeopleDirectory } from '../kanban/people.js';
+import { SESSION_MARKER } from '../kanban/gates.js';
 import { KanbanService } from '../kanban/service.js';
+import { tiersOf } from '../policy/auth.js';
 import type { GateRow } from '../kanban/types.js';
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { loadTeam, teamSecrets, type Team } from '../team.js';
+import type { Tier } from '../types.js';
 import { refuse, table } from './args.js';
 import type { MtIo } from './mt.js';
 
@@ -73,9 +77,19 @@ export function hasBoardRun(env: Env): boolean {
  */
 export const AGENT_VARIABLES = ['MT_KANBAN_RUN', 'MT_KANBAN_TOKEN', 'MT_CRON_TOKEN', 'MT_CRON_FIRE'] as const;
 
-/** What an operator's command, `what`, says in an agent's shell, naming the first of its variables `env` has set. */
+/** Any agent's shell, a chat session's with cron off included: the agent variables, or the session marker. */
+export function inAgentSession(env: Env): boolean {
+  return inAgentRun(env) || env[SESSION_MARKER] !== undefined;
+}
+
+/**
+ * What an operator's command, `what`, says in an agent's shell, naming the
+ * first of its variables `env` has set, and the session marker when it is the
+ * only one.
+ */
 export function runShellRefusal(what: string, env: Env): string {
-  const found = AGENT_VARIABLES.find((name) => env[name] !== undefined) ?? AGENT_VARIABLES[0];
+  const found =
+    AGENT_VARIABLES.find((name) => env[name] !== undefined) ?? (env[SESSION_MARKER] !== undefined ? SESSION_MARKER : AGENT_VARIABLES[0]);
   return `${what} is an operator's command, not an agent's; this shell has ${found} set. Run it from your own shell`;
 }
 
@@ -100,8 +114,9 @@ export interface BoardAccess {
   /** Why the service has no people, so a person cannot be checked here; undefined when it has them. */
   peopleMissing: PeopleMissing | undefined;
   /**
-   * The people this bot has seen, each with talk tier by this shell's allowlist,
-   * none with an owner missing: `mt kanban people`'s (kanban spec §22.2).
+   * The people this bot has seen, each with talk tier by this shell's allowlist
+   * or a grant, none with an owner missing: `mt kanban people`'s (kanban spec
+   * §22.2, tier grants spec §8.3).
    * Undefined with no app id, as there is no bot to list them for.
    */
   seen(): SeenPerson[] | undefined;
@@ -112,7 +127,10 @@ export interface BoardAccess {
 export interface SeenPerson {
   unionId: string;
   name: string | null;
+  /** Whether they can be given work: talk tier by this shell's lists, or by a grant (tier grants spec §8.3). */
   talk: boolean;
+  /** Where their talk tier comes from, the configuration winning when both give it; null with none. */
+  talkFrom: 'config' | 'grant' | null;
 }
 
 /** What `assignable` says of a person when the service has no talk check: right for a board not in Lark, wrong beside a gateway that is. */
@@ -188,6 +206,7 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   }
   let db: ReturnType<typeof openDb>;
   let migrated: unknown;
+  let granted: boolean;
   try {
     db = openDb(settings.dbPath);
   } catch (err) {
@@ -196,7 +215,10 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   // The table the command needs: the board's, or for the workflow commands the workflows' (workflows spec §7).
   const table = opts.workflows === true ? 'kanban_workflow_instances' : 'kanban_gates';
   try {
-    migrated = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    const has = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
+    migrated = has.get(table);
+    // A database not yet migrated to 011 has no grants: the board reads it as having none (tier grants spec §4.3).
+    granted = has.get('tier_grants') !== undefined;
   } catch (err) {
     db.close();
     return no('failed', failed(err));
@@ -206,12 +228,16 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     const has = opts.workflows === true ? 'no workflows yet' : 'no board yet';
     return no('no_board', `the database at ${settings.dbPath} has ${has}: start the gateway once, so it is migrated`);
   }
-  // Chat's own check of a person, against the same table (kanban spec §22.2): the people this bot has
-  // seen, and the talk allowlist this shell's settings give, as the gateway's authorizer holds it.
+  // Chat's own check of a person, against the same tables (kanban spec §22.2, tier grants spec §4.3): the people
+  // this bot has seen, the lists this shell's settings give, as the gateway's authorizer holds them, and the grants.
   const { appId, talk } = settings;
+  const lists = { allowTalk: talk ?? [], allowOperate: settings.operate ?? [] };
   const peopleMissing: PeopleMissing | undefined = appId === undefined ? 'appId' : talk === undefined ? 'owner' : undefined;
+  const grantOf = appId !== undefined && granted ? tierReader(db, appId) : (): Tier | undefined => undefined;
   const people =
-    appId === undefined || talk === undefined ? undefined : new PeopleDirectory({ db, appId, canTalk: (openId) => talk.includes(openId) });
+    appId === undefined || talk === undefined
+      ? undefined
+      : new PeopleDirectory({ db, appId, canTalk: (person) => tiersOf(lists, person.openId, grantOf(person.unionId)).talk });
   // As the gateway builds its own: a supervised role's approvals go to the chat that follows its task (spec §7.1).
   const service = new KanbanService({
     db,
@@ -231,7 +257,11 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   const seen = (): SeenPerson[] | undefined =>
     appId === undefined
       ? undefined
-      : peopleOf(db, appId).map((p) => ({ unionId: p.unionId, name: p.name, talk: talk?.includes(p.openId) === true }));
+      : peopleOf(db, appId).map((p) => {
+          // With no owner there is no talk list, and nobody is shown with talk tier.
+          const has = talk !== undefined && tiersOf(lists, p.openId, grantOf(p.unionId)).talk;
+          return { unionId: p.unionId, name: p.name, talk: has, talkFrom: !has ? null : talk.includes(p.openId) ? 'config' : 'grant' };
+        });
   return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, close: () => db.close() };
 }
 

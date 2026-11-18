@@ -33,7 +33,7 @@ beforeEach(() => {
   const people = new PeopleDirectory({
     db: t.db,
     appId: 'cli_app',
-    canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
+    canTalk: ({ openId }) => openId !== null && authorizer.canTalk({ openId, unionId: null, displayName: null }),
   });
   service = new KanbanService({
     db: t.db,

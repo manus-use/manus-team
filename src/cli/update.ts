@@ -9,6 +9,7 @@ import { runningFireCount } from '../db/cron.js';
 import { hasBoard, openAgentRunCount } from '../db/kanban-read.js';
 import { openDbReadOnly, type Db } from '../db/open.js';
 import { isSecretName, loadGatewayEnv } from '../gateway-env.js';
+import { SESSION_MARKER } from '../kanban/gates.js';
 import { privateDir } from '../kanban/socket.js';
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { parse, UsageError } from './args.js';
@@ -414,10 +415,10 @@ class Update {
     this.view = serviceView(this.io, deps.service);
     this.checkout = realpathOr(deps.service.checkout);
     this.node = deps.service.node;
-    // This shell's, never an agent's (no MT_KANBAN_* and no MT_CRON_*), and nothing git or npm starts may prompt.
+    // This shell's, never an agent's (no MT_KANBAN_*, no MT_CRON_* and no MT_AGENT_SESSION), and nothing git or npm starts may prompt.
     const env: Record<string, string | undefined> = {};
     for (const [name, value] of Object.entries(io.env)) {
-      if (!name.startsWith('MT_KANBAN_') && !name.startsWith('MT_CRON_')) env[name] = value;
+      if (!name.startsWith('MT_KANBAN_') && !name.startsWith('MT_CRON_') && name !== SESSION_MARKER) env[name] = value;
     }
     this.shellEnv = { ...env, GIT_TERMINAL_PROMPT: '0' };
     // This shell's secrets, as the .env's are once read: an exported LARK_APP_SECRET is masked in what a failure shows.

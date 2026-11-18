@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigError, loadConfig, type GatewayConfig } from '../src/config.js';
 import { migrate, openDb } from '../src/db/open.js';
-import { createGateway, findingUuid, findingsOn, registerConfiguredSecrets } from '../src/index.js';
+import { createGateway, findingUuid, findingsOn, grantLines, registerConfiguredSecrets } from '../src/index.js';
+import { grantTier } from '../src/db/grants.js';
 import { LarkAdapter } from '../src/channel/lark/adapter.js';
 import { LarkInbound } from '../src/channel/lark/inbound.js';
 import { loadTeam, type Team } from '../src/team.js';
@@ -104,10 +105,46 @@ describe('createGateway', () => {
     });
     const gateway = await createGateway(config, team);
     try {
-      expect(lines.some((l) => l.endsWith(` schema at version 10 (${config.dbPath})\n`))).toBe(true);
+      expect(lines.some((l) => l.endsWith(` schema at version 11 (${config.dbPath})\n`))).toBe(true);
     } finally {
       await gateway.stop();
     }
+  });
+
+  it("says how many people this bot's grants let in, and how many grants are another app id's, after the schema line", async () => {
+    const lines: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    const quiet = await createGateway(config, team);
+    await quiet.stop();
+    expect(lines.filter((l) => l.includes(' auth: '))).toEqual([]);
+    const db = openDb(config.dbPath);
+    try {
+      const actor = { by: 'operator:alice', via: 'terminal' as const, chat: null };
+      const grant = (appId: string, unionId: string, tier: 'talk' | 'operate'): void =>
+        void grantTier(db, { appId, unionId, openId: `ou_${unionId}`, tier, ...actor }, () => ({ write: 'insert' as const }), 1);
+      grant(config.lark.appId, 'on_a', 'talk');
+      grant(config.lark.appId, 'on_b', 'talk');
+      grant(config.lark.appId, 'on_c', 'operate');
+      grant('cli_old', 'on_a', 'talk');
+    } finally {
+      db.close();
+    }
+    lines.length = 0;
+    const gateway = await createGateway(config, team);
+    try {
+      const at = lines.findIndex((l) => l.includes(' schema at version '));
+      expect(lines.slice(at + 1, at + 3).map((l) => l.replace(/^\S+ /, ''))).toEqual([
+        "auth: 2 person(s) granted talk and 1 operate, beside the configuration's; mt auth list shows who\n",
+        'auth: 1 grant(s) are for another app id than lark.appId, and count for nothing here\n',
+      ]);
+    } finally {
+      await gateway.stop();
+    }
+    expect(grantLines({ talk: 0, operate: 0, otherApps: 3 })).toEqual(['auth: 3 grant(s) are for another app id than lark.appId, and count for nothing here']);
+    expect(grantLines({ talk: 0, operate: 2, otherApps: 0 })).toEqual(["auth: 0 person(s) granted talk and 2 operate, beside the configuration's; mt auth list shows who"]);
   });
 
   it('says, with the board on, which workspaces give each task a directory of its own', async () => {

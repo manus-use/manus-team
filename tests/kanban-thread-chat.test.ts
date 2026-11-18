@@ -48,7 +48,7 @@ function chat(holdMs?: number): KanbanChat {
 beforeEach(() => {
   t = testDb();
   const authorizer = new Authorizer({ ...defaultAuthConfig(OWNER.openId), allowTalk: [OWNER.openId, 'ou_alice'] });
-  people = new PeopleDirectory({ db: t.db, appId: 'cli_app', canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }) });
+  people = new PeopleDirectory({ db: t.db, appId: 'cli_app', canTalk: ({ openId }) => openId !== null && authorizer.canTalk({ openId, unionId: null, displayName: null }) });
   service = new KanbanService({ db: t.db, roles: new Map(DEFAULT_ROLES.map((r) => [r.name, r])), workspaces: WORKSPACES, people });
   heldAtPass = [];
 });

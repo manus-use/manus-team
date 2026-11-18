@@ -703,6 +703,9 @@ describe('loadTeamSettings', () => {
       appId: c.lark.appId,
       talk: c.auth.allowTalk,
       chats: c.auth.allowChats,
+      owner: c.auth.ownerOpenId,
+      operate: c.auth.allowOperate,
+      from: c.auth.from,
     });
     // kanban.enabled is unset: absent here, off there.
     expect(s.kanbanEnabled).toBeUndefined();

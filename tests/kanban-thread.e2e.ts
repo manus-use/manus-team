@@ -78,7 +78,7 @@ function build(): Stack {
   const people = new PeopleDirectory({
     db: t.db,
     appId: 'cli_app',
-    canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
+    canTalk: ({ openId }) => openId !== null && authorizer.canTalk({ openId, unionId: null, displayName: null }),
   });
   // Both have used the board before, so it knows them, and their open_ids for this bot.
   for (const p of [ALICE, BOB]) notePerson(t.db, { appId: 'cli_app', unionId: p.unionId ?? '', openId: p.openId, name: p.displayName }, Date.now());

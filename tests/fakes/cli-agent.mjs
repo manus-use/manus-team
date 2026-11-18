@@ -35,14 +35,16 @@
  *               with that JSON and answer with its answer; in a cron fire, answer
  *               `[nothing to report]` when the job's prompt says QUIET, hang when
  *               it says SLOW, and otherwise `Fired: ` and the job's prompt; each
- *               turn's PATH, and its MT_CRON_FIRE if a fire's, is appended to
- *               `cron-env.log` beside the log
+ *               turn's PATH, its MT_CRON_FIRE if a fire's, and its
+ *               MT_AGENT_SESSION, is appended to `cron-env.log` beside the log
  *
  * Every invocation appends its argv to `FAKE_CLI_LOG` as one JSON line. That file
  * is how a test sees the composed prompt -- which is the whole of this driver's
  * session handling, and otherwise invisible. The line also carries the one
  * environment variable a native package is named by, `BYTESEC_LOCAL_APM_PATH`,
- * as `apm` (null when unset), and a board run's id, `MT_KANBAN_RUN`, as `run`.
+ * as `apm` (null when unset), a board run's id, `MT_KANBAN_RUN`, as `run`, and
+ * the session marker every agent session is given, `MT_AGENT_SESSION`, as
+ * `marker`.
  *
  * In the kanban modes it also writes the run's environment to `kanban-env.json`
  * beside the log, token included: a test that later reports as a run whose
@@ -106,7 +108,8 @@ if (process.env['FAKE_CLI_REFUSAL'] === 'slow') process.on('SIGTERM', () => {});
 if (LOG !== undefined) {
   const apm = process.env['BYTESEC_LOCAL_APM_PATH'] ?? null;
   const run = process.env['MT_KANBAN_RUN'] ?? null;
-  appendFileSync(LOG, `${JSON.stringify({ argv, prompt, apm, run, session: asked ?? null })}\n`);
+  const marker = process.env['MT_AGENT_SESSION'] ?? null;
+  appendFileSync(LOG, `${JSON.stringify({ argv, prompt, apm, run, session: asked ?? null, marker })}\n`);
 }
 
 let SESSION = 'ses_fake_cli';
@@ -337,7 +340,10 @@ switch (MODE) {
   case 'cron': {
     // What the turn was given to find mt by: a chat turn's, or a fire's, by its fire id.
     if (LOG !== undefined) {
-      appendFileSync(join(dirname(LOG), 'cron-env.log'), `${JSON.stringify({ fire: process.env['MT_CRON_FIRE'] ?? null, path: process.env['PATH'] ?? null })}\n`);
+      appendFileSync(
+        join(dirname(LOG), 'cron-env.log'),
+        `${JSON.stringify({ fire: process.env['MT_CRON_FIRE'] ?? null, path: process.env['PATH'] ?? null, marker: process.env['MT_AGENT_SESSION'] ?? null })}\n`,
+      );
     }
     const add = /^cron-add (\{[\s\S]*\})$/.exec(prompt.trim());
     if (add !== null) {

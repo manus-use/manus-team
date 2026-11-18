@@ -41,6 +41,7 @@ describe('Authorizer.admits', () => {
     const decision = auth({ allowTalk: [], allowOperate: [] }).admits(message());
     expect(decision.ok).toBe(false);
     if (!decision.ok) expect(decision.reason).toBe('sender_not_allowed');
+    if (!decision.ok) expect(decision.detail).toBe('You do not have talk tier here.');
   });
 
   it('rejects a bot sender before anything else', () => {

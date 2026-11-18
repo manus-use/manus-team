@@ -1217,8 +1217,11 @@ cron:
 ```
 
 - **Off by default**, as the board is (kanban §12): with it unset, no tick runs, no chat session
-  gets a token or a changed `PATH`, `/cron` says cron is off, and the tables wait. A gateway that
-  never sets it runs chat exactly as before.
+  gets a token or a `PATH` change, `/cron` says cron is off, and the tables wait; the session
+  marker, `MT_AGENT_SESSION`, is always set, cron on or off (*amended on 2026-11-18 by the tier
+  grants spec, [`2026-11-18-tier-grants-design.md`](2026-11-18-tier-grants-design.md) §6.3*, so
+  that `mt auth` refuses every agent's shell). A gateway that never sets it runs chat exactly as
+  before.
 - **Snake case, and file only**, as the `kanban:` section's keys are (`config.ts`): `MT_CRON_*`
   names are an agent's environment (§7), and a setting under that prefix would read as one. An
   unknown key under `cron:` is refused, as every section's is.

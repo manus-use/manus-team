@@ -87,7 +87,7 @@ async function build(): Promise<Stack> {
   const log = join(dir, 'invocations.log');
   const t = testDb();
   const authorizer = new Authorizer(defaultAuthConfig(OWNER.openId));
-  const people = new PeopleDirectory({ db: t.db, appId: 'cli_app', canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }) });
+  const people = new PeopleDirectory({ db: t.db, appId: 'cli_app', canTalk: ({ openId }) => openId !== null && authorizer.canTalk({ openId, unionId: null, displayName: null }) });
   const roles = new Map(['worker', 'planner', 'decider'].map((n) => [n, role(n)]));
   const service = new KanbanService({ db: t.db, roles, workspaces: new Set(['default']), people, supervisedRoles: true, workflowsDir: join(home, 'workflows') });
   const agent = (): Driver => createCliDriver({ command: process.execPath, args: [AGENT], env: { FAKE_CLI_MODE: 'kanban-body', FAKE_CLI_LOG: log } });

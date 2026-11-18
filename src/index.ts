@@ -10,8 +10,10 @@ import { LarkAdapter } from './channel/lark/adapter.js';
 import { LarkInbound } from './channel/lark/inbound.js';
 import { buildRoleDrivers } from './driver/build.js';
 import { buildEnv } from './driver/env.js';
-import { Authorizer } from './policy/auth.js';
+import { Authorizer, tiersOf } from './policy/auth.js';
+import { AuthChat } from './policy/auth-chat.js';
 import { Router } from './core/router.js';
+import { rolesReply } from './core/roles-chat.js';
 import { DEFAULT_ROLE, DEFAULT_WORKSPACE, SessionRegistry, type BootFinding } from './core/registry.js';
 import { NamedWorkspaces } from './core/workspace.js';
 import { BOOT_ID, replyUuid } from './core/ids.js';
@@ -22,6 +24,7 @@ import { KanbanChat } from './kanban/chat.js';
 import { Dispatcher } from './kanban/dispatcher.js';
 import { Notifier } from './kanban/notices.js';
 import { KanbanService } from './kanban/service.js';
+import { SESSION_MARKER } from './kanban/gates.js';
 import { writeMtShim } from './kanban/shim.js';
 import { CardPoster } from './kanban/cards.js';
 import { PeopleDirectory } from './kanban/people.js';
@@ -39,6 +42,7 @@ import { CronTokens } from './cron/tokens.js';
 import { CronApi } from './cron/worker.js';
 import { writeGatewayZone } from './cron/zone-file.js';
 import { jobCounts } from './db/cron.js';
+import { grantCounts, tierReader } from './db/grants.js';
 import { lockDatabase } from './kanban/socket.js';
 import { SinkChannel } from './kanban/sink.js';
 import { PackagesInUse } from './render/native.js';
@@ -88,6 +92,32 @@ export function cronLine(cron: { enabled: boolean; maxRunning: number; idleTimeo
     `each stopped after ${cron.idleTimeoutS} s with no activity; new jobs in ${zone} (from ${cron.tz === undefined ? "this process's zone" : 'cron.tz'}), ` +
     'and every job keeps its own zone'
   );
+}
+
+/**
+ * The grants' startup lines (tier grants spec §8.4), after the schema's: how
+ * many people this bot's active grants let in, by tier, and how many active
+ * grants are another app id's, which count for nothing here; none of either
+ * says nothing.
+ */
+export function grantLines(counts: { talk: number; operate: number; otherApps: number }): string[] {
+  const out: string[] = [];
+  if (counts.talk + counts.operate > 0) {
+    out.push(`auth: ${counts.talk} person(s) granted talk and ${counts.operate} operate, beside the configuration's; mt auth list shows who`);
+  }
+  if (counts.otherApps > 0) out.push(`auth: ${counts.otherApps} grant(s) are for another app id than lark.appId, and count for nothing here`);
+  return out;
+}
+
+/**
+ * An agent session's environment as the registry is given it (tier grants spec
+ * §6.3): what the dispatcher, the scheduler or the cron tokens give, with the
+ * session marker, `MT_AGENT_SESSION=<session id>`, beside it, or alone when
+ * none gives anything. So every agent's shell, a chat session's with cron off
+ * included, is one `mt auth` refuses.
+ */
+export function sessionEnv(sessionId: string, env: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  return { ...env, [SESSION_MARKER]: sessionId };
 }
 
 /**
@@ -231,6 +261,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     );
   }
   note(`schema at version ${version} (${config.dbPath})`);
+  for (const line of grantLines(grantCounts(db, config.lark.appId))) note(line);
   // The zone new jobs get (the cron spec, §2.2): cron.tz, else this process's.
   const zone = config.cron.tz ?? processZone();
 
@@ -270,6 +301,10 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     allowBots: [],
     allowDirectMessages: config.auth.allowDirectMessages,
     allowMentionAll: config.auth.allowMentionAll,
+  }, {
+    // A grant made in chat or at the terminal counts at the next check, read from the database (tier grants spec §4.1).
+    grants: { tierOf: tierReader(db, config.lark.appId) },
+    note,
   });
 
   // The registry asks the dispatcher and the scheduler, which need the registry, so they are read late.
@@ -287,8 +322,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       ['kanban', new KanbanSink(undefined, { db, channels: new Map<string, Channel>([[adapter.id, adapter]]), appId: config.lark.appId })],
       ['cron', new SinkChannel('cron', { subject: (jobId) => `cron job ${jobId}` })],
     ]),
-    // A run's, else a fire's, else a chat session's cron token (the cron spec, §7).
-    envFor: (sessionId, key) => dispatcher?.envFor(sessionId) ?? scheduler?.envFor(sessionId) ?? tokens?.envFor(sessionId, key),
+    // A run's, else a fire's, else a chat session's cron token (the cron spec, §7); and the session marker, always (tier grants spec §6.3).
+    envFor: (sessionId, key) => sessionEnv(sessionId, dispatcher?.envFor(sessionId) ?? scheduler?.envFor(sessionId) ?? tokens?.envFor(sessionId, key)),
     argsFor: (sessionId) => dispatcher?.argsFor(sessionId) ?? scheduler?.argsFor(sessionId),
     pinned: (sessionId) => (dispatcher?.pinned(sessionId) ?? false) || (scheduler?.pinned(sessionId) ?? false),
     // A kanban run in a task's own directory works there, as recorded when it was made (spec §18).
@@ -315,14 +350,18 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   // One set of the rendered packages in use, the dispatcher's runs' and the scheduler's fires' (the cron spec, §5.2).
   const packages = new PackagesInUse();
   let boardApi: WorkerApi | undefined;
+  // Who the gateway has seen in Lark: how a person named by principal is checked for talk tier (spec §4.2),
+  // and named in /auth's lists, the board on or off (tier grants spec §6.1).
+  const people = new PeopleDirectory({
+    db,
+    appId: config.lark.appId,
+    // The configuration's lists and the grant, as the authorizer holds them, for a person named by principal (tier grants spec §4.3).
+    canTalk: (person) => tiersOf(config.auth, person.openId, authorizer.grantOf(person.unionId)).talk,
+  });
+  // /auth, always on: the tiers are the gateway's, whatever kanban.enabled and cron.enabled say (tier grants spec §6.1).
+  const authChat = new AuthChat({ db, appId: config.lark.appId, authorizer, auth: config.auth, people, zone, note });
   if (config.kanban.enabled) {
     const { failureLimit, transientLimit, transientCooldownS } = config.kanban;
-    // Who the gateway has seen in Lark: how a person named by principal is checked for talk tier (spec §4.2).
-    const people = new PeopleDirectory({
-      db,
-      appId: config.lark.appId,
-      canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
-    });
     const service = new KanbanService({
       db,
       roles: team.roles,
@@ -473,6 +512,9 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     appId: config.lark.appId,
     ...(kanbanChat === undefined ? {} : { kanban: kanbanChat }),
     ...(cronChat === undefined ? {} : { cron: cronChat }),
+    auth: authChat,
+    // The gateway's roles, read at each /roles, the board on or off (tier grants spec §13).
+    roles: () => rolesReply(db, team.roles, config.kanban),
     // Each turn's sender's tier, against its session's cron token (the cron spec, §7.1).
     ...(tokens === undefined ? {} : { cronTurns: tokens }),
     note,

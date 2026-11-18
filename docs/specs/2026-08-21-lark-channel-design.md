@@ -163,6 +163,10 @@ opaque; the binding is the mutable mapping.
 - `owner_open_id` is stored raw and never resolved, as a fail-safe DM target.
 - **Every write path into the allowlist goes through one function.** The failure this prevents is a
   second entry point silently reopening a boundary the first one closed.
+  *Amended on 2026-11-18 by the tier grants spec,
+  [`2026-11-18-tier-grants-design.md`](2026-11-18-tier-grants-design.md) §4.2:* a tier has two
+  sources, each with a single write path: the configuration's lists, written by `loadConfig`
+  alone, and the grants, written by `db/grants.ts` alone.
 
 ### 3.5 Authorization: two tiers
 

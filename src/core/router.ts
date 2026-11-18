@@ -110,6 +110,17 @@ export interface RouterDeps {
   cronTurns?: { turnSubmitted(sessionId: string, idempotencyKey: string, operate: boolean): void };
   /** `/cron` (the cron spec, §6.1); absent when `cron.enabled` is off, and `/cron` says so. `CronChat`. */
   cron?: { run(arg: string, message: InboundMessage, key: BindingKey): Promise<string> };
+  /**
+   * `/auth` (tier grants spec §6.1): always on, as the tiers are the gateway's.
+   * Its grants and revokes check their own tier, through the same authorizer.
+   * `AuthChat`; absent only where a caller gives none, and `/auth` says so.
+   */
+  auth?: { run(arg: string, message: InboundMessage): string };
+  /**
+   * `/roles` (tier grants spec §13): the reply's text, synchronous, which the
+   * router masks. Absent where a caller gives none, and `/roles` says so.
+   */
+  roles?: () => string;
   clock?: Clock;
   note?: (line: string) => void;
 }
@@ -117,6 +128,12 @@ export interface RouterDeps {
 /** What `/kanban` says on a gateway whose board is off. */
 export const KANBAN_OFF =
   'The task board is off on this gateway. An operator turns it on with `kanban.enabled: true` in config.yaml, and a restart.';
+
+/** What `/roles` says where nothing was given to answer it. */
+export const ROLES_OFF = 'The roles cannot be listed here.';
+
+/** What `/auth` says where nothing was given to answer it. */
+export const AUTH_OFF = 'The tiers cannot be listed or changed here.';
 
 /** What `/cron` says on a gateway whose cron is off. */
 export const CRON_OFF =
@@ -518,6 +535,45 @@ export class Router {
           }
         }
         await this.#reply(target, message, 'cron', redactKnownSecrets(text));
+        return;
+      }
+
+      case 'roles': {
+        if (arg !== '') {
+          // A word after it reads as a filter, and a full list would look like one that matched everything.
+          await this.#reply(target, message, 'roles-usage', 'Usage: `/roles`, with nothing after it.');
+          return;
+        }
+        const roles = this.#deps.roles;
+        let text: string;
+        if (roles === undefined) text = ROLES_OFF;
+        else {
+          try {
+            text = roles();
+          } catch (err) {
+            this.#note(`roles command in ${message.messageId} failed: ${redactKnownSecrets(err instanceof Error ? err.message : String(err))}`);
+            text = 'Could not list the roles.';
+          }
+        }
+        await this.#reply(target, message, 'roles', redactKnownSecrets(text));
+        return;
+      }
+
+      case 'auth': {
+        const auth = this.#deps.auth;
+        let text: string;
+        if (auth === undefined) text = AUTH_OFF;
+        else {
+          try {
+            text = auth.run(arg, message);
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            this.#note(`auth command in ${message.messageId} failed: ${redactKnownSecrets(detail)}`);
+            text = `The tiers could not be read or changed: ${label(detail, 600)}`;
+          }
+        }
+        // Names were masked as they were put in; the whole reply once more, as /kanban's is.
+        await this.#reply(target, message, 'auth', redactKnownSecrets(text));
         return;
       }
 

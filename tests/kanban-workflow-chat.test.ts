@@ -54,7 +54,7 @@ beforeEach(() => {
   mkdirSync(dir);
   writeFileSync(join(dir, 'vendor-eval.yaml'), VENDOR_EVAL);
   const authorizer = new Authorizer({ ...defaultAuthConfig(OWNER.openId), allowTalk: [OWNER.openId, GUEST.openId, 'ou_alice', 'ou_al'] });
-  people = new PeopleDirectory({ db: t.db, appId: 'cli_app', canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }) });
+  people = new PeopleDirectory({ db: t.db, appId: 'cli_app', canTalk: ({ openId }) => openId !== null && authorizer.canTalk({ openId, unionId: null, displayName: null }) });
   service = new KanbanService({
     db: t.db,
     roles: new Map([['worker', role('worker')], ['reviewer', role('reviewer')]]),
