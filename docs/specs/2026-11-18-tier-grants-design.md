@@ -1,10 +1,12 @@
-# Tier grants: talk and operate tier from chat and the terminal
+# Tier grants, and `/roles`: who may talk, and who can work, from chat
 
 **Date:** 2026-11-18
 **Status:** draft, for review
 **Scope:** plan X. `/auth grant`, `/auth revoke` and `/auth list` in chat, and `mt auth grant`,
 `revoke` and `list` at the terminal: a person given talk or operate tier by a row in the database,
-counted beside `auth.owner`, `auth.talk` and `auth.operate`, at once and with no restart.
+counted beside `auth.owner`, `auth.talk` and `auth.operate`, at once and with no restart. And
+`/roles` in chat (§13): the gateway's roles, what each is for, whether it can be given work, where
+it works and how many of its runs are open.
 
 This document assumes [`../architecture.md`](../architecture.md), the Lark channel spec,
 [`2026-08-21-lark-channel-design.md`](2026-08-21-lark-channel-design.md), cited as "channel §n",
@@ -42,7 +44,7 @@ check still goes through the one `Authorizer`.
 **In:** the `tier_grants` table and its writer (§3); grants counted by the `Authorizer` at each
 check, and by the terminal's talk check (§4); who may grant and revoke what (§5); `/auth` in chat
 and `mt auth` at the terminal (§6); masking and the log (§7); the lists, the startup line and the
-changes to `mt kanban people` (§8).
+changes to `mt kanban people` (§8); `/roles` (§13).
 
 **Out, each with the seam that keeps it cheap later:**
 
@@ -663,6 +665,8 @@ counted once.
 - **`/auth` in a direct message**: works; but a person can be @-mentioned only where Lark lets them
   be, so a grant is usually made in a group they are in, and a revoke can take `lark:<union_id>`.
 
+- **`/roles`**: its cases are §13.5.
+
 ---
 
 ## 10. Wiring
@@ -703,6 +707,7 @@ counted once.
   a grant, and `mt kanban people`'s talk column counts grants; a section "Letting people in" in the
   guide gives `/auth` and `mt auth`; channel §3.4, kanban §4.2 and §22.2, and cron §10 get an
   amendment note pointing here, cron §10's sentence reworded as §6.3 says.
+- **`/roles`**: its wiring is §13.6.
 
 ---
 
@@ -755,6 +760,7 @@ counted once.
   restart; the startup line with grants and with another app id's.
 - **Docs**: the guide's and the README's `/auth` and `mt auth` examples checked by
   `tests/docs-examples.test.ts`, as the other commands' are.
+- **`/roles`**: its tests are §13.7.
 
 ---
 
@@ -782,6 +788,136 @@ counted once.
 - **No history command**: the revoked grants are in the table, read with `sqlite3` (§1).
 - **Going back before migration 011 drops every grant**, with the backup restored, failing closed
   (§8.5).
+- **`/roles`**: its limits are §13.8.
+
+---
+
+## 13. `/roles` in chat
+
+A person in chat who wants to give work to a role, by `/kanban task new` or by asking an operator
+for a cron job or a workflow, has no way to learn the roles' names, what each is for, or whether
+one is busy: `mt role list` is at the terminal. `/roles` says it in chat.
+
+### 13.1 The command
+
+- **`/roles`, top level, at talk tier**, registered in `COMMANDS` as `/sessions` is: `needsSession:
+  false`, `effect: 'immediate'`, `multiline: false`, `mutating: false`, so a busy session never
+  refuses it, and `/help` lists it. *Why not under `/kanban`:* roles are not the board's alone; cron
+  jobs name a role (cron §2.3) and workflows name roles (workflows spec §1), and both work with the
+  board off.
+- **Takes no argument.** Anything after it is answered with the usage, "`/roles` takes no
+  arguments", as `/sessions` would be if it took none.
+- **With the board off it works**, and the running column says `–` for every role (§13.2): with
+  `kanban.enabled` unset no dispatcher runs, so no limit applies.
+
+### 13.2 A line a role
+
+One line a role, in the order of their names, as `mt role list` orders them, each the role's name
+in bold and then four fields separated by ` · `, the layout of `/kanban task list` and `/sessions`:
+
+```
+**worker**: general research and writing · can be given work: yes · workspace worker · running 1 of 2
+**reviewer**: checks a task's work before done · can be given work: yes · workspace any (default) · running 0 of 1
+**watched**: asks for approval before acting · can be given work: board only (supervised) · workspace any (default) · running –
+```
+
+*Why lines, not the user's aligned table:* chat replies render through Lark's card markdown, which
+has no table the gateway uses; a code block would align only in a fixed-width font, would break
+with names in CJK, and would show `label`'s escapes as written. Every list the gateway sends in
+chat is lines with ` · ` (`renderList`, `/sessions`), and the fields are the user's, in the user's
+order. The fields:
+
+- **What it's for**: the role's `config.yaml` `description` (`Role.description`), else the first
+  line of its `role.md` that is not empty, a leading `#` and spaces taken off, read from
+  `Role.roleMdPath` when `/roles` runs, as a claim reads `role.md` at each claim; else `–`. Shown
+  through `label`, cut to 80. A `role.md` that cannot be read gives `(role.md unreadable)`, and
+  the line still comes. The role `default` from the gateway's `agent:` block has neither, and
+  shows `–`.
+- **Can be given work**: from `agent.unsupervised` (`Role.agent.unsupervised`). Unsupervised gives
+  `yes`. Supervised gives `board only (supervised)`. *Why not the user's "no (supervised)":* the
+  code accepts a supervised role on the board, where its approval cards go to the chat that follows
+  the task (`supervisedRoles: true` in `src/index.ts`, kanban §7.1), and refuses one only for a cron
+  job (cron §2.3). "no" would tell a person not to assign a task that the board takes. The words
+  are the main agent's, open for the user to change.
+- **Workspace**: the role's `workspace:` when set. Unset, `any (default)`: a task as the role
+  takes its parents', else its board's, else `default` (kanban §2.3), and a cron job the role's
+  own, else `default` (cron §2.3), so no one name is true. *Why not "default":* it would be wrong
+  for a task on a board with a workspace of its own, or under a parent in another.
+- **Running**: the role's open agent runs against its `max_running`, as `1 of 2`. Counted by
+  `openAgentRunCountAs` (`src/db/kanban-read.ts`), the count the dispatcher's limit uses (kanban
+  §6.3): open runs as the role, decided or not, a work run against its assignee role and a review
+  run against its reviewer role. The limit is `roleLimit` (`src/roles.ts`): the role's own, else
+  `kanban.max_running_per_role`. With no limit, the count alone, `1`; with the board off, `–`.
+  *Why cron fires do not count:* a role's `max_running` counts board runs only, and a fire is not
+  held to it (cron §1); counting them here would show a role at its limit that the dispatcher
+  would still claim for. Chat sessions, which run `default`, do not count either, for the same
+  reason.
+
+### 13.3 What it leaves out, and masking
+
+- **Left out on purpose**: the agent's command, driver, model, args, environment and secrets, and
+  its skills. A talk-tier person needs to know what a role is for, not how it runs, and an agent's
+  command line can name hosts and paths an operator would not post. `mt role list` and `mt role
+  check` at the terminal keep giving what they give, and the role's files the rest. (There is no
+  `mt role show`.)
+- **Masked like every reply**: each field through `label`, and the whole reply through
+  `redactKnownSecrets` once more, as `/kanban`'s is. A description or a `role.md` line is the
+  operator's text, and could hold a value the masker knows.
+
+### 13.4 The cut
+
+At most 30 lines, `LIST_MAX`'s number for `/kanban task list`, then "… and N more; mt role list
+shows all". *Why 30:* a reply past it is a scroll in chat, and Lark cuts a long card.
+
+### 13.5 The cases
+
+- **A role that fails to load**: the gateway does not start (`loadTeam` throws a `ConfigError` for
+  any role whose files are refused), so a running gateway has none to list. An entry under
+  `roles/` that is not a role, a file or a name outside the grammar, is ignored with a startup note
+  (kanban §2.1), and is not listed either. *So there is no "not usable" line:* the only roles
+  `/roles` can see are the ones the gateway loaded, and those are usable.
+- **A role edited since the start**: its `description`, `workspace`, `max_running` and
+  supervision are as loaded at the start, as the dispatcher uses them; its `role.md`'s first line
+  is read now. A role removed from disk while the gateway runs is still listed until the restart,
+  as it can still be claimed until then.
+- **More open runs than the limit**, after a restart that lowered it: shown as they are, `3 of 2`;
+  the dispatcher claims none until they close.
+- **A role with open runs whose limit is none**: the count alone.
+- **The board off**: every running field `–` (§13.1).
+- **Runs of a role no longer loaded**: not listed, as the role is not.
+
+### 13.6 Wiring
+
+- **`src/core/commands.ts`** gains `roles`; **`src/core/router.ts`** its `case 'roles'`, with a
+  `roles` dependency giving the reply's text, which the router masks.
+- **`src/core/roles-chat.ts`**, `renderRoles(roles, { running })`: the lines of §13.2, the cut of
+  §13.4; `running(name)` the count and limit, or undefined with the board off.
+- **`src/index.ts`**: the dependency, over `team.roles`, `config.kanban.enabled`,
+  `openAgentRunCountAs` on the gateway's database and `roleLimit` with
+  `config.kanban.maxRunningPerRole`.
+- **Docs, as built**: `/help`'s line, from the registry; the README's command table gains `/roles`,
+  talk, "The roles, what each is for, whether it can be given work, and its open runs".
+
+### 13.7 Testing
+
+- **Unit, `renderRoles`**: the description from `config.yaml`, else `role.md`'s first non-empty
+  line without its `#`, else `–`; an unreadable `role.md`; supervised and unsupervised; a set and
+  an unset workspace; `1 of 2`, a count with no limit, and `–` with the board off; the 30-line cut
+  and its words; a description holding a known secret shown masked; the agent's command never in
+  the text.
+- **The count**: a work run and a review run of one role both counted, a person's run not, a
+  decided run still counted until it closes, a cron fire of the role not.
+- **Router**: `/roles` at talk tier, refused silently without it, listed in `/help`, answered while
+  a session is busy, and with the board off.
+
+### 13.8 Limits
+
+- **The fields are the start's**, but `role.md`'s line, which is read now (§13.5).
+- **The running count is a moment's**: a pass may claim the next run as the reply is sent.
+- **"Can be given work" speaks for the board and cron**, not for a role named in a workflow, which
+  takes supervised roles as the board does (workflows spec §4).
+- **No per-board or per-workspace view**: a board's own `max_running` and the one agent run per
+  workspace (kanban §6.3) are `/kanban task show`'s `waiting:` lines, not `/roles`'.
 
 ---
 
@@ -838,3 +974,17 @@ read of the configuration (§5.1); `--json` on `mt auth grant` and `revoke` (§6
 refused by `mentioned_type` (§6.1); `mentionedPerson` taking `@` names only (§6.1); the
 `revoked_chat` check (§3.1); and an owner's leftover grant revoked, the owner keeping both tiers
 (§5.2).
+*Amended on 2026-11-18, for `/roles`.* The user approved adding `/roles` to plan X: a top-level
+chat command at talk tier, like `/sessions`, not under `/kanban`, as cron and workflows use roles
+too; one line a role, with its name, what it's for (`description`, else `role.md`'s first line),
+whether it can be given work, its workspace, and its open runs against its `max_running`, or `–`
+where none applies; the agent's command, model, args, environment and secrets left out; masked;
+at most 30 lines, then "… and N more; mt role list shows all" (§13). The main agent decided, where
+the code forced it: it works with the board off, running `–`; lines with ` · `, as the gateway's
+other chat lists, in place of the aligned table; no "not usable" lines, as a role that fails to
+load stops the gateway; supervised shown "board only (supervised)" rather than "no
+(supervised)", as the board accepts supervised roles and only cron refuses them; an unset
+workspace shown "any (default)"; a role with no limit shown by its count alone; runs counted by
+`openAgentRunCountAs`, review runs against their reviewer role, and cron fires and chat sessions
+not, as `max_running` itself counts; `role.md`'s line read at each `/roles`; and the terminal's
+commands named as `mt role list` and `mt role check`, since there is no `mt role show`.
