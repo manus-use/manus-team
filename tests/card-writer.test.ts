@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { CARD_FAILURE_LIMIT, CARD_MAX_AGE_MS, CardWriter } from '../src/channel/card-writer.js';
+import { describe, expect, it, vi } from 'vitest';
+import { CARD_FAILURE_LIMIT, CARD_MAX_AGE_MS, CARD_THROTTLE_BUDGET_MS, CardWriter, TOOL_LINE_DELAY_MS } from '../src/channel/card-writer.js';
 import { ChannelError } from '../src/channel/types.js';
 import type { Event, EventType } from '../src/types.js';
 import { FakeChannel } from './helpers/channel.js';
@@ -357,6 +357,69 @@ describe('CardWriter', () => {
     expect(h.channel.calls).toEqual(['openCard', 'set', 'finish']);
   });
 
+  it('hands the card its parts, so the adapter can write each to its own element', async () => {
+    // Channel spec §4.5: the tool line and the answer are separate elements, so
+    // the writer passes the render's parts, not one text.
+    const h = harness();
+    h.submit('ask');
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    h.writer.want(h.chunk('b'));
+    await h.writer.flushNow();
+    h.writer.want(h.end('completed'));
+    await h.writer.flushNow();
+
+    const card = h.channel.lastCard;
+    expect(card?.partSets).toEqual([
+      { tools: '', answer: 'a', status: '' },
+      { tools: '', answer: 'ab', status: '' },
+    ]);
+    expect(card?.partFinishes).toEqual([{ tools: '', answer: 'ab', status: '' }]);
+    // And the fake keeps the joined text, which the other tests read.
+    expect(card?.sets).toEqual(['a', 'ab']);
+  });
+
+  it('holds a write that changes only the tool line until 2 s after the last one, but not one to the answer, nor the finish', async () => {
+    // Channel spec §4.5: tool events come in bursts, each a request to Lark.
+    const h = harness();
+    const tool = (status: string): number => {
+      const seq = h.log.length + 1;
+      h.log.push(ev(seq, 'tool_call', { toolCallId: 'c1', title: 'Bash', status }));
+      return seq;
+    };
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    h.writer.want(tool('in_progress'));
+    await h.writer.flushNow();
+    expect(h.channel.calls).toEqual(['openCard']);
+    expect(h.rendered).toEqual([1]);
+
+    h.clock.advance(TOOL_LINE_DELAY_MS);
+    await h.writer.flushNow();
+    expect(h.channel.calls).toEqual(['openCard', 'set']);
+    expect(h.channel.lastCard?.partSets.at(-1)?.tools).toBe('⏳ Bash');
+
+    h.writer.want(h.chunk('b'));
+    await h.writer.flushNow();
+    h.writer.want(tool('completed'));
+    h.writer.want(h.end('completed'));
+    await h.writer.flushNow();
+    expect(h.channel.calls).toEqual(['openCard', 'set', 'set', 'finish']);
+    expect(h.channel.lastCard?.partFinishes).toEqual([{ tools: '✅ Bash', answer: 'a\n\nb', status: '' }]);
+  });
+
+  it('does not hold the tool line on the way out', async () => {
+    const h = harness();
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    const seq = h.log.length + 1;
+    h.log.push(ev(seq, 'tool_call', { toolCallId: 'c1', title: 'Bash', status: 'completed' }));
+    h.writer.want(seq);
+    await h.writer.close();
+    expect(h.channel.calls).toEqual(['openCard', 'set', 'finish']);
+    expect(h.channel.lastCard?.partFinishes).toEqual([{ tools: '✅ Bash', answer: 'a', status: '' }]);
+  });
+
   it('reports a swallowed failure instead of retrying in silence', async () => {
     const h = harness();
     h.writer.want(h.chunk('an answer nobody should log'));
@@ -434,6 +497,198 @@ describe('CardWriter', () => {
     expect(h.channel.texts).toEqual([]);
   });
 
+  it('waits before it writes again after a failure: the wait Lark gave, else a backoff', async () => {
+    // Retried at once, a throttle is only met again, and five failures spend
+    // the limit inside five seconds.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const h = harness();
+      h.writer.want(h.chunk('a'));
+      await h.writer.flushNow();
+      h.channel.failNext('set', new ChannelError(230020, 'chat rate limit', true, 5_000));
+      h.writer.want(h.chunk('b'));
+      await h.writer.flushNow();
+      expect(h.channel.calls).toEqual(['openCard', 'set']);
+      await vi.advanceTimersByTimeAsync(4_900);
+      expect(h.channel.calls).toEqual(['openCard', 'set']);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(h.channel.calls).toEqual(['openCard', 'set', 'set']);
+
+      // No wait given: a backoff, 250 to 500 ms after a first failure, here
+      // where the coalescing window is long past.
+      h.clock.advance(10_000);
+      h.channel.failNext('set', new ChannelError(230020, 'chat rate limit', true));
+      h.writer.want(h.chunk('c'));
+      await h.writer.flushNow();
+      await vi.advanceTimersByTimeAsync(240);
+      expect(h.channel.calls).toHaveLength(4);
+      await vi.advanceTimersByTimeAsync(270);
+      expect(h.channel.calls).toHaveLength(5);
+      expect(h.channel.lastCard?.text).toBe('abc');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not count a throttle against the limit until 30 s of waiting on throttles is spent', async () => {
+    const h = harness();
+    h.writer.want(h.chunk('the answer'));
+    expect(CARD_THROTTLE_BUDGET_MS).toBe(30_000);
+    // Three of 10 s spend the budget; Lark's code or a bare HTTP 429, alike.
+    const throttles = [429, 99991400, 99991400].map((code) => new ChannelError(code, 'throttled', true, 10_000));
+    for (const err of throttles) {
+      h.channel.failNext('openCard', err);
+      await h.writer.flushNow();
+    }
+    // Then they count, as any failure does.
+    for (let i = 0; i < CARD_FAILURE_LIMIT - 1; i += 1) {
+      h.channel.failNext('openCard', new ChannelError(99991400, 'throttled', true, 10_000));
+      await h.writer.flushNow();
+    }
+    expect(h.channel.texts).toEqual([]);
+    expect(h.notes.filter((n) => n.includes('throttled, waiting 10s'))).toHaveLength(3);
+    h.channel.failNext('openCard', new ChannelError(99991400, 'throttled', true, 10_000));
+    await h.writer.flushNow();
+    expect(h.channel.texts).toHaveLength(1);
+  });
+
+  it('finishes the card it gives up on, so it does not stream on', async () => {
+    const h = harness();
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    const card = h.channel.lastCard;
+    h.writer.want(h.chunk('b'));
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) {
+      h.channel.failNext('set', new ChannelError(230099, 'refused', false));
+      await h.writer.flushNow();
+    }
+    expect(h.channel.texts).toHaveLength(1);
+    expect(h.channel.calls.slice(-2)).toEqual(['sendText', 'finish']);
+    expect(card?.partFinishes).toEqual([{ tools: '', answer: 'ab', status: '' }]);
+  });
+
+  it('finishes the card it gives up on when finishing was what kept failing', async () => {
+    // A failed finish leaves the card open, so the fallback's finish still has a card to stop.
+    const h = harness();
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    const card = h.channel.lastCard;
+    h.writer.want(h.end('completed'));
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) {
+      h.channel.failNext('finish', new ChannelError(230099, 'refused', false));
+      await h.writer.flushNow();
+    }
+    expect(h.channel.texts).toHaveLength(1);
+    expect(h.channel.calls.slice(-3)).toEqual(['finish', 'sendText', 'finish']);
+    expect(card?.partFinishes).toEqual([{ tools: '', answer: 'a', status: '' }]);
+  });
+
+  it('backs off a throttle that says to wait 0, and still falls back in the end', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const h = harness();
+      h.writer.want(h.chunk('a'));
+      await h.writer.flushNow();
+      for (let i = 0; i < 100; i += 1) h.channel.failNext('set', new ChannelError(99991400, 'throttled', true, 0));
+      h.writer.want(h.chunk('b'));
+      await h.writer.flushNow();
+      expect(h.channel.calls).toEqual(['openCard', 'set']);
+      // Not at once: a backoff of at least a quarter of a second.
+      await vi.advanceTimersByTimeAsync(240);
+      expect(h.channel.calls).toEqual(['openCard', 'set']);
+      // The budget runs out on the floored waits, and then they count.
+      for (let i = 0; i < 40 && h.channel.texts.length === 0; i += 1) await h.writer.flushNow();
+      expect(h.channel.texts).toHaveLength(1);
+      expect(h.notes.filter((n) => n.includes('throttled, waiting')).length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a turn plain once it has fallen back: no card writes, and the rest once at its end', async () => {
+    const h = harness();
+    h.submit('ask');
+    h.writer.want(h.chunk('start '));
+    await h.writer.flushNow();
+    for (let i = 0; i < 200; i += 1) {
+      h.channel.failNext('set', new ChannelError(200860, 'card too large', false));
+      h.channel.failNext('openCard', new ChannelError(200860, 'card too large', false));
+    }
+    for (let i = 0; i < 40; i += 1) {
+      h.clock.advance(10_000);
+      h.writer.want(h.chunk(`more${i} `));
+      await h.writer.flushNow();
+    }
+    expect(h.channel.texts).toHaveLength(1);
+    expect(h.channel.calls.filter((c) => c === 'openCard')).toHaveLength(1);
+    const first = h.channel.texts[0]?.text ?? '';
+    h.writer.want(h.end('completed'));
+    await h.writer.flushNow();
+    await h.writer.close();
+    expect(h.channel.texts).toHaveLength(2);
+    // The rest only: what the first message carried is not sent again.
+    const rest = h.channel.texts[1]?.text ?? '';
+    expect(rest).toContain('more39');
+    expect(rest).not.toContain('start');
+    expect(first).toContain('start');
+    expect(h.channel.calls.filter((c) => c === 'set' || c === 'openCard').length).toBe(1 + CARD_FAILURE_LIMIT);
+  });
+
+  it('opens a card again only once a turn when it is lost on every write', async () => {
+    const h = harness();
+    h.submit('ask');
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    for (let i = 0; i < 200; i += 1) h.channel.failNext('set', new ChannelError(300311, 'not updatable', false));
+    for (let i = 0; i < 40; i += 1) {
+      h.writer.want(h.chunk('b'));
+      await h.writer.flushNow();
+    }
+    expect(h.channel.calls.filter((c) => c === 'openCard')).toHaveLength(2);
+    expect(h.channel.texts).toHaveLength(1);
+    // The next turn gets a card again.
+    h.submit('next');
+    h.writer.want(h.chunk('c'));
+    await h.writer.flushNow();
+    expect(h.channel.calls.filter((c) => c === 'openCard')).toHaveLength(3);
+  });
+
+  it('does not finish an earlier turn\'s card with this turn\'s render when it falls back', async () => {
+    const h = harness();
+    h.submit('first');
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    const old = h.channel.lastCard;
+    h.submit('second');
+    h.writer.want(h.chunk('b'));
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) {
+      h.channel.failNext('finish', new ChannelError(230099, 'refused', false));
+      h.channel.failNext('openCard', new ChannelError(230099, 'refused', false));
+      await h.writer.flushNow();
+    }
+    expect(h.channel.texts).toHaveLength(1);
+    expect(h.channel.calls.at(-1)).toBe('sendText');
+    expect(old?.partFinishes ?? []).toEqual([]);
+  });
+
+  it('starts no pass after close, though a failed pass in its drain scheduled one', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const h = harness();
+      h.writer.want(h.chunk('a'));
+      await h.writer.flushNow();
+      h.channel.failNext('set', new ChannelError(230020, 'chat rate limit', true));
+      h.channel.failNext('finish', new ChannelError(230020, 'chat rate limit', true));
+      h.writer.want(h.chunk('b'));
+      await h.writer.close();
+      const after = h.channel.calls.length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.channel.calls).toHaveLength(after);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('gives up rather than loop when the plain path fails too', async () => {
     // Nothing left to try. Holding the cursor back would re-attempt both failures
     // every second for the life of the process, which is the behaviour being fixed.
@@ -459,6 +714,36 @@ describe('CardWriter', () => {
     h.writer.want(h.chunk('a'));
     await h.writer.close();
     expect(h.rendered).toEqual([1]);
+  });
+
+  it('waits for the write in flight before it finishes the card on the way out', async () => {
+    // Otherwise the finish overlaps the write on the same card.
+    const h = harness();
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    h.writer.want(h.chunk('b'));
+    h.channel.hold();
+    const pass = h.writer.flushNow();
+    const closing = h.writer.close();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.channel.calls).toEqual(['openCard', 'set']);
+    h.channel.release();
+    await Promise.all([pass, closing]);
+    expect(h.channel.calls).toEqual(['openCard', 'set', 'finish']);
+    expect(h.channel.lastCard?.partFinishes).toEqual([{ tools: '', answer: 'ab', status: '' }]);
+  });
+
+  it('finishes again on the next pass when a finish fails, the card still open', async () => {
+    const h = harness();
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    h.channel.failNext('finish', new ChannelError(230020, 'chat rate limit', true));
+    h.writer.want(h.end('completed'));
+    await h.writer.flushNow();
+    await h.writer.flushNow();
+    expect(h.channel.calls).toEqual(['openCard', 'finish', 'finish']);
+    expect(h.channel.lastCard?.partFinishes).toEqual([{ tools: '', answer: 'a', status: '' }]);
+    expect(h.channel.lastCard?.droppedSets).toEqual([]);
   });
 
   it('freezes an un-frozen card on the way out', async () => {

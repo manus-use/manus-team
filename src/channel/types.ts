@@ -106,13 +106,30 @@ export interface SendResult {
 }
 
 /**
+ * A reply card's three parts (channel spec §4.5), each already escaped and masked
+ * by the renderer, and each '' when it has nothing to show.
+ *
+ * Three, not one text, because Lark's client animates an element by its diff: a
+ * new text that starts with the old one has only its tail typed, and anything
+ * else is typed again from the start. With the tool line first in one text,
+ * every tool event rewrote the start of the card, and the whole answer was typed
+ * out again each time.
+ */
+export interface CardParts {
+  /** The turn's tool calls on one line. Rewritten as they change, on its own. */
+  tools: string;
+  /** The agent's answer. Only grows at its end while the turn streams, bar the cases §4.5 lists. */
+  answer: string;
+  /** The error, the approval wait, the terminal, the retry hint, or the placeholder: the lines that come and go. */
+  status: string;
+}
+
+/**
  * A card being written to, as a session rather than a handle.
  *
- * This shape is dictated by what the platform actually offers. Feishu's streaming
- * card API is a *producer*: you hand it a callback and it owns the card's
- * lifecycle for the duration, handling throttling and the 30,000-character
- * element rollover itself. A create/update/close triple would either reimplement
- * that or fight it.
+ * The session holds what the card's updates need and nothing persists: the
+ * card's next sequence, and what each element was last given, so only a part
+ * that changed is written (channel spec §4.5).
  *
  * The consequence, stated plainly because it constrains recovery: a card session
  * cannot outlive the process that opened it. After a restart the old card can no
@@ -126,13 +143,13 @@ export interface CardSession {
   readonly createdAt: number;
 
   /**
-   * Replace the card's content.
+   * Replace the card's content, part by part.
    *
    * Full replacement, not append. Renders are computed from the log and are
    * idempotent, so a retry after an ambiguous failure re-sends the same state
    * rather than appending it twice.
    */
-  set(text: string): Promise<void>;
+  set(parts: CardParts): Promise<void>;
 
   /**
    * Final content, then freeze. Idempotent; must not throw on a second call.
@@ -144,7 +161,7 @@ export interface CardSession {
    * and keeps writing to it therefore loses every later write silently, which is
    * why the writer opens a new card per turn rather than reusing this one.
    */
-  finish(text: string): Promise<void>;
+  finish(parts: CardParts): Promise<void>;
 }
 
 export interface ApprovalCardSpec {
@@ -185,8 +202,8 @@ export interface Channel {
    */
   sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[]): Promise<SendResult>;
 
-  /** Open a streaming card. */
-  openCard(target: SendTarget, initialText: string, uuid: string): Promise<CardSession>;
+  /** Open a streaming card, showing `initial`. */
+  openCard(target: SendTarget, initial: CardParts, uuid: string): Promise<CardSession>;
 
   /** Post an approval card with one button per offered option. */
   sendApprovalCard(target: SendTarget, spec: ApprovalCardSpec, uuid: string): Promise<SendResult>;
@@ -251,6 +268,8 @@ export class ChannelError extends Error {
 export const CARD_GONE_CODES: ReadonlySet<number> = new Set([
   230011, // message withdrawn
   200750, // card entity expired or not found
+  200740, // card entity not found
+  300311, // card entity no longer updatable
 ]);
 
 /**

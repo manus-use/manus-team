@@ -101,7 +101,10 @@ export function forPlainText(text: string): string {
  */
 export function truncate(text: string, maxChars: number, marker = '\n… (truncated)'): string {
   if (text.length <= maxChars) return text;
-  const budget = Math.max(0, maxChars - marker.length);
+  let budget = Math.max(0, maxChars - marker.length);
+  // Never half a surrogate pair: an emoji cut in two is a broken character.
+  const last = text.charCodeAt(budget - 1);
+  if (budget > 0 && last >= 0xd800 && last <= 0xdbff) budget -= 1;
   return text.slice(0, budget) + marker;
 }
 

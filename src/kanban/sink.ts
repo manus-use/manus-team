@@ -3,6 +3,7 @@ import type { Db } from '../db/open.js';
 import type {
   ApprovalCardSpec,
   ApprovalOutcomeView,
+  CardParts,
   CardSession,
   CardView,
   Channel,
@@ -63,9 +64,9 @@ class DiscardedCard implements CardSession {
     this.createdAt = createdAt;
   }
 
-  async set(_text: string): Promise<void> {}
+  async set(_parts: CardParts): Promise<void> {}
 
-  async finish(_text: string): Promise<void> {}
+  async finish(_parts: CardParts): Promise<void> {}
 }
 
 export interface SinkOptions {
@@ -96,7 +97,7 @@ export class SinkChannel implements Channel {
     return { messageId: `${this.id}:${uuid}`, deduped: false };
   }
 
-  async openCard(_target: SendTarget, _initialText: string, uuid: string): Promise<CardSession> {
+  async openCard(_target: SendTarget, _initial: CardParts, uuid: string): Promise<CardSession> {
     return new DiscardedCard(`${this.id}:${uuid}`, this.#now());
   }
 

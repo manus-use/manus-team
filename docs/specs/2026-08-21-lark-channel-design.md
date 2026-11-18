@@ -283,6 +283,284 @@ itself become a notification.
 Agent-authored cards, if ever supported, get display + `open_url` only — never callback buttons,
 which would let a custom card forge an interaction callback.
 
+### 4.5 The reply card's parts
+
+**Root cause of the card that typed itself again and again.** During a long turn with several tool
+calls, the reply card's text disappeared and was typed out again from the start, over and over,
+until the turn ended. `renderCard` built one text: the tool summary line first (`✅ Bash ×2 · • Read
+×3`), then the answer. The card was the SDK's streaming card (`MarkdownStreamController`, SDK
+1.73.0): one markdown element, `stream_md`, in a card with `streaming_mode: true`, printing one
+character every 70 ms with `print_strategy: 'fast'`, and every `setContent` sent the whole text to
+that element through `cardkit.v1.cardElement.content` with the next sequence. Lark's client
+animates an element by its diff: a new text that starts with the old one has only its tail typed;
+any other text is typed again from the start. Every `tool_call` and `tool_call_update` rewrote the
+first line, so the old text no longer started the new one. A real session's events replayed through
+`renderCard` gave 28 updates, 19 of them not extensions of the one before, and all 19 were tool
+events, so in a long turn the answer was typed out again after nearly every tool call.
+
+**Three elements, one a part.** The card is three markdown elements, in reading order:
+
+1. `tools`: the tool summary line. Short, and rewritten by tool events, on its own.
+2. `answer`: the agent's answer. While the turn streams it only grows at its end, so Lark types
+   only the new words.
+3. `status`: the lines that come and go: the error, the approval-wait line, the terminal line, the
+   retry hint, and the placeholder (`_Working…_`, `_Finished with no output._`).
+
+`renderCard` returns the three parts (`CardParts`) beside the text it always returned, which is now
+the parts joined: the tool line, the answer and the status, a blank line between, cut to
+`CARD_TEXT_BUDGET`. That text is what the plain-message fallback sends, so it reads as the card
+did, and as the card always read.
+
+**The lines that come and go are a third element, below the answer.** The alternatives each fail
+one of them:
+
+- *Only on finish* would hide the error and the approval-wait line while the turn is open, and both
+  are there to be seen while it is open: the approval line is what stops an approval sitting
+  unanswered for hours.
+- *In the answer element* makes the answer shrink when the approval line goes, and the placeholder
+  would be replaced by the first word; each is a re-type of the whole answer, the bug again.
+- *In the tool element* puts an error above the answer it is about, changes the reading order the
+  plain message keeps, and re-types the tool line whenever the status changes.
+
+A third element keeps today's reading order, so nothing a person reads moves, and each element is
+rewritten only by what it holds.
+
+**A part with nothing to show is a zero-width space.** Each element exists from the card's creation,
+because an update names an element the card already has. An element is never given an empty text,
+which Lark may refuse (10002); a zero-width space is a character, which it draws as nothing. The
+answer starts as one. A zero-width space does not start the first words, so those are not typed but
+appear at once, as Lark's documentation says of a text that does not extend the old one; there is
+nothing on screen for them to wipe. Every word after them is typed.
+
+**The reply card is driven through Lark's card API directly**, with the SDK's own client,
+`rawClient`. The SDK's streaming card has one element and no way to name another. The calls it
+makes internally (`createCardInstance`, `sendCardByReference`, `updateCardElementContent`,
+`finishStreamingCard`) are methods of its sender, which `LarkChannel` keeps private, so the adapter
+makes the same calls through the client they wrap:
+
+- `cardkit.v1.card.create`, with the card JSON: schema 2.0, `update_multi: true`, `streaming_mode:
+  true`, the SDK's own streaming config (one character every 70 ms, `fast`), a chat-list preview of
+  "Working…", and the three elements with their `element_id`s. Not retried: a card never sent costs
+  nothing, and the writer retries the whole open with the newest render.
+- The card sent by reference, `msg_type: interactive` with `{ type: 'card', data: { card_id } }`,
+  through the adapter's own one-message send: placed in its thread, as a quoted reply, or in the
+  chat, as every other message is, retried on a retryable failure, with a uuid. The SDK's send by
+  reference had no uuid.
+- `cardkit.v1.cardElement.content` for each part that changed, with its own sequence.
+- `cardkit.v1.card.settings` to finish: `streaming_mode: false`, and a preview of the answer's first
+  50 characters, on one line, or of the status when there is no answer, then of the tool line, with
+  simple emphasis and backslash escapes taken out, as the preview is plain text; and with
+  `streaming_mode: true` and the preview "Working…" to turn streaming on again (below).
+- `cardkit.v1.cardElement.update`, a plain replace of an element, only as a finish's last resort,
+  when Lark will not turn streaming on again (below).
+
+A failure Lark gives, thrown or as a code in a 2xx body, is a `ChannelError` with Lark's code, so
+the writer's handling of a gone card (`CARD_GONE_CODES`), its failure count and its fallback work
+on these calls as they did on the SDK's. `CARD_GONE_CODES` gains cardkit's two: 200740, a card
+entity Lark does not hold, and 300311, one it will no longer update; on either the writer opens a
+new card, as on a withdrawn message, once a turn (below). Both codes are read from Lark's
+documentation and are to be confirmed live (point 9 below).
+
+**One sequence a card, strictly increasing over every update and the finish.** Lark orders a card's
+updates by their sequence and refuses one that is not above the last; the SDK's own streaming card
+draws its updates and its finish from one counter a card. Separate counters an element would give
+two updates of one card the same number. Each update takes the next number, and its uuid is built
+from the card and that number, as the SDK builds its: `c_<card_id>_<sequence>`,
+`s_<card_id>_<sequence>` for settings, and `u_<card_id>_<sequence>` for a replace. A failed update
+has used its number; the next write takes a new one.
+
+**A card's writes go one at a time.** Every `set` and `finish` of a session waits for the one before
+it to settle, and the writer's `close` waits for a pass in flight before it finishes the card: a
+finish overlapping a write would draw interleaved sequences, so the earlier could land late and be
+refused (300317), or the write could turn streaming on again after the finish turned it off and
+leave the typing cursor.
+
+**Only a part that changed is written, and one write's updates go one after another.** The session
+remembers what each element was last given, set only once Lark has taken the update, so a part
+whose update failed is written again by the next write, and an unchanged part costs nothing. The
+updates of one write go in reading order, each awaited before the next, because a later sequence
+landing first would get the earlier one refused. A write is one update in most renders (a chunk
+changes the answer, a tool event the tool line), and three at most.
+
+**The card's send has a uuid of its own: `reply_<card_id>`.** The writer's uuid for the open,
+`sendUuid(seq)`, is also the uuid of the plain message it falls back to at the same seq, and of a
+card it opens again at that seq once one has gone, and Lark answers a repeated uuid with the first
+message rather than send it. A card is sent once, so a retry of its send is the same card and keeps
+the same uuid.
+
+**The writer's design stays** (§4.1): single-flight, latest-wins by seq, one card per turn, rotation
+before the 14-day edge, the five-failure limit and the plain-message fallback, and finishing on
+every path. The session's `createdAt` is read before the card is made, as an entity's 14 days run
+from its making.
+
+**A finish whose last write fails is a failure, not a silence.** The last write is the answer's end.
+`finish` writes what changed first, then turns streaming off whether or not that landed, as a card
+left streaming shows its cursor until Lark gives up on it. If the write failed, `finish` then throws
+with Lark's code, so the writer counts it and finishes again on its next pass, or falls back to the
+plain message. Only a finish that landed marks the session finished; after that, `finish` and `set`
+do nothing, as before. The writer's two other finishes, of a card left behind for a new turn and at
+shutdown, already catch what they throw. A finish tried again meets a card with streaming off, and
+turns it on again to write (below).
+
+**Lark's streaming timeout is the session's, not the writer's.** Lark turns a card's streaming off
+ten minutes after it was last turned on, and then refuses an update with 200850 (timed out) or
+300309 (streaming is off); `card.settings` with `streaming_mode: true` turns it on again. A turn
+past ten minutes is common, and the SDK's card swallowed these refusals, so a long turn's card
+stopped moving with nothing said. The session:
+
+1. keeps `streamingSince`, by the adapter's clock, from before the card is made and from each time
+   it turns streaming on; a write past nine minutes of it (`STREAMING_REFRESH_MS`) turns streaming on
+   first, with the next sequence, so Lark's ten minutes are never reached; refused, and not
+   finishing, the write goes ahead all the same, as Lark's ten minutes may not have run out, and if
+   they have, step 2 covers it;
+2. on a content update refused with 200850 or 300309, which a clock out of step with Lark's or a
+   finish tried again meets, turns streaming on and sends that update once more with a new sequence;
+   refused again, or refused the turning on, it throws with Lark's code;
+3. while finishing, when Lark refuses to turn streaming on, writes the final parts with
+   `cardElement.update` instead, which needs no streaming, so the answer's end still lands, then
+   turns streaming off.
+
+The writer never sees the timeout: the card keeps moving past ten minutes, and past twenty, with no
+failure counted.
+
+**The writer waits after a failure, and a throttle is not a broken card.** Every failed write was
+retried by the next pass at once, so five failures took about five seconds, and a card that Lark
+was only throttling was given up on and its answer sent a second time as a plain message. Now:
+
+- the next pass waits what Lark said (`x-ogw-ratelimit-reset`, §4.3), but never less than
+  `backoffMs` of the consecutive failures, from a quarter of a second up to eight, so a wait of 0
+  is not a retry at once, forever;
+- a throttle (99991400, or an HTTP 429 with no code of its own) does not count against the
+  five-failure limit until 30 seconds of waiting on throttles is spent (`CARD_THROTTLE_BUDGET_MS`),
+  each throttle charged the wait it caused, floor included, so the budget does run out; reset by
+  any write that lands;
+- the fallback finishes the card it gives up on, best effort, so it does not stream on, and only a
+  card of the same turn: one left from an earlier turn has had its own end. That finish writes the
+  parts first, which the card may refuse for the same reason it was given up on; the one wasted
+  request is accepted, as the finish still turns streaming off, and a finish without the parts
+  would be a second path to keep;
+- a card lost (`CARD_GONE_CODES`) is opened again once a turn, and the open that follows does not
+  reset the failure count; lost a second time in the turn, the card is given up on. A card lost on
+  every write used to be opened again on every pass.
+
+**A turn given up on stays plain.** After the fallback, the writer makes no card writes for that
+turn. When it reaches its terminal, or the writer closes first, one more plain message carries what
+the first did not: the answer's new end, and the tool line and the status where they changed. When
+the answer no longer starts with what was sent (a secret learnt late, the budget crossed), that
+message is the whole card's text again, the only text that reads right; and when the first plain
+message failed, it is the whole too. The next turn gets a card again. Before this, a card failing
+on every write fell back, opened a new card for the rest of the turn, failed again and fell back
+again, so the answer's start was sent over and over.
+
+**Lark's rate limits.** `cardElement.content` is limited to 1,000 calls a minute and 50 a second for
+an app, and 10 a second for a card. The writer passes about once a second, a pass is one update in
+most renders and three at most, and the timeout's settings call comes once in nine minutes, so a
+card stays far under 10 a second. Tool events come in bursts, each a write that changes only the
+tool line, so such a write waits until two seconds after the last write (`TOOL_LINE_DELAY_MS`),
+unless the turn is finishing; the answer's writes are not held. The app's 50 a second is shared by
+every card at once: about 16 cards each writing three updates a second would reach it. Nothing
+bounds that yet (Limits).
+
+**No rollover.** The SDK splits an element past 30,000 characters across cards. No element gets
+there: the answer is cut at `CARD_TEXT_BUDGET`, 20,000, and the tool line and the status at 2,000
+each, those two marked with a bare `…` so a cut tool line stays one line, so the three are at most 24,004 characters, each under cardkit's element cap and the whole far
+under the ~109 KB message ceiling (§11).
+
+**But a card has a size limit in bytes.** Lark refuses a card past 30 KB with 200860. Most English
+is a byte a character, but Chinese, Japanese and Korean are about three in UTF-8, so a CJK answer
+past roughly 9,000 characters is refused though it is inside the budget. The writer then backs off,
+and after five refusals sends the answer as a plain message, so it arrives; the rest of the turn
+stays plain, and its end comes as one more message (above). A budget in bytes is a
+follow-up (Limits).
+
+**When the answer does not only grow.** Four cases were suspected. Two cannot happen and two can,
+each a single re-type of the answer element alone, never of the card:
+
+- *A held tail, then released* cannot. `withholdSecretPrefix` holds back a tail that could start a
+  known secret; the text shown is a prefix of the text held, and releasing the tail, or masking it
+  when the secret completes, adds after it. **But** a fragment is held only from its fourth
+  character (`MIN_PREFIX_LENGTH`), so a render that ends in a secret's first one to three characters
+  shows them, and the next one holds them, and the answer gets shorter: one re-type. It needs a
+  render to land between the third character and the fourth.
+- *A mask applied when a secret completes* cannot, for the same reason: the secret's start was
+  never shown. **But** a secret learnt during the turn (`addSecrets`) masks text already shown:
+  one re-type.
+- *`forMarkdown`'s escaping changing earlier text* cannot. It doubles the backslashes before a `<`
+  or `>`, so text that ended in backslashes still starts the escaped one.
+- *Truncation at the budget* can, once: the render that crosses 20,000 characters ends in the
+  truncation marker where the one before ended in answer, then every render after is the same
+  text, so nothing is typed again (§4.1 says why the head is kept).
+
+These are accepted rather than avoided. Each is rare, costs one re-type of the answer, and avoiding
+them means either holding back every secret's first character, which mangles ordinary text, or
+giving the renderer memory of what it rendered before. The render is a pure function of the log,
+which is what lets the writer drop, retry and re-render it freely (§4.1).
+
+**Not changed:** approval cards, board cards and notices. None of them streams.
+
+**Only a live check can confirm** these points about Lark's client and its card API. Points 1 to 6
+are smoke-test items 1 to 6 in the plan (`docs/plans/2026-11-19-plan-c5-card-parts.md`), point 8 is
+item 9, and points 7 and 9 have no item, as no smoke test can make Lark refuse to turn streaming on,
+or lose a card on demand; point 9 is to be watched for in the logs:
+
+1. A text that starts with the element's old one is typed from where the old one ended, element by
+   element, on a card of three elements. This is the fix, and it was observed on one element only.
+2. What a text that does not start with the old one does. It was observed being typed again from
+   the start, while Lark's documentation of the content API says it is put on screen whole, without
+   the typewriter. Either way the tool line now takes it alone.
+3. A zero-width space draws nothing, and an element holding one leaves no gap worth seeing.
+4. One sequence across a card's elements and its settings is taken, with no update refused for it.
+5. A turn longer than ten minutes, and twenty: turning streaming on again ahead of Lark's ten
+   minutes keeps the card updating, with no failed write in the log, and the preview reads
+   "Working…" until the end. This assumes that turning streaming on while it is already on starts
+   Lark's ten minutes over, which its documentation does not say.
+6. The chat-list preview reads "Working…" while the card streams, and the answer's start once it is
+   finished.
+7. `cardElement.update` replaces an element's content on a card whose streaming is off.
+8. A long CJK answer: where Lark refuses the card with 200860, and that the answer then arrives as
+   a plain message.
+9. The codes cardkit gives a lost card: 200740 for an entity it does not hold, and 300311 for one
+   it will no longer update.
+
+**Testing.** `renderCard`'s parts and their budgets; the answer, over every render of a turn of
+interleaved tool events and answer chunks, starting with the one before it each time, while the one
+text did not; each case above, the two that re-type among them. The card JSON and its preview. The
+adapter over a fake cardkit client that keeps Lark's rules, each refused with Lark's code: a
+sequence not above the card's last (300317), a card or element it does not hold (200740, 300313),
+empty content (10002), content with streaming off (300309) or ten minutes after it was last turned
+on, by its own clock (200850), a card past 30 KB in UTF-8 (200860), and a card sent by reference
+that it does not hold (200740); a call can also be taken and its answer lost. Over it: the card made and sent by reference with its uuid and
+placement, a throttled send retried, Lark's codes passed on, only changed parts written, an emptied
+part sent as a zero-width space, one strictly increasing sequence; a finish whose write fails
+rejecting with the code, still turning streaming off, and landing when tried again; streaming
+turned on again past nine minutes and on a refusal, a refused turning on thrown, and a finish
+replacing the answer when streaming will not come back. A finish and a write held on its way
+do not overlap. The writer: its wait after a failure, floored for a wait of 0, the throttle budget,
+the fallback finishing its own turn's card only, the turn kept plain after it with the rest sent
+once, one re-open a turn for a lost card, no pass after `close`, and a tool-line-only write held.
+A long CJK answer through the writer, the adapter and the fake: refused at 30 KB, one fallback,
+and one more message at the turn's end. And the bug
+replayed end to end: the card writer, the adapter and the fake cardkit client over one turn, a pass
+after every event, every update the answer element is given starting with the one before, past the
+zero-width spaces it starts with, and none refused.
+
+**Limits.**
+
+- The tool line is still typed again on each tool event. It is one short line; if that proves
+  distracting, `cardElement.update` or `patch` may replace it without the typewriter, which is not
+  done until a live check shows it.
+- Nothing bounds the app's cardkit calls across cards: Lark's 50 a second for an app is shared by
+  every card streaming at once. An app-wide token bucket in the adapter, which every cardkit call
+  takes from, is a follow-up.
+- The budget is in characters, and a CJK answer can pass Lark's 30 KB (200860) inside it. A budget
+  in bytes is a follow-up.
+- A turn that falls back comes as two plain messages, the answer to that point and then its rest;
+  where the answer was rewritten in between (a secret learnt late, the budget), the second repeats
+  the whole.
+- The re-types above remain, rare and one at a time.
+- §12's bet on the SDK's `Channel` module stands for the connection, inbound events and every other
+  send. The reply card no longer rests on it.
+
 ---
 
 ## 5. Approvals

@@ -1,9 +1,11 @@
-import { createLarkChannel, type LarkChannel, type MarkdownStreamController } from '@larksuiteoapi/node-sdk';
+import { createLarkChannel, type LarkChannel } from '@larksuiteoapi/node-sdk';
 import {
+  CARD_GONE_CODES,
   ChannelError,
   type ApprovalCardSpec,
   type ApprovalOutcomeView,
   type CardButton,
+  type CardParts,
   type CardSession,
   type CardView,
   type Channel,
@@ -21,12 +23,13 @@ import { PRODUCT_NAME } from '../../identity.js';
 /**
  * The Lark implementation of the outbound `Channel` port.
  *
- * Built on the SDK's high-level `Channel` module rather than raw API calls. That
- * is a deliberate bet: the module already owns per-chat queueing, the streaming
- * card lifecycle, and the 30,000-character element rollover, and reimplementing
- * those on top of `im.v1.*` means owning three pieces of fiddly behaviour whose
- * failure modes are all silent. The cost of the bet is that the card lifecycle is
- * shaped by its producer callback, which is why `CardSession` exists.
+ * Built on the SDK's high-level `Channel` module rather than raw API calls, for
+ * the connection, inbound events and the longer text sends. The reply card is
+ * the exception (channel spec §4.5): the SDK's streaming card has one element,
+ * so a tool line above the answer made every tool event retype the whole
+ * answer. The card is driven through Lark's card API instead, one element a
+ * part, with the SDK's own client. Its rollover past 30,000 characters is not
+ * needed: no part is let grow past `CARD_TEXT_BUDGET`, 20,000.
  *
  * **The uuid.** The SDK's high-level `send`/`stream` do not expose Feishu's
  * `uuid` field, so every message that goes out as one message -- a text of up to
@@ -34,9 +37,9 @@ import { PRODUCT_NAME } from '../../identity.js';
  * SDK's own client instead (`im.v1.message.create` or `reply`), with the uuid:
  * Feishu then sends one message for any number of sends with the same uuid
  * within an hour, so a retry, or a notice sent again after a restart, is one
- * message (spec §9.4). A longer text is split by the SDK into several messages,
- * and a streamed card is the SDK's to send; neither carries the uuid, so a retry
- * of those can still post a second copy.
+ * message (spec §9.4). The reply card is sent so too, with a uuid of its own
+ * (`openCard`). A longer text is split by the SDK into several messages, with
+ * no uuid, so a retry of one can still post a second copy.
  */
 
 export interface LarkChannelConfig {
@@ -237,92 +240,200 @@ export class LarkAdapter implements Channel {
   }
 
   /**
-   * Open a streaming card.
+   * Open the reply card (channel spec §4.5), over Lark's card API directly.
    *
-   * `stream()` does not return until its producer resolves, so it cannot be
-   * awaited here -- the card has to stay writable for the length of a turn. What
-   * this does instead is start `stream()`, wait for the producer to hand over its
-   * controller, and return a session that drives it.
+   * The card is made first, as a card entity with its three elements, then sent
+   * by reference, a message of its own: placed as `#post` places any message,
+   * and retried as one, with a uuid. The uuid is the card's, not the writer's:
+   * the writer's is also the uuid of the plain message it falls back to for the
+   * same seq, and of a card it opens again at the same seq once one has gone,
+   * and Lark would answer either with this card's message rather than send it.
+   * A card is sent once; a retry of the send is the same card, so the same uuid.
    *
-   * The producer is held open by a promise that `finish()` resolves. That is the
-   * whole trick, and it has one hard requirement: **`finish()` must be reached on
-   * every path**, including failure, or `stream()` never settles and the card
-   * shows a typing indicator forever.
+   * Making the card is not retried here: an entity never sent costs nothing,
+   * and the writer retries the whole open with the newest render.
+   *
+   * `createdAt` is read before the card is made, as an entity's 14 days run
+   * from its making.
    */
-  async openCard(target: SendTarget, initialText: string, _uuid: string): Promise<CardSession> {
+  async openCard(target: SendTarget, initial: CardParts, _uuid: string): Promise<CardSession> {
+    const cardkit = this.#lark.rawClient.cardkit.v1;
     const clock = this.#clock;
-
-    let onController: (c: MarkdownStreamController) => void;
-    let onFailed: (e: unknown) => void;
-    const ready = new Promise<MarkdownStreamController>((resolve, reject) => {
-      onController = resolve;
-      onFailed = reject;
-    });
-
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-
-    const streaming = this.#lark
-      .stream(
-        target.chatId,
-        {
-          markdown: async (controller) => {
-            await controller.setContent(initialText);
-            onController(controller);
-            await held;
-          },
-        },
-        this.#sendOptions(target),
-      )
-      .catch((err: unknown) => {
-        // Surfaced to whichever side is waiting. Before handover this rejects
-        // `openCard`; after it, the failure is reported through `set`/`finish`.
-        onFailed(err);
-        // Unblock the producer so a failed stream cannot leave `finish()` hanging.
-        release();
-        throw toChannelError(err);
-      });
-    // The rejection is consumed by whoever awaits `streaming`; this keeps it from
-    // surfacing as an unhandled rejection in the meantime.
-    void streaming.catch(() => undefined);
-
-    let controller: MarkdownStreamController;
-    try {
-      controller = await ready;
-    } catch (err) {
-      throw toChannelError(err);
-    }
-
     const createdAt = clock.now();
+
+    let made: { code?: number | undefined; msg?: string | undefined; data?: { card_id: string } | undefined };
+    try {
+      made = await cardkit.card.create({ data: { type: 'card_json', data: JSON.stringify(replyCard(initial)) } });
+    } catch (err) {
+      throw sendError(err);
+    }
+    if (typeof made.code === 'number' && made.code !== 0) throw toChannelError(made);
+    const cardId = made.data?.card_id;
+    if (cardId === undefined || cardId === '') throw new ChannelError(0, 'Lark made the card with no card id', false);
+
+    const sent = await this.#withRetry(() =>
+      this.#post(target, 'interactive', { type: 'card', data: { card_id: cardId } }, `reply_${cardId}`.slice(0, 50)),
+    );
+
+    // What each element shows, as far as Lark has said it took it: an update is
+    // sent only for a part that differs, and a part whose update failed is sent
+    // again by the next write.
+    const shown: Record<keyof CardParts, string> = {
+      tools: partContent(initial.tools),
+      answer: partContent(initial.answer),
+      status: partContent(initial.status),
+    };
+    // One sequence for the card, every update and the settings drawing the next:
+    // Lark orders a card's updates by it, and refuses one not above the last.
+    let sequence = 0;
     let finished = false;
+    // When streaming was last turned on, by our clock: at the card's making,
+    // and at each `streamOn`. Read before the card was made, so never late.
+    let streamingSince = createdAt;
+
+    const settings = async (config: object): Promise<void> => {
+      sequence += 1;
+      const at = sequence;
+      await cardkitCall(() =>
+        cardkit.card.settings({
+          path: { card_id: cardId },
+          data: { settings: JSON.stringify({ config }), sequence: at, uuid: `s_${cardId}_${at}` },
+        }),
+      );
+    };
+    const content = async (part: keyof CardParts, text: string): Promise<void> => {
+      sequence += 1;
+      const at = sequence;
+      await cardkitCall(() =>
+        cardkit.cardElement.content({
+          path: { card_id: cardId, element_id: REPLY_ELEMENTS[part] },
+          data: { content: text, sequence: at, uuid: `c_${cardId}_${at}` },
+        }),
+      );
+    };
+    // Lark stops streaming a card by itself, and a finish that failed has
+    // stopped it too; an update is then refused, and streaming is turned on again.
+    const streamOn = async (): Promise<void> => {
+      await settings({ streaming_mode: true, summary: { content: REPLY_SUMMARY_OPEN } });
+      streamingSince = clock.now();
+    };
+    // Streaming turned on again: true once it is. While finishing, a refusal is
+    // false, and the parts are written without streaming instead (`replace`);
+    // otherwise it is thrown with Lark's code.
+    const turnOn = async (finishing: boolean): Promise<boolean> => {
+      try {
+        await streamOn();
+        return true;
+      } catch (err) {
+        if (finishing) return false;
+        throw err;
+      }
+    };
+    // A plain replace of the element, which needs no streaming: the last resort
+    // of a finish, so the answer's end still lands.
+    const replace = async (part: keyof CardParts, text: string): Promise<void> => {
+      sequence += 1;
+      const at = sequence;
+      await cardkitCall(() =>
+        cardkit.cardElement.update({
+          path: { card_id: cardId, element_id: REPLY_ELEMENTS[part] },
+          data: {
+            element: JSON.stringify({ tag: 'markdown', element_id: REPLY_ELEMENTS[part], content: text }),
+            sequence: at,
+            uuid: `u_${cardId}_${at}`,
+          },
+        }),
+      );
+    };
+
+    const write = async (parts: CardParts, finishing = false): Promise<void> => {
+      const changed = REPLY_ORDER.filter((part) => partContent(parts[part]) !== shown[part]);
+      if (changed.length === 0) return;
+      // Ahead of Lark's ten minutes, so the writer never meets them. Refused
+      // while not finishing, the write goes ahead all the same: Lark's ten
+      // minutes may not have run out, and if they have, the refusal below
+      // (200850, 300309) turns streaming on again or fails the write.
+      let replacing = false;
+      if (clock.now() - streamingSince >= STREAMING_REFRESH_MS) {
+        try {
+          await streamOn();
+        } catch {
+          if (finishing) replacing = true;
+        }
+      }
+      for (const part of changed) {
+        const text = partContent(parts[part]);
+        if (replacing) {
+          await replace(part, text);
+        } else {
+          try {
+            await content(part, text);
+          } catch (err) {
+            if (!(err instanceof ChannelError) || !STREAMING_OFF_CODES.has(err.code)) throw err;
+            // Once, with a new sequence; a second refusal is thrown with Lark's code.
+            if (await turnOn(finishing)) {
+              await content(part, text);
+            } else {
+              replacing = true;
+              await replace(part, text);
+            }
+          }
+        }
+        shown[part] = text;
+      }
+    };
+
+    // Every `set` and `finish` of the card, one after another: two at once would
+    // draw interleaved sequences, so the earlier could land late and be refused,
+    // or a write could turn streaming on again after the finish turned it off.
+    let tail: Promise<void> = Promise.resolve();
+    const serial = (f: () => Promise<void>): Promise<void> => {
+      const p = tail.then(f, f);
+      tail = p.then(
+        () => undefined,
+        () => undefined,
+      );
+      return p;
+    };
 
     return {
-      messageId: controller.messageId,
+      messageId: sent.messageId,
       createdAt,
-      async set(text: string): Promise<void> {
-        if (finished) return;
-        try {
-          await controller.setContent(text);
-        } catch (err) {
-          throw toChannelError(err);
-        }
+      set(parts: CardParts): Promise<void> {
+        return serial(async () => {
+          // Inert once finished: streaming is off, and the card is done.
+          if (finished) return;
+          await write(parts);
+        });
       },
-      async finish(text: string): Promise<void> {
-        // Idempotent: teardown reaches this from the writer's normal terminal
-        // path and again from its shutdown path, and a second call must be inert
-        // rather than an error.
-        if (finished) return;
-        finished = true;
-        try {
-          await controller.setContent(text);
-        } catch {
-          // The content update failed, but the producer still has to be released.
-          // Leaving it held would hang `stream()` and, with it, the card.
-        }
-        release();
-        await streaming.catch(() => undefined);
+      finish(parts: CardParts): Promise<void> {
+        return serial(async () => {
+          // Idempotent once it has landed: teardown reaches this from the writer's
+          // normal terminal path and again from its shutdown path, and a second
+          // call must be inert rather than an error.
+          if (finished) return;
+          let failed: unknown;
+          try {
+            await write(parts, true);
+          } catch (err) {
+            failed = err;
+          }
+          // Whether or not the write landed: a card left streaming shows its
+          // typing cursor until Lark gives up on it. Not for a card Lark no
+          // longer holds, which has no streaming to turn off.
+          const gone = failed instanceof ChannelError && CARD_GONE_CODES.has(failed.code);
+          if (!gone) {
+            try {
+              await settings({ streaming_mode: false, summary: { content: replySummary(parts) } });
+            } catch {
+              // Best effort. The card keeps what it shows.
+            }
+          }
+          // Thrown, so the writer counts it, and finishes again or falls back: the
+          // last content is the answer's end, and it must not be lost in silence.
+          if (failed !== undefined) throw failed;
+          finished = true;
+        });
       },
     };
   }
@@ -548,6 +659,113 @@ function byline(openId: string): object | undefined {
       },
     ],
   };
+}
+
+/**
+ * Lark's codes for an update refused because the card is not streaming: 200850,
+ * streaming timed out, ten minutes after it was last turned on; 300309,
+ * streaming is off. The session turns streaming on again and writes once more.
+ */
+const STREAMING_OFF_CODES: ReadonlySet<number> = new Set([200850, 300309]);
+
+/**
+ * How long after streaming was last turned on a write turns it on again first:
+ * nine minutes, a minute inside Lark's ten, so a long turn's card keeps
+ * streaming and its writes are not refused.
+ */
+export const STREAMING_REFRESH_MS = 9 * 60 * 1000;
+
+/**
+ * The reply card's element ids (channel spec §4.5): one markdown element a part,
+ * named so each part's update goes to its own element.
+ */
+export const REPLY_ELEMENTS: Readonly<Record<keyof CardParts, string>> = { tools: 'tools', answer: 'answer', status: 'status' };
+
+/** The parts in reading order: the tool line, the answer, the status. */
+const REPLY_ORDER: ReadonlyArray<keyof CardParts> = ['tools', 'answer', 'status'];
+
+/**
+ * What a part with nothing to show is sent as: a zero-width space. Lark is never
+ * given an empty element, which it may refuse, and draws this as nothing.
+ */
+export const EMPTY_PART = '\u200b';
+
+/** The card's preview in the chat list while it streams. */
+export const REPLY_SUMMARY_OPEN = 'Working…';
+
+/** The longest preview a finished card is given, in characters, as the SDK's own streaming card cuts its. */
+const SUMMARY_MAX = 50;
+
+/** A part as an element's content: itself, or `EMPTY_PART`. */
+export function partContent(part: string): string {
+  return part === '' ? EMPTY_PART : part;
+}
+
+/**
+ * The reply card, in Lark's card schema 2.0 (channel spec §4.5): streaming, so
+ * Lark's client types each update, with the SDK's own streaming card's pace, one
+ * character every 70 ms, `fast` showing what is buffered when a new update
+ * comes; and three markdown elements, one a part, in reading order. The parts
+ * were escaped and masked by the renderer.
+ */
+export function replyCard(parts: CardParts): object {
+  return {
+    schema: '2.0',
+    config: {
+      update_multi: true,
+      streaming_mode: true,
+      summary: { content: REPLY_SUMMARY_OPEN },
+      streaming_config: {
+        print_frequency_ms: { default: 70 },
+        print_step: { default: 1 },
+        print_strategy: 'fast',
+      },
+    },
+    body: {
+      elements: REPLY_ORDER.map((part) => ({ tag: 'markdown', element_id: REPLY_ELEMENTS[part], content: partContent(parts[part]) })),
+    },
+  };
+}
+
+/**
+ * A finished card's preview in the chat list: the answer, else the status, else
+ * the tool line, on one line, cut to `SUMMARY_MAX` characters on a code point.
+ * The preview is plain text, so simple emphasis and backslash escapes are taken
+ * out first: `_Turn failed._` previews as `Turn failed.`.
+ */
+export function replySummary(parts: CardParts): string {
+  const text = [parts.answer, parts.status, parts.tools].find((p) => p.trim() !== '') ?? '';
+  const chars = Array.from(plainPreview(text).replace(/\s+/g, ' ').trim());
+  return chars.length <= SUMMARY_MAX ? chars.join('') : `${chars.slice(0, SUMMARY_MAX - 1).join('')}…`;
+}
+
+/**
+ * Markdown's simple emphasis taken out of `text`, a marker pair at a time (`**`,
+ * `~~`, `__`, then `*`, `` ` ``, `_`), an escaped marker left alone, and an
+ * underscore only at a word's edge, so `snake_case` keeps its own; then each
+ * backslash escape replaced by the character it escapes.
+ */
+function plainPreview(text: string): string {
+  return text
+    .replace(/(?<!\\)(\*\*|~~)(?=\S)(.+?)(?<=\S)(?<!\\)\1/g, '$2')
+    .replace(/(?<![\w\\])__(?=\S)(.+?)(?<=\S)(?<!\\)__(?!\w)/g, '$1')
+    .replace(/(?<!\\)([*`])(?=\S)(.+?)(?<=\S)(?<!\\)\1/g, '$2')
+    .replace(/(?<![\w\\])_(?=\S)(.+?)(?<=\S)(?<!\\)_(?!\w)/g, '$1')
+    .replace(/\\(.)/g, '$1');
+}
+
+/**
+ * One call to Lark's card API, answered with `code` 0 or failed with Lark's code:
+ * thrown, as axios throws an HTTP error, or in the body of a 2xx.
+ */
+async function cardkitCall(request: () => Promise<{ code?: number | undefined; msg?: string | undefined }>): Promise<void> {
+  let r: { code?: number | undefined; msg?: string | undefined };
+  try {
+    r = await request();
+  } catch (err) {
+    throw sendError(err);
+  }
+  if (typeof r.code === 'number' && r.code !== 0) throw toChannelError(r);
 }
 
 /** The HTTP status of an error axios threw, if Lark answered at all. */

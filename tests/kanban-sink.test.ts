@@ -26,10 +26,10 @@ describe('KanbanSink', () => {
       messageId: 'kanban:u1',
       deduped: false,
     });
-    const card = await sink.openCard({ chatId: 'k_1', threadId: 'r_1' }, 'starting', 'u2');
+    const card = await sink.openCard({ chatId: 'k_1', threadId: 'r_1' }, { tools: '', answer: '', status: 'starting' }, 'u2');
     expect(card).toMatchObject({ messageId: 'kanban:u2', createdAt: NOW });
-    await card.set('more');
-    await card.finish('done');
+    await card.set({ tools: '', answer: 'more', status: '' });
+    await card.finish({ tools: '', answer: 'more', status: 'done' });
     await sink.react('m', 'OK');
     await sink.unreact('m', 'OK');
     await sink.updateApprovalCard('m', { action: 'a', choice: 'b', answeredBy: 'c' });
@@ -41,7 +41,7 @@ describe('KanbanSink', () => {
     const sink = new SinkChannel('cron', { now: () => NOW, subject: (jobId) => `cron job ${jobId}` });
     expect(sink.id).toBe('cron');
     expect(await sink.sendText({ chatId: 'c_1', threadId: '7' }, 'hello', 'u1')).toEqual({ messageId: 'cron:u1', deduped: false });
-    expect(await sink.openCard({ chatId: 'c_1', threadId: '7' }, 'starting', 'u2')).toMatchObject({ messageId: 'cron:u2', createdAt: NOW });
+    expect(await sink.openCard({ chatId: 'c_1', threadId: '7' }, { tools: '', answer: '', status: 'starting' }, 'u2')).toMatchObject({ messageId: 'cron:u2', createdAt: NOW });
     expect(await sink.sendCard({ chatId: 'c_1', threadId: '7' }, { markdown: 'x', buttons: [] }, 'u3')).toEqual({ messageId: 'cron:u3', deduped: false });
     await expect(
       sink.sendApprovalCard({ chatId: 'c_1', threadId: '7' }, { approvalId: 'a_1', action: 'write', options: [], nonce: 'n' } as never, 'u4'),

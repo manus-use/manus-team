@@ -127,6 +127,14 @@ describe('truncate', () => {
     expect(out).toHaveLength(50);
     expect(out.endsWith('… (truncated)')).toBe(true);
   });
+
+  it('never cuts an emoji in half', () => {
+    // 'x' then emoji, each two UTF-16 units: a cut at an odd unit would split one.
+    const marker = '…';
+    const out = truncate(`x${'😀'.repeat(10)}`, 5, marker);
+    expect(out).toBe(`x😀${marker}`);
+    expect(out.isWellFormed()).toBe(true);
+  });
 });
 
 describe('mask', () => {
