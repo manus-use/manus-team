@@ -507,11 +507,19 @@ chat is told, with the typed commands they can use instead.
 ### How chat names people
 
 Every reply names a person by the name Lark last gave for them, in plain text, so nobody is
-pinged: task lists, `task show`, gate lists, workflow replies, notices, cards and `/cron show`.
-A person the gateway has no name for is shown as `lark:on_…`. When two people the bot has seen
-share a name, each is followed by the start of their id, as "Hemanth (on_8ba3…)", so you can tell
-them apart. `/auth list` keeps each person's `lark:on_…` beside their name, as `/auth revoke`
-takes it. The terminal's `mt` commands show the ids, which is what you type there.
+pinged: task lists, `task show`, gate lists, workflow replies, notices, cards, `/cron show` and
+`/auth`'s replies. A `lark:on_…` in a task's title or body, as a workflow's person param puts
+there, is shown by name too; the task itself keeps the id. A person the gateway has no name for is
+shown as `lark:on_…`. When two people the bot has seen share a name, each is followed by the start
+of their id, as "Hemanth (on_8ba3…)", so you can tell them apart.
+
+Two places keep the id on purpose, as `/auth revoke` takes it for someone who can no longer be
+mentioned:
+
+- `/auth list` shows each person as "Name (lark:on_…)".
+- A grant's reply ends "`/auth revoke lark:on_…` takes it back".
+
+The terminal's `mt` commands show the ids, which is what you type there.
 
 ## 5. A chain, A → B → C
 

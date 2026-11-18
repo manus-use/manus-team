@@ -5,7 +5,7 @@ import { getInstance, getTask, subscriptionsOf } from '../src/db/kanban-read.js'
 import { createBoard } from '../src/db/kanban.js';
 import { notePerson } from '../src/db/people.js';
 import { KanbanChat } from '../src/kanban/chat.js';
-import { WORKFLOW_REPLY_MAX, renderInstance, renderStarted, startedReply } from '../src/kanban/chat-render.js';
+import { WORKFLOW_REPLY_MAX, renderInstance, renderNotice, renderStarted, startedReply } from '../src/kanban/chat-render.js';
 import { PeopleDirectory } from '../src/kanban/people.js';
 import { KanbanService } from '../src/kanban/service.js';
 import type { TaskRow } from '../src/kanban/types.js';
@@ -204,6 +204,28 @@ describe('people by name in workflow replies (spec §9.3)', () => {
     // Another person of the same name, seen by this bot: each is told apart by the start of their union_id.
     notePerson(t.db, { appId: 'cli_app', unionId: 'on_other', openId: 'ou_other', name: 'Alice Smith' }, NOW);
     expect((await chat.run(`workflow show ${id}`, message(TEAM), TEAM)).text).toMatch(/ ready · Alice Smith \\\(on\\_alic…\\\)$/m);
+  });
+});
+
+describe('a title built from a person param, by name in chat only (spec §9.3)', () => {
+  it('shows "Ask Alice Smith" in task list, task show, the start reply, workflow show and a notice, the stored title kept', async () => {
+    writeFileSync(join(dir, 'ask.yaml'), 'params:\n  owner: { required: true }\nsteps:\n  ask: { title: "Ask {{owner}}", body: "Ask {{owner}} today.", assignee: "{{owner}}" }\n');
+    const started = (await chat.run('workflow start ask owner=@Alice Smith', message(TEAM), TEAM)).text;
+    expect(started).toContain(' Ask Alice Smith, for Alice Smith\n');
+    const [taskId] = members();
+    const task = getTask(t.db, taskId ?? '');
+    expect(task?.title).toBe('Ask lark:on_alice');
+    expect((await chat.run('task list', message(TEAM), TEAM)).text).toContain(': Ask Alice Smith · Alice Smith');
+    const show = (await chat.run(`task show ${taskId}`, message(TEAM), TEAM)).text;
+    expect(show.split('\n')[0]).toMatch(/^\*\*Ask Alice Smith\*\* /);
+    expect(show).toContain('> Ask Alice Smith today.');
+    const instance = instanceOf(started);
+    expect((await chat.run(`workflow show ${instance}`, message(TEAM), TEAM)).text).not.toContain('lark:');
+    const notice = renderNotice({ id: 1, taskId: taskId ?? '', runId: null, kind: 'completed', actor: 'run:r_x', payload: {}, createdAt: NOW }, task!, {
+      blockRecurrenceLimit: 2,
+      nameOf: (p) => people.chatName(p),
+    });
+    expect(notice).toBe(`Done: **Ask Alice Smith** \`${taskId}\`.`);
   });
 });
 

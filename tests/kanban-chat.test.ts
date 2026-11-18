@@ -509,6 +509,14 @@ describe("a person's card", () => {
     return chat.card(action);
   }
 
+  it('names its presser on the redrawn card by chat name, telling two of one name apart', async () => {
+    const { taskId, run } = await soloTask();
+    notePerson(t.db, { appId: 'cli_app', unionId: 'on_other', openId: 'ou_other', name: 'Alice Smith' }, 1);
+    expect(await press(run, 'done', ALICE, 'all links answer')).toBe(`Completing \`${taskId}\`: the card shows how it goes.`);
+    expect(await chat.idle(5_000)).toBe(true);
+    expect(redrawn.at(-1)?.view.markdown).toBe(`**Check the links** \`${taskId}\`\nDone by Alice Smith \\(on\\_alic…\\).`);
+  });
+
   it("answers at once, reports through the card's run in the background, and redraws the card as worked on, then with what happened", async () => {
     const { taskId, run } = await soloTask();
     expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
@@ -541,6 +549,8 @@ describe("a person's card", () => {
 
   it("names a presser it has no name for through Lark's person element, not their id", async () => {
     const { taskId, run } = await soloTask();
+    // No name from Lark now, and none kept from before.
+    t.db.prepare("UPDATE people SET name = NULL WHERE union_id = 'on_alice'").run();
     await press(run, 'done', { ...ALICE, displayName: null }, 'all links answer');
     expect(await chat.idle(5_000)).toBe(true);
     expect(redrawn.at(-1)).toEqual({

@@ -123,4 +123,22 @@ describe('PeopleDirectory.chatName', () => {
     expect(shown.length).toBeLessThanOrEqual(60 + ' (on_aaaa…)'.length);
     expect(shown).not.toContain('sk-name');
   });
+
+  it('compares names collapsed and trimmed, so "Alice" and "Alice  " are one name and tagged', () => {
+    notePerson(t.db, { appId: 'cli_app', unionId: 'on_aaaa1111', openId: 'ou_a', name: 'Alice  Smith' }, 1);
+    notePerson(t.db, { appId: 'cli_app', unionId: 'on_bbbb2222', openId: 'ou_b', name: ' Alice Smith ' }, 1);
+    expect(people.chatName('lark:on_aaaa1111')).toBe('Alice Smith (on_aaaa…)');
+    expect(people.chatName('lark:on_bbbb2222')).toBe('Alice Smith (on_bbbb…)');
+  });
+
+  it('reads the people table once for a reply: chatNames answers from what it read, a later one sees a new person', () => {
+    notePerson(t.db, { appId: 'cli_app', unionId: 'on_aaaa1111', openId: 'ou_a', name: 'Hemanth' }, 1);
+    const reply = people.chatNames();
+    expect(reply('lark:on_aaaa1111')).toBe('Hemanth');
+    notePerson(t.db, { appId: 'cli_app', unionId: 'on_bbbb2222', openId: 'ou_b', name: 'Hemanth' }, 2);
+    expect(reply('lark:on_aaaa1111')).toBe('Hemanth');
+    expect(reply('lark:on_bbbb2222')).toBeUndefined();
+    expect(reply('operator:x')).toBeUndefined();
+    expect(people.chatNames()('lark:on_aaaa1111')).toBe('Hemanth (on_aaaa…)');
+  });
 });

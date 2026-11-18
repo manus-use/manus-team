@@ -129,6 +129,27 @@ function personName(principal: string, nameOf: NameOf | undefined): string {
   return name === undefined || name.trim() === '' ? principal : name;
 }
 
+/** A person's principal as a token in task text: `lark:` and a union_id. */
+const PRINCIPAL_TOKEN = /lark:[A-Za-z0-9_-]+/g;
+
+/**
+ * Task text with each `lark:<union_id>` in it shown by chat name (spec §9.3),
+ * falling back to the token: at render time, in chat only, so what is stored,
+ * hashed and shown at the terminal stays as the start made it.
+ */
+function named(text: string, nameOf: NameOf | undefined): string {
+  if (nameOf === undefined) return text;
+  return text.replace(PRINCIPAL_TOKEN, (token) => {
+    const name = nameOf(token);
+    return name === undefined || name.trim() === '' ? token : name;
+  });
+}
+
+/** A task's title as chat labels it: its principals by name (`named`), then masked, cut and escaped. */
+export function titleText(title: string, nameOf: NameOf | undefined, max = 200): string {
+  return label(named(title, nameOf), max);
+}
+
 /** Nobody, a role as a role, or a person by name (`personText`). */
 function who(a: Assignee | null, nameOf?: NameOf): string {
   if (a === null) return 'nobody';
@@ -224,7 +245,7 @@ export function renderList(
   }
   const lines = ordered
     .slice(0, LIST_MAX)
-    .map((e) => `${id(e.task.taskId)} **${e.status}**: ${label(e.task.title, 120)} · ${who(e.task.assignee, nameOf)}`);
+    .map((e) => `${id(e.task.taskId)} **${e.status}**: ${titleText(e.task.title, nameOf, 120)} · ${who(e.task.assignee, nameOf)}`);
   const more = ordered.length - LIST_MAX;
   if (more > 0) lines.push(`… and ${more} more. \`/kanban task list <${LIST_FILTERS.join('|')}>\` narrows it.`);
   if (on !== '') lines.unshift(`Board **${label(board)}**:`);
@@ -310,7 +331,7 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
   const { task } = view;
   const board = task.board === DEFAULT_BOARD && chatBoard === DEFAULT_BOARD ? '' : ` · board: ${label(task.board)}`;
   const out: string[] = [
-    `**${label(task.title)}** ${id(task.taskId)}: ${view.status}`,
+    `**${titleText(task.title, nameOf)}** ${id(task.taskId)}: ${view.status}`,
     `assignee: ${who(task.assignee, nameOf)} · reviewer: ${who(task.reviewer, nameOf)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}${board}`,
   ];
   if (view.member !== undefined) out.push(memberLine(view.member, label, id));
@@ -325,7 +346,7 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
     out.push(`children: ${view.children.map((c) => `${id(c.taskId)} (${view.statuses.get(c.taskId) ?? c.phase})`).join(', ')}`);
   }
   if (view.workdir !== undefined) out.push(workdirLine(view.workdir, label));
-  if (task.body.trim() !== '') out.push(block(task.body, 1500));
+  if (task.body.trim() !== '') out.push(block(named(task.body, nameOf), 1500));
   const contract = Object.entries(task.contract).filter(([, v]) => v !== undefined && v.trim() !== '');
   if (contract.length > 0) {
     out.push('**Contract**');
@@ -416,8 +437,8 @@ function text(payload: Record<string, unknown>, key: string): string {
   return typeof v === 'string' ? v : '';
 }
 
-function blockedLine(task: TaskRow, kind: string, reason: string, recurrences: number, limit: number): string {
-  const head = `**${label(task.title)}** ${id(task.taskId)} is blocked (${forDisplay(kind)}): ${label(reason, 800)}`;
+function blockedLine(task: TaskRow, kind: string, reason: string, recurrences: number, limit: number, nameOf: NameOf | undefined): string {
+  const head = `**${titleText(task.title, nameOf)}** ${id(task.taskId)} is blocked (${forDisplay(kind)}): ${label(reason, 800)}`;
   if (recurrences >= limit) {
     return (
       `${head}\nIt keeps blocking for the same reason (${recurrences} times after an unblock); ` +
@@ -471,7 +492,7 @@ export function renderNotice(
   },
 ): string | undefined {
   const p = payloadOf(event);
-  const name = `**${label(task.title)}** ${id(task.taskId)}`;
+  const name = `**${titleText(task.title, opts.nameOf)}** ${id(task.taskId)}`;
   // As the event recorded it, not as the task is now: a notice delivered late tells what was true then.
   const recurrences = typeof p['blockRecurrences'] === 'number' ? p['blockRecurrences'] : 0;
   switch (event.kind) {
@@ -504,11 +525,11 @@ export function renderNotice(
     case 'blocked': {
       const kind = text(p, 'kind');
       if (kind === '' || kind === 'dependency') return undefined;
-      return blockedLine(task, kind, text(p, 'reason'), recurrences, opts.blockRecurrenceLimit);
+      return blockedLine(task, kind, text(p, 'reason'), recurrences, opts.blockRecurrenceLimit, opts.nameOf);
     }
     case 'stopped':
       // A person's stop, not the task blocking again by itself: never the suggestion to rewrite it.
-      return blockedLine(task, 'needs_input', `stopped by ${personName(event.actor, opts.nameOf)}`, 0, Number.POSITIVE_INFINITY);
+      return blockedLine(task, 'needs_input', `stopped by ${head(masked(personName(event.actor, opts.nameOf)).replace(/\s+/g, ' ').trim(), NAME_MAX, '…')}`, 0, Number.POSITIVE_INFINITY, opts.nameOf);
     case 'run_ended': {
       const outcome = text(p, 'outcome');
       const error = text(p, 'error');
@@ -522,7 +543,7 @@ export function renderNotice(
       if (kind === 'gave_up') {
         return `Gave up on ${name}: ${label(reason, 800)}\n\`/kanban task unblock ${task.taskId} [comment]\` gives it a fresh set of attempts.`;
       }
-      return blockedLine(task, kind, reason, recurrences, opts.blockRecurrenceLimit);
+      return blockedLine(task, kind, reason, recurrences, opts.blockRecurrenceLimit, opts.nameOf);
     }
     case 'changes_requested': {
       // A run's reviewer as the event recorded it; a person by the name Lark last gave; anyone else as recorded.
@@ -541,11 +562,11 @@ export function renderNotice(
     case 'task_created_followed': {
       // The "Created" line of a task a terminal made (kanban spec §22.1), from the task as it is now, as every notice.
       const whose = task.assignee === null ? 'nobody yet' : who(task.assignee, opts.nameOf);
-      return `Created ${id(task.taskId)} **${label(task.title)}**, for ${whose}, by ${label(text(p, 'by'), 80)} from a terminal.`;
+      return `Created ${id(task.taskId)} **${titleText(task.title, opts.nameOf)}**, for ${whose}, by ${label(text(p, 'by'), 80)} from a terminal.`;
     }
     case 'workflow_started':
       // A terminal start's reply (workflows spec §18.2), on its first member, whole: it may run to 3,800 characters.
-      return renderStarted(startedOf(p), opts.where ?? 'chat', (a) => who(a, opts.nameOf));
+      return renderStarted(startedOf(p), opts.where ?? 'chat', (a) => who(a, opts.nameOf), opts.nameOf);
     default:
       return undefined;
   }
@@ -614,9 +635,9 @@ function act(appId: string, run: RunRow, name: string, attempt: number | undefin
 }
 
 /** The task's own text, as a card shows it: the body, then the contract. */
-function taskText(task: TaskRow, bodyMax: number): string[] {
+function taskText(task: TaskRow, bodyMax: number, nameOf: NameOf | undefined): string[] {
   const out: string[] = [];
-  if (task.body.trim() !== '') out.push(block(task.body, bodyMax));
+  if (task.body.trim() !== '') out.push(block(named(task.body, nameOf), bodyMax));
   const contract = Object.entries(task.contract).filter(([, v]) => v !== undefined && v.trim() !== '');
   if (contract.length > 0) {
     out.push('**Contract**');
@@ -632,17 +653,17 @@ function taskText(task: TaskRow, bodyMax: number): string[] {
  */
 export function renderTaskCard(f: CardFacts, appId: string): CardView {
   const { task, run } = f;
-  const out = [mentioning(f, `📋 For you to do: **${label(task.title)}** ${id(task.taskId)}`)];
+  const out = [mentioning(f, `📋 For you to do: **${titleText(task.title, f.nameOf)}** ${id(task.taskId)}`)];
   if (f.note !== undefined) out.push(f.note);
   if (f.changes !== undefined) {
     out.push(`**Changes asked** by ${personText(f.changes.actor, f.nameOf)}:`, block(f.changes.reason, 1200));
   }
-  out.push(...taskText(task, 1500));
+  out.push(...taskText(task, 1500, f.nameOf));
   const parents = f.parents.slice(0, 5);
   if (parents.length > 0) {
     out.push('**From its parents**');
     for (const p of parents) {
-      out.push(`${id(p.task.taskId)} **${label(p.task.title, 120)}**:`, block(p.summary === '' ? '(no summary)' : p.summary, 600));
+      out.push(`${id(p.task.taskId)} **${titleText(p.task.title, f.nameOf, 120)}**:`, block(p.summary === '' ? '(no summary)' : p.summary, 600));
     }
     if (f.parents.length > parents.length) out.push(`… and ${f.parents.length - parents.length} more: \`/kanban task show ${task.taskId}\``);
   }
@@ -669,7 +690,7 @@ export function renderTaskCard(f: CardFacts, appId: string): CardView {
  */
 export function renderReviewCard(f: CardFacts, appId: string): CardView {
   const { task, run } = f;
-  const out = [mentioning(f, `🔎 For you to review: **${label(task.title)}** ${id(task.taskId)}`)];
+  const out = [mentioning(f, `🔎 For you to review: **${titleText(task.title, f.nameOf)}** ${id(task.taskId)}`)];
   if (f.note !== undefined) out.push(f.note);
   const h = f.handoff;
   if (h !== undefined) {
@@ -679,7 +700,7 @@ export function renderReviewCard(f: CardFacts, appId: string): CardView {
     const state = describeReported(h);
     if (state !== undefined) out.push(`To review: ${forDisplay(state)}.`);
   }
-  out.push(...taskText(task, 1200));
+  out.push(...taskText(task, 1200, f.nameOf));
   out.push(
     `Press **Approve**, or type what needs changing and press **Request changes**. ` +
       `In any chat with the bot, \`/kanban task approve ${task.taskId}\` and \`/kanban task changes ${task.taskId} <reason>\` do the same.`,
@@ -700,9 +721,9 @@ export function renderReviewCard(f: CardFacts, appId: string): CardView {
  * A card once acted on, or found out of date (spec §9.2): its title and what
  * happened, with no buttons left to press.
  */
-export function renderCardOutcome(task: { taskId: string; title: string }, outcome: string, byOpenId?: string): CardView {
+export function renderCardOutcome(task: { taskId: string; title: string }, outcome: string, byOpenId?: string, nameOf?: NameOf): CardView {
   return {
-    markdown: `**${label(task.title)}** ${id(task.taskId)}\n${outcome}`,
+    markdown: `**${titleText(task.title, nameOf)}** ${id(task.taskId)}\n${outcome}`,
     buttons: [],
     ...(byOpenId === undefined ? {} : { byOpenId }),
   };
@@ -774,13 +795,14 @@ export function renderPreview(
   name: string,
   dag: { board: string | null; tasks: readonly { ref: string; title: string; assignee: string | null; parents: readonly string[]; gates: readonly unknown[] }[] },
   whom: (name: string) => string,
+  nameOf?: NameOf,
 ): string {
   const board = dag.board === null || dag.board === DEFAULT_BOARD ? '' : `, on board **${label(dag.board)}**`;
   const n = dag.tasks.length;
   const lines = previewLines(dag).map((t) => {
     const after = t.parents.length === 0 ? '' : `, after ${t.parents.map((p) => `\`${label(p, 64)}\``).join(', ')}`;
     const gates = t.gates === 0 ? '' : `, ${t.gates} gate${t.gates === 1 ? '' : 's'}`;
-    return `- \`${label(t.ref, 64)}\` ${label(t.title, WORKFLOW_TITLE_MAX)}, for ${t.assignee === null ? 'nobody yet' : whom(t.assignee)}${after}${gates}`;
+    return `- \`${label(t.ref, 64)}\` ${titleText(t.title, nameOf, WORKFLOW_TITLE_MAX)}, for ${t.assignee === null ? 'nobody yet' : whom(t.assignee)}${after}${gates}`;
   });
   return fitted(
     [`${label(name)} would make ${n} task${n === 1 ? '' : 's'}${board}:`],
@@ -843,12 +865,12 @@ function startedOf(p: Record<string, unknown>): StartedReply {
  * with its id, its title and its assignee, and who hears, in the words of the
  * thread or of the chat. A terminal's names who started it (§18.2).
  */
-export function renderStarted(reply: StartedReply, where: 'thread' | 'chat', whom: (a: Assignee) => string): string {
+export function renderStarted(reply: StartedReply, where: 'thread' | 'chat', whom: (a: Assignee) => string, nameOf?: NameOf): string {
   const { instance, tasks, count: n } = reply;
   const board = instance.board === DEFAULT_BOARD ? '' : `, on board **${label(instance.board)}**`;
   const lines = tasks.map((t) => {
     const assignee = t.assignee === null ? 'nobody yet' : whom({ kind: t.assigneeKind === 'human' ? 'human' : 'role', name: t.assignee });
-    return `- ${id(t.taskId)} ${label(t.title, WORKFLOW_TITLE_MAX)}, for ${assignee}`;
+    return `- ${id(t.taskId)} ${titleText(t.title, nameOf, WORKFLOW_TITLE_MAX)}, for ${assignee}`;
   });
   const started = `${label(workflowName(instance.name))} ${reply.by === undefined ? 'as' : 'from a terminal as'} ${id(instance.instanceId)}`;
   const head = reply.by === undefined ? `Started ${started}` : `${label(reply.by, 80)} started ${started}`;
@@ -998,7 +1020,7 @@ export function renderInstance(
   }
   if (view.related.length > 0 || view.relatedInstances.length > 0) {
     lines.push('**Related**, not members:');
-    for (const r of view.related) lines.push(`- ${id(r.task.taskId)} ${label(r.task.title, WORKFLOW_TITLE_MAX)}: ${r.status}`);
+    for (const r of view.related) lines.push(`- ${id(r.task.taskId)} ${titleText(r.task.title, nameOf, WORKFLOW_TITLE_MAX)}: ${r.status}`);
     for (const o of view.relatedInstances) {
       lines.push(`- ${id(o.instanceId)} ${label(workflowName(o.name))}, ${o.tasks} task${o.tasks === 1 ? '' : 's'}: \`/kanban workflow show ${o.instanceId}\``);
     }

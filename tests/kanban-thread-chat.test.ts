@@ -168,7 +168,7 @@ describe('the hold on a task whose thread is being made (spec §19.4)', () => {
 
   it('ends the hold when the reply cannot be rendered after the create, which stands, at chat scope', async () => {
     const c = chat();
-    people.chatName = () => {
+    people.chatNames = () => () => {
       throw new Error('the people table is locked');
     };
     await expect(c.run(FOR_ALICE, message(TEAM), TEAM)).rejects.toThrow('the people table is locked');

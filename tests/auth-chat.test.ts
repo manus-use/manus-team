@@ -106,6 +106,15 @@ describe('/auth grant', () => {
     expect(people.canTalk('lark:on_carol')).toBe(true);
   });
 
+  it('names the target and the actor by chat name, telling two of one name apart, in grant and revoke replies', () => {
+    people.saw({ openId: 'ou_other', unionId: 'on_other', name: 'Alice' });
+    people.saw({ openId: 'ou_carol2', unionId: 'on_zcarol', name: 'Carol Wu' });
+    expect(say('grant @Carol Wu talk', OWNER, [AT_CAROL])).toBe(
+      'Carol Wu \\(on\\_caro…\\) now has talk tier, granted by Alice \\(on\\_owne…\\). `/auth revoke lark:on_carol` takes it back.',
+    );
+    expect(say('revoke lark:on_carol')).toBe('Carol Wu \\(on\\_caro…\\) no longer has talk tier: revoked by Alice \\(on\\_owne…\\).');
+  });
+
   it('puts operate in place of a talk grant, and says a tier already held, from where', () => {
     say('grant @Carol Wu talk', OWNER, [AT_CAROL]);
     expect(say('grant @Carol Wu talk', BOB, [AT_CAROL])).toBe('Carol Wu already has talk tier, by a grant from Alice on 2026-11-18.');
@@ -159,8 +168,8 @@ describe('/auth grant', () => {
     expect(say('grant @Helper talk', OWNER, [{ key: '@_user_7', name: 'Helper', openId: 'ou_helper', unionId: null, isBot: true }])).toBe(
       '@Helper is a bot, and a bot is never given a tier here.',
     );
-    // Mentioned in a direct message, as Lark lets one be: granted.
-    expect(say('grant @Carol Wu talk', OWNER, [AT_CAROL], 'p2p')).toMatch(/^Carol Wu now has talk tier/);
+    // Mentioned in a direct message, as Lark lets one be: granted. The other Carol Wu mentioned above tells them apart.
+    expect(say('grant @Carol Wu talk', OWNER, [AT_CAROL], 'p2p')).toMatch(/^Carol Wu \\\(on\\_caro…\\\) now has talk tier/);
   });
 
   it('refuses a sender Lark gave no union_id, as the grant records who made it', () => {

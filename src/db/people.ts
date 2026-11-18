@@ -73,12 +73,12 @@ export function peopleOf(db: Db, appId: string): PersonRow[] {
 }
 
 /**
- * The union_ids of the other people this bot has seen with this name (kanban
- * spec §9.3): chat tells them apart. Compared as Lark gave the names, exactly.
+ * Every person this bot has seen with a name, their union_id and that name
+ * (kanban spec §9.3): read once for a chat reply, which tells apart two of one name.
  */
-export function othersNamed(db: Db, appId: string, name: string, unionId: string): string[] {
+export function namedPeopleOf(db: Db, appId: string): Array<{ unionId: string; name: string }> {
   return db
-    .prepare<[string, string, string], { union_id: string }>('SELECT union_id FROM people WHERE app_id = ? AND name = ? AND union_id <> ? ORDER BY union_id')
-    .all(appId, name, unionId)
-    .map((r) => r.union_id);
+    .prepare<[string], { union_id: string; name: string }>('SELECT union_id, name FROM people WHERE app_id = ? AND name IS NOT NULL ORDER BY union_id')
+    .all(appId)
+    .map((r) => ({ unionId: r.union_id, name: r.name }));
 }

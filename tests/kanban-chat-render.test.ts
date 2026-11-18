@@ -586,4 +586,27 @@ describe('people by name in chat (spec §9.3)', () => {
     expect(renderGates(k.taskId, gates, nameOf)).toContain('(30 s, by Alice \\*Smith\\*)');
     expect(renderGates(k.taskId, gates)).toContain('by lark:on\\_alice');
   });
+
+  it('cuts a long name in the stopped notice at 80 characters before it goes into the reason', () => {
+    const k = newTask(h.db, { title: 'Stopped one' });
+    const long = 'L'.repeat(300);
+    const notice = renderNotice({ id: 1, taskId: k.taskId, runId: null, kind: 'stopped', actor: HEMANTH, payload: {}, createdAt: NOW } as KanbanEvent, k, {
+      ...LIMIT,
+      nameOf: () => long,
+    });
+    expect(notice).toContain(`stopped by ${'L'.repeat(79)}…\n`);
+  });
+
+  it("shows a lark:<union_id> in a title or body by chat name, at render time only, falling back to the token", () => {
+    const k = newTask(h.db, { title: `Ask ${HEMANTH} and lark:on_nobody`, body: `Ping ${HEMANTH} first.` });
+    expect(renderList(boardList(h.db), undefined, 'default', nameOf)).toContain(': Ask Hemanth and lark:on\\_nobody · role implementer');
+    const view = taskView(h.db, k.taskId);
+    if (view === undefined) throw new Error('no view');
+    const show = renderShow(view, [], 'default', nameOf);
+    expect(show.split('\n')[0]).toBe(`**Ask Hemanth and lark:on\\_nobody** \`${k.taskId}\`: ready`);
+    expect(show).toContain('> Ping Hemanth first.');
+    expect(getTask(h.db, k.taskId)?.title).toBe(`Ask ${HEMANTH} and lark:on_nobody`);
+    // Without names, as stored.
+    expect(renderList(boardList(h.db), undefined)).toContain(`Ask lark:on\\_8ba330a6567863a9d92c2268d2197f1e`);
+  });
 });

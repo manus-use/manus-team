@@ -1,5 +1,5 @@
 import type { Db } from '../db/open.js';
-import { notePerson, othersNamed, personOf } from '../db/people.js';
+import { namedPeopleOf, notePerson, personOf } from '../db/people.js';
 import { sharedName } from './chat-render.js';
 import { systemClock, type Clock } from '../time.js';
 import type { People } from './service.js';
@@ -90,16 +90,47 @@ export class PeopleDirectory implements People {
 
   /**
    * What chat calls this person (spec §9.3): the name Lark last gave, or, when
-   * another person this bot has seen has the same name, that name with the start
-   * of their union_id, "Hemanth (on_8ba3…)" (`sharedName`). Undefined where no name is known,
-   * and chat shows the principal. Agents' prompts take `nameOf`, unchanged.
+   * another person this bot has seen has the same name, collapsed and trimmed,
+   * that name with the start of their union_id, "Hemanth (on_8ba3…)"
+   * (`sharedName`). Undefined where no name is known, and chat shows the
+   * principal. Agents' prompts take `nameOf`, unchanged. One lookup reads the
+   * table; a reply naming several people takes `chatNames`.
    */
   chatName(principal: string): string | undefined {
-    const unionId = unionIdOf(principal);
-    if (unionId === undefined) return undefined;
-    const name = personOf(this.#deps.db, this.#deps.appId, unionId)?.name ?? undefined;
-    if (name === undefined || name.trim() === '') return undefined;
-    const others = othersNamed(this.#deps.db, this.#deps.appId, name, unionId);
-    return others.length === 0 ? name : sharedName(name, unionId, others);
+    return this.chatNames()(principal);
   }
+
+  /**
+   * `chatName` for one reply: the people table read once, at the first name
+   * asked for, and every name after answered from what was read.
+   */
+  chatNames(): (principal: string) => string | undefined {
+    let read: { names: Map<string, string>; byName: Map<string, string[]> } | undefined;
+    return (principal) => {
+      const unionId = unionIdOf(principal);
+      if (unionId === undefined) return undefined;
+      read ??= this.#read();
+      const name = read.names.get(unionId);
+      if (name === undefined) return undefined;
+      const others = (read.byName.get(collapsed(name)) ?? []).filter((u) => u !== unionId);
+      return others.length === 0 ? name : sharedName(name, unionId, others);
+    };
+  }
+
+  #read(): { names: Map<string, string>; byName: Map<string, string[]> } {
+    const names = new Map<string, string>();
+    const byName = new Map<string, string[]>();
+    for (const p of namedPeopleOf(this.#deps.db, this.#deps.appId)) {
+      const key = collapsed(p.name);
+      if (key === '') continue;
+      names.set(p.unionId, p.name);
+      byName.set(key, [...(byName.get(key) ?? []), p.unionId]);
+    }
+    return { names, byName };
+  }
+}
+
+/** A name as two are compared (spec §9.3): white space collapsed, and trimmed. */
+function collapsed(name: string): string {
+  return name.replace(/\s+/g, ' ').trim();
 }
