@@ -545,7 +545,8 @@ export class Router {
       case 'role': {
         // `/role list`, or `/roles`, its alias, alone. A word after either reads as a
         // filter, and a full list would look like one that matched everything.
-        if (arg !== (verb === 'roles' ? '' : 'list')) {
+        // The word in any case, as `/kanban`'s and `/cron`'s commands are.
+        if (arg.toLowerCase() !== (verb === 'roles' ? '' : 'list')) {
           await this.#reply(target, message, 'roles-usage', ROLES_USAGE);
           return;
         }

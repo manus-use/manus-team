@@ -793,6 +793,8 @@ describe('Router: /auth', () => {
     await flush();
     const prompts = (): string[] => h.driver.runtimes.flatMap((r) => r.prompts.map((p) => p.text));
     expect(prompts()).toEqual(['after the grant']);
+    // The turn's card is opened by CardWriter's own timer, which can fire after the flush: waited for, so it is not counted as the revoked guest's.
+    await vi.waitFor(() => expect(h.channel.cardOpens).toHaveLength(1));
     await h.router.onMessage(inGroup('/auth revoke @Guest'));
     expect(lastReply(h)).toBe('Guest no longer has talk tier: revoked by Owner.');
     expect(await guestSays('after the revoke')).toBe(0);
@@ -839,6 +841,9 @@ describe('Router: /role list and /roles', () => {
     const message = msg({ text: '/role list' });
     await h.router.onMessage(message);
     expect(h.channel.texts.at(-1)).toMatchObject({ text: '**worker**: writes', uuid: replyUuid(APP, message.messageId, 'roles') });
+    const upper = msg({ text: '/role LIST' });
+    await h.router.onMessage(upper);
+    expect(h.channel.texts.at(-1)).toMatchObject({ text: '**worker**: writes', uuid: replyUuid(APP, upper.messageId, 'roles') });
     const alias = msg({ text: '/roles' });
     await h.router.onMessage(alias);
     expect(h.channel.texts.at(-1)).toMatchObject({ text: '**worker**: writes', uuid: replyUuid(APP, alias.messageId, 'roles') });
@@ -846,7 +851,7 @@ describe('Router: /role list and /roles', () => {
     await h.router.onMessage(msg({ text: '/role list', sender: GUEST }));
     await h.router.onMessage(msg({ text: '/roles', sender: GUEST }));
     expect(h.channel.texts).toHaveLength(before);
-    expect(asked).toBe(2);
+    expect(asked).toBe(3);
   });
 
   it('answers /role alone, an unknown word, or anything after /roles with the usage naming list, keyed roles-usage, and lists nothing', async () => {
