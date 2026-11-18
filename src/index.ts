@@ -380,6 +380,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       maxRunning: config.kanban.maxRunning,
       // So /kanban task show can say a task is waiting on its role's limit (spec §6.3).
       ...(config.kanban.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: config.kanban.maxRunningPerRole }),
+      // Read at each use, as the startup's check and the terminal's read them (workflows spec §4, §10).
+      workflowsDir: join(config.home, 'workflows'),
     });
     dispatcher = new Dispatcher({
       db,
