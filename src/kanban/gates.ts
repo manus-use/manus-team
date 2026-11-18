@@ -137,13 +137,22 @@ export function rawTail(all: Buffer): string {
 /**
  * A gate's environment: the allowlist an agent gets from the gateway's own
  * environment, and its role's values. Nothing named `MT_KANBAN_*` or
- * `MT_CRON_*`, whatever put it there.
+ * `MT_CRON_*`, nor the session marker `MT_AGENT_SESSION` (tier grants spec
+ * §6.3), whatever put it there: a gate and a cron script are the operator's.
  */
 export function gateEnv(role: Role, parent: Readonly<Record<string, string | undefined>>): Record<string, string> {
   const env = buildEnv(parent, role.agent.env);
-  for (const key of Object.keys(env)) if (key.startsWith('MT_KANBAN_') || key.startsWith('MT_CRON_')) delete env[key];
+  for (const key of Object.keys(env)) if (key.startsWith('MT_KANBAN_') || key.startsWith('MT_CRON_') || key === SESSION_MARKER) delete env[key];
   return env;
 }
+
+/**
+ * What the gateway puts in every agent session's environment, a chat
+ * session's, a board run's and a fire's, cron on or off (tier grants spec
+ * §6.3): the session's id. Not one of the agent variables `mt` refuses its
+ * operator's commands by, so it changes no command but `mt auth`.
+ */
+export const SESSION_MARKER = 'MT_AGENT_SESSION';
 
 export interface GateContext {
   cwd: string;

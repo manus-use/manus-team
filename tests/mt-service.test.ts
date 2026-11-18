@@ -633,6 +633,14 @@ describe('mt service status on macOS', () => {
     expect(r.out).not.toMatch(/^database lock:/m);
   });
 
+  it('runs in a shell with only the session marker set, which guards mt auth alone', async () => {
+    fx = fixture();
+    notLoaded(fx);
+    const r = await fx.run(['service', 'status'], { env: { MT_AGENT_SESSION: 's_1' } });
+    expect(r.out).toMatch(/^installed: no/m);
+    expect(r.err).not.toContain("operator's command");
+  });
+
   it('says what the database lock names, with cron.enabled', async () => {
     fx = fixture();
     notLoaded(fx);

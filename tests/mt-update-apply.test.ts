@@ -63,12 +63,12 @@ describe('mt update --yes', () => {
     expect(Object.keys(check?.opts.env ?? {}).filter((k) => k.startsWith('MT_KANBAN_'))).toEqual([]);
   });
 
-  it("gives git, npm and the check none of an agent's variables, MT_CRON_* as MT_KANBAN_*", async () => {
+  it("gives git, npm and the check none of an agent's variables, MT_CRON_* and the session marker as MT_KANBAN_*", async () => {
     fx = await updateFake();
-    await fx.update(['--yes'], { env: { MT_KANBAN_SOCKET: '/nowhere.sock', MT_CRON_STRAY: 'x' } });
+    await fx.update(['--yes'], { env: { MT_KANBAN_SOCKET: '/nowhere.sock', MT_CRON_STRAY: 'x', MT_AGENT_SESSION: 's_1' } });
     expect(fx.runs.length).toBeGreaterThan(0);
     for (const run of fx.runs) {
-      expect(Object.keys(run.opts.env).filter((k) => k.startsWith('MT_KANBAN_') || k.startsWith('MT_CRON_'))).toEqual([]);
+      expect(Object.keys(run.opts.env).filter((k) => k.startsWith('MT_KANBAN_') || k.startsWith('MT_CRON_') || k === 'MT_AGENT_SESSION')).toEqual([]);
     }
     expect(fx.runs.find((r) => r.args[0] === 'merge')?.opts.timeoutMs).toBe(120_000);
   });

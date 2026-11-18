@@ -6,6 +6,7 @@ import { tierReader } from '../db/grants.js';
 import { openDb } from '../db/open.js';
 import { peopleOf } from '../db/people.js';
 import { PeopleDirectory } from '../kanban/people.js';
+import { SESSION_MARKER } from '../kanban/gates.js';
 import { KanbanService } from '../kanban/service.js';
 import { tiersOf } from '../policy/auth.js';
 import type { GateRow } from '../kanban/types.js';
@@ -76,9 +77,19 @@ export function hasBoardRun(env: Env): boolean {
  */
 export const AGENT_VARIABLES = ['MT_KANBAN_RUN', 'MT_KANBAN_TOKEN', 'MT_CRON_TOKEN', 'MT_CRON_FIRE'] as const;
 
-/** What an operator's command, `what`, says in an agent's shell, naming the first of its variables `env` has set. */
+/** Any agent's shell, a chat session's with cron off included: the agent variables, or the session marker. */
+export function inAgentSession(env: Env): boolean {
+  return inAgentRun(env) || env[SESSION_MARKER] !== undefined;
+}
+
+/**
+ * What an operator's command, `what`, says in an agent's shell, naming the
+ * first of its variables `env` has set, and the session marker when it is the
+ * only one.
+ */
 export function runShellRefusal(what: string, env: Env): string {
-  const found = AGENT_VARIABLES.find((name) => env[name] !== undefined) ?? AGENT_VARIABLES[0];
+  const found =
+    AGENT_VARIABLES.find((name) => env[name] !== undefined) ?? (env[SESSION_MARKER] !== undefined ? SESSION_MARKER : AGENT_VARIABLES[0]);
   return `${what} is an operator's command, not an agent's; this shell has ${found} set. Run it from your own shell`;
 }
 

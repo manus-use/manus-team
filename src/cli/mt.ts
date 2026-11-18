@@ -4,7 +4,7 @@ import { redactKnownSecrets } from '../secrets.js';
 import { parse, refuse, UsageError } from './args.js';
 import { jsonLine } from './operator.js';
 import { LIST_FILTERS } from '../kanban/chat-parse.js';
-import { gateAdd, gateList, gateRemove, hasBoardRun, inAgentRun, runShellRefusal } from './gate.js';
+import { gateAdd, gateList, gateRemove, hasBoardRun, inAgentRun, inAgentSession, runShellRefusal } from './gate.js';
 import { WORKER_COMMANDS } from '../kanban/worker.js';
 import { kanbanCommand, NOT_IN_A_RUN } from './kanban.js';
 import { operatorCommand, TASK_COMMANDS } from './operator.js';
@@ -38,8 +38,9 @@ import { workspaceAdd, workspaceList } from './workspace.js';
  *
  * `mt auth` is the operator's too (tier grants spec §6.2): it writes the
  * gateway's grants through their own writer, which the gateway reads at its
- * next check, and refuses to run in an agent's shell before its arguments are
- * read.
+ * next check, and refuses to run in any agent's shell before its arguments are
+ * read: by the agent variables, or by `MT_AGENT_SESSION`, which the gateway
+ * sets in every agent session, cron on or off.
  */
 
 export type Git = (args: readonly string[]) => Promise<{ code: number; stderr: string }>;
@@ -310,8 +311,9 @@ export async function runMt(argv: readonly string[], io: MtIo): Promise<number> 
       return await cronOperator(command, rest, withGatewayFile(io));
     }
     if (group === 'auth') {
-      // Refused in an agent's shell before its arguments are read, in JSON when asked (tier grants spec §6.3).
-      if (inAgentRun(io.env)) return refuseAuth(command, rest, io);
+      // Refused in every agent's shell, a chat session's with cron off included, before its arguments are
+      // read, in JSON when asked (tier grants spec §6.3).
+      if (inAgentSession(io.env)) return refuseAuth(command, rest, io);
       return authCommand(argv.slice(1), withGatewayFile(io));
     }
     if (group === 'service') {

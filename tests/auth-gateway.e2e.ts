@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LarkAdapter } from '../src/channel/lark/adapter.js';
 import type { Channel } from '../src/channel/types.js';
 import { loadConfig, type GatewayConfig } from '../src/config.js';
+import { resolveBinding } from '../src/db/bindings.js';
 import { createGateway, type Gateway } from '../src/index.js';
 import { mtCommand } from '../src/kanban/shim.js';
 import { clearSecrets } from '../src/secrets.js';
@@ -17,9 +18,10 @@ import { FakeChannel } from './helpers/channel.js';
  * Tier grants through createGateway (the tier grants spec §11, end to end),
  * with the fake chat standing in for Lark and the fake CLI agent for the
  * role's, the board and cron off: the owner grants talk in a group and the
- * person's next message runs a turn; an operator's grant of operate is
- * refused; and `mt auth revoke`, run as another process while the gateway
- * runs, refuses the person's next message, with no restart.
+ * person's next message runs a turn, whose agent has the session marker in
+ * its environment; an operator's grant of operate is refused; and `mt auth
+ * revoke`, run as another process while the gateway runs, refuses the
+ * person's next message, with no restart.
  */
 
 const AGENT = fileURLToPath(new URL('./fakes/cli-agent.mjs', import.meta.url));
@@ -133,17 +135,19 @@ async function until(what: string, ok: () => boolean): Promise<void> {
   throw new Error(`gave up waiting for ${what}`);
 }
 
-/** The prompts the fake agent was given, in order. */
-function prompts(): string[] {
+/** The turns the fake agent was given, in order: each prompt, and the session marker in its environment. */
+function turns(): Array<{ prompt: string; marker: string | null }> {
   try {
     return readFileSync(log, 'utf8')
       .split('\n')
       .filter((l) => l !== '')
-      .map((l) => (JSON.parse(l) as { prompt: string }).prompt);
+      .map((l) => JSON.parse(l) as { prompt: string; marker: string | null });
   } catch {
     return [];
   }
 }
+
+const prompts = (): string[] => turns().map((t) => t.prompt);
 
 const replies = (): string[] => lark.texts.map((m) => m.text);
 
@@ -179,6 +183,10 @@ describe('tier grants through createGateway', () => {
     expect(replies().at(-1)).toBe('Carol Wu now has talk tier, granted by Alice. `/auth revoke lark:on_carol` takes it back.');
     await inGroup(CAROL, 'hello after the grant');
     await until('the turn to run', () => prompts().some((p) => p.includes('hello after the grant')));
+    // A chat session's agent, with cron off, is marked as an agent's shell all the same (tier grants spec §6.3).
+    const session = resolveBinding(gateway.db, { channel: 'lark', appId: 'cli_app', conversationId: 'oc_team', threadId: '' })?.sessionId;
+    expect(session).toMatch(/^s_/);
+    expect(turns().find((t) => t.prompt.includes('hello after the grant'))?.marker).toBe(session);
 
     await inGroup(BOB, '/auth grant @Dan operate', [DAN]);
     expect(replies().at(-1)).toBe('Only the owner grants operate tier: an operator cannot make another operator.');

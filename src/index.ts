@@ -23,6 +23,7 @@ import { KanbanChat } from './kanban/chat.js';
 import { Dispatcher } from './kanban/dispatcher.js';
 import { Notifier } from './kanban/notices.js';
 import { KanbanService } from './kanban/service.js';
+import { SESSION_MARKER } from './kanban/gates.js';
 import { writeMtShim } from './kanban/shim.js';
 import { CardPoster } from './kanban/cards.js';
 import { PeopleDirectory } from './kanban/people.js';
@@ -90,6 +91,17 @@ export function cronLine(cron: { enabled: boolean; maxRunning: number; idleTimeo
     `each stopped after ${cron.idleTimeoutS} s with no activity; new jobs in ${zone} (from ${cron.tz === undefined ? "this process's zone" : 'cron.tz'}), ` +
     'and every job keeps its own zone'
   );
+}
+
+/**
+ * An agent session's environment as the registry is given it (tier grants spec
+ * §6.3): what the dispatcher, the scheduler or the cron tokens give, with the
+ * session marker, `MT_AGENT_SESSION=<session id>`, beside it, or alone when
+ * none gives anything. So every agent's shell, a chat session's with cron off
+ * included, is one `mt auth` refuses.
+ */
+export function sessionEnv(sessionId: string, env: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  return { ...env, [SESSION_MARKER]: sessionId };
 }
 
 /**
@@ -293,8 +305,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       ['kanban', new KanbanSink(undefined, { db, channels: new Map<string, Channel>([[adapter.id, adapter]]), appId: config.lark.appId })],
       ['cron', new SinkChannel('cron', { subject: (jobId) => `cron job ${jobId}` })],
     ]),
-    // A run's, else a fire's, else a chat session's cron token (the cron spec, §7).
-    envFor: (sessionId, key) => dispatcher?.envFor(sessionId) ?? scheduler?.envFor(sessionId) ?? tokens?.envFor(sessionId, key),
+    // A run's, else a fire's, else a chat session's cron token (the cron spec, §7); and the session marker, always (tier grants spec §6.3).
+    envFor: (sessionId, key) => sessionEnv(sessionId, dispatcher?.envFor(sessionId) ?? scheduler?.envFor(sessionId) ?? tokens?.envFor(sessionId, key)),
     argsFor: (sessionId) => dispatcher?.argsFor(sessionId) ?? scheduler?.argsFor(sessionId),
     pinned: (sessionId) => (dispatcher?.pinned(sessionId) ?? false) || (scheduler?.pinned(sessionId) ?? false),
     // A kanban run in a task's own directory works there, as recorded when it was made (spec §18).
