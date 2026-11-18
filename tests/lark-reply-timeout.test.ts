@@ -81,6 +81,22 @@ describe('the reply card past Lark streaming timeout', () => {
     await expect(card.set(parts('ab'))).rejects.toMatchObject({ code: 99991400 });
   });
 
+  it('goes ahead with the write when turning streaming on ahead of time is refused, and tries again on the next', async () => {
+    const { a, kit, ours } = adapter();
+    const card = await a.openCard(CHAT, parts('a'), 'u');
+    ours.advance(9.5 * MINUTE);
+    kit.failNext('settings', refused(99991400, 429));
+    await expect(card.set(parts('ab'))).resolves.toBeUndefined();
+    await card.set(parts('abc'));
+    expect(after(kit)).toEqual([
+      ['settings', true, true],
+      ['content', false, undefined],
+      ['settings', false, true],
+      ['content', false, undefined],
+    ]);
+    expect(kit.shown('card_1', 'answer')).toEqual(['a', 'ab', 'abc']);
+  });
+
   it('still finishes with streaming off past the timeout, and replaces the answer when streaming will not come back', async () => {
     const back = adapter(false);
     const card = await back.a.openCard(CHAT, parts('a'), 'u');

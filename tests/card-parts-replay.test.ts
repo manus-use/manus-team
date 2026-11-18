@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CardWriter } from '../src/channel/card-writer.js';
+import { CARD_FAILURE_LIMIT, CardWriter } from '../src/channel/card-writer.js';
 import { EMPTY_PART, LarkAdapter, REPLY_ELEMENTS } from '../src/channel/lark/adapter.js';
 import { renderCard } from '../src/channel/render.js';
 import type { Event, EventType } from '../src/types.js';
@@ -115,5 +115,51 @@ describe('the reply card, a turn replayed', () => {
     const texts = log.map((_e, i) => renderCard(log.slice(0, i + 1)).text);
     const rewrites = texts.filter((t, i) => i > 0 && !t.startsWith(texts[i - 1] ?? ''));
     expect(rewrites.length).toBeGreaterThan(5);
+  });
+});
+
+describe('the reply card, a turn too large for a card', () => {
+  it('falls back once when Lark refuses the card past 30 KB, keeps the turn plain, and sends the rest once at its end', async () => {
+    // A long CJK answer: three bytes a character, so past Lark's 30 KB inside the
+    // character budget (channel spec §4.5).
+    const clock = new ManualClock(NOW);
+    const kit = new FakeCardkit(clock);
+    const adapter = new LarkAdapter({ appId: 'cli_app', appSecret: 'not-a-secret' }, clock, { lark: kit.lark, sleep: async () => undefined });
+    const log: Event[] = [];
+    const writer = new CardWriter({
+      channel: adapter,
+      target: { chatId: 'oc_chat', threadId: '' },
+      readEvents: (afterSeq, throughSeq) => log.filter((e) => e.seq > afterSeq && e.seq <= throughSeq),
+      onRendered: () => undefined,
+      onCardChanged: () => undefined,
+      sendUuid: (seq) => `uuid_${seq}`,
+      clock,
+    });
+    const pass = async (type: EventType, payload: unknown): Promise<void> => {
+      log.push(ev(log.length + 1, type, payload));
+      writer.want(log.length);
+      clock.advance(1_000);
+      await writer.flushNow();
+    };
+    await pass('turn_submitted', { text: 'explain it all' });
+    for (let i = 0; i < 40; i += 1) await pass('agent_message_chunk', { text: `[${i}]${'中'.repeat(400)}` });
+    await pass('turn_ended', { terminal: 'completed' });
+    await writer.close();
+
+    expect(kit.calls.filter((c) => c.api === 'create')).toHaveLength(1);
+    const refusedSize = kit.calls.filter((c) => c.refused === true);
+    expect(refusedSize.length).toBeGreaterThan(0);
+    expect(refusedSize.every((c) => c.api === 'content')).toBe(true);
+    // Five refusals give the card up; the fallback's finish may meet a sixth.
+    expect(refusedSize.length).toBeLessThanOrEqual(CARD_FAILURE_LIMIT + 1);
+    expect(kit.streaming('card_1')).toBe(false);
+
+    const plain = kit.calls.filter((c) => c.api === 'text' || (c.api === 'send' && c.msgType !== 'interactive'));
+    expect(plain).toHaveLength(2);
+    // The second carries the rest only: the answer's start is not sent again.
+    const text = (c: (typeof plain)[number] | undefined): string => c?.content ?? JSON.stringify(c?.body);
+    expect(text(plain[0])).toContain('[0]');
+    expect(text(plain[1])).not.toContain('[0]');
+    expect(text(plain[1])).toContain('[39]');
   });
 });

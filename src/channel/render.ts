@@ -192,7 +192,9 @@ export function renderCard(events: readonly Event[]): RenderedCard {
     }
   }
 
-  const toolLine = truncate(toolSummary([...tools.values()]), TOOLS_BUDGET);
+  // Cut with a bare '…', not the answer's marker on a line of its own, so a
+  // cut tool line stays one line.
+  const toolLine = truncate(toolSummary([...tools.values()]), TOOLS_BUDGET, '…');
 
   // Cut, then masked: the joined answer is the only text guaranteed to hold a
   // streamed secret whole. A trailing fragment of one is dropped, because this
@@ -234,7 +236,7 @@ export function renderCard(events: readonly Event[]): RenderedCard {
     status.push(finished ? '_Finished with no output._' : '_Working…_');
   }
 
-  const parts: CardParts = { tools: toolLine, answer, status: truncate(status.join('\n\n'), STATUS_BUDGET) };
+  const parts: CardParts = { tools: toolLine, answer, status: truncate(status.join('\n\n'), STATUS_BUDGET, '…') };
   return {
     text: cardText(parts),
     parts,

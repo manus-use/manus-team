@@ -1,7 +1,7 @@
 import type { Event } from '../types.js';
 import type { CardParts, CardSession, Channel, SendTarget } from './types.js';
 import { CARD_GONE_CODES, ChannelError } from './types.js';
-import { renderCard, type RenderedCard } from './render.js';
+import { cardText, renderCard, type RenderedCard } from './render.js';
 import { backoffMs } from './lark/errors.js';
 import type { Clock } from '../time.js';
 import { systemClock } from '../time.js';
@@ -132,6 +132,22 @@ export class CardWriter {
   #throttledMs = 0;
   /** No pass starts before this, by the clock: the wait after a failure. */
   #notBefore = 0;
+  /**
+   * The turn whose card was given up on (`#fallback`), by its `turnStartSeq`:
+   * kept plain to its end, with no card writes, so its answer is not sent again
+   * and again by a card that fails again and again.
+   */
+  #plainTurn: number | undefined;
+  /** What that turn's plain message carried, so its terminal sends only the rest. */
+  #plainSent: CardParts | undefined;
+  /** Whether that turn's rest has been sent, or needs none. */
+  #plainDone = false;
+  /** The turn whose card was last lost (`CARD_GONE_CODES`): one re-open a turn. */
+  #goneTurn: number | undefined;
+  /** Set when a lost card is dropped; the open that follows does not clear `#failures`. */
+  #reopenAfterGone = false;
+  /** Set by `#write` when the card it opened followed a lost one. */
+  #openedAfterGone = false;
 
   constructor(deps: CardWriterDeps) {
     this.#deps = deps;
@@ -179,6 +195,9 @@ export class CardWriter {
   }
 
   async #drain(): Promise<void> {
+    // After `close`, a timer left over must not start a pass. `close`'s own
+    // drain runs before the flag is set.
+    if (this.#closed) return;
     if (this.#inFlight) return;
     if (this.#wanted <= this.#rendered) return;
 
@@ -197,7 +216,10 @@ export class CardWriter {
       if (!(await this.#write(target))) return;
       this.#rendered = target;
       this.#lastWriteAt = this.#clock.now();
-      this.#failures = 0;
+      // A card opened after one was lost is not yet a card that works: a card
+      // lost on every write would otherwise reset the count each time.
+      if (!this.#openedAfterGone) this.#failures = 0;
+      this.#openedAfterGone = false;
       this.#attempts = 0;
       this.#throttledMs = 0;
       this.#deps.onRendered(target);
@@ -206,7 +228,10 @@ export class CardWriter {
       // once, a throttle is only met again, and a failing card spends the
       // limit in five seconds.
       this.#attempts += 1;
-      const wait = (err instanceof ChannelError ? err.retryAfterMs : undefined) ?? backoffMs(this.#attempts);
+      // Floored at the backoff: a wait of 0 from Lark would otherwise retry at
+      // once, forever, and never spend the throttle budget.
+      const hinted = err instanceof ChannelError ? err.retryAfterMs : undefined;
+      const wait = Math.max(hinted ?? 0, backoffMs(this.#attempts));
       this.#notBefore = this.#clock.now() + wait;
       const throttle = err instanceof ChannelError && THROTTLE_CODES.has(err.code);
       if (throttle && this.#throttledMs < CARD_THROTTLE_BUDGET_MS) {
@@ -217,11 +242,21 @@ export class CardWriter {
         this.#note(`card write through ${target} failed (${this.#failures}): ${describe(err)}`);
       }
 
-      if (err instanceof ChannelError && CARD_GONE_CODES.has(err.code)) {
+      if (err instanceof ChannelError && CARD_GONE_CODES.has(err.code) && this.#session !== undefined) {
         // The card is gone. Drop the session and let the next pass open a fresh
-        // one, continuing from the cursor -- the log still has everything.
+        // one, continuing from the cursor -- the log still has everything. Once a
+        // turn: a second card lost in the same turn is a card path that does not
+        // work, and the answer goes as a plain message instead.
+        const again = this.#goneTurn === this.#cardTurn;
+        this.#goneTurn = this.#cardTurn;
         this.#session = undefined;
         this.#deps.onCardChanged(null);
+        if (again) {
+          this.#note(`card through ${target} lost twice in one turn`);
+          this.#failures = CARD_FAILURE_LIMIT;
+        } else {
+          this.#reopenAfterGone = true;
+        }
       }
 
       if (this.#failures >= CARD_FAILURE_LIMIT) {
@@ -270,6 +305,7 @@ export class CardWriter {
     this.#lastWriteAt = this.#clock.now();
 
     let view: RenderedCard | undefined;
+    let sent = false;
     try {
       // The parts joined: the plain message reads as the card did.
       view = renderCard(this.#deps.readEvents(0, target));
@@ -278,15 +314,30 @@ export class CardWriter {
         view.text,
         this.#deps.sendUuid(target),
       );
+      sent = true;
       this.#note(`gave up on the card through ${target}; sent it as a plain message`);
     } catch (err) {
       this.#note(`card and plain message both failed through ${target}: ${describe(err)}`);
     }
 
+    // The rest of the turn stays plain: no card for it, and at its terminal one
+    // more message with what this one did not carry.
+    if (view !== undefined) {
+      this.#plainTurn = view.turnStartSeq;
+      this.#plainSent = sent ? view.parts : { tools: '', answer: '', status: '' };
+      this.#plainDone = view.finished;
+    }
+
     // The card given up on is finished, as every card is: left streaming, it
     // shows its typing cursor until Lark gives up on it. Best effort; it may
     // be what was failing.
-    if (had !== undefined && view !== undefined && !this.#finished) {
+    //
+    // The finish writes the parts first, and the card may refuse them for the
+    // same reason it was given up on (too large, say), which is one wasted
+    // request. Accepted: the finish then still turns streaming off, which is
+    // what it is for, and a finish without the parts would be a second path to
+    // keep. Only this turn's card: one from an earlier turn has its own end.
+    if (had !== undefined && view !== undefined && !this.#finished && view.turnStartSeq === this.#cardTurn) {
       await had.finish(view.parts).catch((e: unknown) => this.#note(`finishing the card given up on through ${target} failed: ${describe(e)}`));
     }
 
@@ -303,6 +354,12 @@ export class CardWriter {
     // one. It scopes the result to the current turn itself.
     const events = this.#deps.readEvents(0, target);
     const view = renderCard(events);
+
+    // A turn given up on stays plain: no card, and its terminal sends the rest.
+    if (this.#plainTurn !== undefined && view.turnStartSeq === this.#plainTurn) {
+      if (view.finished && !this.#plainDone) await this.#sendRest(view, target);
+      return true;
+    }
 
     const existing = this.#session;
     const expired =
@@ -326,12 +383,16 @@ export class CardWriter {
           // which is the card the answer is actually going onto.
         }
       }
-      this.#finished = false;
       session = await this.#deps.channel.openCard(
         view.replyTo === undefined ? this.#deps.target : { ...this.#deps.target, replyTo: view.replyTo },
         view.parts,
         this.#deps.sendUuid(target),
       );
+      // Only once the card is open: until then the card left behind is still
+      // the one `#finished` speaks for.
+      this.#finished = false;
+      this.#openedAfterGone = this.#reopenAfterGone;
+      this.#reopenAfterGone = false;
       this.#session = session;
       this.#cardTurn = view.turnStartSeq;
       this.#shownParts = view.parts;
@@ -362,6 +423,25 @@ export class CardWriter {
   }
 
   /**
+   * Send what a plain turn's first message did not carry, once: the answer's
+   * new end, and the tool line and the status where they changed. When the
+   * answer does not start with what was sent (a secret learnt late, the
+   * budget), the whole of it goes again, as the only text that reads right.
+   * Best effort, as the fallback is: a failure is said, not retried.
+   */
+  async #sendRest(view: RenderedCard, target: number): Promise<void> {
+    this.#plainDone = true;
+    const text = restText(this.#plainSent ?? { tools: '', answer: '', status: '' }, view.parts);
+    if (text === '') return;
+    try {
+      await this.#deps.channel.sendText(this.#deps.target, text, this.#deps.sendUuid(target));
+      this.#note(`sent the rest of the turn through ${target} as a plain message`);
+    } catch (err) {
+      this.#note(`sending the rest of the turn through ${target} failed: ${describe(err)}`);
+    }
+  }
+
+  /**
    * Flush anything outstanding and stop.
    *
    * Awaits the final write, unlike `want`. This is the one place where blocking is
@@ -386,6 +466,21 @@ export class CardWriter {
     // shutdown is not silently dropped.
     await this.#drain();
     this.#closed = true;
+    // A failed pass in the drain may have scheduled another.
+    if (this.#timer !== undefined) {
+      clearTimeout(this.#timer);
+      this.#timer = undefined;
+    }
+
+    // A plain turn cut short still sends its rest.
+    if (this.#plainTurn !== undefined && !this.#plainDone) {
+      try {
+        const view = renderCard(this.#deps.readEvents(0, this.#rendered));
+        if (view.turnStartSeq === this.#plainTurn) await this.#sendRest(view, this.#rendered);
+      } catch (err) {
+        this.#note(`sending the rest of the turn on close failed: ${describe(err)}`);
+      }
+    }
 
     // A card left un-frozen keeps its typing indicator forever. If the render
     // never reported a terminal, freeze it anyway on the way out.
@@ -418,6 +513,20 @@ export class CardWriter {
   get renderedThrough(): number {
     return this.#rendered;
   }
+}
+
+/**
+ * What a plain turn's terminal message carries, given what its first one did:
+ * the answer's new end, and the tool line and the status where they changed;
+ * the whole card's text when the answer no longer starts with what was sent.
+ */
+function restText(sent: CardParts, final: CardParts): string {
+  if (!final.answer.startsWith(sent.answer)) return cardText(final);
+  return cardText({
+    tools: final.tools === sent.tools ? '' : final.tools,
+    answer: final.answer.slice(sent.answer.length).replace(/^\s+/, ''),
+    status: final.status === sent.status ? '' : final.status,
+  });
 }
 
 /** Whether `next` differs from `shown` in its tool line alone. */

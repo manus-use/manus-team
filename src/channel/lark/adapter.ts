@@ -349,9 +349,18 @@ export class LarkAdapter implements Channel {
     const write = async (parts: CardParts, finishing = false): Promise<void> => {
       const changed = REPLY_ORDER.filter((part) => partContent(parts[part]) !== shown[part]);
       if (changed.length === 0) return;
-      // Ahead of Lark's ten minutes, so the writer never meets them.
+      // Ahead of Lark's ten minutes, so the writer never meets them. Refused
+      // while not finishing, the write goes ahead all the same: Lark's ten
+      // minutes may not have run out, and if they have, the refusal below
+      // (200850, 300309) turns streaming on again or fails the write.
       let replacing = false;
-      if (clock.now() - streamingSince >= STREAMING_REFRESH_MS) replacing = !(await turnOn(finishing));
+      if (clock.now() - streamingSince >= STREAMING_REFRESH_MS) {
+        try {
+          await streamOn();
+        } catch {
+          if (finishing) replacing = true;
+        }
+      }
       for (const part of changed) {
         const text = partContent(parts[part]);
         if (replacing) {

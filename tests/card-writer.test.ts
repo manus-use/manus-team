@@ -583,6 +583,112 @@ describe('CardWriter', () => {
     expect(card?.partFinishes).toEqual([{ tools: '', answer: 'a', status: '' }]);
   });
 
+  it('backs off a throttle that says to wait 0, and still falls back in the end', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const h = harness();
+      h.writer.want(h.chunk('a'));
+      await h.writer.flushNow();
+      for (let i = 0; i < 100; i += 1) h.channel.failNext('set', new ChannelError(99991400, 'throttled', true, 0));
+      h.writer.want(h.chunk('b'));
+      await h.writer.flushNow();
+      expect(h.channel.calls).toEqual(['openCard', 'set']);
+      // Not at once: a backoff of at least a quarter of a second.
+      await vi.advanceTimersByTimeAsync(240);
+      expect(h.channel.calls).toEqual(['openCard', 'set']);
+      // The budget runs out on the floored waits, and then they count.
+      for (let i = 0; i < 40 && h.channel.texts.length === 0; i += 1) await h.writer.flushNow();
+      expect(h.channel.texts).toHaveLength(1);
+      expect(h.notes.filter((n) => n.includes('throttled, waiting')).length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a turn plain once it has fallen back: no card writes, and the rest once at its end', async () => {
+    const h = harness();
+    h.submit('ask');
+    h.writer.want(h.chunk('start '));
+    await h.writer.flushNow();
+    for (let i = 0; i < 200; i += 1) {
+      h.channel.failNext('set', new ChannelError(200860, 'card too large', false));
+      h.channel.failNext('openCard', new ChannelError(200860, 'card too large', false));
+    }
+    for (let i = 0; i < 40; i += 1) {
+      h.clock.advance(10_000);
+      h.writer.want(h.chunk(`more${i} `));
+      await h.writer.flushNow();
+    }
+    expect(h.channel.texts).toHaveLength(1);
+    expect(h.channel.calls.filter((c) => c === 'openCard')).toHaveLength(1);
+    const first = h.channel.texts[0]?.text ?? '';
+    h.writer.want(h.end('completed'));
+    await h.writer.flushNow();
+    await h.writer.close();
+    expect(h.channel.texts).toHaveLength(2);
+    // The rest only: what the first message carried is not sent again.
+    const rest = h.channel.texts[1]?.text ?? '';
+    expect(rest).toContain('more39');
+    expect(rest).not.toContain('start');
+    expect(first).toContain('start');
+    expect(h.channel.calls.filter((c) => c === 'set' || c === 'openCard').length).toBe(1 + CARD_FAILURE_LIMIT);
+  });
+
+  it('opens a card again only once a turn when it is lost on every write', async () => {
+    const h = harness();
+    h.submit('ask');
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    for (let i = 0; i < 200; i += 1) h.channel.failNext('set', new ChannelError(300311, 'not updatable', false));
+    for (let i = 0; i < 40; i += 1) {
+      h.writer.want(h.chunk('b'));
+      await h.writer.flushNow();
+    }
+    expect(h.channel.calls.filter((c) => c === 'openCard')).toHaveLength(2);
+    expect(h.channel.texts).toHaveLength(1);
+    // The next turn gets a card again.
+    h.submit('next');
+    h.writer.want(h.chunk('c'));
+    await h.writer.flushNow();
+    expect(h.channel.calls.filter((c) => c === 'openCard')).toHaveLength(3);
+  });
+
+  it('does not finish an earlier turn\'s card with this turn\'s render when it falls back', async () => {
+    const h = harness();
+    h.submit('first');
+    h.writer.want(h.chunk('a'));
+    await h.writer.flushNow();
+    const old = h.channel.lastCard;
+    h.submit('second');
+    h.writer.want(h.chunk('b'));
+    for (let i = 0; i < CARD_FAILURE_LIMIT; i += 1) {
+      h.channel.failNext('finish', new ChannelError(230099, 'refused', false));
+      h.channel.failNext('openCard', new ChannelError(230099, 'refused', false));
+      await h.writer.flushNow();
+    }
+    expect(h.channel.texts).toHaveLength(1);
+    expect(h.channel.calls.at(-1)).toBe('sendText');
+    expect(old?.partFinishes ?? []).toEqual([]);
+  });
+
+  it('starts no pass after close, though a failed pass in its drain scheduled one', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const h = harness();
+      h.writer.want(h.chunk('a'));
+      await h.writer.flushNow();
+      h.channel.failNext('set', new ChannelError(230020, 'chat rate limit', true));
+      h.channel.failNext('finish', new ChannelError(230020, 'chat rate limit', true));
+      h.writer.want(h.chunk('b'));
+      await h.writer.close();
+      const after = h.channel.calls.length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.channel.calls).toHaveLength(after);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('gives up rather than loop when the plain path fails too', async () => {
     // Nothing left to try. Holding the cursor back would re-attempt both failures
     // every second for the life of the process, which is the behaviour being fixed.

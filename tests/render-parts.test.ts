@@ -106,11 +106,28 @@ describe('renderCard: the parts', () => {
       ev('agent_error', { message: 'e'.repeat(STATUS_BUDGET * 2), retryable: false }),
     ]);
     expect(view.parts.tools.length).toBeLessThanOrEqual(TOOLS_BUDGET);
-    expect(view.parts.tools).toContain('truncated');
+    expect(view.parts.tools.endsWith('…')).toBe(true);
+    expect(view.parts.tools).not.toContain('\n');
     expect(view.parts.answer.length).toBeLessThanOrEqual(CARD_TEXT_BUDGET);
     expect(view.parts.answer).toContain('truncated');
     expect(view.parts.status.length).toBeLessThanOrEqual(STATUS_BUDGET);
+    expect(view.parts.status.endsWith('…')).toBe(true);
     expect(view.text.length).toBeLessThanOrEqual(CARD_TEXT_BUDGET);
+  });
+});
+
+describe('renderCard: a cut part', () => {
+  it('cuts the tool line and the status with a bare ellipsis, so the tool line stays one line', () => {
+    const view = renderCard([
+      ev('turn_submitted', { text: 'hi' }),
+      ...Array.from({ length: 400 }, (_x, i) => ev('tool_call', { toolCallId: `c${i}`, title: `Read file${i}.ts`, status: 'completed' })),
+      ev('agent_error', { message: 'e'.repeat(STATUS_BUDGET * 2), retryable: false }),
+    ]);
+    expect(view.parts.tools).toHaveLength(TOOLS_BUDGET);
+    expect(view.parts.tools.split('\n')).toHaveLength(1);
+    expect(view.parts.tools.endsWith('…')).toBe(true);
+    expect(view.parts.status).toHaveLength(STATUS_BUDGET);
+    expect(view.parts.status.endsWith('e…')).toBe(true);
   });
 });
 

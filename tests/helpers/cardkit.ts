@@ -23,14 +23,19 @@ import { systemClock } from '../../src/time.js';
  * - content once streaming is off: 300309;
  * - content more than ten minutes after streaming was last turned on, by its own
  *   clock: 200850, and streaming is then off. Settings turning it on again start
- *   the ten minutes over.
+ *   the ten minutes over;
+ * - a card past 30 KB (`CARD_BYTES_MAX`), its elements' content in UTF-8, made
+ *   so or grown so by an update: 200860.
+ *
+ * It also stands in for the SDK's own split send of a long text (`send`),
+ * recorded as `text`, so a reply that falls back to a plain message is seen.
  *
  * A refused call is recorded with `refused: true`. A call failed with
  * `{ landed: true }` is taken, as Lark takes a call whose answer is lost, and
  * then fails; it is recorded with `lost: true`, not `refused`.
  */
 
-export type CardkitApi = 'create' | 'content' | 'update' | 'settings' | 'send';
+export type CardkitApi = 'create' | 'content' | 'update' | 'settings' | 'send' | 'text';
 
 export interface CardkitCall {
   api: CardkitApi;
@@ -73,6 +78,21 @@ interface QueuedFailure {
 
 /** How long Lark keeps a card streaming after it was last turned on. */
 export const STREAMING_WINDOW_MS = 10 * 60 * 1000;
+
+/** Lark's limit on a card's size, in bytes: past it the card is refused with 200860. */
+export const CARD_BYTES_MAX = 30 * 1024;
+
+/** A card's size as the fake counts it: its elements' content, in UTF-8 bytes. */
+function cardBytes(elements: Iterable<string>): number {
+  let total = 0;
+  for (const content of elements) total += Buffer.byteLength(content, 'utf8');
+  return total;
+}
+
+/** The card's size were `elementId` given `content`. */
+function bytesWith(card: Card, elementId: string, content: string): number {
+  return cardBytes([...card.elements].map(([id, c]) => (id === elementId ? content : c)));
+}
 
 interface Answer {
   code?: number;
@@ -250,6 +270,7 @@ export class FakeCardkit {
                 () => {
                   if (elements.some((e) => e.content === '')) return refusal(10002);
                   if (new Set(elements.map((e) => e.element_id)).size !== elements.length) return refusal(200621);
+                  if (cardBytes(elements.map((e) => e.content)) > CARD_BYTES_MAX) return refusal(200860);
                   return undefined;
                 },
                 { code: 0, msg: 'ok', data: { card_id: cardId } },
@@ -317,6 +338,7 @@ export class FakeCardkit {
                   if (!('elements' in found)) return found;
                   if (p.data.content === '') return refusal(10002);
                   if (!found.streaming) return refusal(300309);
+                  if (bytesWith(found, p.path.element_id, p.data.content) > CARD_BYTES_MAX) return refusal(200860);
                   if (this.#clock.now() - found.streamingSince > STREAMING_WINDOW_MS) {
                     found.streaming = false;
                     return refusal(200850);
@@ -351,6 +373,7 @@ export class FakeCardkit {
                   const found = this.#sequenced(p.path.card_id, p.data.sequence, p.path.element_id);
                   if (!('elements' in found)) return found;
                   if ((element.content ?? '') === '') return refusal(10002);
+                  if (bytesWith(found, p.path.element_id, element.content ?? '') > CARD_BYTES_MAX) return refusal(200860);
                   card = found;
                   return undefined;
                 },
@@ -379,6 +402,21 @@ export class FakeCardkit {
           },
         },
       },
+    },
+    // The SDK's split send of a text longer than one message: no uuid, and a
+    // failure thrown, as the SDK throws one.
+    send: async (chatId: string, content: { markdown?: string }) => {
+      await this.#gate('text');
+      const answer = this.#answer(
+        { api: 'text', to: chatId, content: content.markdown ?? '' },
+        () => undefined,
+        { code: 0, msg: 'ok' },
+        () => {
+          this.#messages += 1;
+        },
+      );
+      if (answer.code !== 0) throw refused(answer.code ?? 0);
+      return { messageId: `om_${this.#messages}` };
     },
   } as unknown as LarkChannel;
 
