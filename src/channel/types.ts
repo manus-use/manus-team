@@ -106,6 +106,25 @@ export interface SendResult {
 }
 
 /**
+ * A reply card's three parts (channel spec §4.5), each already escaped and masked
+ * by the renderer, and each '' when it has nothing to show.
+ *
+ * Three, not one text, because Lark's client animates an element by its diff: a
+ * new text that starts with the old one has only its tail typed, and anything
+ * else is typed again from the start. With the tool line first in one text,
+ * every tool event rewrote the start of the card, and the whole answer was typed
+ * out again each time.
+ */
+export interface CardParts {
+  /** The turn's tool calls on one line. Rewritten as they change, on its own. */
+  tools: string;
+  /** The agent's answer. Only grows at its end while the turn streams, bar the cases §4.5 lists. */
+  answer: string;
+  /** The error, the approval wait, the terminal, the retry hint, or the placeholder: the lines that come and go. */
+  status: string;
+}
+
+/**
  * A card being written to, as a session rather than a handle.
  *
  * This shape is dictated by what the platform actually offers. Feishu's streaming

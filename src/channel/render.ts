@@ -2,6 +2,7 @@ import { redactKnownSecrets, withholdSecretPrefix } from '../secrets.js';
 import { stripControl } from '../text.js';
 import type { Event } from '../types.js';
 import { forDisplay, forMarkdown, truncate } from './escape.js';
+import type { CardParts } from './types.js';
 
 /**
  * Project a slice of the event log into card text.
@@ -26,8 +27,24 @@ import { forDisplay, forMarkdown, truncate } from './escape.js';
  */
 export const CARD_TEXT_BUDGET = 20_000;
 
+/**
+ * The tool line's own budget, and the status's (spec §4.5). Each part is an
+ * element of its own on the card, so each is bounded on its own: the answer by
+ * `CARD_TEXT_BUDGET`, these two by far less, as a line of tools or an error is
+ * never what a reader came for. The three together stay under cardkit's
+ * 30,000-character element cap one by one, and far under the message ceiling.
+ */
+export const TOOLS_BUDGET = 2_000;
+export const STATUS_BUDGET = 2_000;
+
 export interface RenderedCard {
+  /**
+   * The card as one text: the parts joined, cut to `CARD_TEXT_BUDGET`
+   * (`cardText`). What the plain-message fallback sends.
+   */
   text: string;
+  /** The card's three parts, each its own element on a Lark card (spec §4.5). */
+  parts: CardParts;
   /** Highest event seq included. Becomes `cursor_seq`. */
   throughSeq: number;
   /** True when a turn terminal was seen, so the card can be frozen. */
@@ -175,10 +192,7 @@ export function renderCard(events: readonly Event[]): RenderedCard {
     }
   }
 
-  const parts: string[] = [];
-
-  const toolLine = toolSummary([...tools.values()]);
-  if (toolLine !== '') parts.push(toolLine);
+  const toolLine = truncate(toolSummary([...tools.values()]), TOOLS_BUDGET);
 
   // Cut, then masked: the joined answer is the only text guaranteed to hold a
   // streamed secret whole. A trailing fragment of one is dropped, because this
@@ -189,39 +203,55 @@ export function renderCard(events: readonly Event[]): RenderedCard {
   // kept masks the same as the whole would.
   const body = redactKnownSecrets(withholdSecretPrefix(stripControl(message))).trim();
   // Markdown is kept for the answer and nowhere else: see `forMarkdown`.
-  if (body !== '') parts.push(forMarkdown(body));
+  const answer = body === '' ? '' : truncate(forMarkdown(body), CARD_TEXT_BUDGET);
 
-  if (error !== undefined) parts.push(`**Error:** ${forDisplay(error)}`);
+  // The lines that come and go, below the answer, so the answer only grows at
+  // its end (spec §4.5).
+  const status: string[] = [];
+  if (error !== undefined) status.push(`**Error:** ${forDisplay(error)}`);
 
   // Only while the turn is open. After a terminal the approval is moot, and a
   // stale "waiting on you" line sends the user hunting for a button that no
   // longer does anything.
   const blocked = !finished && openApprovals.size > 0;
-  if (blocked) parts.push('_Waiting for your approval: see the card below._');
+  if (blocked) status.push('_Waiting for your approval: see the card below._');
 
   if (finished && terminal !== undefined && terminal !== 'completed') {
-    parts.push(`_Turn ${forDisplay(terminal)}._`);
+    status.push(`_Turn ${forDisplay(terminal)}._`);
   }
 
   // `failed` only. An `ambiguous` turn may already have acted on the prompt, and
   // inviting a casual resend there is how one instruction runs twice.
   if (finished && terminal === 'failed' && errorRetryable) {
-    parts.push(tools.size > 0 ? RETRY_AFTER_TOOLS_HINT : RETRY_HINT);
+    status.push(tools.size > 0 ? RETRY_AFTER_TOOLS_HINT : RETRY_HINT);
   }
 
   // Empty output is a legitimate terminal, not a bug to paper over -- but an
-  // empty card is indistinguishable from a broken one, so say so explicitly.
-  if (parts.length === 0) {
-    parts.push(finished ? '_Finished with no output._' : '_Working…_');
+  // empty card is indistinguishable from a broken one, so say so explicitly. In
+  // the status, not the answer: the first word would otherwise replace it, and
+  // Lark would type the answer from the start.
+  if (toolLine === '' && answer === '' && status.length === 0) {
+    status.push(finished ? '_Finished with no output._' : '_Working…_');
   }
 
+  const parts: CardParts = { tools: toolLine, answer, status: truncate(status.join('\n\n'), STATUS_BUDGET) };
   return {
-    text: truncate(parts.join('\n\n'), CARD_TEXT_BUDGET),
+    text: cardText(parts),
+    parts,
     throughSeq,
     finished,
     turnStartSeq,
     ...(replyTo === undefined ? {} : { replyTo }),
   };
+}
+
+/**
+ * The card as one text: its parts that have something, in reading order, a
+ * blank line between, cut to `CARD_TEXT_BUDGET`. The plain-message fallback
+ * sends it, and so it reads as the card does.
+ */
+export function cardText(parts: CardParts): string {
+  return truncate([parts.tools, parts.answer, parts.status].filter((p) => p !== '').join('\n\n'), CARD_TEXT_BUDGET);
 }
 
 /**
