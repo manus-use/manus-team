@@ -4,7 +4,7 @@ import { formatWall } from '../cron/schedule.js';
 import { activeGrants, grantTier, revokeGrant, talkGrantsMadeBy, type GrantRow } from '../db/grants.js';
 import type { Db } from '../db/open.js';
 import { peopleOf, personOf } from '../db/people.js';
-import { label } from '../kanban/chat-render.js';
+import { label, personText } from '../kanban/chat-render.js';
 import { personPrincipal, unionIdOf, type PeopleDirectory } from '../kanban/people.js';
 import { systemClock, type Clock } from '../time.js';
 import type { InboundMention, InboundMessage, Principal } from '../types.js';
@@ -258,10 +258,9 @@ export class AuthChat {
     return { via: 'chat', who, principal, by, from: this.#deps.auth.from, held: (g) => `${this.#nameOf(g.by)} on ${this.#day(g.at)}` };
   }
 
-  /** A grant's maker, by the name Lark last gave for them, else their principal. */
+  /** A grant's maker, by name, two of one name told apart, else their principal (kanban spec §9.3). */
   #nameOf(principal: string): string {
-    const name = this.#deps.people.nameOf(principal);
-    return label(name ?? principal, 80);
+    return personText(principal, (p) => this.#deps.people.chatName(p));
   }
 
   #day(at: number): string {

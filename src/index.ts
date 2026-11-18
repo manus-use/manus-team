@@ -482,7 +482,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     });
     const s = scheduler;
     cronApi = new CronApi({ db, service: cronService, tokens, appId: config.lark.appId, changed: () => s.tick() });
-    cronChat = new CronChat({ db, service: cronService, hasTier: (principal, tier) => authorizer.hasTier(principal, tier), changed: () => s.tick() });
+    cronChat = new CronChat({ db, service: cronService, hasTier: (principal, tier) => authorizer.hasTier(principal, tier), changed: () => s.tick(), people });
   }
   const cronNote = cronLine(config.cron, jobCounts(db), zone);
   if (cronNote !== undefined) note(cronNote);

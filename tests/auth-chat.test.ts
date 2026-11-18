@@ -242,6 +242,12 @@ describe('/auth list and help', () => {
     ]);
   });
 
+  it('keeps each person\'s principal in the list, which a revoke takes, and tells apart two grant makers of one name', () => {
+    say('grant @Carol Wu talk', OWNER, [AT_CAROL]);
+    people.saw({ openId: 'ou_other', unionId: 'on_other', name: 'Alice' });
+    expect(say('list').split('\n')).toContain('Carol Wu (lark:on\\_carol): talk, granted by Alice \\(on\\_owne…\\) on 2026-11-18');
+  });
+
   it('says a mix of sources, and cuts the list at 50 lines', () => {
     say('grant @Tess operate', OWNER, [AT_TESS]);
     expect(say('list').split('\n')).toContain('Tess (lark:on\\_tess): operate, granted by Alice on 2026-11-18; talk also from auth.talk in config.yaml');
