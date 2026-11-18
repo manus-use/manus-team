@@ -26,6 +26,10 @@ import { hashToken, mintToken } from '../src/kanban/token.js';
 import { WORKER_COMMANDS, WorkerApi } from '../src/kanban/worker.js';
 import { checkWorkflow, type WorkflowFacts } from '../src/kanban/workflow.js';
 import { clearSecrets } from '../src/secrets.js';
+import { AuthChat } from '../src/policy/auth-chat.js';
+import { Authorizer, defaultAuthConfig, tiersOf } from '../src/policy/auth.js';
+import { tierReader } from '../src/db/grants.js';
+import { PeopleDirectory } from '../src/kanban/people.js';
 import { loadTeam, type Team } from '../src/team.js';
 import type { BindingKey, InboundMessage } from '../src/types.js';
 import { NOW } from './helpers/cron.js';
@@ -41,7 +45,8 @@ import { ALICE, VIA } from './helpers/kanban.js';
  * through chat's parser and a real start, a `/cron add` through chat's `/cron`,
  * an `mt` command through `mt` itself, a cron script calling plain `mt` as a
  * fire runs it, by /bin/sh with the environment the scheduler gives it, which
- * finds the gateway's launcher first, and an agent's JSON through the handler it is sent to. Nothing here
+ * finds the gateway's launcher first, an agent's JSON through the handler it is sent to, and a
+ * `/auth` line through chat's `/auth` and an `mt auth` line through `mt`. Nothing here
  * touches ~/.manus-team: every home is a temporary directory.
  */
 
@@ -692,5 +697,85 @@ describe("an agent's JSON", () => {
     expect(started, JSON.stringify(started)).toMatchObject({ ok: true, existing: false, instance_id: expect.stringMatching(/^w_/) });
     const created = await ask('create', json('kanban-agent create'));
     expect(created, JSON.stringify(created)).toMatchObject({ ok: true });
+  });
+});
+
+describe('/auth and mt auth', () => {
+  /** The gateway's `/auth` over a home: the owner Alice, Dana at talk tier, as the home's config gives them. */
+  function authChat(h: Home): AuthChat {
+    const lists = { allowTalk: ['ou_owner', DANA.openId], allowOperate: ['ou_owner'] };
+    const authorizer = new Authorizer({ ...defaultAuthConfig('ou_owner'), ...lists }, { grants: { tierOf: tierReader(h.db, 'cli_app') } });
+    return new AuthChat({
+      db: h.db,
+      appId: 'cli_app',
+      authorizer,
+      auth: { ownerOpenId: 'ou_owner', ...lists, from: { owner: 'auth.owner', talk: 'auth.talk', operate: 'auth.operate' } },
+      people: new PeopleDirectory({ db: h.db, appId: 'cli_app', canTalk: (p) => tiersOf(lists, p.openId, authorizer.grantOf(p.unionId)).talk }),
+      zone: 'Asia/Shanghai',
+      clock: new ManualClock(NOW),
+    });
+  }
+
+  let sent = 0;
+
+  /** A line of an `auth chat` block, from the owner in a group, its @-mentions as Lark would send them. */
+  function inGroup(text: string): InboundMessage {
+    return {
+      messageId: `om_docs_auth_${++sent}`,
+      appId: 'cli_app',
+      chatId: 'oc_team',
+      chatType: 'group',
+      threadId: '',
+      sender: { openId: 'ou_owner', unionId: 'on_owner', displayName: 'Alice' },
+      senderIsBot: false,
+      text,
+      mentionedBot: true,
+      mentionAll: false,
+      mentions: mentionsIn(text).map((name, i) => {
+        const unionId = principalOf(`@${name}`).slice('lark:'.length);
+        return { key: `@_user_${i + 1}`, name, openId: `ou_${unionId.slice(3)}`, unionId };
+      }),
+      attachments: [],
+      createTime: NOW,
+    };
+  }
+
+  it("each /auth line in the guide and the README is done by chat's /auth, and the guide's reply is the one it gives", () => {
+    let seen = 0;
+    for (const doc of ['docs/kanban-guide.md', 'README.md'] as const) {
+      const h = docHome.get(doc) as Home;
+      const chat = authChat(h);
+      for (const b of (blocks.get(doc) ?? []).filter((x) => x.marker === 'auth chat')) {
+        const replies = b.body
+          .split('\n')
+          .filter((l) => l.startsWith('/auth '))
+          .map((l) => chat.run(l.slice('/auth '.length), inGroup(l)));
+        expect(replies.length, where(b)).toBeGreaterThanOrEqual(3);
+        for (const r of replies) expect(r, where(b)).toMatch(/^(Carol Wu now has|Carol Wu no longer has|Owner: )/);
+        if (doc === 'docs/kanban-guide.md') {
+          const quoted = (replies[0] ?? '').replace(/lark:on_[a-z0-9_]+/, 'lark:on_…');
+          expect(readFileSync(join(REPO, doc), 'utf8')).toContain(`> ${quoted}`);
+        }
+        seen += 1;
+      }
+    }
+    expect(seen).toBe(2);
+  });
+
+  it('each mt auth line in the guide and the README is done by mt, for a person the bot has seen', async () => {
+    let seen = 0;
+    for (const doc of ['docs/kanban-guide.md', 'README.md'] as const) {
+      const h = docHome.get(doc) as Home;
+      for (const b of (blocks.get(doc) ?? []).filter((x) => x.marker === 'auth terminal')) {
+        const commands = commandsOf(b.body).filter((c) => c.command.startsWith('mt auth '));
+        expect(commands.length, where(b)).toBeGreaterThanOrEqual(3);
+        for (const c of commands) {
+          const r = await h.mt(shellWords(c.command).slice(1));
+          expect(r.code, `${where(b)}: ${c.command}: ${r.err}`).toBe(0);
+        }
+        seen += 1;
+      }
+    }
+    expect(seen).toBe(2);
   });
 });

@@ -283,8 +283,8 @@ itself, for instance in a file it reads, is not known to the gateway and is not 
 | `lark.appId` | `LARK_APP_ID` | App id. Required from one source or the other. |
 | `lark.domain` | `LARK_DOMAIN` | Set for Lark (`https://open.larksuite.com`); omitted means Feishu. |
 | `auth.owner` | `MT_OWNER_OPEN_ID` | Your `open_id`. Required. Always in both allowlists — an allowlist that excludes the owner locks out the only person who can fix it. |
-| `auth.talk` | `MT_ALLOW_TALK` | `open_id`s that may prompt the agent. |
-| `auth.operate` | `MT_ALLOW_OPERATE` | `open_id`s that may answer approvals and run mutating commands. |
+| `auth.talk` | `MT_ALLOW_TALK` | `open_id`s that may prompt the agent. A grant, `/auth grant @Name talk` in chat or `mt auth grant` at the terminal, adds a person beside them, kept in the database and counted at once; no command removes an entry. |
+| `auth.operate` | `MT_ALLOW_OPERATE` | `open_id`s that may answer approvals and run mutating commands. Only the owner, or the terminal, grants operate tier beside them. |
 | `auth.chats` | `MT_ALLOW_CHATS` | `chat_id`s the bot will work in. Empty means any chat it was added to. |
 | `auth.directMessages` | `MT_ALLOW_DM` | Answer direct messages without a mention. Default on. |
 | `auth.mentionAll` | `MT_ALLOW_MENTION_ALL` | Treat `@all` as addressing the bot. Default **off**: `@all` is a room-wide notification, not an instruction. |
@@ -317,7 +317,8 @@ Three rules make a mistake fail loudly instead of silently:
   file and an emergency lockdown needs no edit. Lists are *replaced*, not merged — merging
   would leave no way to revoke. `MT_ALLOW_TALK=` set-but-empty means the owner alone.
 - **Empty means closed.** An unset allowlist is everyone-except-the-owner, not
-  no-restrictions.
+  no-restrictions. A grant adds a person beside a list and never removes one, and a grant
+  that cannot be read counts as none.
 - **An unknown key is an error.** A typo'd setting silently taking its default is how a
   value someone deliberately changed turns out never to have applied — and for the auth
   keys that failure is silent *and* permissive.
@@ -358,6 +359,10 @@ agent:
   args: [run, -m, bytesec/modelhub-sg/gpt-5.6-sol]
   unsupervised: true
 ```
+
+`/roles` shows a role's `description` in chat, to anyone at talk tier, in every chat the gateway
+acts in, and the first line of its `role.md` when it has none: keep in neither anything a
+talk-tier person should not read.
 
 A role's `max_running: N`, a positive whole number, lets at most N of its agent runs be open at
 once, however many workspaces are free. A run counts against the role it runs as: a work run
@@ -491,6 +496,9 @@ mt service status
 mt service logs [-f] [-n <lines>]
 mt service check
 mt update [--check | --yes]
+mt auth grant lark:<union_id> talk|operate [--json]
+mt auth revoke lark:<union_id> [--json]
+mt auth list [--json]
 mt kanban board list [all]
 mt kanban board create <name>
 mt kanban board set <name> max_running <number|none>
@@ -654,6 +662,8 @@ a running gateway, through the board's own service, and take effect at once.
 | `/status` | talk | What this session is doing |
 | `/stop`, `/cancel` | operate | Cancel the current turn |
 | `/help` | talk | List commands |
+| `/roles` | talk | The roles, what each is for, whether it can be given work, and its open runs |
+| `/auth <command>` | talk; an operator grants talk, the owner operate | Who may talk to the agent and operate it, below. Never refused because this chat's session is busy |
 | `/kanban <command>` | talk; operate to change the board | The task board, below. Never refused because this chat's session is busy |
 | `/cron <command>` | talk; operate to change a job | Scheduled jobs, below. Never refused because this chat's session is busy |
 | `/cd <path>` | operate | Declared, and honestly unavailable in this build — every session shares the one configured workspace |
@@ -661,6 +671,30 @@ a running gateway, through the board's own service, and take effect at once.
 Approvals are answered by clicking a card button, never by typing: the agent's blocked
 `session/request_permission` call *is* the pending request, and a chat verb would be a
 second way to mutate it with no capability the button doesn't already have.
+
+**Letting people in.** A tier comes from `auth.talk` and `auth.operate`, or from a grant. In a
+group the person is in, @-mention them, so Lark gives their ids and nobody types one:
+
+<!-- example: auth chat -->
+```text
+/auth grant @Carol Wu talk
+/auth list
+/auth revoke @Carol Wu
+```
+
+The reply in the chat is the announcement. An operator grants and revokes talk; only the owner
+grants operate, or revokes an operate grant. A grant counts at the next message, with no
+restart, and never removes a config entry or the owner. At the terminal, as the owner, for a
+person the bot has seen (`mt kanban people` lists them):
+
+<!-- example: auth terminal -->
+```
+mt auth grant lark:on_5d1e7a operate
+mt auth list
+mt auth revoke lark:on_5d1e7a
+```
+
+`mt auth` is refused in every agent's shell, and posts in no chat.
 
 ### The board from Lark
 

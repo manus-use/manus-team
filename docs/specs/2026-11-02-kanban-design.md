@@ -859,7 +859,10 @@ session status already follows (`core/status.ts`, channel spec §7), for the sam
   person a `/kanban` command mentions, and each person who presses a board card's button. A person
   named by principal alone — typed out in chat, or in an agent's `mt kanban create` or `review` —
   is checked through the `open_id` last seen with it; a principal the gateway has never seen cannot
-  be checked, and is refused.
+  be checked, and is refused. *Amended on 2026-11-18 by the tier grants spec,
+  [`2026-11-18-tier-grants-design.md`](2026-11-18-tier-grants-design.md) §4.3:* a person named by
+  principal has talk tier when the `open_id` `people` holds for them is in the talk list, **or**
+  their union_id has an active grant, which needs no row in `people`.
 - **Unassigned, or an assignee that does not resolve** (a role whose directory was removed or is
   now invalid, a role whose files cannot be read, a person the channel cannot reach), **or an agent task whose fixed
   workspace was removed from config**, or whose parents are in different workspaces and none was set
@@ -4160,7 +4163,11 @@ mt kanban task new <title…> … --chat oc_… [--thread omt_…]
   bot's app, and the open_id the gateway last saw them with must be in the talk allowlist.
   `openBoard` (`src/cli/gate.ts`) gives its service a `PeopleDirectory` over the database it
   opened, with this bot's app id and a `canTalk(openId)` that reads the allowlist from the
-  settings, so the terminal's check is chat's own code, against the same table.
+  settings, so the terminal's check is chat's own code, against the same table. *Amended on
+  2026-11-18 by the tier grants spec,
+  [`2026-11-18-tier-grants-design.md`](2026-11-18-tier-grants-design.md) §4.3:* `canTalk` takes
+  the person's open_id, null when `people` holds none, and union_id, and counts their active
+  grant, read from the database the terminal opened; one not yet migrated to grants has none.
 - **How a terminal knows talk tier, with no gateway.** The allowlist is configuration: the owner,
   `MT_OWNER_OPEN_ID` or `auth.owner`, and `MT_ALLOW_TALK` or `auth.talk`, the owner always
   included, as `loadConfig` builds `auth.allowTalk`. `teamSettingsFrom` (`src/config.ts`) reads

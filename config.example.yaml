@@ -65,8 +65,10 @@ lark:
 
 auth:
   # Always in both tiers below, whatever the lists say: an allowlist that
-  # excludes the owner locks out the only person who can fix it, and it is not
-  # editable from chat.
+  # excludes the owner locks out the only person who can fix it. The lists are
+  # not editable from chat: /auth grant, and mt auth grant at the terminal, add
+  # people beside them, kept in the database, and never remove an entry or the
+  # owner. A grant counts at once, with no restart.
   owner: ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
   # May prompt the agent. An empty list means the owner alone -- empty is
@@ -90,6 +92,11 @@ auth:
   # notification and answering announcements is not what anyone wants.
   mentionAll: false
 
+# The role default, when there is no roles/default/. It has no description, so
+# /roles shows "–" for what it is for. A role directory's config.yaml
+# description, else the first line of its role.md, is what /roles shows in
+# chat, to anyone at talk tier, in every chat the gateway acts in: keep in
+# neither anything a talk-tier person should not read.
 agent:
   # How the agent is run. Two choices:
   #
