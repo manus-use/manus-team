@@ -849,7 +849,10 @@ order. The fields:
   `/roles` runs, as a claim reads it at each claim, by `roleMdFirstLine(path)` in `src/roles.ts`:
   - **The file is checked first**: an `lstat` of `Role.roleMdPath`, which must be a regular file and
     not a symbolic link, as `readRoleMd` requires at the start (kanban §2.1). Anything else, or an
-    `lstat` or a read that fails, gives `(role.md unreadable)`, and the line still comes.
+    `lstat` or a read that fails, gives `(role.md unreadable)`, and the line still comes. The open
+    takes `O_NOFOLLOW` and `O_NONBLOCK`, and an `fstat` of what it opened must be a regular file
+    too, so a link or a FIFO swapped in after the `lstat` is refused, and a FIFO cannot hold the
+    open waiting for a writer.
   - **At most an 8 KiB prefix is read**, with `open` and `read`, never the whole file; a partial UTF-8
     character at the prefix's end is dropped.
   - **The first non-empty line is used only if it ends inside the prefix.** A line still going at

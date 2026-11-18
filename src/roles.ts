@@ -324,8 +324,9 @@ export function wholeUtf8(bytes: Uint8Array): Uint8Array {
  * The first line of a role's `role.md` that is not empty, as `/roles` shows
  * what a role is for (tier grants spec §13.2), read when asked: `^#+\s*`
  * stripped, so a heading shows as its words. The file is checked first, as
- * `readRoleMd` checks it at the start: a regular file, not a symbolic link;
- * anything else, or a read that fails, is `ROLE_MD_UNREADABLE`. At most an
+ * `readRoleMd` checks it at the start: a regular file, not a symbolic link,
+ * opened without blocking so a FIFO swapped in after the check cannot hang the
+ * reply; anything else, or a read that fails, is `ROLE_MD_UNREADABLE`. At most an
  * 8 KiB prefix is read, and a line still going at its end is never shown, as
  * a secret cut in two would reach the reply as its first half, unmasked:
  * undefined then, as for a file with no line at all.
@@ -336,7 +337,8 @@ export function roleMdFirstLine(path: string): string | undefined {
   let size: number;
   try {
     if (!lstatSync(path).isFile()) return ROLE_MD_UNREADABLE;
-    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    // Non-blocking, so a FIFO swapped in after the lstat cannot hold the open for a writer; the fstat then refuses it.
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
     const stat = fstatSync(fd);
     if (!stat.isFile()) return ROLE_MD_UNREADABLE;
     size = stat.size;
