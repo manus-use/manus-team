@@ -1926,6 +1926,38 @@ notice, and a bot that mentions people whenever work moves trains them to ignore
 §19 (plan L):* a card in a task's thread mentions its person, the only mention the board makes
 (§19.2).
 
+**People by name.** *Amended on 2026-11-18, as the user approved.* Every chat reply, notice and
+card that names a person names them by the name Lark last gave, from the `people` table
+(`PeopleDirectory.chatName`), and falls back to their principal, `lark:<union_id>`, where no name
+is known: `/kanban task list` and `task show` (assignee, reviewer, runs, comments), `gate list`,
+`workflow show`, `instances` and `preview`, a start's and a "Created" reply, the replies to assign,
+review and a refused report, task and review cards, the notices, `/cron show`'s maker and a grant's
+maker in `/auth`, a grant's or revoke's target and actor, and a card's presser ("Done by …"). A
+workflow's person param shown in `workflow show` is named the same way. *Titles and bodies:* each
+`lark:<union_id>` in a task's title, wherever chat labels one (lists, `show`, notices, cards and
+their redraws, a start's, a preview's and a "Created" reply, `workflow show`'s related tasks), and
+in the body excerpt `task show` and the cards quote, is replaced by the person's chat name at
+render time, in chat only, the token kept where no name is known (`titleText`), then masked, cut
+and escaped as any label. What is stored is never changed: the start's expansion, the DAG's hash,
+`--json`, the terminal, a preview against its start and a repeated start stay exact. A name is masked, made one line, cut at 80
+characters and escaped as any label, and is never an @-mention. *Two of one name:* when another
+person this bot has seen, across the whole `people` table for this app, has the same name, the
+two compared with white space collapsed and trimmed, so "Alice" and "Alice " are one name, the name is cut at 60 characters and followed by the start of the union_id in parentheses,
+"Hemanth (on_8ba3…)": seven characters, more where another of the name's ids starts the same way,
+the whole id unmarked where nothing shorter differs. *Why the table, not the reply:* the
+same name shown the same way in every reply, with nothing gathered first. A reply reads the table
+once, at its first name (`PeopleDirectory.chatNames`), and answers every other name from what it
+read: lighter than a migration for an index on `people(app_id, name)`, which nothing else needs.
+A name is cut at 80 characters before it goes into a longer piece too, as "stopped by …" goes
+into a block's 800-character reason. *The two exceptions*, where chat keeps a principal on purpose: `/auth list`, which shows "Name
+(lark:<union_id>)", and the grant reply's "`/auth revoke lark:<union_id>` takes it back", as
+`/auth revoke` takes the id they show, for someone who can no longer be mentioned. Left as they
+were:
+the terminal's plain output, which shows principals, as they are what is typed there; `--json`,
+principals only; and agents' prompts and the worker's JSON, which take the plain name (`nameOf`).
+A card that cannot be sent to a person who lost talk tier records "they no longer have talk tier on
+this gateway", as the notice telling of it names them already.
+
 ### 9.4 Subscriptions
 
 *Amended by §19 (plan L).* A task created by `/kanban task new` in a group at chat scope is

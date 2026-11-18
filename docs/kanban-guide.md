@@ -45,6 +45,10 @@ where they say "They are sent it as a card, in a direct message, once it is read
 **Ids.** Every task has an id such as `k_…`, which the chat gives you when the task is created.
 Runs have ids such as `r_…`. Wherever an example says `k_…`, use the id the chat gave you.
 
+**Roles.** `/role list` lists the roles in chat, with what each is for, whether it can be given
+work, where it works and its open runs; `/roles` is its alias, and says the same. Anyone at talk
+tier may run it. Name a role from it on an `assignee:` line.
+
 **Who may do what.** The gateway decides your tier from `auth.talk` and `auth.operate` in its
 config, or from a grant (see "Letting people in", below). Anyone at talk tier may use the
 board's read commands; anything that changes the board needs operator tier, except a person's
@@ -232,8 +236,8 @@ List them, which anyone at talk tier may do:
 ```
 
 > Gates of `k_…`, run in this order before it may complete or go to review:
-> 1\. test -s docs/incidents/2026-11-03.md (300 s, by lark:on_…)
-> 2\. grep -q "## Timeline" docs/incidents/2026-11-03.md (60 s, by lark:on_…)
+> 1\. test -s docs/incidents/2026-11-03.md (300 s, by Alice Chen)
+> 2\. grep -q "## Timeline" docs/incidents/2026-11-03.md (60 s, by Alice Chen)
 
 Remove one by its number:
 
@@ -389,7 +393,7 @@ nothing ended: the operator's answer decides it, and the person's card goes out 
 
 A person who is neither the reviewer nor an operator is told:
 
-> `/kanban task approve` answers a review, and is for `k_…`'s reviewer (Bob Li (lark:on_…)) or an operator.
+> `/kanban task approve` answers a review, and is for `k_…`'s reviewer (Bob Li) or an operator.
 
 ## 4. A person's task
 
@@ -409,7 +413,7 @@ Ask facilities for the two rooms on the third floor first.
 
 Typed in a group, it is answered in a thread on your message:
 
-> Created `k_…`: **Book the venue for the January offsite**, for Alice Chen (lark:on_…). Their card comes in this thread when it is ready, or by direct message if they are not in this group. This thread hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Book the venue for the January offsite**, for Alice Chen. Their card comes in this thread when it is ready, or by direct message if they are not in this group. This thread hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 In a direct message with the bot, the reply says instead "They are sent it as a card, in a direct
 message, once it is ready. This chat hears …".
@@ -455,7 +459,7 @@ Each button has a typed form, which works from any chat with the bot, a direct m
 The summary is optional. If the task names a reviewer, done sends it to them instead, and the
 chat says:
 
-> Sent `k_…` for review to Bob Li (lark:on_…): the task names a reviewer, so done asks for review.
+> Sent `k_…` for review to Bob Li: the task names a reviewer, so done asks for review.
 
 Pressing **Done** on the card does the same, and the card says "Sent for review to Bob Li". A
 block needs a reason:
@@ -474,7 +478,7 @@ with a summary, and name the reviewer on a `reviewer:` line unless the task alre
 reviewer: @Bob Li
 ```
 
-> `k_…` is waiting for review, by Bob Li (lark:on_…).
+> `k_…` is waiting for review, by Bob Li.
 
 Without a `reviewer:` line on either the command or the task, the chat says:
 
@@ -499,6 +503,23 @@ The gateway must know a person, and they must have talk tier:
 
 If a card cannot reach the person at all (Lark says they are outside the app's availability), the
 chat is told, with the typed commands they can use instead.
+
+### How chat names people
+
+Every reply names a person by the name Lark last gave for them, in plain text, so nobody is
+pinged: task lists, `task show`, gate lists, workflow replies, notices, cards, `/cron show` and
+`/auth`'s replies. A `lark:on_…` in a task's title or body, as a workflow's person param puts
+there, is shown by name too; the task itself keeps the id. A person the gateway has no name for is
+shown as `lark:on_…`. When two people the bot has seen share a name, each is followed by the start
+of their id, as "Hemanth (on_8ba3…)", so you can tell them apart.
+
+Two places keep the id on purpose, as `/auth revoke` takes it for someone who can no longer be
+mentioned:
+
+- `/auth list` shows each person as "Name (lark:on_…)".
+- A grant's reply ends "`/auth revoke lark:on_…` takes it back".
+
+The terminal's `mt` commands show the ids, which is what you type there.
 
 ## 5. A chain, A → B → C
 
@@ -723,7 +744,7 @@ What to know:
 > `k_…` **running**: Survey the vendors · role worker
 > `k_…` **todo**: Price out vendor A · role worker
 > `k_…` **todo**: Write the vendor comparison · role worker
-> `k_…` **blocked**: Book the venue for the January offsite · lark:on_…
+> `k_…` **blocked**: Book the venue for the January offsite · Alice Chen
 
 Without a status it shows the tasks someone may still act on, grouped as running, reviewing,
 review, ready, todo, then blocked. Name a status to see only those: `todo`, `ready`, `running`,
@@ -915,7 +936,7 @@ next start goes to the new assignee:
 /kanban task assign k_… @Alice Chen
 ```
 
-> `k_…` is now for Alice Chen (lark:on_…); its run `r_…` was superseded.
+> `k_…` is now for Alice Chen; its run `r_…` was superseded.
 
 **Archive** puts a task away for good, ending any run on it. Its children treat it as finished:
 
@@ -1509,7 +1530,7 @@ outcome: v2.4.0 tagged and deployed, and the changelog says CSV export is new
 Deploy with the usual checklist in docs/release.md.
 ```
 
-> Created `k_…`: **Release the CSV export**, for Dana Park (lark:on\_…). They are sent it as a card, in a direct message, once it is ready. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
+> Created `k_…`: **Release the CSV export**, for Dana Park. They are sent it as a card, in a direct message, once it is ready. This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.
 
 **What happens:**
 

@@ -71,3 +71,14 @@ export function peopleOf(db: Db, appId: string): PersonRow[] {
     .all(appId)
     .map((row) => ({ appId: row.app_id, unionId: row.union_id, openId: row.open_id, name: row.name, seenAt: row.seen_at }));
 }
+
+/**
+ * Every person this bot has seen with a name, their union_id and that name
+ * (kanban spec §9.3): read once for a chat reply, which tells apart two of one name.
+ */
+export function namedPeopleOf(db: Db, appId: string): Array<{ unionId: string; name: string }> {
+  return db
+    .prepare<[string], { union_id: string; name: string }>('SELECT union_id, name FROM people WHERE app_id = ? AND name IS NOT NULL ORDER BY union_id')
+    .all(appId)
+    .map((r) => ({ unionId: r.union_id, name: r.name }));
+}

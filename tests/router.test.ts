@@ -793,6 +793,8 @@ describe('Router: /auth', () => {
     await flush();
     const prompts = (): string[] => h.driver.runtimes.flatMap((r) => r.prompts.map((p) => p.text));
     expect(prompts()).toEqual(['after the grant']);
+    // The turn's card is opened by CardWriter's own timer, which can fire after the flush: waited for, so it is not counted as the revoked guest's.
+    await vi.waitFor(() => expect(h.channel.cardOpens).toHaveLength(1));
     await h.router.onMessage(inGroup('/auth revoke @Guest'));
     expect(lastReply(h)).toBe('Guest no longer has talk tier: revoked by Owner.');
     expect(await guestSays('after the revoke')).toBe(0);
@@ -827,30 +829,42 @@ describe('Router: /auth', () => {
   });
 });
 
-describe('Router: /roles', () => {
+describe('Router: /role list and /roles', () => {
   afterEach(() => clearSecrets());
 
   it('is registered at talk tier, listed in /help, answered while the session is busy, and refused silently without talk', async () => {
     let asked = 0;
     const h = harness({ roles: () => (asked += 1, '**worker**: writes') });
     await h.router.onMessage(msg({ text: '/help' }));
-    expect(lastReply(h)).toContain('`/roles`: The roles, what each is for, whether it can be given work, and its open runs. (anyone allowed)');
+    expect(lastReply(h)).toContain('`/role list` (or `/roles`): The roles, what each is for, whether it can be given work, and its open runs. (anyone allowed)');
     await working(h);
-    const message = msg({ text: '/roles' });
+    const message = msg({ text: '/role list' });
     await h.router.onMessage(message);
     expect(h.channel.texts.at(-1)).toMatchObject({ text: '**worker**: writes', uuid: replyUuid(APP, message.messageId, 'roles') });
+    const upper = msg({ text: '/role LIST' });
+    await h.router.onMessage(upper);
+    expect(h.channel.texts.at(-1)).toMatchObject({ text: '**worker**: writes', uuid: replyUuid(APP, upper.messageId, 'roles') });
+    const alias = msg({ text: '/roles' });
+    await h.router.onMessage(alias);
+    expect(h.channel.texts.at(-1)).toMatchObject({ text: '**worker**: writes', uuid: replyUuid(APP, alias.messageId, 'roles') });
     const before = h.channel.texts.length;
+    await h.router.onMessage(msg({ text: '/role list', sender: GUEST }));
     await h.router.onMessage(msg({ text: '/roles', sender: GUEST }));
     expect(h.channel.texts).toHaveLength(before);
-    expect(asked).toBe(1);
+    expect(asked).toBe(3);
   });
 
-  it('answers anything after it with the usage, keyed roles-usage, and lists nothing', async () => {
+  it('answers /role alone, an unknown word, or anything after /roles with the usage naming list, keyed roles-usage, and lists nothing', async () => {
     let asked = 0;
     const h = harness({ roles: () => (asked += 1, 'the roles') });
-    const message = msg({ text: '/roles worker' });
-    await h.router.onMessage(message);
-    expect(h.channel.texts.at(-1)).toMatchObject({ text: 'Usage: `/roles`, with nothing after it.', uuid: replyUuid(APP, message.messageId, 'roles-usage') });
+    for (const text of ['/role', '/role worker', '/role list worker', '/roles worker']) {
+      const message = msg({ text });
+      await h.router.onMessage(message);
+      expect(h.channel.texts.at(-1)).toMatchObject({
+        text: 'Usage: `/role list`, or `/roles`, with nothing after it.',
+        uuid: replyUuid(APP, message.messageId, 'roles-usage'),
+      });
+    }
     expect(asked).toBe(0);
   });
 

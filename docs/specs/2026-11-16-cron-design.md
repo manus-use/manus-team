@@ -918,7 +918,7 @@ pruning to 50 cannot change it.
 |---|---|---|
 | `/cron add "<schedule>" <role> <prompt>` | operate | then optional lines `name:`, `tz:`, `script:` |
 | `/cron list` | talk | this chat's jobs: id, name, schedule, state, next run, last outcome |
-| `/cron show <id>` | talk | the job, its prompt and script masked, its last ten fires and the start of its last result |
+| `/cron show <id>` | talk | the job, its prompt and script masked, who made it by name (kanban spec §9.3; each `/cron` sender is noted in `people`), its last ten fires and the start of its last result |
 | `/cron pause <id>` · `resume <id>` · `run <id>` · `remove <id>` | operate | |
 | `/cron help` | talk | every command, with its tier |
 

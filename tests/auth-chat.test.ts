@@ -106,6 +106,15 @@ describe('/auth grant', () => {
     expect(people.canTalk('lark:on_carol')).toBe(true);
   });
 
+  it('names the target and the actor by chat name, telling two of one name apart, in grant and revoke replies', () => {
+    people.saw({ openId: 'ou_other', unionId: 'on_other', name: 'Alice' });
+    people.saw({ openId: 'ou_carol2', unionId: 'on_zcarol', name: 'Carol Wu' });
+    expect(say('grant @Carol Wu talk', OWNER, [AT_CAROL])).toBe(
+      'Carol Wu \\(on\\_caro…\\) now has talk tier, granted by Alice \\(on\\_owne…\\). `/auth revoke lark:on_carol` takes it back.',
+    );
+    expect(say('revoke lark:on_carol')).toBe('Carol Wu \\(on\\_caro…\\) no longer has talk tier: revoked by Alice \\(on\\_owne…\\).');
+  });
+
   it('puts operate in place of a talk grant, and says a tier already held, from where', () => {
     say('grant @Carol Wu talk', OWNER, [AT_CAROL]);
     expect(say('grant @Carol Wu talk', BOB, [AT_CAROL])).toBe('Carol Wu already has talk tier, by a grant from Alice on 2026-11-18.');
@@ -159,8 +168,8 @@ describe('/auth grant', () => {
     expect(say('grant @Helper talk', OWNER, [{ key: '@_user_7', name: 'Helper', openId: 'ou_helper', unionId: null, isBot: true }])).toBe(
       '@Helper is a bot, and a bot is never given a tier here.',
     );
-    // Mentioned in a direct message, as Lark lets one be: granted.
-    expect(say('grant @Carol Wu talk', OWNER, [AT_CAROL], 'p2p')).toMatch(/^Carol Wu now has talk tier/);
+    // Mentioned in a direct message, as Lark lets one be: granted. The other Carol Wu mentioned above tells them apart.
+    expect(say('grant @Carol Wu talk', OWNER, [AT_CAROL], 'p2p')).toMatch(/^Carol Wu \\\(on\\_caro…\\\) now has talk tier/);
   });
 
   it('refuses a sender Lark gave no union_id, as the grant records who made it', () => {
@@ -240,6 +249,12 @@ describe('/auth list and help', () => {
       'Tess (lark:on\\_tess): talk, from auth.talk in config.yaml',
       'Olga (lark:on\\_olga): in auth.operate without talk tier, so no tier',
     ]);
+  });
+
+  it('keeps each person\'s principal in the list, which a revoke takes, and tells apart two grant makers of one name', () => {
+    say('grant @Carol Wu talk', OWNER, [AT_CAROL]);
+    people.saw({ openId: 'ou_other', unionId: 'on_other', name: 'Alice' });
+    expect(say('list').split('\n')).toContain('Carol Wu (lark:on\\_carol): talk, granted by Alice \\(on\\_owne…\\) on 2026-11-18');
   });
 
   it('says a mix of sources, and cuts the list at 50 lines', () => {

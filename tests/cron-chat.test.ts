@@ -5,6 +5,8 @@ import { NamedWorkspaces } from '../src/core/workspace.js';
 import { getJob, listJobs } from '../src/db/cron.js';
 import { CronChat, parseAdd } from '../src/cron/chat.js';
 import { CronService } from '../src/cron/service.js';
+import { notePerson } from '../src/db/people.js';
+import { PeopleDirectory } from '../src/kanban/people.js';
 import { Authorizer, defaultAuthConfig } from '../src/policy/auth.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import type { InboundMessage, Principal } from '../src/types.js';
@@ -36,7 +38,7 @@ afterEach(() => {
   h.close();
 });
 
-function router(cronOn = true): Router {
+function router(cronOn = true, withPeople = false): Router {
   const config = defaultAuthConfig(OWNER.openId);
   const authorizer = new Authorizer({ ...config, allowTalk: [OWNER.openId, TALKER.openId] });
   const service = new CronService({ db: h.db, roles: new Map([['worker', role('worker')]]), workspaces: new Set(['default']), zone: 'Asia/Shanghai', clock: new ManualClock(NOW) });
@@ -54,7 +56,17 @@ function router(cronOn = true): Router {
     channel: lark,
     channelId: 'lark',
     appId: 'cli_app',
-    ...(cronOn ? { cron: new CronChat({ db: h.db, service, hasTier: (p, tier) => authorizer.hasTier(p, tier) }) } : {}),
+    // The people directory, as the gateway gives it: a sender is noted, and named by it.
+    ...(cronOn
+      ? {
+          cron: new CronChat({
+            db: h.db,
+            service,
+            hasTier: (p, tier) => authorizer.hasTier(p, tier),
+            ...(withPeople ? { people: new PeopleDirectory({ db: h.db, appId: 'cli_app', canTalk: () => true }) } : {}),
+          }),
+        }
+      : {}),
   });
 }
 
@@ -128,6 +140,18 @@ describe('/cron', () => {
     const reply = await say(r, '/cron add "every 2h" worker Check with sk-live-1234567890.\nscript: gh pr list');
     expect(reply).toMatch(/\nScript: `gh pr list`$/);
     expect(getJob(h.db, listJobs(h.db)[0]?.jobId ?? '')?.prompt).toBe(`Check with ${MASK}.`);
+  });
+
+  it("names a job's maker in show by the name Lark gave, noted from the sender, else by principal, two of one name told apart", async () => {
+    const r = router(true, true);
+    await say(r, '/cron add "every 2h" worker Check.');
+    const jobId = listJobs(h.db)[0]?.jobId ?? '';
+    expect(await say(r, `/cron show ${jobId}`, { sender: TALKER })).toContain(', made by Owner, ');
+    notePerson(h.db, { appId: 'cli_app', unionId: 'on_owner2', openId: 'ou_owner2', name: 'Owner' }, NOW);
+    expect(await say(r, `/cron show ${jobId}`, { sender: TALKER })).toContain(', made by Owner \\(on\\_owner\\), ');
+    // Without the directory, the principal, as before.
+    const plain = router();
+    expect(await say(plain, `/cron show ${jobId}`)).toContain(', made by lark:on\\_owner, ');
   });
 
   it('lets talk tier list, show and see the help, and refuses the rest; a sender with no union_id changes nothing', async () => {

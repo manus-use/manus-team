@@ -77,15 +77,26 @@ describe('the command table', () => {
     expect(parsed.arg).toBe('task new A task\nassignee: implementer');
   });
 
-  it('runs /auth and /roles at talk tier, one line, without a session and never refused mid-turn', () => {
-    for (const name of ['auth', 'roles']) {
+  it('runs /auth and /role at talk tier, one line, without a session and never refused mid-turn', () => {
+    for (const name of ['auth', 'role']) {
       const parsed = parseCommand(`/${name} list\nmore`);
       if (parsed === undefined || !('spec' in parsed)) throw new Error(`/${name} did not parse`);
       expect(parsed.spec).toMatchObject({ name, tier: 'talk', needsSession: false, mutating: false, multiline: false, effect: 'immediate' });
       expect(parsed.arg).toBe('list');
     }
     expect(renderHelp()).toContain('`/auth <command>`');
-    expect(renderHelp()).toContain('`/roles`');
+  });
+
+  it('keeps /roles as an alias of /role, naming the verb typed, and shows /role list first in /help', () => {
+    const role = parseCommand('/role list');
+    const roles = parseCommand('/ROLES');
+    if (role === undefined || !('spec' in role)) throw new Error('/role did not parse');
+    if (roles === undefined || !('spec' in roles)) throw new Error('/roles did not parse');
+    expect(roles.spec).toBe(role.spec);
+    expect(role.verb).toBe('role');
+    expect(roles.verb).toBe('roles');
+    expect(roles.arg).toBe('');
+    expect(renderHelp()).toContain('`/role list` (or `/roles`): The roles, ');
   });
 
   it('has no /approve', () => {

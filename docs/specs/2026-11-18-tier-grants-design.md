@@ -1,11 +1,11 @@
-# Tier grants, and `/roles`: who may talk, and who can work, from chat
+# Tier grants, and `/role list`: who may talk, and who can work, from chat
 
 **Date:** 2026-11-18
 **Status:** draft, for review
 **Scope:** plan X. `/auth grant`, `/auth revoke` and `/auth list` in chat, and `mt auth grant`,
 `revoke` and `list` at the terminal: a person given talk or operate tier by a row in the database,
 counted beside `auth.owner`, `auth.talk` and `auth.operate`, at once and with no restart. And
-`/roles` in chat (§13): the gateway's roles, what each is for, whether it can be given work, where
+`/role list`, or `/roles`, in chat (§13): the gateway's roles, what each is for, whether it can be given work, where
 it works and how many of its runs are open.
 
 This document assumes [`../architecture.md`](../architecture.md), the Lark channel spec,
@@ -807,21 +807,28 @@ counted once.
 
 ---
 
-## 13. `/roles` in chat
+## 13. `/role list` in chat
 
 A person in chat who wants to give work to a role, by `/kanban task new` or by asking an operator
 for a cron job or a workflow, has no way to learn the roles' names, what each is for, or whether
-one is busy: `mt role list` is at the terminal. `/roles` says it in chat.
+one is busy: `mt role list` is at the terminal. `/role list` says it in chat, and `/roles`, its
+alias, says the same.
 
 ### 13.1 The command
 
-- **`/roles`, top level, at talk tier**, registered in `COMMANDS` as `/sessions` is: `needsSession:
+- **`/role list`, top level, at talk tier**, registered in `COMMANDS` as `/role`, with `/roles` as
+  its alias the way `/ls` is for `/sessions`: one spec, so the tier cannot differ. `needsSession:
   false`, `effect: 'immediate'`, `multiline: false`, `mutating: false`, so a busy session never
-  refuses it, and `/help` lists it. *Why not under `/kanban`:* roles are not the board's alone; cron
+  refuses it, and `/help` lists it as "`/role list` (or `/roles`)". *Why `/role list`:* it reads as
+  the terminal's `mt role list` does, and leaves `/role` room for more verbs. *Why keep `/roles`:*
+  people already type it. The parser gives the router the verb as typed, so the two can take
+  different arguments. *Why not under `/kanban`:* roles are not the board's alone; cron
   jobs name a role (cron §2.3) and workflows name roles (workflows spec §1), and both work with the
   board off.
-- **Takes no argument.** `/roles` with anything after it is answered with one line, "Usage:
-  `/roles`, with nothing after it.", sent with the dedupe key `roles-usage`, and lists nothing.
+- **`/role` takes `list` and nothing more; `/roles` takes nothing.** `/role` alone, `/role` with
+  a word other than `list`, and either with anything after it are answered with one line, "Usage:
+  `/role list`, or `/roles`, with nothing after it.", sent with the dedupe key `roles-usage`, and
+  list nothing. Both lists are sent with the key `roles`.
   *Why refuse rather than ignore:* a word after it reads as a filter, and a full list in answer to
   `/roles worker` would look like a filter that matched everything.
 - **With the board off it works**, and the running column says `–` for every role (§13.2): with
@@ -920,7 +927,8 @@ At most 30 lines, `LIST_MAX`'s number for `/kanban task list`, then one more, ex
 
 ### 13.6 Wiring
 
-- **`src/core/commands.ts`** gains `roles`; **`src/core/router.ts`** its `case 'roles'`, with a
+- **`src/core/commands.ts`** gains `role`, alias `roles`, usage `/role list` and `helpAlias:
+  '/roles'`, and `parseCommand` gives the verb as typed; **`src/core/router.ts`** its `case 'role'`, with a
   dependency `roles?: () => string`, synchronous, giving the reply's text, which the router masks.
   Absent (the tests, a caller that gives none), the reply is one plain line, "The roles cannot be
   listed here."; a throw is caught, noted masked (`redactKnownSecrets`), and answered "Could not
@@ -935,7 +943,7 @@ At most 30 lines, `LIST_MAX`'s number for `/kanban task list`, then one more, ex
 - **`src/index.ts`**: the dependency, over `team.roles`, `config.kanban.enabled`,
   `roleMdFirstLine`, `openAgentRunCountAs` on the gateway's database and `roleLimit` with
   `config.kanban.maxRunningPerRole`.
-- **Docs, as built**: `/help`'s line, from the registry; the README's command table gains `/roles`,
+- **Docs, as built**: `/help`'s line, from the registry; the README's command table gains `/role list`, `/roles`,
   talk, "The roles, what each is for, whether it can be given work, and its open runs"; the
   README's `description` row and `config.example.yaml`'s comment on a role's `description` say that
   `/roles` shows it in chat, to anyone at talk tier, as it shows the first line of `role.md` when
@@ -955,8 +963,9 @@ At most 30 lines, `LIST_MAX`'s number for `/kanban task list`, then one more, ex
   the text.
 - **The count**: a work run and a review run of one role both counted, a person's run not, a
   decided run still counted until it closes, a cron fire of the role not.
-- **Router**: `/roles` at talk tier, refused silently without it, listed in `/help`, answered while
-  a session is busy, and with the board off; `/roles x` answered with the usage, key
+- **Router**: `/role list` and `/roles` at talk tier, the same reply with the key `roles`, refused
+  silently without it, listed in `/help` as "`/role list` (or `/roles`)", answered while
+  a session is busy, and with the board off; `/role`, `/role x`, `/role list x` and `/roles x` answered with the usage, key
   `roles-usage`; no dependency answered with the plain line; a throwing dependency answered "Could
   not list the roles." and noted masked.
 
@@ -1043,3 +1052,10 @@ workspace shown "any (default)"; a role with no limit shown by its count alone; 
 `openAgentRunCountAs`, review runs against their reviewer role, and cron fires and chat sessions
 not, as `max_running` itself counts; `role.md`'s line read at each `/roles`; and the terminal's
 commands named as `mt role list` and `mt role check`, since there is no `mt role show`.
+*Amended on 2026-11-18, for `/role list`.* The user approved naming the command `/role list`, as
+the terminal's `mt role list`, with `/roles` kept as its alias the way `/ls` is for `/sessions`,
+both giving the same reply, and `/role` alone or with an unknown word answered with a usage line
+naming `list` (§13.1). The main agent decided: `/help` shows the alias after the usage, "`/role
+list` (or `/roles`)", by a `helpAlias` on the spec, so the other commands' lines are unchanged;
+`/roles list` is answered with the usage, as `/roles` takes nothing; and the dedupe keys stay
+`roles` and `roles-usage`.

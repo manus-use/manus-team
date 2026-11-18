@@ -2,7 +2,8 @@ import { forDisplay } from '../channel/escape.js';
 import type { CronChat as CronChatScope, CronRefusal, FireRow, JobRow } from '../db/cron.js';
 import { lastResult } from '../db/cron.js';
 import type { Db } from '../db/open.js';
-import { label } from '../kanban/chat-render.js';
+import { label, personText } from '../kanban/chat-render.js';
+import type { PeopleDirectory } from '../kanban/people.js';
 import { redactKnownSecrets } from '../secrets.js';
 import type { BindingKey, InboundMessage, Principal, Tier } from '../types.js';
 import { formatWall } from './schedule.js';
@@ -22,6 +23,11 @@ export interface CronChatDeps {
   hasTier(principal: Principal, tier: Tier): boolean;
   /** After a change: a tick in process, so a run fires at once (§4.5). */
   changed?: () => void;
+  /**
+   * The people this bot has seen (kanban spec §9.3): each sender is noted, and
+   * a job's maker is named by name in `show`. Absent, the maker is shown by principal.
+   */
+  people?: Pick<PeopleDirectory, 'saw' | 'chatName'>;
 }
 
 type Verb = 'add' | 'list' | 'show' | 'pause' | 'resume' | 'run' | 'remove' | 'help';
@@ -148,6 +154,8 @@ export class CronChat {
     if (!(verb in TIERS)) return `Unknown \`/cron\` command \`${forDisplay(verb)}\`. ${this.#help()}`;
     const v = verb as Verb;
     const by = message.sender.unionId === null || message.sender.unionId === '' ? undefined : `lark:${message.sender.unionId}`;
+    // Noted, as `/kanban` and `/auth` note a sender, so the job's maker has a name to be shown by.
+    this.#deps.people?.saw({ openId: message.sender.openId, unionId: message.sender.unionId, name: message.sender.displayName ?? null });
     if (TIERS[v] === 'operate') {
       if (!this.#deps.hasTier(message.sender, 'operate')) return `\`/cron ${v}\` changes a cron job, and needs operator permission.`;
       if (by === undefined) return NO_UNION_ID;
@@ -236,7 +244,7 @@ export class CronChat {
   #show(job: JobRow, fires: readonly FireRow[]): string {
     const lines = [
       `${id(job.jobId)} *${label(job.name, 100)}*: ${forDisplay(job.schedule)} (${forDisplay(job.tz)}), ${job.state}, next ${when(job, job.nextRunAt)}`,
-      `role ${forDisplay(job.role)}, workspace ${forDisplay(job.workspace)}, made by ${forDisplay(job.createdBy)}, ${job.failures} failure(s) in a row`,
+      `role ${forDisplay(job.role)}, workspace ${forDisplay(job.workspace)}, made by ${personText(job.createdBy, (p) => this.#deps.people?.chatName(p))}, ${job.failures} failure(s) in a row`,
       `prompt: ${label(job.prompt, 600)}`,
       ...(job.script === null ? [] : [`script: ${label(job.script, 600)}`]),
     ];

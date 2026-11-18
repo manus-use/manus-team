@@ -35,7 +35,10 @@ import {
   renderReviewCard,
   renderShow,
   renderTaskCard,
+  personText,
+  titleText,
   type CardFacts,
+  type NameOf,
 } from './chat-render.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { CARD_SEND_MS } from './cards.js';
@@ -247,6 +250,7 @@ export class KanbanChat {
 
   /** Run `/kanban <arg>` from this message, bound at `key`; the reply to send, and for a task given a thread, the task. */
   async run(arg: string, message: InboundMessage, key: BindingKey): Promise<KanbanAnswer> {
+    this.#names = undefined;
     const answer = await this.#run(arg, message, key);
     return typeof answer === 'string' ? { text: answer } : answer;
   }
@@ -318,14 +322,14 @@ export class KanbanChat {
       case 'list': {
         // The chat's board alone (spec §16).
         const board = this.#deps.service.chatBoard(chatAt(key)).name;
-        return renderList(this.#deps.service.list(board), command.filter, board);
+        return renderList(this.#deps.service.list(board), command.filter, board, this.#nameOf);
       }
       case 'show': {
         // A task on any board, by id, with its board named (spec §16).
         const r = this.#deps.service.show(command.taskId);
         if (!r.ok) return refused(r);
         const gates = this.#deps.service.listGates(command.taskId);
-        return renderShow(r.view, gates.ok ? gates.gates : [], this.#deps.service.chatBoard(chatAt(key)).name);
+        return renderShow(r.view, gates.ok ? gates.gates : [], this.#deps.service.chatBoard(chatAt(key)).name, this.#nameOf);
       }
       case 'board list': {
         // This chat's own board is always listed, archived or not, so it is marked.
@@ -334,7 +338,7 @@ export class KanbanChat {
       }
       case 'gate list': {
         const r = this.#deps.service.listGates(command.taskId);
-        return r.ok ? renderGates(command.taskId, r.gates) : refused(r);
+        return r.ok ? renderGates(command.taskId, r.gates, this.#nameOf) : refused(r);
       }
       case 'workflow list':
       case 'workflow instances':
@@ -466,7 +470,7 @@ export class KanbanChat {
   #workflowRead(command: WorkflowCommand, message: InboundMessage, key: BindingKey): string {
     const service = this.#deps.service;
     const board = service.chatBoard(chatAt(key));
-    const nameOf = (p: string): string | undefined => this.#deps.people.nameOf(p);
+    const nameOf = this.#nameOf;
     switch (command.verb) {
       case 'workflow list': {
         const list = service.workflows();
@@ -496,7 +500,7 @@ export class KanbanChat {
           board: board.name,
         });
         if (!r.ok) return refused(r);
-        return renderPreview(command.name, r.dag, (name) => this.#whom({ kind: name.includes(':') ? 'human' : 'role', name }));
+        return renderPreview(command.name, r.dag, (name) => this.#whom({ kind: name.includes(':') ? 'human' : 'role', name }), this.#nameOf);
       }
       default:
         return renderHelp();
@@ -552,7 +556,7 @@ export class KanbanChat {
   }
 
   #started(made: WorkflowMade, where: 'thread' | 'chat'): string {
-    return renderStarted(startedReply(made), where, (a) => this.#whom(a));
+    return renderStarted(startedReply(made), where, (a) => this.#whom(a), this.#nameOf);
   }
 
   /**
@@ -751,6 +755,7 @@ export class KanbanChat {
    * payload does not match, changes nothing.
    */
   async card(action: InboundCardAction): Promise<string> {
+    this.#names = undefined;
     const v = action.value;
     const verb = field(v, 'act');
     const taskId = field(v, 'task');
@@ -810,8 +815,9 @@ export class KanbanChat {
       this.#track(this.#redrawLive(press, empty));
       return empty;
     }
-    // A presser with no name is shown on the card through Lark's person element, by open_id.
-    const name = presser.displayName === null || presser.displayName === undefined ? undefined : label(presser.displayName, 80);
+    // By chat name, two of one name told apart; one with no name is shown through Lark's person element, by open_id.
+    const named = this.#nameOf(by) ?? presser.displayName ?? undefined;
+    const name = named === undefined || named === '' ? undefined : label(named, 80);
     this.#busy.add(press.messageId);
     this.#track(this.#press(verb, press, by, name ?? { openId: presser.openId }, text).finally(() => this.#busy.delete(press.messageId)));
     return `${{ done: 'Completing', block: 'Blocking', approve: 'Approving', changes: 'Asking for changes on' }[verb]} ${id(taskId)}: the card shows how it goes.`;
@@ -824,9 +830,10 @@ export class KanbanChat {
    * always drawn after it.
    */
   async #press(verb: ReportCommand['verb'], press: Press, by: string, who: string | { openId: string }, text: string): Promise<void> {
+    this.#names = undefined;
     const shown = this.#deps.service.show(press.run.taskId);
     const task = shown.ok ? shown.view.task : { taskId: press.run.taskId, title: '' };
-    const working = this.#redraw(press.messageId, renderCardOutcome(task, 'Working on it…'));
+    const working = this.#redraw(press.messageId, renderCardOutcome(task, 'Working on it…', undefined, this.#nameOf));
     let r: { ok: true; task: TaskRow; run?: RunRow | undefined } | Refusal;
     try {
       const as = verb === 'done' || verb === 'block' ? 'assignee' : press.run.assignee.name === by ? 'reviewer' : 'operator';
@@ -853,17 +860,18 @@ export class KanbanChat {
       block: `Blocked${byName}: ${label(text, 300)}`,
       changes: `Changes requested${byName}: ${label(text, 300)}`,
     }[verb];
-    await this.#redraw(press.messageId, renderCardOutcome(task, outcome, typeof who === 'string' ? undefined : who.openId));
+    await this.#redraw(press.messageId, renderCardOutcome(task, outcome, typeof who === 'string' ? undefined : who.openId, this.#nameOf));
   }
 
   /** A card for a run that is over: redrawn so, and said so. */
   async #outOfDate(press: Press, task: { taskId: string; title: string }): Promise<string> {
-    await this.#redraw(press.messageId, renderCardOutcome(task, 'This card is out of date: the task has moved on since it was sent.'));
+    await this.#redraw(press.messageId, renderCardOutcome(task, 'This card is out of date: the task has moved on since it was sent.', undefined, this.#nameOf));
     return outOfDate(task.taskId);
   }
 
   /** The card redrawn as it was, from the board as it is, with why the press did nothing, and buttons of the next attempt. */
   async #redrawLive(press: Press, note: string): Promise<void> {
+    this.#names = undefined;
     const reading = this.#deps.service.cardReading(press.run.runId);
     if (reading === undefined) return;
     // A run that ended meanwhile -- typed, stopped, reassigned -- has no card to press again.
@@ -875,7 +883,7 @@ export class KanbanChat {
       ...reading,
       attempt: press.attempt,
       note: `**Not done.** ${note}`,
-      nameOf: (p) => this.#deps.people.nameOf(p),
+      nameOf: this.#nameOf,
     };
     const view = press.run.kind === 'review' ? renderReviewCard(facts, this.#deps.appId) : renderTaskCard(facts, this.#deps.appId);
     await this.#redraw(press.messageId, { ...view, markdown: redactKnownSecrets(view.markdown) });
@@ -1033,7 +1041,7 @@ export class KanbanChat {
           ? ' Their card comes in this thread when it is ready, or by direct message if they are not in this group.'
           : ' They are sent it as a card, in a direct message, once it is ready.';
     return (
-      `Created ${id(task.taskId)}: **${label(task.title)}**, for ${whom}` +
+      `Created ${id(task.taskId)}: **${titleText(task.title, this.#nameOf)}**, for ${whom}` +
       `${task.workspace === null ? '' : `, in ${label(task.workspace)}`}` +
       `${task.board === DEFAULT_BOARD ? '' : `, on board ${boardName(task.board)}`}.${card} ` +
       `${where === 'thread' ? 'This thread' : 'This chat'} hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.`
@@ -1067,11 +1075,20 @@ export class KanbanChat {
     return found.ok ? { ok: true, name: personPrincipal(found.unionId) } : { ok: false, reply: found.reply };
   }
 
-  /** A role, as a role; a person, by the name Lark last gave, with their principal. */
+  /** What a reply calls a person (spec §9.3): the people directory's chat name, two of one name told apart. */
+  readonly #nameOf: NameOf = (principal) => (this.#names ??= this.#deps.people.chatNames())(principal);
+
+  /**
+   * The people table as read for the reply being made: read at its first name,
+   * and dropped as each command, press or redraw starts, so a reply naming many
+   * people reads it once and the next reply reads it afresh.
+   */
+  #names: NameOf | undefined;
+
+  /** A role, as a role; a person by name, else by principal (spec §9.3), never mentioned. */
   #whom(a: Assignee): string {
     if (a.kind === 'role') return `role ${forDisplay(a.name)}`;
-    const name = this.#deps.people.nameOf(a.name);
-    return name === undefined ? label(a.name, 80) : `${label(name, 80)} (${label(a.name, 80)})`;
+    return personText(a.name, this.#nameOf);
   }
 
   /** An agent run the change decided: its turn is cancelled, and it closes when the turn ends. */

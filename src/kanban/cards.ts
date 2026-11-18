@@ -199,7 +199,8 @@ export class CardPoster {
       return false;
     }
     if (this.#deps.canTalk !== undefined && !this.#deps.canTalk(run.assignee.name)) {
-      this.#refused(run, `${run.assignee.name} no longer has talk tier on this gateway`);
+      // Not by principal: the notice that tells of it names the person already (spec §9.3).
+      this.#refused(run, 'they no longer have talk tier on this gateway');
       return false;
     }
     const reading = this.#reading(run);

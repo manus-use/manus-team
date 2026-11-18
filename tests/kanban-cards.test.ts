@@ -157,7 +157,7 @@ describe('CardPoster', () => {
     expect(eventsOf(t.db, task.taskId).at(-1)).toMatchObject({
       kind: 'card_failed',
       runId: run.runId,
-      payload: { error: `${ALICE} no longer has talk tier on this gateway` },
+      payload: { error: 'they no longer have talk tier on this gateway' },
     });
   });
 
@@ -191,7 +191,7 @@ describe('CardPoster', () => {
     expect(await round).toBe(1);
     expect(eventsOf(t.db, second.taskId).some((e) => e.kind === 'card_failed')).toBe(false);
     expect(notes).toContain(
-      `kanban: the card of run ${run.runId} cannot be sent (${BOB} no longer has talk tier on this gateway); ` +
+      `kanban: the card of run ${run.runId} cannot be sent (they no longer have talk tier on this gateway); ` +
         'its run is over, or its card was recorded already, so nobody is told',
     );
   });

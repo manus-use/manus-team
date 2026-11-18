@@ -4,7 +4,7 @@ import { formatWall } from '../cron/schedule.js';
 import { activeGrants, grantTier, revokeGrant, talkGrantsMadeBy, type GrantRow } from '../db/grants.js';
 import type { Db } from '../db/open.js';
 import { peopleOf, personOf } from '../db/people.js';
-import { label } from '../kanban/chat-render.js';
+import { label, personText } from '../kanban/chat-render.js';
 import { personPrincipal, unionIdOf, type PeopleDirectory } from '../kanban/people.js';
 import { systemClock, type Clock } from '../time.js';
 import type { InboundMention, InboundMessage, Principal } from '../types.js';
@@ -105,6 +105,8 @@ export class AuthChat {
     // Noted first, as /kanban notes them: the person granted can be named by principal at once, and has a name in the lists.
     this.#deps.people.saw(seen(message.sender));
     for (const m of message.mentions ?? []) this.#deps.people.saw(seen(m));
+    // The people table read once for this reply, after the noting (kanban spec §9.3).
+    this.#names = this.#deps.people.chatNames();
     switch (verb) {
       case 'list':
         return rest === '' ? this.#list() : HELP;
@@ -171,7 +173,7 @@ export class AuthChat {
       const unionId = unionIdOf(rest);
       if (unionId === undefined || !/^[A-Za-z0-9_-]{1,64}$/.test(unionId)) return `${label(rest, 80)} is not a person: a person is \`lark:<union_id>\`, which \`/auth list\` shows.`;
       const p = personOf(this.#deps.db, this.#deps.appId, unionId);
-      found = { unionId, openId: p?.openId ?? null, who: p?.name === null || p?.name === undefined ? label(rest, 80) : label(p.name, 80) };
+      found = { unionId, openId: p?.openId ?? null, who: label(this.#chatName(unionId) ?? p?.name ?? rest, 80) };
     } else if (rest.startsWith('@')) {
       found = this.#mentioned(rest, message);
     } else {
@@ -249,20 +251,28 @@ export class AuthChat {
   #mentioned(name: string, message: InboundMessage): Named | Unnamed {
     const found = mentionedPerson(name, message);
     if (!found.ok) return { refused: found.reply, reason: found.reason };
-    return { unionId: found.unionId, openId: found.openId, who: label(found.name ?? name.slice(1).trim(), 80) };
+    return { unionId: found.unionId, openId: found.openId, who: label(this.#chatName(found.unionId) ?? found.name ?? name.slice(1).trim(), 80) };
   }
 
   #words(who: string, principal: string, sender: Principal): Words {
     const u = sender.unionId;
-    const by = sender.displayName === null || sender.displayName === '' ? label(u === null ? sender.openId : personPrincipal(u), 80) : label(sender.displayName, 80);
+    const name = (u === null || u === '' ? undefined : this.#chatName(u)) ?? sender.displayName ?? '';
+    const by = label(name !== '' ? name : u === null ? sender.openId : personPrincipal(u), 80);
     return { via: 'chat', who, principal, by, from: this.#deps.auth.from, held: (g) => `${this.#nameOf(g.by)} on ${this.#day(g.at)}` };
   }
 
-  /** A grant's maker, by the name Lark last gave for them, else their principal. */
+  /** A grant's maker, by name, two of one name told apart, else their principal (kanban spec §9.3). */
   #nameOf(principal: string): string {
-    const name = this.#deps.people.nameOf(principal);
-    return label(name ?? principal, 80);
+    return personText(principal, (p) => this.#names(p));
   }
+
+  /** A person by union_id as chat names them, two of one name told apart; undefined with no name known. */
+  #chatName(unionId: string): string | undefined {
+    return this.#names(personPrincipal(unionId));
+  }
+
+  /** The people table as read for the reply being made (kanban spec §9.3). */
+  #names: (principal: string) => string | undefined = (p) => this.#deps.people.chatName(p);
 
   #day(at: number): string {
     return formatWall(this.#deps.zone, at).slice(0, 10);

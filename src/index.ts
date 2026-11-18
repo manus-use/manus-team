@@ -428,7 +428,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       channels: new Map<string, Channel>([[adapter.id, adapter]]),
       appId: config.lark.appId,
       blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
-      nameOf: (principal) => people.nameOf(principal),
+      // By name, two of one name told apart (spec §9.3); the agent's prompts keep nameOf.
+      nameOf: (principal) => people.chatName(principal),
       note,
     });
     // A person's run is sent its card: in its task's thread when they are in the group, else as a
@@ -439,7 +440,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       service,
       channel: adapter,
       appId: config.lark.appId,
-      nameOf: (principal) => people.nameOf(principal),
+      nameOf: (principal) => people.chatName(principal),
       canTalk: (principal) => people.canTalk(principal),
       held: (taskId) => chat.held(taskId),
       note,
@@ -481,7 +482,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     });
     const s = scheduler;
     cronApi = new CronApi({ db, service: cronService, tokens, appId: config.lark.appId, changed: () => s.tick() });
-    cronChat = new CronChat({ db, service: cronService, hasTier: (principal, tier) => authorizer.hasTier(principal, tier), changed: () => s.tick() });
+    cronChat = new CronChat({ db, service: cronService, hasTier: (principal, tier) => authorizer.hasTier(principal, tier), changed: () => s.tick(), people });
   }
   const cronNote = cronLine(config.cron, jobCounts(db), zone);
   if (cronNote !== undefined) note(cronNote);
@@ -513,7 +514,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     ...(kanbanChat === undefined ? {} : { kanban: kanbanChat }),
     ...(cronChat === undefined ? {} : { cron: cronChat }),
     auth: authChat,
-    // The gateway's roles, read at each /roles, the board on or off (tier grants spec §13).
+    // The gateway's roles, read at each /role list or /roles, the board on or off (tier grants spec §13).
     roles: () => rolesReply(db, team.roles, config.kanban),
     // Each turn's sender's tier, against its session's cron token (the cron spec, §7.1).
     ...(tokens === undefined ? {} : { cronTurns: tokens }),

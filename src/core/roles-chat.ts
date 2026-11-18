@@ -4,7 +4,7 @@ import { label } from '../kanban/chat-render.js';
 import { roleLimit, roleMdFirstLine, type Role } from '../roles.js';
 
 /**
- * `/roles` in chat (the tier grants spec §13): one line a role, sorted by
+ * `/role list`, or `/roles`, in chat (the tier grants spec §13): one line a role, sorted by
  * name, with what it is for, whether it can be given work, where it works and
  * its open agent runs against its `max_running`, in the layout of the
  * gateway's other chat lists. Nothing of how a role runs: its command, driver,
@@ -45,7 +45,7 @@ function roleLine(role: Role, view: RolesView): string {
   return `**${label(role.name, 80)}**: ${what} · can be given work: ${work} · workspace ${workspace} · running ${running}`;
 }
 
-/** The reply to `/roles`: the roles given, by name, at most `ROLES_MAX` lines and then how many more. */
+/** The reply to `/role list` and `/roles`: the roles given, by name, at most `ROLES_MAX` lines and then how many more. */
 export function renderRoles(roles: Iterable<Role>, view: RolesView): string {
   const sorted = [...roles].sort((a, b) => a.name.localeCompare(b.name));
   const lines = sorted.slice(0, ROLES_MAX).map((r) => roleLine(r, view));
@@ -55,7 +55,7 @@ export function renderRoles(roles: Iterable<Role>, view: RolesView): string {
 }
 
 /**
- * `/roles` over the gateway's roles and database: `role.md` read now, the
+ * `/role list` over the gateway's roles and database: `role.md` read now, the
  * open runs as the dispatcher's limit counts them, and the limit `roleLimit`
  * gives, the role's own or `kanban.max_running_per_role`.
  */

@@ -85,7 +85,7 @@ describe("/kanban task new in a group, for a thread of its own", () => {
   it('answers a fresh task at chat scope in the words of its thread, with the quoted words beside them, naming the task', async () => {
     const answer = await chat().run(FOR_ALICE, message(TEAM), TEAM);
     const taskId = idOf(answer.text);
-    const head = `Created \`${taskId}\`: **Check the links**, for Alice Smith (lark:on\\_alice).`;
+    const head = `Created \`${taskId}\`: **Check the links**, for Alice Smith.`;
     expect(answer).toEqual({
       text: `${head} Their card comes in this thread when it is ready, or by direct message if they are not in this group. This thread ${HEARS}`,
       quoted: `${head} They are sent it as a card, in a direct message, once it is ready. This chat ${HEARS}`,
@@ -168,7 +168,7 @@ describe('the hold on a task whose thread is being made (spec §19.4)', () => {
 
   it('ends the hold when the reply cannot be rendered after the create, which stands, at chat scope', async () => {
     const c = chat();
-    people.nameOf = () => {
+    people.chatNames = () => () => {
       throw new Error('the people table is locked');
     };
     await expect(c.run(FOR_ALICE, message(TEAM), TEAM)).rejects.toThrow('the people table is locked');
