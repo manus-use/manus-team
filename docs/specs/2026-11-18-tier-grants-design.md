@@ -805,15 +805,17 @@ one is busy: `mt role list` is at the terminal. `/roles` says it in chat.
   refuses it, and `/help` lists it. *Why not under `/kanban`:* roles are not the board's alone; cron
   jobs name a role (cron §2.3) and workflows name roles (workflows spec §1), and both work with the
   board off.
-- **Takes no argument.** Anything after it is answered with the usage, "`/roles` takes no
-  arguments", as `/sessions` would be if it took none.
+- **Takes no argument.** `/roles` with anything after it is answered with one line, "Usage:
+  `/roles`, with nothing after it.", sent with the dedupe key `roles-usage`, and lists nothing.
+  *Why refuse rather than ignore:* a word after it reads as a filter, and a full list in answer to
+  `/roles worker` would look like a filter that matched everything.
 - **With the board off it works**, and the running column says `–` for every role (§13.2): with
   `kanban.enabled` unset no dispatcher runs, so no limit applies.
 
 ### 13.2 A line a role
 
-One line a role, in the order of their names, as `mt role list` orders them, each the role's name
-in bold and then four fields separated by ` · `, the layout of `/kanban task list` and `/sessions`:
+One line a role, sorted by name with `localeCompare`, each the role's name in bold and then four
+fields separated by ` · `, the layout of `/kanban task list` (`renderList`) and `/status`:
 
 ```
 **worker**: general research and writing · can be given work: yes · workspace worker · running 1 of 2
@@ -824,17 +826,29 @@ in bold and then four fields separated by ` · `, the layout of `/kanban task li
 *Why lines, not the user's aligned table:* chat replies render through Lark's card markdown, which
 has no table the gateway uses; a code block would align only in a fixed-width font, would break
 with names in CJK, and would show `label`'s escapes as written. Every list the gateway sends in
-chat is lines with ` · ` (`renderList`, `/sessions`), and the fields are the user's, in the user's
+chat is lines with ` · ` (`renderList`, `/status`), and the fields are the user's, in the user's
 order. The fields:
 
 - **What it's for**: the role's `config.yaml` `description` (`Role.description`), else the first
-  line of its `role.md` that is not empty, a leading `#` and spaces taken off, read from
-  `Role.roleMdPath` when `/roles` runs, as a claim reads `role.md` at each claim; else `–`. Shown
-  through `label`, cut to 80. A `role.md` that cannot be read gives `(role.md unreadable)`, and
-  the line still comes. The role `default` from the gateway's `agent:` block has neither, and
-  shows `–`.
+  line of its `role.md` that is not empty, else `–`. Shown through `label`, cut to 80. The role
+  `default` from the gateway's `agent:` block has neither, and shows `–`. `role.md` is read when
+  `/roles` runs, as a claim reads it at each claim, by `roleMdFirstLine(path)` in `src/roles.ts`:
+  - **The file is checked first**: an `lstat` of `Role.roleMdPath`, which must be a regular file and
+    not a symbolic link, as `readRoleMd` requires at the start (kanban §2.1). Anything else, or an
+    `lstat` or a read that fails, gives `(role.md unreadable)`, and the line still comes.
+  - **At most an 8 KiB prefix is read**, with `open` and `read`, never the whole file; a partial UTF-8
+    character at the prefix's end is dropped.
+  - **The first non-empty line is used only if it ends inside the prefix.** A line still going at
+    8 KiB gives `–`. *Why never a cut line:* the masker matches whole values, so a secret that
+    crossed the limit would reach the reply as its first half, unmatched; a line read whole is
+    masked whole.
+  - **`^#+\s*` is stripped**, so a heading shows as its words.
+  - **A `role.md` added after the start is not seen**: `roleMdPath` was fixed when the role loaded,
+    undefined for a role that had none, so the field shows `–` until the restart, as the role's
+    claims do not read it either.
 - **Can be given work**: from `agent.unsupervised` (`Role.agent.unsupervised`). Unsupervised gives
-  `yes`. Supervised gives `board only (supervised)`. *Why not the user's "no (supervised)":* the
+  `yes`. Supervised gives `board only (supervised)`, and with the board off, `no (supervised; the
+  board is off)`, as cron refuses a supervised role and nothing else would take one. *Why not the user's "no (supervised)":* the
   code accepts a supervised role on the board, where its approval cards go to the chat that follows
   the task (`supervisedRoles: true` in `src/index.ts`, kanban §7.1), and refuses one only for a cron
   job (cron §2.3). "no" would tell a person not to assign a task that the board takes. The words
@@ -866,8 +880,8 @@ order. The fields:
 
 ### 13.4 The cut
 
-At most 30 lines, `LIST_MAX`'s number for `/kanban task list`, then "… and N more; mt role list
-shows all". *Why 30:* a reply past it is a scroll in chat, and Lark cuts a long card.
+At most 30 lines, `LIST_MAX`'s number for `/kanban task list`, then one more, exactly
+`… and N more; mt role list shows all`, N the roles left out. *Why 30:* a reply past it is a scroll in chat, and Lark cuts a long card.
 
 ### 13.5 The cases
 
@@ -889,30 +903,53 @@ shows all". *Why 30:* a reply past it is a scroll in chat, and Lark cuts a long 
 ### 13.6 Wiring
 
 - **`src/core/commands.ts`** gains `roles`; **`src/core/router.ts`** its `case 'roles'`, with a
-  `roles` dependency giving the reply's text, which the router masks.
-- **`src/core/roles-chat.ts`**, `renderRoles(roles, { running })`: the lines of §13.2, the cut of
-  §13.4; `running(name)` the count and limit, or undefined with the board off.
+  dependency `roles?: () => string`, synchronous, giving the reply's text, which the router masks.
+  Absent (the tests, a caller that gives none), the reply is one plain line, "The roles cannot be
+  listed here."; a throw is caught, noted masked (`redactKnownSecrets`), and answered "Could not
+  list the roles.", as `/kanban`'s failures are.
+- **`src/roles.ts`** gains `roleMdFirstLine(path)`, the read of §13.2, beside `readRoleMd`, which
+  checks the same file at the start.
+- **`src/core/roles-chat.ts`**, `renderRoles(roles, { firstLine, running, boardOn })`, pure: the
+  lines of §13.2 and the cut of §13.4, given each role's first line of `role.md` as read, and
+  `running(name)`, the count and limit. It imports `label` from `src/kanban/chat-render.ts`, as
+  `src/core/router.ts` already does, rather than moving it: one import, and no move of a function
+  the board's renderers all use.
 - **`src/index.ts`**: the dependency, over `team.roles`, `config.kanban.enabled`,
-  `openAgentRunCountAs` on the gateway's database and `roleLimit` with
+  `roleMdFirstLine`, `openAgentRunCountAs` on the gateway's database and `roleLimit` with
   `config.kanban.maxRunningPerRole`.
 - **Docs, as built**: `/help`'s line, from the registry; the README's command table gains `/roles`,
-  talk, "The roles, what each is for, whether it can be given work, and its open runs".
+  talk, "The roles, what each is for, whether it can be given work, and its open runs"; the
+  README's `description` row and `config.example.yaml`'s comment on a role's `description` say that
+  `/roles` shows it in chat, to anyone at talk tier, as it shows the first line of `role.md` when
+  there is none.
 
 ### 13.7 Testing
 
-- **Unit, `renderRoles`**: the description from `config.yaml`, else `role.md`'s first non-empty
-  line without its `#`, else `–`; an unreadable `role.md`; supervised and unsupervised; a set and
+- **Unit, `roleMdFirstLine`**: the first non-empty line, with `^#+\s*` stripped; a symlinked
+  `role.md` and a directory in its place giving `(role.md unreadable)`; a first line longer than
+  8 KiB giving `–`; a known secret crossing the 8 KiB limit never in the reply, masked or in part; a
+  multibyte character at the limit dropped whole; only 8 KiB read from a large file.
+- **Unit, `renderRoles`**: the description from `config.yaml`, else the first line given, else `–`;
+  a `role.md` added after the start shown `–`; sorting by `localeCompare`; supervised and
+  unsupervised, and supervised with the board off; a set and
   an unset workspace; `1 of 2`, a count with no limit, and `–` with the board off; the 30-line cut
-  and its words; a description holding a known secret shown masked; the agent's command never in
+  and its line, exactly `… and N more; mt role list shows all`; a description holding a known secret shown masked; the agent's command never in
   the text.
 - **The count**: a work run and a review run of one role both counted, a person's run not, a
   decided run still counted until it closes, a cron fire of the role not.
 - **Router**: `/roles` at talk tier, refused silently without it, listed in `/help`, answered while
-  a session is busy, and with the board off.
+  a session is busy, and with the board off; `/roles x` answered with the usage, key
+  `roles-usage`; no dependency answered with the plain line; a throwing dependency answered "Could
+  not list the roles." and noted masked.
 
 ### 13.8 Limits
 
-- **The fields are the start's**, but `role.md`'s line, which is read now (§13.5).
+- **The fields are the start's**, but `role.md`'s line, which is read now (§13.5), and a
+  `role.md` added since is not seen (§13.2).
+- **What a role is for is shown to talk tier in any chat**: its `description`, or the first line of
+  its `role.md`, reaches everyone at talk tier, in every chat the gateway acts in. An operator who
+  keeps something in either that a talk-tier person should not read must move it; the README and
+  `config.example.yaml` say so (§13.6). Masking catches only the values the masker knows.
 - **The running count is a moment's**: a pass may claim the next run as the reply is sent.
 - **"Can be given work" speaks for the board and cron**, not for a role named in a workflow, which
   takes supervised roles as the board does (workflows spec §4).
