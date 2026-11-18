@@ -10,7 +10,7 @@ import { LarkAdapter } from './channel/lark/adapter.js';
 import { LarkInbound } from './channel/lark/inbound.js';
 import { buildRoleDrivers } from './driver/build.js';
 import { buildEnv } from './driver/env.js';
-import { Authorizer } from './policy/auth.js';
+import { Authorizer, tiersOf } from './policy/auth.js';
 import { Router } from './core/router.js';
 import { DEFAULT_ROLE, DEFAULT_WORKSPACE, SessionRegistry, type BootFinding } from './core/registry.js';
 import { NamedWorkspaces } from './core/workspace.js';
@@ -326,7 +326,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     const people = new PeopleDirectory({
       db,
       appId: config.lark.appId,
-      canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
+      // The configuration's lists and the grant, as the authorizer holds them, for a person named by principal (tier grants spec §4.3).
+      canTalk: (person) => tiersOf(config.auth, person.openId, authorizer.grantOf(person.unionId)).talk,
     });
     const service = new KanbanService({
       db,

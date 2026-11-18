@@ -211,7 +211,7 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   const { appId, talk } = settings;
   const peopleMissing: PeopleMissing | undefined = appId === undefined ? 'appId' : talk === undefined ? 'owner' : undefined;
   const people =
-    appId === undefined || talk === undefined ? undefined : new PeopleDirectory({ db, appId, canTalk: (openId) => talk.includes(openId) });
+    appId === undefined || talk === undefined ? undefined : new PeopleDirectory({ db, appId, canTalk: ({ openId }) => openId !== null && talk.includes(openId) });
   // As the gateway builds its own: a supervised role's approvals go to the chat that follows its task (spec §7.1).
   const service = new KanbanService({
     db,

@@ -128,7 +128,7 @@ async function build(mode: string): Promise<Stack> {
       people: new PeopleDirectory({
         db: t.db,
         appId: 'cli_app',
-        canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
+        canTalk: ({ openId }) => openId !== null && authorizer.canTalk({ openId, unionId: null, displayName: null }),
       }),
       appId: 'cli_app',
       changed: () => d.pass(),

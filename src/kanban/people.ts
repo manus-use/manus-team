@@ -7,20 +7,26 @@ import type { People } from './service.js';
  * The people the board can give work to (spec §4.2, §9.1), as the gateway has
  * seen them in Lark.
  *
- * The board knows a person as `lark:<union_id>`; the tiers are decided by
- * open_id. Lark gives both for a sender, for whoever presses a card's button,
- * and for each person a message mentions, so each is noted as it is seen, and
- * a person named by principal alone -- typed out, or by an agent's `mt kanban
- * create` -- is checked through the open_id last seen with their union_id. A
- * person the gateway has never seen cannot be checked, and so is not given work.
+ * The board knows a person as `lark:<union_id>`; the configuration's tiers are
+ * decided by open_id. Lark gives both for a sender, for whoever presses a
+ * card's button, and for each person a message mentions, so each is noted as
+ * it is seen, and a person named by principal alone -- typed out, or by an
+ * agent's `mt kanban create` -- is checked through the open_id last seen with
+ * their union_id, and by a grant to their union_id (tier grants spec §4.3). A
+ * person the gateway has never seen is in no list, and is given work only by
+ * a grant.
  */
 
 export interface PeopleDeps {
   db: Db;
   /** This bot: open_ids are per app. */
   appId: string;
-  /** Whether an open_id has talk tier: the router's authorizer. */
-  canTalk(openId: string): boolean;
+  /**
+   * Whether a person has talk tier (tier grants spec §4.3): by the open_id
+   * `people` holds for them with this app id, null when it holds none, in the
+   * configuration's lists, or by their union_id's active grant.
+   */
+  canTalk(person: { openId: string | null; unionId: string }): boolean;
   clock?: Clock;
 }
 
@@ -63,12 +69,15 @@ export class PeopleDirectory implements People {
     return personPrincipal(p.unionId);
   }
 
-  /** Whether this person may be given work: seen, and at talk tier by the open_id last seen for them. */
+  /**
+   * Whether this person may be given work: at talk tier by the open_id last
+   * seen for them, or by a grant to their union_id, which needs no row here.
+   */
   canTalk(principal: string): boolean {
     const unionId = unionIdOf(principal);
     if (unionId === undefined) return false;
     const person = personOf(this.#deps.db, this.#deps.appId, unionId);
-    return person !== undefined && this.#deps.canTalk(person.openId);
+    return this.#deps.canTalk({ openId: person?.openId ?? null, unionId });
   }
 
   /** The name Lark last gave for this person, if any: what a notice calls them. */

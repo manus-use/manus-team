@@ -94,7 +94,7 @@ async function build(mode: string): Promise<Stack> {
   const people = new PeopleDirectory({
     db: t.db,
     appId: 'cli_app',
-    canTalk: (openId) => authorizer.canTalk({ openId, unionId: null, displayName: null }),
+    canTalk: ({ openId }) => openId !== null && authorizer.canTalk({ openId, unionId: null, displayName: null }),
   });
   const watchedRole = role('watched');
   const roles = new Map([

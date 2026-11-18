@@ -17,7 +17,7 @@ const TALK = new Set(['ou_alice']);
 beforeEach(() => {
   t = testDb();
   clock = new ManualClock();
-  people = new PeopleDirectory({ db: t.db, appId: 'cli_app', canTalk: (openId) => TALK.has(openId), clock });
+  people = new PeopleDirectory({ db: t.db, appId: 'cli_app', canTalk: ({ openId }) => openId !== null && TALK.has(openId), clock });
 });
 afterEach(() => t.close());
 
@@ -58,5 +58,25 @@ describe('PeopleDirectory', () => {
     expect(people.canTalk('lark:')).toBe(false);
     expect(unionIdOf('lark:on_x')).toBe('on_x');
     expect(unionIdOf('implementer')).toBeUndefined();
+  });
+
+  it("asks about a person by union_id, with the open_id people holds or none, so a grant is found without a row (tier grants spec §4.3)", () => {
+    const asked: Array<{ openId: string | null; unionId: string }> = [];
+    const granted = new PeopleDirectory({
+      db: t.db,
+      appId: 'cli_app',
+      canTalk: (person) => {
+        asked.push(person);
+        return person.unionId === 'on_granted';
+      },
+    });
+    people.saw({ openId: 'ou_alice', unionId: 'on_alice', name: 'Alice' });
+    expect(granted.canTalk('lark:on_granted')).toBe(true);
+    expect(granted.canTalk('lark:on_alice')).toBe(false);
+    expect(granted.canTalk('implementer')).toBe(false);
+    expect(asked).toEqual([
+      { openId: null, unionId: 'on_granted' },
+      { openId: 'ou_alice', unionId: 'on_alice' },
+    ]);
   });
 });
