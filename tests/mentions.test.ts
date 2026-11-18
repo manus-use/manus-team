@@ -57,6 +57,15 @@ describe('mentionedPerson', () => {
     });
   });
 
+  it("refuses a bot's mention, by Lark's mentioned_type, and judges one without the field as before", () => {
+    expect(mentionedPerson('@Helper', message([{ key: '@_user_1', name: 'Helper', openId: 'ou_helper', unionId: null, isBot: true }]))).toEqual({
+      ok: false,
+      reason: 'bot',
+      reply: "@Helper is a bot, and a bot's tier is configuration's.",
+    });
+    expect(mentionedPerson('@Carol Wu', message([{ ...CAROL, isBot: false }]))).toMatchObject({ ok: true, unionId: 'on_carol' });
+  });
+
   it('escapes the name it quotes, and the board calls it rather than keeping a copy', () => {
     expect(mentionedPerson('@a_b*', message([]))).toMatchObject({ reply: expect.stringContaining('@a\\_b\\*') });
     const chat = readFileSync(new URL('../src/kanban/chat.ts', import.meta.url), 'utf8');

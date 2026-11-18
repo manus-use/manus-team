@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ACK_EMOJI, KANBAN_OFF, Router, continuityLine, type InboundCardAction, type KanbanCommands } from '../src/core/router.js';
+import { ACK_EMOJI, AUTH_OFF, KANBAN_OFF, Router, continuityLine, type InboundCardAction, type KanbanCommands, type RouterDeps } from '../src/core/router.js';
 import { CARD_COALESCE_MS } from '../src/channel/card-writer.js';
 import { ChannelError } from '../src/channel/types.js';
 import { SessionRegistry } from '../src/core/registry.js';
 import { MAX_MAILBOX_DEPTH, type SessionActor } from '../src/core/session-actor.js';
 import { approvalNonce, replyUuid } from '../src/core/ids.js';
-import { Authorizer, defaultAuthConfig, type AuthConfig, type Decision } from '../src/policy/auth.js';
+import { Authorizer, defaultAuthConfig, tiersOf, type AuthConfig, type Decision } from '../src/policy/auth.js';
+import { AuthChat } from '../src/policy/auth-chat.js';
+import { tierReader } from '../src/db/grants.js';
+import { PeopleDirectory } from '../src/kanban/people.js';
 import { getApproval, pendingForSession } from '../src/db/approvals.js';
 import { resolveBinding } from '../src/db/bindings.js';
 import { lastSeq, readEvents } from '../src/db/events.js';
@@ -77,7 +80,14 @@ afterEach(() => {
 });
 
 function harness(
-  opts: { auth?: Partial<AuthConfig>; authorizer?: Authorizer; kanban?: KanbanCommands } = {},
+  opts: {
+    auth?: Partial<AuthConfig>;
+    authorizer?: Authorizer;
+    kanban?: KanbanCommands;
+    authChat?: RouterDeps['auth'] | ((db: Db, authorizer: Authorizer) => RouterDeps['auth']);
+    cronTurns?: RouterDeps['cronTurns'];
+    withGrants?: boolean;
+  } = {},
 ): Harness {
   const t = testDb();
   open.push(t);
@@ -86,7 +96,9 @@ function harness(
   const driver = new FakeDriver();
   const notes: string[] = [];
   const authorizer =
-    opts.authorizer ?? new Authorizer({ ...defaultAuthConfig(OWNER.openId), ...opts.auth });
+    opts.authorizer ??
+    new Authorizer({ ...defaultAuthConfig(OWNER.openId), ...opts.auth }, opts.withGrants === true ? { grants: { tierOf: tierReader(t.db, APP) } } : {});
+  const authChat = typeof opts.authChat === 'function' ? opts.authChat(t.db, authorizer) : opts.authChat;
   const registry = new SessionRegistry({
     db: t.db,
     drivers: new Map([['default', driver]]),
@@ -104,6 +116,8 @@ function harness(
     channelId: CHANNEL,
     appId: APP,
     ...(opts.kanban === undefined ? {} : { kanban: opts.kanban }),
+    ...(authChat === undefined ? {} : { auth: authChat }),
+    ...(opts.cronTurns === undefined ? {} : { cronTurns: opts.cronTurns }),
     clock,
     note: (line) => notes.push(line),
   });
@@ -699,6 +713,115 @@ describe('Router: /kanban', () => {
     const noted = h.notes.find((n) => n.includes('kanban command in')) ?? '';
     expect(noted).toContain(MASK);
     expect(noted).not.toContain('sk-noted');
+  });
+});
+
+describe('Router: /auth', () => {
+  afterEach(() => clearSecrets());
+
+  /** The gateway's /auth over the harness's database and authorizer, the owner's lists as configured. */
+  const gatewayAuth =
+    (lists: { allowTalk: string[]; allowOperate: string[] }) =>
+    (db: Db, authorizer: Authorizer): AuthChat =>
+      new AuthChat({
+        db,
+        appId: APP,
+        authorizer,
+        auth: { ownerOpenId: OWNER.openId, ...lists, from: { owner: 'auth.owner', talk: 'auth.talk', operate: 'auth.operate' } },
+        people: new PeopleDirectory({ db, appId: APP, canTalk: (p) => tiersOf(lists, p.openId, authorizer.grantOf(p.unionId)).talk }),
+        zone: 'UTC',
+      });
+  const LISTS = { allowTalk: [OWNER.openId], allowOperate: [OWNER.openId] };
+  const AT_GUEST = { key: '@_user_1', name: 'Guest', openId: GUEST.openId, unionId: GUEST.unionId };
+  const inGroup = (text: string, over: Partial<InboundMessage> = {}): InboundMessage =>
+    msg({ chatType: 'group', mentionedBot: true, text, mentions: [AT_GUEST], ...over });
+
+  it('is registered at talk tier, listed in /help, answered while the session is busy, and refused silently without talk', async () => {
+    const calls: string[] = [];
+    const h = harness({ authChat: { run: (arg) => (calls.push(arg), 'the tiers') } });
+    await h.router.onMessage(msg({ text: '/help' }));
+    expect(lastReply(h)).toContain('`/auth <command>`: Who may talk to the agent and operate it');
+    await working(h);
+    await h.router.onMessage(msg({ text: '/auth list' }));
+    expect(lastReply(h)).toBe('the tiers');
+    const before = h.channel.texts.length;
+    await h.router.onMessage(msg({ text: '/auth list', sender: GUEST }));
+    expect(h.channel.texts).toHaveLength(before);
+    expect(calls).toEqual(['list']);
+  });
+
+  it('says so with nothing to answer it, and answers one that throws, masked, noting it', async () => {
+    const plain = harness();
+    await plain.router.onMessage(msg({ text: '/auth list' }));
+    expect(lastReply(plain)).toBe(AUTH_OFF);
+    addSecrets(['sk-auth-12345678']);
+    const h = harness({
+      authChat: {
+        run: () => {
+          throw new Error('disk_full near sk-auth-12345678');
+        },
+      },
+    });
+    await h.router.onMessage(msg({ text: '/auth list' }));
+    expect(lastReply(h)).toBe(`The tiers could not be read or changed: disk\\_full near ${MASK}`);
+    expect(h.notes.find((n) => n.includes('auth command in'))).toContain(MASK);
+  });
+
+  it("masks the reply once more, and keys it on the message", async () => {
+    addSecrets(['sk-reply-12345678']);
+    const h = harness({ authChat: { run: () => 'granted sk-reply-12345678' } });
+    const message = msg({ text: '/auth grant @x talk' });
+    await h.router.onMessage(message);
+    expect(h.channel.texts.at(-1)).toMatchObject({ text: `granted ${MASK}`, uuid: replyUuid(APP, message.messageId, 'auth') });
+  });
+
+  it("admits a person's next message once granted in a group, with no restart, and refuses it once revoked", async () => {
+    const h = harness({ auth: LISTS, withGrants: true, authChat: gatewayAuth(LISTS) });
+    const guestSays = async (text: string): Promise<number> => {
+      const before = h.channel.texts.length + h.channel.cardOpens.length;
+      await h.router.onMessage(inGroup(text, { sender: GUEST, mentions: [] }));
+      await flush();
+      return h.channel.texts.length + h.channel.cardOpens.length - before;
+    };
+    expect(await guestSays('before the grant')).toBe(0);
+    await h.router.onMessage(inGroup('/auth grant @Guest talk'));
+    expect(lastReply(h)).toBe('Guest now has talk tier, granted by Owner. `/auth revoke lark:on_guest` takes it back.');
+    h.driver.scripts = [async (ctl: TurnControl) => ctl.end('completed')];
+    await h.router.onMessage(inGroup('after the grant', { sender: GUEST, mentions: [] }));
+    await flush();
+    const prompts = (): string[] => h.driver.runtimes.flatMap((r) => r.prompts.map((p) => p.text));
+    expect(prompts()).toEqual(['after the grant']);
+    await h.router.onMessage(inGroup('/auth revoke @Guest'));
+    expect(lastReply(h)).toBe('Guest no longer has talk tier: revoked by Owner.');
+    expect(await guestSays('after the revoke')).toBe(0);
+    expect(prompts()).toEqual(['after the grant']);
+  });
+
+  it("refuses an approval's press by an operator whose operate grant was revoked", async () => {
+    const h = harness({ auth: LISTS, withGrants: true, authChat: gatewayAuth(LISTS) });
+    await h.router.onMessage(inGroup('/auth grant @Guest operate'));
+    await h.router.onMessage(inGroup('/auth revoke @Guest'));
+    const { approvalId, nonce } = await ask(h);
+    expect(await h.router.onCardAction({ ...click(approvalId, 'allow', nonce), operator: GUEST })).toContain('operator permission');
+    expect(await h.router.onCardAction(click(approvalId, 'deny', nonce))).toBe('Sent: Deny.');
+  });
+
+  it("tells cron each turn's tier, operate for an operator by grant", async () => {
+    const turns: boolean[] = [];
+    const h = harness({
+      auth: LISTS,
+      withGrants: true,
+      authChat: gatewayAuth(LISTS),
+      cronTurns: { turnSubmitted: (_s, _k, operate) => void turns.push(operate) },
+    });
+    await h.router.onMessage(inGroup('/auth grant @Guest talk'));
+    h.driver.scripts = [async (ctl: TurnControl) => ctl.end('completed'), async (ctl: TurnControl) => ctl.end('completed')];
+    await h.router.onMessage(inGroup('as talk', { sender: GUEST, mentions: [] }));
+    await flush();
+    await h.router.onMessage(inGroup('/auth grant @Guest operate'));
+    await h.router.onMessage(inGroup('as an operator', { sender: GUEST, mentions: [] }));
+    await flush();
+    expect(turns).toEqual([false, true]);
   });
 });
 

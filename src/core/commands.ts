@@ -138,6 +138,19 @@ export const COMMANDS: readonly CommandSpec[] = [
     usage: '/cron <command>',
   },
   {
+    name: 'auth',
+    // Talk, because listing who has a tier is; a grant and a revoke check their own
+    // tier, the owner's or an operator's (tier grants spec §5.1).
+    tier: 'talk',
+    needsSession: false,
+    effect: 'immediate',
+    multiline: false,
+    // It never touches this chat's session, so a busy one does not refuse it.
+    mutating: false,
+    summary: 'Who may talk to the agent and operate it: `/auth help` lists its commands.',
+    usage: '/auth <command>',
+  },
+  {
     name: 'help',
     tier: 'talk',
     needsSession: false,

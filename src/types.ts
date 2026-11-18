@@ -238,6 +238,11 @@ export interface InboundMention {
   name: string | null;
   openId: string | null;
   unionId: string | null;
+  /**
+   * Whether Lark says the mention is of a bot, by its `mentioned_type`; absent
+   * when Lark did not say. A bot is not a person: its tier is configuration's.
+   */
+  isBot?: boolean;
 }
 
 export interface InboundMessage {

@@ -11,6 +11,7 @@ import { LarkInbound } from './channel/lark/inbound.js';
 import { buildRoleDrivers } from './driver/build.js';
 import { buildEnv } from './driver/env.js';
 import { Authorizer, tiersOf } from './policy/auth.js';
+import { AuthChat } from './policy/auth-chat.js';
 import { Router } from './core/router.js';
 import { DEFAULT_ROLE, DEFAULT_WORKSPACE, SessionRegistry, type BootFinding } from './core/registry.js';
 import { NamedWorkspaces } from './core/workspace.js';
@@ -320,15 +321,18 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   // One set of the rendered packages in use, the dispatcher's runs' and the scheduler's fires' (the cron spec, §5.2).
   const packages = new PackagesInUse();
   let boardApi: WorkerApi | undefined;
+  // Who the gateway has seen in Lark: how a person named by principal is checked for talk tier (spec §4.2),
+  // and named in /auth's lists, the board on or off (tier grants spec §6.1).
+  const people = new PeopleDirectory({
+    db,
+    appId: config.lark.appId,
+    // The configuration's lists and the grant, as the authorizer holds them, for a person named by principal (tier grants spec §4.3).
+    canTalk: (person) => tiersOf(config.auth, person.openId, authorizer.grantOf(person.unionId)).talk,
+  });
+  // /auth, always on: the tiers are the gateway's, whatever kanban.enabled and cron.enabled say (tier grants spec §6.1).
+  const authChat = new AuthChat({ db, appId: config.lark.appId, authorizer, auth: config.auth, people, zone, note });
   if (config.kanban.enabled) {
     const { failureLimit, transientLimit, transientCooldownS } = config.kanban;
-    // Who the gateway has seen in Lark: how a person named by principal is checked for talk tier (spec §4.2).
-    const people = new PeopleDirectory({
-      db,
-      appId: config.lark.appId,
-      // The configuration's lists and the grant, as the authorizer holds them, for a person named by principal (tier grants spec §4.3).
-      canTalk: (person) => tiersOf(config.auth, person.openId, authorizer.grantOf(person.unionId)).talk,
-    });
     const service = new KanbanService({
       db,
       roles: team.roles,
@@ -479,6 +483,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     appId: config.lark.appId,
     ...(kanbanChat === undefined ? {} : { kanban: kanbanChat }),
     ...(cronChat === undefined ? {} : { cron: cronChat }),
+    auth: authChat,
     // Each turn's sender's tier, against its session's cron token (the cron spec, §7.1).
     ...(tokens === undefined ? {} : { cronTurns: tokens }),
     note,

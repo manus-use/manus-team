@@ -10,7 +10,7 @@ import type { InboundMessage } from '../types.js';
  */
 
 /** Why a mention named no one person. */
-export type MentionRefusal = 'not_mentioned' | 'no_union_id' | 'ambiguous';
+export type MentionRefusal = 'not_mentioned' | 'bot' | 'no_union_id' | 'ambiguous';
 
 /** The person an `@Name` stands for, as Lark gave them with the message; or a refusal, in words for chat. */
 export type Mentioned =
@@ -20,8 +20,9 @@ export type Mentioned =
 /**
  * The person `name`, an `@Name`, stands for: the one person among the
  * message's mentions shown by that name, with the union_id and open_id Lark
- * sent. Refused when the message mentions no one by it, when Lark gave no
- * union_id with the mention, and when more than one person is shown by it.
+ * sent. Refused when the message mentions no one by it, when the mention is
+ * of a bot, when Lark gave no union_id with the mention, and when more than
+ * one person is shown by it.
  */
 export function mentionedPerson(name: string, message: InboundMessage): Mentioned {
   const shown = name.slice(1).trim();
@@ -33,6 +34,9 @@ export function mentionedPerson(name: string, message: InboundMessage): Mentione
       reason: 'not_mentioned',
       reply: `${label(name, 80)} is not someone this message mentions: type @ and pick them, so Lark says who they are.`,
     };
+  }
+  if (found.some((m) => m.isBot === true)) {
+    return { ok: false, reason: 'bot', reply: `${label(name, 80)} is a bot, and a bot's tier is configuration's.` };
   }
   const unionId = unionIds[0];
   if (unionId === undefined) {

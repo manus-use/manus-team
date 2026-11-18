@@ -223,6 +223,10 @@ describe('people, named by @-mention', () => {
     expect(await say('task new t\nassignee: @Alice Smith', OWNER, [{ ...AT_ALICE, unionId: null }])).toMatch(
       /^Lark did not say who @Alice Smith is/,
     );
+    // A bot is not a person, and cannot be given work.
+    expect(await say('task new t\nassignee: @Helper', OWNER, [{ key: '@_user_9', name: 'Helper', openId: 'ou_helper', unionId: null, isBot: true }])).toBe(
+      "@Helper is a bot, and a bot's tier is configuration's.",
+    );
     expect(taskCount()).toBe(0);
   });
 

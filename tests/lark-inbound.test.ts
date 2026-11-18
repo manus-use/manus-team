@@ -35,6 +35,23 @@ describe('mentionsOf', () => {
     ]);
   });
 
+  it("says whether a mention is of a bot when Lark sends its mentioned_type, and nothing when it does not", () => {
+    expect(
+      mentionsOf(
+        raw([
+          { key: '@_user_1', name: 'Helper', id: { open_id: 'ou_helper' }, mentioned_type: 'bot' },
+          { key: '@_user_2', name: 'Alice', id: { open_id: 'ou_alice', union_id: 'on_alice' }, mentioned_type: 'user' },
+          { key: '@_user_3', name: 'Bob', id: { open_id: 'ou_bob', union_id: 'on_bob' }, mentioned_type: '' },
+        ]),
+        BOT,
+      ),
+    ).toEqual([
+      { key: '@_user_1', name: 'Helper', openId: 'ou_helper', unionId: null, isBot: true },
+      { key: '@_user_2', name: 'Alice', openId: 'ou_alice', unionId: 'on_alice', isBot: false },
+      { key: '@_user_3', name: 'Bob', openId: 'ou_bob', unionId: 'on_bob' },
+    ]);
+  });
+
   it('is empty for an event without mentions, or with anything else in their place', () => {
     expect(mentionsOf(raw(undefined), BOT)).toEqual([]);
     expect(mentionsOf(undefined, BOT)).toEqual([]);

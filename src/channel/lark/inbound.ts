@@ -266,7 +266,8 @@ function text(value: unknown): string | null {
  * The people a message @-mentions, from its raw event: each mention's key, the
  * name the text shows, and the open_id and union_id Lark gave. `@all` is not a
  * person, and the bot's own mention is how a group addresses it, so both are
- * left out. Anything not shaped like a mention is skipped.
+ * left out. Anything not shaped like a mention is skipped. A mention's
+ * `mentioned_type`, when Lark sends one, says whether it is of a bot.
  */
 export function mentionsOf(raw: unknown, botOpenId: string): InboundMention[] {
   const list = isRecord(raw) ? (raw as RawMentionsShape).message?.mentions : undefined;
@@ -279,7 +280,8 @@ export function mentionsOf(raw: unknown, botOpenId: string): InboundMention[] {
     const ids = isRecord(m['id']) ? m['id'] : {};
     const openId = text(ids['open_id']);
     if (openId !== null && openId === botOpenId) continue;
-    out.push({ key, name: text(m['name']), openId, unionId: text(ids['union_id']) });
+    const type = text(m['mentioned_type']);
+    out.push({ key, name: text(m['name']), openId, unionId: text(ids['union_id']), ...(type === null ? {} : { isBot: type === 'bot' }) });
   }
   return out;
 }

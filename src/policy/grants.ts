@@ -1,6 +1,8 @@
 import { sourceText, type ListSources } from '../config.js';
+import type { GrantRow, NamedGrant } from '../db/grants.js';
+import type { PersonRow } from '../db/people.js';
 import type { Tier } from '../types.js';
-import { tiersFrom } from './auth.js';
+import { sourcesOf, tiersFrom } from './auth.js';
 
 /**
  * Who may grant and revoke what (the tier grants spec §5): one pure decision
@@ -214,4 +216,58 @@ export function revokeReply(d: RevokeDecision, target: Target, w: Words, made = 
           return say(w.via, [`${w.who} is in ${w.from.operate}: their talk grant is what makes them an operator, so only the owner revokes it`]);
       }
   }
+}
+
+/** Someone with a tier, or in `auth.operate` without one, as the lists show them (tier grants spec §8). */
+export interface TierEntry {
+  /** Null for a configuration entry `people` does not hold. */
+  unionId: string | null;
+  /** The open_id `people` holds, or the configuration's entry's; null for a grant to a person `people` does not hold. */
+  openId: string | null;
+  name: string | null;
+  sources: Sources;
+  grant: GrantRow | undefined;
+  tier: Tier | null;
+}
+
+/** The configuration's owner and lists, by open_id, as the gateway or this shell reads them. */
+export interface ConfigLists {
+  owner: string;
+  talk: readonly string[];
+  operate: readonly string[];
+}
+
+/** The order the lists give: the owner first, then operators, then talk, then those with no tier, each by name. */
+function rank(e: TierEntry): number {
+  if (e.sources.owner) return 0;
+  return e.tier === 'operate' ? 1 : e.tier === 'talk' ? 2 : 3;
+}
+
+/**
+ * Everyone with a tier, from the configuration's lists and this bot's active
+ * grants: a configuration entry named by the person `people` holds with its
+ * open_id, a grant by its union_id, one entry a person. A person in
+ * `auth.operate` without talk, the case a grant to them guards, is listed
+ * with no tier. Sorted as the lists give them.
+ */
+export function tierEntries(lists: ConfigLists, grants: readonly NamedGrant[], people: readonly PersonRow[]): TierEntry[] {
+  const byOpenId = new Map(people.map((p) => [p.openId, p]));
+  const byUnionId = new Map(people.map((p) => [p.unionId, p]));
+  const config = { ownerOpenId: lists.owner, allowTalk: lists.talk, allowOperate: lists.operate };
+  const entries = new Map<string, Omit<TierEntry, 'sources' | 'tier'>>();
+  for (const g of grants) {
+    const p = byUnionId.get(g.unionId);
+    entries.set(`u:${g.unionId}`, { unionId: g.unionId, openId: p?.openId ?? null, name: p?.name ?? g.name, grant: g });
+  }
+  for (const openId of new Set([lists.owner, ...lists.talk, ...lists.operate])) {
+    const p = byOpenId.get(openId);
+    const key = p === undefined ? `o:${openId}` : `u:${p.unionId}`;
+    if (!entries.has(key)) entries.set(key, { unionId: p?.unionId ?? null, openId, name: p?.name ?? null, grant: undefined });
+  }
+  const out = [...entries.values()].map((e) => {
+    const sources = sourcesOf(config, e.openId);
+    return { ...e, sources, tier: tierOf(tiersFrom(sources, e.grant?.tier)) };
+  });
+  const sortName = (e: TierEntry): string => e.name ?? (e.unionId === null ? (e.openId ?? '') : `lark:${e.unionId}`);
+  return out.sort((a, b) => rank(a) - rank(b) || sortName(a).localeCompare(sortName(b)) || (a.unionId ?? a.openId ?? '').localeCompare(b.unionId ?? b.openId ?? ''));
 }
