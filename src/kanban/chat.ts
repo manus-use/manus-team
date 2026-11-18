@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { forDisplay } from '../channel/escape.js';
+import { mentionedPerson } from '../channel/mentions.js';
 import type { CardView } from '../channel/types.js';
 import { boardCardNonce } from '../core/ids.js';
 import type { InboundCardAction, KanbanAnswer } from '../core/router.js';
@@ -1059,28 +1060,11 @@ export class KanbanChat {
     return found;
   }
 
-  /** A person's principal: typed out, or the @-mention's, by the ids Lark sent with the message. */
+  /** A person's principal: typed out, or the @-mention's, by the ids Lark sent with the message (`mentionedPerson`). */
   #mentioned(name: string, message: InboundMessage): Named {
     if (!name.startsWith('@')) return { ok: true, name: `lark:${name.slice('lark:'.length)}` };
-    const shown = name.slice(1).trim();
-    const found = (message.mentions ?? []).filter((m) => m.name === shown || m.key === name);
-    const unionIds = [...new Set(found.map((m) => m.unionId).filter((u): u is string => u !== null))];
-    if (found.length === 0) {
-      return {
-        ok: false,
-        reply: `${label(name, 80)} is not someone this message mentions: type @ and pick them, so Lark says who they are.`,
-      };
-    }
-    if (unionIds.length === 0) {
-      return {
-        ok: false,
-        reply: `Lark did not say who ${label(name, 80)} is (no union_id came with the mention). Ask the operator to check the app can read user ids.`,
-      };
-    }
-    if (unionIds.length > 1) {
-      return { ok: false, reply: `More than one person mentioned is called ${label(name, 80)}; say which with \`lark:<union_id>\`.` };
-    }
-    return { ok: true, name: personPrincipal(unionIds[0] ?? '') };
+    const found = mentionedPerson(name, message);
+    return found.ok ? { ok: true, name: personPrincipal(found.unionId) } : { ok: false, reply: found.reply };
   }
 
   /** A role, as a role; a person, by the name Lark last gave, with their principal. */
