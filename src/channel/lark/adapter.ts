@@ -258,7 +258,8 @@ export class LarkAdapter implements Channel {
    */
   async openCard(target: SendTarget, initial: CardParts, _uuid: string): Promise<CardSession> {
     const cardkit = this.#lark.rawClient.cardkit.v1;
-    const createdAt = this.#clock.now();
+    const clock = this.#clock;
+    const createdAt = clock.now();
 
     let made: { code?: number | undefined; msg?: string | undefined; data?: { card_id: string } | undefined };
     try {
@@ -286,6 +287,9 @@ export class LarkAdapter implements Channel {
     // Lark orders a card's updates by it, and refuses one not above the last.
     let sequence = 0;
     let finished = false;
+    // When streaming was last turned on, by our clock: at the card's making,
+    // and at each `streamOn`. Read before the card was made, so never late.
+    let streamingSince = createdAt;
 
     const settings = async (config: object): Promise<void> => {
       sequence += 1;
@@ -309,19 +313,62 @@ export class LarkAdapter implements Channel {
     };
     // Lark stops streaming a card by itself, and a finish that failed has
     // stopped it too; an update is then refused, and streaming is turned on again.
-    const streamOn = (): Promise<void> => settings({ streaming_mode: true, summary: { content: REPLY_SUMMARY_OPEN } });
+    const streamOn = async (): Promise<void> => {
+      await settings({ streaming_mode: true, summary: { content: REPLY_SUMMARY_OPEN } });
+      streamingSince = clock.now();
+    };
+    // Streaming turned on again: true once it is. While finishing, a refusal is
+    // false, and the parts are written without streaming instead (`replace`);
+    // otherwise it is thrown with Lark's code.
+    const turnOn = async (finishing: boolean): Promise<boolean> => {
+      try {
+        await streamOn();
+        return true;
+      } catch (err) {
+        if (finishing) return false;
+        throw err;
+      }
+    };
+    // A plain replace of the element, which needs no streaming: the last resort
+    // of a finish, so the answer's end still lands.
+    const replace = async (part: keyof CardParts, text: string): Promise<void> => {
+      sequence += 1;
+      const at = sequence;
+      await cardkitCall(() =>
+        cardkit.cardElement.update({
+          path: { card_id: cardId, element_id: REPLY_ELEMENTS[part] },
+          data: {
+            element: JSON.stringify({ tag: 'markdown', element_id: REPLY_ELEMENTS[part], content: text }),
+            sequence: at,
+            uuid: `u_${cardId}_${at}`,
+          },
+        }),
+      );
+    };
 
-    const write = async (parts: CardParts): Promise<void> => {
-      for (const part of REPLY_ORDER) {
+    const write = async (parts: CardParts, finishing = false): Promise<void> => {
+      const changed = REPLY_ORDER.filter((part) => partContent(parts[part]) !== shown[part]);
+      if (changed.length === 0) return;
+      // Ahead of Lark's ten minutes, so the writer never meets them.
+      let replacing = false;
+      if (clock.now() - streamingSince >= STREAMING_REFRESH_MS) replacing = !(await turnOn(finishing));
+      for (const part of changed) {
         const text = partContent(parts[part]);
-        if (text === shown[part]) continue;
-        try {
-          await content(part, text);
-        } catch (err) {
-          if (!(err instanceof ChannelError) || !STREAMING_OFF_CODES.has(err.code)) throw err;
-          // Once, with a new sequence; a second refusal is thrown with Lark's code.
-          await streamOn();
-          await content(part, text);
+        if (replacing) {
+          await replace(part, text);
+        } else {
+          try {
+            await content(part, text);
+          } catch (err) {
+            if (!(err instanceof ChannelError) || !STREAMING_OFF_CODES.has(err.code)) throw err;
+            // Once, with a new sequence; a second refusal is thrown with Lark's code.
+            if (await turnOn(finishing)) {
+              await content(part, text);
+            } else {
+              replacing = true;
+              await replace(part, text);
+            }
+          }
         }
         shown[part] = text;
       }
@@ -358,7 +405,7 @@ export class LarkAdapter implements Channel {
           if (finished) return;
           let failed: unknown;
           try {
-            await write(parts);
+            await write(parts, true);
           } catch (err) {
             failed = err;
           }
@@ -611,6 +658,13 @@ function byline(openId: string): object | undefined {
  * streaming is off. The session turns streaming on again and writes once more.
  */
 const STREAMING_OFF_CODES: ReadonlySet<number> = new Set([200850, 300309]);
+
+/**
+ * How long after streaming was last turned on a write turns it on again first:
+ * nine minutes, a minute inside Lark's ten, so a long turn's card keeps
+ * streaming and its writes are not refused.
+ */
+export const STREAMING_REFRESH_MS = 9 * 60 * 1000;
 
 /**
  * The reply card's element ids (channel spec §4.5): one markdown element a part,
