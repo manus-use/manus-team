@@ -1926,6 +1926,26 @@ notice, and a bot that mentions people whenever work moves trains them to ignore
 §19 (plan L):* a card in a task's thread mentions its person, the only mention the board makes
 (§19.2).
 
+**People by name.** *Amended on 2026-11-18, as the user approved.* Every chat reply, notice and
+card that names a person names them by the name Lark last gave, from the `people` table
+(`PeopleDirectory.chatName`), and falls back to their principal, `lark:<union_id>`, where no name
+is known: `/kanban task list` and `task show` (assignee, reviewer, runs, comments), `gate list`,
+`workflow show`, `instances` and `preview`, a start's and a "Created" reply, the replies to assign,
+review and a refused report, task and review cards, the notices, `/cron show`'s maker and a grant's
+maker in `/auth`. A workflow's person param shown in `workflow show` is named the same way; a
+title made from it keeps what the start substituted. A name is masked, made one line, cut at 80
+characters and escaped as any label, and is never an @-mention. *Two of one name:* when another
+person this bot has seen, across the whole `people` table for this app, has exactly the same
+name, the name is cut at 60 characters and followed by the start of the union_id in parentheses,
+"Hemanth (on_8ba3…)": seven characters, more where another of the name's ids starts the same way,
+the whole id unmarked where nothing shorter differs. *Why the table, not the reply:* one lookup per
+person, the same name shown the same way in every reply, with nothing gathered first. Left as they
+were: `/auth list`, which shows "Name (lark:<union_id>)", as `/auth revoke` takes the id it shows;
+the terminal's plain output, which shows principals, as they are what is typed there; `--json`,
+principals only; and agents' prompts and the worker's JSON, which take the plain name (`nameOf`).
+A card that cannot be sent to a person who lost talk tier records "they no longer have talk tier on
+this gateway", as the notice telling of it names them already.
+
 ### 9.4 Subscriptions
 
 *Amended by §19 (plan L).* A task created by `/kanban task new` in a group at chat scope is

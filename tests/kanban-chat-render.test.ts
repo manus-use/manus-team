@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { addComment, addGate, block, closeRun, complete, createTask, endRun, DEFAULT_LIMITS, requestChanges, requestReview } from '../src/db/kanban.js';
-import { boardList, eventsOf, getTask, taskView } from '../src/db/kanban-read.js';
+import { boardList, eventsOf, gatesOf, getTask, taskView } from '../src/db/kanban-read.js';
 import { boardCardNonce } from '../src/core/ids.js';
 import {
   blocksTask,
@@ -547,5 +547,43 @@ describe("a person's cards", () => {
       markdown: '**x hi \\<at id=all\\>\\</at\\> team** `k_1`\nDone by Alice.',
       buttons: [],
     });
+  });
+});
+
+describe('people by name in chat (spec §9.3)', () => {
+  const HEMANTH = 'lark:on_8ba330a6567863a9d92c2268d2197f1e';
+  const NAMES = new Map([
+    [HEMANTH, 'Hemanth'],
+    [ALICE, 'Alice *Smith*'],
+  ]);
+  const nameOf = (p: string): string | undefined => NAMES.get(p);
+
+  it('names the assignee in task list, and falls back to the principal for one with no name, never mentioning', () => {
+    newTask(h.db, { title: 'review', assignee: { kind: 'human', name: HEMANTH } });
+    newTask(h.db, { title: 'unknown', assignee: { kind: 'human', name: 'lark:on_nobody' } });
+    newTask(h.db, { title: 'agent', assignee: { kind: 'role', name: 'implementer' } });
+    const list = renderList(boardList(h.db), undefined, 'default', nameOf);
+    expect(list).toContain(': review · Hemanth');
+    expect(list).not.toContain('8ba330');
+    expect(list).toContain('lark:on\\_nobody');
+    expect(list).toContain('· role implementer');
+    expect(list).not.toContain('<at');
+  });
+
+  it('names the assignee, reviewer, run, comment author and gate maker in task show and the gate list, escaped', () => {
+    const k = newTask(h.db, { title: 'a person', assignee: { kind: 'human', name: HEMANTH }, reviewer: { kind: 'human', name: ALICE } });
+    expect(addGate(h.db, k.taskId, { command: 'true', timeoutS: 30 }, ALICE, NOW).ok).toBe(true);
+    claimed(h.db, k.taskId);
+    expect(addComment(h.db, k.taskId, HEMANTH, 'on it', NOW, true).ok).toBe(true);
+    const view = taskView(h.db, k.taskId);
+    if (view === undefined) throw new Error('no view');
+    const gates = gatesOf(h.db, k.taskId);
+    const show = renderShow(view, gates, 'default', nameOf);
+    expect(show).toContain('assignee: Hemanth · reviewer: Alice \\*Smith\\*');
+    expect(show).toContain('#1 work · Hemanth · working');
+    expect(show).toContain('Hemanth:\n> on it');
+    expect(show).not.toContain('lark:');
+    expect(renderGates(k.taskId, gates, nameOf)).toContain('(30 s, by Alice \\*Smith\\*)');
+    expect(renderGates(k.taskId, gates)).toContain('by lark:on\\_alice');
   });
 });

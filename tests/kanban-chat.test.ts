@@ -3,6 +3,7 @@ import type { CardView } from '../src/channel/types.js';
 import type { InboundCardAction } from '../src/core/router.js';
 import { activeGrant, grantTier, revokeGrant } from '../src/db/grants.js';
 import { commentsOf, eventsOf, gatesOf, getRun, getTask, subscriptionsOf } from '../src/db/kanban-read.js';
+import { notePerson } from '../src/db/people.js';
 import { KanbanChat } from '../src/kanban/chat.js';
 import { renderTaskCard } from '../src/kanban/chat-render.js';
 import type { GateExit } from '../src/kanban/gates.js';
@@ -201,7 +202,7 @@ describe('people, named by @-mention', () => {
     const reply = await say('task new Check the links\nassignee: @Alice Smith\nreviewer: @Bob', OWNER, [AT_ALICE, AT_BOB]);
     const taskId = created(reply);
     expect(reply).toBe(
-      `Created \`${taskId}\`: **Check the links**, for Alice Smith (lark:on\\_alice). ` +
+      `Created \`${taskId}\`: **Check the links**, for Alice Smith. ` +
         'They are sent it as a card, in a direct message, once it is ready. ' +
         'This chat hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.',
     );
@@ -254,11 +255,41 @@ describe('people, named by @-mention', () => {
   it('assigns a task to a person, and says when they have it already', async () => {
     const taskId = created(await say('task new Survey the vendors\nassignee: implementer'));
     expect(await say(`task assign ${taskId} @Alice Smith`, OWNER, [AT_ALICE])).toBe(
-      `\`${taskId}\` is now for Alice Smith (lark:on\\_alice).`,
+      `\`${taskId}\` is now for Alice Smith.`,
     );
     expect(await say(`task assign ${taskId} @Alice Smith`, OWNER, [AT_ALICE])).toBe(
-      `\`${taskId}\` is already assigned to Alice Smith (lark:on\\_alice).`,
+      `\`${taskId}\` is already assigned to Alice Smith.`,
     );
+  });
+});
+
+describe('people by name in replies (spec §9.3)', () => {
+  it('names the assignee, reviewer, run, commenter and gate maker in task list, task show and gate list, never by principal', async () => {
+    const { taskId } = await aliceTask('Name check');
+    expect(await say(`task comment ${taskId} looks fine`)).toMatch(/^Comment/);
+    expect(await say(`gate add ${taskId} true`)).toMatch(/^Gate 1 added/);
+    const list = await say('task list');
+    expect(list).toMatch(/Name check · Alice Smith$/m);
+    const show = await say(`task show ${taskId}`);
+    expect(show).toContain('assignee: Alice Smith · reviewer: Bob ·');
+    expect(show).toContain('#1 work · Alice Smith · working');
+    expect(show).toContain('Owner:\n> looks fine');
+    const gates = await say(`gate list ${taskId}`);
+    expect(gates).toContain('by Owner)');
+    for (const text of [list, show, gates]) {
+      expect(text).not.toContain('lark:');
+      expect(text).not.toContain('<at');
+    }
+  });
+
+  it('shows the principal for a person with no name, and tells two people of one name apart by the start of their union_id', async () => {
+    const taskId = created(await say('task new Unnamed\nassignee: @Alice Smith', OWNER, [AT_ALICE]));
+    notePerson(t.db, { appId: 'cli_app', unionId: 'on_alice2', openId: 'ou_alice2', name: 'Alice Smith' }, 1);
+    expect(await say('task list')).toMatch(/Unnamed · Alice Smith \\\(on\\_alice\\\)$/m);
+    expect(await say(`task show ${taskId}`)).toContain('assignee: Alice Smith \\(on\\_alice\\) · reviewer: nobody');
+    const quiet = created(await say('task new Quiet one\nassignee: lark:on_alice'));
+    t.db.prepare("UPDATE people SET name = NULL WHERE union_id = 'on_alice'").run();
+    expect(await say('task list')).toMatch(new RegExp(`\`${quiet}\` .*Quiet one · lark:on\\\\_alice$`, 'm'));
   });
 });
 
@@ -281,7 +312,7 @@ describe("a person's own reports", () => {
   it('lets the assignee report done, at talk tier, and nobody else', async () => {
     const { taskId, run } = await soloTask();
     expect(await say(`task done ${taskId} all links answer`, GUEST)).toBe(
-      `\`/kanban task done\` is for the person a task is assigned to; \`${taskId}\` is for Alice Smith (lark:on\\_alice).`,
+      `\`/kanban task done\` is for the person a task is assigned to; \`${taskId}\` is for Alice Smith.`,
     );
     // Not even an operator: done is the assignee's report.
     expect(await say(`task done ${taskId} all links answer`)).toMatch(/^`\/kanban task done` is for the person a task is assigned to/);
@@ -301,7 +332,7 @@ describe("a person's own reports", () => {
     expect(await say(`task unblock ${taskId}`)).toContain('is unblocked');
     expect(service.claim(taskId).ok).toBe(true);
     expect(await say(`task review ${taskId} checked them all\nreviewer: @Bob`, ALICE, [AT_BOB])).toBe(
-      `\`${taskId}\` is waiting for review, by Bob (lark:on\\_bob).`,
+      `\`${taskId}\` is waiting for review, by Bob.`,
     );
     expect(getTask(t.db, taskId)).toMatchObject({ phase: 'review', reviewer: { kind: 'human', name: 'lark:on_bob' } });
     // Once in review, the assignee's own reports are not the answer.
@@ -313,7 +344,7 @@ describe("a person's own reports", () => {
     expect(await say(`task approve ${taskId}`, BOB)).toBe(`\`${taskId}\` is not waiting for review: it is open.`);
     expect(await say(`task review ${taskId} checked them all`, ALICE)).toContain('is waiting for review, by Bob');
     expect(await say(`task approve ${taskId}`, GUEST)).toBe(
-      `\`/kanban task approve\` answers a review, and is for \`${taskId}\`'s reviewer (Bob (lark:on\\_bob)) or an operator.`,
+      `\`/kanban task approve\` answers a review, and is for \`${taskId}\`'s reviewer (Bob) or an operator.`,
     );
     expect(await say(`task changes ${taskId} cite the source of each link`, BOB)).toBe(
       `Changes requested on \`${taskId}\`: it goes back to its assignee, with your reason.`,
@@ -340,7 +371,7 @@ describe("a person's own reports", () => {
     const { taskId, run } = await aliceTask();
     expect(await say(`gate add ${taskId} test -f links.md`)).toContain('Gate 1 added');
     expect(await say(`task done ${taskId} all links answer`, ALICE)).toBe(
-      `Sent \`${taskId}\` for review to Bob (lark:on\\_bob): the task names a reviewer, so done asks for review.`,
+      `Sent \`${taskId}\` for review to Bob: the task names a reviewer, so done asks for review.`,
     );
     expect(getRun(t.db, run.runId)).toMatchObject({ outcome: 'review_requested', summary: 'all links answer' });
     expect(getTask(t.db, taskId)?.phase).toBe('review');
@@ -504,7 +535,7 @@ describe("a person's card", () => {
     expect(getRun(t.db, run.runId)).toMatchObject({ outcome: 'review_requested', summary: 'all links answer' });
     expect(getTask(t.db, taskId)?.phase).toBe('review');
     expect(redrawn.at(-1)?.view.markdown).toBe(
-      `**Check the links** \`${taskId}\`\nSent for review to Bob (lark:on\\_bob) by Alice Smith.`,
+      `**Check the links** \`${taskId}\`\nSent for review to Bob by Alice Smith.`,
     );
   });
 
@@ -708,7 +739,7 @@ describe("a person's card", () => {
 
   it('refuses a press by someone else, and an altered payload, changing nothing, the card left as it was', async () => {
     const { run } = await aliceTask();
-    expect(await press(run, 'done', BOB, 'x')).toBe('This card is for Alice Smith (lark:on\\_alice).');
+    expect(await press(run, 'done', BOB, 'x')).toBe('This card is for Alice Smith.');
     expect(await press(run, 'done', ALICE, 'x', { run: 'r_other' })).toBe('That button does not match the card it is on.');
     expect(await press(run, 'done', { openId: 'ou_stranger', unionId: 'on_stranger', displayName: 'S' }, 'x')).toBe(
       'You do not have talk tier here.',

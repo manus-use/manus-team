@@ -428,7 +428,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       channels: new Map<string, Channel>([[adapter.id, adapter]]),
       appId: config.lark.appId,
       blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
-      nameOf: (principal) => people.nameOf(principal),
+      // By name, two of one name told apart (spec §9.3); the agent's prompts keep nameOf.
+      nameOf: (principal) => people.chatName(principal),
       note,
     });
     // A person's run is sent its card: in its task's thread when they are in the group, else as a
@@ -439,7 +440,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       service,
       channel: adapter,
       appId: config.lark.appId,
-      nameOf: (principal) => people.nameOf(principal),
+      nameOf: (principal) => people.chatName(principal),
       canTalk: (principal) => people.canTalk(principal),
       held: (taskId) => chat.held(taskId),
       note,

@@ -1,5 +1,6 @@
 import type { Db } from '../db/open.js';
-import { notePerson, personOf } from '../db/people.js';
+import { notePerson, othersNamed, personOf } from '../db/people.js';
+import { sharedName } from './chat-render.js';
 import { systemClock, type Clock } from '../time.js';
 import type { People } from './service.js';
 
@@ -85,5 +86,20 @@ export class PeopleDirectory implements People {
     const unionId = unionIdOf(principal);
     if (unionId === undefined) return undefined;
     return personOf(this.#deps.db, this.#deps.appId, unionId)?.name ?? undefined;
+  }
+
+  /**
+   * What chat calls this person (spec §9.3): the name Lark last gave, or, when
+   * another person this bot has seen has the same name, that name with the start
+   * of their union_id, "Hemanth (on_8ba3…)" (`sharedName`). Undefined where no name is known,
+   * and chat shows the principal. Agents' prompts take `nameOf`, unchanged.
+   */
+  chatName(principal: string): string | undefined {
+    const unionId = unionIdOf(principal);
+    if (unionId === undefined) return undefined;
+    const name = personOf(this.#deps.db, this.#deps.appId, unionId)?.name ?? undefined;
+    if (name === undefined || name.trim() === '') return undefined;
+    const others = othersNamed(this.#deps.db, this.#deps.appId, name, unionId);
+    return others.length === 0 ? name : sharedName(name, unionId, others);
   }
 }

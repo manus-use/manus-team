@@ -35,7 +35,9 @@ import {
   renderReviewCard,
   renderShow,
   renderTaskCard,
+  personText,
   type CardFacts,
+  type NameOf,
 } from './chat-render.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { CARD_SEND_MS } from './cards.js';
@@ -318,14 +320,14 @@ export class KanbanChat {
       case 'list': {
         // The chat's board alone (spec §16).
         const board = this.#deps.service.chatBoard(chatAt(key)).name;
-        return renderList(this.#deps.service.list(board), command.filter, board);
+        return renderList(this.#deps.service.list(board), command.filter, board, this.#nameOf);
       }
       case 'show': {
         // A task on any board, by id, with its board named (spec §16).
         const r = this.#deps.service.show(command.taskId);
         if (!r.ok) return refused(r);
         const gates = this.#deps.service.listGates(command.taskId);
-        return renderShow(r.view, gates.ok ? gates.gates : [], this.#deps.service.chatBoard(chatAt(key)).name);
+        return renderShow(r.view, gates.ok ? gates.gates : [], this.#deps.service.chatBoard(chatAt(key)).name, this.#nameOf);
       }
       case 'board list': {
         // This chat's own board is always listed, archived or not, so it is marked.
@@ -334,7 +336,7 @@ export class KanbanChat {
       }
       case 'gate list': {
         const r = this.#deps.service.listGates(command.taskId);
-        return r.ok ? renderGates(command.taskId, r.gates) : refused(r);
+        return r.ok ? renderGates(command.taskId, r.gates, this.#nameOf) : refused(r);
       }
       case 'workflow list':
       case 'workflow instances':
@@ -466,7 +468,7 @@ export class KanbanChat {
   #workflowRead(command: WorkflowCommand, message: InboundMessage, key: BindingKey): string {
     const service = this.#deps.service;
     const board = service.chatBoard(chatAt(key));
-    const nameOf = (p: string): string | undefined => this.#deps.people.nameOf(p);
+    const nameOf = this.#nameOf;
     switch (command.verb) {
       case 'workflow list': {
         const list = service.workflows();
@@ -875,7 +877,7 @@ export class KanbanChat {
       ...reading,
       attempt: press.attempt,
       note: `**Not done.** ${note}`,
-      nameOf: (p) => this.#deps.people.nameOf(p),
+      nameOf: this.#nameOf,
     };
     const view = press.run.kind === 'review' ? renderReviewCard(facts, this.#deps.appId) : renderTaskCard(facts, this.#deps.appId);
     await this.#redraw(press.messageId, { ...view, markdown: redactKnownSecrets(view.markdown) });
@@ -1067,11 +1069,13 @@ export class KanbanChat {
     return found.ok ? { ok: true, name: personPrincipal(found.unionId) } : { ok: false, reply: found.reply };
   }
 
-  /** A role, as a role; a person, by the name Lark last gave, with their principal. */
+  /** What a reply calls a person (spec §9.3): the people directory's chat name, two of one name told apart. */
+  readonly #nameOf: NameOf = (principal) => this.#deps.people.chatName(principal);
+
+  /** A role, as a role; a person by name, else by principal (spec §9.3), never mentioned. */
   #whom(a: Assignee): string {
     if (a.kind === 'role') return `role ${forDisplay(a.name)}`;
-    const name = this.#deps.people.nameOf(a.name);
-    return name === undefined ? label(a.name, 80) : `${label(name, 80)} (${label(a.name, 80)})`;
+    return personText(a.name, this.#nameOf);
   }
 
   /** An agent run the change decided: its turn is cancelled, and it closes when the turn ends. */
