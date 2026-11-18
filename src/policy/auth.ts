@@ -1,7 +1,9 @@
+import { systemClock, type Clock } from '../time.js';
 import type { InboundMessage, Principal, RejectReason, Tier } from '../types.js';
+import type { Sources } from './grants.js';
 
 /**
- * Authorization. Two tiers, one write path, closed by default.
+ * Authorization. Two tiers, two sources each with one write path, closed by default.
  *
  * The three properties below are each stated explicitly because each one is easy
  * to get backwards, and getting any of them backwards fails *open*.
@@ -80,6 +82,32 @@ export function tiersOf(lists: TierLists, openId: string | null, grant: Tier | u
   );
 }
 
+/** Whether an open_id is the owner, and whether it is in each of the configuration's lists (tier grants spec §5.1). */
+export function sourcesOf(lists: TierLists & { ownerOpenId: string }, openId: string | null): Sources {
+  if (openId === null) return { owner: false, talk: false, operate: false };
+  return { owner: openId === lists.ownerOpenId, talk: lists.allowTalk.includes(openId), operate: lists.allowOperate.includes(openId) };
+}
+
+/**
+ * The second source of a tier beside the configuration (tier grants spec
+ * §4.1): this bot's active grants, read at each check.
+ */
+export interface GrantReader {
+  /** This bot's active grant for the person with this union_id: its tier, or undefined. */
+  tierOf(unionId: string): Tier | undefined;
+}
+
+export interface AuthorizerDeps {
+  /** Grants, read at each check; without, there are none, as before grants. */
+  grants?: GrantReader;
+  /** Where a failed read of the grants is said, at most once a minute. */
+  note?: (line: string) => void;
+  clock?: Clock;
+}
+
+/** How often a failing grant read is said: once is enough to be seen, and every check would flood the log. */
+const READ_FAILURE_NOTE_MS = 60_000;
+
 /**
  * `tiersOf`'s rule, given whether the person is in each list. A grant of
  * operate gives talk too: operate needs talk, and an operate grant that left
@@ -102,17 +130,24 @@ const OK: Decision = { ok: true };
  */
 export class Authorizer {
   #config: AuthConfig;
+  readonly #deps: AuthorizerDeps;
+  readonly #clock: Clock;
+  #failedAt: number | undefined;
 
-  constructor(config: AuthConfig) {
+  constructor(config: AuthConfig, deps: AuthorizerDeps = {}) {
     this.#config = config;
+    this.#deps = deps;
+    this.#clock = deps.clock ?? systemClock;
   }
 
   /**
-   * Replace the configuration.
+   * Replace the configuration, and only the configuration.
    *
-   * The only mutation path. Allowlist edits do not come from chat, so there is no
-   * command that reaches this -- a chat-editable allowlist means whoever gets in
-   * once can keep themselves in.
+   * The configuration is not edited from chat, so there is no command that
+   * reaches this. Grants are a second source, read through the `GrantReader`
+   * at each check and written only by `db/grants.ts`, never passed through
+   * here; their rules (tier grants spec §5) are what keep a person who got in
+   * from keeping themselves in.
    */
   reconfigure(config: AuthConfig): void {
     this.#config = config;
@@ -122,8 +157,39 @@ export class Authorizer {
     return this.#config.ownerOpenId;
   }
 
+  /** Whether this principal is the owner, by the configuration's owner open_id. */
+  isOwner(principal: Principal): boolean {
+    return principal.openId === this.#config.ownerOpenId;
+  }
+
+  /** Whether an open_id is the owner, and in each of the configuration's lists: what a grant's decision is fed. */
+  sourcesOf(openId: string | null): Sources {
+    return sourcesOf(this.#config, openId);
+  }
+
+  /**
+   * The tier of this bot's active grant for a union_id, read now: none with no
+   * reader or no union_id, and none when the read fails, which is said at most
+   * once a minute. Closed, as an empty list is; the configuration's tiers, the
+   * owner's included, still hold.
+   */
+  grantOf(unionId: string | null): Tier | undefined {
+    const grants = this.#deps.grants;
+    if (grants === undefined || unionId === null || unionId === '') return undefined;
+    try {
+      return grants.tierOf(unionId);
+    } catch (err) {
+      const now = this.#clock.now();
+      if (this.#failedAt === undefined || now - this.#failedAt >= READ_FAILURE_NOTE_MS) {
+        this.#failedAt = now;
+        this.#deps.note?.(`auth: reading the tier grants failed, so none count until a read succeeds: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return undefined;
+    }
+  }
+
   canTalk(principal: Principal): boolean {
-    return tiersOf(this.#config, principal.openId, undefined).talk;
+    return tiersOf(this.#config, principal.openId, this.grantOf(principal.unionId)).talk;
   }
 
   /**
@@ -133,7 +199,7 @@ export class Authorizer {
    * would otherwise let someone `/clear` a session they cannot even read.
    */
   canOperate(principal: Principal): boolean {
-    return tiersOf(this.#config, principal.openId, undefined).operate;
+    return tiersOf(this.#config, principal.openId, this.grantOf(principal.unionId)).operate;
   }
 
   hasTier(principal: Principal, tier: Tier): boolean {

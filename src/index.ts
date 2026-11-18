@@ -39,6 +39,7 @@ import { CronTokens } from './cron/tokens.js';
 import { CronApi } from './cron/worker.js';
 import { writeGatewayZone } from './cron/zone-file.js';
 import { jobCounts } from './db/cron.js';
+import { tierReader } from './db/grants.js';
 import { lockDatabase } from './kanban/socket.js';
 import { SinkChannel } from './kanban/sink.js';
 import { PackagesInUse } from './render/native.js';
@@ -270,6 +271,10 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     allowBots: [],
     allowDirectMessages: config.auth.allowDirectMessages,
     allowMentionAll: config.auth.allowMentionAll,
+  }, {
+    // A grant made in chat or at the terminal counts at the next check, read from the database (tier grants spec §4.1).
+    grants: { tierOf: tierReader(db, config.lark.appId) },
+    note,
   });
 
   // The registry asks the dispatcher and the scheduler, which need the registry, so they are read late.
