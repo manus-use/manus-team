@@ -9,9 +9,11 @@ counted beside `auth.owner`, `auth.talk` and `auth.operate`, at once and with no
 This document assumes [`../architecture.md`](../architecture.md), the Lark channel spec,
 [`2026-08-21-lark-channel-design.md`](2026-08-21-lark-channel-design.md), cited as "channel §n",
 and the kanban spec, [`2026-11-02-kanban-design.md`](2026-11-02-kanban-design.md), cited as
-"kanban §n". It amends two of their rules, each said where it is changed: channel §3.4's single
-write path into the allowlist (§4.2), and kanban §4.2 and §22.2's talk check of a person named by
-principal (§4.3). Elsewhere, where this document and they disagree, they win and this document is a
+"kanban §n", and the cron spec, [`2026-11-16-cron-design.md`](2026-11-16-cron-design.md), cited
+as "cron §n". It amends three of their rules, each said where it is changed: channel §3.4's single
+write path into the allowlist (§4.2), kanban §4.2 and §22.2's talk check of a person named by
+principal (§4.3), and cron §10's "no chat session gets a token or a changed `PATH`" with cron off
+(§6.3). Elsewhere, where this document and they disagree, they win and this document is a
 bug. As in them, every rule that looks arbitrary states the mechanism that forces it, so that it is
 not "simplified" away later.
 
@@ -102,8 +104,9 @@ owner's, for that reason.
 - **A person named by principal alone**, `lark:<union_id>` (the board's assignees and reviewers, the
   card poster's check, the terminal), is matched to a grant by that union_id directly, and to the
   configuration's lists by **the open_id `people` holds for them with this app id**, as today
-  (kanban §4.2). A person `people` does not hold is in no list, and may still have a grant: a grant
-  needs no open_id to be found.
+  (kanban §4.2). A person `people` does not hold is in no list, and may still have a grant: the
+  grant is checked by union_id whether or not `people` has a row, as it needs no open_id to be
+  found.
 - **When a person's open_id changes.** Within one app Lark gives one open_id per person, so it does
   not change for this bot; `notePerson` replaces it if Lark ever sends another. A grant, keyed by
   union_id, is unaffected; the configuration's lists, which hold open_ids, follow whatever the
@@ -153,7 +156,7 @@ CREATE TABLE tier_grants (
   CHECK ((revoked_at IS NULL) = (revoked_via IS NULL)),
   CHECK ((revoked_at IS NULL) = (ended IS NULL)),
   CHECK ((granted_via = 'chat') = (granted_chat IS NOT NULL)),
-  CHECK (revoked_chat IS NULL OR revoked_via = 'chat')
+  CHECK ((revoked_via IS 'chat') = (revoked_chat IS NOT NULL))
 ) STRICT;
 
 CREATE UNIQUE INDEX idx_tier_grants_active ON tier_grants(app_id, union_id) WHERE revoked_at IS NULL;
@@ -261,13 +264,18 @@ At once, everywhere a tier is checked, because each of these asks the `Authorize
   `CronTokens.turnSubmitted` for each turn as it is submitted (cron spec §7.1).
 - **A person named by principal, in the gateway**: `PeopleDirectory.canTalk` (assignees and
   reviewers, kanban §4.2) and the card poster's check at each send (`CardPoster`, `canTalk`).
-  `PeopleDeps.canTalk(openId)` becomes `canTalk(person: { openId, unionId })`, so the gateway's
-  callback gives the `Authorizer` a principal with its union_id, and a grant is found. *Why change
-  the signature:* today's callback passes `unionId: null`, which would hide every grant from the
-  board.
+  `PeopleDeps.canTalk(openId)` becomes `canTalk(person: { openId: string | null; unionId: string
+  })`, so the gateway's callback gives the `Authorizer` a principal with its union_id, and a grant
+  is found. `PeopleDirectory.canTalk(principal)` calls it whether or not `people` has a row for the
+  union_id, with `openId` null when it has none: the grant is found by the union_id, and the
+  configuration's lists, which hold open_ids, then match nothing. *Why change the signature:*
+  today's callback passes `unionId: null`, which would hide every grant from the board, and today's
+  method returns false for a person `people` does not hold before asking.
 - **The terminal's talk check** (plan V, kanban §22.2): `openBoard` (`src/cli/gate.ts`) builds its
   `PeopleDirectory` with `canTalk(person)` = `tiersOf` over `TeamSettings`'s lists and
-  `activeGrant(db, appId, person.unionId)`, on the database it opened. `TeamSettings` gains
+  `activeGrant(db, appId, person.unionId)`, on the database it opened. A database with no
+  `tier_grants` table, not yet migrated to 011, has no grants for this reader: `mt kanban` and its
+  talk column work as today, and only `mt auth` refuses such a database (§6.2). `TeamSettings` gains
   `operate` (the owner and `MT_ALLOW_OPERATE` or `auth.operate`, present with an owner, as `talk`
   is) and `owner`, read with `loadConfig`'s precedence, so `mt auth list` can say who operates.
 
@@ -306,14 +314,36 @@ the actor (`owner`, `operator` or `terminal`), the target's sources (owner, in `
 `revoke`, a no-op with its reason, or a refusal with its reason. Chat and the terminal both call it,
 through the writer (§3.2), so they cannot judge a case differently.
 
+**The sources fed to it.** The `Authorizer` exposes `sourcesOf(openId)`, which says whether an
+open_id is the owner and whether it is in `allowTalk` and `allowOperate`, and `isOwner(principal)`;
+`AuthChat` gives `decide` the actor's and the target's from these, and their grants from the
+writer's reads. The terminal builds the same `sourcesOf` from `TeamSettings`' `owner`, `talk` and
+`operate` (§4.3), with the same function behind both. *Its consequence:* the terminal judges by its
+own read of the configuration, the file and the environment as this shell sees them, which may
+differ from the running gateway's until the gateway restarts, as the terminal's talk check already
+may (kanban §22.2). An edit to `config.yaml` that the gateway has not yet loaded is thus judged by
+the terminal as if loaded.
+
+**Where each list came from.** `loadConfig` records, beside `allowTalk`, `allowOperate` and
+`ownerOpenId`, the name each came from, as it records `maxRunningFrom`: `auth.talk` or
+`MT_ALLOW_TALK`, `auth.operate` or `MT_ALLOW_OPERATE`, `auth.owner` or `MT_OWNER_OPEN_ID`;
+`teamSettingsFrom` records the same for the terminal. Every reply that names a list names the one
+in effect: "from auth.talk in config.yaml" for the file, "from MT_ALLOW_TALK" for the environment.
+Below, `<talk source>` stands for these words, and `<operate source>` and `<owner source>` for the
+other two lists' alike. *Why:* with an override set, "config.yaml" points the
+operator at a file whose list is not the one in use.
+
 ### 5.2 The cases a grant meets
 
 In this order, the first that applies deciding:
 
 - **Granting the owner, or revoking them**: a no-op for a grant, "is the owner, who has both tiers
-  always", and a refusal for a revoke, "is the owner, set in config.yaml, and cannot be revoked".
+  always", and a refusal for a revoke, "is the owner, set in <owner source>, and cannot be
+  revoked". An owner with a grant left over from before they were the owner (the owner changed in
+  configuration, §9) is the one revoke that goes ahead: the grant ends, and the reply says "the
+  grant is revoked; they keep both tiers as the owner".
 - **Granting a tier the person already has**: a no-op, said so, with where it comes from: "already
-  has talk tier, from config.yaml (auth.talk)", or "…, by a grant from Alice on 2026-11-18". Talk to
+  has talk tier, <talk source>", or "…, by a grant from Alice on 2026-11-18". Talk to
   an operator is a no-op too, since operate includes talk (§2.1); the reply says that to leave them
   talk alone, the owner revokes and grants talk again. *Why no downgrade by `grant talk`:* the same
   words would mean "make sure they have talk" from an operator and "take operate away" from the
@@ -332,11 +362,11 @@ In this order, the first that applies deciding:
   auth.operate: their talk grant is what makes them an operator, so only the owner revokes it".
   *Why allowed otherwise:* talk is the operators' to manage; an operator by grant holds an operate
   grant, not a talk one, so this case does not reach them.
-- **Revoking a person whose tier is the configuration's alone**: refused, "has talk tier from
-  config.yaml (auth.talk), which chat cannot change: the operator edits config.yaml and restarts
-  the gateway". At the terminal the same words, naming the file the settings came from.
+- **Revoking a person whose tier is the configuration's alone**: refused, "has talk tier <talk
+  source>, which chat cannot change: the operator edits it and restarts the gateway". At the
+  terminal the same words, "which mt auth cannot change".
 - **Revoking a person with a grant and a configuration entry**: the grant ends; the reply says what
-  is left, "keeps talk tier from config.yaml (auth.talk)".
+  is left, "keeps talk tier <talk source>".
 - **Revoking a person with neither**: a no-op, "has no grant to revoke".
 - **Granting or revoking yourself**: no rule of its own; the cases above settle it. An operator's
   `grant @me talk` is a no-op (they have it); an operator by grant cannot revoke their own operate
@@ -394,13 +424,24 @@ As today when a person loses talk tier, which until now took an edit and a resta
   everything between is the person; after `revoke`, everything is the person. A person is an
   @-mention or, for `revoke` only, `lark:<union_id>`. *Why the tier last:* a mention's name may
   have spaces (`@Alice Smith`), and with the tier last no name needs splitting.
-- **The mention is resolved as `/kanban` resolves one**: `KanbanChat.#mentioned` moves to a shared
-  function, `mentionedPerson(name, message)` in `src/channel/mentions.ts`, used by both, with its
-  three refusals and their words: not someone this message mentions ("type @ and pick them, so Lark
-  says who they are"), no union_id with the mention ("ask the operator to check the app can read
-  user ids"), and more than one person mentioned by that name. It also returns the mention's
-  open_id, which the grant records. *Why move it:* `/auth` works with the board off, and two copies
-  of the same resolution would drift.
+- **The mention is resolved as `/kanban` resolves one**: the `@` half of `KanbanChat.#mentioned`
+  moves to a shared function, `mentionedPerson(name, message)` in `src/channel/mentions.ts`, which
+  takes `@` names only, with its three refusals and their words: not someone this message mentions
+  ("type @ and pick them, so Lark says who they are"), no union_id with the mention ("ask the
+  operator to check the app can read user ids"), and more than one person mentioned by that name.
+  It also returns the mention's open_id, which the grant records. The `lark:` branch stays with
+  each caller: `KanbanChat` keeps its own for a typed principal, and `AuthChat` takes one for
+  `revoke` only, so no path reaches a grant with a typed id. *Why move it:* `/auth` works with the
+  board off, and two copies of the same resolution would drift.
+- **A bot is not a person.** `admits`' `bot_sender` check comes first, as now, so a bot cannot type
+  `/auth` at all. A mention of a bot is refused by `mentionedPerson`, "is a bot, and a bot's tier is
+  configuration's", by the mention's `mentioned_type`, which the adapter's `mentionsOf` reads into
+  `InboundMention.isBot`; a mention without the field is judged as today, and a bot's comes with no
+  union_id anyway. `/kanban`'s callers get the refusal too, which is right for them: a bot cannot be
+  given work.
+- **In a direct message**, a person can be @-mentioned only where Lark lets them be, so a grant
+  whose name is not among the message's mentions is refused there with the mention's words and
+  "in a direct message, grant in a group they are in, or with mt auth grant".
 - **`lark:<union_id>` for a revoke only.** A person to revoke may have left the chat, and can no
   longer be mentioned; `/auth list` shows the principal to type. A grant takes a mention only, so
   that a chat grant is always made with the ids Lark sent: that is the point of this design (§0).
@@ -415,7 +456,11 @@ As today when a person loses talk tier, which until now took an edit and a resta
   - "Carol now has talk tier, granted by Alice. `/auth revoke @Carol` takes it back."
   - "Carol now has operate tier, in place of talk, granted by Alice."
   - "Carol no longer has talk tier: revoked by Bob." or "…: revoked by Bob; they keep talk tier
-    from config.yaml (auth.talk)."
+    <talk source>."
+  - For a person whose operate grant is revoked, who may have granted talk while an operator, the
+    count of the talk grants they made that are still active is added: "They made 2 talk grants
+    still in force; /auth list shows them." *Why say it:* those grants stay (§9), and the owner
+    revoking an operator is the moment they are wanted.
 
   No-ops and refusals are one line too (§5.2). The person is named by the name Lark's mention
   showed, the granter by the name Lark gave for the sender, falling back to their principal. *Why
@@ -426,8 +471,8 @@ As today when a person loses talk tier, which until now took an edit and a resta
 ### 6.2 `mt auth` at the terminal
 
 ```
-mt auth grant lark:<union_id> talk|operate
-mt auth revoke lark:<union_id>
+mt auth grant lark:<union_id> talk|operate [--json]
+mt auth revoke lark:<union_id> [--json]
 mt auth list [--json]
 ```
 
@@ -436,7 +481,8 @@ mt auth list [--json]
   settings name. It needs the app id (`lark.appId` or `LARK_APP_ID`), refused without one, "there
   is no bot to grant for: this shell finds no lark.appId or LARK_APP_ID", and `tier_grants`,
   refused without it, "the database at … has no tier grants yet: start the gateway once, so it is
-  migrated".
+  migrated". Only `mt auth` refuses an unmigrated database; the other commands read it as having
+  no grants (§4.3).
 - **The person is `lark:<union_id>`, and must be in `people`** for this app id. Refused otherwise:
   "lark:on_… is not someone this bot has seen: mt kanban people lists those it has, or grant them in
   chat with /auth grant @Name talk, which needs no id". An `ou_…` is refused with "ou_… is an
@@ -448,6 +494,12 @@ mt auth list [--json]
   same decisions as chat, through the same writer, in the same words, on stderr for a refusal.
 - **Exit codes** as the other operator commands: 0 done, a no-op included, its line on stdout; 1
   refused; 2 the command line was wrong.
+- **`--json`** on `grant` and `revoke`, as on the other operator commands, so a script reads the
+  outcome rather than words: `{"ok": true, "outcome": "granted" | "replaced" | "revoked" |
+  "already" | "no_grant", "tier": "talk" | "operate" | null, "principal": "lark:<union_id>"}`, the
+  tier being the one the person has afterwards; a refusal `{"ok": false, "code", "message"}`, its
+  code one of `no_bot`, `no_owner`, `not_migrated`, `unknown_person`, `open_id`, `invalid`,
+  `is_owner`, `from_config` and `operator_command` (in an agent's shell, §6.3).
 - **No announcement.** A terminal's grant is made in no chat (§1). The running gateway sees it at
   its next check (§4.1), with no nudge.
 - **The owner and the lists** come from `TeamSettings` (§4.3). With no owner set, `grant` and
@@ -456,12 +508,33 @@ mt auth list [--json]
 
 ### 6.3 Agents
 
-`mt auth` is refused in an agent's shell (`inAgentRun`), before its arguments are read, with
-`runShellRefusal('mt auth …')`, as `mt service` is; `--json` among its words gives the refusal as
-JSON, as `mt kanban`'s operator groups do. An agent has no other way in: `/auth` is a chat command,
-and an agent's messages are not inbound messages. This holds as far as the shell says it is an
-agent's, as kanban §10 says of the board's operator commands: an agent runs as the gateway's user,
-and one set on it could unset its variables, or write `config.yaml` or the database (§12).
+`mt auth` is refused in every agent's shell, whether or not cron is on, before its arguments are
+read; `--json` among its words gives the refusal as JSON, as `mt kanban`'s operator groups do. An
+agent has no other way in: `/auth` is a chat command, and an agent's messages are not inbound
+messages.
+
+- **The session marker.** Today a chat session's agent has no marked shell with cron off (cron
+  §15), so `inAgentRun` alone would let it run `mt auth`. The gateway therefore puts
+  `MT_AGENT_SESSION=<session id>` into every agent session's environment, a chat session's, a board
+  run's and a fire's alike, cron on or off: the registry's `envFor` in `src/index.ts` adds it to
+  what the dispatcher, the scheduler or the cron tokens give, and gives it alone when none of them
+  gives anything.
+- **`mt auth` is refused when `inAgentRun(env)` or `MT_AGENT_SESSION` is set**, with
+  `runShellRefusal`'s words, naming `MT_AGENT_SESSION` when it is the only one set.
+- **Not in `AGENT_VARIABLES`.** Every other operator command keeps today's behaviour: with cron
+  off, a chat agent's shell can still run `mt kanban task`, `mt service` and the rest, and the
+  role and workflow checks still read the gateway's `.env` there. *Why:* the user chose to guard
+  only `mt auth`; adding the marker to `AGENT_VARIABLES` would change every command's behaviour in
+  every chat session, which cron §15 lists as a cost of turning cron on, for every gateway.
+- **Dropped where the others are.** `gateEnv` (`src/kanban/gates.ts`) and `mt update`'s child
+  environment (`src/cli/update.ts`) drop `MT_AGENT_SESSION` as they drop `MT_KANBAN_*` and
+  `MT_CRON_*`, so a cron script and a gate, the operator's commands, stay operator shells, and
+  their `mt auth` works.
+- **Cron §10 amended.** Its rule that with cron off "no chat session gets a token or a changed
+  `PATH`" becomes: no chat session gets a token or a `PATH` change; the session marker is always
+  set.
+
+This guards against mistakes and injection, not against a determined agent (§12).
 
 ---
 
@@ -500,9 +573,11 @@ ou_e…: talk, from config.yaml; not seen by this bot yet
 A configuration entry is named by the person `people` holds with that open_id, or by the open_id
 when there is none. A person in `auth.operate` with no talk is listed last, "in auth.operate
 without talk tier, so no tier", the case §5.2 guards. The date is the gateway's zone's
-(`cron.tz`, else the process's), as cron's are. *Why talk tier may list:* who can drive the agent in
-a chat is something its members are entitled to see, and the list holds nothing a grant's reply did
-not say in a chat already.
+(`cron.tz`, else the process's), as cron's are. *Talk tier may list, and sees every chat's grants:*
+grants are gateway-wide (§5.2), so the list is the gateway's, and a chat's members see grants made
+in other chats, with the granter's name and the date, though not the chat. This is accepted: who
+can drive the agent, and so read what is said to it, is something a person at talk tier is
+entitled to know, and the list names no chat and quotes nothing said in one.
 
 ### 8.2 `mt auth list`
 
@@ -547,9 +622,12 @@ counted once.
 
 - **`mt service check`** needs no change: it checks the configuration the gateway would start with,
   and grants cannot stop a start. Its database line already says the version, 11 once migrated.
-- **`mt update`** takes the backup for migration 011, as for any new one (kanban §20.8). Going back
-  to a build before it leaves the table in place and unread: every grant stops counting, which fails
-  closed, the configuration's tiers still holding; going forward again counts them again.
+- **`mt update`** takes the backup for migration 011, as for any new one (kanban §20.8).
+- **Going back to a build before 011** cannot keep the database: an older build refuses a database
+  above its highest migration (`migrate`, `src/db/open.ts`, kanban §20.6), so going back means
+  restoring the backup taken before 011. That drops every grant, and everything else written
+  since; it fails closed, as the configuration's tiers, the owner's included, still hold. Grants
+  made since must be made again after going forward.
 
 ---
 
@@ -562,8 +640,8 @@ counted once.
   and the unique index make one; the other reads it and is a no-op, said so.
 - **The owner revoking an operator while that operator grants talk**: whichever transaction is
   second re-reads the operator's grant (§3.2): a grant after the revoke is refused.
-- **An operator by grant, revoked**: the talk grants they made stay; `mt auth list --json` gives
-  each one's `by`.
+- **An operator by grant, revoked**: the talk grants they made stay; the revoke's reply counts them
+  (§6.1), and `mt auth list --json` gives each one's `by`.
 - **A mention of a bot, or of `@all`**: `@all` is not a mention (`InboundMessage.mentions` leaves it
   out); a bot comes with no union_id and is refused (§6.1).
 - **Two people mentioned with the same name**: refused, "say which with lark:<union_id>", which a
@@ -597,12 +675,20 @@ counted once.
   it (§6.1).
 - **`src/core/commands.ts`** gains `auth`; **`src/core/router.ts`** its `case 'auth'`, through an
   `auth` dependency, with the reply masked; **`src/core/router.ts`'s** deps comment on tiers.
-- **`src/kanban/people.ts`**: `PeopleDeps.canTalk` takes `{ openId, unionId }` (§4.3).
+- **`src/kanban/people.ts`**: `PeopleDeps.canTalk` takes `{ openId: string | null, unionId }`,
+  and `canTalk(principal)` asks it with or without a `people` row (§4.3).
 - **`src/index.ts`**: the `GrantReader` over the database; the `PeopleDirectory` built whatever
-  `kanban.enabled` says; `AuthChat`; the startup lines (§8.4).
-- **`src/config.ts`**: `TeamSettings.owner` and `TeamSettings.operate` (§4.3).
-- **`src/cli/auth.ts`**: `mt auth` (§6.2, §8.2); **`src/cli/mt.ts`**: the group, its usage lines,
-  and its refusal in an agent's shell (§6.3); **`src/cli/gate.ts`**: `openBoard`'s
+  `kanban.enabled` says; `AuthChat`; the startup lines (§8.4); `MT_AGENT_SESSION` in the
+  registry's `envFor` (§6.3).
+- **`src/config.ts`**: `TeamSettings.owner` and `TeamSettings.operate` (§4.3); where each list came
+  from, in `loadConfig` and `teamSettingsFrom` (§5.1).
+- **`src/policy/auth.ts`** also: `sourcesOf(openId)` (§5.1).
+- **`src/channel/lark/inbound.ts`**: `mentionsOf` reading `mentioned_type` into
+  `InboundMention.isBot` (§6.1).
+- **`src/kanban/gates.ts`** and **`src/cli/update.ts`**: `MT_AGENT_SESSION` dropped from a gate's,
+  a script's and `mt update`'s children's environments (§6.3).
+- **`src/cli/auth.ts`**: `mt auth`, `--json` on all three (§6.2, §8.2); **`src/cli/mt.ts`**: the
+  group, its usage lines, and its refusal by `inAgentRun` or `MT_AGENT_SESSION` (§6.3); **`src/cli/gate.ts`**: `openBoard`'s
   `canTalk(person)` and `seen()`'s `talk`, through `tiersOf` and `activeGrant`, and `talk_from`
   (§8.3).
 - **Docs, as built:** `config.example.yaml`'s comment on `auth.owner`, which says the lists are
@@ -611,8 +697,8 @@ counted once.
   `auth.operate` rows, and its "Empty means closed" rule, name grants; the kanban guide's "Who may
   do what" (`docs/kanban-guide.md`) and its §22.2 lines say a tier comes from the configuration or
   a grant, and `mt kanban people`'s talk column counts grants; a section "Letting people in" in the
-  guide gives `/auth` and `mt auth`; channel §3.4 and kanban §4.2 and §22.2 get an amendment note
-  pointing here.
+  guide gives `/auth` and `mt auth`; channel §3.4, kanban §4.2 and §22.2, and cron §10 get an
+  amendment note pointing here, cron §10's sentence reworded as §6.3 says.
 
 ---
 
@@ -636,7 +722,9 @@ counted once.
   a minute; no reader as today; `isOwner`.
 - **Unit, `/auth`**: the parse (a mention name with spaces, the tier in any case and last, a
   missing tier, `lark:` for revoke only, `help` and an unknown word answered with the usage);
-  `mentionedPerson`'s three refusals, through `/kanban` too, unchanged; each tier refusal; the
+  `mentionedPerson`'s three refusals, through `/kanban` too, unchanged, and its fourth for a bot's
+  mention; a typed `lark:` refused for `grant`; the direct message's refusal; the revoked
+  operator's count of grants still in force; the owner's leftover grant revoked; each tier refusal; the
   sender and mentions noted in `people`; the reply's words for each outcome, masked, a name holding
   a known secret shown masked; the 50-line cut of `/auth list`.
 - **Router**: `/auth` registered at talk, listed in `/help`, answered while a session is busy, and
@@ -646,7 +734,14 @@ counted once.
 - **The board**: a person granted talk assignable by `/kanban task new` and at the terminal; the
   card poster refusing a revoked assignee's card, `card_failed`; `PeopleDirectory.canTalk` finding a
   grant by union_id.
-- **`mt auth`**: grant, revoke and list against a temp home and database; an unseen union_id, an
+- **The marker**: `MT_AGENT_SESSION` in a chat session's environment with cron off and on, a board
+  run's and a fire's; absent from a gate's, a cron script's and `mt update`'s children's; `mt auth`
+  refused with it alone set, and `mt kanban task list` and `mt service status` not refused with it
+  alone set.
+- **Sources**: a reply naming `MT_ALLOW_TALK` with the override set and `auth.talk` without; the
+  terminal's `sourcesOf` from `TeamSettings` agreeing with the `Authorizer`'s for the same settings.
+- **`mt auth`**: grant, revoke and list against a temp home and database, `--json` on each, every
+  refusal code; an unseen union_id, an
   `ou_` and an `@` refused in their words; no app id, no owner, an unmigrated database; refused in an
   agent's shell, `--json` included; `list --json`'s shape; `mt kanban people`'s `talk` and
   `talk_from`.
@@ -661,11 +756,15 @@ counted once.
 
 ## 12. Limits
 
-- **The terminal is trusted, and an agent is held off only by its shell.** `mt auth` refuses an
-  agent's shell (§6.3), but an agent runs as the gateway's user, and one set on it could unset its
-  variables, write `config.yaml`, or write `tier_grants` itself, as kanban §10 says of the board's
-  operator commands. With `cron.enabled` off, a chat session's agent has no marked shell at all
-  (cron spec §15), so there `mt auth` runs for it, as `mt kanban task` does today.
+- **The terminal is trusted, and an agent is held off only by its shell.** `mt auth` refuses every
+  agent's shell, by `MT_AGENT_SESSION` or the agent variables (§6.3). That guards `mt auth` against
+  mistakes and prompt injection, not against an agent set on it: an agent runs as the gateway's OS
+  user, and could unset the variable, edit `config.yaml`, or write `tier_grants` itself, as kanban
+  §10 says of the board's operator commands.
+- **Other operator commands stay reachable from a chat agent's shell with cron off**, by the user's
+  choice (§6.3): `mt kanban task`, `mt service` and the rest, as today.
+- **The terminal judges by its own read of the configuration**, which may differ from the running
+  gateway's until a restart (§5.1).
 - **A grant needs a union_id**: an app that cannot read user ids can grant nobody, and its people
   are let in by configuration alone (§2.2).
 - **Grants are per bot**: a new app id starts with none in effect (§2.2).
@@ -674,7 +773,8 @@ counted once.
 - **A terminal's grant is announced nowhere**, and is not in the gateway's log (§6.2, §7).
 - **A revoked operator's grants stay** until each is revoked (§9).
 - **No history command**: the revoked grants are in the table, read with `sqlite3` (§1).
-- **A build before migration 011 ignores grants**, failing closed (§8.5).
+- **Going back before migration 011 drops every grant**, with the backup restored, failing closed
+  (§8.5).
 
 ---
 
@@ -686,7 +786,8 @@ open_id as last seen, the tier, who, when and how, counted beside the configurat
 the configuration stays the base, its entries and the owner never revoked from chat or `mt auth`;
 the grant's effect at once, with no restart, on chat messages, card presses, `/kanban`'s checks,
 cron's per-turn tier, the card poster's check and the terminal's (`TeamSettings.talk`); one line in
-the chat a grant or revoke was made in; a revoked person's work treated as on losing talk today; a
+the chat a grant or revoke was made in, which the main agent read as posting nothing for a
+terminal's change, made in no chat; a revoked person's work treated as on losing talk today; a
 table of grants with `revoked_at`, never deleted; an operator allowed to revoke another operator's
 talk grant unless the target is an operator by configuration; a configuration tier refused for
 revoke with that said; a grant of a tier already held a no-op, said so; and the config example's
@@ -709,3 +810,24 @@ granting only a person `people` holds, and refusing an open_id; no names stored,
 events table; `PeopleDeps.canTalk` given the union_id; `TeamSettings.owner` and `operate`; `mt
 kanban people`'s `talk_from`; the startup lines; `/auth list`'s 50-line cut; and `mt service check`
 unchanged.
+*Amended on 2026-11-18, after review round 1.* The user decided that only `mt auth` is refused in an
+agent's shell, whether or not cron is on: the gateway sets `MT_AGENT_SESSION=<session id>` in every
+agent session's environment through the registry's `envFor`, not added to `AGENT_VARIABLES`;
+`mt auth` refuses when `inAgentRun` holds or the marker is set; `gateEnv` and `mt update`'s
+environment drop it; cron §10's rule becomes "no token or `PATH` change; the session marker is
+always set"; and the limits say this guards `mt auth` against mistakes and injection, not against
+an agent that unsets the variable or edits `config.yaml` as the same OS user, with the other
+operator commands reachable from a chat agent's shell when cron is off (§6.3, §12). The user also
+chose: `/auth list` kept at talk tier, accepting that a chat's members see other chats' grants
+(§8.1); a revoked operator's reply counting their talk grants still in force (§6.1); the audit
+view deferred (§1); and the direct message rule kept, its refusal pointing at a group or `mt auth
+grant` (§6.1). The review found, and this revision takes: that going back before 011 means
+restoring the backup, which drops every grant (§8.5); that only `mt auth` refuses an unmigrated
+database, the terminal's reader finding no grants (§4.3); that `PeopleDirectory.canTalk` checks a
+grant with or without a `people` row, its callback taking `openId: string | null` (§4.3); that
+replies name the list in effect, `loadConfig` recording each list's source (§5.1); `sourcesOf`
+and `isOwner` feeding `decide` in the gateway and at the terminal, the terminal judging by its own
+read of the configuration (§5.1); `--json` on `mt auth grant` and `revoke` (§6.2); a bot's mention
+refused by `mentioned_type` (§6.1); `mentionedPerson` taking `@` names only (§6.1); the
+`revoked_chat` check (§3.1); and an owner's leftover grant revoked, the owner keeping both tiers
+(§5.2).
