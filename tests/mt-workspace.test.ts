@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import {
   appendFileSync,
   chmodSync,
@@ -13,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import type { Git } from '../src/cli/mt.js';
 import { loadTeamSettings } from '../src/config.js';
@@ -21,6 +20,7 @@ import { migrate, openDb } from '../src/db/open.js';
 import { registerWorkspaces } from '../src/db/workspaces.js';
 import { SCHEMA_DIR } from './helpers/db.js';
 import { mtFixture, type MtFixture } from './helpers/mt.js';
+import { GIT_ISOLATION, git as runGit, gitEnv } from './helpers/git.js';
 
 let fx: MtFixture;
 afterEach(() => fx.cleanup());
@@ -171,9 +171,12 @@ describe('mt workspace add --clone', () => {
   it('clones into the home and adds it', async () => {
     fx = mtFixture();
     const source = join(fx.root, 'source');
-    execFileSync('git', ['init', '-q', source]);
-    execFileSync('git', ['-C', source, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '--allow-empty', '-q', '-m', 'init']);
-    const r = await fx.run(['workspace', 'add', 'docs', '--clone', source]);
+    const env = gitEnv(fx.root);
+    runGit(fx.root, env, 'init', '-q', source);
+    runGit(fx.root, env, '-C', source, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '--allow-empty', '-q', '-m', 'init');
+    // mt's own git clone inherits this process's environment: isolate that too, so no hook of the user's runs.
+    for (const [key, value] of Object.entries({ ...GIT_ISOLATION, HOME: fx.root })) vi.stubEnv(key, value);
+    const r = await fx.run(['workspace', 'add', 'docs', '--clone', source]).finally(() => vi.unstubAllEnvs());
     expect(r.code, r.err).toBe(0);
     const target = join(fx.home, 'workspaces', 'docs');
     expect(existsSync(join(target, '.git'))).toBe(true);

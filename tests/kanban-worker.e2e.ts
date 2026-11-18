@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +22,7 @@ import { clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
 import { role } from './helpers/dispatch.js';
 import { ALICE, VIA } from './helpers/kanban.js';
+import { git as runGit, gitEnv } from './helpers/git.js';
 
 /**
  * The board end to end (spec §11): a real dispatcher runs a task as a session
@@ -80,9 +81,9 @@ async function build(mode: string, opts: { gated?: boolean } = {}): Promise<Stac
     db: t.db,
     roles,
     workspaces: new Set(['default']),
-    // A made-up home, so git reads no configuration of the real one.
+    // No global or system git configuration, and a made-up home, so git reads nothing of the real one's.
     ...(opts.gated === true
-      ? { checks: { workspaceDirs: new Map([['default', workspace]]), env: { PATH: process.env['PATH'], HOME: home } } }
+      ? { checks: { workspaceDirs: new Map([['default', workspace]]), env: gitEnv(home) } }
       : {}),
   });
   const drivers = new Map<string, Driver>([
@@ -208,10 +209,8 @@ describe('the worker CLI, end to end', () => {
 
   it("an agent's report runs the task's gate in the workspace, and is refused until it passes", async () => {
     const s = await build('kanban-gated', { gated: true });
-    const env = { PATH: process.env['PATH'], HOME: join(s.dir, 'home'), GIT_CONFIG_NOSYSTEM: '1' };
-    const git = (...args: string[]) =>
-      spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: s.workspace, env, encoding: 'utf8' })
-        .stdout.trim();
+    const env = gitEnv(join(s.dir, 'home'));
+    const git = (...args: string[]) => runGit(s.workspace, env, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args);
     git('init', '-q');
     writeFileSync(join(s.workspace, 'README'), 'a repository\n');
     git('add', 'README');

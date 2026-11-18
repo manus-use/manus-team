@@ -1,29 +1,23 @@
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { commitReader } from '../src/kanban/commit.js';
+import { git, gitEnv } from './helpers/git.js';
 
 /** The reported commit against real git (spec §7.8, §11): clean, dirty, not a repository, and no git. */
 
 let dir: string;
-/** git's environment: a made-up home, so no test reads the real one's configuration. */
+/** git's environment: no global or system configuration, and a made-up home. */
 let env: Record<string, string>;
 
 function sh(cwd: string, ...args: string[]): string {
-  const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], {
-    cwd,
-    env: { ...env, GIT_CONFIG_NOSYSTEM: '1' },
-    encoding: 'utf8',
-  });
-  if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
-  return r.stdout.trim();
+  return git(cwd, env, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args);
 }
 
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'mt-commit-')));
-  env = { PATH: process.env['PATH'] ?? '/usr/bin:/bin', HOME: dir };
+  env = gitEnv(dir);
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 

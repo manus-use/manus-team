@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +9,7 @@ import type { FakeDriver } from './helpers/driver.js';
 import { completes, dispatchHarness, reportComplete, type DispatchHarness } from './helpers/dispatch.js';
 import { testDb } from './helpers/db.js';
 import { ALICE } from './helpers/kanban.js';
+import { git as testGit, gitEnv } from './helpers/git.js';
 
 /**
  * A DAG in an isolated git workspace, end to end (spec §18): two parallel tasks
@@ -24,9 +24,7 @@ let env: Record<string, string>;
 let h: DispatchHarness;
 
 function git(cwd: string, ...args: string[]): string {
-  const r = spawnSync('git', args, { cwd, env, encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
-  return r.stdout.trim();
+  return testGit(cwd, env, ...args);
 }
 
 /** The directory a turn's run works in, read from the board as the agent would find its cwd. */
@@ -76,7 +74,7 @@ async function eventually(done: () => boolean, what: string): Promise<void> {
 
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'mt-wt-dispatch-')));
-  env = { PATH: process.env['PATH'] ?? '/usr/bin:/bin', HOME: dir, GIT_CONFIG_NOSYSTEM: '1' };
+  env = gitEnv(dir);
   repo = join(dir, 'web');
   mkdirSync(repo);
   git(repo, 'init', '-q', '-b', 'main');
