@@ -93,9 +93,9 @@ auth:
   mentionAll: false
 
 # The role default, when there is no roles/default/. It has no description, so
-# /roles shows "–" for what it is for. A role directory's config.yaml
-# description, else the first line of its role.md, is what /roles shows in
-# chat, to anyone at talk tier, in every chat the gateway acts in: keep in
+# /role list shows "–" for what it is for. A role directory's config.yaml
+# description, else the first line of its role.md, is what /role list (or
+# /roles) shows in chat, to anyone at talk tier, in every chat the gateway acts in: keep in
 # neither anything a talk-tier person should not read.
 agent:
   # How the agent is run. Two choices:

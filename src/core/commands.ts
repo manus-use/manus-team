@@ -33,6 +33,8 @@ export interface CommandSpec {
   mutating: boolean;
   summary: string;
   usage?: string;
+  /** An alias `/help` shows after the usage, as `(or /alias)`: the old name of a command renamed. */
+  helpAlias?: string;
 }
 
 /**
@@ -101,7 +103,9 @@ export const COMMANDS: readonly CommandSpec[] = [
     summary: 'Cancel the current turn. Cancellation is a terminal, not a deletion.',
   },
   {
-    name: 'roles',
+    name: 'role',
+    // `/roles` was its name before `/role list`, and stays: the same spec, so the tier cannot differ.
+    aliases: ['roles'],
     // Talk, as /sessions is: a person giving work to a role needs to know its name and what it is for.
     tier: 'talk',
     needsSession: false,
@@ -109,6 +113,8 @@ export const COMMANDS: readonly CommandSpec[] = [
     multiline: false,
     mutating: false,
     summary: 'The roles, what each is for, whether it can be given work, and its open runs.',
+    usage: '/role list',
+    helpAlias: '/roles',
   },
   {
     name: 'status',
@@ -182,6 +188,8 @@ for (const spec of COMMANDS) {
 
 export interface ParsedCommand {
   spec: CommandSpec;
+  /** The verb as typed, lowercased: the spec's name or one of its aliases. */
+  verb: string;
   /** Everything after the verb, trimmed. */
   arg: string;
 }
@@ -213,7 +221,7 @@ export function parseCommand(
   // The alternative -- passing embedded newlines into a path or an id -- produces
   // errors that name the whole blob rather than the mistake.
   const arg = spec.multiline ? rest : (rest.split('\n')[0] ?? '').trim();
-  return { spec, arg };
+  return { spec, verb: name, arg };
 }
 
 export function renderHelp(): string {
@@ -223,7 +231,8 @@ export function renderHelp(): string {
       c.tier === 'operate' ? 'operator' : 'anyone allowed',
       c.effect === 'next-session' ? 'applies to the next session' : null,
     ].filter((b): b is string => b !== null);
-    return `\`${usage}\`: ${c.summary} (${badges.join(', ')})`;
+    const alias = c.helpAlias === undefined ? '' : ` (or \`${c.helpAlias}\`)`;
+    return `\`${usage}\`${alias}: ${c.summary} (${badges.join(', ')})`;
   });
   return lines.join('\n');
 }

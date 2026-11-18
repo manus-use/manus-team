@@ -513,7 +513,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     ...(kanbanChat === undefined ? {} : { kanban: kanbanChat }),
     ...(cronChat === undefined ? {} : { cron: cronChat }),
     auth: authChat,
-    // The gateway's roles, read at each /roles, the board on or off (tier grants spec §13).
+    // The gateway's roles, read at each /role list or /roles, the board on or off (tier grants spec §13).
     roles: () => rolesReply(db, team.roles, config.kanban),
     // Each turn's sender's tier, against its session's cron token (the cron spec, §7.1).
     ...(tokens === undefined ? {} : { cronTurns: tokens }),

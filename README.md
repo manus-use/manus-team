@@ -360,7 +360,7 @@ agent:
   unsupervised: true
 ```
 
-`/roles` shows a role's `description` in chat, to anyone at talk tier, in every chat the gateway
+`/role list` (or `/roles`) shows a role's `description` in chat, to anyone at talk tier, in every chat the gateway
 acts in, and the first line of its `role.md` when it has none: keep in neither anything a
 talk-tier person should not read.
 
@@ -662,7 +662,7 @@ a running gateway, through the board's own service, and take effect at once.
 | `/status` | talk | What this session is doing |
 | `/stop`, `/cancel` | operate | Cancel the current turn |
 | `/help` | talk | List commands |
-| `/roles` | talk | The roles, what each is for, whether it can be given work, and its open runs |
+| `/role list`, `/roles` | talk | The roles, what each is for, whether it can be given work, and its open runs |
 | `/auth <command>` | talk; an operator grants talk, the owner operate | Who may talk to the agent and operate it, below. Never refused because this chat's session is busy |
 | `/kanban <command>` | talk; operate to change the board | The task board, below. Never refused because this chat's session is busy |
 | `/cron <command>` | talk; operate to change a job | Scheduled jobs, below. Never refused because this chat's session is busy |

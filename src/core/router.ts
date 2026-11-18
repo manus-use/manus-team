@@ -117,8 +117,8 @@ export interface RouterDeps {
    */
   auth?: { run(arg: string, message: InboundMessage): string };
   /**
-   * `/roles` (tier grants spec §13): the reply's text, synchronous, which the
-   * router masks. Absent where a caller gives none, and `/roles` says so.
+   * `/role list` and `/roles` (tier grants spec §13): the reply's text, synchronous, which the
+   * router masks. Absent where a caller gives none, and `/role list` says so.
    */
   roles?: () => string;
   clock?: Clock;
@@ -129,7 +129,10 @@ export interface RouterDeps {
 export const KANBAN_OFF =
   'The task board is off on this gateway. An operator turns it on with `kanban.enabled: true` in config.yaml, and a restart.';
 
-/** What `/roles` says where nothing was given to answer it. */
+/** What `/role` says alone, with a word it does not know, or with anything after `/roles`. */
+export const ROLES_USAGE = 'Usage: `/role list`, or `/roles`, with nothing after it.';
+
+/** What `/role list` says where nothing was given to answer it. */
 export const ROLES_OFF = 'The roles cannot be listed here.';
 
 /** What `/auth` says where nothing was given to answer it. */
@@ -220,7 +223,7 @@ export class Router {
     }
 
     if (parsed !== undefined) {
-      await this.#runCommand(parsed.spec, parsed.arg, message, key, target);
+      await this.#runCommand(parsed.spec, parsed.arg, message, key, target, parsed.verb);
       return;
     }
 
@@ -369,6 +372,7 @@ export class Router {
     message: InboundMessage,
     key: BindingKey,
     target: SendTarget,
+    verb: string,
   ): Promise<void> {
     const tier = this.#deps.authorizer.admitsTier(message.sender, spec.tier);
     if (!tier.ok) {
@@ -538,10 +542,11 @@ export class Router {
         return;
       }
 
-      case 'roles': {
-        if (arg !== '') {
-          // A word after it reads as a filter, and a full list would look like one that matched everything.
-          await this.#reply(target, message, 'roles-usage', 'Usage: `/roles`, with nothing after it.');
+      case 'role': {
+        // `/role list`, or `/roles`, its alias, alone. A word after either reads as a
+        // filter, and a full list would look like one that matched everything.
+        if (arg !== (verb === 'roles' ? '' : 'list')) {
+          await this.#reply(target, message, 'roles-usage', ROLES_USAGE);
           return;
         }
         const roles = this.#deps.roles;

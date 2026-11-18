@@ -45,6 +45,10 @@ where they say "They are sent it as a card, in a direct message, once it is read
 **Ids.** Every task has an id such as `k_…`, which the chat gives you when the task is created.
 Runs have ids such as `r_…`. Wherever an example says `k_…`, use the id the chat gave you.
 
+**Roles.** `/role list` lists the roles in chat, with what each is for, whether it can be given
+work, where it works and its open runs; `/roles` is its alias, and says the same. Anyone at talk
+tier may run it. Name a role from it on an `assignee:` line.
+
 **Who may do what.** The gateway decides your tier from `auth.talk` and `auth.operate` in its
 config, or from a grant (see "Letting people in", below). Anyone at talk tier may use the
 board's read commands; anything that changes the board needs operator tier, except a person's
