@@ -110,6 +110,8 @@ export interface GatewayConfig {
     allowChats: readonly string[];
     allowDirectMessages: boolean;
     allowMentionAll: boolean;
+    /** Where the owner and the two lists came from, as a reply names them (tier grants spec §5.1). */
+    from: ListSources;
   };
 
   /** The `agent:` block or `MT_AGENT_*` variables, if either is present. Absent means a role directory must supply the role `default` (`team.ts`). */
@@ -209,6 +211,23 @@ export interface KanbanSettings {
 
 /** The setting the session limit came from. */
 export type SessionLimitSource = 'MT_MAX_LIVE_SESSIONS' | 'maxLiveSessions';
+
+/**
+ * Where the owner and each tier list came from (tier grants spec §5.1): the
+ * file's key, or the variable that overrides it, as `maxRunningFrom` records
+ * the session limit's. A reply names the one in effect, so an operator with an
+ * override set is not pointed at a file whose list is not the one in use.
+ */
+export interface ListSources {
+  owner: 'auth.owner' | 'MT_OWNER_OPEN_ID';
+  talk: 'auth.talk' | 'MT_ALLOW_TALK';
+  operate: 'auth.operate' | 'MT_ALLOW_OPERATE';
+}
+
+/** A list's source as a reply says it: `from auth.talk in config.yaml`, or `from MT_ALLOW_TALK`. */
+export function sourceText(source: ListSources[keyof ListSources]): string {
+  return source.startsWith('auth.') ? `from ${source} in config.yaml` : `from ${source}`;
+}
 
 /**
  * The session limit and `kanban.max_running`, worked out once for `loadConfig`
@@ -419,6 +438,7 @@ export function loadConfig(
       // Default false. `@all` is a room-wide notification, not an instruction, and
       // treating it as one makes the bot answer announcements.
       allowMentionAll: envFlag(env, 'MT_ALLOW_MENTION_ALL') ?? file.auth.mentionAll ?? false,
+      from: listSources(env),
     },
 
     agent: team.agent,
@@ -484,6 +504,15 @@ function ownerOf(env: Env, file: FileConfig): string | undefined {
 /** The talk allowlist, `MT_ALLOW_TALK` else `auth.talk`, with the owner always first in it. */
 function talkOf(env: Env, file: FileConfig, owner: string): string[] {
   return unique([owner, ...(envList(env, 'MT_ALLOW_TALK') ?? file.auth.talk)]);
+}
+
+/** Which of the owner and the two lists the environment overrides: `ownerOf`'s, `talkOf`'s and `MT_ALLOW_OPERATE`'s precedence. */
+function listSources(env: Env): ListSources {
+  return {
+    owner: envString(env, 'MT_OWNER_OPEN_ID') === undefined ? 'auth.owner' : 'MT_OWNER_OPEN_ID',
+    talk: envList(env, 'MT_ALLOW_TALK') === undefined ? 'auth.talk' : 'MT_ALLOW_TALK',
+    operate: envList(env, 'MT_ALLOW_OPERATE') === undefined ? 'auth.operate' : 'MT_ALLOW_OPERATE',
+  };
 }
 
 /** The chats the gateway acts in, `MT_ALLOW_CHATS` else `auth.chats`; empty for any. */

@@ -51,6 +51,45 @@ export function defaultAuthConfig(ownerOpenId: string): AuthConfig {
 
 export type Decision = { ok: true } | { ok: false; reason: RejectReason; detail: string };
 
+/** The configuration's two lists, by open_id, with the owner in both (`loadConfig`). */
+export interface TierLists {
+  allowTalk: readonly string[];
+  allowOperate: readonly string[];
+}
+
+/** A person's two tiers. */
+export interface Tiers {
+  talk: boolean;
+  operate: boolean;
+}
+
+/**
+ * A person's tiers (tier grants spec §2.1), from the configuration's lists and
+ * their active grant, if any: talk when the open_id is in `allowTalk` or there
+ * is a grant of either tier; operate when they have talk and the open_id is in
+ * `allowOperate` or the grant is operate. An open_id of null, a person `people`
+ * does not hold, matches no list.
+ *
+ * One function, which the gateway's `Authorizer` and the terminal both call, so
+ * the two cannot come to disagree about who has a tier.
+ */
+export function tiersOf(lists: TierLists, openId: string | null, grant: Tier | undefined): Tiers {
+  return tiersFrom(
+    { talk: openId !== null && lists.allowTalk.includes(openId), operate: openId !== null && lists.allowOperate.includes(openId) },
+    grant,
+  );
+}
+
+/**
+ * `tiersOf`'s rule, given whether the person is in each list. A grant of
+ * operate gives talk too: operate needs talk, and an operate grant that left
+ * talk to the configuration would be dead for a person in no list.
+ */
+export function tiersFrom(listed: { talk: boolean; operate: boolean }, grant: Tier | undefined): Tiers {
+  const talk = listed.talk || grant !== undefined;
+  return { talk, operate: talk && (listed.operate || grant === 'operate') };
+}
+
 const OK: Decision = { ok: true };
 
 /**
@@ -84,7 +123,7 @@ export class Authorizer {
   }
 
   canTalk(principal: Principal): boolean {
-    return this.#config.allowTalk.includes(principal.openId);
+    return tiersOf(this.#config, principal.openId, undefined).talk;
   }
 
   /**
@@ -94,7 +133,7 @@ export class Authorizer {
    * would otherwise let someone `/clear` a session they cannot even read.
    */
   canOperate(principal: Principal): boolean {
-    return this.canTalk(principal) && this.#config.allowOperate.includes(principal.openId);
+    return tiersOf(this.#config, principal.openId, undefined).operate;
   }
 
   hasTier(principal: Principal, tier: Tier): boolean {
