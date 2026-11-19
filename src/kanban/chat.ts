@@ -785,8 +785,8 @@ export class KanbanChat {
       const r = this.#deps.service.unblock(taskId, by, undefined, { blockedAt: Number(event) });
       if (!r.ok) {
         if (r.code !== 'stale' && r.code !== 'illegal_transition') return refused(r);
-        // Lifted before this press: the card is redrawn as it stands, beside the reply.
-        if (r.code === 'stale') this.#liftedNotice(action.messageId);
+        // Lifted before this press, by an unblock or an archive: the card is redrawn as it stands, beside the reply.
+        this.#liftedNotice(action.messageId);
         return `${id(taskId)} is not blocked as that notice said any more: \`/kanban task show ${taskId}\` says where it is.`;
       }
       this.#liftedNotice(action.messageId);

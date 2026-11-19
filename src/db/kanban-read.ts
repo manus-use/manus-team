@@ -1120,14 +1120,17 @@ export function relatedTasks(db: Db, instanceId: string): TaskRow[] {
     .map(decodeTask);
 }
 
-/** One Unblock button of a recorded message, and the `unblocked` event that lifted its block, if one has. */
+/** One Unblock button of a recorded message, and the `unblocked` or `archived` event that lifted its block, if one has. */
 export interface UnblockButtonReading {
   taskId: string;
   blockEvent: number;
-  /** The `unblocked` event it was last redrawn for; null until then. */
+  /** The event it was last redrawn for; null until then. */
   redrawnFor: number | null;
-  /** The first `unblocked` event of the task after its block: who lifted it, and when. */
-  lift?: { eventId: number; actor: string; at: number };
+  /**
+   * The first `unblocked` or `archived` event of the task after its block: how,
+   * who lifted it, and when. An archive clears a block with no `unblocked` event.
+   */
+  lift?: { eventId: number; kind: 'unblocked' | 'archived'; actor: string; at: number };
 }
 
 /** A recorded message of notices with Unblock buttons (spec §9.2, amended by the unblock redraw), its buttons in the order sent. */
@@ -1136,6 +1139,8 @@ export interface UnblockMessageReading {
   channel: string;
   appId: string;
   markdown: string;
+  /** When it was sent, unix ms. */
+  sentAt: number;
   buttons: UnblockButtonReading[];
 }
 
@@ -1146,8 +1151,10 @@ interface UnblockButtonRaw {
   task_id: string;
   block_event: number;
   markdown: string;
+  sent_at: number;
   redrawn_for: number | null;
   lift_id: number | null;
+  lift_kind: string | null;
   lift_actor: string | null;
   lift_at: number | null;
 }
@@ -1155,17 +1162,18 @@ interface UnblockButtonRaw {
 /**
  * A recorded message of notices, with each button's lift read from the log:
  * the first `unblocked` event of its task after the event that blocked it, as
- * the board's unblock reads it when it refuses a stale press. Undefined for a
+ * the board's unblock reads it when it refuses a stale press, or the task's
+ * archive, which clears a block without one. Undefined for a
  * message with no record, or another bot's.
  */
 export function unblockMessage(db: Db, appId: string, messageId: string): UnblockMessageReading | undefined {
   const rows = db
     .prepare<[string, string], UnblockButtonRaw>(
-      `SELECT b.message_id, b.channel, b.app_id, b.task_id, b.block_event, b.markdown, b.redrawn_for,
-              e.id AS lift_id, e.actor AS lift_actor, e.created_at AS lift_at
+      `SELECT b.message_id, b.channel, b.app_id, b.task_id, b.block_event, b.markdown, b.sent_at, b.redrawn_for,
+              e.id AS lift_id, e.kind AS lift_kind, e.actor AS lift_actor, e.created_at AS lift_at
          FROM kanban_unblock_buttons b
          LEFT JOIN kanban_events e ON e.id = (
-           SELECT min(id) FROM kanban_events WHERE task_id = b.task_id AND kind = 'unblocked' AND id > b.block_event)
+           SELECT min(id) FROM kanban_events WHERE task_id = b.task_id AND kind IN ('unblocked', 'archived') AND id > b.block_event)
         WHERE b.message_id = ? AND b.app_id = ?
         ORDER BY b.block_event`,
     )
@@ -1177,19 +1185,23 @@ export function unblockMessage(db: Db, appId: string, messageId: string): Unbloc
     channel: first.channel,
     appId: first.app_id,
     markdown: first.markdown,
+    sentAt: first.sent_at,
     buttons: rows.map((r) => ({
       taskId: r.task_id,
       blockEvent: r.block_event,
       redrawnFor: r.redrawn_for,
-      ...(r.lift_id === null || r.lift_actor === null || r.lift_at === null ? {} : { lift: { eventId: r.lift_id, actor: r.lift_actor, at: r.lift_at } }),
+      ...(r.lift_id === null || r.lift_actor === null || r.lift_at === null
+        ? {}
+        : { lift: { eventId: r.lift_id, kind: r.lift_kind === 'archived' ? ('archived' as const) : ('unblocked' as const), actor: r.lift_actor, at: r.lift_at } }),
     })),
   };
 }
 
 /**
- * The messages with a button whose block has been lifted since it was sent and
- * that has not been redrawn for it, oldest first, at most `limit`. Each row's
- * `block_event` is its own cursor into the log: only `unblocked` events past it
+ * The messages with a button whose block has been lifted since it was sent, by
+ * an unblock or the task's archive, and that has not been redrawn for it, oldest
+ * first, at most `limit`. Each row's
+ * `block_event` is its own cursor into the log: only `unblocked` and `archived` events past it
  * count, so an unblock written by any process, the terminal's included, is found
  * however long after, and a row recorded after its block was lifted too.
  */
@@ -1198,7 +1210,7 @@ export function unblockMessagesDue(db: Db, appId: string, limit: number): string
     .prepare<[string, number], { message_id: string }>(
       `SELECT b.message_id FROM kanban_unblock_buttons b
         WHERE b.app_id = ? AND b.redrawn_for IS NULL
-          AND EXISTS (SELECT 1 FROM kanban_events e WHERE e.task_id = b.task_id AND e.kind = 'unblocked' AND e.id > b.block_event)
+          AND EXISTS (SELECT 1 FROM kanban_events e WHERE e.task_id = b.task_id AND e.kind IN ('unblocked', 'archived') AND e.id > b.block_event)
         GROUP BY b.message_id
         ORDER BY min(b.sent_at), b.message_id
         LIMIT ?`,

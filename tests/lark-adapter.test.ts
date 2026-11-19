@@ -135,8 +135,13 @@ describe('LarkAdapter.sendText', () => {
   it('sends a text whose card of buttons Lark refuses without them, unless the bot is not in the chat', async () => {
     const button = { label: 'Unblock k_1', style: 'primary' as const, value: { kind: 'kanban' } };
     const fallback = adapter([refused(200621)]);
-    expect((await fallback.a.sendText(CHAT, 'Blocked', 'u-6', [button])).messageId).toBe('om_1');
+    const sent = await fallback.a.sendText(CHAT, 'Blocked', 'u-6', [button]);
+    expect(sent.messageId).toBe('om_1');
+    // Said, so the notifier records no buttons for a redraw of a message that has none.
+    expect(sent.card).toBe(false);
     expect(fallback.calls.map((c) => c.payload.data.msg_type)).toEqual(['interactive', 'post']);
+    const carded = adapter([undefined]);
+    expect((await carded.a.sendText(CHAT, 'Blocked', 'u-8', [button])).card).toBe(true);
     const outside = adapter([refused(230002)]);
     await expect(outside.a.sendText(CHAT, 'Blocked', 'u-7', [button])).rejects.toMatchObject({ code: 230002 });
     expect(outside.calls).toHaveLength(1);

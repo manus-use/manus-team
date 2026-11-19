@@ -154,12 +154,13 @@ export class LarkAdapter implements Channel {
   async sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[]): Promise<SendResult> {
     if (buttons !== undefined && buttons.length > 0) {
       try {
-        return await this.sendCard(target, { markdown: text, buttons }, uuid);
+        return { ...(await this.sendCard(target, { markdown: text, buttons }, uuid)), card: true };
       } catch (err) {
         // A card Lark will not take, for a reason that is not the chat's, must not
-        // hold back the text it carries: the text goes alone, without its buttons.
+        // hold back the text it carries: the text goes alone, without its buttons,
+        // and says so, so nobody waits to redraw buttons it never had.
         if (!(err instanceof ChannelError) || err.code === 0 || err.retryable || err.code === NOT_IN_CHAT) throw err;
-        return this.sendText(target, text, uuid);
+        return { ...(await this.sendText(target, text, uuid)), card: false };
       }
     }
     // A send that stays in its thread is always one message, cut to fit: the

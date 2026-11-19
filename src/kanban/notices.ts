@@ -336,7 +336,8 @@ export class Notifier {
       return { notices: 0, sent: true };
     }
     this.#backoff.delete(c.key);
-    if (buttons.length > 0) this.#recordButtons(c.channel, sent.messageId, markdown, buttons);
+    // A notice that went as text alone has no buttons to redraw.
+    if (buttons.length > 0 && sent.card !== false) this.#recordButtons(c.channel, sent.messageId, markdown, buttons);
     this.#advanceAll(pending, upTo, true);
     return { notices: batch.length, sent: true };
   }

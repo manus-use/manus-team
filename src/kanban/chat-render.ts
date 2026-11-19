@@ -743,25 +743,26 @@ export function unblockButton(appId: string, event: Pick<KanbanEvent, 'id' | 'ta
 export interface UnblockShown {
   taskId: string;
   blockEvent: number;
-  lift?: { actor: string; at: number };
+  lift?: { kind: 'unblocked' | 'archived'; actor: string; at: number };
 }
 
 /**
  * A message of notices redrawn once a block it offered Unblock for has been
  * lifted (spec §9.2, amended by the unblock redraw): its text as it was sent,
- * then a line for each lifted block, "`<task>`: Unblocked by <name> at HH:MM"
- * in `hhmm`'s zone, the person by chat name, else as recorded; and the buttons
+ * then a line for each lifted block, "`<task>`: Unblocked by <name> at HH:MM",
+ * or "Archived by" for a task archived while blocked, at the time `when` says,
+ * the person by chat name, else as recorded; and the buttons
  * of the blocks not yet lifted, as they were.
  */
 export function renderUnblockRedraw(
   appId: string,
   markdown: string,
   buttons: readonly UnblockShown[],
-  hhmm: (ms: number) => string,
+  when: (ms: number) => string,
   nameOf?: NameOf,
 ): CardView {
   const lines = buttons.flatMap((b) =>
-    b.lift === undefined ? [] : [`${id(b.taskId)}: Unblocked by ${personText(b.lift.actor, nameOf)} at ${hhmm(b.lift.at)}`],
+    b.lift === undefined ? [] : [`${id(b.taskId)}: ${b.lift.kind === 'archived' ? 'Archived' : 'Unblocked'} by ${personText(b.lift.actor, nameOf)} at ${when(b.lift.at)}`],
   );
   return {
     markdown: lines.length === 0 ? markdown : `${markdown}\n\n${lines.join('\n')}`,

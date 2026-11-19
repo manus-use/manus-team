@@ -680,7 +680,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       // Together, under one bound: the notices, the cards, the card presses being
       // worked on, whose redraws need the channel, and a cron fire's message being
       // posted, which a send failed by the disconnect leaves pending for the next boot.
-      const [notices, sent, pressed, , posted] = await Promise.all([
+      const [notices, sent, pressed, , posted, redrawn] = await Promise.all([
         notifier?.idle(SHUTDOWN_DRAIN_MS),
         cards?.idle(SHUTDOWN_DRAIN_MS),
         kanbanChat?.idle(SHUTDOWN_DRAIN_MS),
@@ -698,6 +698,9 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       }
       if (pressed === false) {
         note('kanban: stopped with a card press still being worked on; anything it still writes is dropped, and its card may not show the outcome');
+      }
+      if (redrawn === false) {
+        note('kanban: stopped with a notice still being redrawn; the next boot tries it again');
       }
       if (posted === false) {
         note('cron: stopped with a fire\'s message still being posted; it stays pending, and the next boot posts it again with the same uuids');

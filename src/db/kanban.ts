@@ -2316,7 +2316,7 @@ export function recordUnblockButtons(db: Db, message: UnblockMessage, now: numbe
 }
 
 /**
- * A message's buttons have been redrawn for the `unblocked` events given, by
+ * A message's buttons have been redrawn for the `unblocked` or `archived` events given, by
  * task: each row's `redrawn_for` is written once, whether the redraw succeeded
  * or not, so a redraw is tried once and never again (spec §9.2, amended by the
  * unblock redraw).

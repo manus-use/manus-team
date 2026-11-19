@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CardView, Channel } from '../src/channel/types.js';
 import type { InboundCardAction } from '../src/core/router.js';
-import { eventsOf } from '../src/db/kanban-read.js';
+import { eventsOf, subscriptionsOf } from '../src/db/kanban-read.js';
 import { notePerson } from '../src/db/people.js';
 import { unblockButton } from '../src/kanban/chat-render.js';
 import { KanbanChat } from '../src/kanban/chat.js';
@@ -8,7 +9,7 @@ import { Notifier } from '../src/kanban/notices.js';
 import { PeopleDirectory } from '../src/kanban/people.js';
 import { KanbanService } from '../src/kanban/service.js';
 import type { CreatedVia, KanbanEvent, TaskRow } from '../src/kanban/types.js';
-import { UnblockRedraws } from '../src/kanban/unblock-redraw.js';
+import { REDRAW_POLL_MS, UnblockRedraws } from '../src/kanban/unblock-redraw.js';
 import type { Principal } from '../src/types.js';
 import { FakeChannel } from './helpers/channel.js';
 import { ManualClock, testDb, type TestDb } from './helpers/db.js';
@@ -66,16 +67,17 @@ function notifier(): Notifier {
   });
 }
 
-function redraws(opts: { redrawTimeoutMs?: number } = {}): UnblockRedraws {
+function redraws(opts: { redrawTimeoutMs?: number; zone?: string; channel?: Channel } = {}): UnblockRedraws {
+  const { channel, ...rest } = opts;
   return new UnblockRedraws({
     db: t.db,
     service,
-    channels: new Map([['lark', lark]]),
+    channels: new Map([['lark', channel ?? lark]]),
     appId: 'cli_app',
     nameOf: (p) => people.chatName(p),
     zone: 'UTC',
     note: (line) => notes.push(line),
-    ...opts,
+    ...rest,
   });
 }
 
@@ -258,5 +260,187 @@ describe('the redraw once a block is lifted', () => {
     expect(await c.card(press(e, 'om_unknown'))).toBe(`\`${a.taskId}\` is unblocked, back to open.`);
     await c.idle();
     expect(lark.cardUpdates).toEqual([]);
+  });
+
+  it("never lets a press's newer view land before the loop's older one of the same message", async () => {
+    const a = create('Draft the notes');
+    const b = create('Check the links');
+    block(a, 'which wiki?');
+    const eb = block(b, 'which links?');
+    await notifier().deliver();
+    const sent = lark.texts[0]!;
+    // The first update is held until the test lets it go; any later one lands at once.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let first = true;
+    const slow: Channel = Object.assign(Object.create(lark) as Channel, {
+      updateCard: async (messageId: string, view: CardView) => {
+        if (first) {
+          first = false;
+          await held;
+        }
+        return lark.updateCard(messageId, view);
+      },
+    });
+    const r = redraws({ channel: slow });
+    expect(service.unblock(a.taskId, 'operator:hemanth').ok).toBe(true);
+    const round = r.redrawDue();
+    await new Promise((resolve) => setImmediate(resolve));
+    // B pressed while the loop's redraw, which still shows B's button, is under way.
+    const c = chat((m) => r.redrawMessage(m));
+    expect(await c.card(press(eb, 'om_text_1'))).toBe(`\`${b.taskId}\` is unblocked, back to open.`);
+    await new Promise((resolve) => setImmediate(resolve));
+    release();
+    await round;
+    await c.idle();
+    expect(lark.cardUpdates.map((u) => u.view.buttons.length)).toEqual([1, 0]);
+    expect(lark.cardUpdates.at(-1)?.view.markdown).toBe(
+      `${sent.text}\n\n\`${a.taskId}\`: Unblocked by operator:hemanth at ${AT}\n\`${b.taskId}\`: Unblocked by Owner at ${AT}`,
+    );
+  });
+
+  it('counts an archive while blocked as the lift, and redraws the card when it is pressed after', async () => {
+    const a = create('Draft the notes');
+    const e = block(a, 'which wiki?');
+    await notifier().deliver();
+    const sent = lark.texts[0]!;
+    expect(service.archive(a.taskId, 'lark:on_owner').ok).toBe(true);
+    const r = redraws();
+    expect(await r.redrawDue()).toBe(1);
+    const drawn = { messageId: 'om_text_1', view: { markdown: `${sent.text}\n\n\`${a.taskId}\`: Archived by Owner at ${AT}`, buttons: [] } };
+    expect(lark.cardUpdates).toEqual([drawn]);
+    expect(await r.redrawDue()).toBe(0);
+    // Its press finds it no longer blocked, and the card is redrawn again, beside the reply.
+    const c = chat((m) => r.redrawMessage(m));
+    expect(await c.card(press(e, 'om_text_1'))).toContain('is not blocked as that notice said any more');
+    await c.idle();
+    expect(lark.cardUpdates).toEqual([drawn, drawn]);
+  });
+
+  it('gives the date with the time when the block is lifted on another day than the message was sent', async () => {
+    const a = create('Draft the notes');
+    block(a, 'which wiki?');
+    await notifier().deliver();
+    clock.advance(Date.UTC(2025, 9, 10, 9, 0) - clock.now());
+    expect(service.unblock(a.taskId, 'operator:hemanth').ok).toBe(true);
+    expect(await redraws().redrawDue()).toBe(1);
+    expect(lark.cardUpdates[0]?.view.markdown).toMatch(/: Unblocked by operator:hemanth at 10-10 09:00$/);
+  });
+
+  it("says the time in the gateway's zone", async () => {
+    const a = create('Draft the notes');
+    block(a, 'which wiki?');
+    await notifier().deliver();
+    expect(service.unblock(a.taskId, 'operator:hemanth').ok).toBe(true);
+    expect(await redraws({ zone: 'Asia/Shanghai' }).redrawDue()).toBe(1);
+    // 08:53 UTC is 16:53 in Shanghai, the same day.
+    expect(lark.cardUpdates[0]?.view.markdown).toMatch(/: Unblocked by operator:hemanth at 16:53$/);
+  });
+
+  it('redraws the first message after a task blocked again, and leaves the second one its button', async () => {
+    const a = create('Draft the notes');
+    const e1 = block(a, 'which wiki?');
+    await notifier().deliver();
+    expect(service.unblock(a.taskId, 'operator:hemanth').ok).toBe(true);
+    const e2 = block(a, 'which page?');
+    await notifier().deliver();
+    const second = lark.texts.find((m) => m.buttons?.some((x) => x.value['event'] === String(e2.id)) === true);
+    expect(second).toBeDefined();
+    const r = redraws();
+    expect(await r.redrawDue()).toBe(1);
+    expect(lark.cardUpdates.map((u) => [u.messageId, u.view.buttons.length])).toEqual([['om_text_1', 0]]);
+    expect(lark.cardUpdates[0]?.view.markdown).toMatch(/: Unblocked by operator:hemanth at 08:53$/);
+    // The first notice's old button is stale: that card is redrawn again, the second left alone.
+    const c = chat((m) => r.redrawMessage(m));
+    expect(await c.card(press(e1, 'om_text_1'))).toContain('is not blocked as that notice said any more');
+    await c.idle();
+    expect(lark.cardUpdates.map((u) => [u.messageId, u.view.buttons.length])).toEqual([
+      ['om_text_1', 0],
+      ['om_text_1', 0],
+    ]);
+    expect(service.show(a.taskId).ok && service.show(a.taskId)).toMatchObject({ view: { task: { phase: 'blocked' } } });
+  });
+
+  it('redraws in the next round a message recorded after its block was already lifted', async () => {
+    const a = create('Draft the notes');
+    const e = block(a, 'which wiki?');
+    expect(service.unblock(a.taskId, 'operator:hemanth').ok).toBe(true);
+    await notifier().deliver();
+    // The batch told of the block, so it carried its button: by now stale.
+    expect(lark.texts[0]?.buttons).toEqual([unblockButton('cli_app', e)]);
+    expect(await redraws().redrawDue()).toBe(1);
+    expect(lark.cardUpdates.map((u) => u.view.buttons)).toEqual([[]]);
+  });
+});
+
+describe('the record, when it cannot be made', () => {
+  it('is noted, and the cursors still move', async () => {
+    const a = create('Draft the notes');
+    block(a, 'which wiki?');
+    vi.spyOn(service, 'recordUnblockButtons').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    expect(await notifier().deliver()).toBe(1);
+    expect(notes.some((n) => n.includes('om_text_1') && n.includes('disk full'))).toBe(true);
+    expect(subscriptionsOf(t.db, a.taskId)[0]?.cursor).toBe(eventsOf(t.db, a.taskId).at(-1)?.id);
+    expect(t.db.prepare('SELECT count(*) AS n FROM kanban_unblock_buttons').get()).toEqual({ n: 0 });
+  });
+
+  it('is not made for a notice whose card was refused and that went as text alone', async () => {
+    const a = create('Draft the notes');
+    block(a, 'which wiki?');
+    lark.answerNext('sendText', { messageId: 'om_plain', deduped: false, card: false });
+    expect(await notifier().deliver()).toBe(1);
+    expect(t.db.prepare('SELECT count(*) AS n FROM kanban_unblock_buttons').get()).toEqual({ n: 0 });
+  });
+});
+
+describe('the redraw loop', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('runs a round as it starts, every REDRAW_POLL_MS after, and none once stopped', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const a = create('Draft the notes');
+    const b = create('Check the links');
+    block(a, 'which wiki?');
+    await notifier().deliver();
+    block(b, 'which links?');
+    await notifier().deliver();
+    expect(service.unblock(a.taskId, 'operator:hemanth').ok).toBe(true);
+    const r = redraws();
+    r.start();
+    expect(await r.idle(1_000)).toBe(true);
+    expect(lark.cardUpdates.map((u) => u.messageId)).toEqual(['om_text_1']);
+    expect(service.unblock(b.taskId, 'operator:hemanth').ok).toBe(true);
+    vi.advanceTimersByTime(REDRAW_POLL_MS);
+    expect(await r.idle(1_000)).toBe(true);
+    expect(lark.cardUpdates.map((u) => u.messageId)).toEqual(['om_text_1', 'om_text_2']);
+    r.stop();
+    const c = create('Name the files');
+    block(c, 'which names?');
+    await notifier().deliver();
+    expect(service.unblock(c.taskId, 'operator:hemanth').ok).toBe(true);
+    vi.advanceTimersByTime(REDRAW_POLL_MS * 3);
+    expect(await r.idle(1_000)).toBe(true);
+    expect(lark.cardUpdates).toHaveLength(2);
+    // And a press once stopped does nothing.
+    await r.redrawMessage('om_text_3');
+    expect(lark.cardUpdates).toHaveLength(2);
+  });
+
+  it('is not idle while a redraw is held past its bound', async () => {
+    const a = create('Draft the notes');
+    block(a, 'which wiki?');
+    await notifier().deliver();
+    expect(service.unblock(a.taskId, 'operator:hemanth').ok).toBe(true);
+    lark.hold();
+    const r = redraws({ redrawTimeoutMs: 1_000 });
+    const drawing = r.redrawMessage('om_text_1');
+    expect(await r.idle(20)).toBe(false);
+    lark.release();
+    await drawing;
+    expect(await r.idle(1_000)).toBe(true);
   });
 });
