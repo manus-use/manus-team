@@ -345,7 +345,7 @@ CREATE TABLE kanban_deferred_buttons (
   event_id         INTEGER NOT NULL,                -- the block whose Unblock button waits for the agent
   task_id          TEXT NOT NULL,
   app_id           TEXT NOT NULL,
-  held_at          INTEGER NOT NULL,                -- when its notice was rendered without the button
+  held_at          INTEGER NOT NULL,                -- when its notice, without the button, was sent
   state            TEXT NOT NULL CHECK (state IN ('held', 'due', 'sent', 'lifted', 'failed')),
   why              TEXT,                            -- why it is due: tried, not_woken, turn_failed, running, restart (§5.9)
   attempts         INTEGER NOT NULL DEFAULT 0,      -- sends of the button card tried
@@ -405,10 +405,13 @@ All in `db/kanban.ts`, the board's tables' one writer. WRITERS.md gains:
   `KanbanService`."
 - `kanban_wake_events`, new: "Added with its wake by `recordWake`; never changed or deleted."
 - `kanban_deferred_buttons`, new: "Added by `deferButton` (migration 013), at most once a
-  subscription and block event (`INSERT OR IGNORE`), when the notifier renders a block's notice
-  without its Unblock button at the waker's word (wake spec §5.9). `state` moves forward only:
+  subscription and block event (`INSERT OR IGNORE`), in the notifier's after-send step, beside the
+  Unblock buttons' record and before its cursor moves, once a notice it rendered without the
+  block's Unblock button, at the waker's word, has been sent, as a card or as text (wake spec
+  §5.9). `state` moves forward only:
   `held` to `due` by `buttonDue`, with `why`; `held` or `due` to `lifted` by `buttonLifted`; `due`
-  to `sent` by `buttonSent`, with the card's message id, or to `failed` by `buttonFailed`; each in
+  to `sent` by `buttonSent`, with the card's message id, or `held` or `due` to `failed` by
+  `buttonFailed`; each in
   one transaction, and only from the state it names. `attempts` is added to by `buttonTried`. Never
   deleted. Only the gateway writes it, through `KanbanService`."
 - `kanban_unblock_buttons`: "`has_button` (migration 013) is written at the insert: 1 for a
@@ -754,58 +757,89 @@ waits for the agent's try, and comes after the turn, if at all (§5.9).
 ### 5.9 A block's Unblock button waits for the agent
 
 *Decided by the user* ("agent first, 10 minute hold", then corrected: hold the button, not the
-notice). For a task with wake on, the agent gets the first try at a block, and people get the
-button only if it fails. Completions, changes requested and stranded tasks are unchanged: notice,
-then turn.
+notice). For a task with wake on, the agent gets the first try at a block it could lift, and people
+get the button only if it does not. Completions, changes requested and stranded tasks are
+unchanged: notice, then turn.
 
-**The notice goes at once, without its button.** When the notifier renders a block outcome (§2.2:
-a run's `blocked`, or a `run_ended` that blocks) for a subscription, it asks the waker,
-`deferButton(sub, event): boolean` (a dependency the gateway gives it when the waker runs). The
-waker answers true, and writes the `kanban_deferred_buttons` row `held` (`INSERT OR IGNORE`, so a
-batch sent again asks again harmlessly), when all of these hold: the task has wake on; the event
-is past the subscription's `wake_cursor` (so the waker will read it); the conversation is admitted
-and not let go of; the setter has talk tier; and wakes are enabled. Then the notifier:
+**The decision, at render, in memory.** When the notifier renders a block outcome (§2.2: a run's
+`blocked`, or a `run_ended` that blocks) for a subscription, it asks the waker
+`wouldDefer(sub, event): boolean`, a read that writes nothing (a dependency the gateway gives it
+when the waker runs). It is **true when a `kanban_deferred_buttons` row already exists** for the
+subscription and event, whatever else holds, so a batch sent again after a failed send, or after a
+restart, is rendered as the first one was: the decision is sticky. Otherwise it is true only when
+the agent could lift the block, all of these:
 
-- **leaves that block out of the batch's Unblock buttons**, and ends its notice with `The agent is
-  looking at it first.`;
-- **sends the batch as a card even when no button is left in it** (`sendText`'s new option
-  `card: true`, which the Lark adapter sends as a card with no actions), so that it can be redrawn;
-- **records it** in `kanban_unblock_buttons` with `has_button` 0 for the deferred block, beside the
-  rows of any real buttons, once the send succeeded and Lark answered a card (`sent.card !==
-  false`), as it records buttons today.
+- the task has wake on, and wakes are enabled;
+- the event is past the subscription's `wake_cursor`, so the waker will read it;
+- the conversation is admitted, and not let go of by the notifier;
+- the setter has talk tier, as any wake needs (§5.3), **and operate tier** (`canOperate`), as an
+  unblock needs (§9.2);
+- the event's `blockRecurrences` is below `kanban.block_recurrence_limit`, and the task's
+  `wokenUnblocksSince` is below `kanban.wake.max_depth`, so neither `recurring` nor
+  `woken_unblock_limit` would refuse the agent's unblock (§9.2).
+
+Otherwise the button stays on the notice, as today: an agent that cannot lift the block is told so
+(§7), and people need not wait for it.
+
+**The notice goes at once, without its button.** For a block `wouldDefer` answered true, the
+notifier leaves it out of the batch's Unblock buttons and ends its notice with `The agent is
+looking at it first.`; sends the batch as a card even when no button is left in it (`sendText`'s
+new option `card: true`, which the Lark adapter sends as a card with no actions), so it can be
+redrawn; and, once the send succeeded:
+
+- **records the message** in `kanban_unblock_buttons` with `has_button` 0 for the deferred block,
+  beside the rows of any real buttons, when Lark answered a card (`sent.card !== false`), as it
+  records buttons today (`#recordButtons`);
+- **writes the deferral**, `deferButton(sub, event, sentAt)`, a `kanban_deferred_buttons` row
+  `held` with `held_at` the send's time, `INSERT OR IGNORE`, **whether the notice went as a card or
+  as text**: a text notice cannot be redrawn, but its button is owed all the same;
+- both **before `#advanceAll`** moves the cursor. A send that failed writes neither, and the next
+  try decides afresh; a record or a deferral whose write fails is logged, and the cursor still
+  moves, as a failed `#recordButtons` does today. A deferral never written leaves a notice that
+  says "The agent is looking at it first." with no button to follow: the waker then finds the
+  block in its batch with no row, uses the prompt's other note (§7), and nothing is owed; the
+  notice's typed commands still unblock it. Logged, and accepted as the cost of writing after the
+  send.
 
 The notifier holds nothing back, so its cursor, its batches and the order of notices in a
 conversation are exactly as before: *the simpler correct choice*, as holding the notice would have
-held every later notice of the conversation behind it to keep event order. A notice whose card Lark
-refused went as text, cannot be redrawn, and is not recorded, as today; its deferred button is
-still the waker's.
+held every later notice of the conversation behind it to keep event order.
 
 **The waker owns the deferred button from then on**: its state, its release and its sending.
 
 - **When the woken turn ends** (the submit's promise settles, kept in `#underWay` until it does,
   §5.2), for each deferred block of the wake the lift is read (`liftOf`, §5.3b):
-  - **lifted**: `buttonLifted`; no card is sent. The notice gets the line by the unblock redraw
-    (below);
+  - **lifted**: `buttonLifted`; no card. The notice gets the lifted line by the unblock redraw;
   - **still blocked after a turn that ended `completed`**: `buttonDue`, `why` `tried`;
   - **still blocked after a turn that ended `failed`, `cancelled` or `ambiguous`**: `buttonDue`,
     `why` `turn_failed`.
-- **The button goes out at once**, `buttonDue`, `why` `not_woken`, whenever the agent will not get a
-  real try: the block's outcome skipped by §5.3 (tier); passed over for a conversation let go of or
-  not admitted (§2.1); dropped from a pending row by §5.3a (wake turned off or taken over, the
-  setter's tier, the chat); or its batch dropped after its refusals (§5.6). A lift before the turn
-  makes it `lifted` instead, as there is nothing left to unblock.
-- **The hold is bounded** by `kanban.wake.hold_minutes` (10): each round, a row still `held` whose
-  `held_at` is that long ago is made `due`, `why` `running` when its wake is delivered and its turn
-  still runs, `not_woken` otherwise (waiting on a busy session or the cap). A turn that ends after
-  that changes nothing: the button has gone.
-- **Wakes off.** With `kanban.wake.enabled` false nothing is deferred (`deferButton` is not given).
+- **Released at once**, whenever the agent will no longer get a real try, each round checking every
+  `held` row:
+  - the setter's talk tier lost, or **their operate tier lost** after the deferral: `due`,
+    `not_woken`;
+  - **wake turned off**, or taken over by another setter: `due`, `not_woken`;
+  - a conversation let go of, or no longer admitted (§2.1): `due`, `not_woken`;
+  - the block dropped from a pending row by §5.3a, or its batch dropped after its refusals (§5.6):
+    `due`, `not_woken`;
+  - **the block cut from the prompt** by the 4,000-character limit (§7), at the submit: `due`,
+    `not_woken`, as the agent is not told of it;
+  - **the task archived**: `lifted`, as an archive clears the block (kanban §9.2's redraw says
+    "Archived by");
+  - **the task deleted from the board**: `failed`, with no card and one log line, as there is no
+    task to unblock;
+  - the block lifted before the turn: `lifted`.
+- **The hold is bounded** by `kanban.wake.hold_minutes` (10): a row still `held` whose `held_at` is
+  that long ago is made `due`, `why` `running` when its wake is delivered and its turn still runs,
+  `not_woken` otherwise (waiting on a busy session or the cap). A turn that ends after that
+  changes nothing: the button has gone.
+- **Wakes off.** With `kanban.wake.enabled` false nothing is deferred (`wouldDefer` is not given).
   A gateway started with wakes off that finds `held` or `due` rows left from before builds the
   waker in **release mode**: it forms no wakes, and makes every such row `due`, `why` `not_woken`,
   in its first round, and sends them.
 - **A stop and a restart.** A stopping gateway sends nothing more; the rows are durable. At the
   first round after a start: a `held` row older than `hold_minutes` is made `due` at once; a `held`
   row whose wake an earlier boot delivered (its turn cut by the restart, §5.7) is made `due`, `why`
-  `restart`; a `held` row whose wake is still pending goes on waiting, within its limit.
+  `restart`; a `held` row whose wake is pending, or not yet formed, waits within its limit.
 
 **Sending a due button** is the waker's own send, not the notifier's, as it is one card for one
 block with its own uuid and nothing to batch. Each round, for each `due` row, the lift is read
@@ -813,29 +847,42 @@ first (lifted: `buttonLifted`, no card); then one card goes to the subscription'
 replying to the thread's root as the notifier's sends do, with one Unblock button for the block
 event (`unblockButton(appId, event)`, the notifier's), bounded by `NOTICE_SEND_MS`, with the uuid
 `replyUuid(appId, 'wake-button:<subscription>:<event>', 'unblock')`, the same however often it is
-tried, so a card sent again after a restart shows once within Lark's hour. Its text, by `why`, the
-task by id and title, the reason not repeated:
+tried, so a card sent again after a restart shows once within Lark's hour. **These sends share the
+round's `ROUND_MARKER_MS` budget with the markers** (§5.5 step 3): none starts once the budget is
+spent, the rest wait for the next round, so `idle()`'s bound of `ROUND_MARKER_MS + NOTICE_SEND_MS`
+holds. The card's text, by `why`, the task by id and title, the reason not repeated:
 
 - `tried`: `` The agent could not lift the block on `k_…` **Draft the agenda**. ``
 - `turn_failed`: `` The agent's turn ended without lifting the block on `k_…` **Draft the agenda**. ``
 - `running`: `` The agent is still working on the block on `k_…` **Draft the agenda**; lift it here if you can answer it. ``
 - `not_woken`, `restart`: `` The agent was not woken for the block on `k_…` **Draft the agenda**; lift it here. ``
 
-Once sent, `buttonSent` with its message id, and the card **recorded for the unblock redraw**
-(`recordUnblockButtons`, `has_button` 1), like any Unblock card, so a later lift redraws it. A send
-that fails is tried again with the notifier's pause, 2 s doubling to five minutes (`buttonTried`);
-after `WAKE_REFUSALS` (10) failures, or at once when the notifier has let the conversation go, it
-is `failed`, with one log line; `/kanban task unblock` still lifts the block, as the notice's own
-typed commands say.
+Once sent: `buttonSent` with its message id; the card **recorded for the unblock redraw**
+(`recordUnblockButtons`, `has_button` 1), like any Unblock card, so a later lift redraws it; and
+**the notice redrawn** by the existing path, `UnblockRedraws.redrawMessage(messageId)` for the
+notice's message (its `has_button` 0 row), so its line `The agent is looking at it first.` reads
+`The agent could not lift it; the Unblock button is below.` (below). A send that fails is tried
+again with the notifier's pause, 2 s doubling to five minutes (`buttonTried`); after
+`WAKE_REFUSALS` (10) failures, or at once when the notifier has let the conversation go, it is
+`failed`, with one log line; `/kanban task unblock` still lifts the block, as the notice's own typed
+commands say.
 
-**The redraw of a buttonless notice.** `unblockMessage` reads `has_button`; `renderUnblockRedraw`
-adds the lifted line for every row of the message, button or not, and draws buttons only for rows
-with `has_button` 1 and no lift. So a notice that said "The agent is looking at it first." gains
-`` `k_…`: Unblocked by Zhixi Sun (woken by the board) at 14:05`` once the agent lifts it; a block
-the agent did not lift, later lifted by a press on the button card, redraws both: the card loses
-its button, and the notice gains the line. Kanban §9.2's amendment, "the notifier records the
-message id of each message it sends with Unblock buttons", is amended: and of each message that
-tells of a block whose button the waker deferred.
+**The redraw of a notice that deferred a button.** `unblockMessage` reads `has_button` and, for a
+`has_button` 0 row, its deferred button's state. `renderUnblockRedraw`:
+
+- replaces, for each `has_button` 0 row whose deferred button is `sent`, that block's `The agent is
+  looking at it first.` with `The agent could not lift it; the Unblock button is below.`. The
+  sentences stand in the message in the order of its `has_button` 0 rows by `block_event`, as the
+  batch is in event order, so the Nth such sentence is the Nth row's;
+- adds the lifted line for every lifted row of the message, button or not;
+- draws buttons only for rows with `has_button` 1 and no lift.
+
+So a notice whose block the agent lifts gains `` `k_…`: Unblocked by Zhixi Sun (woken by the
+board) at 14:05``; a block the agent did not lift gets the button card, its notice reads "could not
+lift it", and a later press redraws both, the card losing its button and the notice gaining the
+line. Kanban §9.2's amendment, "the notifier records the message id of each message it sends with
+Unblock buttons", is amended: and of each message that tells of a block whose button the waker
+deferred.
 
 ---
 
@@ -970,7 +1017,9 @@ the operator's commands would run. The approved header's "or use mt kanban as in
   chat shows them by, with its "two of one name" suffix, so the agent and the thread name a
   person alike.
 - **For a block**, its kind and reason, then one note, chosen at the submit:
-  - **its button deferred** (§5.9, the usual case): `People in this thread have seen this block,
+  - **its button deferred** (§5.9), only when its `kanban_deferred_buttons` row is still `held` at
+    the submit, which it is only when the agent could lift the block, so this note never stands
+    beside "You cannot lift this block" or a recurrence note: `People in this thread have seen this block,
     but have no Unblock button for it yet: you have the first try. If it is still blocked when your
     turn ends, or after 10 minutes, the button goes to them.`, the minutes `hold_minutes`;
   - otherwise, with an Unblock button recorded for that block event (`kanban_unblock_buttons`,
@@ -993,7 +1042,8 @@ the operator's commands would run. The approved header's "or use mt kanban as in
   check mt kanban task show <id> before acting on it. If it was lifted, mt kanban task unblock
   answers so, and changes nothing.` The read-only `task show` of §9.2 is the check (§17, D17).
 - **At most 4,000 characters in all**: blocks are dropped from the end until the prompt fits, and
-  the last line is `and N more: /kanban task list`. The dropped events are covered by the wake all
+  the last line is `and N more: /kanban task list`. A dropped block whose button was deferred has
+  its button released at the submit, `not_woken` (§5.9): the agent was not told of it. The dropped events are covered by the wake all
   the same: their notices are in the thread.
 - **Masked once more as a whole** before the submit, as every reply is. The prompt is stored as
   given in `turn_submitted` (replay sends it again), so it is built only from masked pieces.
@@ -1312,8 +1362,18 @@ kanban:
   the block on …"; the agent's later unblock redraws it.
 - **The same, the woken turn fails**: the card "The agent's turn ended without lifting the block on
   …".
-- **The same, the setter without talk tier**: the waker answers the notifier no, so the notice
-  carries its button at once.
+- **The same, the setter at talk tier only, or the block at its recurrence limit, or the task at
+  its woken-unblock limit**: the waker answers the notifier no, so the notice carries its button
+  at once; the agent is still woken, and told it cannot lift the block.
+- **The same, the setter's operate tier revoked during the hold**: the button card goes at once,
+  "The agent was not woken for …".
+- **The same, wake turned off during the hold**: the button card at once. **The task archived**: no
+  card, the notice redrawn "Archived by". **The task deleted**: no card, a log line.
+- **The same, the notice's send failed once**: nothing deferred is written; the retry, sticky or
+  decided afresh, writes the row with its own send time.
+- **The same, eight blocks in one batch, two cut from the prompt**: those two buttons go at once.
+- **A button card sent**: the notice's line now reads "The agent could not lift it; the Unblock
+  button is below.".
 - **A gateway restart with a button held**: past the limit, or its turn cut, the card goes at the
   first round; within the limit, its wake pending, it waits.
 - **A person lifts a deferred block with `/kanban task unblock` before the round**: the block is
@@ -1385,9 +1445,10 @@ kanban:
   grants.tierOf(person.unionId)).operate` (grants §2.1, §4.3), so a grant of operate counts and
   operate still needs talk.
 - **`src/kanban/notices.ts`**: `Notifier.letGo(at: ThreadAt): boolean`, whether a conversation is
-  in its `#dead` set; `NotifierDeps.deferButton?(sub: SubscriptionRow, event: KanbanEvent):
-  boolean`, the waker's; a deferred block's line, the batch sent as a card when any block was
-  deferred, and its `has_button` 0 record.
+  in its `#dead` set; `NotifierDeps.wouldDefer?(sub: SubscriptionRow, event: KanbanEvent):
+  boolean`, the waker's read; a deferred block's line, the batch sent as a card when any block was
+  deferred; after the send, before `#advanceAll`, its `has_button` 0 record and
+  `service.deferButton(sub, event, sentAt)`.
 - **`src/channel/types.ts`, `src/channel/lark/adapter.ts`**: `sendText`'s `card: true`, a card with
   no actions; the fake channel's the same.
 - **`src/kanban/wake-tokens.ts`**, new: `WakeTokens`, `envFor(sessionId, key)`, `lookup(token):
@@ -1396,7 +1457,7 @@ kanban:
 - **`src/cli/plain.ts`**: `showText` taking an optional `nameOf`, which the operator's call leaves
   out; the woken show's quoted framing.
 - **`src/kanban/waker.ts`**, new: the `Waker`, `WAKE_KINDS`, `WAKE_POLL_MS`, `ROUND_WAKES`,
-  `WAKE_REFUSALS`, `WAKE_BACKOFF_MAX_MS`, `ROUND_MARKER_MS`, and the prompt's builder, with:
+  `WAKE_REFUSALS`, `WAKE_BACKOFF_MAX_MS`, `ROUND_MARKER_MS`, `Waker.wouldDefer(sub, event)` (§5.9), the deferred buttons' releases and sends, and the prompt's builder, with:
 
   ```ts
   export interface WakerDeps {
@@ -1503,14 +1564,22 @@ kanban:
   under a new uuid; a task archived and one deleted, dropped, the others re-batched; the chat left
   `auth.chats`, and a direct message with DMs turned off, dropped with the log line; the
   conversation let go of by the notifier, dropped.
-- **The deferred button (§5.9)**: the notifier asking `deferButton` for a block of a task with wake
+- **The deferred button (§5.9)**: the notifier asking `wouldDefer` for a block of a task with wake
   on and leaving its button out with the line, for each condition of the answer (wake off, an event
-  at or before `wake_cursor`, a conversation let go of, the setter without talk tier, wakes off),
-  and keeping it otherwise; a batch with no button left sent as a card and recorded `has_button` 0,
+  at or before `wake_cursor`, a conversation let go of, the setter without talk tier, **without
+  operate tier**, **`blockRecurrences` at the limit**, **`wokenUnblocksSince` at `max_depth`**,
+  wakes off), and keeping it otherwise; **the row written after the send, before the cursor
+  moves, with the send's time, for a card and for a text notice, none written for a failed send,
+  and a row already there making the decision sticky though the conditions have since changed**;
+  a deferral write failing, logged, the cursor moving, and the wake's prompt using the other note;
+  the prompt's deferred note only with the row `held`; a batch with no button left sent as a card and recorded `has_button` 0,
   one with a deferred and a real button recorded with both; notice order and cursors unchanged
   against today's for the same events; the turn's end deciding each deferred block, lifted (no
   card), `tried`, and `turn_failed` for each failing terminal; every release at once of §5.9, one
-  test each; the `hold_minutes` bound for a busy session, the cap and a running turn; release mode
+  test each, operate tier lost, wake turned off, the task archived (`lifted`, no card) and deleted
+  (`failed`, no card, a log line), and a block cut from the prompt among them; button sends under
+  `ROUND_MARKER_MS`, the rest left to the next round; the notice redrawn on `buttonSent`, its
+  sentence replaced, the Nth of N in a batch with several; the `hold_minutes` bound for a busy session, the cap and a running turn; release mode
   with wakes off; the restart's three cases; a due button lifted before its send sending nothing;
   the card's text by `why`, its uuid stable across retries and a restart, its record for the
   redraw, its retries and `failed` after ten; the redraw of a buttonless notice adding the line and
@@ -1756,7 +1825,9 @@ On the user's tenant, with the board and wakes on:
 - **D18. A block's Unblock button waits for the agent** (§5.9), by the user's decision, which
   changes the design's order for blocks only: the notice goes at once without its button, the
   agent gets the first try, and the button goes to people when the turn ends with the block still
-  there, at once when the agent gets no real try, or after `kanban.wake.hold_minutes`. The
+  there, at once when the agent gets no real try, or after `kanban.wake.hold_minutes`. Deferred
+  only when the agent could lift the block: the setter at operate tier, and neither unblock limit
+  reached; the deferral is written after the notice's send, and sticks. The
   notifier's order is untouched; the waker owns, releases and sends the deferred button.
 - **D17. A woken turn reads the tasks that woke it with `mt kanban task show`.** A block may be
   lifted while the turn runs (§5.3b), so the prompt tells the agent to check `mt kanban task show
@@ -1823,3 +1894,12 @@ command runs as before (§9.2); `task show` asks the socket first too, and is re
 be reached (§9.2); a woken turn's show and unblock outside its wake are refused with no fallback
 (§16); the woken show names people by chat name, quotes its output as data, and checks `--board`
 (§9.2); and §6.2 says each command's tier.
+
+*Revised on 2026-11-19, after review round 5.* The deferral is decided in memory at render, sticky
+once written, and written after the notice's send, card or text, before the cursor moves; a button
+is deferred only when the agent could lift the block (operate tier, and neither unblock limit
+reached), and released at once if operate tier is lost; wake turned off, an archive and a deletion
+release a held button (`not_woken`, `lifted`, `failed`); button cards share the round's marker
+budget; a held row whose wake is not yet formed waits within its limit; a sent button card redraws
+its notice's line; and a deferred block cut from the prompt has its button released at the submit
+(§5.9, §7).
