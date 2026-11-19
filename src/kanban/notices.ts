@@ -1,4 +1,4 @@
-import { ChannelError, type CardButton, type Channel, type SendTarget } from '../channel/types.js';
+import { ChannelError, type CardButton, type Channel, type SendResult, type SendTarget } from '../channel/types.js';
 import { noticeBatchUuid } from '../core/ids.js';
 import { dueSubscriptions, eventsAfter, getRun, getTask, threadRootOf, type DueSubscription } from '../db/kanban-read.js';
 import type { Db } from '../db/open.js';
@@ -53,9 +53,10 @@ import type { KanbanEvent, SubscriptionRow } from './types.js';
  *
  * **A block's notice offers Unblock** (spec §9.2): a message whose notices left
  * tasks blocked carries an Unblock button for each, at most `UNBLOCK_BUTTONS`,
- * bound to the event that blocked it. The message is not redrawn when one is
- * pressed -- it carries the round's other notices too -- so a second press
- * finds the block lifted and does nothing, which is noted in the log.
+ * bound to the event that blocked it. The message is recorded with each task
+ * and that event, and once a block is lifted, by any path, `UnblockRedraws`
+ * redraws it with a line in place of that button (spec §9.2, amended by the
+ * unblock redraw).
  */
 
 /** How often a round looks for notices to send. */
@@ -316,11 +317,13 @@ export class Notifier {
     const buttons = this.#unblockButtons(batch.map((n) => n.event));
     // The last event the message covers: each cursor moves to it, notices or not.
     const upTo = more > 0 ? (batch.at(-1)?.event.id ?? 0) : readTo;
+    const markdown = redactKnownSecrets(text);
+    let sent: SendResult;
     try {
-      await this.#bounded(
+      sent = await this.#bounded(
         channel.sendText(
           c.target,
-          redactKnownSecrets(text),
+          markdown,
           noticeBatchUuid(
             this.#deps.appId,
             batch.map((n) => [n.sub.id, n.event.id]),
@@ -333,6 +336,8 @@ export class Notifier {
       return { notices: 0, sent: true };
     }
     this.#backoff.delete(c.key);
+    // A notice that went as text alone has no buttons to redraw.
+    if (buttons.length > 0 && sent.card !== false) this.#recordButtons(c.channel, sent.messageId, markdown, buttons);
     this.#advanceAll(pending, upTo, true);
     return { notices: batch.length, sent: true };
   }
@@ -370,6 +375,28 @@ export class Notifier {
       .sort((a, b) => a.id - b.id)
       .slice(0, UNBLOCK_BUTTONS)
       .map((e) => unblockButton(this.#deps.appId, e));
+  }
+
+  /**
+   * The message a batch's Unblock buttons went under, with each task and the
+   * event that blocked it, so the message can be redrawn once a block is lifted
+   * (spec §9.2, amended by the unblock redraw). A record that fails is said, and
+   * the message stays as sent: its cursors still move, as the notices went.
+   */
+  #recordButtons(channel: string, messageId: string, markdown: string, buttons: readonly CardButton[]): void {
+    const recorded = buttons.flatMap((b) => {
+      const taskId = b.value['task'];
+      const blockEvent = Number(b.value['event']);
+      return taskId === undefined || !Number.isSafeInteger(blockEvent) ? [] : [{ taskId, blockEvent }];
+    });
+    let why: string | undefined;
+    try {
+      const r = this.#deps.service.recordUnblockButtons({ messageId, channel, appId: this.#deps.appId, markdown, buttons: recorded });
+      if (!r.ok) why = r.message;
+    } catch (err) {
+      why = message(err);
+    }
+    if (why !== undefined) this.#note(`kanban: recording the Unblock buttons of message ${messageId} failed (${why}); it will not be redrawn`);
   }
 
   /** A subscription's events past its cursor, and the notices among them, worded for a thread with a root or for the chat. */

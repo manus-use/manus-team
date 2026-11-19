@@ -23,6 +23,7 @@ import { addSecrets, redactKnownSecrets } from './secrets.js';
 import { KanbanChat } from './kanban/chat.js';
 import { Dispatcher } from './kanban/dispatcher.js';
 import { Notifier } from './kanban/notices.js';
+import { UnblockRedraws } from './kanban/unblock-redraw.js';
 import { KanbanService } from './kanban/service.js';
 import { SESSION_MARKER } from './kanban/gates.js';
 import { writeMtShim } from './kanban/shim.js';
@@ -73,6 +74,8 @@ export interface Gateway {
   readonly dispatcher: Dispatcher | undefined;
   /** What delivers the board's notices to the chats that follow its tasks, when `kanban.enabled` is set. */
   readonly notifier: Notifier | undefined;
+  /** What redraws a notice's message once a block it offered Unblock for is lifted, when `kanban.enabled` is set. */
+  readonly unblockRedraws: UnblockRedraws | undefined;
   /** What sends people their task and review cards, when `kanban.enabled` is set. */
   readonly cards: CardPoster | undefined;
   /** `/kanban` and the board cards' buttons, when `kanban.enabled` is set. */
@@ -338,6 +341,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   let worker: { handler: SocketHandler; socket: string } | undefined;
   let kanbanChat: KanbanChat | undefined;
   let notifier: Notifier | undefined;
+  let unblockRedraws: UnblockRedraws | undefined;
   let cards: CardPoster | undefined;
   let workerServer: WorkerServer | undefined;
   let lock: GatewayLock | undefined;
@@ -410,6 +414,18 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     });
     // A worker's create, link or report can make a task claimable.
     boardApi = new WorkerApi({ db, service, changed: () => dispatcher?.pass(), nameOf: (principal) => people.nameOf(principal) });
+    // A notice's message redrawn once a block it offered Unblock for is lifted, by any path,
+    // the terminal's and an agent's mt included (spec §9.2, amended by the unblock redraw).
+    const redraws = new UnblockRedraws({
+      db,
+      service,
+      channels: new Map<string, Channel>([[adapter.id, adapter]]),
+      appId: config.lark.appId,
+      nameOf: (principal) => people.chatName(principal),
+      zone,
+      note,
+    });
+    unblockRedraws = redraws;
     // /kanban in chat (spec §9.1): through the same service, with the router's tiers.
     kanbanChat = new KanbanChat({
       service,
@@ -417,6 +433,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       people,
       appId: config.lark.appId,
       redraw: (messageId, view) => adapter.updateCard(messageId, view),
+      liftedNotice: (messageId) => redraws.redrawMessage(messageId),
       note,
       changed: () => dispatcher?.pass(),
       cancel: (runId) => {
@@ -537,6 +554,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     db,
     dispatcher,
     notifier,
+    unblockRedraws,
     cards,
     get chat() {
       return kanbanChat;
@@ -587,6 +605,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       note(`connected as ${adapter.botOpenId ?? 'unknown bot identity'}`);
       // Once connected: its first round catches up on what the chats missed while the gateway was down.
       notifier?.start();
+      // And redraws the notices whose blocks were lifted while it was down.
+      unblockRedraws?.start();
       // And the first tick, which sends what is pending and fires what came due while down.
       scheduler?.start();
       // And sends the cards of people's runs that a stop left unsent.
@@ -640,6 +660,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       scheduler?.stop();
       // No more notices, nor cards; what was not sent is sent by the next boot, from the board.
       notifier?.stop();
+      unblockRedraws?.stop();
       cards?.stop();
       // And the gates of a report from chat, a press's or typed: killed, nothing applied,
       // as the worker socket's are below; the next report after a restart runs them again.
@@ -659,12 +680,14 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       // Together, under one bound: the notices, the cards, the card presses being
       // worked on, whose redraws need the channel, and a cron fire's message being
       // posted, which a send failed by the disconnect leaves pending for the next boot.
-      const [notices, sent, pressed, , posted] = await Promise.all([
+      const [notices, sent, pressed, , posted, redrawn] = await Promise.all([
         notifier?.idle(SHUTDOWN_DRAIN_MS),
         cards?.idle(SHUTDOWN_DRAIN_MS),
         kanbanChat?.idle(SHUTDOWN_DRAIN_MS),
         inbound.idle(SHUTDOWN_DRAIN_MS),
         scheduler?.idle(SHUTDOWN_DRAIN_MS),
+        // A notice being redrawn: best effort, and one the stop cuts short before it is marked is tried again by the next boot.
+        unblockRedraws?.idle(SHUTDOWN_DRAIN_MS),
       ]);
       // Past the bound, the database closes under whatever is still in flight: its write is dropped.
       if (notices === false) {
@@ -675,6 +698,9 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       }
       if (pressed === false) {
         note('kanban: stopped with a card press still being worked on; anything it still writes is dropped, and its card may not show the outcome');
+      }
+      if (redrawn === false) {
+        note('kanban: stopped with a notice still being redrawn; the next boot tries it again');
       }
       if (posted === false) {
         note('cron: stopped with a fire\'s message still being posted; it stays pending, and the next boot posts it again with the same uuids');

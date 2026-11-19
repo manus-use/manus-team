@@ -103,6 +103,12 @@ export interface SendResult {
    * in no thread, a direct message among them (spec §19.2, §19.7).
    */
   threadId?: string;
+  /**
+   * For a text sent with buttons: true when it went as a card carrying them,
+   * false when the platform refused the card and the text went alone, without
+   * them. Absent for any other send.
+   */
+  card?: boolean;
 }
 
 /**

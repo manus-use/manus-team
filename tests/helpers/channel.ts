@@ -248,7 +248,8 @@ export class FakeChannel implements Channel {
     this.calls.push('sendText');
     await this.gate('sendText');
     this.texts.push({ target, text, uuid, ...(buttons === undefined ? {} : { buttons }) });
-    return this.#result(`om_text_${++this.#seq}`, target);
+    const result = this.#result(`om_text_${++this.#seq}`, target);
+    return this.#answers.get('sendText')?.shift() ?? result;
   }
 
   async openCard(target: SendTarget, initial: CardParts, uuid: string): Promise<CardSession> {

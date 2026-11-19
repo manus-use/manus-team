@@ -2282,3 +2282,52 @@ export function archiveWorkflow(
     return { ok: true, instance, archived, runs };
   });
 }
+
+/** A message of notices that carries Unblock buttons (spec §9.2, amended by the unblock redraw): what its redraw is rebuilt from. */
+export interface UnblockMessage {
+  /** The message, as the channel answered its send. */
+  messageId: string;
+  channel: string;
+  appId: string;
+  /** Its text as sent, masked. */
+  markdown: string;
+  /** One for each button: the task, and the event that blocked it, which the button's `event` names. */
+  buttons: ReadonlyArray<{ taskId: string; blockEvent: number }>;
+}
+
+/**
+ * Record the Unblock buttons a message of notices carries (spec §9.2, amended
+ * by the unblock redraw), one row a button, in one transaction. A batch sent
+ * again, which the channel answers with the same message, records nothing
+ * more. It writes no event: the rows are the notifier's own, as its cursors are.
+ */
+export function recordUnblockButtons(db: Db, message: UnblockMessage, now: number): Result<{ recorded: number }> {
+  return tx(db, (d) => {
+    const insert = d.prepare(
+      `INSERT INTO kanban_unblock_buttons (message_id, channel, app_id, task_id, block_event, markdown, sent_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (message_id, task_id) DO NOTHING`,
+    );
+    let recorded = 0;
+    for (const b of message.buttons) {
+      recorded += insert.run(message.messageId, message.channel, message.appId, b.taskId, b.blockEvent, mask(message.markdown), now).changes;
+    }
+    return { ok: true, recorded };
+  });
+}
+
+/**
+ * A message's buttons have been redrawn for the `unblocked` or `archived` events given, by
+ * task: each row's `redrawn_for` is written once, whether the redraw succeeded
+ * or not, so a redraw is tried once and never again (spec §9.2, amended by the
+ * unblock redraw).
+ */
+export function markUnblockRedrawn(db: Db, messageId: string, lifts: ReadonlyArray<{ taskId: string; liftEvent: number }>): Result<{ marked: number }> {
+  return tx(db, (d) => {
+    const update = d.prepare(
+      'UPDATE kanban_unblock_buttons SET redrawn_for = ? WHERE message_id = ? AND task_id = ? AND redrawn_for IS NULL',
+    );
+    let marked = 0;
+    for (const l of lifts) marked += update.run(l.liftEvent, messageId, l.taskId).changes;
+    return { ok: true, marked };
+  });
+}

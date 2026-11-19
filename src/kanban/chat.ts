@@ -94,6 +94,12 @@ export interface KanbanChatDeps {
   appId: string;
   /** Redraw a card once acted on, so its buttons stop working: the Lark adapter's. */
   redraw?: (messageId: string, view: CardView) => Promise<void>;
+  /**
+   * A notice's Unblock was pressed, and its block lifted by the press or before
+   * it: the notice's message is redrawn from its record (spec §9.2, amended by
+   * the unblock redraw). Bounded and never rejecting: `UnblockRedraws.redrawMessage`.
+   */
+  liftedNotice?: (messageId: string) => Promise<void>;
   /** Metadata, masked: a press whose work in the background failed. */
   note?: (line: string) => void;
   /** How long a redraw is waited for; `REDRAW_MS` unless a test says otherwise. */
@@ -778,10 +784,12 @@ export class KanbanChat {
       if (!this.#deps.hasTier(presser, 'operate')) return 'Unblock changes the board, and needs operator permission.';
       const r = this.#deps.service.unblock(taskId, by, undefined, { blockedAt: Number(event) });
       if (!r.ok) {
-        return r.code === 'stale' || r.code === 'illegal_transition'
-          ? `${id(taskId)} is not blocked as that notice said any more: \`/kanban task show ${taskId}\` says where it is.`
-          : refused(r);
+        if (r.code !== 'stale' && r.code !== 'illegal_transition') return refused(r);
+        // Lifted before this press, by an unblock or an archive: the card is redrawn as it stands, beside the reply.
+        this.#liftedNotice(action.messageId);
+        return `${id(taskId)} is not blocked as that notice said any more: \`/kanban task show ${taskId}\` says where it is.`;
       }
+      this.#liftedNotice(action.messageId);
       this.#changed();
       return `${id(taskId)} is unblocked, back to ${r.task.phase}.`;
     }
@@ -887,6 +895,13 @@ export class KanbanChat {
     };
     const view = press.run.kind === 'review' ? renderReviewCard(facts, this.#deps.appId) : renderTaskCard(facts, this.#deps.appId);
     await this.#redraw(press.messageId, { ...view, markdown: redactKnownSecrets(view.markdown) });
+  }
+
+  /** A notice whose block is lifted, redrawn in the background: Lark waits about three seconds for the press's answer. */
+  #liftedNotice(messageId: string): void {
+    const lifted = this.#deps.liftedNotice;
+    if (lifted === undefined) return;
+    this.#track(Promise.resolve().then(() => lifted(messageId)));
   }
 
   /** Background work, tracked so `idle()` -- and the gateway's stop -- can wait for it. */

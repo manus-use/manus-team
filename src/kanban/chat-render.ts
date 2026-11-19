@@ -730,12 +730,43 @@ export function renderCardOutcome(task: { taskId: string; title: string }, outco
 }
 
 /** An Unblock under a notice of a block (spec §9.2), bound to the task and the event that blocked it. */
-export function unblockButton(appId: string, event: KanbanEvent): CardButton {
+export function unblockButton(appId: string, event: Pick<KanbanEvent, 'id' | 'taskId'>): CardButton {
   const ref = `event:${event.id}`;
   return {
     label: `Unblock ${event.taskId}`,
     style: 'primary',
     value: { kind: 'kanban', act: 'unblock', task: event.taskId, event: String(event.id), nonce: boardCardNonce(appId, event.taskId, ref) },
+  };
+}
+
+/** One Unblock of a recorded message, as its redraw shows it: still a button, or lifted by someone at a time. */
+export interface UnblockShown {
+  taskId: string;
+  blockEvent: number;
+  lift?: { kind: 'unblocked' | 'archived'; actor: string; at: number };
+}
+
+/**
+ * A message of notices redrawn once a block it offered Unblock for has been
+ * lifted (spec §9.2, amended by the unblock redraw): its text as it was sent,
+ * then a line for each lifted block, "`<task>`: Unblocked by <name> at HH:MM",
+ * or "Archived by" for a task archived while blocked, at the time `when` says,
+ * the person by chat name, else as recorded; and the buttons
+ * of the blocks not yet lifted, as they were.
+ */
+export function renderUnblockRedraw(
+  appId: string,
+  markdown: string,
+  buttons: readonly UnblockShown[],
+  when: (ms: number) => string,
+  nameOf?: NameOf,
+): CardView {
+  const lines = buttons.flatMap((b) =>
+    b.lift === undefined ? [] : [`${id(b.taskId)}: ${b.lift.kind === 'archived' ? 'Archived' : 'Unblocked'} by ${personText(b.lift.actor, nameOf)} at ${when(b.lift.at)}`],
+  );
+  return {
+    markdown: lines.length === 0 ? markdown : `${markdown}\n\n${lines.join('\n')}`,
+    buttons: buttons.filter((b) => b.lift === undefined).map((b) => unblockButton(appId, { id: b.blockEvent, taskId: b.taskId })),
   };
 }
 
