@@ -373,8 +373,9 @@ All in `db/kanban.ts`, the board's tables' one writer. WRITERS.md gains:
 - `kanban_wakes`, new: "Added by `recordWake` (migration 013), with its `kanban_wake_events`, in
   one transaction, before its marker and its first submit. `marker_at` is written once, by
   `wakeMarked`. `session_id`, `turn_key` and `submit_boot` are set together by `wakeSubmitted`,
-  for the current attempt, and cleared together by `wakeRefused`, which adds one to `attempt` and records `error`
-  in the same transaction, so a pair is never left naming a refused attempt's turn (§5.7); `state` moves from `pending` once, to `delivered`
+  for the current attempt, and all three cleared together by `wakeRefused`, `submit_boot`
+  included, which adds one to `attempt` and records `error` in the same transaction, so a pair is
+  never left naming a refused attempt's turn (§5.7), nor a refused row stamped as under way (§5.2); `state` moves from `pending` once, to `delivered`
   by `advanceWake`, to `dropped` by `dropWake`, or to `lifted` by `liftedWake` (wake spec §5.3b),
   each only on a row still `pending` (`WHERE state = 'pending'`), changing nothing otherwise, so a
   late callback cannot undo a row another path settled; `wakeRefused` likewise; each in the transaction that moves the
@@ -413,16 +414,37 @@ before the channel disconnects at shutdown. It is the only thing that submits a 
 1. **Pending wakes first.** Every `kanban_wakes` row of this bot still `pending` is a batch
    already fixed: recorded, and not yet delivered, because its session was busy, it was refused,
    or a restart cut it off. **A row whose `submit_boot` is this process's `BOOT_ID` has a submit
-   under way** (§5.5 step 6 wrote it, and neither callback nor the promise has settled it yet): it
-   is skipped, and holds its conversation, as any pending row does. *Chosen over an in-memory set*
-   of submits under way, as the column is written in the same transaction as the attempt's key, so
-   the two cannot disagree, and a row of an earlier boot is told apart without anything kept
-   across the restart. Every other pending row is looked up (§5.7), only when its `submit_boot` is
+   under way** (§5.5 step 6 wrote it): it is never looked up (§5.7), and is handled from memory,
+   below. *The column tells this boot's rows from an earlier boot's*, written in the same
+   transaction as the attempt's key, so the two cannot disagree, with nothing kept across a
+   restart; **the waker's memory says what became of this boot's**:
+   - **`#underWay`**, a map `wakeId → {sessionId, key, settled?: {outcome: 'delivered' |
+     'refused', error?}}`, an entry added just before `wakeSubmitted` (§5.5 step 6) and removed once
+     the row's settling write has landed. When the submit's promise or a callback settles the
+     wake, the outcome is kept in the entry first, then written (`advanceWake`, or `wakeRefused`
+     with its pause); **a write that fails keeps the outcome, and every round tries the write
+     again until it lands**, with one log line the first time. So a failed write never leaves the
+     row stamped for good.
+   - **An unsettled entry** is skipped, and holds its conversation, as any pending row does, with
+     one exception: **a stamped row stops holding its conversation once the session bound at its
+     key is no longer its `session_id`**, as after `/new` or `/attach`. A driver whose start hangs
+     leaves the actor's turn waiting in `#ensureRuntime`, where `/stop` finds no runtime to cancel,
+     so only moving the binding frees the thread; the next wake then goes to the session now bound.
+     The row stays pending, and stamped, for its own callbacks: if the start ever fails it is
+     refused and retried in the session bound then, and if the prompt ever reaches the old
+     session's agent it is delivered there.
+   - **A stamped row with no entry**, which only a waker built anew in the same process could
+     find, is treated as refused (`wakeRefused`, reason `lost by the waker`), and retried.
+
+   Every other pending row is looked up (§5.7), only when its `submit_boot` is
    another boot's, then checked again (§5.3a), its lifted blocks dropped (§5.3b), then tried (§5.5), before anything new for its conversation is read.
 2. **What is due.** One query, `dueWakes(db, appId)` beside `dueSubscriptions`
    (`src/db/kanban-read.ts`): this bot's subscriptions whose task has `wake_by` set, with an event
    past `wake_cursor` **and at or before `cursor`**, the notice cursor (§5.8), each with its oldest
-   such event's id, **leaving out every subscription of a conversation that has a pending row**.
+   such event's id, **leaving out every subscription of a conversation that has a pending row**,
+   stamped rows of this boot included, but for one whose `session_id` is no longer the session
+   bound at its key (above); a conversation released so is read, with every event already in a
+   pending row left out, so no event is in two pending rows.
    A subscription reads at most `ROUND_EVENTS` (100) events a round, as the notifier's does.
    - **One pending row holds its whole conversation**, every principal's batch in it, not only its
      own: *a decision.* A conversation is one session, which runs one turn at a time; letting P2's
@@ -570,9 +592,13 @@ For a batch that passed the limits, in this order:
    after a restart shows once within Lark's hour; then `wakeMarked` sets `marker_at`, whether the
    send succeeded, failed or timed out. A marker that fails is logged and the turn goes all the
    same. A later attempt of the same row sends none. **A round waits at most `ROUND_MARKER_MS`
-   (30 s) for markers in all**: a batch whose marker would start after the round has spent it is
-   left for the next round, unrecorded if new, its row pending if not, so a round's length, and
-   `idle()`'s wait at shutdown, stay within one send's bound plus `actorFor`'s. *Why awaited, and before the actor:* the
+   (30 s) for markers in all**: no marker is started once the round has spent it; that batch is
+   left for the next round, unrecorded if new, its row pending if not. A marker started inside the
+   budget may run to its own bound, `NOTICE_SEND_MS`, past it, so a round's marker wait is at most
+   `ROUND_MARKER_MS + NOTICE_SEND_MS`, 60 s, and **`idle()`'s default bound is that sum**. *Chosen
+   over* starting no marker once less than `NOTICE_SEND_MS` of the budget remains, which with both
+   at 30 s would allow one marker a round however fast it was. `actorFor` is not bounded by either;
+   an `idle()` that runs out says so and the stop goes on, as the notifier's does. *Why awaited, and before the actor:* the
    marker must be in the thread before the turn's card, and the card's first write can come as soon
    as the submit does; awaiting it after `actorFor` would put a 30 s wait between the busy check and
    the submit, where a person's message could come in.
@@ -582,7 +608,14 @@ For a batch that passed the limits, in this order:
    again (§5.3b), then the prompt built. Busy now, the row stays pending, its marker sent, for a later round; the marker
    then precedes a person's turn and the woken one, in that order, which is accepted.
 6. **`wakeSubmitted(wakeId, sessionId, turnKey, BOOT_ID)`**: the current attempt's session, key
-   and this process's boot, so the next round knows the submit is under way (§5.2 step 1).
+   and this process's boot, so the next round knows the submit is under way (§5.2 step 1), its
+   `#underWay` entry added just before.
+
+   **Steps 6 to 8 are one guarded block**: anything that throws in them before `actor.submit`
+   has returned its promise, `wakeSubmitted`'s write, `cronTurns.turnSubmitted`, building the
+   request, is caught and taken as a refusal (`wakeRefused`, with the error, and the pause), so no
+   row is left stamped by a submit that never happened. `wakeSubmitted` failing writes no stamp,
+   and its entry is removed.
 7. **`cronTurns.turnSubmitted(sessionId, turnKey, false)`**, with cron on: a woken turn is
    recorded **without operate tier**, whoever set the wake, so its `mt cron add` is refused
    `needs_operator` (cron §6.3). *A decision* (§17, D11): a turn nobody typed does not get an
@@ -600,11 +633,11 @@ For a batch that passed the limits, in this order:
 **The round never awaits a turn.** The submit's promise, and the two callbacks, are handled when
 they come, outside the round: the round awaits only the marker's send and `actorFor`, each bounded,
 so one long woken turn never holds another conversation's wake. `idle(boundMs)`, at shutdown,
-waits for the round alone, which `ROUND_MARKER_MS` bounds, its default `boundMs` that bound, not for the turns it started, which the registry closes as it closes
-every session; a callback that fires after the stop finds the waker stopped and writes nothing, and
-the row is settled by §5.7 at the next start, its `submit_boot` then another boot's. A callback
-whose write fails leaves its row with this boot's `submit_boot`, skipped until a restart; the log
-says so.
+waits for the round alone, by default `ROUND_MARKER_MS + NOTICE_SEND_MS` (§5.5 step 3), not for the
+turns it started, which the registry closes as it closes every session; a callback that fires
+after the stop finds the waker stopped and writes nothing, and the row is settled by §5.7 at the
+next start, its `submit_boot` then another boot's. A settling write that fails is kept in
+`#underWay` and tried again each round (§5.2 step 1).
 
 `turnKey` is `turnIdempotencyKey(appId, messageId)`, the key the actor gives the turn.
 `wakeBatchUuid(appId, pairs)` (`src/core/ids.ts`) is a hash of the bot, the word `kanban-wake`, and
@@ -1146,7 +1179,10 @@ kanban:
   `dropWake`, `liftedWake`, `passWake`; `unblock` takes `wake?: number` for its event's payload.
 - **`src/db/kanban-read.ts`**: `liftOf(db, taskId, blockEvent)`, the lift read `unblockMessage` now
   shares (§5.3b); `dueWakes(db, appId)`, beside `dueSubscriptions`, leaving out
-  conversations with a pending row; `pendingWakes(db, appId)`; `wakesInLastHour(db, at, now)`;
+  conversations with a pending row, **stamped rows of this boot with a submit under way included**,
+  but not a stamped row whose `session_id` differs from the session `channel_bindings` binds at its
+  key now (`revoked_at IS NULL`), whose conversation is read with the events of every pending row
+  left out (§5.2); `pendingWakes(db, appId)`; `wakesInLastHour(db, at, now)`;
   `wakeOfShell(db, sessionId)`; `lastWokeOf(db, taskId)`; `wokenUnblocksSince(db, taskId)`, the
   count of §9.2; `unblockMessage`'s lift gains `woken`.
 - **`src/db/turns.ts`**: `turnByKey(db, sessionId, idempotencyKey): TurnRow | undefined`, a read.
@@ -1250,6 +1286,14 @@ kanban:
   woken and one at 5 not, with its note; the talk check failing, the task's events skipped, its
   line once, said again after a lapse and a return; at most 5 submits a round, the longest waiting
   first; the round not waiting for a turn's terminal, and `idle()` settling while a woken turn runs.
+- **A submit under way that does not settle (round 3)**: a settling write that fails once, kept in
+  `#underWay`, and landing at the next round, the row then delivered (or refused) and its
+  conversation free; `cronTurns.turnSubmitted` throwing at step 7, the row refused through
+  `wakeRefused`, unstamped, and retried after its pause; a driver start that hangs, the row stamped
+  and its thread held, `/stop` changing nothing, then `/new`: the conversation no longer held, the
+  next outcome woken in the new session, its events not those of the hung row, and the hung row
+  later refused and retried in the session bound then, or delivered in the old one if its prompt
+  goes through; a stamped row with no entry refused and retried.
 - **A submit under way (C2)**: a start that fails only after several rounds have run, the row
   skipped by each with its conversation held, its turn present in the turns table meanwhile but
   never looked up, then refused and retried under the next attempt, never delivered; a late
@@ -1280,8 +1324,9 @@ kanban:
 - **One pending row holds the conversation (I4)**: `dueWakes` leaves out a conversation with a
   pending row; P2's outcome in a thread with P1's pending row waits, and is batched once P1's row
   is delivered, and again once it is dropped; no event in two pending rows.
-- **The marker (I2)**: sent and awaited before `actorFor`; a round's markers stopping at
-  `ROUND_MARKER_MS`, the rest left to the next round; once a batch, not again on a refused
+- **The marker (I2)**: sent and awaited before `actorFor`; a round starting no marker once
+  `ROUND_MARKER_MS` is spent, the rest left to the next round, a slow last marker running to its own
+  bound, and `idle()` settling within `ROUND_MARKER_MS + NOTICE_SEND_MS`; once a batch, not again on a refused
   attempt or after a restart with `marker_at` set; its uuid from the pairs; a marker failing, and
   one past `NOTICE_SEND_MS`, logged, `marker_at` set, the turn submitted; a person's message
   arriving during the marker's send queued first, the wake held for the next round, its marker not
@@ -1523,3 +1568,10 @@ marker's count high (§5.3b); five woken unblocks go through and the sixth is re
 shell's `task wake on` needs a deeper task (§3.2a); `MT_WAKE_` dropped by `gateEnv` and `mt update`
 (§9.2); `envFor` in today's order (§13); a round's markers bounded together (§5.5); and a
 terminal's DM subscription noted (§16). Q6 is held for the user.
+
+*Revised on 2026-11-19, after review round 3.* This boot's submits under way are kept in memory,
+with their outcome, and a settling write that fails is tried again each round; a throw before the
+submit is a refusal; a stamped row stops holding its conversation once its key binds another
+session, so `/new` frees a thread whose agent's start hangs (§5.2, §5.5); `idle()`'s default is
+`ROUND_MARKER_MS + NOTICE_SEND_MS` (§5.5); `dueWakes` counts stamped rows as pending (§13); and
+`wakeRefused` clears `submit_boot` (§4.3). Q6 is still held for the user.
