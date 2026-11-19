@@ -1903,6 +1903,19 @@ card is redrawn with the outcome once acted on, so its buttons stop working.
   The same operator's second press of one Unblock is dropped by the SDK, as above; `/kanban task unblock`
   still works. An Unblock's event must be a block of its task: a `blocked` or `stopped` event, or a
   `run_ended` whose task blocked there, not one it was retried after.
+  *Amended by the unblock redraw.* The message is redrawn once a block it offers Unblock for is
+  lifted, by any path: a press, `/kanban task unblock`, the terminal's `mt kanban task unblock`, or
+  an agent's mt. The notifier records the message id of each message it sends with Unblock buttons,
+  with each task and the event that blocked it, and the message's text as sent, masked
+  (`kanban_unblock_buttons`, migration 012). A loop in the gateway looks every 2 s for a recorded
+  button whose task has an `unblocked` event after that block, so an unblock from another process,
+  or from while the gateway was down, is found too. The redraw is the text as sent, then a line for
+  each block lifted, "`<task>`: Unblocked by *name* at HH:MM", by chat name, else the principal, in the
+  gateway's zone, `cron.tz` or the process's; the other buttons of a batch stay as they were. It is
+  bounded, about 10 s, logged when it fails or times out, and tried once: its rows are marked
+  either way. A press on a card whose block was lifted already redraws it the same way, beside its
+  reply. A message whose card Lark refused and that went as text alone is recorded too, and its
+  redraw fails, which is logged.
 - **Approval cards** are built in Lark's card schema 2.0, their buttons in the body with callback
   behaviors, as a board card's are; the router reads the button's value the same way for a card
   posted before.

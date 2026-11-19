@@ -1084,6 +1084,19 @@ export class KanbanService {
     return board.recordCard(this.#db, runId, card, this.#clock.now());
   }
 
+  /** A message of notices was sent with Unblock buttons (spec §9.2, amended by the unblock redraw): the notifier records it. */
+  recordUnblockButtons(message: board.UnblockMessage): Result<{ recorded: number }> {
+    if (!isText(message.messageId) || message.buttons.some((b) => !isText(b.taskId) || !Number.isSafeInteger(b.blockEvent))) {
+      return board.refuse('invalid', 'a message id and a task id are text, and a block an event id');
+    }
+    return board.recordUnblockButtons(this.#db, message, this.#clock.now());
+  }
+
+  /** A recorded message's buttons were redrawn, or the redraw tried, for these lifts: never tried again. */
+  markUnblockRedrawn(messageId: string, lifts: ReadonlyArray<{ taskId: string; liftEvent: number }>): Result<{ marked: number }> {
+    return board.markUnblockRedrawn(this.#db, messageId, lifts);
+  }
+
   stop(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
