@@ -43,7 +43,7 @@ export interface RenderedCard {
    * (`cardText`). What the plain-message fallback sends.
    */
   text: string;
-  /** The card's three parts, each its own element on a Lark card (spec §4.5). */
+  /** The card's three parts, each its own element on a Lark card while it has something to show (spec §4.5). */
   parts: CardParts;
   /** Highest event seq included. Becomes `cursor_seq`. */
   throughSeq: number;

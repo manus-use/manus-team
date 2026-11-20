@@ -81,11 +81,11 @@ describe('the reply card, a turn replayed', () => {
     const { kit } = await replay();
     expect(kit.calls.filter((c) => c.api === 'create')).toHaveLength(1);
 
-    // The zero-width spaces before the first words are dropped, and only those:
-    // an answer that emptied later would fail here.
-    const given = kit.shown('card_1', REPLY_ELEMENTS.answer);
-    const answer = given.slice(given.findIndex((c) => c !== EMPTY_PART));
-    expect(given[0]).toBe(EMPTY_PART);
+    // The answer's element is added with its first words, so everything it is
+    // given is the answer: an answer that emptied later would fail here.
+    const answer = kit.shown('card_1', REPLY_ELEMENTS.answer);
+    expect(answer[0]).toBe('The build fails');
+    expect(kit.calls.find((c) => c.elementId === REPLY_ELEMENTS.answer)).toMatchObject({ api: 'add', target: REPLY_ELEMENTS.tools });
     expect(answer.length).toBeGreaterThan(3);
     for (let i = 1; i < answer.length; i += 1) {
       expect(answer[i]?.startsWith(answer[i - 1] ?? ''), `update ${i}: ${JSON.stringify(answer[i - 1])} then ${JSON.stringify(answer[i])}`).toBe(true);
@@ -100,7 +100,12 @@ describe('the reply card, a turn replayed', () => {
     expect(kit.calls.filter((c) => c.refused === true)).toEqual([]);
     expect(tools.at(-1)).toBe('✅ Bash ×2 · ✅ Read ×2 · ✅ Edit');
     // The approval's wait line came and went below the answer, not in it.
-    expect(kit.contents(REPLY_ELEMENTS.status)).toContain('_Waiting for your approval: see the card below._');
+    expect(kit.calls.filter((c) => c.api === 'add' && c.elementId === REPLY_ELEMENTS.status).map((c) => c.content)).toContain(
+      '_Waiting for your approval: see the card below._',
+    );
+    // The card ends with no empty element and no zero-width space.
+    expect(kit.shown('card_1').map((e) => e.id)).toEqual([REPLY_ELEMENTS.tools, REPLY_ELEMENTS.answer]);
+    expect(JSON.stringify(kit.calls)).not.toContain(EMPTY_PART);
 
     // One sequence for the card, strictly increasing, ending with streaming turned off.
     const sequences = kit.sequences('card_1');

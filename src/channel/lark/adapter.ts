@@ -243,7 +243,8 @@ export class LarkAdapter implements Channel {
   /**
    * Open the reply card (channel spec §4.5), over Lark's card API directly.
    *
-   * The card is made first, as a card entity with its three elements, then sent
+   * The card is made first, as a card entity with an element for each part that
+   * has something to show, then sent
    * by reference, a message of its own: placed as `#post` places any message,
    * and retried as one, with a uuid. The uuid is the card's, not the writer's:
    * the writer's is also the uuid of the plain message it falls back to for the
@@ -276,14 +277,10 @@ export class LarkAdapter implements Channel {
       this.#post(target, 'interactive', { type: 'card', data: { card_id: cardId } }, `reply_${cardId}`.slice(0, 50)),
     );
 
-    // What each element shows, as far as Lark has said it took it: an update is
-    // sent only for a part that differs, and a part whose update failed is sent
-    // again by the next write.
-    const shown: Record<keyof CardParts, string> = {
-      tools: partContent(initial.tools),
-      answer: partContent(initial.answer),
-      status: partContent(initial.status),
-    };
+    // What each element shows, as far as Lark has said it took it, '' for a
+    // part the card has no element for: an update is sent only for a part that
+    // differs, and a part whose update failed is sent again by the next write.
+    const shown: CardParts = drawn(initial);
     // One sequence for the card, every update and the settings drawing the next:
     // Lark orders a card's updates by it, and refuses one not above the last.
     let sequence = 0;
@@ -338,17 +335,61 @@ export class LarkAdapter implements Channel {
       await cardkitCall(() =>
         cardkit.cardElement.update({
           path: { card_id: cardId, element_id: REPLY_ELEMENTS[part] },
-          data: {
-            element: JSON.stringify({ tag: 'markdown', element_id: REPLY_ELEMENTS[part], content: text }),
-            sequence: at,
-            uuid: `u_${cardId}_${at}`,
-          },
+          data: { element: JSON.stringify(replyElement(part, text)), sequence: at, uuid: `u_${cardId}_${at}` },
         }),
       );
     };
+    // A part's element added, in reading order: after the nearest part before it
+    // that the card has, else before the nearest after it. Lark's documentation
+    // does not say it needs streaming. False when Lark did not take it.
+    const add = async (part: keyof CardParts, text: string): Promise<boolean> => {
+      sequence += 1;
+      const at = sequence;
+      const i = REPLY_ORDER.indexOf(part);
+      const before = REPLY_ORDER.slice(0, i).reverse().find((p) => shown[p] !== '');
+      const after = REPLY_ORDER.slice(i + 1).find((p) => shown[p] !== '');
+      const place: { type: 'insert_before' | 'insert_after' | 'append'; target_element_id?: string } =
+        before !== undefined
+          ? { type: 'insert_after', target_element_id: REPLY_ELEMENTS[before] }
+          : after !== undefined
+            ? { type: 'insert_before', target_element_id: REPLY_ELEMENTS[after] }
+            : { type: 'append' };
+      return taken(() =>
+        cardkit.cardElement.create({
+          path: { card_id: cardId },
+          data: { ...place, elements: JSON.stringify([replyElement(part, text)]), sequence: at, uuid: `a_${cardId}_${at}` },
+        }),
+      );
+    };
+    // A part's element taken out, once the part has nothing to show. False when Lark did not take it.
+    const remove = async (part: keyof CardParts): Promise<boolean> => {
+      sequence += 1;
+      const at = sequence;
+      return taken(() =>
+        cardkit.cardElement.delete({
+          path: { card_id: cardId, element_id: REPLY_ELEMENTS[part] },
+          data: { sequence: at, uuid: `d_${cardId}_${at}` },
+        }),
+      );
+    };
+    // The whole card replaced by one of `parts`, with an element for each part
+    // that has something to show: what an add or a delete Lark refused falls
+    // back to, so the turn goes on. Its failure is thrown, as a write's is.
+    const replaceCard = async (parts: CardParts): Promise<void> => {
+      sequence += 1;
+      const at = sequence;
+      await cardkitCall(() =>
+        cardkit.card.update({
+          path: { card_id: cardId },
+          data: { card: { type: 'card_json', data: JSON.stringify(replyCard(parts)) }, sequence: at, uuid: `r_${cardId}_${at}` },
+        }),
+      );
+      for (const part of REPLY_ORDER) shown[part] = parts[part];
+    };
 
-    const write = async (parts: CardParts, finishing = false): Promise<void> => {
-      const changed = REPLY_ORDER.filter((part) => partContent(parts[part]) !== shown[part]);
+    const write = async (given: CardParts, finishing = false): Promise<void> => {
+      const parts = drawn(given);
+      const changed = REPLY_ORDER.filter((part) => parts[part] !== shown[part]);
       if (changed.length === 0) return;
       // Ahead of Lark's ten minutes, so the writer never meets them. Refused
       // while not finishing, the write goes ahead all the same: Lark's ten
@@ -362,9 +403,14 @@ export class LarkAdapter implements Channel {
           if (finishing) replacing = true;
         }
       }
-      for (const part of changed) {
-        const text = partContent(parts[part]);
-        if (replacing) {
+      // The parts with something to show first, in reading order, then the
+      // elements of those emptied taken out, so the card always has one.
+      for (const part of changed.filter((p) => parts[p] !== '')) {
+        const text = parts[part];
+        if (shown[part] === '') {
+          // A refused add falls back to the whole card, which writes every part.
+          if (!(await add(part, text))) return replaceCard(parts);
+        } else if (replacing) {
           await replace(part, text);
         } else {
           try {
@@ -381,6 +427,10 @@ export class LarkAdapter implements Channel {
           }
         }
         shown[part] = text;
+      }
+      for (const part of changed.filter((p) => parts[p] === '')) {
+        if (!(await remove(part))) return replaceCard(parts);
+        shown[part] = '';
       }
     };
 
@@ -677,8 +727,8 @@ const STREAMING_OFF_CODES: ReadonlySet<number> = new Set([200850, 300309]);
 export const STREAMING_REFRESH_MS = 9 * 60 * 1000;
 
 /**
- * The reply card's element ids (channel spec §4.5): one markdown element a part,
- * named so each part's update goes to its own element.
+ * The reply card's element ids (channel spec §4.5): one markdown element for each
+ * part with something to show, named so each part's update goes to its own element.
  */
 export const REPLY_ELEMENTS: Readonly<Record<keyof CardParts, string>> = { tools: 'tools', answer: 'answer', status: 'status' };
 
@@ -686,8 +736,12 @@ export const REPLY_ELEMENTS: Readonly<Record<keyof CardParts, string>> = { tools
 const REPLY_ORDER: ReadonlyArray<keyof CardParts> = ['tools', 'answer', 'status'];
 
 /**
- * What a part with nothing to show is sent as: a zero-width space. Lark is never
- * given an empty element, which it may refuse, and draws this as nothing.
+ * What the status is drawn as when no part has anything to show, a zero-width
+ * space: a card with no element at all is not something Lark is ever given, nor
+ * an element of empty content, which it refuses with 10002. `renderCard` never
+ * renders such parts, as it then has the "_Working…_" status; this is only so
+ * the card is never left with nothing. Lark draws it as a blank line, which is
+ * why a part with nothing to show otherwise has no element.
  */
 export const EMPTY_PART = '\u200b';
 
@@ -697,19 +751,29 @@ export const REPLY_SUMMARY_OPEN = 'Working…';
 /** The longest preview a finished card is given, in characters, as the SDK's own streaming card cuts its. */
 const SUMMARY_MAX = 50;
 
-/** A part as an element's content: itself, or `EMPTY_PART`. */
-export function partContent(part: string): string {
-  return part === '' ? EMPTY_PART : part;
+/**
+ * The parts as the card draws them: as given, each part with nothing to show
+ * having no element, unless none has anything, when the status is `EMPTY_PART`.
+ */
+function drawn(parts: CardParts): CardParts {
+  return REPLY_ORDER.some((part) => parts[part] !== '') ? { ...parts } : { ...parts, status: EMPTY_PART };
+}
+
+/** A part's element: markdown, with the part's element id. */
+function replyElement(part: keyof CardParts, content: string): object {
+  return { tag: 'markdown', element_id: REPLY_ELEMENTS[part], content };
 }
 
 /**
  * The reply card, in Lark's card schema 2.0 (channel spec §4.5): streaming, so
  * Lark's client types each update, with the SDK's own streaming card's pace, one
  * character every 70 ms, `fast` showing what is buffered when a new update
- * comes; and three markdown elements, one a part, in reading order. The parts
- * were escaped and masked by the renderer.
+ * comes; and a markdown element for each part with something to show, in
+ * reading order, as Lark draws even an element of a zero-width space as a blank
+ * line. The parts were escaped and masked by the renderer.
  */
 export function replyCard(parts: CardParts): object {
+  const shown = drawn(parts);
   return {
     schema: '2.0',
     config: {
@@ -723,7 +787,7 @@ export function replyCard(parts: CardParts): object {
       },
     },
     body: {
-      elements: REPLY_ORDER.map((part) => ({ tag: 'markdown', element_id: REPLY_ELEMENTS[part], content: partContent(parts[part]) })),
+      elements: REPLY_ORDER.filter((part) => shown[part] !== '').map((part) => replyElement(part, shown[part])),
     },
   };
 }
@@ -767,6 +831,19 @@ async function cardkitCall(request: () => Promise<{ code?: number | undefined; m
     throw sendError(err);
   }
   if (typeof r.code === 'number' && r.code !== 0) throw toChannelError(r);
+}
+
+/**
+ * One call to Lark's card API, true once Lark has taken it, false when it failed
+ * in any way: for a call whose failure has a fallback of its own.
+ */
+async function taken(request: () => Promise<{ code?: number | undefined; msg?: string | undefined }>): Promise<boolean> {
+  try {
+    await cardkitCall(request);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The HTTP status of an error axios threw, if Lark answered at all. */
