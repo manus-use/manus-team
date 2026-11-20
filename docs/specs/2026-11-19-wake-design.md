@@ -1786,8 +1786,8 @@ On the user's tenant, with the board and wakes on:
     redrawn. (d) Lark renders, and updates, a card with no actions.
 16. **A role's wake, end to end** (§19.14): a task with `wake: vi-coordinator` completes in its
     thread; the notice, then "Waking vi-coordinator for 1 board update (k_…).", then the reaction
-    task's notices in the thread as its run claims and completes it; `/kanban task list` without
-    it, `/kanban task list all` with it, and the source's `task show` naming it; a block
+    task's notices in the thread as its run claims and completes it; `/kanban task list` listing
+    it as any task, and the source's `task show` naming it; a block
     whose button waits for the reaction run, lifted by its `mt kanban wake-unblock`, no button
     card, the notice redrawn "(woken by the board)".
 15. **A woken turn's `mt cron add`**, with cron on and an operator as setter: refused
@@ -2034,9 +2034,10 @@ again, the same uuid and the same key.
   - **the brief's directories** (`ownDirectory`, `src/kanban/brief.ts`): yes, intended: the
     reaction run is told the source task's own directory (kanban §18), as the work it reacts to is
     there;
-  - **a workflow's related tasks** (`relatedTasks`, workflows §10): no: a reaction task is left out
-    of an instance's related tasks, as `task list` leaves it out; its source's `task show` names
-    it (§19.9);
+  - **a workflow's related tasks** (`relatedTasks`, workflows §10): yes: a reaction task made from
+    a member's outcomes is one of the instance's related tasks, as any task made from a member is,
+    so `workflow show` lists the work the instance's outcomes set going. *Decided again*, now that
+    the lists hide nothing: the first draft left it out only to match the hiding;
   - **a run's `link`** (kanban §7.3: a run may link only the tasks its task created): a run of the
     source task may **not** link a reaction task as its child, refused `wrong_task`, `` run … may
     not link `k_…`: it is a reaction task, made by a wake, not by this run``, though its
@@ -2145,16 +2146,18 @@ the tasks that woke it are others', which only the wake's setter's tiers may ans
 
 ### 19.9 Listing
 
-- **`/kanban task list` and `mt kanban task list` leave reaction tasks out by default**, and of
-  every filter but **`all`**, which, beside its meaning today, every status on the board, shows
-  them too (*decided by the user*). No filter word or flag is added: `all` is already a word of
-  `LIST_FILTERS` (`src/kanban/chat-parse.ts`), which chat and the terminal's `mt kanban task list
-  [filter]` both take (`src/cli/mt.ts`). `--json` of `task list` marks each reaction task with
-  `"reacts_to": ["k_…", …]`, the tasks whose outcomes its wake carried, in event order, and gives
-  `null` for a task that is none; it leaves reaction tasks out but under `all`, by the same rule.
+- **Reaction tasks are listed as any other task** (*decided by the user*): `/kanban task list`, `mt
+  kanban task list` and every filter, in chat and at the terminal, treat them as they treat every
+  task, and the board's counts count them. No filter word or flag is added.
+- **No marker on a list line**: a reaction task's title already says what it reacts to,
+  `React to board updates: k_… completed, …` (§19.3), and a list line shows the title; a second
+  "reacts to" beside it would say the same twice, and the terminal's columns (`task status age
+  assignee title`) stay as scripts read them.
+- **`--json` of `task list`** marks each reaction task with `"reacts_to": ["k_…", …]`, the tasks
+  whose outcomes its wake carried, in event order, and gives `null` for a task that is none.
 - **`task show` of a source task** gains, after its `Wake:` line, `Reactions:` and the reaction
   tasks its outcomes made, newest first, at most five, each `` `k_…` `` with its display status,
-  then `and N more: /kanban task list all`; `--json` gains `"reactions": [{"task_id",
+  then `and N more: /kanban task list`; `--json` gains `"reactions": [{"task_id",
   "status"}]`.
 - **`task show` of a reaction task** says `Made by a wake of k_…, k_…, for role vi-coordinator, set
   by Zhixi Sun.`, from its wake's events.
@@ -2202,7 +2205,6 @@ gave up, is a task like any: its block's notice has its button at once, as its w
   the same words; `--json`'s `created_via`, which gives `{"kind": "wake", "wake_id"}` as it gives
   the others; and `subscribe()`, which copies the batch's subscription for it (§19.3).
 - **`src/kanban/worker.ts`**: `link` refusing a reaction task as a child (§19.3).
-- **`src/db/kanban-read.ts`**: `relatedTasks` leaving reaction tasks out.
 - **`src/db/kanban-read.ts`**: `reactionsOf(db, taskId)`; `wakeOfReaction(db, taskId)`; the list
   read's reaction filter.
 - **`src/kanban/waker.ts`**: batching by target; a role's batch to `recordRoleWake`; the role's
@@ -2215,7 +2217,7 @@ gave up, is a task like any: its block's notice has its button at once, as its w
   `task wake <id> <role>` at operate tier; `all` showing reaction tasks, no new filter; the `Reactions:` line;
   "Made by a wake of …".
 - **`src/cli/operator.ts`, `src/cli/mt.ts`, `src/cli/plain.ts`**: `--wake-role`; `task wake <id>
-  <role>`; `task list all` showing reaction tasks, and `--json`'s `reacts_to`; `USAGE`.
+  <role>`; `task list --json`'s `reacts_to`; `USAGE`.
 - **`src/kanban/workflow.ts`**: a step's and a DAG task's `wake: { role }`.
 - **`src/kanban/prompt.ts`**: nothing: the reaction task's body is its prompt, as any task's.
 - **`src/db/WRITERS.md`**: §4.3's rows for §19.
@@ -2245,14 +2247,15 @@ gave up, is a task like any: its block's notice has its button at once, as its w
   `{kind: 'wake', wakeId}` and the service refusing it from chat, the terminal and a run; a throw
   rolling everything back and the batch tried again with the same key.
 - **`created_from_task`**: the reaction task working in the source's workspace, its brief naming the
-  source's directory, left out of a workflow's related tasks, and a source run's `link` of it
+  source's directory, among a workflow's related tasks, and a source run's `link` of it
   refused `wrong_task`; `setWake` refused on a reaction task.
 - **Agent-first blocks**: the deferred button decided by the reaction task's first run, lifted,
   `tried` and `turn_failed`; released at `hold_minutes` while the task waits in the queue
   (`not_woken`) and while its run runs (`running`); after a restart, the same from the database.
-- **Listing**: `task list` without reaction tasks, under every filter but `all`, and `all` with
-  them, chat and terminal; `--json`'s `reacts_to`, the source tasks' ids for a reaction task and
-  `null` for any other; no `reactions` word accepted, refused as an unknown filter; the source's `Reactions:` line, five and "N more"; the
+- **Listing**: reaction tasks under `task list` and each filter as any task, chat and terminal,
+  their lines as any task's, and the board's counts counting them; `--json`'s `reacts_to`, the
+  source tasks' ids for a reaction task and `null` for any other; no `reactions` word accepted,
+  refused as an unknown filter; the source's `Reactions:` line, five and "N more"; the
   reaction task's "Made by a wake of".
 - **Removed role**: the skip, its line once, the buttons released.
 - **End to end**, through `createGateway` with `FakeChannel` and a fake role agent: §19.11's first
@@ -2270,7 +2273,7 @@ Item 16 of §15: one role's wake end to end on the user's tenant.
   its run by kanban §7.5's rules, or talk to the conversation's chat session, which knows the
   reaction task only by what the thread shows.
 - **No archive.** A completed reaction task stays on the board, done, until someone archives it; a
-  busy thread's wakes can leave many, which `task list` hides unless asked.
+  busy thread's wakes can leave many, which `task list` shows as any tasks.
 - **The board is the batch's oldest task's**, when a chat's tasks are on several boards (§19.3).
 - **The prompt is fixed when the task is made**: a run that starts later reads `wake-show` for the
   board as it is.
@@ -2279,10 +2282,6 @@ Item 16 of §15: one role's wake end to end on the user's tenant.
   `comment` on a source task is a run's comment, which steers that task's next run as any run's
   comment does today (kanban §7.5), whoever set the wake. Unchanged by this design; the scoped
   commands of §19.8 are only `wake-show` and `wake-unblock`.
-- **A blocked reaction task is hidden from `task list blocked`**, as from every filter but `all`
-  (§19.9), though its block's notice still goes to the thread, with its button; and the board's
-  counts (`board list`, a chat's board line) include reaction tasks, hidden or not. Both follow
-  from the user's choice of `all` alone.
 
 ---
 
@@ -2346,15 +2345,16 @@ its notice's line; and a deferred block cut from the prompt has its button relea
 *Amended on 2026-11-20.* The user added a role as a wake's target (§19): a reaction task the role
 runs on the board, its scope given by the wake rows to its run's worker commands `wake-show` and
 `wake-unblock`, counted by the cap, the depth and the woken-unblock limit, its deferred buttons
-waiting for its first run, and hidden from `task list` but for `all` (D19).
+waiting for its first run, and listed as any task (D19, as since decided).
 
-*Amended on 2026-11-20, again.* The user chose that reaction tasks show only under `task list all`,
-in chat and at the terminal, with no `reactions` filter; `--json` marks each with `reacts_to`,
-the tasks its wake carried (§19.9).
+*Amended on 2026-11-20, again.* The user chose that reaction tasks are listed as any other task,
+in chat and at the terminal, under every filter, with no filter of their own and no marker on a
+list line; `--json` marks each with `reacts_to`, the tasks its wake carried; and a workflow's
+related tasks include them (§19.3, §19.9).
 
 *Revised on 2026-11-20, after the review of §19.* Everything made under a wake carries `wake_root`,
 and no run of such a task adds cron jobs (§19.8); `recordRoleWake` makes `createTask`'s checks, the
 key first, then `liveBoard`, `assignable` and the fields (§19.3); `assignable` judges the role
 alone; every switch on `createdVia.kind` learns `wake` (§19.12); `created_from_task`'s uses are
 said, a run's `link` of a reaction task refused (§19.3); `setWake` refuses a reaction task; the
-`--json` key is `reacts_to`; and two limits are noted (§19.15).
+`--json` key is `reacts_to`; and a limit on a reaction run's comments is noted (§19.15).
