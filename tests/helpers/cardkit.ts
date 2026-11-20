@@ -22,6 +22,7 @@ import { systemClock } from '../../src/time.js';
  * - a card it does not hold: 200740; an element the card has not got: 300313,
  *   whether updated, deleted or named as an add's target;
  * - an element added with an id the card already has: `DUPLICATE_ELEMENT_CODE`;
+ * - a card's last element deleted: `LAST_ELEMENT_CODE`;
  * - empty content: 10002;
  * - content once streaming is off: 300309;
  * - content more than ten minutes after streaming was last turned on, by its own
@@ -116,6 +117,13 @@ function bytesWith(card: Card, elementId: string, content: string): number {
  * live.
  */
 export const DUPLICATE_ELEMENT_CODE = 300312;
+
+/**
+ * The code the fake gives a delete of a card's last element, which it refuses
+ * so a card is never left with none. Whether Lark refuses it, and with what
+ * code, is not documented where we have looked; to be confirmed live.
+ */
+export const LAST_ELEMENT_CODE = 300316;
 
 /** An element of a card, as the fake holds it. */
 export interface CardElement {
@@ -249,7 +257,9 @@ export class FakeCardkit {
   /**
    * What `elementId` of `cardId` was given, in order, as Lark's client would
    * receive it: its content in the card as created, then each add, update and
-   * whole-card replace Lark took that gave it content.
+   * whole-card replace Lark took that gave it content. An element deleted and
+   * added again, or dropped and brought back by a replace, has one history
+   * here, joined across the gap.
    */
   shown(cardId: string, elementId: string): string[];
   shown(cardId: string, elementId?: string): CardElement[] | string[] {
@@ -529,6 +539,7 @@ export class FakeCardkit {
                 () => {
                   const found = this.#sequenced(p.path.card_id, p.data.sequence, p.path.element_id);
                   if (!('elements' in found)) return found;
+                  if (found.elements.length === 1) return refusal(LAST_ELEMENT_CODE);
                   card = found;
                   return undefined;
                 },

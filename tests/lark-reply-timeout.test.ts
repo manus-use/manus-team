@@ -17,8 +17,8 @@ const NOW = 1_760_000_000_000;
 const MINUTE = 60 * 1000;
 const CHAT = { chatId: 'oc_team', threadId: '' };
 
-function parts(answer: string): CardParts {
-  return { tools: '', answer, status: '' };
+function parts(answer: string, status = ''): CardParts {
+  return { tools: '', answer, status };
 }
 
 /** `ours` is the adapter's clock, `lark` the fake's; the same one unless a test parts them. */
@@ -122,5 +122,23 @@ describe('the reply card past Lark streaming timeout', () => {
     ]);
     expect(refusing.kit.shown('card_1', 'answer')).toEqual(['a', 'ab']);
     expect(refusing.kit.calls.at(-1)?.body).toEqual({ config: { streaming_mode: false, summary: { content: 'ab' } } });
+  });
+
+  it('takes the emptied status out of a finish past the timeout when streaming will not come back, then turns streaming off', async () => {
+    const { a, kit, lark } = adapter(false);
+    const card = await a.openCard(CHAT, parts('a', '_Working…_'), 'u');
+    lark.advance(11 * MINUTE);
+    kit.failNext('settings', refused(99991400, 429));
+    await expect(card.finish(parts('ab'))).resolves.toBeUndefined();
+    expect(kit.calls.slice(2).map((c) => [c.api, c.elementId, c.refused === true])).toEqual([
+      ['content', 'answer', true],
+      ['settings', undefined, true],
+      ['update', 'answer', false],
+      ['delete', 'status', false],
+      ['settings', undefined, false],
+    ]);
+    expect(kit.calls.at(-1)?.body).toEqual({ config: { streaming_mode: false, summary: { content: 'ab' } } });
+    expect(kit.shown('card_1')).toEqual([{ id: 'answer', content: 'ab' }]);
+    expect(kit.streaming('card_1')).toBe(false);
   });
 });

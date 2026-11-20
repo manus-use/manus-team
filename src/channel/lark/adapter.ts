@@ -285,6 +285,10 @@ export class LarkAdapter implements Channel {
     // Lark orders a card's updates by it, and refuses one not above the last.
     let sequence = 0;
     let finished = false;
+    // Set when an add or a delete failed in a way that may have landed unseen,
+    // or an element was missing: what the card holds is then in doubt, and
+    // every write replaces it whole until a replace lands.
+    let unsure = false;
     // When streaming was last turned on, by our clock: at the card's making,
     // and at each `streamOn`. Read before the card was made, so never late.
     let streamingSince = createdAt;
@@ -353,7 +357,9 @@ export class LarkAdapter implements Channel {
           ? { type: 'insert_after', target_element_id: REPLY_ELEMENTS[before] }
           : after !== undefined
             ? { type: 'insert_before', target_element_id: REPLY_ELEMENTS[after] }
-            : { type: 'append' };
+            : // Defensive: a write adds before it deletes, so the card always has a
+              // part to place the new one by, and this is never reached.
+              { type: 'append' };
       return taken(() =>
         cardkit.cardElement.create({
           path: { card_id: cardId },
@@ -373,24 +379,30 @@ export class LarkAdapter implements Channel {
       );
     };
     // The whole card replaced by one of `parts`, with an element for each part
-    // that has something to show: what an add or a delete Lark refused falls
-    // back to, so the turn goes on. Its failure is thrown, as a write's is.
-    const replaceCard = async (parts: CardParts): Promise<void> => {
+    // that has something to show: what a failed add, or a delete whose blanking
+    // failed too, falls back to, so the turn goes on. While finishing, the card
+    // it gives is finished, streaming off with the final preview. Its failure is
+    // thrown, as a write's is.
+    const replaceCard = async (parts: CardParts, finishing: boolean): Promise<void> => {
       sequence += 1;
       const at = sequence;
       await cardkitCall(() =>
         cardkit.card.update({
           path: { card_id: cardId },
-          data: { card: { type: 'card_json', data: JSON.stringify(replyCard(parts)) }, sequence: at, uuid: `r_${cardId}_${at}` },
+          data: { card: { type: 'card_json', data: JSON.stringify(replyCard(parts, finishing)) }, sequence: at, uuid: `r_${cardId}_${at}` },
         }),
       );
       for (const part of REPLY_ORDER) shown[part] = parts[part];
+      unsure = false;
     };
 
     const write = async (given: CardParts, finishing = false): Promise<void> => {
       const parts = drawn(given);
-      const changed = REPLY_ORDER.filter((part) => parts[part] !== shown[part]);
-      if (changed.length === 0) return;
+      // A part emptied whose delete Lark refused keeps its element, blanked to
+      // `EMPTY_PART`: that is the part empty, and nothing to write.
+      const same = (part: keyof CardParts): boolean => parts[part] === shown[part] || (parts[part] === '' && shown[part] === EMPTY_PART);
+      const changed = REPLY_ORDER.filter((part) => !same(part));
+      if (changed.length === 0 && !unsure) return;
       // Ahead of Lark's ten minutes, so the writer never meets them. Refused
       // while not finishing, the write goes ahead all the same: Lark's ten
       // minutes may not have run out, and if they have, the refusal below
@@ -403,34 +415,61 @@ export class LarkAdapter implements Channel {
           if (finishing) replacing = true;
         }
       }
+      // The card's elements are in doubt, so it is replaced whole until a
+      // replace lands: see `unsure`.
+      if (unsure) return replaceCard(parts, finishing);
+      const whole = (): Promise<void> => {
+        unsure = true;
+        return replaceCard(parts, finishing);
+      };
       // The parts with something to show first, in reading order, then the
       // elements of those emptied taken out, so the card always has one.
       for (const part of changed.filter((p) => parts[p] !== '')) {
         const text = parts[part];
-        if (shown[part] === '') {
-          // A refused add falls back to the whole card, which writes every part.
-          if (!(await add(part, text))) return replaceCard(parts);
-        } else if (replacing) {
-          await replace(part, text);
-        } else {
-          try {
-            await content(part, text);
-          } catch (err) {
-            if (!(err instanceof ChannelError) || !STREAMING_OFF_CODES.has(err.code)) throw err;
-            // Once, with a new sequence; a second refusal is thrown with Lark's code.
-            if (await turnOn(finishing)) {
+        try {
+          if (shown[part] === '') {
+            // A failed add falls back to the whole card, which writes every part.
+            if (!(await add(part, text))) return whole();
+          } else if (replacing) {
+            await replace(part, text);
+          } else {
+            try {
               await content(part, text);
-            } else {
-              replacing = true;
-              await replace(part, text);
+            } catch (err) {
+              if (!(err instanceof ChannelError) || !STREAMING_OFF_CODES.has(err.code)) throw err;
+              // Once, with a new sequence; a second refusal is thrown with Lark's code.
+              if (await turnOn(finishing)) {
+                await content(part, text);
+              } else {
+                replacing = true;
+                await replace(part, text);
+              }
             }
           }
+        } catch (err) {
+          // An element the session holds the card has is not there: the card
+          // is not what the session thinks, and is replaced whole.
+          if (err instanceof ChannelError && err.code === ELEMENT_MISSING_CODE) return whole();
+          throw err;
         }
         shown[part] = text;
       }
       for (const part of changed.filter((p) => parts[p] === '')) {
-        if (!(await remove(part))) return replaceCard(parts);
-        shown[part] = '';
+        if (await remove(part)) {
+          shown[part] = '';
+          continue;
+        }
+        // A delete Lark refused: the element is blanked instead, one blank
+        // line in a rare failure, and the answer is not touched. Blanking
+        // failed too, as on a delete that did land unseen (300313), the whole
+        // card is replaced.
+        try {
+          await replace(part, EMPTY_PART);
+        } catch (err) {
+          if (!fallsBack(err)) throw err;
+          return whole();
+        }
+        shown[part] = EMPTY_PART;
       }
     };
 
@@ -770,16 +809,17 @@ function replyElement(part: keyof CardParts, content: string): object {
  * character every 70 ms, `fast` showing what is buffered when a new update
  * comes; and a markdown element for each part with something to show, in
  * reading order, as Lark draws even an element of a zero-width space as a blank
- * line. The parts were escaped and masked by the renderer.
+ * line. The parts were escaped and masked by the renderer. `finished`, for a
+ * replace while finishing: streaming off, and the finished card's preview.
  */
-export function replyCard(parts: CardParts): object {
+export function replyCard(parts: CardParts, finished = false): object {
   const shown = drawn(parts);
   return {
     schema: '2.0',
     config: {
       update_multi: true,
-      streaming_mode: true,
-      summary: { content: REPLY_SUMMARY_OPEN },
+      streaming_mode: !finished,
+      summary: { content: finished ? replySummary(parts) : REPLY_SUMMARY_OPEN },
       streaming_config: {
         print_frequency_ms: { default: 70 },
         print_step: { default: 1 },
@@ -833,15 +873,35 @@ async function cardkitCall(request: () => Promise<{ code?: number | undefined; m
   if (typeof r.code === 'number' && r.code !== 0) throw toChannelError(r);
 }
 
+/** Lark's code for an element the card has not got. */
+const ELEMENT_MISSING_CODE = 300313;
+
+/**
+ * Lark's throttles: its rate-limit code, HTTP 429 with no code of its own, and
+ * the chat's rate limit. A call throttled was not taken, so there is nothing to
+ * fall back from; the writer waits and writes again.
+ */
+const THROTTLE_CODES: ReadonlySet<number> = new Set([99991400, 429, 230020]);
+
+/**
+ * Whether a card call's failure is one its fallback is for: a refusal, with
+ * Lark's code, or a call that got no answer at all. Not a card Lark no longer
+ * holds, which no fallback reaches, nor a throttle.
+ */
+function fallsBack(err: unknown): boolean {
+  return !(err instanceof ChannelError && (CARD_GONE_CODES.has(err.code) || THROTTLE_CODES.has(err.code)));
+}
+
 /**
  * One call to Lark's card API, true once Lark has taken it, false when it failed
- * in any way: for a call whose failure has a fallback of its own.
+ * in a way its fallback is for (`fallsBack`); any other failure is thrown.
  */
 async function taken(request: () => Promise<{ code?: number | undefined; msg?: string | undefined }>): Promise<boolean> {
   try {
     await cardkitCall(request);
     return true;
-  } catch {
+  } catch (err) {
+    if (!fallsBack(err)) throw err;
     return false;
   }
 }
