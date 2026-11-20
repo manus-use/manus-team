@@ -304,6 +304,8 @@ ALTER TABLE kanban_tasks ADD COLUMN wake_role TEXT;
   -- the role a wake targets (§19); null: the conversation's chat session. Only with wake_by set
 ALTER TABLE kanban_tasks ADD COLUMN reaction_of INTEGER;
   -- for a reaction task (§19): the kanban_wakes row that made it; null for every other task
+ALTER TABLE kanban_tasks ADD COLUMN wake_root TEXT;
+  -- made under a wake (§19.8): the root reaction task's id, its own for a reaction task; null otherwise
 ```
 
 Kanban §3.4's subscription row is amended: beside `cursor`, the notifier's, a subscription holds
@@ -430,7 +432,10 @@ All in `db/kanban.ts`, the board's tables' one writer. WRITERS.md gains:
   `marker_at` by `wakeMarked`. No other field of it is written again."
 - `kanban_tasks`, for §19: "`wake_role` is written with `wake_by`, by the same writers, and
   cleared with it; `reaction_of` once, at the insert, by `recordRoleWake`'s `insertTask`, and never
-  changed. A reaction task's `wake_by` is always null."
+  changed. A reaction task's `wake_by` is always null. `wake_root` once, at the insert, by
+  `insertTask`: the task's own id for a reaction task, else copied from the creating run's task
+  (`createTask` with `createdVia` a run, and `applyDag`'s members of a run's start or apply), never
+  changed. `setWake` refuses a task with `reaction_of` set."
 - `kanban_deferred_buttons`, new: "Added by `deferButton` (migration 013), at most once a
   subscription and block event (`INSERT OR IGNORE`), in the notifier's after-send step, beside the
   Unblock buttons' record and before its cursor moves, once a notice it rendered without the
@@ -1956,9 +1961,12 @@ one, each in its own grammar, with no `--` in chat:
   target the role, each replacing the setter as §3.1 says, with its `wake_set` event, whose payload
   gains `role`.
 - **The role must exist and be usable when it is set**, or the wake is refused: configured on this
-  gateway, and accepted by `assignable` (`src/kanban/task-checks.ts`) as an assignee of a task on
-  the source task's board, so a role that could not be given the reaction task cannot be named;
-  refused `invalid` with `assignable`'s own words, as `task assign` would refuse it.
+  gateway, and accepted by `assignable` (`src/kanban/task-checks.ts`) as an assignee, which judges
+  the role alone, so a role that could not be given the reaction task cannot be named; refused
+  `invalid` with `assignable`'s own words, as `task assign` would refuse it. The board is checked
+  when the reaction task is made, by `liveBoard` (§19.3), not here.
+- **A reaction task's own wake cannot be set**: `setWake` refuses a task with `reaction_of` set,
+  `invalid`: `` `k_…` is a reaction task, which never wakes anyone``, so its wake stays off (§19.3).
 - **Tier: operate.** Setting a role as target needs operate tier: in chat, `task new` and `workflow
   start` need it already, and `/kanban task wake <id> <role>` needs it, where `on` and `off` need
   talk (§3.1). The setter's operate tier is checked live at every wake, as their talk tier is
@@ -1983,7 +1991,26 @@ and the task's deferred buttons are released, `not_woken` (§5.9).
 For a batch of a role's target, the waker makes, **in one transaction** (`recordRoleWake` in
 `db/kanban.ts`), the `kanban_wakes` row, already `delivered`, with `target_role` and
 `reaction_task`, its `kanban_wake_events`, the moves of every covered subscription's `wake_cursor`,
-and the task, through `insertTask`, as `createTask` makes any:
+and the task, through `insertTask`, as `createTask` makes any. **It makes `createTask`'s checks,
+none bypassed**, inside that transaction, in this order:
+
+1. **`getTaskByKey('wake:<uuid>')`** first: a task with the key answers the repeat, `existing:
+   true`, and nothing else is written;
+2. **`liveBoard`** on the target board (below): a board archived or gone skips the wake, the
+   batch's outcomes passed over, one line in the conversation, `` the board did not wake
+   vi-coordinator for `k_…`: board research is archived``, and the batch's deferred buttons released,
+   `not_woken`;
+3. **`assignable`** again for the role, as it is now, which a role removed since the round began
+   refuses: the skip of §19.2;
+4. **the checked fields**, as `createChecks` (`src/kanban/task-checks.ts`) checks a request's: the
+   title's and body's limits, after the cut of the table below, and `createdVia`, for which
+   `createdViaRefused` is extended to accept `{kind: 'wake', wakeId}`, `wakeId` a whole number, and
+   the service refuses that kind from every caller but the waker's own write;
+5. then the insert, its subscription and the rest.
+
+A refusal at 2 or 3 is a skip, as said; any other refusal, or a throw, rolls the whole transaction
+back, holds the conversation back with the notifier's pause, and is logged: the batch is tried
+again, the same uuid and the same key.
 
 | Field | Value |
 |---|---|
@@ -1993,13 +2020,27 @@ and the task, through `insertTask`, as `createTask` makes any:
 | `board` | the source task's: the board of the batch's oldest event's task. A batch's tasks share a thread, whose tasks are one task and its follow-ups, which keep their board (kanban §16); a terminal's `--chat` can put tasks of two boards in one chat, and the oldest decides |
 | `created_by` | `wake_by`, the setter |
 | `created_via` | a new kind, `{kind: 'wake', wakeId}`, which `task show` names "made by a wake of k_…" |
-| `created_from_task` | the batch's oldest task, so the role's workspace is resolved from it when the role fixes none (kanban §2.3 rule 3); not a link, so it is ready at once |
+| `created_from_task` | the batch's oldest task, so the role's workspace is resolved from it when the role fixes none (kanban §2.3 rule 3); not a link, so it is ready at once. Its other uses are below the table |
+| `wake_root` | its own id (§19.8) |
 | `wake_by`, `wake_role` | null: wake off. Its outcomes are plain notices, and it never wakes anyone |
 | `wake_depth` | the batch's depth + 1 (§5.4), the same count a task made in a woken turn's shell gets |
 | `reaction_of` | the wake's id: what marks it a reaction task |
 | `idempotency_key` | `wake:<uuid>`, the batch's uuid (§5.5), a namespace of its own beside `lark:`, `run-task:` and `operator:` (kanban §3.1), which no other creator may use |
 | its subscription | one, a copy of the batch's conversation's subscription for this bot: channel, chat, thread, root and `chat_type`, `wake_cursor` 0 |
 
+- **What `created_from_task` means for it**, in each rule that reads it:
+  - **workspace resolution** (kanban §2.3 rule 3): yes, intended: the reaction task works in the
+    source task's workspace unless its role fixes one;
+  - **the brief's directories** (`ownDirectory`, `src/kanban/brief.ts`): yes, intended: the
+    reaction run is told the source task's own directory (kanban §18), as the work it reacts to is
+    there;
+  - **a workflow's related tasks** (`relatedTasks`, workflows §10): no: a reaction task is left out
+    of an instance's related tasks, as `task list` leaves it out; its source's `task show` names
+    it (§19.9);
+  - **a run's `link`** (kanban §7.3: a run may link only the tasks its task created): a run of the
+    source task may **not** link a reaction task as its child, refused `wrong_task`, `` run … may
+    not link `k_…`: it is a reaction task, made by a wake, not by this run``, though its
+    `created_from_task` is the run's task.
 - **Dedupe across restarts.** The row, the task and the cursors are one transaction, so a stop can
   leave all or none; the key makes a second attempt, should anything retry the transaction, answer
   the existing task (`existing: true`) and write nothing. A role's wake is never `pending`, so §5.7
@@ -2090,9 +2131,15 @@ unblock's event records `wake: <wake_id>` and its actor `wake_by`, and its comme
 (woken by the board)". *Why not the run's own authority:* a run of a role reports on its own task;
 the tasks that woke it are others', which only the wake's setter's tiers may answer for.
 
-- **Cron.** A reaction task's run may not add cron jobs: its `mt cron add` is refused
-  `needs_operator`, as a woken chat turn's is (§5.5 step 7). Cron §6.3's "a board run's `add` is
-  accepted, as an operator put the work on the board" does not hold for work a wake put there.
+- **Cron, for everything made under a wake.** A run whose task has `wake_root` set, a reaction
+  task's and every task made from one, however deep, may not add cron jobs: its `mt cron add` is
+  refused `needs_operator`, in the words a woken chat turn's refusal uses (§5.5 step 7). *Why the
+  mark, not the reaction task alone:* a reaction run could otherwise make a follow-up with `mt
+  kanban create`, or start a workflow, whose run would be an ordinary board run, and add the job
+  it was refused. So `insertTask` writes `wake_root`: its own id for a reaction task, and for a task
+  whose creating run's task has one, that one, workflow and DAG members made by such a run
+  included; a task made any other way has none. Cron §6.3's "a board run's `add` is accepted, as
+  an operator put the work on the board" does not hold for work a wake put there.
 - Everything else of the run is a run's: its prompt (kanban §7.1), its report, its gates, its
   supervision, its retries and its runtime limit.
 
@@ -2103,7 +2150,7 @@ the tasks that woke it are others', which only the wake's setter's tiers may ans
   them too (*decided by the user*). No filter word or flag is added: `all` is already a word of
   `LIST_FILTERS` (`src/kanban/chat-parse.ts`), which chat and the terminal's `mt kanban task list
   [filter]` both take (`src/cli/mt.ts`). `--json` of `task list` marks each reaction task with
-  `"reaction_of": ["k_…", …]`, the tasks whose outcomes its wake carried, in event order, and gives
+  `"reacts_to": ["k_…", …]`, the tasks whose outcomes its wake carried, in event order, and gives
   `null` for a task that is none; it leaves reaction tasks out but under `all`, by the same rule.
 - **`task show` of a source task** gains, after its `Wake:` line, `Reactions:` and the reaction
   tasks its outcomes made, newest first, at most five, each `` `k_…` `` with its display status,
@@ -2144,22 +2191,31 @@ gave up, is a task like any: its block's notice has its button at once, as its w
 
 - **`schema/013_wake.sql`**: `kanban_tasks.wake_role`, `reaction_of`; `kanban_wakes.target_role`,
   `reaction_task`, and their index (§4).
-- **`src/db/kanban.ts`**: `recordRoleWake(db, batch, task, now)`; `setWake` and the creators taking
-  `role`; `CreatedVia` gains `{kind: 'wake', wakeId}`; the key namespace `wake:` refused for every
-  other creator.
+- **`src/db/kanban.ts`**: `recordRoleWake(db, batch, task, now)`, with `createTask`'s checks (§19.3);
+  `setWake` and the creators taking `role`, `setWake` refusing a reaction task; `insertTask`
+  writing `wake_root`; `CreatedVia` gains `{kind: 'wake', wakeId}`; the key namespace `wake:` refused
+  for every other creator.
+- **Every place that switches on `createdVia.kind`** learns `wake`: `createdViaRefused`
+  (`src/kanban/task-checks.ts`), which accepts it from the waker's write only; `howMade`
+  (`src/kanban/chat-render.ts`), which says "made by a wake of k_…"; the terminal's plain
+  rendering of how a task or an instance was made (`src/cli/plain.ts`, beside its "by a run of"),
+  the same words; `--json`'s `created_via`, which gives `{"kind": "wake", "wake_id"}` as it gives
+  the others; and `subscribe()`, which copies the batch's subscription for it (§19.3).
+- **`src/kanban/worker.ts`**: `link` refusing a reaction task as a child (§19.3).
+- **`src/db/kanban-read.ts`**: `relatedTasks` leaving reaction tasks out.
 - **`src/db/kanban-read.ts`**: `reactionsOf(db, taskId)`; `wakeOfReaction(db, taskId)`; the list
   read's reaction filter.
 - **`src/kanban/waker.ts`**: batching by target; a role's batch to `recordRoleWake`; the role's
   marker; the deferred buttons of a role's wake read from the reaction task's runs; the removed
-  role's skip and line; `WakerDeps` gains `assignable(role: string, board: string): Result<void>`.
+  role's skip and line; `WakerDeps` gains `assignable(role: string): Result<void>`, the role alone.
 - **`src/kanban/worker.ts`**: `wake-show` and `wake-unblock`, through `KanbanService.showForWake`
   and `unblockForWake`, given the run in place of a wake token.
-- **`src/cron/worker.ts`**: a reaction run's `add` refused.
+- **`src/cron/worker.ts`**: the `add` of a run whose task has `wake_root` refused.
 - **`src/kanban/chat-parse.ts`, `chat.ts`, `chat-render.ts`**: `wake: <role>`, `wake:<role>`,
   `task wake <id> <role>` at operate tier; `all` showing reaction tasks, no new filter; the `Reactions:` line;
   "Made by a wake of …".
 - **`src/cli/operator.ts`, `src/cli/mt.ts`, `src/cli/plain.ts`**: `--wake-role`; `task wake <id>
-  <role>`; `task list all` showing reaction tasks, and `--json`'s `reaction_of`; `USAGE`.
+  <role>`; `task list all` showing reaction tasks, and `--json`'s `reacts_to`; `USAGE`.
 - **`src/kanban/workflow.ts`**: a step's and a DAG task's `wake: { role }`.
 - **`src/kanban/prompt.ts`**: nothing: the reaction task's body is its prompt, as any task's.
 - **`src/db/WRITERS.md`**: §4.3's rows for §19.
@@ -2179,12 +2235,23 @@ gave up, is a task like any: its block's notice has its button at once, as its w
   allowed for the wake's tasks, `unauthorized` (show) and `not_this_wake` (unblock) for others,
   `not_woken` for an ordinary task's run; `wake_by`'s talk and operate tiers live; `recurring` and
   `woken_unblock_limit`; the unblock's actor, payload and comment; a reaction run's `mt cron add`
-  refused.
+  refused; **a reaction run's follow-up, by `mt kanban create`, then that follow-up's run's `mt cron
+  add`, refused `needs_operator` in the same words**, and the same for a member of a workflow the
+  reaction run started, and a follow-up of that follow-up; `wake_root` written for each, and for no
+  task made by chat, the terminal, or an ordinary run.
+- **`recordRoleWake`'s checks**: a repeat answered by the key before anything else; an archived
+  board skipped, with its line and the buttons released; a role removed between the round and the
+  write skipped; a title or body past its limit cut, never refused; `createdViaRefused` accepting
+  `{kind: 'wake', wakeId}` and the service refusing it from chat, the terminal and a run; a throw
+  rolling everything back and the batch tried again with the same key.
+- **`created_from_task`**: the reaction task working in the source's workspace, its brief naming the
+  source's directory, left out of a workflow's related tasks, and a source run's `link` of it
+  refused `wrong_task`; `setWake` refused on a reaction task.
 - **Agent-first blocks**: the deferred button decided by the reaction task's first run, lifted,
   `tried` and `turn_failed`; released at `hold_minutes` while the task waits in the queue
   (`not_woken`) and while its run runs (`running`); after a restart, the same from the database.
 - **Listing**: `task list` without reaction tasks, under every filter but `all`, and `all` with
-  them, chat and terminal; `--json`'s `reaction_of`, the source tasks' ids for a reaction task and
+  them, chat and terminal; `--json`'s `reacts_to`, the source tasks' ids for a reaction task and
   `null` for any other; no `reactions` word accepted, refused as an unknown filter; the source's `Reactions:` line, five and "N more"; the
   reaction task's "Made by a wake of".
 - **Removed role**: the skip, its line once, the buttons released.
@@ -2208,6 +2275,14 @@ Item 16 of §15: one role's wake end to end on the user's tenant.
 - **The prompt is fixed when the task is made**: a run that starts later reads `wake-show` for the
   board as it is.
 - **A role named `on` or `off`** is targeted only at the terminal or by a step (§19.1).
+- **A reaction run's comments steer the source tasks' runs** without `wake_by`'s tiers: its worker
+  `comment` on a source task is a run's comment, which steers that task's next run as any run's
+  comment does today (kanban §7.5), whoever set the wake. Unchanged by this design; the scoped
+  commands of §19.8 are only `wake-show` and `wake-unblock`.
+- **A blocked reaction task is hidden from `task list blocked`**, as from every filter but `all`
+  (§19.9), though its block's notice still goes to the thread, with its button; and the board's
+  counts (`board list`, a chat's board line) include reaction tasks, hidden or not. Both follow
+  from the user's choice of `all` alone.
 
 ---
 
@@ -2274,5 +2349,12 @@ runs on the board, its scope given by the wake rows to its run's worker commands
 waiting for its first run, and hidden from `task list` but for `all` (D19).
 
 *Amended on 2026-11-20, again.* The user chose that reaction tasks show only under `task list all`,
-in chat and at the terminal, with no `reactions` filter; `--json` marks each with `reaction_of`,
+in chat and at the terminal, with no `reactions` filter; `--json` marks each with `reacts_to`,
 the tasks its wake carried (§19.9).
+
+*Revised on 2026-11-20, after the review of §19.* Everything made under a wake carries `wake_root`,
+and no run of such a task adds cron jobs (§19.8); `recordRoleWake` makes `createTask`'s checks, the
+key first, then `liveBoard`, `assignable` and the fields (§19.3); `assignable` judges the role
+alone; every switch on `createdVia.kind` learns `wake` (§19.12); `created_from_task`'s uses are
+said, a run's `link` of a reaction task refused (§19.3); `setWake` refuses a reaction task; the
+`--json` key is `reacts_to`; and two limits are noted (§19.15).
