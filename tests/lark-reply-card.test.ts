@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { EMPTY_PART, REPLY_ELEMENTS, REPLY_SUMMARY_OPEN, replyCard, replySummary } from '../src/channel/lark/adapter.js';
+import type { CardParts } from '../src/channel/types.js';
 
 /**
- * The reply card as Lark is given it (channel spec §4.5): a streaming card of
- * three markdown elements, one a part, in reading order, each with an element id
- * the updates name.
+ * The reply card as Lark is given it (channel spec §4.5): a streaming card of a
+ * markdown element for each part with something to show, in reading order, each
+ * with an element id the updates name.
  */
 
 describe('replyCard', () => {
@@ -32,9 +33,16 @@ describe('replyCard', () => {
     expect(REPLY_ELEMENTS).toEqual({ tools: 'tools', answer: 'answer', status: 'status' });
   });
 
-  it('gives a part with nothing to show a zero-width space, never an empty element', () => {
-    const card = replyCard({ tools: '', answer: '', status: '_Working…_' }) as { body: { elements: Array<{ content: string }> } };
-    expect(card.body.elements.map((e) => e.content)).toEqual([EMPTY_PART, EMPTY_PART, '_Working…_']);
+  it('gives a part with nothing to show no element, as Lark draws even a zero-width space as a blank line', () => {
+    const ids = (parts: CardParts): string[] => (replyCard(parts) as { body: { elements: Array<{ element_id: string }> } }).body.elements.map((e) => e.element_id);
+    expect(ids({ tools: '', answer: '', status: '_Working…_' })).toEqual(['status']);
+    expect(ids({ tools: '', answer: 'Hello', status: '' })).toEqual(['answer']);
+    expect(ids({ tools: '✅ Bash', answer: '', status: '_Turn failed._' })).toEqual(['tools', 'status']);
+  });
+
+  it('keeps one element of a zero-width space when no part has anything, which renderCard never gives', () => {
+    const card = replyCard({ tools: '', answer: '', status: '' }) as { body: { elements: Array<{ element_id: string; content: string }> } };
+    expect(card.body.elements).toEqual([{ tag: 'markdown', element_id: 'status', content: EMPTY_PART }]);
     expect(EMPTY_PART).toBe('\u200b');
   });
 });

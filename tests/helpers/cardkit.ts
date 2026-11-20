@@ -4,8 +4,9 @@ import { systemClock } from '../../src/time.js';
 
 /**
  * A stand-in for the part of the Lark SDK the reply card uses (channel spec
- * §4.5): cardkit's card create, element content, element update and card
- * settings, and the message send that carries the card by reference. Every call
+ * §4.5): cardkit's card create, card update and card settings, element add,
+ * content, update and delete, and the message send that carries the card by
+ * reference. Every call
  * is recorded in order and answered as Lark answers: a card id, a message id,
  * `code: 0`, or a refusal, thrown as axios throws an HTTP error or returned in a
  * 2xx body. It has no `stream`, so an adapter that still went through the SDK's
@@ -18,14 +19,21 @@ import { systemClock } from '../../src/time.js';
  *   one id: 200621 (the code Lark gives a card JSON it will not take);
  * - a card sent by reference that it does not hold: 200740;
  * - a sequence not above the card's last one taken: 300317;
- * - a card it does not hold: 200740; an element the card has not got: 300313;
+ * - a card it does not hold: 200740; an element the card has not got: 300313,
+ *   whether updated, deleted or named as an add's target;
+ * - an element added with an id the card already has: `DUPLICATE_ELEMENT_CODE`;
+ * - a card's last element deleted: `LAST_ELEMENT_CODE`;
  * - empty content: 10002;
  * - content once streaming is off: 300309;
  * - content more than ten minutes after streaming was last turned on, by its own
  *   clock: 200850, and streaming is then off. Settings turning it on again start
  *   the ten minutes over;
  * - a card past 30 KB (`CARD_BYTES_MAX`), its elements' content in UTF-8, made
- *   so or grown so by an update: 200860.
+ *   so or grown so by an update, an add or a replace: 200860.
+ *
+ * Adds and deletes do not need streaming, here: Lark's documentation of them
+ * does not say they do, and a live check is to settle it. A whole-card replace
+ * (`card.update`) takes the new card's streaming mode, as a card made with it.
  *
  * It also stands in for the SDK's own split send of a long text (`send`),
  * recorded as `text`, so a reply that falls back to a plain message is seen.
@@ -35,17 +43,25 @@ import { systemClock } from '../../src/time.js';
  * then fails; it is recorded with `lost: true`, not `refused`.
  */
 
-export type CardkitApi = 'create' | 'content' | 'update' | 'settings' | 'send' | 'text';
+/**
+ * The calls, by what they do: `create` makes a card, `replace` is `card.update`,
+ * the whole card replaced; `add` is `cardElement.create`, `content`, `update`
+ * and `delete` are the element calls of those names.
+ */
+export type CardkitApi = 'create' | 'replace' | 'add' | 'content' | 'update' | 'delete' | 'settings' | 'send' | 'text';
 
 export interface CardkitCall {
   api: CardkitApi;
   cardId?: string;
   elementId?: string;
-  /** content: the text; update: the element's content. */
+  /** content: the text; update and add: the element's content. */
   content?: string;
+  /** add: where the element goes, and the element it goes by. */
+  type?: 'insert_before' | 'insert_after' | 'append';
+  target?: string;
   sequence?: number;
   uuid?: string;
-  /** create: the card, parsed. update: the element, parsed. settings: the settings, parsed. send: the message's content, parsed. */
+  /** create and replace: the card, parsed. update and add: the element, parsed. settings: the settings, parsed. send: the message's content, parsed. */
   body?: unknown;
   /** send: a new message or a reply. */
   kind?: 'create' | 'reply';
@@ -89,9 +105,30 @@ function cardBytes(elements: Iterable<string>): number {
   return total;
 }
 
-/** The card's size were `elementId` given `content`. */
+/** The card's size were `elementId` given `content`, or added with it. */
 function bytesWith(card: Card, elementId: string, content: string): number {
-  return cardBytes([...card.elements].map(([id, c]) => (id === elementId ? content : c)));
+  const others = card.elements.filter((e) => e.id !== elementId).map((e) => e.content);
+  return cardBytes([...others, content]);
+}
+
+/**
+ * The code the fake gives an element added with an id the card already has.
+ * Lark's own code for it is not documented where we have looked; to be confirmed
+ * live.
+ */
+export const DUPLICATE_ELEMENT_CODE = 300312;
+
+/**
+ * The code the fake gives a delete of a card's last element, which it refuses
+ * so a card is never left with none. Whether Lark refuses it, and with what
+ * code, is not documented where we have looked; to be confirmed live.
+ */
+export const LAST_ELEMENT_CODE = 300316;
+
+/** An element of a card, as the fake holds it. */
+export interface CardElement {
+  id: string;
+  content: string;
 }
 
 interface Answer {
@@ -107,10 +144,31 @@ interface SendPayload {
 }
 
 interface Card {
-  elements: Map<string, string>;
+  /** In the card's order. */
+  elements: CardElement[];
   last: number;
   streaming: boolean;
   streamingSince: number;
+}
+
+/** A card's JSON, as far as the fake reads it. */
+interface CardJson {
+  config?: { streaming_mode?: boolean };
+  body: { elements: Array<{ element_id: string; content: string }> };
+}
+
+/** The rules a whole card keeps, made or replaced: no empty element, no id twice, 30 KB at most. */
+function cardRule(elements: Array<{ element_id: string; content: string }>): Answer | undefined {
+  if (elements.some((e) => e.content === '')) return refusal(10002);
+  if (new Set(elements.map((e) => e.element_id)).size !== elements.length) return refusal(200621);
+  if (cardBytes(elements.map((e) => e.content)) > CARD_BYTES_MAX) return refusal(200860);
+  return undefined;
+}
+
+/** `elementId`'s content set, in its place. */
+function setContent(card: Card, elementId: string, content: string): void {
+  const element = card.elements.find((e) => e.id === elementId);
+  if (element !== undefined) element.content = content;
 }
 
 /** An HTTP error as axios throws one: Lark's code in the response body. */
@@ -194,18 +252,30 @@ export class FakeCardkit {
     return this.calls.filter((c) => c.api === 'content' && c.elementId === elementId).map((c) => c.content ?? '');
   }
 
+  /** The elements `cardId` has now, in its order, as Lark holds them: none for a card it does not hold. */
+  shown(cardId: string): CardElement[];
   /**
    * What `elementId` of `cardId` was given, in order, as Lark's client would
-   * receive it: its content in the card as created, then each update Lark took.
+   * receive it: its content in the card as created, then each add, update and
+   * whole-card replace Lark took that gave it content. An element deleted and
+   * added again, or dropped and brought back by a replace, has one history
+   * here, joined across the gap.
    */
-  shown(cardId: string, elementId: string): string[] {
-    const created = this.calls.find((c) => c.api === 'create' && c.cardId === cardId && c.refused !== true);
-    const card = created?.body as { body: { elements: Array<{ element_id: string; content: string }> } } | undefined;
-    const initial = card?.body.elements.find((e) => e.element_id === elementId)?.content;
-    const updates = this.calls
-      .filter((c) => (c.api === 'content' || c.api === 'update') && c.cardId === cardId && c.elementId === elementId && c.refused !== true)
-      .map((c) => c.content ?? '');
-    return initial === undefined ? updates : [initial, ...updates];
+  shown(cardId: string, elementId: string): string[];
+  shown(cardId: string, elementId?: string): CardElement[] | string[] {
+    if (elementId === undefined) return (this.#cards.get(cardId)?.elements ?? []).map((e) => ({ ...e }));
+    const given: string[] = [];
+    for (const c of this.calls) {
+      if (c.cardId !== cardId || c.refused === true) continue;
+      if (c.api === 'create' || c.api === 'replace') {
+        const card = c.body as { body: { elements: Array<{ element_id: string; content: string }> } };
+        const element = card.body.elements.find((e) => e.element_id === elementId);
+        if (element !== undefined) given.push(element.content);
+      } else if ((c.api === 'add' || c.api === 'content' || c.api === 'update') && c.elementId === elementId) {
+        given.push(c.content ?? '');
+      }
+    }
+    return given;
   }
 
   /** Every sequence `cardId` was given, updates and settings alike, refused or not, in order. */
@@ -250,7 +320,7 @@ export class FakeCardkit {
   #sequenced(cardId: string, sequence: number, elementId?: string): Card | Answer {
     const card = this.#cards.get(cardId);
     if (card === undefined) return refusal(200740);
-    if (elementId !== undefined && !card.elements.has(elementId)) return refusal(300313);
+    if (elementId !== undefined && !card.elements.some((e) => e.id === elementId)) return refusal(300313);
     if (sequence <= card.last) return refusal(300317);
     return card;
   }
@@ -263,21 +333,16 @@ export class FakeCardkit {
             create: async (p: { data: { type: string; data: string } }) => {
               await this.#gate('create');
               const cardId = `card_${this.#made + 1}`;
-              const body = JSON.parse(p.data.data) as { config?: { streaming_mode?: boolean }; body: { elements: Array<{ element_id: string; content: string }> } };
+              const body = JSON.parse(p.data.data) as CardJson;
               const elements = body.body.elements;
               return this.#answer(
                 { api: 'create', cardId, body },
-                () => {
-                  if (elements.some((e) => e.content === '')) return refusal(10002);
-                  if (new Set(elements.map((e) => e.element_id)).size !== elements.length) return refusal(200621);
-                  if (cardBytes(elements.map((e) => e.content)) > CARD_BYTES_MAX) return refusal(200860);
-                  return undefined;
-                },
+                () => cardRule(elements),
                 { code: 0, msg: 'ok', data: { card_id: cardId } },
                 () => {
                   this.#made += 1;
                   this.#cards.set(cardId, {
-                    elements: new Map(elements.map((e) => [e.element_id, e.content])),
+                    elements: elements.map((e) => ({ id: e.element_id, content: e.content })),
                     last: 0,
                     streaming: body.config?.streaming_mode === true,
                     streamingSince: this.#clock.now(),
@@ -318,6 +383,38 @@ export class FakeCardkit {
                 },
               );
             },
+            update: async (p: { path: { card_id: string }; data: { card: { type: string; data: string }; sequence: number; uuid?: string } }) => {
+              await this.#gate('replace');
+              const body = JSON.parse(p.data.card.data) as CardJson;
+              const elements = body.body.elements;
+              const call: CardkitCall = {
+                api: 'replace',
+                cardId: p.path.card_id,
+                sequence: p.data.sequence,
+                ...(p.data.uuid === undefined ? {} : { uuid: p.data.uuid }),
+                body,
+              };
+              let card = undefined as Card | undefined;
+              return this.#answer(
+                call,
+                () => {
+                  const found = this.#sequenced(p.path.card_id, p.data.sequence);
+                  if (!('elements' in found)) return found;
+                  const broken = cardRule(elements);
+                  if (broken !== undefined) return broken;
+                  card = found;
+                  return undefined;
+                },
+                OK,
+                () => {
+                  if (card === undefined) return;
+                  card.last = p.data.sequence;
+                  card.elements = elements.map((e) => ({ id: e.element_id, content: e.content }));
+                  card.streaming = body.config?.streaming_mode === true;
+                  if (card.streaming) card.streamingSince = this.#clock.now();
+                },
+              );
+            },
           },
           cardElement: {
             content: async (p: { path: { card_id: string; element_id: string }; data: { content: string; sequence: number; uuid?: string } }) => {
@@ -350,7 +447,7 @@ export class FakeCardkit {
                 () => {
                   if (card === undefined) return;
                   card.last = p.data.sequence;
-                  card.elements.set(p.path.element_id, p.data.content);
+                  setContent(card, p.path.element_id, p.data.content);
                 },
               );
             },
@@ -381,7 +478,76 @@ export class FakeCardkit {
                 () => {
                   if (card === undefined) return;
                   card.last = p.data.sequence;
-                  card.elements.set(p.path.element_id, element.content ?? '');
+                  setContent(card, p.path.element_id, element.content ?? '');
+                },
+              );
+            },
+            create: async (p: {
+              path: { card_id: string };
+              data: { type: 'insert_before' | 'insert_after' | 'append'; target_element_id?: string; elements: string; sequence: number; uuid?: string };
+            }) => {
+              await this.#gate('add');
+              const added = JSON.parse(p.data.elements) as Array<{ element_id: string; content: string }>;
+              const call: CardkitCall = {
+                api: 'add',
+                cardId: p.path.card_id,
+                elementId: added.map((e) => e.element_id).join(','),
+                content: added.map((e) => e.content).join(''),
+                type: p.data.type,
+                ...(p.data.target_element_id === undefined ? {} : { target: p.data.target_element_id }),
+                sequence: p.data.sequence,
+                ...(p.data.uuid === undefined ? {} : { uuid: p.data.uuid }),
+                body: added.length === 1 ? added[0] : added,
+              };
+              let card = undefined as Card | undefined;
+              return this.#answer(
+                call,
+                () => {
+                  const target = p.data.type === 'append' ? undefined : (p.data.target_element_id ?? '');
+                  const found = this.#sequenced(p.path.card_id, p.data.sequence, target);
+                  if (!('elements' in found)) return found;
+                  if (added.some((e) => e.content === '')) return refusal(10002);
+                  const ids = added.map((e) => e.element_id);
+                  if (new Set(ids).size !== ids.length || found.elements.some((e) => ids.includes(e.id))) return refusal(DUPLICATE_ELEMENT_CODE);
+                  if (cardBytes([...found.elements, ...added].map((e) => e.content)) > CARD_BYTES_MAX) return refusal(200860);
+                  card = found;
+                  return undefined;
+                },
+                OK,
+                () => {
+                  if (card === undefined) return;
+                  card.last = p.data.sequence;
+                  const fresh = added.map((e) => ({ id: e.element_id, content: e.content }));
+                  const at = card.elements.findIndex((e) => e.id === p.data.target_element_id);
+                  const index = p.data.type === 'append' ? card.elements.length : p.data.type === 'insert_before' ? at : at + 1;
+                  card.elements.splice(index, 0, ...fresh);
+                },
+              );
+            },
+            delete: async (p: { path: { card_id: string; element_id: string }; data: { sequence: number; uuid?: string } }) => {
+              await this.#gate('delete');
+              const call: CardkitCall = {
+                api: 'delete',
+                cardId: p.path.card_id,
+                elementId: p.path.element_id,
+                sequence: p.data.sequence,
+                ...(p.data.uuid === undefined ? {} : { uuid: p.data.uuid }),
+              };
+              let card = undefined as Card | undefined;
+              return this.#answer(
+                call,
+                () => {
+                  const found = this.#sequenced(p.path.card_id, p.data.sequence, p.path.element_id);
+                  if (!('elements' in found)) return found;
+                  if (found.elements.length === 1) return refusal(LAST_ELEMENT_CODE);
+                  card = found;
+                  return undefined;
+                },
+                OK,
+                () => {
+                  if (card === undefined) return;
+                  card.last = p.data.sequence;
+                  card.elements = card.elements.filter((e) => e.id !== p.path.element_id);
                 },
               );
             },

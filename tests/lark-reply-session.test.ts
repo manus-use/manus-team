@@ -1,14 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { EMPTY_PART, LarkAdapter, replyCard } from '../src/channel/lark/adapter.js';
 import { CARD_GONE_CODES, ChannelError, type CardParts } from '../src/channel/types.js';
-import { FakeCardkit, refused } from './helpers/cardkit.js';
+import { DUPLICATE_ELEMENT_CODE, FakeCardkit, LAST_ELEMENT_CODE, refused } from './helpers/cardkit.js';
 import { ManualClock } from './helpers/db.js';
 
 /**
  * The reply card's session over Lark's card API (channel spec §4.5): the card
- * is created with its three elements and sent by reference, each part that
- * changed is written to its own element with the card's next sequence, and
- * finishing turns streaming off. Over a stand-in for the SDK: nothing here
+ * is created with an element for each part with something to show and sent by
+ * reference, each part that changed is written to its own element with the
+ * card's next sequence, an element added when its part first has something and
+ * taken out when it empties, and finishing turns streaming off. Over a stand-in for the SDK: nothing here
  * reaches Lark.
  */
 
@@ -42,6 +43,16 @@ function parts(answer: string, tools = '', status = ''): CardParts {
 /** The content updates, as [element, content, sequence]. */
 function updates(kit: FakeCardkit): Array<[string | undefined, string | undefined, number | undefined]> {
   return kit.calls.filter((c) => c.api === 'content').map((c) => [c.elementId, c.content, c.sequence]);
+}
+
+/** The element calls, adds, contents and deletes, as [api, element, sequence]. */
+function elementCalls(kit: FakeCardkit): Array<[string, string | undefined, number | undefined]> {
+  return kit.calls.filter((c) => ['add', 'content', 'update', 'delete'].includes(c.api)).map((c) => [c.api, c.elementId, c.sequence]);
+}
+
+/** The card's elements now, as [id, content], in its order. */
+function elements(kit: FakeCardkit, cardId = 'card_1'): Array<[string, string]> {
+  return kit.shown(cardId).map((e) => [e.id, e.content]);
 }
 
 describe('LarkAdapter.openCard', () => {
@@ -113,23 +124,18 @@ describe('LarkAdapter card session', () => {
     await card.set(parts('Hello', '✅ Bash'));
     await card.set(parts('Hello wor', '✅ Bash'));
     await card.set(parts('Hello wor', '✅ Bash'));
+    expect(elementCalls(kit)).toEqual([
+      ['add', 'tools', 1],
+      ['content', 'answer', 2],
+      ['content', 'tools', 3],
+      ['content', 'answer', 4],
+    ]);
     expect(updates(kit)).toEqual([
-      ['tools', '⏳ Bash', 1],
       ['answer', 'Hello', 2],
       ['tools', '✅ Bash', 3],
       ['answer', 'Hello wor', 4],
     ]);
-    expect(kit.calls.filter((c) => c.api === 'content').map((c) => c.uuid)).toEqual(['c_card_1_1', 'c_card_1_2', 'c_card_1_3', 'c_card_1_4']);
-  });
-
-  it('sends a part that has emptied as a zero-width space', async () => {
-    const { a, kit } = adapter();
-    const card = await a.openCard(CHAT, parts('', '', '_Working…_'), 'u');
-    await card.set(parts('First words'));
-    expect(updates(kit)).toEqual([
-      ['answer', 'First words', 1],
-      ['status', EMPTY_PART, 2],
-    ]);
+    expect(kit.calls.filter((c) => c.api === 'content').map((c) => c.uuid)).toEqual(['c_card_1_2', 'c_card_1_3', 'c_card_1_4']);
   });
 
   it('fails with the code Lark gave, and writes again what did not land, with a new sequence', async () => {
@@ -303,6 +309,266 @@ describe('LarkAdapter card session', () => {
   });
 });
 
+describe('the reply card holds only the parts with something to show', () => {
+  const WORKING = '_Working…_';
+
+  it('starts with only the status element', async () => {
+    const { a, kit } = adapter();
+    await a.openCard(CHAT, parts('', '', WORKING), 'u');
+    expect(elements(kit)).toEqual([['status', WORKING]]);
+    expect(kit.calls[0]?.body).toMatchObject({ body: { elements: [{ tag: 'markdown', element_id: 'status', content: WORKING }] } });
+  });
+
+  it('adds the tool line before the status at the first tool, then the answer between them at its first chunk, and takes the status out', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('', '', WORKING), 'u');
+    await card.set(parts('', '⏳ Bash'));
+    expect(kit.calls.at(-2)).toMatchObject({ api: 'add', elementId: 'tools', type: 'insert_before', target: 'status', sequence: 1, uuid: 'a_card_1_1' });
+    expect(kit.calls.at(-2)?.body).toEqual({ tag: 'markdown', element_id: 'tools', content: '⏳ Bash' });
+    expect(kit.calls.at(-1)).toMatchObject({ api: 'delete', elementId: 'status', sequence: 2, uuid: 'd_card_1_2' });
+    expect(elements(kit)).toEqual([['tools', '⏳ Bash']]);
+
+    // The status back, below the tool line, then the answer between them.
+    const other = adapter();
+    const second = await other.a.openCard(CHAT, parts('', '', WORKING), 'u');
+    await second.set(parts('', '⏳ Bash', WORKING));
+    expect(elements(other.kit)).toEqual([
+      ['tools', '⏳ Bash'],
+      ['status', WORKING],
+    ]);
+    await second.set(parts('The build', '⏳ Bash'));
+    expect(other.kit.calls.slice(2).map((c) => [c.api, c.elementId, c.type, c.target, c.sequence])).toEqual([
+      ['add', 'tools', 'insert_before', 'status', 1],
+      ['add', 'answer', 'insert_after', 'tools', 2],
+      ['delete', 'status', undefined, undefined, 3],
+    ]);
+    expect(elements(other.kit)).toEqual([
+      ['tools', '⏳ Bash'],
+      ['answer', 'The build'],
+    ]);
+    // The status that comes later goes below the answer.
+    await second.set(parts('The build', '⏳ Bash', '_Waiting for your approval: see the card below._'));
+    expect(other.kit.calls.at(-1)).toMatchObject({ api: 'add', elementId: 'status', type: 'insert_after', target: 'answer', sequence: 4 });
+    expect(elements(other.kit).map(([id]) => id)).toEqual(['tools', 'answer', 'status']);
+    expect(other.kit.calls.filter((c) => c.refused === true)).toEqual([]);
+  });
+
+  it('never has a tool element in a turn with no tools, and the answer grows by content updates once added', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('', '', WORKING), 'u');
+    await card.set(parts('Hel'));
+    expect(elements(kit)).toEqual([['answer', 'Hel']]);
+    expect(kit.calls.at(-2)).toMatchObject({ api: 'add', elementId: 'answer', type: 'insert_before', target: 'status' });
+    await card.set(parts('Hello'));
+    await card.finish(parts('Hello there.'));
+    expect(kit.calls.some((c) => c.elementId === 'tools')).toBe(false);
+    expect(elementCalls(kit)).toEqual([
+      ['add', 'answer', 1],
+      ['delete', 'status', 2],
+      ['content', 'answer', 3],
+      ['content', 'answer', 4],
+    ]);
+    expect(kit.shown('card_1', 'answer')).toEqual(['Hel', 'Hello', 'Hello there.']);
+    expect(elements(kit)).toEqual([['answer', 'Hello there.']]);
+  });
+
+  it('leaves no empty element once finished, and no zero-width space anywhere', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('', '', WORKING), 'u');
+    await card.set(parts('Done', '✅ Bash', '_Waiting for your approval: see the card below._'));
+    await card.finish(parts('Done.', '✅ Bash'));
+    expect(elements(kit)).toEqual([
+      ['tools', '✅ Bash'],
+      ['answer', 'Done.'],
+    ]);
+    expect(kit.streaming('card_1')).toBe(false);
+    expect(kit.calls.filter((c) => c.refused === true)).toEqual([]);
+    expect(JSON.stringify(kit.calls)).not.toContain(EMPTY_PART);
+  });
+
+  it('draws one sequence across adds, deletes, content and settings', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('', '', WORKING), 'u');
+    await card.set(parts('', '⏳ Bash', WORKING));
+    await card.set(parts('a', '✅ Bash'));
+    await card.set(parts('ab', '✅ Bash', '_Waiting for your approval: see the card below._'));
+    await card.finish(parts('abc', '✅ Bash'));
+    expect(kit.calls.slice(2).map((c) => [c.api, c.elementId, c.sequence])).toEqual([
+      ['add', 'tools', 1],
+      ['content', 'tools', 2],
+      ['add', 'answer', 3],
+      ['delete', 'status', 4],
+      ['content', 'answer', 5],
+      ['add', 'status', 6],
+      ['content', 'answer', 7],
+      ['delete', 'status', 8],
+      ['settings', undefined, 9],
+    ]);
+    expect(kit.calls.filter((c) => c.refused === true)).toEqual([]);
+  });
+
+  it('falls back to one whole-card replace when Lark refuses an add, and goes on from there', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('', '', WORKING), 'u');
+    kit.failNext('add', { code: 300313, msg: 'element not found' });
+    await expect(card.set(parts('First', '⏳ Bash'))).resolves.toBeUndefined();
+    expect(kit.calls.slice(2).map((c) => [c.api, c.sequence, c.refused === true])).toEqual([
+      ['add', 1, true],
+      ['replace', 2, false],
+    ]);
+    expect(kit.calls.at(-1)).toMatchObject({ uuid: 'r_card_1_2', body: replyCard(parts('First', '⏳ Bash')) });
+    expect(elements(kit)).toEqual([
+      ['tools', '⏳ Bash'],
+      ['answer', 'First'],
+    ]);
+    await card.set(parts('First words', '⏳ Bash'));
+    expect(kit.calls.at(-1)).toMatchObject({ api: 'content', elementId: 'answer', content: 'First words', sequence: 3 });
+    expect(kit.shown('card_1', 'answer')).toEqual(['First', 'First words']);
+  });
+
+  it('blanks the element when Lark refuses a delete, the answer untouched, and writes it again in place later', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('', '', WORKING), 'u');
+    kit.failNext('delete', refused(10002));
+    await card.set(parts('First'));
+    expect(kit.calls.slice(2).map((c) => [c.api, c.elementId, c.content, c.sequence, c.refused === true])).toEqual([
+      ['add', 'answer', 'First', 1, false],
+      ['delete', 'status', undefined, 2, true],
+      ['update', 'status', EMPTY_PART, 3, false],
+    ]);
+    expect(elements(kit)).toEqual([
+      ['answer', 'First'],
+      ['status', EMPTY_PART],
+    ]);
+    // The blanked element is the part empty: not deleted again on every write.
+    await card.set(parts('First words'));
+    expect(kit.calls.at(-1)).toMatchObject({ api: 'content', elementId: 'answer', sequence: 4 });
+    expect(kit.calls).toHaveLength(6);
+    // The status back: written to its element, where it is.
+    await card.set(parts('First words', '', '_Waiting for your approval: see the card below._'));
+    expect(kit.calls.at(-1)).toMatchObject({ api: 'content', elementId: 'status', sequence: 5 });
+    expect(kit.shown('card_1', 'answer')).toEqual(['First', 'First words']);
+    expect(kit.calls.some((c) => c.api === 'replace')).toBe(false);
+  });
+
+  it('throws when the replace is refused too, and replaces the card whole on the next write', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('', '', WORKING), 'u');
+    kit.failNext('add', { code: 10002, msg: 'invalid' });
+    kit.failNext('replace', refused(99991400, 429));
+    await expect(card.set(parts('First'))).rejects.toMatchObject({ code: 99991400 });
+    expect(elements(kit)).toEqual([['status', WORKING]]);
+    await card.set(parts('First'));
+    expect(kit.calls.slice(2).map((c) => [c.api, c.sequence, c.refused === true])).toEqual([
+      ['add', 1, true],
+      ['replace', 2, true],
+      ['replace', 3, false],
+    ]);
+    expect(elements(kit)).toEqual([['answer', 'First']]);
+    // Sure again once the replace lands: the next write is a content update.
+    await card.set(parts('First words'));
+    expect(kit.calls.at(-1)).toMatchObject({ api: 'content', elementId: 'answer', sequence: 4 });
+  });
+
+  it('throws a throttled add or delete with its code, no replace, and writes it again on the next write', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('', '', WORKING), 'u');
+    kit.failNext('add', refused(99991400, 429));
+    await expect(card.set(parts('First'))).rejects.toMatchObject({ code: 99991400 });
+    kit.failNext('delete', { code: 230020, msg: 'rate limited' });
+    await expect(card.set(parts('First'))).rejects.toMatchObject({ code: 230020 });
+    await card.set(parts('First'));
+    expect(kit.calls.slice(2).map((c) => [c.api, c.sequence, c.refused === true])).toEqual([
+      ['add', 1, true],
+      ['add', 2, false],
+      ['delete', 3, true],
+      ['delete', 4, false],
+    ]);
+    expect(elements(kit)).toEqual([['answer', 'First']]);
+  });
+
+  it('throws an add or a delete on a card Lark no longer holds, with no replace', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('', '', WORKING), 'u');
+    kit.forget('card_1');
+    await expect(card.set(parts('First'))).rejects.toMatchObject({ code: 200740 });
+    await expect(card.finish(parts('First'))).rejects.toMatchObject({ code: 200740 });
+    expect(kit.calls.slice(2).map((c) => c.api)).toEqual(['add', 'add']);
+  });
+
+  it('replaces the card while its elements are in doubt: an add lost on its way back, then a refused replace', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('', '', WORKING), 'u');
+    kit.failNext('add', new Error('socket hang up'), { landed: true });
+    kit.failNext('replace', refused(99991400, 429));
+    await expect(card.set(parts('', '⏳ Bash', WORKING))).rejects.toMatchObject({ code: 99991400 });
+    // Lark took the add: the card has the tool line the session could not count on.
+    expect(elements(kit).map(([id]) => id)).toEqual(['tools', 'status']);
+    // The tool line cleared again: nothing differs from what the session last
+    // knew, but the card is replaced, so it has no tool element.
+    await card.set(parts('', '', WORKING));
+    expect(kit.calls.at(-1)?.api).toBe('replace');
+    expect(kit.calls.at(-1)?.refused).toBeUndefined();
+    expect(elements(kit)).toEqual([['status', WORKING]]);
+  });
+
+  it('replaces the card while its elements are in doubt: a delete lost on its way back, then a refused replace', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('a', '', WORKING), 'u');
+    kit.failNext('delete', new Error('socket hang up'), { landed: true });
+    kit.failNext('replace', refused(99991400, 429));
+    await expect(card.set(parts('a'))).rejects.toMatchObject({ code: 99991400 });
+    // Lark took the delete, so blanking the element met 300313, and the replace was refused.
+    expect(kit.calls.slice(2).map((c) => [c.api, c.refused === true])).toEqual([
+      ['delete', false],
+      ['update', true],
+      ['replace', true],
+    ]);
+    expect(elements(kit)).toEqual([['answer', 'a']]);
+    // The status back: nothing differs from what the session last knew, but
+    // the card is replaced, so the status is there.
+    await card.set(parts('a', '', WORKING));
+    expect(elements(kit)).toEqual([
+      ['answer', 'a'],
+      ['status', WORKING],
+    ]);
+  });
+
+  it('replaces the card whole when a content update finds its element missing', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('a', '✅ Bash'), 'u');
+    kit.failNext('content', { code: 300313, msg: 'element not found' });
+    await card.set(parts('ab', '✅ Bash'));
+    expect(kit.calls.slice(2).map((c) => [c.api, c.sequence, c.refused === true])).toEqual([
+      ['content', 1, true],
+      ['replace', 2, false],
+    ]);
+    expect(elements(kit)).toEqual([
+      ['tools', '✅ Bash'],
+      ['answer', 'ab'],
+    ]);
+  });
+
+  it('finishes with a finished whole card when a delete and its blanking are refused, then turns streaming off', async () => {
+    const { a, kit } = adapter();
+    const card = await a.openCard(CHAT, parts('Done', '', '_Waiting for your approval: see the card below._'), 'u');
+    kit.failNext('delete', new Error('socket hang up'));
+    kit.failNext('update', { code: 10002, msg: 'invalid' });
+    await card.finish(parts('Done.'));
+    expect(kit.calls.slice(2).map((c) => [c.api, c.refused === true])).toEqual([
+      ['content', false],
+      ['delete', true],
+      ['update', true],
+      ['replace', false],
+      ['settings', false],
+    ]);
+    expect(kit.calls.at(-2)?.body).toMatchObject({ config: { streaming_mode: false, summary: { content: 'Done.' } } });
+    expect(kit.calls.at(-2)?.body).toEqual(replyCard(parts('Done.'), true));
+    expect(elements(kit)).toEqual([['answer', 'Done.']]);
+    expect(kit.streaming('card_1')).toBe(false);
+  });
+});
+
 describe('the fake cardkit client', () => {
   // Its own rules, checked, as the tests above lean on them.
   type Raw = {
@@ -330,5 +596,48 @@ describe('the fake cardkit client', () => {
       data: { receive_id: 'oc_team', msg_type: 'interactive', content: JSON.stringify({ type: 'card', data: { card_id: 'card_9' } }), uuid: 'u' },
     });
     await expect(send).resolves.toMatchObject({ code: 200740 });
+  });
+
+  type Elements = {
+    create: (p: object) => Promise<{ code?: number }>;
+    delete: (p: object) => Promise<{ code?: number }>;
+  };
+  const elementsOf = (kit: FakeCardkit): Elements => (kit.lark.rawClient as unknown as { cardkit: { v1: { cardElement: Elements } } }).cardkit.v1.cardElement;
+  const add = (type: string, target: string | undefined, id: string, sequence: number): object => ({
+    path: { card_id: 'card_1' },
+    data: {
+      type,
+      ...(target === undefined ? {} : { target_element_id: target }),
+      elements: JSON.stringify([{ tag: 'markdown', element_id: id, content: id }]),
+      sequence,
+    },
+  });
+
+  it("adds and deletes elements by Lark's rules, and shows the card's elements in order", async () => {
+    const kit = new FakeCardkit(new ManualClock(NOW));
+    await raw(kit).cardkit.v1.card.create(make([{ element_id: 'b', content: 'b' }]));
+    const el = elementsOf(kit);
+    await expect(el.create(add('insert_before', 'b', 'a', 1))).resolves.toMatchObject({ code: 0 });
+    await expect(el.create(add('insert_after', 'b', 'c', 2))).resolves.toMatchObject({ code: 0 });
+    await expect(el.create(add('append', undefined, 'd', 3))).resolves.toMatchObject({ code: 0 });
+    expect(kit.shown('card_1').map((e) => e.id)).toEqual(['a', 'b', 'c', 'd']);
+    // An unknown target, an id the card has, a sequence not above the last.
+    await expect(el.create(add('insert_before', 'zz', 'e', 4))).resolves.toMatchObject({ code: 300313 });
+    await expect(el.create(add('insert_after', 'a', 'c', 4))).resolves.toMatchObject({ code: DUPLICATE_ELEMENT_CODE });
+    await expect(el.create(add('append', undefined, 'e', 3))).resolves.toMatchObject({ code: 300317 });
+    // Deleting: an unknown element, a stale sequence, then one Lark takes.
+    await expect(el.delete({ path: { card_id: 'card_1', element_id: 'zz' }, data: { sequence: 4 } })).resolves.toMatchObject({ code: 300313 });
+    await expect(el.delete({ path: { card_id: 'card_1', element_id: 'b' }, data: { sequence: 3 } })).resolves.toMatchObject({ code: 300317 });
+    await expect(el.delete({ path: { card_id: 'card_1', element_id: 'b' }, data: { sequence: 4 } })).resolves.toMatchObject({ code: 0 });
+    expect(kit.shown('card_1')).toEqual([
+      { id: 'a', content: 'a' },
+      { id: 'c', content: 'c' },
+      { id: 'd', content: 'd' },
+    ]);
+    // Never the last element.
+    await expect(el.delete({ path: { card_id: 'card_1', element_id: 'a' }, data: { sequence: 5 } })).resolves.toMatchObject({ code: 0 });
+    await expect(el.delete({ path: { card_id: 'card_1', element_id: 'c' }, data: { sequence: 6 } })).resolves.toMatchObject({ code: 0 });
+    await expect(el.delete({ path: { card_id: 'card_1', element_id: 'd' }, data: { sequence: 7 } })).resolves.toMatchObject({ code: LAST_ELEMENT_CODE });
+    expect(kit.shown('card_1').map((e) => e.id)).toEqual(['d']);
   });
 });

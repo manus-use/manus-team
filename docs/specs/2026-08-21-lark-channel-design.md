@@ -332,6 +332,33 @@ answer starts as one. A zero-width space does not start the first words, so thos
 appear at once, as Lark's documentation says of a text that does not extend the old one; there is
 nothing on screen for them to wipe. Every word after them is typed.
 
+*Amended by the blank-lines fix.* Lark draws an element holding only a zero-width space as a full
+blank line, so the card showed two blank lines above `_Working…_` at the start, one above the answer
+in a turn with no tools, and one below the answer when it finished with no status. The card now
+holds an element only for a part with something to show. It is made with those parts alone, and
+`renderCard` always gives at least one, as an empty render has the `_Working…_` status. When a part
+first has something, its element is added with `cardkit.v1.cardElement.create`, in reading order:
+after the nearest part above it that the card has, else before the nearest below it. When a part
+empties, its element is taken out with `cardkit.v1.cardElement.delete`. Both take the card's next
+sequence, on the same chain as every other call, and a write makes its adds and updates before its
+deletes, so the card is never left with no element. The answer's element is added with its first
+words and then only grows by content updates, so its words are still typed. If Lark refuses an add,
+or a content update finds its element missing (300313), the session replaces the whole card once
+with `cardkit.v1.card.update`, the card's JSON of its non-empty parts with the next sequence, and
+goes on; while finishing, that card has streaming off and the final preview. If Lark refuses a
+delete, the element is blanked to a zero-width space with `cardElement.update` instead: one blank
+line in a rare failure, and the answer is not touched; only if that fails too is the card replaced
+whole. A card Lark no longer holds, or a throttle, is thrown as before, with no fallback. An add or
+a delete that got no answer may have landed, so the card is then in doubt, and every write replaces
+it whole until a replace lands. Only a refused replace fails the write. A finished card has no
+empty element, but for a delete Lark refused. The zero-width space is otherwise kept for one case
+only: parts with nothing in any of them, which `renderCard` never gives, are drawn as a status of
+one, so Lark is never given a card with no element. Still to be confirmed live: that adds and
+deletes are taken while the card streams and when it does not; that a new element's first text
+appears without a blank line; that a whole-card replace while streaming does not re-type the
+answer; the code Lark gives an add of an element id the card already has, and whether it refuses
+deleting a card's last element.
+
 **The reply card is driven through Lark's card API directly**, with the SDK's own client,
 `rawClient`. The SDK's streaming card has one element and no way to name another. The calls it
 makes internally (`createCardInstance`, `sendCardByReference`, `updateCardElementContent`,

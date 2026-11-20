@@ -52,9 +52,11 @@ const TURN: Array<[EventType, unknown]> = [
   ['turn_ended', { terminal: 'completed' }],
 ];
 
-async function replay(): Promise<{ kit: FakeCardkit; log: Event[] }> {
+/** The turn replayed; `prepare` is given the fake first, to queue its failures. */
+async function replay(prepare?: (kit: FakeCardkit) => void): Promise<{ kit: FakeCardkit; log: Event[] }> {
   const clock = new ManualClock(NOW);
   const kit = new FakeCardkit(clock);
+  prepare?.(kit);
   const adapter = new LarkAdapter({ appId: 'cli_app', appSecret: 'not-a-secret' }, clock, { lark: kit.lark, sleep: async () => undefined });
   const log: Event[] = [];
   const writer = new CardWriter({
@@ -81,11 +83,11 @@ describe('the reply card, a turn replayed', () => {
     const { kit } = await replay();
     expect(kit.calls.filter((c) => c.api === 'create')).toHaveLength(1);
 
-    // The zero-width spaces before the first words are dropped, and only those:
-    // an answer that emptied later would fail here.
-    const given = kit.shown('card_1', REPLY_ELEMENTS.answer);
-    const answer = given.slice(given.findIndex((c) => c !== EMPTY_PART));
-    expect(given[0]).toBe(EMPTY_PART);
+    // The answer's element is added with its first words, so everything it is
+    // given is the answer: an answer that emptied later would fail here.
+    const answer = kit.shown('card_1', REPLY_ELEMENTS.answer);
+    expect(answer[0]).toBe('The build fails');
+    expect(kit.calls.find((c) => c.elementId === REPLY_ELEMENTS.answer)).toMatchObject({ api: 'add', target: REPLY_ELEMENTS.tools });
     expect(answer.length).toBeGreaterThan(3);
     for (let i = 1; i < answer.length; i += 1) {
       expect(answer[i]?.startsWith(answer[i - 1] ?? ''), `update ${i}: ${JSON.stringify(answer[i - 1])} then ${JSON.stringify(answer[i])}`).toBe(true);
@@ -100,12 +102,44 @@ describe('the reply card, a turn replayed', () => {
     expect(kit.calls.filter((c) => c.refused === true)).toEqual([]);
     expect(tools.at(-1)).toBe('✅ Bash ×2 · ✅ Read ×2 · ✅ Edit');
     // The approval's wait line came and went below the answer, not in it.
-    expect(kit.contents(REPLY_ELEMENTS.status)).toContain('_Waiting for your approval: see the card below._');
+    expect(kit.calls.filter((c) => c.api === 'add' && c.elementId === REPLY_ELEMENTS.status).map((c) => c.content)).toContain(
+      '_Waiting for your approval: see the card below._',
+    );
+    // The card ends with no empty element and no zero-width space.
+    expect(kit.shown('card_1').map((e) => e.id)).toEqual([REPLY_ELEMENTS.tools, REPLY_ELEMENTS.answer]);
+    expect(JSON.stringify(kit.calls)).not.toContain(EMPTY_PART);
 
     // One sequence for the card, strictly increasing, ending with streaming turned off.
     const sequences = kit.sequences('card_1');
     expect(sequences).toEqual(sequences.map((_s, i) => i + 1));
     expect(kit.calls.at(-1)).toMatchObject({ api: 'settings', body: { config: { streaming_mode: false } } });
+  });
+
+  it('keeps the answer growing at its end through a whole-card replace, when an add is refused mid-answer', async () => {
+    // The third add is the approval line's, after the tool line's and the answer's.
+    const { kit } = await replay((k) => k.failNext('add', { code: 10002, msg: 'invalid' }, { skip: 2 }));
+    const refusedCalls = kit.calls.filter((c) => c.refused === true);
+    expect(refusedCalls.map((c) => [c.api, c.elementId])).toEqual([['add', REPLY_ELEMENTS.status]]);
+    const replaced = kit.calls.filter((c) => c.api === 'replace');
+    expect(replaced).toHaveLength(1);
+    expect(kit.calls[kit.calls.indexOf(replaced[0]!) - 1]).toBe(refusedCalls[0]);
+
+    // The replace's answer starts with the one before it, and every update after it starts with it.
+    const answer = kit.shown('card_1', REPLY_ELEMENTS.answer);
+    const body = (replaced[0]?.body ?? {}) as { body: { elements: Array<{ element_id: string; content: string }> } };
+    const atReplace = body.body.elements.find((e) => e.element_id === REPLY_ELEMENTS.answer)?.content ?? '';
+    const i = answer.indexOf(atReplace);
+    expect(i).toBeGreaterThan(0);
+    expect(i).toBeLessThan(answer.length - 1);
+    for (let k = 1; k < answer.length; k += 1) {
+      expect(answer[k]?.startsWith(answer[k - 1] ?? ''), `update ${k}: ${JSON.stringify(answer[k - 1])} then ${JSON.stringify(answer[k])}`).toBe(true);
+    }
+    expect(answer.at(-1)).toBe('The build fails \n\nin `main.ts`.\n\nLine 12 \n\nhad a typo. \n\nFixed, and the build passes.');
+    // The approval line came with the replace, and went again.
+    expect(body.body.elements.map((e) => e.element_id)).toEqual([REPLY_ELEMENTS.tools, REPLY_ELEMENTS.answer, REPLY_ELEMENTS.status]);
+    expect(kit.shown('card_1').map((e) => e.id)).toEqual([REPLY_ELEMENTS.tools, REPLY_ELEMENTS.answer]);
+    const sequences = kit.sequences('card_1');
+    expect(sequences).toEqual(sequences.map((_s, n) => n + 1));
   });
 
   it('is the case the old card failed: the same turn as one text is rewritten from its start', async () => {
