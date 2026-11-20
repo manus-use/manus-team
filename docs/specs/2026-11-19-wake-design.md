@@ -87,7 +87,8 @@ session's; §19 says what holds for a role's wake.
   default role and workspace, as the router's `#submit` does. A thread opened by `/kanban task
   new` has no session until someone types in it, so a first wake usually makes one.
 - **A task with no subscription of this bot cannot be woken**, so wake on it is refused (§3.4). A
-  terminal's task without `--chat` has none (kanban §22.1).
+  terminal's task without `--chat` has none (kanban §22.1). *Amended by §19.16:* a role's wake
+  needs no chat; it is read from the task's own cursor.
 - **A conversation the gateway does not admit is not woken.** The waker asks
   `Authorizer.admitsConversation(chatId, chatType)` (§13): a chat outside a non-empty `auth.chats`
   (one removed from the list since its task was made), or a direct message while
@@ -255,7 +256,11 @@ Each refusal leaves the task as it was; for a new task or a start, nothing is ma
 - **No chat follows the task.** For `mt kanban task new --wake` or `workflow start --wake`
   without `--chat`, `invalid`: `a wake needs a chat that follows the task: add --chat`. For `wake
   on` of an existing task with no subscription of this bot, `invalid`: `a wake needs a chat that
-  follows the task, and no chat follows k_…: a chat is chosen when a task is made`.
+  follows the task, and no chat follows k_…: a chat is chosen when a task is made`. *Amended by
+  §19.16:* a role's wake (`--wake-role`, `wake <id> <role>`, a step's `wake: { role }`) needs no
+  chat; and a start or apply with no `--chat` whose steps ask for the chat session's wake (`wake:
+  true`) is made, those members with wake off, its answer ending with the note `no chat follows
+  this start (add --chat), so the steps that wake the chat session are notice-only`.
 - **Wakes are off.** With `kanban.wake.enabled` false, `wake: on` on a new task, a start's
   `wake` or `--wake`, and `wake on`, are refused `wake_off`: `wakes are off on this gateway: an operator turns
   them on with kanban.wake.enabled: true in config.yaml, and a restart`. `wake off` still works.
@@ -306,6 +311,8 @@ ALTER TABLE kanban_tasks ADD COLUMN reaction_of INTEGER;
   -- for a reaction task (§19): the kanban_wakes row that made it; null for every other task
 ALTER TABLE kanban_tasks ADD COLUMN wake_root TEXT;
   -- made under a wake (§19.8): the root reaction task's id, its own for a reaction task; null otherwise
+ALTER TABLE kanban_tasks ADD COLUMN wake_cursor INTEGER NOT NULL DEFAULT 0;
+  -- a role's wake with no chat (§19.16): the last kanban_events id the waker has covered for the task; unused while it has a subscription
 ```
 
 Kanban §3.4's subscription row is amended: beside `cursor`, the notifier's, a subscription holds
@@ -1915,7 +1922,9 @@ On the user's tenant, with the board and wakes on:
 
 ## 18. Open questions for the user
 
-None. Q6 of round 2, a read-only `mt kanban task show` for a woken turn, was answered yes, for the
+None. The plan's question, a terminal start with no `--chat` whose steps ask for a wake, was
+answered by the user on 2026-11-20: a role's wake needs no chat, and the chat session's is
+notice-only with a note (§19.16). Q6 of round 2, a read-only `mt kanban task show` for a woken turn, was answered yes, for the
 tasks that woke it only (§9.2; §17, D17).
 
 The first draft's five were answered by the user and are recorded where they apply: Q1, the
@@ -2283,6 +2292,39 @@ Item 16 of §15: one role's wake end to end on the user's tenant.
   comment does today (kanban §7.5), whoever set the wake. Unchanged by this design; the scoped
   commands of §19.8 are only `wake-show` and `wake-unblock`.
 
+### 19.16 A role's wake with no chat
+
+*Added on 2026-11-20, by the user's decision.* A role's wake wakes no conversation, so it needs no
+chat to follow the task:
+
+- **It keeps its wake.** A task with `wake_role` set and no subscription of this bot, made by `mt
+  kanban task new --wake-role <role>` without `--chat`, or by a workflow start or apply without
+  `--chat` whose steps say `wake: { role: … }`, keeps `wake_by` and `wake_role`; at the terminal
+  the setter is the owner (§3.2). `mt kanban task wake <id> <role>` of such a task is accepted.
+  `--wake` and `wake <id> on`, the chat session's, without a chat stay refused (§3.4).
+- **Its own cursor.** The waker reads such a task's outcomes through `kanban_tasks.wake_cursor`
+  (migration 013), used only while the task has no subscription of this bot: set to the task's
+  latest event by `setWake` when the role's wake is turned on, 0 for a task made with one, moved
+  forward only, as a subscription's `wake_cursor` is. With no notifier behind it, an event is read
+  as soon as it is written: there is no notice to come first (§5.8).
+- **Its batch** is the task's own outcomes for one setter and role; there is no conversation to
+  group by. The checks of §5.3 and §19.2 hold, `admitsConversation` and `letGo` excepted; the
+  lines they would say in a thread are logged instead.
+- **Its reaction task** is made as §19.3 says, by `recordRoleWake`, with its role, depth, setter,
+  limits and key, and **no subscription**, so it has no marker and no notices; it is seen in the
+  lists, in `task show`, and on the source's `Reactions:` line (§19.9).
+- **The per-hour cap** counts such wakes per board, the source task's: the delivered role wakes
+  with no conversation of that board in the last hour.
+- **§5.9 does not apply**: with no notice, there is no button to defer.
+- **Follow-ups** inherit as §3.1 says: a chatless task's follow-ups have no subscription either,
+  and keep its role's wake.
+- **The chat session's wake without a chat** (§3.4): a start or apply with no `--chat` whose steps
+  say `wake: true` gives those members `wake_by` null, and its answer ends with `no chat follows
+  this start (add --chat), so the steps that wake the chat session are notice-only`. When the owner
+  is not yet known (§3.2), every member whose step asks for a wake, of either target, has wake off,
+  and the answer ends with one note, `the owner has not used /kanban in Lark yet, so the steps that
+  ask for a wake are notice-only`, in place of a refusal.
+
 ---
 
 *Revised on 2026-11-19, after review round 1.* The user answered the first draft's five questions
@@ -2358,3 +2400,8 @@ key first, then `liveBoard`, `assignable` and the fields (§19.3); `assignable` 
 alone; every switch on `createdVia.kind` learns `wake` (§19.12); `created_from_task`'s uses are
 said, a run's `link` of a reaction task refused (§19.3); `setWake` refuses a reaction task; the
 `--json` key is `reacts_to`; and a limit on a reaction run's comments is noted (§19.15).
+
+*Amended on 2026-11-20, a third time.* A role's wake needs no chat: it is read from the task's own
+`wake_cursor`, its reaction task has no subscription and no marker, the cap counts it per board,
+and §5.9 does not apply; a start with no chat whose steps wake the chat session makes them
+notice-only with a note (§19.16).
