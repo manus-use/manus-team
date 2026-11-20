@@ -1782,7 +1782,7 @@ On the user's tenant, with the board and wakes on:
 16. **A role's wake, end to end** (§19.14): a task with `wake: vi-coordinator` completes in its
     thread; the notice, then "Waking vi-coordinator for 1 board update (k_…).", then the reaction
     task's notices in the thread as its run claims and completes it; `/kanban task list` without
-    it, `/kanban task list reactions` with it, and the source's `task show` naming it; a block
+    it, `/kanban task list all` with it, and the source's `task show` naming it; a block
     whose button waits for the reaction run, lifted by its `mt kanban wake-unblock`, no button
     card, the notice redrawn "(woken by the board)".
 15. **A woken turn's `mt cron add`**, with cron on and an operator as setter: refused
@@ -2098,15 +2098,16 @@ the tasks that woke it are others', which only the wake's setter's tiers may ans
 
 ### 19.9 Listing
 
-- **`/kanban task list` and `mt kanban task list` leave reaction tasks out** of every filter but
-  two: `all`, which lists every task, and a new filter word, **`reactions`**, which lists only
-  reaction tasks, in any status. Both are words of `LIST_FILTERS` (`src/kanban/chat-parse.ts`), so
-  chat and the terminal take them the same way, positional, as the other filters. `--json` of
-  `task list` gives each task's `reaction_of`, null for a task that is none, and leaves reaction
-  tasks out by the same rule.
+- **`/kanban task list` and `mt kanban task list` leave reaction tasks out by default**, and of
+  every filter but **`all`**, which, beside its meaning today, every status on the board, shows
+  them too (*decided by the user*). No filter word or flag is added: `all` is already a word of
+  `LIST_FILTERS` (`src/kanban/chat-parse.ts`), which chat and the terminal's `mt kanban task list
+  [filter]` both take (`src/cli/mt.ts`). `--json` of `task list` marks each reaction task with
+  `"reaction_of": ["k_…", …]`, the tasks whose outcomes its wake carried, in event order, and gives
+  `null` for a task that is none; it leaves reaction tasks out but under `all`, by the same rule.
 - **`task show` of a source task** gains, after its `Wake:` line, `Reactions:` and the reaction
   tasks its outcomes made, newest first, at most five, each `` `k_…` `` with its display status,
-  then `and N more: /kanban task list reactions`; `--json` gains `"reactions": [{"task_id",
+  then `and N more: /kanban task list all`; `--json` gains `"reactions": [{"task_id",
   "status"}]`.
 - **`task show` of a reaction task** says `Made by a wake of k_…, k_…, for role vi-coordinator, set
   by Zhixi Sun.`, from its wake's events.
@@ -2155,10 +2156,10 @@ gave up, is a task like any: its block's notice has its button at once, as its w
   and `unblockForWake`, given the run in place of a wake token.
 - **`src/cron/worker.ts`**: a reaction run's `add` refused.
 - **`src/kanban/chat-parse.ts`, `chat.ts`, `chat-render.ts`**: `wake: <role>`, `wake:<role>`,
-  `task wake <id> <role>` at operate tier; `reactions` in `LIST_FILTERS`; the `Reactions:` line;
+  `task wake <id> <role>` at operate tier; `all` showing reaction tasks, no new filter; the `Reactions:` line;
   "Made by a wake of …".
 - **`src/cli/operator.ts`, `src/cli/mt.ts`, `src/cli/plain.ts`**: `--wake-role`; `task wake <id>
-  <role>`; `task list reactions`; `USAGE`.
+  <role>`; `task list all` showing reaction tasks, and `--json`'s `reaction_of`; `USAGE`.
 - **`src/kanban/workflow.ts`**: a step's and a DAG task's `wake: { role }`.
 - **`src/kanban/prompt.ts`**: nothing: the reaction task's body is its prompt, as any task's.
 - **`src/db/WRITERS.md`**: §4.3's rows for §19.
@@ -2182,8 +2183,9 @@ gave up, is a task like any: its block's notice has its button at once, as its w
 - **Agent-first blocks**: the deferred button decided by the reaction task's first run, lifted,
   `tried` and `turn_failed`; released at `hold_minutes` while the task waits in the queue
   (`not_woken`) and while its run runs (`running`); after a restart, the same from the database.
-- **Listing**: `task list` without reaction tasks, `all` and `reactions` with them, chat and
-  terminal, `--json`'s `reaction_of`; the source's `Reactions:` line, five and "N more"; the
+- **Listing**: `task list` without reaction tasks, under every filter but `all`, and `all` with
+  them, chat and terminal; `--json`'s `reaction_of`, the source tasks' ids for a reaction task and
+  `null` for any other; no `reactions` word accepted, refused as an unknown filter; the source's `Reactions:` line, five and "N more"; the
   reaction task's "Made by a wake of".
 - **Removed role**: the skip, its line once, the buttons released.
 - **End to end**, through `createGateway` with `FakeChannel` and a fake role agent: §19.11's first
@@ -2269,4 +2271,8 @@ its notice's line; and a deferred block cut from the prompt has its button relea
 *Amended on 2026-11-20.* The user added a role as a wake's target (§19): a reaction task the role
 runs on the board, its scope given by the wake rows to its run's worker commands `wake-show` and
 `wake-unblock`, counted by the cap, the depth and the woken-unblock limit, its deferred buttons
-waiting for its first run, and hidden from `task list` but for `all` and `reactions` (D19).
+waiting for its first run, and hidden from `task list` but for `all` (D19).
+
+*Amended on 2026-11-20, again.* The user chose that reaction tasks show only under `task list all`,
+in chat and at the terminal, with no `reactions` filter; `--json` marks each with `reaction_of`,
+the tasks its wake carried (§19.9).
