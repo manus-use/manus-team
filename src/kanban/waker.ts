@@ -2,6 +2,7 @@ import type { Channel, SendTarget } from '../channel/types.js';
 import { BOOT_ID, replyUuid, turnIdempotencyKey, wakeBatchUuid } from '../core/ids.js';
 import type { SubmitRequest } from '../core/session-actor.js';
 import {
+  deferredButton,
   dueWakes,
   eventsAfter,
   getRun,
@@ -395,6 +396,29 @@ export class Waker {
         // Nowhere left to say it.
       }
     };
+  }
+
+  /**
+   * The waker's word to the notifier on a block's Unblock button (§5.9): whether
+   * it waits for the agent's try. A read that writes nothing. True whenever a
+   * deferral is already written for the subscription and event, whatever else
+   * holds, so a batch sent again is rendered as the first one was; otherwise
+   * true only when the agent could lift the block: a run's block (§2.2) of a
+   * task with wake on, past the subscription's wake cursor, in a conversation
+   * admitted and not let go of, set by someone with talk and operate tier, and
+   * below both the recurrence limit and the woken-unblock limit (§9.2).
+   */
+  wouldDefer(sub: SubscriptionRow, event: KanbanEvent): boolean {
+    const deps = this.#deps;
+    if (deferredButton(deps.db, sub.id, event.id) !== undefined) return true;
+    if (!isBlockOutcome(event) || event.id <= sub.wakeCursor) return false;
+    const task = getTask(deps.db, event.taskId);
+    if (task === undefined || task.wakeBy === null || task.phase === 'archived') return false;
+    const at = threadAtOf(sub);
+    if (deps.letGo(at) || deps.admitsConversation(at.conversationId, sub.chatType) !== undefined) return false;
+    if (!deps.people.canTalk(task.wakeBy) || !deps.people.canOperate(task.wakeBy)) return false;
+    if (recurrencesOf(event) >= deps.blockRecurrenceLimit) return false;
+    return wokenUnblocksSince(deps.db, task.taskId) < deps.settings.maxDepth;
   }
 
   /** A round every `WAKE_POLL_MS`, starting now: the first is the catch-up after a restart (§5.7). */
