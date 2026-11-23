@@ -14,6 +14,7 @@ import { updateCommand, type UpdateDeps } from './update.js';
 import { AUTH_USAGE, authCommand } from './auth.js';
 import { CRON_USAGE, cronAgent, cronOperator } from './cron.js';
 import { CRON_COMMANDS } from '../cron/worker.js';
+import { asksWake, wokenTask } from './wake.js';
 import { workflowCheck } from './workflow.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
 
@@ -200,6 +201,12 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
  */
 async function kanban(command: string | undefined, rest: readonly string[], io: MtIo): Promise<number> {
   if (command !== undefined && OPERATOR_GROUPS.includes(command)) {
+    // A woken turn's show and unblock ask the gateway first (wake spec §9.2); on not_woken, as before wakes.
+    const verb = rest[0];
+    if (command === 'task' && asksWake(io.env, verb)) {
+      const woken = await wokenTask(verb, rest.slice(1), io);
+      if (woken !== undefined) return woken;
+    }
     if (inAgentRun(io.env)) return refuseInRun(command, rest, io);
     const operator = withGatewayFile(io);
     return command === 'gate' ? gate(rest, operator) : await operatorCommand(command, rest, operator);
