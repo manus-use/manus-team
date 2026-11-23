@@ -130,6 +130,8 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'workflowName',
   'ref',
   'step',
+  // A wake's setter, a principal (wake spec §4.4).
+  'as',
 ]);
 
 /** One row of the board's log, masked value by value. */
@@ -309,6 +311,21 @@ export interface NewTask {
   board?: string;
   /** The chat a terminal named to follow it (kanban spec §22.1), checked by the service. */
   follow?: Follow;
+  /** Its wake and its depth (wake spec §3.1, §9.1); wake off at depth 0 unless given. A run's follow-up inherits its creating task's instead. */
+  wake?: NewWake;
+}
+
+/**
+ * A new task's wake (wake spec §3.1, §3.4, §9.1): `by`, the principal its woken
+ * turns run as, or null for wake off; `depth`, the woken turns in its making,
+ * kept whether or not it has a wake; and `tooDeep`, set by the service when a
+ * wake was asked at a depth of `kanban.wake.max_depth` or more, which makes it
+ * with wake off and records why.
+ */
+export interface NewWake {
+  by: string | null;
+  depth: number;
+  tooDeep?: boolean;
 }
 
 /**
@@ -381,6 +398,7 @@ interface TaskInsert extends NewTask {
 function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, unknown> = {}): string {
   const { board, createdFromTask, parents } = t;
   const taskId = newTaskId();
+  const wake = wakeOfInsert(d, t);
   d.prepare(
     `INSERT INTO kanban_tasks
        (task_id, title, body, contract, assignee_kind, assignee, reviewer_kind, reviewer,
@@ -408,6 +426,10 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
     createdFromTask,
     board,
   );
+  if (wake.by !== null || wake.depth !== 0) {
+    if (!hasWakeColumns(d)) throw new Error('the database is not yet migrated to version 13, so a task cannot be given a wake');
+    d.prepare('UPDATE kanban_tasks SET wake_by = ?, wake_depth = ? WHERE task_id = ?').run(wake.by, wake.depth, taskId);
+  }
   const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
   for (const parent of parents) link.run(parent, taskId, now);
   subscribe(d, taskId, t.createdVia, createdFromTask, now, t.follow);
@@ -432,7 +454,37 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
     },
     now,
   );
+  if (wake.event !== undefined) record(d, { taskId, kind: 'wake_set', actor: wake.event.actor, payload: wake.event.payload }, now);
   return taskId;
+}
+
+/**
+ * The wake a new task is made with (wake spec §3.1, §9.1): a run's follow-up
+ * copies its creating task's `wake_by` and `wake_depth`, unchanged, whatever it
+ * asked for, with an inherited `wake_set` when that task has wake on, by the run,
+ * `from` the task; any other task takes the request's, its `wake_set` by its
+ * creator, or the too-deep one with wake off (§3.4, §4.4).
+ */
+function wakeOfInsert(
+  d: Db,
+  t: TaskInsert,
+): { by: string | null; depth: number; event?: { actor: string; payload: Record<string, unknown> } } {
+  if (t.createdVia.kind === 'run' && t.createdFromTask !== null) {
+    const from = mustGet(d, t.createdFromTask);
+    if (from.wakeBy === null) return { by: null, depth: from.wakeDepth };
+    return {
+      by: from.wakeBy,
+      depth: from.wakeDepth,
+      event: { actor: `run:${t.createdVia.runId}`, payload: { on: true, as: from.wakeBy, depth: from.wakeDepth, from: from.taskId } },
+    };
+  }
+  const w = t.wake;
+  if (w === undefined) return { by: null, depth: 0 };
+  if (w.by === null) return { by: null, depth: w.depth };
+  if (w.tooDeep === true) {
+    return { by: null, depth: w.depth, event: { actor: t.createdBy, payload: { on: false, refused: 'too_deep', depth: w.depth } } };
+  }
+  return { by: w.by, depth: w.depth, event: { actor: t.createdBy, payload: { on: true, as: w.by, depth: w.depth } } };
 }
 
 /**
