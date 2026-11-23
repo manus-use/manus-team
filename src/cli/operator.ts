@@ -8,7 +8,7 @@ import { NO_MENTIONS } from '../kanban/task-checks.js';
 import { WAKES_OFF, WORKFLOW_MESSAGE_BYTES, type KanbanService, type StartWake, type WorkflowMade } from '../kanban/service.js';
 import { expand, listWorkflows, paramsLine, readWorkflow, usableMessage } from '../kanban/workflow.js';
 import { maskAll, NUDGE, workerSocketPath } from '../kanban/socket.js';
-import { DEFAULT_BOARD, type BoardRow, type Contract, type CreatedVia, type Follow, type Refusal, type TaskRow, type Waiting, type WakeRow } from '../kanban/types.js';
+import { DEFAULT_BOARD, type BoardRow, type Contract, type CreatedVia, type Follow, type Refusal, type WakeRow } from '../kanban/types.js';
 import { WORKER_LIMITS } from '../kanban/limits.js';
 import { visible } from '../names.js';
 import { parse, UsageError } from './args.js';
@@ -16,7 +16,7 @@ import { loadOperator, operatorName, personHint, withBoard, type BoardAccess, ty
 import { ask } from './kanban.js';
 import type { MtIo } from './mt.js';
 import { BIDI, decodeUtf8, INVISIBLE } from '../text.js';
-import { boardsText, dryRunText, instanceText, instancesText, line, listText, madeText, peopleText, previewText, showText, who, workflowsText } from './plain.js';
+import { boardsText, dryRunText, instanceText, instancesText, line, listText, madeText, peopleText, previewText, showJson, showText, wakeJson, who, workflowsText } from './plain.js';
 
 /**
  * The operator's `mt kanban task …` and `mt kanban board …` (spec §2.6): chat's
@@ -356,10 +356,6 @@ function followsText(f: NonNullable<Follows>, what: string): string {
   return `chat ${f.chat} follows ${what}${f.thread === null ? '' : `, in thread ${f.thread}`}`;
 }
 
-/** A task's wake, as `--json` gives it (wake spec §3.4): on, by whom, and its depth. */
-function wakeJson(task: TaskRow): { on: boolean; by: string | null; depth: number } {
-  return { on: task.wakeBy !== null, by: task.wakeBy, depth: task.wakeDepth };
-}
 
 /** The conversation a woken turn's tasks must be followed by (wake spec §3.2a), as `--chat` and `--thread` name it. */
 function ownConversation(w: WakeRow): string {
@@ -642,19 +638,6 @@ function list(rest: readonly string[], io: MtIo): Promise<number> {
   });
 }
 
-/** One reason a task waits, as `--json` gives it: snake_case, as the rest of the output is. */
-function waitingJson(w: Waiting): Record<string, unknown> {
-  switch (w.kind) {
-    case 'gateway':
-      return { reason: 'gateway', max_running: w.maxRunning };
-    case 'board':
-      return { reason: 'board', board: w.board, max_running: w.maxRunning };
-    case 'role':
-      return { reason: 'role', role: w.role, max_running: w.maxRunning };
-    case 'workspace':
-      return { reason: 'workspace', workspace: w.workspace, task_id: w.taskId, run_id: w.runId };
-  }
-}
 
 /** `mt kanban task show <task> [--board <name>]`: a task on any board, by id, or on the one named (spec §16.4). */
 function show(rest: readonly string[], io: MtIo): Promise<number> {
@@ -668,62 +651,11 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
     if (!r.ok) return refused(r);
     const gates = service.listGates(taskId);
     const g = gates.ok ? gates.gates : [];
-    const { task } = r.view;
-    const roleWait = r.view.waiting?.find((w) => w.kind === 'role');
+
     return {
       ok: true,
       lines: showText(r.view, g, { enabled: b.wake.enabled, zone: b.zone, now: Date.now() }),
-      json: {
-        task: {
-          task_id: task.taskId,
-          title: task.title,
-          body: task.body,
-          contract: task.contract,
-          assignee: task.assignee?.name ?? null,
-          reviewer: task.reviewer?.name ?? null,
-          workspace: task.workspace,
-          // Its own directory (spec §18), or null in the workspace's shared one: its path and branch are null until
-          // made, and first says no agent has taken it up yet, so its first agent claim makes it, not its next.
-          worktree:
-            r.view.workdir === undefined
-              ? null
-              : {
-                  path: r.view.workdir.path,
-                  branch: r.view.workdir.branch,
-                  made: r.view.workdir.path !== null,
-                  first: r.view.workdir.first === true,
-                },
-          phase: task.phase,
-          status: r.view.status,
-          board: task.board,
-          block_kind: task.blockKind,
-          block_reason: task.blockReason,
-          // Its wake (wake spec §10), its last wake in milliseconds as every --json time is.
-          wake: { ...wakeJson(task), last_woke: r.view.lastWoke ?? null },
-          // The role whose max_running the task is waiting on (spec §6.3), or null.
-          waiting_on_role: roleWait === undefined ? null : { role: roleWait.role, max_running: roleWait.maxRunning },
-          // Every reason a pass skips it, in the order the pass checks them; empty for none.
-          waiting: (r.view.waiting ?? []).map(waitingJson),
-          // The workflow's instance it is a member of (workflows spec §10), or null.
-          workflow:
-            r.view.member === undefined
-              ? null
-              : { instance_id: r.view.member.instanceId, name: r.view.member.name, step: r.view.member.step, item: r.view.member.item },
-        },
-        parents: r.view.parents.map((p) => ({ task_id: p.taskId, phase: p.phase, status: r.view.statuses.get(p.taskId) ?? null })),
-        children: r.view.children.map((c) => ({ task_id: c.taskId, phase: c.phase, status: r.view.statuses.get(c.taskId) ?? null })),
-        gates: g.map((x) => ({ gate_id: x.id, command: x.command, timeout_s: x.timeoutS, by: x.createdBy })),
-        runs: r.view.runs.map((run) => ({
-          run_id: run.runId,
-          attempt: run.attempt,
-          kind: run.kind,
-          assignee: run.assignee.name,
-          outcome: run.outcome,
-          summary: run.summary,
-          error: run.error,
-        })),
-        comments: r.view.comments.map((c) => ({ author: c.author, body: c.body, created_at: c.createdAt })),
-      },
+      json: showJson(r.view, g),
     };
   });
 }
