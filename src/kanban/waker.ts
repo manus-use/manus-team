@@ -1498,9 +1498,9 @@ export class Waker {
    * people now (§5.9), or undefined while the agent still gets its try: the
    * conversation let go of or no longer admitted, wake turned off, its setter's
    * talk or operate tier lost, or the wake taken over by another setter than
-   * the one its wake runs as, `not_woken`; the block never to be woken, its
-   * cursor past it and no wake carrying it (passed over, or its batch
-   * dropped), `not_woken`; its wake delivered by an earlier boot, its turn cut
+   * the one its wake runs as, or moved to another target (§19.1), `not_woken`;
+   * the block never to be woken, its cursor past it and no wake carrying it
+   * (passed over, or its batch dropped), `not_woken`; its wake delivered by an earlier boot, its turn cut
    * by the restart, `restart`; and once `hold_minutes` have passed since its
    * notice, `running` while its woken turn runs, `not_woken` otherwise.
    */
@@ -1516,7 +1516,8 @@ export class Waker {
     if (setter === null || !deps.people.canTalk(setter) || !deps.people.canOperate(setter)) return 'not_woken';
     if (task.wakeRole !== null && !deps.assignable(task.wakeRole).ok) return 'not_woken';
     const wake = wakesOfEvent(db, row.subscriptionId, row.eventId)[0];
-    if (wake !== undefined && wake.principal !== setter) return 'not_woken';
+    // Taken over (§5.9): another setter, or another target with the same setter, as the service's stillWakes reads it (§19.1).
+    if (wake !== undefined && (wake.principal !== setter || (wake.targetRole ?? null) !== task.wakeRole)) return 'not_woken';
     if (wake === undefined && sub.wakeCursor >= row.eventId) return 'not_woken';
     if (wake !== undefined && wake.reactionTask !== null) return this.#reactionWhy(row, wake.reactionTask);
     const entry = wake === undefined ? undefined : this.#underWay.get(wake.wakeId);
@@ -1586,9 +1587,10 @@ export class Waker {
   /**
    * A pending row checked again (§5.3a), each failure dropping it: its
    * principal's talk tier lost, with the tier line for each of its tasks; a task
-   * whose wake is off or set by another now, archived, or no longer on the
-   * board, only those tasks' events passed, said in the log; the conversation no
-   * longer admitted, or let go of by the notifier, said once. True while it
+   * whose wake is off, set by another now or aimed at another target (§19.1),
+   * archived, or no longer on the board, only those tasks' events passed, said
+   * in the log; the conversation no longer admitted, or let go of by the
+   * notifier, said once. True while it
    * still stands. Every check is a synchronous read.
    */
   #stillDue(row: WakeRow): boolean {
@@ -1620,9 +1622,11 @@ export class Waker {
             ? `task ${taskId} has wake off`
             : task.wakeBy !== row.principal
               ? `task ${taskId}'s wake is set by another now`
-              : task.phase === 'archived'
-                ? `task ${taskId} is archived`
-                : undefined;
+              : (task.wakeRole ?? null) !== (row.targetRole ?? null)
+                ? `task ${taskId}'s wake targets another now`
+                : task.phase === 'archived'
+                  ? `task ${taskId} is archived`
+                  : undefined;
       if (why === undefined) continue;
       failed.push(taskId);
       reasons.push(why);
