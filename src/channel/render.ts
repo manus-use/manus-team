@@ -109,6 +109,8 @@ export function renderCard(events: readonly Event[]): RenderedCard {
   let throughSeq = 0;
   let turnStartSeq = 0;
   let replyTo: string | undefined;
+  /** A woken turn's setter's name, from its `turn_submitted` (wake spec §6.2); undefined for a typed turn. */
+  let wokenAs: string | undefined;
   // Tracked so the placeholder can say *why* nothing is happening. A card reading
   // "Working…" while the agent is blocked on a button is how approvals sit
   // unanswered for hours: the user has no reason to look for one.
@@ -156,6 +158,7 @@ export function renderCard(events: readonly Event[]): RenderedCard {
         // accumulated goes -- see the note on this function.
         turnStartSeq = event.seq;
         replyTo = typeof payload?.['replyTo'] === 'string' ? payload['replyTo'] : undefined;
+        wokenAs = wokenName(payload?.['wake']);
         message = '';
         toolSinceText = false;
         error = undefined;
@@ -236,7 +239,11 @@ export function renderCard(events: readonly Event[]): RenderedCard {
     status.push(finished ? '_Finished with no output._' : '_Working…_');
   }
 
-  const parts: CardParts = { tools: toolLine, answer, status: truncate(status.join('\n\n'), STATUS_BUDGET, '…') };
+  // A woken turn's first line (wake spec §6.2), above everything else: it never
+  // changes during the turn, so the tool line after it is still the only thing
+  // its part rewrites.
+  const toolsPart = wokenAs === undefined ? toolLine : [`_(woken by the board, as ${forDisplay(wokenAs)})_`, ...(toolLine === '' ? [] : [toolLine])].join('\n\n');
+  const parts: CardParts = { tools: toolsPart, answer, status: truncate(status.join('\n\n'), STATUS_BUDGET, '…') };
   return {
     text: cardText(parts),
     parts,
@@ -245,6 +252,15 @@ export function renderCard(events: readonly Event[]): RenderedCard {
     turnStartSeq,
     ...(replyTo === undefined ? {} : { replyTo }),
   };
+}
+
+/** The setter's name a woken turn's `turn_submitted` records (wake spec §6.1), if it is one. */
+function wokenName(wake: unknown): string | undefined {
+  if (wake === null || typeof wake !== 'object') return undefined;
+  const name = (wake as Record<string, unknown>)['name'];
+  const by = (wake as Record<string, unknown>)['by'];
+  if (typeof name === 'string' && name.trim() !== '') return name;
+  return typeof by === 'string' ? by : undefined;
 }
 
 /**
