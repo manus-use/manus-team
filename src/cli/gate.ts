@@ -1,10 +1,10 @@
 import { existsSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
-import { loadTeamSettings, type Env, type TeamSettings } from '../config.js';
+import { loadTeamSettings, WAKE_DEFAULTS, type Env, type TeamSettings, type WakeSettings } from '../config.js';
 import { tierReader } from '../db/grants.js';
 import { openDb } from '../db/open.js';
-import { peopleOf } from '../db/people.js';
+import { peopleOf, personByOpenId } from '../db/people.js';
 import { PeopleDirectory } from '../kanban/people.js';
 import { SESSION_MARKER } from '../kanban/gates.js';
 import { KanbanService } from '../kanban/service.js';
@@ -120,8 +120,19 @@ export interface BoardAccess {
    * Undefined with no app id, as there is no bot to list them for.
    */
   seen(): SeenPerson[] | undefined;
+  /** `kanban.wake` as this shell's settings give it (wake spec §11): the terminal's reading, as for every setting. */
+  wake: WakeSettings;
+  /**
+   * Whom a wake set from the terminal runs as (wake spec §3.2): the owner's
+   * principal, found in `people` by the owner's open_id for this bot; or why not.
+   */
+  owner(): { ok: true; principal: string } | { ok: false; code: string; message: string };
   close(): void;
 }
+
+/** A wake set from the terminal, whose owner this bot has not seen (wake spec §3.4). */
+export const OWNER_UNSEEN =
+  'a wake set from the terminal runs as the owner, whom this gateway has not seen yet: the owner is known once they have used /kanban in Lark';
 
 /** A person as `mt kanban people` lists them. */
 export interface SeenPerson {
@@ -244,9 +255,12 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
           canOperate: (person) => tiersOf(lists, person.openId, grantOf(person.unionId)).operate,
         });
   // As the gateway builds its own: a supervised role's approvals go to the chat that follows its task (spec §7.1).
+  const wake = settings.wake ?? WAKE_DEFAULTS;
   const service = new KanbanService({
     db,
     roles: team.roles,
+    // As the gateway's (wake spec §3.4, §11): the switch and the depth, by this shell's reading.
+    wake: { enabled: wake.enabled, maxDepth: wake.maxDepth },
     workspaces: new Set(team.workspaces.keys()),
     // As the gateway's: so show says where a task in one will work, and what it waits on (spec §18).
     isolated: new Set(Object.keys(settings.isolated ?? {})),
@@ -267,7 +281,14 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
           const has = talk !== undefined && tiersOf(lists, p.openId, grantOf(p.unionId)).talk;
           return { unionId: p.unionId, name: p.name, talk: has, talkFrom: !has ? null : talk.includes(p.openId) ? 'config' : 'grant' };
         });
-  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, close: () => db.close() };
+  // No owner, or no app id, is refused as the talk check is (wake spec §3.2, kanban spec §22.2).
+  const owner = (): ReturnType<BoardAccess['owner']> => {
+    const why: PeopleMissing | undefined = appId === undefined ? 'appId' : settings.owner === undefined ? 'owner' : undefined;
+    if (why !== undefined) return { ok: false, code: 'invalid', message: `a wake set from the terminal runs as the owner, who ${MISSING[why]}` };
+    const person = personByOpenId(db, appId ?? '', settings.owner ?? '');
+    return person === undefined ? { ok: false, code: 'invalid', message: OWNER_UNSEEN } : { ok: true, principal: `lark:${person.unionId}` };
+  };
+  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, wake, owner, close: () => db.close() };
 }
 
 /** A write the gateway held the lock through, every retry: not this command's fault. */

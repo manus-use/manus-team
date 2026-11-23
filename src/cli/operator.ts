@@ -5,10 +5,10 @@ import { boardSetting, LIST_FILTERS, tooBig, type NewTaskCommand } from '../kanb
 import { CHAT_ID, NEEDS_BOT, THREAD_ID, chatRefused } from '../core/lark-ids.js';
 import { DAG_LIMITS, checkDagShape, checkDagTasks, dagFile } from '../kanban/dag.js';
 import { NO_MENTIONS } from '../kanban/task-checks.js';
-import { WORKFLOW_MESSAGE_BYTES, type KanbanService, type WorkflowMade } from '../kanban/service.js';
+import { WAKES_OFF, WORKFLOW_MESSAGE_BYTES, type KanbanService, type StartWake, type WorkflowMade } from '../kanban/service.js';
 import { expand, listWorkflows, paramsLine, readWorkflow, usableMessage } from '../kanban/workflow.js';
 import { maskAll, NUDGE, workerSocketPath } from '../kanban/socket.js';
-import { DEFAULT_BOARD, type BoardRow, type Contract, type CreatedVia, type Follow, type Refusal, type Waiting } from '../kanban/types.js';
+import { DEFAULT_BOARD, type BoardRow, type Contract, type CreatedVia, type Follow, type Refusal, type TaskRow, type Waiting } from '../kanban/types.js';
 import { WORKER_LIMITS } from '../kanban/limits.js';
 import { visible } from '../names.js';
 import { parse, UsageError } from './args.js';
@@ -355,6 +355,39 @@ function followsText(f: NonNullable<Follows>, what: string): string {
   return `chat ${f.chat} follows ${what}${f.thread === null ? '' : `, in thread ${f.thread}`}`;
 }
 
+/** A task's wake, as `--json` gives it (wake spec §3.4): on, by whom, and its depth. */
+function wakeJson(task: TaskRow): { on: boolean; by: string | null; depth: number } {
+  return { on: task.wakeBy !== null, by: task.wakeBy, depth: task.wakeDepth };
+}
+
+/**
+ * The wake a terminal asks for (wake spec §3.2, §3.4), run as the owner: refused
+ * while wakes are off, with no `--chat`, and for an owner this bot has not seen,
+ * in that order. Undefined when none is asked.
+ */
+function terminalWake(board: BoardAccess, asked: boolean, chat: boolean): { ok: true; by: string } | Outcome | undefined {
+  if (!asked) return undefined;
+  if (!board.wake.enabled) return refused({ code: 'wake_off', message: WAKES_OFF });
+  if (!chat) return refused({ code: 'invalid', message: 'a wake needs a chat that follows the task: add --chat' });
+  const owner = board.owner();
+  return owner.ok ? { ok: true, by: owner.principal } : refused(owner);
+}
+
+/**
+ * A start's or an apply's wake (wake spec §3.1): every member's with `--wake`,
+ * as `terminalWake` checks it; else the members that ask for one, as the owner
+ * when this bot has seen them, and none otherwise, with a note (§19.16).
+ */
+function startWakeOf(board: BoardAccess, all: boolean, chat: boolean): StartWake | Outcome | undefined {
+  if (all) {
+    const w = terminalWake(board, true, chat);
+    return w === undefined || !('by' in w) ? w : { by: w.by, depth: 0, all: true };
+  }
+  const owner = board.owner();
+  // An owner not yet seen: the asking members are made notice-only, and the answer says so (wake spec §19.16).
+  return { by: owner.ok ? owner.principal : null, depth: 0, all: false };
+}
+
 /** One task id, and nothing else. */
 function oneTask(positionals: readonly string[], what: string): string {
   const [taskId, extra] = positionals;
@@ -445,6 +478,7 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
     'body-file': text,
     key: text,
     ...FOLLOW_FLAGS,
+    wake: { type: 'boolean' },
   });
   const json = values.json === true;
   const flags = chatFlags(values);
@@ -497,11 +531,14 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
         const mention = name === undefined ? undefined : mentionRefused(name);
         if (mention !== undefined) return mention;
       }
+      const wake = terminalWake(b, values.wake === true, flags !== undefined);
+      if (wake !== undefined && !('by' in wake)) return wake;
       const follow = followOrRefusal(service, b, flags, key, 'task');
       if (follow !== undefined && 'ok' in follow) return follow;
       const r = service.create({
         board,
         title: command.title,
+        ...(wake === undefined ? {} : { wake: { by: wake.by, depth: 0 } }),
         ...(command.body === '' ? {} : { body: command.body }),
         contract: command.contract,
         ...(command.assignee === undefined ? {} : { assignee: command.assignee }),
@@ -534,8 +571,11 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
       const follows = followsOf(follow);
       return {
         ok: true,
-        lines: [`created ${task.taskId}: ${line(task.title)}, for ${whom}${where}, on board ${line(task.board, 80)}${follows === null ? '' : `; ${followsText(follows, 'it')}`}`],
-        json: { task_id: task.taskId, board: task.board, existing: false, follows },
+        lines: [
+          `created ${task.taskId}: ${line(task.title)}, for ${whom}${where}, on board ${line(task.board, 80)}${follows === null ? '' : `; ${followsText(follows, 'it')}`}` +
+            `${task.wakeBy === null ? '' : '; its outcomes wake the agent'}`,
+        ],
+        json: { task_id: task.taskId, board: task.board, existing: false, follows, wake: wakeJson(task) },
         nudge: true,
         ...(key === undefined ? {} : { keyed: true }),
       };
@@ -746,6 +786,39 @@ function decide(verb: 'unblock' | 'stop' | 'archive', rest: readonly string[], i
   });
 }
 
+/**
+ * `mt kanban task wake <task> on|off [--board <name>] [--json]` (wake spec §3.1, §3.2):
+ * on runs the task's woken turns as the owner, set by the operator; off clears it.
+ */
+function wake(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
+  const [taskId, word, extra] = positionals;
+  const on = word?.toLowerCase();
+  if (taskId === undefined || (on !== 'on' && on !== 'off') || extra !== undefined) {
+    throw new UsageError('kanban task wake takes a task id, and on or off');
+  }
+  const board = boardFlag(values.board);
+  return act(io, values.json === true, 'mt kanban task wake', (service, by, b) => {
+    const guard = offBoard(service, board, taskId);
+    if (guard !== undefined) return guard;
+    let as: string | undefined;
+    if (on === 'on') {
+      const owner = b.owner();
+      if (!owner.ok) return refused(owner);
+      as = owner.principal;
+    }
+    const r = service.setWake(taskId, as === undefined ? { on: false } : { on: true, as }, by, b.appId ?? '');
+    if (!r.ok) return refused(r);
+    const t = r.task;
+    const json = { task_id: t.taskId, wake: wakeJson(t) };
+    if (as === undefined) return { ok: true, lines: [`wake off for ${t.taskId}`], json };
+    if (r.tooDeep) return { ok: true, lines: [`${t.taskId} is ${t.wakeDepth} tasks deep in woken turns, so it stays notice-only`], json };
+    const f = storedFollows(service, b, t.taskId);
+    const at = f === null ? '' : ` in ${f.chat}${f.thread === null ? '' : `/${f.thread}`}`;
+    return { ok: true, lines: [`wake on for ${t.taskId}: its outcomes start a turn${at}, as ${as} (the owner)`], json };
+  });
+}
+
 /** `mt kanban task comment <task> <text>`: an operator's comment, which steers the task's agent (spec §7.5). */
 function comment(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
@@ -801,7 +874,7 @@ function worktree(rest: readonly string[], io: MtIo): Promise<number> {
 }
 
 /** The verbs of `mt kanban task`: chat's task commands that a terminal has (spec §2.6), and `worktree`. */
-export const TASK_COMMANDS: readonly string[] = ['new', 'list', 'show', 'assign', 'link', 'unblock', 'stop', 'archive', 'comment', 'worktree'];
+export const TASK_COMMANDS: readonly string[] = ['new', 'list', 'show', 'assign', 'link', 'unblock', 'wake', 'stop', 'archive', 'comment', 'worktree'];
 
 /** `mt kanban task <verb> …`. */
 function task(args: readonly string[], io: MtIo): Promise<number> {
@@ -821,6 +894,8 @@ function task(args: readonly string[], io: MtIo): Promise<number> {
     case 'stop':
     case 'archive':
       return decide(verb, rest, io);
+    case 'wake':
+      return wake(rest, io);
     case 'comment':
       return comment(rest, io);
     case 'worktree':
@@ -962,8 +1037,9 @@ function madeAnswer(service: KanbanService, board: BoardAccess, r: WorkflowMade,
   const said = follows === null ? [] : [r.existing ? followsText(follows, 'its tasks') : `${followsText(follows, 'its tasks')}, and is sent the start's reply`];
   return {
     ok: true,
-    lines: [...madeText(r), ...said],
-    json: { ...madeJson(r), follows },
+    // A start whose steps ask for a wake while wakes are off ends with the note (wake spec §3.4).
+    lines: [...madeText(r), ...said, ...(r.wakeNote === undefined ? [] : [r.wakeNote])],
+    json: { ...madeJson(r), follows, ...(r.wakeNote === undefined ? {} : { wake_note: r.wakeNote }) },
     nudge: !r.existing,
     ...(key === undefined ? {} : { keyed: true }),
     makes: 'instance',
@@ -972,7 +1048,13 @@ function madeAnswer(service: KanbanService, board: BoardAccess, r: WorkflowMade,
 
 /** `mt kanban workflow start <name> [--board] [--param k=v]… [--key] [--chat [--thread]] [--json]` (workflows spec §6, §18.1). */
 function start(rest: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, ...FOLLOW_FLAGS, param: { type: 'string', multiple: true }, key: { type: 'string' } });
+  const { values, positionals } = parse(rest, {
+    ...BOARD_FLAGS,
+    ...FOLLOW_FLAGS,
+    param: { type: 'string', multiple: true },
+    key: { type: 'string' },
+    wake: { type: 'boolean' },
+  });
   const [name, extra] = positionals;
   if (name === undefined || extra !== undefined) throw new UsageError('kanban workflow start takes a workflow name');
   const pairs = paramPairs(values.param);
@@ -984,10 +1066,13 @@ function start(rest: readonly string[], io: MtIo): Promise<number> {
     values.json === true,
     'mt kanban workflow start',
     (service, by, b) => {
+      const wake = startWakeOf(b, values.wake === true, flags !== undefined);
+      if (wake !== undefined && 'ok' in wake) return wake;
       const follow = followOrRefusal(service, b, flags, key, 'instance');
       if (follow !== undefined && 'ok' in follow) return follow;
       const r = service.startWorkflow({
         workflow: name,
+        ...(wake === undefined ? {} : { wake }),
         params: { from: 'terminal', pairs },
         ...(key === undefined ? {} : { idempotencyKey: key }),
         createdBy: by,
@@ -1048,10 +1133,14 @@ async function applyFile(rest: readonly string[], io: MtIo): Promise<number> {
     json,
     'mt kanban workflow apply',
     (service, by, b) => {
+      // A DAG's tasks that say `"wake": true` wake as the owner (wake spec §3.1).
+      const wake = startWakeOf(b, false, flags !== undefined);
+      if (wake !== undefined && 'ok' in wake) return wake;
       const follow = followOrRefusal(service, b, flags, key, 'instance');
       if (follow !== undefined && 'ok' in follow) return follow;
       const r = service.applyDag({
         dag,
+        ...(wake === undefined ? {} : { wake }),
         ...(key === undefined ? {} : { idempotencyKey: key }),
         ...(dryRun ? { dryRun: true } : {}),
         createdBy: by,

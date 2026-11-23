@@ -262,7 +262,8 @@ export interface ApplyRequest {
 
 /** A start's or an apply's wake (wake spec §3.1): its setter and depth, and whether every member wakes or only those that ask. */
 export interface StartWake {
-  by: string;
+  /** Null at the terminal for an owner this bot has not seen (wake spec §3.2): the asking members are made notice-only, with a note (§19.16). */
+  by: string | null;
   depth: number;
   all: boolean;
 }
@@ -272,6 +273,9 @@ export const STEPS_NOTICE_ONLY = 'wakes are off on this gateway (kanban.wake.ena
 
 /** The note a terminal's start or apply with no chat ends with when its steps ask for the chat session's wake (wake spec §19.16). */
 export const NO_CHAT_NOTICE_ONLY = 'no chat follows this start (add --chat), so the steps that wake the chat session are notice-only';
+
+/** The note a terminal's start or apply ends with when its steps ask for a wake and the owner is not yet known (wake spec §3.2, §19.16). */
+export const OWNER_UNSEEN_NOTICE_ONLY = 'the owner has not used /kanban in Lark yet, so the steps that ask for a wake are notice-only';
 
 /** What a start or an apply made, or found made with its key: the instance, and its members with their tasks. */
 export interface WorkflowMade {
@@ -1584,11 +1588,12 @@ export class KanbanService {
       if (w.all) return board.refuse('wake_off', WAKES_OFF);
       return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: STEPS_NOTICE_ONLY };
     }
-    if (req.createdVia?.kind === 'operator' && req.follow === undefined) {
-      if (w.all) return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
-      // The steps' wake is the chat session's, and no chat follows the members: they are made notice-only, with a note (§19.16).
-      return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: NO_CHAT_NOTICE_ONLY };
-    }
+    const chatless = req.createdVia?.kind === 'operator' && req.follow === undefined;
+    if (chatless && w.all) return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
+    // An owner the terminal could not name: the members that ask are notice-only, with one note (§19.16), which wins over the no-chat note.
+    if (w.by === null) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: OWNER_UNSEEN_NOTICE_ONLY };
+    // The steps' wake is the chat session's, and no chat follows the members: they are made notice-only, with a note (§19.16).
+    if (chatless) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: NO_CHAT_NOTICE_ONLY };
     return { ok: true, wake: { by: w.by, depth: w.depth, all: w.all, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}) } };
   }
 
