@@ -849,6 +849,70 @@ Notices are **batched**: each chat or thread gets at most one message every coup
 listing what happened in order, at most 20 notices, then "… and N more, in the next message."
 Notices due while the gateway was down are sent when it is back.
 
+### Wakes
+
+A task with **wake** on does more than notify: when it is done, has changes requested, blocks
+in its run, gives up or is stranded, the agent of the conversation that follows it is woken
+there, in its thread or the chat, to decide what to do next. Wake is off unless asked for, task
+by task. Turn it on when you make the task, with a field line:
+
+<!-- example: wake task new -->
+```
+/kanban task new Book the venue
+assignee: worker
+wake: on
+```
+
+The "Created" reply ends `Its outcomes wake the agent here.` For a task that exists, in a chat
+that follows it (its thread, or the chat it was made at), at talk tier:
+
+<!-- example: wake task wake -->
+```
+/kanban task wake k_7gq2 on
+/kanban task wake k_7gq2 off
+```
+
+A workflow's start takes the trailing word `wake`, for every member; a step that says `wake: true`
+asks for one by itself. At a terminal, `mt kanban task new … --chat oc_… --wake`, `mt kanban
+workflow start … --chat oc_… --wake` and `mt kanban task wake <task_id> on|off` do the same; a
+terminal's wake needs a chat to follow the task, and runs as the owner, once the gateway has seen
+them in Lark. A task a run makes inherits its task's wake.
+
+What the thread sees, for each outcome: the notice, as always; then one line,
+`Waking the agent for 1 board update.`, or `2 board updates` for two at once; then the agent's card, whose first
+line says it was woken by the board, and as whom. The woken turn runs as the person who turned
+wake on, at talk tier: it is answered in the thread like any turn, a message typed during it
+waits behind it, and `/stop` cancels it. Each outcome wakes once; a block nobody answers is not
+woken again.
+
+A woken turn may read the tasks that woke it with `mt kanban task show <id>`, and, when the
+person who set the wake has operate tier, lift a block that woke it with `mt kanban task unblock
+<id> <comment>`: the comment, marked `(woken by the board)`, goes to the task's next run, and the
+notice is redrawn `Unblocked by <name> (woken by the board)`. It is told so in its prompt, and
+told when it cannot. A block a person lifts before the turn starts is left out of it.
+
+The limits: at most `kanban.wake.per_hour` woken turns a conversation in any hour, 6 by default
+(past it the thread is told `wakes are paused here until HH:MM`, and what comes meanwhile waits
+for one later turn); a task made in a woken turn's own shell is one level deeper, and a task 5
+deep (`kanban.wake.max_depth`) stays notice-only; and a woken turn's agent may unblock one task
+at most 5 times between two completions. A setter who loses talk tier has their tasks' outcomes
+noticed and not woken, and the thread is told once. The settings, with their defaults:
+
+<!-- example: config wake -->
+```yaml
+kanban:
+  enabled: true
+  wake:
+    enabled: true
+    per_hour: 6
+    max_depth: 5
+    hold_minutes: 10
+```
+
+With `kanban.wake.enabled: false` nothing is woken, and a wake asked for is refused; turned on
+again, what waited is woken, one turn a conversation and setter. `/kanban task show` says each
+task's wake: `Wake: on, set by Zhixi Sun, depth 0`, with when it last woke.
+
 ## 9. When things go wrong
 
 ### Blocked
