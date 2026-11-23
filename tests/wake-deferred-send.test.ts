@@ -3,6 +3,7 @@ import { deferButton, unblock } from '../src/db/kanban.js';
 import { deferredButton, hasUnblockButton, subscriptionsOf } from '../src/db/kanban-read.js';
 import { replyUuid } from '../src/core/ids.js';
 import { unblockButton } from '../src/kanban/chat-render.js';
+import { ROUND_MARKER_MS, WAKE_REFUSALS } from '../src/kanban/waker.js';
 import type { DeferredWhy, TaskRow } from '../src/kanban/types.js';
 import { ChannelError } from '../src/channel/types.js';
 import { clearSecrets } from '../src/secrets.js';
@@ -15,10 +16,10 @@ import { APP, wakeHarness, type WakeHarness } from './helpers/waker.js';
  * conversation, replying to the thread's root, with one Unblock button for the
  * block, its words by why, its uuid the same however often it is tried; once
  * sent, the row is `sent` with the card's message id, the card is recorded for
- * the unblock redraw, and the notice that deferred it is redrawn. Once the
- * notifier has let the conversation go, the row is `failed` at once. A send
- * that fails leaves the row due for the next round. Its words carry the typed
- * command, as Lark may take the card as text.
+ * the unblock redraw, and the notice that deferred it is redrawn. A send that
+ * fails is tried again after the notifier's pause, and after ten failures, or
+ * at once when the notifier has let the conversation go, the row is `failed`.
+ * These sends share the round's marker budget.
  */
 
 let letGo: boolean;
@@ -141,6 +142,28 @@ describe('a due button', () => {
     expect(hasUnblockButton(h.db, APP, b.task.taskId, b.event)).toBe(true);
   });
 
+  it("is tried again after the notifier's pause, with the same uuid, and failed after ten tries with one log line", async () => {
+    const b = dueBlock('tried');
+    for (let i = 0; i < WAKE_REFUSALS; i += 1) h.lark.failNext('sendText', new ChannelError(99, 'refused', false));
+    await h.round();
+    expect(deferredButton(h.db, b.sub, b.event)).toMatchObject({ state: 'due', attempts: 1 });
+    h.clock.advance(1_000);
+    await h.round();
+    expect(deferredButton(h.db, b.sub, b.event)?.attempts).toBe(1);
+    h.clock.advance(1_000);
+    await h.round();
+    expect(deferredButton(h.db, b.sub, b.event)?.attempts).toBe(2);
+    for (let i = 2; i < WAKE_REFUSALS; i += 1) {
+      h.clock.advance(5 * 60_000);
+      await h.round();
+    }
+    const row = deferredButton(h.db, b.sub, b.event);
+    expect(row).toMatchObject({ state: 'failed', attempts: WAKE_REFUSALS });
+    expect(h.notes.filter((n) => n.includes('was not sent after'))).toEqual([
+      `kanban: the Unblock button of task ${b.task.taskId} (subscription ${b.sub}, event ${b.event}) was not sent after ${WAKE_REFUSALS} tries (refused (code 99)); /kanban task unblock still lifts it`,
+    ]);
+  });
+
   it('keeps its uuid after a restart', async () => {
     const b = dueBlock('restart');
     h.lark.failNext('sendText', new ChannelError(99, 'refused', false));
@@ -159,6 +182,53 @@ describe('a due button', () => {
     expect(h.notes).toContain(
       `kanban: the Unblock button of task ${b.task.taskId} (subscription ${b.sub}, event ${b.event}) is dropped: the notifier has let oc_chat/omt_1 go`,
     );
+  });
+
+  it(`shares the round's ROUND_MARKER_MS (${ROUND_MARKER_MS} ms): none starts once it is spent, the rest wait for the next round`, async () => {
+    const send = h.lark.sendText.bind(h.lark);
+    h.lark.sendText = async (...args: Parameters<typeof send>) => {
+      await h.clock.delay(20_000);
+      return send(...args);
+    };
+    const blocks = [dueBlock('tried', 'One'), dueBlock('tried', 'Two'), dueBlock('tried', 'Three')];
+    await h.round();
+    expect(blocks.map((b) => deferredButton(h.db, b.sub, b.event)?.state)).toEqual(['sent', 'sent', 'due']);
+    await h.round();
+    expect(blocks.map((b) => deferredButton(h.db, b.sub, b.event)?.state)).toEqual(['sent', 'sent', 'sent']);
+  });
+
+  it('shares the budget with the markers: a slow marker leaves the buttons for the next round', async () => {
+    const b = dueBlock('tried');
+    const task = h.woken(ALICE, { title: 'Book the venue' });
+    h.event(task, 'completed', 'run:r_2', { summary: 'booked' });
+    h.db.prepare('UPDATE kanban_subscriptions SET cursor = (SELECT max(id) FROM kanban_events) WHERE task_id = ?').run(task.taskId);
+    const send = h.lark.sendText.bind(h.lark);
+    h.lark.sendText = async (...args: Parameters<typeof send>) => {
+      if (args[3] === undefined) await h.clock.delay(ROUND_MARKER_MS);
+      return send(...args);
+    };
+    await h.round();
+    expect(h.lark.texts.map((t) => t.text)).toEqual(['Waking the agent for 1 board update.']);
+    expect(deferredButton(h.db, b.sub, b.event)?.state).toBe('due');
+    await h.round();
+    expect(buttonCards()).toHaveLength(1);
+    expect(deferredButton(h.db, b.sub, b.event)?.state).toBe('sent');
+  });
+
+  it('counts a row whose channel the gateway has not got as a failed send, failed after ten', async () => {
+    const b = dueBlock('tried');
+    h.db.prepare("UPDATE kanban_subscriptions SET channel = 'teams' WHERE id = ?").run(b.sub);
+    await h.round();
+    expect(deferredButton(h.db, b.sub, b.event)).toMatchObject({ state: 'due', attempts: 1 });
+    for (let i = 1; i < WAKE_REFUSALS; i += 1) {
+      h.clock.advance(5 * 60_000);
+      await h.round();
+    }
+    expect(deferredButton(h.db, b.sub, b.event)).toMatchObject({ state: 'failed', attempts: WAKE_REFUSALS });
+    expect(h.notes.filter((n) => n.includes('was not sent after'))).toEqual([
+      `kanban: the Unblock button of task ${b.task.taskId} (subscription ${b.sub}, event ${b.event}) was not sent after ${WAKE_REFUSALS} tries (no channel teams); /kanban task unblock still lifts it`,
+    ]);
+    expect(h.lark.texts).toHaveLength(0);
   });
 
   it('is sent by a waker in release mode too', async () => {

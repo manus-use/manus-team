@@ -413,6 +413,8 @@ export class Waker {
   readonly #backoff = new Map<string, { until: number; waitMs: number }>();
   /** Conversations told they are paused by the cap (§5.4), until a wake is next delivered there. */
   readonly #paused = new Set<string>();
+  /** Deferred buttons whose card failed to send, held back by `<subscription>:<event>` (§5.9): the notifier's pause, in memory. */
+  readonly #buttonPause = new Map<string, { until: number; waitMs: number }>();
   /** When the round under way began: its markers' budget is counted from it (§5.5 step 3). */
   #roundStart = 0;
   #round: Promise<number> | undefined;
@@ -990,9 +992,11 @@ export class Waker {
    * bounded by the notifier's bound, its uuid the same however often it is
    * tried. Once sent: `sent` with the card's message id, the card recorded for
    * the unblock redraw when it went as a card, and the notice that deferred it
-   * redrawn. A conversation the notifier has let go of makes the row `failed`
-   * at once, with one log line. A send that fails leaves the row due, said in
-   * the log, for the next round; nothing more is sent once stopped.
+   * redrawn. A send that fails is tried again after a pause, 2 s doubling to
+   * five minutes, and after `WAKE_REFUSALS` tries, or at once when the
+   * notifier has let the conversation go, the row is `failed`, with one log
+   * line. None starts once the round's `ROUND_MARKER_MS` is spent, which the
+   * markers share, and nothing more is sent once stopped.
    */
   async #sendButtons(): Promise<void> {
     const deps = this.#deps;
@@ -1019,9 +1023,14 @@ export class Waker {
         this.#note(`kanban: the Unblock button of ${which} is dropped: the notifier has let ${describe(at)} go`);
         continue;
       }
+      const pauseKey = `${row.subscriptionId}:${row.eventId}`;
+      const paused = this.#buttonPause.get(pauseKey);
+      if (paused !== undefined && this.#clock.now() < paused.until) continue;
+      if (this.#clock.now() - this.#roundStart >= ROUND_MARKER_MS) return;
       const channel = deps.channels.get(sub.channel);
       if (channel === undefined) {
-        this.#note(`kanban: no channel ${sub.channel} for the Unblock button of ${which}`);
+        // Counted as a send that failed: no later round finds the channel either, and the tenth makes it failed.
+        this.#buttonFailedSend(key, which, pauseKey, `no channel ${sub.channel}`);
         continue;
       }
       const text = redactKnownSecrets(deferredButtonText(row.why ?? 'not_woken', task.taskId, task.title, deps.people.chatNames()));
@@ -1030,9 +1039,10 @@ export class Waker {
       try {
         sent = await this.#bounded(channel.sendText(targetOf(db, at), text, uuid, [unblockButton(deps.appId, { id: row.eventId, taskId: row.taskId })]));
       } catch (err) {
-        this.#note(`kanban: the Unblock button of ${which} was not sent (${message(err)}); trying again next round`);
+        this.#buttonFailedSend(key, which, pauseKey, message(err));
         continue;
       }
+      this.#buttonPause.delete(pauseKey);
       this.#buttonWrite(key, () => deps.service.buttonSent(key, sent.messageId));
       // Recorded as any Unblock card, so a later lift redraws it; a card that went as text has no button to redraw.
       if (sent.card !== false) {
@@ -1052,6 +1062,30 @@ export class Waker {
       const notice = deferredNoticeOf(db, deps.appId, row.taskId, row.eventId);
       if (notice !== undefined) void deps.redrawNotice?.(notice);
     }
+  }
+
+  /** A due button's card that did not go (§5.9): tried again after the pause, failed after `WAKE_REFUSALS` tries. */
+  #buttonFailedSend(key: DeferredKey, which: string, pauseKey: string, why: string): void {
+    let attempts: number;
+    try {
+      const r = this.#deps.service.buttonTried(key);
+      if (!r.ok) {
+        this.#note(`kanban: the Unblock button of ${which} was not sent (${why}), and its try not counted (${r.message})`);
+        return;
+      }
+      attempts = r.attempts;
+    } catch (err) {
+      this.#note(`kanban: the Unblock button of ${which} was not sent (${why}), and its try not counted (${message(err)})`);
+      return;
+    }
+    if (attempts >= WAKE_REFUSALS) {
+      this.#buttonPause.delete(pauseKey);
+      this.#buttonWrite(key, () => this.#deps.service.buttonFailed(key));
+      this.#note(`kanban: the Unblock button of ${which} was not sent after ${WAKE_REFUSALS} tries (${why}); /kanban task unblock still lifts it`);
+      return;
+    }
+    const waitMs = Math.min((this.#buttonPause.get(pauseKey)?.waitMs ?? WAKE_POLL_MS / 2) * 2, WAKE_BACKOFF_MAX_MS);
+    this.#buttonPause.set(pauseKey, { until: this.#clock.now() + waitMs, waitMs });
   }
 
   /** A send, waited for at most the notifier's bound; past it, it fails here, and may still land. */
