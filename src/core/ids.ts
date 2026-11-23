@@ -129,6 +129,21 @@ export function noticeBatchUuid(appId: string, pairs: ReadonlyArray<readonly [nu
 }
 
 /**
+ * A woken turn's batch (wake spec §5.5): its `kanban_wakes.uuid`, which names
+ * its marker, its message id and, for a role's wake, its reaction task's key.
+ *
+ * A hash of the bot, the word `kanban-wake`, and the sorted set of the batch's
+ * (subscription, event) pairs, as `noticeBatchUuid` is, so a batch's uuid is its
+ * events', never the time it was made: a batch formed again after a restart
+ * carries the uuid the first one did.
+ */
+export function wakeBatchUuid(appId: string, pairs: ReadonlyArray<readonly [number, number]>): string {
+  const covered = [...new Set(pairs.map(([sub, event]) => `${sub}:${event}`))].sort();
+  const canonical = [appId, 'kanban-wake', ...covered].join(SEP);
+  return createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 50);
+}
+
+/**
  * The `uuid` of a person's card for a run (spec §9.2): the same however often it
  * is sent, so a card sent again after a restart, before it was recorded, is one
  * message.
