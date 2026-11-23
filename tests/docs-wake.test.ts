@@ -80,12 +80,34 @@ describe("the guide's wakes", () => {
   });
 });
 
+describe("the guide's role wakes", () => {
+  it("names a role on a new task's field line, as chat parses it, with no long dash", () => {
+    const parsed = parseKanban(example('docs/kanban-guide.md', 'wake role task new').slice('/kanban '.length), []);
+    expect(parsed).toMatchObject({ ok: true, command: { verb: 'new', wake: true, wakeRole: 'vi-coordinator' } });
+    expect(section('docs/kanban-guide.md', '#### A role as a wake\'s target')).toContain('Waking vi-coordinator for 1 board update (k_…).');
+    expect(section('docs/kanban-guide.md', '#### A role as a wake\'s target').includes('\u2014')).toBe(false);
+  });
+
+  it('says a role needs no chat, at the terminal, and that its reaction task then has no notices', () => {
+    const text = section('docs/kanban-guide.md', '#### A role as a wake\'s target');
+    expect(text).toContain('`--wake-role` needs no `--chat`');
+    expect(text).toContain('no marker and no notices');
+  });
+
+  it('names the forms chat parses for an existing task and a start', () => {
+    expect(parseKanban('task wake k_7gq2 vi-coordinator', [])).toMatchObject({ ok: true, command: { verb: 'wake', taskId: 'k_7gq2', on: true, role: 'vi-coordinator' } });
+    expect(parseKanban('workflow start weekly-report wake:vi-coordinator', [])).toMatchObject({ ok: true, command: { verb: 'workflow start', wakeRole: 'vi-coordinator' } });
+  });
+});
+
 describe("the README's wakes", () => {
   it('lists the chat command, the terminal commands and the settings', () => {
     const text = read('README.md');
     expect(text).toContain('| `/kanban task wake <task> on\\|off` | talk');
-    expect(text).toContain('mt kanban task wake <task_id> on|off [--board <name>]');
-    expect(text).toContain('[--chat <chat_id> [--thread <thread_id>] [--wake]]');
+    expect(text).toContain('[--chat <chat_id> [--thread <thread_id>] [--wake]] [--wake-role <role>]');
+    expect(text).toContain('mt kanban task wake <task_id> on|off|<role> [--board <name>]');
+    expect(text).toContain('| `/kanban task wake <task> <role>` | operate');
+    expect(text).toContain('start-workflow|apply-dag|wake-show|wake-unblock> < input.json');
     for (const key of ['kanban.wake.enabled', 'kanban.wake.per_hour', 'kanban.wake.max_depth', 'kanban.wake.hold_minutes']) expect(text).toContain(`\`${key}\``);
   });
 });

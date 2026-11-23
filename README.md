@@ -511,13 +511,13 @@ mt kanban board archive <name>
 mt kanban task new <title> [--board <name>] [--assignee <role|lark:<union_id>>] [--reviewer <role|lark:<union_id>>]
     [--workspace <name>] [--parent <task_id>]... [--outcome "..."] [--verify "..."] [--constraints "..."]
     [--boundaries "..."] [--stop-when "..."] [--body "..." | --body-file <path|->] [--key <key>]
-    [--chat <chat_id> [--thread <thread_id>] [--wake]]
+    [--chat <chat_id> [--thread <thread_id>] [--wake]] [--wake-role <role>]
 mt kanban task list [todo|ready|running|review|reviewing|blocked|done|archived|all] [--board <name>]
 mt kanban task show <task_id> [--board <name>]
 mt kanban task assign <task_id> <role|lark:<union_id>> [--board <name>]
 mt kanban task link <parent_id> <child_id> [--board <name>]
 mt kanban task unblock <task_id> [comment...] [--board <name>]
-mt kanban task wake <task_id> on|off [--board <name>]
+mt kanban task wake <task_id> on|off|<role> [--board <name>]
 mt kanban task stop <task_id> [--board <name>]
 mt kanban task archive <task_id> [--board <name>]
 mt kanban task comment <task_id> <text...> [--board <name>]
@@ -529,13 +529,13 @@ mt kanban workflow list
 mt kanban workflow instances [all] [--board <name>]
 mt kanban workflow show <instance> [--board <name>] [--dag]
 mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]... [--json]
-mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>] [--chat <chat_id> [--thread <thread_id>] [--wake]]
+mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>] [--chat <chat_id> [--thread <thread_id>] [--wake]] [--wake-role <role>]
 mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--chat <chat_id> [--thread <thread_id>]]
 mt kanban workflow archive <instance> [--board <name>]
 mt kanban people
 
 # the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:
-mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag> < input.json
+mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag|wake-show|wake-unblock> < input.json
 ```
 
 The role, workspace and operator's board commands find the home, config file and database the
@@ -781,6 +781,7 @@ typed without `task`, such as `/kanban new`, is an unknown command.
 | `/kanban task comment <task> <text>` | talk: everyone sees it in `/kanban task show`; an operator's, or the task's assignee's or reviewer's, also reaches its agent, when its turn ends or in its next run |
 | `/kanban task unblock <task> [comment]` | operate |
 | `/kanban task wake <task> on\|off` | talk, in a chat that follows the task: its outcomes start a turn of the agent there, run as you; a line `wake: on` on `task new`, and the word `wake` at the end of `workflow start`, do it as the task is made |
+| `/kanban task wake <task> <role>` | operate, in a chat that follows the task: its outcomes make a reaction task for that role, which follows the same thread; a line `wake: <role>` on `task new`, and the word `wake:<role>` at the end of `workflow start`, do it as the task is made |
 | `/kanban task stop <task>` | operate: the run ends `cancelled`, and the task blocks |
 | `/kanban task archive <task>` | operate |
 | `/kanban gate add <task> [--timeout <s>] <command>` | operate: the rest of the message is the command, as written; a `--` before it, as the terminal's form takes, is dropped |
@@ -828,8 +829,10 @@ each outcome: done, changes requested, blocked by its run, given up, stranded. A
 notice, the thread gets `Waking the agent for 1 board update.` and then the agent's card, run
 as the person who turned wake on. The woken agent may read the tasks that woke it, and lift a
 block that woke it when that person has operate tier. At most `kanban.wake.per_hour` woken
-turns a conversation an hour; each outcome wakes once. See "Wakes" in section 8 of
-[docs/kanban-guide.md](docs/kanban-guide.md).
+turns a conversation an hour; each outcome wakes once. A wake may name a role instead: its
+outcomes then make a reaction task for that role, run on the board as any task, listed as any
+task, its notices in the same thread, after `Waking <role> for 1 board update (k_…).`. See
+"Wakes" in section 8 of [docs/kanban-guide.md](docs/kanban-guide.md).
 
 **Boards.** Several projects can share the gateway, each on a board of its own: a queue of
 tasks with its own list, its turn in each dispatcher pass, and optionally its own

@@ -913,6 +913,43 @@ With `kanban.wake.enabled: false` nothing is woken, and a wake asked for is refu
 again, what waited is woken, one turn a conversation and setter. `/kanban task show` says each
 task's wake: `Wake: on, set by Zhixi Sun, depth 0`, with when it last woke.
 
+#### A role as a wake's target
+
+A wake may name a role instead of the conversation's agent. Then its outcomes make a
+**reaction task** for that role, which the board runs as any task, with the role's own files,
+model and limits, and which follows the same thread, so its notices are heard there:
+
+<!-- example: wake role task new -->
+```
+/kanban task new Book the venue
+assignee: worker
+wake: vi-coordinator
+```
+
+For a task that exists, `/kanban task wake k_7gq2 vi-coordinator`; `on` and `off` always mean the
+conversation's agent and off. Naming a role needs operate tier, as giving a role work does, and
+the role must be one the board can give work to. A workflow's start takes `wake:vi-coordinator`,
+one word, at its end; a step says `wake: { role: vi-coordinator }`; at a terminal,
+`--wake-role vi-coordinator`, which implies `--wake`, and `mt kanban task wake <task_id> <role>`.
+
+What the thread sees: the notice; then `Waking vi-coordinator for 1 board update (k_…).`, naming
+the reaction task; then the reaction task's own notices as its run claims and completes it. No
+card streams: a reaction task is not a conversation, and a person who wants to steer it comments
+on it. Its body is the update, as the woken agent's prompt would be, and its run may read the
+tasks that woke it with `mt kanban wake-show` and, when the setter has operate tier, lift a block
+that woke it with `mt kanban wake-unblock`, each JSON on stdin; for a block, the Unblock button
+waits for its first run to end, or for `kanban.wake.hold_minutes`. A reaction task is listed as
+any task, titled `React to board updates: k_… completed`, never wakes anyone itself, and is left
+on the board when done, for you to archive. `/kanban task show` of the source task names its
+reactions; no run of work a wake put on the board may add cron jobs.
+
+A role's wake needs no chat: at a terminal, `--wake-role` needs no `--chat`, and `mt kanban task
+wake <task_id> <role>` takes a task no chat follows. Its outcomes then make the reaction task as
+soon as they are written, with no marker and no notices, as there is no thread to tell; you find it
+with `mt kanban task list` and on the source task's `Reactions:` line, and such wakes are held to
+`kanban.wake.per_hour` for each board. A workflow started with no `--chat` keeps its role steps'
+wakes, and makes the steps that would wake the conversation's agent notice-only, saying so.
+
 ## 9. When things go wrong
 
 ### Blocked
