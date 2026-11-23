@@ -770,6 +770,13 @@ export function renderCardOutcome(task: { taskId: string; title: string }, outco
   };
 }
 
+/**
+ * The line a block's notice ends with when the waker deferred its Unblock
+ * button (wake spec §5.9): people have seen the block, and the agent gets the
+ * first try.
+ */
+export const AGENT_FIRST_LINE = 'The agent is looking at it first.';
+
 /** An Unblock under a notice of a block (spec §9.2), bound to the task and the event that blocked it. */
 export function unblockButton(appId: string, event: Pick<KanbanEvent, 'id' | 'taskId'>): CardButton {
   const ref = `event:${event.id}`;
