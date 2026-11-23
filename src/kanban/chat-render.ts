@@ -8,7 +8,7 @@ import { stripControl } from '../text.js';
 import { LIST_FILTERS, USAGE } from './chat-parse.js';
 import { describeReported } from './commit.js';
 import type { DisplayStatus } from './status.js';
-import { DEFAULT_BOARD, type Assignee, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow, type Waiting } from './types.js';
+import { DEFAULT_BOARD, type Assignee, type DeferredWhy, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow, type Waiting } from './types.js';
 
 /**
  * What `/kanban` says in chat (spec §9.3), and the notices a subscription hears
@@ -776,6 +776,38 @@ export function renderCardOutcome(task: { taskId: string; title: string }, outco
  * first try.
  */
 export const AGENT_FIRST_LINE = 'The agent is looking at it first.';
+
+/**
+ * The card a deferred Unblock button goes in once it is due (wake spec §5.9):
+ * the task by id and title, the reason not repeated, worded by why it is due.
+ */
+export function deferredButtonText(why: DeferredWhy, taskId: string, title: string, nameOf?: NameOf): string {
+  return `${deferredButtonLine(why, taskId, title, nameOf)}\n${typedUnblock(taskId)} lifts it too.`;
+}
+
+/** The card's first line, by why (wake spec §5.9). */
+function deferredButtonLine(why: DeferredWhy, taskId: string, title: string, nameOf?: NameOf): string {
+  const block = `the block on ${id(taskId)} **${titleText(title, nameOf)}**`;
+  switch (why) {
+    case 'tried':
+      return `The agent could not lift ${block}.`;
+    case 'turn_failed':
+      return `The agent's turn ended without lifting ${block}.`;
+    case 'running':
+      return `The agent is still working on ${block}; lift it here if you can answer it.`;
+    case 'not_woken':
+    case 'restart':
+      return `The agent was not woken for ${block}; lift it here.`;
+  }
+}
+
+/**
+ * The typed command that lifts a block, for a card whose button may not
+ * arrive: Lark can refuse a card and take its text alone.
+ */
+export function typedUnblock(taskId: string): string {
+  return `\`/kanban task unblock ${taskId}\``;
+}
 
 /** An Unblock under a notice of a block (spec §9.2), bound to the task and the event that blocked it. */
 export function unblockButton(appId: string, event: Pick<KanbanEvent, 'id' | 'taskId'>): CardButton {

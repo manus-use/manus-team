@@ -1,10 +1,11 @@
-import type { Channel, SendTarget } from '../channel/types.js';
+import type { Channel, SendResult, SendTarget } from '../channel/types.js';
 import { WAKE_DEFAULTS } from '../config.js';
 import { BOOT_ID, replyUuid, turnIdempotencyKey, wakeBatchUuid } from '../core/ids.js';
 import type { SubmitRequest } from '../core/session-actor.js';
 import {
   deferredButton,
   deferredButtons,
+  deferredNoticeOf,
   dueWakes,
   eventsAfter,
   getRun,
@@ -31,7 +32,7 @@ import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, Principal, SessionRow, TurnTerminal } from '../types.js';
-import { named, type NameOf } from './chat-render.js';
+import { deferredButtonText, named, unblockButton, type NameOf } from './chat-render.js';
 import { NOTICE_SEND_MS, ROUND_EVENTS } from './notices.js';
 import type { KanbanService } from './service.js';
 import type { Assignee, DeferredButtonRow, DeferredKey, DeferredWhy, KanbanEvent, Result, SubscriptionRow, TaskRow, WakeRow } from './types.js';
@@ -320,6 +321,12 @@ export interface WakerDeps {
    * buttons left from before forms no wakes, and only releases and sends them.
    */
   releaseOnly?: boolean;
+  /**
+   * Redraws a recorded notice's message as its blocks stand now: the unblock
+   * redraw's `redrawMessage`, given the notice that deferred a button once that
+   * button's card is sent (§5.9). Never rejects.
+   */
+  redrawNotice?(messageId: string): Promise<void>;
 }
 
 /** One outcome a batch covers: its subscription, the event, and its task as read this round. */
@@ -506,7 +513,10 @@ export class Waker {
     this.#roundStart = this.#clock.now();
     // Every held deferred button first (§5.9): released at once when the agent will no longer get a real try.
     this.#releaseButtons();
-    if (this.#deps.releaseOnly === true) return 0;
+    if (this.#deps.releaseOnly === true) {
+      await this.#sendButtons();
+      return 0;
+    }
     let submits = 0;
     // A delivered wake whose turn ended but whose deferred buttons were not all moved: tried again (§5.9).
     for (const [wakeId, entry] of [...this.#underWay]) {
@@ -529,6 +539,8 @@ export class Waker {
       if (this.#stopped || submits >= ROUND_WAKES) break;
       if (await this.#tryNew(batch)) submits += 1;
     }
+    // The due buttons last, under what is left of the round's marker budget (§5.9).
+    await this.#sendButtons();
     return submits;
   }
 
@@ -968,6 +980,92 @@ export class Waker {
       }
       const why = deps.releaseOnly === true ? 'not_woken' : this.#heldWhy(row);
       if (why !== undefined) this.#buttonWrite(key, () => deps.service.buttonDue(key, why));
+    }
+  }
+
+  /**
+   * Each due deferred button sent (§5.9), the waker's own send: its lift read
+   * first, and a lifted one owes no card; then one card to its conversation,
+   * replying to the thread's root, with one Unblock button for the block,
+   * bounded by the notifier's bound, its uuid the same however often it is
+   * tried. Once sent: `sent` with the card's message id, the card recorded for
+   * the unblock redraw when it went as a card, and the notice that deferred it
+   * redrawn. A conversation the notifier has let go of makes the row `failed`
+   * at once, with one log line. A send that fails leaves the row due, said in
+   * the log, for the next round; nothing more is sent once stopped.
+   */
+  async #sendButtons(): Promise<void> {
+    const deps = this.#deps;
+    const db = deps.db;
+    for (const row of deferredButtons(db, deps.appId)) {
+      if (this.#stopped) return;
+      if (row.state !== 'due') continue;
+      const key = { subscriptionId: row.subscriptionId, eventId: row.eventId };
+      const which = `task ${row.taskId} (subscription ${row.subscriptionId}, event ${row.eventId})`;
+      const task = getTask(db, row.taskId);
+      const sub = getSubscription(db, row.subscriptionId);
+      if (task === undefined || sub === undefined) {
+        this.#buttonWrite(key, () => deps.service.buttonFailed(key));
+        this.#note(`kanban: the deferred Unblock button of ${which} is dropped: the task is not on the board`);
+        continue;
+      }
+      if (liftOf(db, row.taskId, row.eventId) !== undefined) {
+        this.#buttonWrite(key, () => deps.service.buttonLifted(key));
+        continue;
+      }
+      const at = threadAtOf(sub);
+      if (deps.letGo(at)) {
+        this.#buttonWrite(key, () => deps.service.buttonFailed(key));
+        this.#note(`kanban: the Unblock button of ${which} is dropped: the notifier has let ${describe(at)} go`);
+        continue;
+      }
+      const channel = deps.channels.get(sub.channel);
+      if (channel === undefined) {
+        this.#note(`kanban: no channel ${sub.channel} for the Unblock button of ${which}`);
+        continue;
+      }
+      const text = redactKnownSecrets(deferredButtonText(row.why ?? 'not_woken', task.taskId, task.title, deps.people.chatNames()));
+      const uuid = replyUuid(deps.appId, `wake-button:${row.subscriptionId}:${row.eventId}`, 'unblock');
+      let sent: SendResult;
+      try {
+        sent = await this.#bounded(channel.sendText(targetOf(db, at), text, uuid, [unblockButton(deps.appId, { id: row.eventId, taskId: row.taskId })]));
+      } catch (err) {
+        this.#note(`kanban: the Unblock button of ${which} was not sent (${message(err)}); trying again next round`);
+        continue;
+      }
+      this.#buttonWrite(key, () => deps.service.buttonSent(key, sent.messageId));
+      // Recorded as any Unblock card, so a later lift redraws it; a card that went as text has no button to redraw.
+      if (sent.card !== false) {
+        try {
+          const r = deps.service.recordUnblockButtons({
+            messageId: sent.messageId,
+            channel: sub.channel,
+            appId: deps.appId,
+            markdown: text,
+            buttons: [{ taskId: row.taskId, blockEvent: row.eventId }],
+          });
+          if (!r.ok) this.#note(`kanban: recording the Unblock button of ${which} failed (${r.message}); it will not be redrawn`);
+        } catch (err) {
+          this.#note(`kanban: recording the Unblock button of ${which} failed (${message(err)}); it will not be redrawn`);
+        }
+      }
+      const notice = deferredNoticeOf(db, deps.appId, row.taskId, row.eventId);
+      if (notice !== undefined) void deps.redrawNotice?.(notice);
+    }
+  }
+
+  /** A send, waited for at most the notifier's bound; past it, it fails here, and may still land. */
+  async #bounded<T>(send: Promise<T>): Promise<T> {
+    const ms = this.#deps.sendTimeoutMs ?? NOTICE_SEND_MS;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`the send took longer than ${ms < 1000 ? `${ms} ms` : `${Math.round(ms / 1000)} s`}`)), ms);
+    });
+    try {
+      return await Promise.race([send, late]);
+    } finally {
+      clearTimeout(timer);
+      send.catch(() => undefined);
     }
   }
 

@@ -90,7 +90,7 @@ describe("a woken turn's end", () => {
     await h.round();
     await settle();
     expect(h.wakes()[0]?.state).toBe('delivered');
-    expect(deferredButton(h.db, b.sub, b.event)).toMatchObject({ state: 'due', why: 'turn_failed' });
+    expect(deferredButton(h.db, b.sub, b.event)).toMatchObject({ state: 'sent', why: 'turn_failed' });
   });
 
   it('keeps the wake in hand until every decision is written, and tries a failed one again from the round', async () => {
@@ -106,7 +106,7 @@ describe("a woken turn's end", () => {
     expect(h.notes.some((n) => n.includes(`event ${b.event} was not moved (database is locked)`))).toBe(true);
     await h.round();
     expect(due).toHaveBeenCalledTimes(2);
-    expect(deferredButton(h.db, b.sub, b.event)).toMatchObject({ state: 'due', why: 'tried' });
+    expect(deferredButton(h.db, b.sub, b.event)).toMatchObject({ state: 'sent', why: 'tried' });
     // Decided: the next round writes nothing more.
     await h.round();
     expect(due).toHaveBeenCalledTimes(2);
@@ -129,7 +129,8 @@ describe("a woken turn's end", () => {
     const prompt = h.registry.submits[0]?.input.text ?? '';
     expect(prompt).not.toContain(DEFERRED_NOTE);
     expect(prompt).toContain('Its notice in this thread has no Unblock button; /kanban task unblock lifts it.');
-    expect(deferredButton(h.db, b.sub, b.event)?.state).toBe('due');
+    // Due already, so its card is sent in the round that wakes the turn.
+    expect(deferredButton(h.db, b.sub, b.event)?.state).toBe('sent');
   });
 
   it('says the hold in the minutes kanban.wake.hold_minutes gives', async () => {
@@ -150,7 +151,8 @@ describe('a deferred block cut from the prompt', () => {
     expect(prompt).toMatch(/and \d+ more: \/kanban task list$/);
     const states = blocks.map((b) => deferredButton(h.db, b.sub, b.event));
     const told = states.filter((r) => r?.state === 'held');
-    const cut = states.filter((r) => r?.state === 'due');
+    // Released at the submit, and sent in the same round.
+    const cut = states.filter((r) => r?.state === 'sent');
     expect(told.length).toBeGreaterThan(0);
     expect(cut.length).toBeGreaterThan(0);
     expect(told.length + cut.length).toBe(8);

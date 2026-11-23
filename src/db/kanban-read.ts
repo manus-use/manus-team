@@ -1611,6 +1611,22 @@ export function wakesOfEvent(db: Db, subscriptionId: number, eventId: number): W
     .map(decodeWake);
 }
 
+/**
+ * The notice that told of a block whose Unblock button the waker deferred: its
+ * message's `has_button` 0 record, the latest if two (wake spec §5.9), which is
+ * redrawn once the button's card is sent.
+ */
+export function deferredNoticeOf(db: Db, appId: string, taskId: string, blockEvent: number): string | undefined {
+  if (!hasWakeColumns(db)) return undefined;
+  return db
+    .prepare<[string, string, number], { message_id: string }>(
+      `SELECT message_id FROM kanban_unblock_buttons
+        WHERE app_id = ? AND task_id = ? AND block_event = ? AND has_button = 0
+        ORDER BY sent_at DESC, message_id DESC LIMIT 1`,
+    )
+    .get(appId, taskId, blockEvent)?.message_id;
+}
+
 /** This bot's deferred buttons still `held` or `due` (wake spec §5.9), the oldest held first: what each round releases and sends. */
 export function deferredButtons(db: Db, appId: string): DeferredButtonRow[] {
   if (!hasWakeColumns(db)) return [];

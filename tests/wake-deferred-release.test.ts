@@ -15,6 +15,8 @@ import { APP, BOB, wakeHarness, type WakeHarness } from './helpers/waker.js';
  * due, `running` while its woken turn runs and `not_woken` otherwise; after a
  * restart a row whose wake an earlier boot delivered is due, `restart`; and a
  * waker built in release mode forms no wakes and makes every held row due.
+ * A row made due is sent in the same round, its card going to people, so the
+ * tests read it `sent`, with the why it was due for.
  */
 
 const MINUTE = 60_000;
@@ -53,14 +55,14 @@ describe('a held button released at once', () => {
     const b = deferredBlock(h.woken());
     h.operate.delete(ALICE);
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'not_woken' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'not_woken' });
   });
 
   it("goes due, not_woken, when the setter's talk tier is lost", async () => {
     const b = deferredBlock(h.woken());
     h.talk.delete(ALICE);
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'not_woken' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'not_woken' });
   });
 
   it('goes due, not_woken, when wake is turned off', async () => {
@@ -69,7 +71,7 @@ describe('a held button released at once', () => {
     const off = setWake(h.db, task.taskId, { on: false }, ALICE, APP, NOW + 1);
     if (!off.ok) throw new Error(off.message);
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'not_woken' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'not_woken' });
   });
 
   it('goes due, not_woken, when another setter takes the wake over from the one its turn runs as', async () => {
@@ -81,19 +83,20 @@ describe('a held button released at once', () => {
     const over = setWake(h.db, task.taskId, { on: true, as: BOB, maxDepth: 5 }, BOB, APP, NOW + 1);
     if (!over.ok) throw new Error(over.message);
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'not_woken' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'not_woken' });
   });
 
   it('goes due, not_woken, when the notifier lets the conversation go, or the gateway no longer admits it', async () => {
     const b = deferredBlock(h.woken());
     letGo = true;
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'not_woken' });
+    // Due, and then failed at its send: the notifier has let the conversation go.
+    expect(state(b)).toEqual({ state: 'failed', why: 'not_woken' });
     letGo = false;
     const c = deferredBlock(h.woken());
     admits = 'chat_not_allowed';
     await h.round();
-    expect(state(c)).toEqual({ state: 'due', why: 'not_woken' });
+    expect(state(c)).toEqual({ state: 'sent', why: 'not_woken' });
   });
 
   it('goes due, not_woken, once its batch is dropped and its cursor moved past it', async () => {
@@ -106,7 +109,7 @@ describe('a held button released at once', () => {
     const dropped = h.service.dropWake(pending?.wakeId ?? 0, 'dropped after its refusals');
     if (!dropped.ok) throw new Error(dropped.message);
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'not_woken' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'not_woken' });
   });
 
   it('goes due, not_woken, when its batch is dropped after ten refusals in a row', async () => {
@@ -124,7 +127,7 @@ describe('a held button released at once', () => {
     await h.round();
     expect(h.wakes()[0]?.state).toBe('dropped');
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'not_woken' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'not_woken' });
   });
 
   it("goes due, not_woken, when its pending row is dropped by the check before the submit, the setter's tier lost", async () => {
@@ -136,7 +139,7 @@ describe('a held button released at once', () => {
     await h.clock.delay(WAKE_BACKOFF_MAX_MS);
     await h.round();
     expect(h.wakes()[0]).toMatchObject({ state: 'dropped' });
-    expect(state(b)).toEqual({ state: 'due', why: 'not_woken' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'not_woken' });
     expect(h.registry.submits).toHaveLength(1);
   });
 
@@ -192,7 +195,7 @@ describe('the hold, bounded by hold_minutes', () => {
     expect(state(b)?.state).toBe('held');
     h.clock.advance(1);
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'not_woken' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'not_woken' });
   });
 
   it('makes a row whose woken turn still runs due, running', async () => {
@@ -201,11 +204,11 @@ describe('the hold, bounded by hold_minutes', () => {
     await h.round();
     h.clock.advance(10 * MINUTE);
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'running' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'running' });
     // A turn that ends after that changes nothing: the button has gone.
     h.registry.actor('s_w1').release('completed');
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'running' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'running' });
   });
 
   it('counts in the minutes kanban.wake.hold_minutes gives', async () => {
@@ -219,7 +222,7 @@ describe('the hold, bounded by hold_minutes', () => {
     expect(state(b)?.state).toBe('held');
     h.clock.advance(5 * MINUTE);
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'running' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'running' });
   });
 });
 
@@ -231,7 +234,7 @@ describe('after a restart', () => {
     expect(h.wakes()[0]?.state).toBe('delivered');
     h.rebuild();
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'restart' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'restart' });
   });
 
   it('leaves a row whose wake is pending waiting within its limit, and makes one past it due at once', async () => {
@@ -246,7 +249,7 @@ describe('after a restart', () => {
     h.rebuild();
     h.clock.advance(10 * MINUTE);
     await h.round();
-    expect(state(b)).toEqual({ state: 'due', why: 'not_woken' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'not_woken' });
   });
 });
 
@@ -260,7 +263,7 @@ describe('release mode', () => {
     expect(await h.round()).toBe(0);
     expect(h.wakes()).toEqual([]);
     expect(h.registry.submits).toEqual([]);
-    expect(state(b)).toEqual({ state: 'due', why: 'not_woken' });
-    expect(state(c)).toEqual({ state: 'due', why: 'tried' });
+    expect(state(b)).toEqual({ state: 'sent', why: 'not_woken' });
+    expect(state(c)).toEqual({ state: 'sent', why: 'tried' });
   });
 });
