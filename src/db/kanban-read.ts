@@ -1466,6 +1466,15 @@ export function wakeOfShell(db: Db, sessionId: string): WakeRow | undefined {
   return r === undefined ? undefined : decodeWake(r);
 }
 
+/**
+ * How many tasks have wake on (wake spec §11): what the startup line says stay
+ * notice-only while wakes are off. None on a database before migration 013.
+ */
+export function tasksWithWakeOn(db: Db): number {
+  if (!hasWakeColumns(db)) return 0;
+  return db.prepare<[], { n: number }>('SELECT count(*) AS n FROM kanban_tasks WHERE wake_by IS NOT NULL').get()?.n ?? 0;
+}
+
 /** When a task's latest delivered wake was delivered (wake spec §10), or none. */
 export function lastWokeOf(db: Db, taskId: string): number | undefined {
   if (!hasWakeColumns(db)) return undefined;

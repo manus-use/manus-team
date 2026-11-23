@@ -1,8 +1,9 @@
 import type { Db } from '../db/open.js';
-import { namedPeopleOf, notePerson, personOf } from '../db/people.js';
+import { namedPeopleOf, notePerson, personByOpenId, personOf } from '../db/people.js';
 import { sharedName } from './chat-render.js';
 import { systemClock, type Clock } from '../time.js';
 import type { People } from './service.js';
+import type { Principal } from '../types.js';
 
 /**
  * The people the board can give work to (spec §4.2, §9.1), as the gateway has
@@ -34,6 +35,8 @@ export interface PeopleDeps {
    * never without talk. Absent, nobody named by principal has it.
    */
   canOperate?(person: { openId: string | null; unionId: string }): boolean;
+  /** The owner's open_id from the configuration (`auth.owner`), for a wake's setter who is the owner (wake spec §13). */
+  ownerOpenId?: string;
   clock?: Clock;
 }
 
@@ -97,6 +100,25 @@ export class PeopleDirectory implements People {
     if (unionId === undefined || this.#deps.canOperate === undefined) return false;
     const person = personOf(this.#deps.db, this.#deps.appId, unionId);
     return this.#deps.canOperate({ openId: person?.openId ?? null, unionId });
+  }
+
+  /**
+   * A wake's setter as a session's owner (wake spec §2.1, §13): the open_id and
+   * name this bot last saw for them; for the owner, the configuration's open_id,
+   * matched to the setter through `personByOpenId`, as the terminal's wake found
+   * the owner's union_id (§3.2). Undefined for a principal that is not a
+   * person's, or one this bot has not seen: a session is owned by an open_id.
+   */
+  principalOf(principal: string): Principal | undefined {
+    const unionId = unionIdOf(principal);
+    if (unionId === undefined) return undefined;
+    const ownerOpenId = this.#deps.ownerOpenId;
+    if (ownerOpenId !== undefined && ownerOpenId !== '') {
+      const owner = personByOpenId(this.#deps.db, this.#deps.appId, ownerOpenId);
+      if (owner?.unionId === unionId) return { openId: ownerOpenId, unionId, displayName: owner.name };
+    }
+    const person = personOf(this.#deps.db, this.#deps.appId, unionId);
+    return person === undefined ? undefined : { openId: person.openId, unionId, displayName: person.name };
   }
 
   /** The name Lark last gave for this person, if any: what a notice calls them. */
