@@ -9,6 +9,8 @@ import type { GateRun } from '../kanban/gates.js';
 import { placeName, placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
 import { worktreeId } from './workspaces.js';
 import { DEFAULT_BOARD, ENDED_OUTCOMES, GATE_LIMITS, REPORTED_OUTCOMES } from '../kanban/types.js';
+import { cutToBytes, WORKER_LIMITS } from '../kanban/limits.js';
+import { assignable, checkTask, type TaskFacts } from '../kanban/task-checks.js';
 import type {
   ActivePhase,
   AgentSnapshot,
@@ -36,6 +38,7 @@ import type {
   RunKind,
   RunOutcome,
   RunRow,
+  SubscriptionRow,
   TaskRow,
   WakeRow,
 } from '../kanban/types.js';
@@ -56,6 +59,7 @@ import {
   parentsOf,
   runsOf,
   subscriptionsOf,
+  getSubscription,
   getWake,
   wakeByUuid,
   wakeEventsOf,
@@ -415,6 +419,10 @@ interface TaskInsert extends NewTask {
   board: string;
   createdFromTask: string | null;
   parents: readonly string[];
+  /** A reaction task's (wake spec §19.3): its id, chosen first, and the wake that makes it. */
+  reaction?: { taskId: string; wakeId: number };
+  /** A reaction task's subscription, copied from its batch's conversation's (wake spec §19.3). */
+  copySubscription?: SubscriptionRow;
 }
 
 /**
@@ -425,7 +433,7 @@ interface TaskInsert extends NewTask {
  */
 function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, unknown> = {}): string {
   const { board, createdFromTask, parents } = t;
-  const taskId = newTaskId();
+  const taskId = t.reaction?.taskId ?? newTaskId();
   const wake = wakeOfInsert(d, t);
   d.prepare(
     `INSERT INTO kanban_tasks
@@ -458,9 +466,20 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
     if (!hasWakeColumns(d)) throw new Error('the database is not yet migrated to version 13, so a task cannot be given a wake');
     d.prepare('UPDATE kanban_tasks SET wake_by = ?, wake_depth = ?, wake_role = ? WHERE task_id = ?').run(wake.by, wake.depth, wake.role, taskId);
   }
+  // Made under a wake (wake spec §19.8): a reaction task is its own root; a run's
+  // task of one passes its root on, workflow and DAG members of its start included.
+  const root =
+    t.reaction !== undefined
+      ? taskId
+      : t.createdVia.kind === 'run' && createdFromTask !== null
+        ? mustGet(d, createdFromTask).wakeRoot
+        : null;
+  if (t.reaction !== undefined || root !== null) {
+    d.prepare('UPDATE kanban_tasks SET reaction_of = ?, wake_root = ? WHERE task_id = ?').run(t.reaction?.wakeId ?? null, root, taskId);
+  }
   const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
   for (const parent of parents) link.run(parent, taskId, now);
-  subscribe(d, taskId, t.createdVia, createdFromTask, now, t.follow);
+  subscribe(d, taskId, t.createdVia, createdFromTask, now, t.follow, t.copySubscription);
   record(
     d,
     {
@@ -551,7 +570,15 @@ function roleOf(role: string | null): { role?: string } {
  * cannot ask Lark what it named. A database not yet migrated to 013 has no such
  * column, and the task is followed as before.
  */
-function subscribe(d: Db, taskId: string, via: CreatedVia, createdFromTask: string | null, now: number, follow?: Follow): void {
+function subscribe(
+  d: Db,
+  taskId: string,
+  via: CreatedVia,
+  createdFromTask: string | null,
+  now: number,
+  follow?: Follow,
+  copy?: SubscriptionRow,
+): void {
   const wake = hasWakeColumns(d);
   const insert = d.prepare(
     wake
@@ -566,6 +593,11 @@ function subscribe(d: Db, taskId: string, via: CreatedVia, createdFromTask: stri
   };
   if (follow !== undefined) {
     run('lark', follow.appId, follow.chatId, follow.threadId, follow.threadId === '' ? null : follow.rootId, null);
+  }
+  // A reaction task follows its batch's conversation, a copy of its subscription (wake spec §19.3).
+  if (via.kind === 'wake') {
+    if (copy !== undefined) run(copy.channel, copy.appId, copy.conversationId, copy.threadId, copy.rootMessageId, copy.chatType);
+    return;
   }
   if (via.kind === 'chat') {
     const root = via.threadId === '' || via.rootId === undefined || via.rootId === '' ? null : via.rootId;
@@ -2605,6 +2637,102 @@ export function recordWake(db: Db, batch: NewWakeBatch, now: number): Result<{ w
     const wake = getWake(d, wakeId);
     if (wake === undefined) throw new Error(`wake ${wakeId} vanished inside its own transaction`);
     return { ok: true, wake, existing: false };
+  });
+}
+
+/** A role's batch, as the waker formed it (wake spec §19.3): the batch, the role, and the reaction task's words. */
+export interface NewRoleWake extends NewWakeBatch {
+  role: string;
+  title: string;
+  /** The prompt (wake spec §7, §19.5), masked. */
+  body: string;
+}
+
+/** What `recordRoleWake` did: made its task, found it made, or skipped the wake, saying why. */
+export type RoleWakeMade =
+  | { wake: WakeRow; task: TaskRow; existing: boolean }
+  | { skipped: 'board' | 'role' | 'turn' | 'subscription'; reason: string };
+
+/**
+ * A role's wake (wake spec §19.3): the `kanban_wakes` row, already `delivered`,
+ * with its role and its reaction task, its events, every covered
+ * subscription's `wake_cursor` moved, and the reaction task, made by
+ * `insertTask` as `createTask` makes any, with its subscription, a copy of the
+ * batch's conversation's, all in one transaction. It makes `createTask`'s
+ * checks, none bypassed, in its order: the key `wake:<uuid>` first, whose task
+ * answers a repeat and writes nothing; the board, by `liveBoard`, and the role,
+ * by `assignable` as it is now, each a skip, with nothing written; the checked
+ * fields, with the title and body cut to their limits, never refused for
+ * length, any other refusal rolling everything back.
+ *
+ * The task is the batch's oldest event's task's: its board, and its
+ * `created_from_task`, so the role's workspace is resolved from it; by the
+ * setter, its wake off, its depth the batch's + 1, its `wake_root` its own id.
+ */
+export function recordRoleWake(db: Db, batch: NewRoleWake, facts: TaskFacts, now: number): Result<RoleWakeMade> {
+  return tx(db, (d) => {
+    if (batch.events.length === 0) return refuse('invalid', 'a wake covers at least one event');
+    const key = `wake:${batch.uuid}`;
+    // The repeat first, by its wake row: a uuid is its batch's, whichever target recorded it.
+    const recorded = wakeByUuid(d, batch.uuid);
+    if (recorded !== undefined) {
+      // A uuid a chat turn recorded is that turn's batch: skipped, as waiting would never change it.
+      if (recorded.reactionTask === null) {
+        return { ok: true, skipped: 'turn', reason: `wake ${batch.uuid} is recorded already, as a turn of the chat session, and makes no reaction task` };
+      }
+      const made = getTaskByKey(d, key) ?? getTask(d, recorded.reactionTask);
+      if (made === undefined) throw new Error(`wake ${batch.uuid} names reaction task ${recorded.reactionTask}, which is not on the board`);
+      return { ok: true, wake: recorded, task: made, existing: true };
+    }
+    const oldest = [...batch.events].sort((a, b) => a.eventId - b.eventId)[0];
+    if (oldest === undefined) return refuse('invalid', 'a wake covers at least one event');
+    const source = mustGet(d, oldest.taskId);
+    const live = liveBoard(d, source.board);
+    if (!live.ok) return { ok: true, skipped: 'board', reason: live.message };
+    const who = assignable(batch.role, facts);
+    if (!who.ok) return { ok: true, skipped: 'role', reason: who.message };
+    const sub = getSubscription(d, oldest.subscriptionId);
+    // A batch of a conversation follows its subscription: one gone is skipped, as no later try would find it.
+    if (sub === undefined) return { ok: true, skipped: 'subscription', reason: `no subscription ${oldest.subscriptionId} for the reaction task to follow` };
+    const taskId = newTaskId();
+    const { lastInsertRowid } = d
+      .prepare(
+        `INSERT INTO kanban_wakes (uuid, channel, app_id, conversation_id, thread_id, principal, depth, state, created_at, delivered_at,
+                                   target_role, reaction_task)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?)`,
+      )
+      .run(batch.uuid, batch.channel, batch.appId, batch.conversationId, batch.threadId, batch.principal, batch.depth, now, now, batch.role, taskId);
+    const wakeId = Number(lastInsertRowid);
+    const insert = d.prepare('INSERT OR IGNORE INTO kanban_wake_events (wake_id, subscription_id, event_id, task_id) VALUES (?, ?, ?, ?)');
+    for (const e of batch.events) insert.run(wakeId, e.subscriptionId, e.eventId, e.taskId);
+    const createdVia: CreatedVia = { kind: 'wake', wakeId };
+    const title = cutToBytes(batch.title, WORKER_LIMITS.title);
+    const body = cutToBytes(batch.body, WORKER_LIMITS.body);
+    const checked = checkTask({ title, body, assignee: batch.role, createdBy: batch.principal, createdVia }, facts);
+    if (!checked.ok) return checked;
+    insertTask(
+      d,
+      {
+        title,
+        body,
+        contract: checked.contract,
+        assignee: checked.assignee ?? null,
+        idempotencyKey: key,
+        createdBy: batch.principal,
+        createdVia,
+        board: source.board,
+        createdFromTask: source.taskId,
+        parents: [],
+        wake: { by: null, depth: batch.depth + 1 },
+        reaction: { taskId, wakeId },
+        copySubscription: sub,
+      },
+      now,
+    );
+    moveWakeCursors(d, wakeId);
+    const wake = getWake(d, wakeId);
+    if (wake === undefined) throw new Error(`wake ${wakeId} vanished inside its own transaction`);
+    return { ok: true, wake, task: mustGet(d, taskId), existing: false };
   });
 }
 

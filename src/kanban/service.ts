@@ -673,6 +673,15 @@ export class KanbanService {
     return board.setWake(this.#db, taskId, writerChange, by, appId, this.#clock.now());
   }
 
+  /**
+   * The waker's record of a role's batch (wake spec §19.3): its reaction task,
+   * made with `createTask`'s checks against the team as it is now. The waker's
+   * own write, the only one that makes a task by a wake.
+   */
+  recordRoleWake(batch: board.NewRoleWake): Result<board.RoleWakeMade> {
+    return board.recordRoleWake(this.#db, batch, this.#facts(), this.#clock.now());
+  }
+
   /** The waker's record of a batch (wake spec §5.5 step 2), through the writer. */
   recordWake(batch: board.NewWakeBatch): ReturnType<typeof board.recordWake> {
     return board.recordWake(this.#db, batch, this.#clock.now());
