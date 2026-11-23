@@ -706,6 +706,7 @@ describe('loadTeamSettings', () => {
       owner: c.auth.ownerOpenId,
       operate: c.auth.allowOperate,
       from: c.auth.from,
+      wake: c.kanban.wake,
     });
     // kanban.enabled is unset: absent here, off there.
     expect(s.kanbanEnabled).toBeUndefined();
@@ -727,6 +728,7 @@ describe('loadConfig: the kanban section', () => {
       strandedAfterS: 1_800,
       nudgeLimit: 2,
       blockRecurrenceLimit: 2,
+      wake: { enabled: true, perHour: 6, maxDepth: 5, holdMinutes: 10 },
     });
     expect(load({ MT_MAX_LIVE_SESSIONS: '3' }).kanban.maxRunning).toBe(3);
   });
@@ -760,6 +762,7 @@ describe('loadConfig: the kanban section', () => {
       strandedAfterS: 120,
       nudgeLimit: 1,
       blockRecurrenceLimit: 3,
+      wake: { enabled: true, perHour: 6, maxDepth: 5, holdMinutes: 10 },
     });
   });
 
