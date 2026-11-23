@@ -44,7 +44,8 @@ import { CronApi } from './cron/worker.js';
 import { writeGatewayZone } from './cron/zone-file.js';
 import { jobCounts } from './db/cron.js';
 import { grantCounts, tierReader } from './db/grants.js';
-import { tasksWithWakeOn } from './db/kanban-read.js';
+import { deferredButtons, tasksWithWakeOn } from './db/kanban-read.js';
+import type { KanbanEvent, SubscriptionRow } from './kanban/types.js';
 import { Waker } from './kanban/waker.js';
 import { WakeTokens } from './kanban/wake-tokens.js';
 import { WakeApi } from './kanban/wake-api.js';
@@ -499,6 +500,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
       // By name, two of one name told apart (spec §9.3); the agent's prompts keep nameOf.
       nameOf: (principal) => people.chatName(principal),
+      // With wakes on, a block's Unblock button may wait for the agent (wake spec §5.9); the waker answers.
+      ...(config.kanban.wake.enabled ? { wouldDefer: (sub: SubscriptionRow, event: KanbanEvent) => waker?.wouldDefer(sub, event) ?? false } : {}),
       note,
     });
     // A person's run is sent its card: in its task's thread when they are in the group, else as a
@@ -579,6 +582,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       settings: config.kanban.wake,
       blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
       zone,
+      // A due button's card sent, its notice redrawn (wake spec §5.9).
+      redrawNotice: (messageId) => unblockRedraws?.redrawMessage(messageId) ?? Promise.resolve(),
       note,
     });
     wakeApi = new WakeApi({
@@ -592,6 +597,28 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       appId: config.lark.appId,
       zone,
       nudge: () => dispatcher?.pass(),
+      note,
+    });
+  }
+
+  // Release mode (wake spec §5.9): with wakes off, deferred buttons left from before are made due and sent,
+  // by a waker that forms no wakes; with none left, no waker at all.
+  if (!config.kanban.wake.enabled && boardService !== undefined && notifier !== undefined && deferredButtons(db, config.lark.appId).length > 0) {
+    const notices = notifier;
+    waker = new Waker({
+      db,
+      service: boardService,
+      registry,
+      channels: new Map<string, Channel>([[adapter.id, adapter]]),
+      appId: config.lark.appId,
+      people,
+      admitsConversation: (chatId, chatType) => authorizer.admitsConversation(chatId, chatType),
+      letGo: (at) => notices.letGo(at),
+      settings: config.kanban.wake,
+      blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
+      zone,
+      redrawNotice: (messageId) => unblockRedraws?.redrawMessage(messageId) ?? Promise.resolve(),
+      releaseOnly: true,
       note,
     });
   }

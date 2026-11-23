@@ -41,8 +41,9 @@
  *               task whose title or body says BLOCK is run, `mt kanban block` as
  *               `needs_input`; in a chat turn the board woke (its prompt starts
  *               `Board update`), unblock with `mt kanban task unblock` the task its
- *               prompt says it may lift, and wait for a file `release` beside the
- *               log first when the prompt says SLOW; each chat turn's prompt,
+ *               prompt says it may lift, unless the prompt says KEEP, and wait for
+ *               a file `release` beside the log first when the prompt says SLOW;
+ *               each chat turn's prompt,
  *               whether it had a wake token, and the unblock's answer, is
  *               appended to `wake.log` beside the log
  *
@@ -403,7 +404,8 @@ switch (MODE) {
         while (!existsSync(beside('release')) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
       }
       const lift = /lift it with mt kanban task unblock (k_[0-9a-z]+) /.exec(prompt);
-      if (lift !== null) {
+      // A task whose title says KEEP is one the agent cannot answer: it replies, and lifts nothing.
+      if (lift !== null && !prompt.includes('KEEP')) {
         const r = spawnSync('mt', ['kanban', 'task', 'unblock', lift[1], 'Speaker', 'two', 'is', 'confirmed.'], { encoding: 'utf8', timeout: 30_000 });
         unblocked = { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
       }

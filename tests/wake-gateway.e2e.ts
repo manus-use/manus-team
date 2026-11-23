@@ -8,6 +8,7 @@ import { LarkAdapter } from '../src/channel/lark/adapter.js';
 import type { Channel } from '../src/channel/types.js';
 import { loadConfig, type GatewayConfig } from '../src/config.js';
 import { createGateway, type Gateway } from '../src/index.js';
+import { AGENT_COULD_NOT_LINE, AGENT_FIRST_LINE } from '../src/kanban/chat-render.js';
 import { mtCommand } from '../src/kanban/shim.js';
 import { clearSecrets } from '../src/secrets.js';
 import { loadTeam } from '../src/team.js';
@@ -20,7 +21,9 @@ import { FakeChannel } from './helpers/channel.js';
  * session's. A completion's notice, then the marker, then the woken turn's
  * card, in that order, with the marker's send made slow; a message typed during
  * the woken turn queued; a block lifted by the woken agent's own `mt kanban task
- * unblock`, with its wake token, and its notice redrawn; a revoked grant's task
+ * unblock`, with its wake token, its notice sent without its Unblock button
+ * and redrawn; a block the agent cannot lift, whose button card follows the
+ * turn, its press redrawing the card and the notice; a revoked grant's task
  * noticed and not woken; a direct message's task not woken with direct messages
  * off; and a pending wake woken once after a restart.
  */
@@ -33,7 +36,7 @@ let log: string;
 let env: Record<string, string>;
 let config: GatewayConfig;
 let lark: FakeChannel;
-let handlers: { message: (msg: unknown) => Promise<void> } | undefined;
+let handlers: { message: (msg: unknown) => Promise<void>; cardAction: (evt: unknown) => Promise<void> } | undefined;
 let gateway: Gateway | undefined;
 let lines: string[];
 let seq = 0;
@@ -138,6 +141,18 @@ async function say(sender: Person, text: string, at: { threadId?: string; dm?: b
   return messageId;
 }
 
+/** A press of a button under `messageId`, by `who`, as the SDK hands it to the inbound side. */
+async function press(who: Person, messageId: string, value: Readonly<Record<string, string>>): Promise<void> {
+  if (handlers === undefined) throw new Error('the inbound side is not listening');
+  await handlers.cardAction({
+    messageId,
+    chatId: 'oc_team',
+    operator: { openId: who.openId, name: who.name },
+    action: { value: { ...value }, tag: 'button' },
+    raw: { operator: { union_id: who.unionId } },
+  });
+}
+
 /** Wait for `ok`, polling, for up to about 45 s: a loaded machine starts the fake agent slowly. */
 async function until(what: string, ok: () => boolean): Promise<void> {
   for (let i = 0; i < 1800; i += 1) {
@@ -228,18 +243,26 @@ describe('wakes through createGateway', () => {
     expect(wakes()).toEqual([{ state: 'delivered', attempt: 1, principal: 'lark:on_owner' }]);
   });
 
-  it("lets the woken agent lift its block with its own mt kanban task unblock, and redraws the notice as woken by the board", async () => {
+  it("sends a block's notice without its button, lets the woken agent lift the block with its own mt kanban task unblock, and redraws the notice as woken by the board", async () => {
     await start();
     await say(OWNER, '/kanban task new Draft the BLOCK agenda\nassignee: default\nwake: on');
     const taskId = createdTask();
     await until('the woken unblock', () => woken().some((t) => t.unblocked !== null));
     const turn = woken().find((t) => t.unblocked !== null);
     expect(turn?.prompt).toContain(`lift it with mt kanban task unblock ${taskId} <comment>`);
+    expect(turn?.prompt).toContain('People in this thread have seen this block, but have no Unblock button for it yet: you have the first try.');
     expect(turn?.unblocked).toMatchObject({ status: 0 });
     expect(turn?.unblocked?.out).toContain(`\`${taskId}\` is unblocked, back to open, as Alice (woken by the board)`);
 
-    const notice = lark.texts.find((m) => m.text.includes(`\`${taskId}\``) && (m.buttons?.length ?? 0) > 0);
-    if (notice === undefined) throw new Error('no notice with an Unblock button');
+    // The notice went at once, as a card with no button, before the marker and the turn (wake spec §5.9).
+    const notice = lark.texts.find((m) => m.text.includes(`\`${taskId}\``) && m.text.endsWith(AGENT_FIRST_LINE));
+    if (notice === undefined) throw new Error('no notice that defers its button');
+    expect(notice.card).toBe(true);
+    expect(notice.buttons).toBeUndefined();
+    const noticeAt = lark.landed.indexOf(`text:${notice.text}`);
+    expect(lark.landed.indexOf('text:Waking the agent for 1 board update.')).toBeGreaterThan(noticeAt);
+    expect(lark.landed.indexOf('card')).toBeGreaterThan(noticeAt);
+
     await until('the notice redrawn', () => lark.cardUpdates.length > 0);
     expect(lark.cardUpdates[0]?.view.buttons).toEqual([]);
     expect(lark.cardUpdates[0]?.view.markdown).toMatch(new RegExp(`\`${taskId}\`: Unblocked by Alice \\(woken by the board\\) at \\d\\d:\\d\\d$`));
@@ -250,6 +273,46 @@ describe('wakes through createGateway', () => {
     const comment = db?.prepare('SELECT author, body, steers FROM kanban_comments WHERE task_id = ?').get(taskId);
     expect(comment).toEqual({ author: 'lark:on_owner', body: '(woken by the board) Speaker two is confirmed.', steers: 1 });
     // The run after it reads the comment, and completes.
+    await until('the task to complete', () => phaseOf(taskId) === 'done');
+    // The agent lifted it: its deferred button owes no card.
+    expect(db?.prepare('SELECT state FROM kanban_deferred_buttons WHERE task_id = ?').get(taskId)).toEqual({ state: 'lifted' });
+    expect(texts().some((t) => t.startsWith('The agent could not lift the block'))).toBe(false);
+  });
+
+  it("sends a block's button card after a woken turn that did not lift it, and a press redraws the card and the notice", async () => {
+    await start();
+    await say(OWNER, '/kanban task new Draft the BLOCK KEEP agenda\nassignee: default\nwake: on');
+    const taskId = createdTask();
+    const words = `The agent could not lift the block on \`${taskId}\` **Draft the BLOCK KEEP agenda**.\n\`/kanban task unblock ${taskId}\` lifts it too.`;
+    await until('the button card', () => texts().includes(words));
+    const turnAt = lark.landed.indexOf('card');
+    const card = lark.texts.find((m) => m.text === words);
+    expect(lark.landed.indexOf(`text:${words}`)).toBeGreaterThan(turnAt);
+    const button = card?.buttons?.[0];
+    if (card === undefined || button === undefined || card.buttons?.length !== 1) throw new Error('no Unblock on the button card');
+    expect(button.value['task']).toBe(taskId);
+    const db = gateway?.db;
+    const row = (): { state: string; why: string; message_id: string | null } | undefined =>
+      db?.prepare('SELECT state, why, message_id FROM kanban_deferred_buttons WHERE task_id = ?').get(taskId) as { state: string; why: string; message_id: string | null } | undefined;
+    expect(row()).toMatchObject({ state: 'sent', why: 'tried' });
+    const noticeId = (db?.prepare('SELECT message_id FROM kanban_unblock_buttons WHERE task_id = ? AND has_button = 0').get(taskId) as { message_id: string } | undefined)?.message_id;
+    if (noticeId === undefined) throw new Error('no record of the notice');
+    await until('the notice redrawn with the button below', () => lark.cardUpdates.some((u) => u.messageId === noticeId));
+    expect(lark.cardUpdates.find((u) => u.messageId === noticeId)?.view).toMatchObject({ buttons: [] });
+    expect(lark.cardUpdates.find((u) => u.messageId === noticeId)?.view.markdown).toContain(AGENT_COULD_NOT_LINE);
+
+    // A person's press of the card's Unblock: the card loses its button, and the notice gains the lifted line.
+    const cardId = row()?.message_id ?? '';
+    await press(OWNER, cardId, button.value);
+    await until('the card redrawn', () => lark.cardUpdates.some((u) => u.messageId === cardId));
+    const drawn = lark.cardUpdates.find((u) => u.messageId === cardId)?.view;
+    expect(drawn?.buttons).toEqual([]);
+    expect(drawn?.markdown).toMatch(new RegExp(`\`${taskId}\`: Unblocked by Alice at \\d\\d:\\d\\d$`));
+    await until('the notice redrawn with the lift', () => lark.cardUpdates.filter((u) => u.messageId === noticeId).length === 2);
+    const again = lark.cardUpdates.filter((u) => u.messageId === noticeId)[1]?.view;
+    expect(again?.buttons).toEqual([]);
+    expect(again?.markdown).toContain(AGENT_COULD_NOT_LINE);
+    expect(again?.markdown).toMatch(new RegExp(`\`${taskId}\`: Unblocked by Alice at \\d\\d:\\d\\d$`));
     await until('the task to complete', () => phaseOf(taskId) === 'done');
   });
 

@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LarkAdapter } from '../src/channel/lark/adapter.js';
 import { LarkInbound } from '../src/channel/lark/inbound.js';
 import { loadConfig, type GatewayConfig } from '../src/config.js';
-import { tasksWithWakeOn } from '../src/db/kanban-read.js';
+import { deferButton } from '../src/db/kanban.js';
+import { subscriptionsOf, tasksWithWakeOn } from '../src/db/kanban-read.js';
 import { notePerson } from '../src/db/people.js';
 import { openDb } from '../src/db/open.js';
 import { chatEnv, createGateway, wakeLine } from '../src/index.js';
@@ -146,6 +147,32 @@ describe('createGateway, with the board on', () => {
     const gateway = await createGateway({ ...config, kanban: { ...config.kanban, wake: { ...config.kanban.wake, enabled: false } } }, team);
     try {
       expect(gateway.waker).toBeUndefined();
+      expect(lines).toContain('kanban: wakes off (kanban.wake.enabled is false); 1 task(s) with wake on stay notice-only');
+    } finally {
+      await gateway.stop();
+    }
+  });
+
+  it('builds the waker in release mode with wakes off when deferred buttons are left from before', async () => {
+    const off = { ...config, kanban: { ...config.kanban, wake: { ...config.kanban.wake, enabled: false } } };
+    const first = await createGateway(config, team);
+    await first.stop();
+    const db = openDb(config.dbPath);
+    try {
+      const task = newTask(db, {
+        createdVia: { kind: 'chat', channel: 'lark', appId: 'cli_app', conversationId: 'oc_team', threadId: '' },
+        wake: { by: 'lark:on_alice', depth: 0 },
+      });
+      db.prepare("INSERT INTO kanban_events (task_id, kind, actor, payload, created_at) VALUES (?, 'blocked', 'run:r_1', jsonb('{}'), 1)").run(task.taskId);
+      const event = db.prepare<[], { id: number }>('SELECT max(id) AS id FROM kanban_events').get()?.id ?? 0;
+      const r = deferButton(db, { subscriptionId: subscriptionsOf(db, task.taskId)[0]?.id ?? 0, eventId: event }, 1);
+      if (!r.ok) throw new Error(r.message);
+    } finally {
+      db.close();
+    }
+    const gateway = await createGateway(off, team);
+    try {
+      expect(gateway.waker).toBeDefined();
       expect(lines).toContain('kanban: wakes off (kanban.wake.enabled is false); 1 task(s) with wake on stay notice-only');
     } finally {
       await gateway.stop();
