@@ -150,8 +150,9 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'workflowName',
   'ref',
   'step',
-  // A wake's setter, a principal (wake spec §4.4).
+  // A wake's setter, a principal, and the role it targets (wake spec §4.4, §19.1).
   'as',
+  'role',
   // The task an inherited wake came from (wake spec §9.1).
   'from',
 ]);
@@ -342,12 +343,15 @@ export interface NewTask {
  * turns run as, or null for wake off; `depth`, the woken turns in its making,
  * kept whether or not it has a wake; and `tooDeep`, set by the service when a
  * wake was asked at a depth of `kanban.wake.max_depth` or more, which makes it
- * with wake off and records why.
+ * with wake off and records why. `role`, with `by` set, names the role the
+ * wake targets (wake spec §19.1): its outcomes make a reaction task for that
+ * role, not a turn of the chat session; absent, the chat session.
  */
 export interface NewWake {
   by: string | null;
   depth: number;
   tooDeep?: boolean;
+  role?: string;
 }
 
 /**
@@ -452,7 +456,7 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
   );
   if (wake.by !== null || wake.depth !== 0) {
     if (!hasWakeColumns(d)) throw new Error('the database is not yet migrated to version 13, so a task cannot be given a wake');
-    d.prepare('UPDATE kanban_tasks SET wake_by = ?, wake_depth = ? WHERE task_id = ?').run(wake.by, wake.depth, taskId);
+    d.prepare('UPDATE kanban_tasks SET wake_by = ?, wake_depth = ?, wake_role = ? WHERE task_id = ?').run(wake.by, wake.depth, wake.role, taskId);
   }
   const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
   for (const parent of parents) link.run(parent, taskId, now);
@@ -487,28 +491,40 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
  * copies its creating task's `wake_by` and `wake_depth`, unchanged, whatever it
  * asked for, with an inherited `wake_set` when that task has wake on, by the run,
  * `from` the task; any other task takes the request's, its `wake_set` by its
- * creator, or the too-deep one with wake off (§3.4, §4.4).
+ * creator, or the too-deep one with wake off (§3.4, §4.4). The role a wake
+ * targets goes with its setter, copied with them, and named in the `wake_set`
+ * as `role` (§19.1).
  */
 function wakeOfInsert(
   d: Db,
   t: TaskInsert,
-): { by: string | null; depth: number; event?: { actor: string; payload: Record<string, unknown> } } {
+): { by: string | null; depth: number; role: string | null; event?: { actor: string; payload: Record<string, unknown> } } {
   if (t.createdVia.kind === 'run' && t.createdFromTask !== null) {
     const from = mustGet(d, t.createdFromTask);
-    if (from.wakeBy === null) return { by: null, depth: from.wakeDepth };
+    if (from.wakeBy === null) return { by: null, depth: from.wakeDepth, role: null };
     return {
       by: from.wakeBy,
       depth: from.wakeDepth,
-      event: { actor: `run:${t.createdVia.runId}`, payload: { on: true, as: from.wakeBy, depth: from.wakeDepth, from: from.taskId } },
+      role: from.wakeRole,
+      event: {
+        actor: `run:${t.createdVia.runId}`,
+        payload: { on: true, as: from.wakeBy, depth: from.wakeDepth, ...roleOf(from.wakeRole), from: from.taskId },
+      },
     };
   }
   const w = t.wake;
-  if (w === undefined) return { by: null, depth: 0 };
-  if (w.by === null) return { by: null, depth: w.depth };
+  if (w === undefined) return { by: null, depth: 0, role: null };
+  if (w.by === null) return { by: null, depth: w.depth, role: null };
   if (w.tooDeep === true) {
-    return { by: null, depth: w.depth, event: { actor: t.createdBy, payload: { on: false, refused: 'too_deep', depth: w.depth } } };
+    return { by: null, depth: w.depth, role: null, event: { actor: t.createdBy, payload: { on: false, refused: 'too_deep', depth: w.depth } } };
   }
-  return { by: w.by, depth: w.depth, event: { actor: t.createdBy, payload: { on: true, as: w.by, depth: w.depth } } };
+  const role = w.role ?? null;
+  return { by: w.by, depth: w.depth, role, event: { actor: t.createdBy, payload: { on: true, as: w.by, depth: w.depth, ...roleOf(role) } } };
+}
+
+/** A `wake_set` payload's `role`, for a wake that targets one (wake spec §19.1). */
+function roleOf(role: string | null): { role?: string } {
+  return role === null ? {} : { role };
 }
 
 /**
@@ -2452,8 +2468,12 @@ export function markUnblockRedrawn(db: Db, messageId: string, lifts: ReadonlyArr
 // Wakes (wake spec §3, §4)
 // ---------------------------------------------------------------------------
 
-/** A wake turned on, as `as`, refused as too deep at `maxDepth` or more; or turned off (wake spec §3.1, §3.4). */
-export type WakeChange = { on: true; as: string; maxDepth: number } | { on: false };
+/**
+ * A wake turned on, as `as`, refused as too deep at `maxDepth` or more, for the
+ * chat session or, with `role`, for that role (wake spec §19.1); or turned off
+ * (wake spec §3.1, §3.4).
+ */
+export type WakeChange = { on: true; as: string; maxDepth: number; role?: string } | { on: false };
 
 /**
  * Turn a task's wake on or off (wake spec §3.1, §3.3), with its `wake_set`
@@ -2469,6 +2489,11 @@ export type WakeChange = { on: true; as: string; maxDepth: number } | { on: fals
  * wake and records nothing (`kept`, §5.4). Off clears `wake_by`, needs no chat, and leaves the cursor
  * where it is: the waker reads only tasks with wake on, and a later on sets it
  * again. Off on a task with wake off changes nothing.
+ *
+ * On names the wake's target (wake spec §19.1): `wake_role` is the role, or null
+ * for the chat session, written with `wake_by` and cleared with it by off; a
+ * switch of target with the same setter is a change, its `wake_set` naming the
+ * `role`. A reaction task's wake is never set: it never wakes anyone (§19.3).
  */
 export function setWake(
   db: Db,
@@ -2481,9 +2506,10 @@ export function setWake(
   return tx(db, (d) => {
     const task = getTask(d, taskId);
     if (task === undefined) return refuse('not_found', `no task ${taskId}`);
+    if (task.reactionOf !== null) return refuse('invalid', `\`${taskId}\` is a reaction task, which never wakes anyone`);
     if (!change.on) {
       if (task.wakeBy === null) return { ok: true, task, changed: false, tooDeep: false, kept: false };
-      d.prepare('UPDATE kanban_tasks SET wake_by = NULL WHERE task_id = ?').run(taskId);
+      d.prepare('UPDATE kanban_tasks SET wake_by = NULL, wake_role = NULL WHERE task_id = ?').run(taskId);
       record(d, { taskId, kind: 'wake_set', actor: by, payload: { on: false } }, now);
       return { ok: true, task: mustGet(d, taskId), changed: true, tooDeep: false, kept: false };
     }
@@ -2492,15 +2518,16 @@ export function setWake(
     if (subs.length === 0) {
       return refuse('invalid', `a wake needs a chat that follows the task, and no chat follows ${taskId}: a chat is chosen when a task is made`);
     }
-    if (task.wakeBy === change.as) return { ok: true, task, changed: false, tooDeep: false, kept: false };
+    const role = change.role ?? null;
+    if (task.wakeBy === change.as && task.wakeRole === role) return { ok: true, task, changed: false, tooDeep: false, kept: false };
     if (task.wakeDepth >= change.maxDepth) {
       // A wake already set stays as it is, though max_depth was lowered since (wake spec §5.4): nothing is recorded.
       if (task.wakeBy !== null) return { ok: true, task, changed: false, tooDeep: true, kept: true };
       record(d, { taskId, kind: 'wake_set', actor: by, payload: { on: false, refused: 'too_deep', depth: task.wakeDepth } }, now);
       return { ok: true, task: mustGet(d, taskId), changed: false, tooDeep: true, kept: false };
     }
-    d.prepare('UPDATE kanban_tasks SET wake_by = ? WHERE task_id = ?').run(change.as, taskId);
-    record(d, { taskId, kind: 'wake_set', actor: by, payload: { on: true, as: change.as, depth: task.wakeDepth } }, now);
+    d.prepare('UPDATE kanban_tasks SET wake_by = ?, wake_role = ? WHERE task_id = ?').run(change.as, role, taskId);
+    record(d, { taskId, kind: 'wake_set', actor: by, payload: { on: true, as: change.as, depth: task.wakeDepth, ...roleOf(role) } }, now);
     const latest = d.prepare<[string], { id: number }>('SELECT max(id) AS id FROM kanban_events WHERE task_id = ?').get(taskId)?.id ?? 0;
     const move = d.prepare('UPDATE kanban_subscriptions SET wake_cursor = ? WHERE id = ?');
     for (const s of subs) move.run(latest, s.id);

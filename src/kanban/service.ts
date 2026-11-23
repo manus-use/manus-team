@@ -191,8 +191,12 @@ export interface ReportOptions {
 export const WAKES_OFF =
   'wakes are off on this gateway: an operator turns them on with kanban.wake.enabled: true in config.yaml, and a restart';
 
-/** A change of a task's wake, as chat or the terminal asks it (wake spec §3.1): on as a principal, or off. */
-export type WakeRequest = { on: true; as: string } | { on: false };
+/**
+ * A change of a task's wake, as chat or the terminal asks it (wake spec §3.1):
+ * on as a principal, for the chat session or, with `role`, for that role
+ * (§19.1); or off.
+ */
+export type WakeRequest = { on: true; as: string; role?: string } | { on: false };
 
 /**
  * Who judges a woken turn's show and unblock (wake spec §9.2): the setter's tiers,
@@ -215,6 +219,7 @@ function wakeShapeRefused(wake: unknown): Refusal | undefined {
   if (
     !isRecord(wake) ||
     !(wake.by === null || (isText(wake.by) && wake.by.startsWith('lark:') && wake.by.length > 'lark:'.length)) ||
+    !(wake.role === undefined || (isText(wake.role) && wake.by !== null)) ||
     typeof wake.depth !== 'number' ||
     !Number.isSafeInteger(wake.depth) ||
     wake.depth < 0
@@ -293,6 +298,8 @@ export interface StartWake {
   by: string | null;
   depth: number;
   all: boolean;
+  /** The role every member that wakes targets (wake spec §19.1); absent, the chat session. */
+  role?: string;
   /**
    * The note said when `by` is null because the terminal could not name the
    * owner for want of a setting (no app id, no owner), in place of
@@ -613,7 +620,26 @@ export class KanbanService {
     if (req.createdVia?.kind === 'operator' && req.follow === undefined) {
       return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
     }
-    return { ok: true, wake: { by: w.by, depth: w.depth, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}) } };
+    const role = this.#wakeRole(w.role);
+    if (!role.ok) return role;
+    return {
+      ok: true,
+      wake: { by: w.by, depth: w.depth, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}), ...role.role },
+    };
+  }
+
+  /**
+   * The role a wake targets, checked when it is set (wake spec §19.1): configured,
+   * and taken by `assignable` as an assignee, which judges the role alone; refused
+   * `invalid` in `assignable`'s words, as `task assign` would refuse it. A
+   * person's principal is not a role.
+   */
+  #wakeRole(role: string | undefined): Result<{ role: { role?: string } }> {
+    if (role === undefined) return { ok: true, role: {} };
+    const who = assignable(role, this.#facts());
+    if (!who.ok) return board.refuse('invalid', who.message);
+    if (who.assignee.kind !== 'role') return board.refuse('invalid', `${JSON.stringify(role)} is not a role: a wake targets a role, or the chat session`);
+    return { ok: true, role: { role } };
   }
 
   /**
@@ -628,7 +654,9 @@ export class KanbanService {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
     if (change.on && !this.#wake.enabled) return board.refuse('wake_off', WAKES_OFF);
-    const writerChange: board.WakeChange = change.on ? { on: true, as: change.as, maxDepth: this.#wake.maxDepth } : { on: false };
+    const role = change.on ? this.#wakeRole(change.role) : { ok: true as const, role: {} };
+    if (!role.ok) return role;
+    const writerChange: board.WakeChange = change.on ? { on: true, as: change.as, maxDepth: this.#wake.maxDepth, ...role.role } : { on: false };
     return board.setWake(this.#db, taskId, writerChange, by, appId, this.#clock.now());
   }
 
@@ -1573,7 +1601,12 @@ export class KanbanService {
     const at = new Map(dag.tasks.map((t, i) => [t.ref, i]));
     const wakeOf = (t: DagTask): board.NewWake | undefined => {
       if (wake === undefined || (!wake.all && t.wake !== true)) return wake === undefined ? undefined : { by: null, depth: wake.depth };
-      return { by: wake.by, depth: wake.depth, ...(wake.tooDeep === true ? { tooDeep: true } : {}) };
+      return {
+        by: wake.by,
+        depth: wake.depth,
+        ...(wake.tooDeep === true ? { tooDeep: true } : {}),
+        ...(wake.role === undefined ? {} : { role: wake.role }),
+      };
     };
     const as = (name: string | null): Assignee | null => (name === null ? null : { kind: name.includes(':') ? 'human' : 'role', name });
     return dag.tasks.map((t) => ({
@@ -1744,7 +1777,12 @@ export class KanbanService {
     if (w.by === null) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: w.note ?? OWNER_UNSEEN_NOTICE_ONLY };
     // The steps' wake is the chat session's, and no chat follows the members: they are made notice-only, with a note (§19.16).
     if (chatless) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: NO_CHAT_NOTICE_ONLY };
-    return { ok: true, wake: { by: w.by, depth: w.depth, all: w.all, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}) } };
+    const role = this.#wakeRole(w.role);
+    if (!role.ok) return role;
+    return {
+      ok: true,
+      wake: { by: w.by, depth: w.depth, all: w.all, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}), ...role.role },
+    };
   }
 
   /** The one transaction (workflows spec §6 step 3). */

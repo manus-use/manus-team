@@ -536,7 +536,8 @@ export interface CreateRequest {
   /**
    * Its wake (wake spec §3.1, §9.1): `by`, the principal its woken turns run
    * as, or null for none; `depth`, the woken turns in its making. A run's
-   * follow-up inherits its creating task's, whatever this says.
+   * follow-up inherits its creating task's, whatever this says. `role`, with
+   * `by`, names the role it targets (wake spec §19.1).
    */
-  wake?: { by: string | null; depth: number };
+  wake?: { by: string | null; depth: number; role?: string };
 }
