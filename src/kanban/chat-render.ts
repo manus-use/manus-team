@@ -138,7 +138,7 @@ const PRINCIPAL_TOKEN = /lark:[A-Za-z0-9_-]+/g;
  * falling back to the token: at render time, in chat only, so what is stored,
  * hashed and shown at the terminal stays as the start made it.
  */
-function named(text: string, nameOf: NameOf | undefined): string {
+export function named(text: string, nameOf: NameOf | undefined): string {
   if (nameOf === undefined) return text;
   return text.replace(PRINCIPAL_TOKEN, (token) => {
     const name = nameOf(token);
