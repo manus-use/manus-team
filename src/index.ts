@@ -462,7 +462,14 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       }),
     });
     // A worker's create, link or report can make a task claimable.
-    boardApi = new WorkerApi({ db, service, changed: () => dispatcher?.pass(), nameOf: (principal) => people.nameOf(principal) });
+    boardApi = new WorkerApi({
+      db,
+      service,
+      changed: () => dispatcher?.pass(),
+      nameOf: (principal) => people.nameOf(principal),
+      // A reaction task's run's wake-show and wake-unblock (wake spec §19.8), through the woken show and unblock.
+      wakes: () => wakeApi,
+    });
     // A notice's message redrawn once a block it offered Unblock for is lifted, by any path,
     // the terminal's and an agent's mt included (spec §9.2, amended by the unblock redraw).
     const redraws = new UnblockRedraws({

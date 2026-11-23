@@ -1400,6 +1400,12 @@ export function wakeByUuid(db: Db, uuid: string): WakeRow | undefined {
 }
 
 /** A woken turn's events, in event order. */
+/** A reaction task's wake (wake spec §19.8): the `kanban_wakes` row its `reaction_of` names; none for any other task. */
+export function wakeOfReaction(db: Db, taskId: string): WakeRow | undefined {
+  const task = getTask(db, taskId);
+  return task === undefined || task.reactionOf === null ? undefined : getWake(db, task.reactionOf);
+}
+
 export function wakeEventsOf(db: Db, wakeId: number): WakeEventRow[] {
   return db
     .prepare<[number], { wake_id: number; subscription_id: number; event_id: number; task_id: string }>(

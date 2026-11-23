@@ -133,6 +133,19 @@ export class WakeApi {
     };
   }
 
+  /**
+   * A wake's show (§9.2), given the wake: the woken turn's, by its token, and a
+   * reaction task's run's, by its own (§19.8). Its checks are the service's.
+   */
+  show(wake: WakeRow, taskId: string): Record<string, unknown> {
+    return this.#show(wake, taskId);
+  }
+
+  /** A wake's unblock (§9.2, §19.8), given the wake, with the limit's line and the nudge. */
+  unblock(wake: WakeRow, taskId: string, comment: string | undefined): Record<string, unknown> {
+    return this.#unblock(wake, taskId, comment);
+  }
+
   #show(wake: WakeRow, taskId: string): Record<string, unknown> {
     const judge = this.#judge();
     const r = this.#deps.service.showForWake(wake, taskId, judge);

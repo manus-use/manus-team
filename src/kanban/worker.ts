@@ -1,9 +1,9 @@
 import type { Db } from '../db/open.js';
-import { getTask, runByTokenHash, taskView, type ReviewRequest } from '../db/kanban-read.js';
+import { getTask, runByTokenHash, taskView, wakeOfReaction, type ReviewRequest } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { briefFor } from './brief.js';
 import { DAG_LIMITS } from './dag.js';
-import type { KanbanService, WorkflowMade } from './service.js';
+import { WAKES_OFF, type KanbanService, type WorkflowMade } from './service.js';
 import { hashToken, sameHash, TOKEN_PATTERN } from './token.js';
 import { WORKER_LIMITS } from './limits.js';
 import {
@@ -14,6 +14,7 @@ import {
   type Reporter,
   type Result,
   type RunRow,
+  type WakeRow,
 } from './types.js';
 
 /**
@@ -55,6 +56,8 @@ export const WORKER_COMMANDS = [
   'link',
   'start-workflow',
   'apply-dag',
+  'wake-show',
+  'wake-unblock',
 ] as const;
 export type WorkerCommand = (typeof WORKER_COMMANDS)[number];
 
@@ -94,6 +97,18 @@ export interface WorkerApiDeps {
   changed?: () => void;
   /** A person's name as the gateway last saw it, to name a person reviewer by; absent, people are named by id. */
   nameOf?: (principal: string) => string | undefined;
+  /**
+   * The woken show and unblock (wake spec §9.2), for a reaction task's run's
+   * `wake-show` and `wake-unblock` (§19.8): asked when a command comes, as it is
+   * built after the worker API; absent, or answering none, wakes are off.
+   */
+  wakes?: () => WakeScope | undefined;
+}
+
+/** What a reaction run's two commands go through: the woken show and unblock, given the wake (wake spec §19.8). */
+export interface WakeScope {
+  show(wake: WakeRow, taskId: string): Record<string, unknown>;
+  unblock(wake: WakeRow, taskId: string, comment: string | undefined): Record<string, unknown>;
 }
 
 export { WORKER_LIMITS };
@@ -131,6 +146,9 @@ const SCHEMAS: Record<WorkerCommand, Readonly<Record<string, Field>>> = {
   'start-workflow': { workflow: name(), params: { kind: 'params' }, idempotency_key: name(false) },
   // A DAG, read by the DAG's own checks (workflows spec §5) rather than this flat schema; its two keys of its own are taken off first.
   'apply-dag': {},
+  // A reaction task's run's scope (wake spec §19.8): the tasks its wake carried.
+  'wake-show': { task_id: name() },
+  'wake-unblock': { task_id: name(), comment: text(WORKER_LIMITS.comment, false) },
 };
 
 const ENVELOPE = ['run', 'token', 'command', 'input'];
@@ -267,11 +285,13 @@ export class WorkerApi {
   readonly #service: KanbanService;
   readonly #changed: () => void;
   readonly #nameOf: ((principal: string) => string | undefined) | undefined;
+  readonly #wakes: () => WakeScope | undefined;
 
   constructor(deps: WorkerApiDeps) {
     this.#db = deps.db;
     this.#service = deps.service;
     this.#nameOf = deps.nameOf;
+    this.#wakes = deps.wakes ?? (() => undefined);
     const changed = deps.changed ?? (() => undefined);
     this.#changed = () => {
       try {
@@ -337,8 +357,8 @@ export class WorkerApi {
     const bad = command === 'apply-dag' ? undefined : badInput(command, input);
     if (bad !== undefined) return bad;
     const r = await this.#act(command, run, input, opts);
-    // A dry run made nothing, and so is no change to look at.
-    if (r.ok && command !== 'show' && r['dry_run'] !== true) this.#changed();
+    // A dry run made nothing, and so is no change to look at; a wake's unblock nudges the dispatcher itself, once (§9.2).
+    if (r.ok && command !== 'show' && command !== 'wake-show' && command !== 'wake-unblock' && r['dry_run'] !== true) this.#changed();
     return r;
   }
 
@@ -419,6 +439,10 @@ export class WorkerApi {
         // A run moves no task but its own: it may hold back the tasks its task
         // created, as decomposition needs, and no other.
         const task = getTask(this.#db, child);
+        // A reaction task's created_from_task is its source's, but a wake made it, not this run (wake spec §19.3).
+        if (task !== undefined && task.reactionOf !== null) {
+          return refused('wrong_task', `run ${run.runId} may not link \`${child}\`: it is a reaction task, made by a wake, not by this run`);
+        }
         if (task !== undefined && task.createdFromTask !== run.taskId) {
           return refused('wrong_task', `run ${run.runId} may link only the tasks its task created, and ${child} is not one`);
         }
@@ -436,6 +460,19 @@ export class WorkerApi {
           createdVia: { kind: 'run', runId: run.runId },
         });
         return r.ok ? madeAnswer(r) : refusal(r);
+      }
+      case 'wake-show':
+      case 'wake-unblock': {
+        const scope = this.#wakes();
+        if (scope === undefined) return refused('wake_off', WAKES_OFF);
+        const wake = this.#wakeOf(run);
+        if (wake === undefined) return refused('not_woken', "this run's task was not made by a wake");
+        const taskId = str('task_id') ?? '';
+        const r = command === 'wake-show' ? scope.show(wake, taskId) : scope.unblock(wake, taskId, str('comment'));
+        if (r['ok'] !== true) return r as WorkerResponse;
+        // The worker's JSON form (§19.8): the show as the operator's --json, the unblock as the woken turn's answer.
+        if (command === 'wake-show') return { ok: true, ...(r['json'] as Record<string, unknown>) };
+        return r as WorkerResponse;
       }
       case 'apply-dag': {
         // Its own two keys, beside the DAG's, are taken off before the DAG is checked (workflows spec §6).
@@ -463,6 +500,11 @@ export class WorkerApi {
         };
       }
     }
+  }
+
+  /** The wake a reaction task's run is scoped by (wake spec §19.8): its task's `reaction_of`. */
+  #wakeOf(run: RunRow): WakeRow | undefined {
+    return wakeOfReaction(this.#db, run.taskId);
   }
 
   /** The run's task and its context, in full (spec §7.3): what the prompt cut or left out is here. */
