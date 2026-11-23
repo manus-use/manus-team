@@ -7,19 +7,24 @@ import {
   getRun,
   getSubscription,
   getTask,
+  getWake,
   hasUnblockButton,
   pendingWakes,
   threadRootOf,
   wakeEventsOf,
   wakeOutcomesOf,
+  wakesInLastHour,
   wokenUnblocksSince,
   type DueWake,
   type ThreadAt,
 } from '../db/kanban-read.js';
 import type { Db } from '../db/open.js';
+import { formatWall } from '../cron/schedule.js';
+import { resolveBinding } from '../db/bindings.js';
+import { openTurns } from '../db/turns.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
-import type { Clock } from '../time.js';
+import { systemClock, type Clock } from '../time.js';
 import type { BindingKey, Principal, SessionRow, TurnTerminal } from '../types.js';
 import { named, type NameOf } from './chat-render.js';
 import { NOTICE_SEND_MS, ROUND_EVENTS } from './notices.js';
@@ -243,6 +248,15 @@ export function wakePrompt(input: WakePromptInput): WakePrompt {
 export const WAKE_POLL_MS = 2_000;
 /** What a round spends on markers, and the deferred buttons' cards, in all (§5.5 step 3). */
 export const ROUND_MARKER_MS = 30_000;
+/** Submits in one round, the longest waiting first (§5.2 step 6). */
+export const ROUND_WAKES = 5;
+const HOUR_MS = 60 * 60_000;
+
+/** A time as the waker's lines say it (§5.4): HH:MM in the zone, MM-DD HH:MM on another day than `now`'s there. */
+export function wakeTime(zone: string, at: number, now: number): string {
+  const wall = formatWall(zone, at);
+  return wall.slice(0, 10) === formatWall(zone, now).slice(0, 10) ? wall.slice(11) : wall.slice(5);
+}
 
 /** What the waker needs of a session's actor: `SessionActor`'s submit and queue. */
 export interface WakeActor {
@@ -341,6 +355,7 @@ export function markerText(n: number): string {
  */
 export class Waker {
   readonly #deps: WakerDeps;
+  readonly #clock: Clock;
   readonly #note: (line: string) => void;
   /** This boot's submits under way, by wake id (§5.2 step 1). */
   readonly #underWay = new Map<number, UnderWay>();
@@ -350,12 +365,17 @@ export class Waker {
   readonly #lapsed = new Set<string>();
   /** Conversations whose passing over has been said in the log, until a restart (§2.1): not admitted, or let go of. */
   readonly #said = new Set<string>();
+  /** Conversations told they are paused by the cap (§5.4), until a wake is next delivered there. */
+  readonly #paused = new Set<string>();
+  /** When the round under way began: its markers' budget is counted from it (§5.5 step 3). */
+  #roundStart = 0;
   #round: Promise<number> | undefined;
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
 
   constructor(deps: WakerDeps) {
     this.#deps = deps;
+    this.#clock = deps.clock ?? systemClock;
     const note = deps.note ?? (() => undefined);
     this.#note = (line) => {
       try {
@@ -421,15 +441,16 @@ export class Waker {
 
   async #roundOnce(): Promise<number> {
     if (this.#stopped) return 0;
+    this.#roundStart = this.#clock.now();
     let submits = 0;
     // Pending rows first (§5.2 step 1): each a batch already fixed.
     for (const row of pendingWakes(this.#deps.db, this.#deps.appId)) {
-      if (this.#stopped) break;
+      if (this.#stopped || submits >= ROUND_WAKES) break;
       if (row.submitBoot === BOOT_ID) continue;
       if (await this.#tryPending(row)) submits += 1;
     }
     for (const batch of await this.#batches()) {
-      if (this.#stopped) break;
+      if (this.#stopped || submits >= ROUND_WAKES) break;
       if (await this.#tryNew(batch)) submits += 1;
     }
     return submits;
@@ -565,8 +586,56 @@ export class Waker {
     }
   }
 
-  /** A new batch (§5.5 step 2): recorded, then tried. */
+  /**
+   * Whether a batch waits this round, nothing moving (§5.4, §5.5 steps 1 and 3):
+   * its session busy, its conversation at the per-hour cap, or, when it still
+   * needs its marker, the round's marker budget spent.
+   */
+  async #waits(at: ThreadAt, needsMarker: boolean): Promise<boolean> {
+    if (this.#busy(at)) return true;
+    if (await this.#capped(at)) return true;
+    return needsMarker && this.#clock.now() - this.#roundStart >= ROUND_MARKER_MS;
+  }
+
+  /**
+   * The session bound at the conversation's key is mid-turn (§5.4): it has an
+   * open turn, or its live actor has anything queued. A conversation with no
+   * session is idle.
+   */
+  #busy(at: ThreadAt): boolean {
+    const bound = resolveBinding(this.#deps.db, { channel: at.channel, appId: at.appId, conversationId: at.conversationId, threadId: at.threadId });
+    if (bound === undefined) return false;
+    if (openTurns(this.#deps.db, bound.sessionId).length > 0) return true;
+    return (this.#deps.registry.liveActor(bound.sessionId)?.queued ?? 0) > 0;
+  }
+
+  /**
+   * The per-hour cap (§5.4): `per_hour` delivered wakes of the conversation in the
+   * last hour, all principals together. Over it, the conversation is told once,
+   * until a wake is next delivered there, when the oldest of them turns an hour
+   * old; the line's uuid is keyed on the conversation and that time.
+   */
+  async #capped(at: ThreadAt): Promise<boolean> {
+    const now = this.#clock.now();
+    const delivered = wakesInLastHour(this.#deps.db, at, now);
+    if (delivered.length < this.#deps.settings.perHour) return false;
+    const key = conversationOf(at);
+    if (!this.#paused.has(key)) {
+      this.#paused.add(key);
+      const until = (delivered[0] ?? now) + HOUR_MS;
+      await this.#say(
+        at,
+        `wakes are paused here until ${wakeTime(this.#deps.zone, until, now)}: ${delivered.length} this hour`,
+        replyUuid(this.#deps.appId, `wake-cap:${key}`, String(until)),
+        `the pause line of ${describe(at)}`,
+      );
+    }
+    return true;
+  }
+
+  /** A new batch (§5.5 step 2): recorded, then tried, unless it waits. */
   async #tryNew(batch: Batch): Promise<boolean> {
+    if (await this.#waits(batch.at, true)) return false;
     const pairs = batch.covered.map((c) => [c.sub.id, c.event.id] as const);
     const recorded = this.#deps.service.recordWake({
       uuid: wakeBatchUuid(this.#deps.appId, pairs),
@@ -585,8 +654,9 @@ export class Waker {
     return this.#submit(recorded.wake, batch.covered);
   }
 
-  /** A pending row (§5.2 step 1): its batch as recorded, read again, then tried. */
+  /** A pending row (§5.2 step 1): its batch as recorded, read again, then tried, unless it waits. */
   async #tryPending(row: WakeRow): Promise<boolean> {
+    if (await this.#waits(rowAt(row), row.markerAt === null)) return false;
     const db = this.#deps.db;
     const covered: Covered[] = [];
     for (const o of wakeOutcomesOf(db, row.wakeId)) {
@@ -634,6 +704,9 @@ export class Waker {
     const { session } = deps.registry.bindOrCreate(key, owner);
     const actor = await deps.registry.actorFor(session.id, key);
     if (this.#stopped) return false;
+    // Busy again, with no await between this and the submit (§5.5 step 5): a
+    // person's message that came in meanwhile goes first, the row stays pending.
+    if (this.#busy(at)) return false;
     const nameOf = deps.people.chatNames();
     const prompt = wakePrompt({
       setter: row.principal,
@@ -696,6 +769,8 @@ export class Waker {
       return;
     }
     this.#underWay.delete(wakeId);
+    const wake = getWake(this.#deps.db, wakeId);
+    if (wake !== undefined) this.#paused.delete(conversationOf(rowAt(wake)));
   }
 
   /** The submit's promise settled without a delivery (§5.6): the attempt refused. */
