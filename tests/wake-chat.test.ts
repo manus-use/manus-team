@@ -180,6 +180,32 @@ describe('/kanban task wake', () => {
     expect(getTask(t.db, r.task.taskId)?.wakeBy).toBeNull();
   });
 
+  it('keeps a wake already on past a max_depth lowered since, and says it stays on, as its setter', async () => {
+    const { chat } = harness();
+    const taskId = created(await say(chat, 'task new Book the venue'));
+    await say(chat, `task wake ${taskId} on`, GUEST);
+    t.db.prepare('UPDATE kanban_tasks SET wake_depth = 5 WHERE task_id = ?').run(taskId);
+    expect(await say(chat, `task wake ${taskId} on`)).toBe(
+      `Wake stays on for \`${taskId}\`, run as Kevin Tu: it is 5 tasks deep, so it cannot be set again.`,
+    );
+    expect(getTask(t.db, taskId)?.wakeBy).toBe('lark:on_guest');
+  });
+
+  it('refuses a task another chat also follows, for on and off alike', async () => {
+    const { chat } = harness();
+    const taskId = created(await say(chat, 'task new Book the venue'));
+    t.db
+      .prepare(
+        `INSERT INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, created_at)
+         VALUES (?, 'lark', 'cli_app', 'oc_other', '', 0)`,
+      )
+      .run(taskId);
+    const refusal = `Not done: \`${taskId}\` is followed by another chat, so its wake is set there, or from the terminal`;
+    expect(await say(chat, `task wake ${taskId} on`)).toBe(refusal);
+    expect(await say(chat, `task wake ${taskId} off`)).toBe(refusal);
+    expect(getTask(t.db, taskId)?.wakeBy).toBeNull();
+  });
+
   it('answers its usage for anything but on or off', async () => {
     const { chat } = harness();
     for (const text of ['task wake', 'task wake k_one', 'task wake k_one maybe', 'task wake k_one on now']) {

@@ -639,8 +639,8 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
   const undecided = runs.find((r) => r.outcome === null);
   // Read only when the members table is there: a database not yet migrated has none (workflows spec §7).
   const member = memberOf(db, taskId);
-  // A database not yet migrated to 013 has no wakes (wake spec §4).
-  const lastWoke = hasWakeColumns(db) ? lastWokeOf(db, taskId) : undefined;
+  // None on a database not yet migrated to 013, which lastWokeOf reads as no wakes (wake spec §4).
+  const lastWoke = lastWokeOf(db, taskId);
   return {
     task,
     status: displayStatus({

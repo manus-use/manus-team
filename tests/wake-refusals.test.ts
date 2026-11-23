@@ -173,6 +173,42 @@ describe('a throw before the submit', () => {
     expect(h.wakes()[0]?.state).toBe('delivered');
   });
 
+  it('when wakeSubmitted refuses the stamp: nothing submitted, its entry gone, tried again after its pause and delivered', async () => {
+    h = wakeHarness();
+    const task = h.woken();
+    completed(task);
+    const a = actor();
+    const stamp = h.service.wakeSubmitted.bind(h.service);
+    let refuses = 1;
+    h.service.wakeSubmitted = (...args: Parameters<typeof stamp>) =>
+      refuses-- > 0 ? { ok: false, code: 'invalid', message: 'the row moved' } : stamp(...args);
+    expect(await h.round()).toBe(0);
+    expect(a.submits).toEqual([]);
+    const id = h.wakes()[0]?.wakeId;
+    expect(h.wakes()[0]).toMatchObject({ state: 'pending', attempt: 2, submitBoot: null, error: `wake ${id} was not stamped (the row moved)` });
+    // No entry is left under way: the row is neither refused as lost nor held, and goes once its pause is over.
+    await h.clock.delay(2_000);
+    expect(await h.round()).toBe(1);
+    expect(a.submits.map((r) => r.messageId)).toEqual([`wake:${h.wakes()[0]?.uuid}:2`]);
+    expect(h.wakes()[0]?.state).toBe('delivered');
+  });
+
+  it('when wakeSubmitted finds the row settled since: nothing submitted, nothing refused, and its entry gone', async () => {
+    h = wakeHarness();
+    const task = h.woken();
+    completed(task);
+    const a = actor();
+    const stamp = h.service.wakeSubmitted.bind(h.service);
+    let settled = 1;
+    h.service.wakeSubmitted = (...args: Parameters<typeof stamp>) => (settled-- > 0 ? { ok: true, submitted: false } : stamp(...args));
+    expect(await h.round()).toBe(0);
+    expect(a.submits).toEqual([]);
+    expect(h.wakes()[0]).toMatchObject({ state: 'pending', attempt: 1, submitBoot: null, error: null });
+    expect(await h.round()).toBe(1);
+    expect(a.submits.map((r) => r.messageId)).toEqual([`wake:${h.wakes()[0]?.uuid}`]);
+    expect(h.wakes()[0]?.state).toBe('delivered');
+  });
+
   it('in actorFor is a refusal', async () => {
     h = wakeHarness();
     const task = h.woken();

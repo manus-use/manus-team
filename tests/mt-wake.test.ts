@@ -27,6 +27,10 @@ const WAKES_OFF =
   'wakes are off on this gateway: an operator turns them on with kanban.wake.enabled: true in config.yaml, and a restart';
 const UNSEEN =
   'a wake set from the terminal runs as the owner, whom this gateway has not seen yet: the owner is known once they have used /kanban in Lark';
+const NO_APP_ID =
+  'a wake set from the terminal runs as the owner, who cannot be checked for talk tier here: this shell finds no lark.appId or LARK_APP_ID, which the people this bot has seen are kept by';
+const NO_OWNER =
+  'a wake set from the terminal runs as the owner, who cannot be checked for talk tier here: this shell finds no auth.owner or MT_OWNER_OPEN_ID, without which there is no talk allowlist to check against';
 
 afterEach(async () => {
   clearSecrets();
@@ -132,6 +136,30 @@ describe('mt kanban task wake', () => {
     expect((await kanban(['task', 'wake', id, 'off'])).code).toBe(0);
   });
 
+  it('keeps a wake already on past a max_depth lowered since, and says it stays on, as its setter', async () => {
+    await setup();
+    const kept = newTask(db, {
+      createdVia: { kind: 'chat', channel: 'lark', appId: 'cli_app', conversationId: 'oc_team', threadId: 'omt_topic', rootId: 'om_root' },
+      wake: { by: 'lark:on_kevin', depth: 5 },
+    });
+    expect(await kanban(['task', 'wake', kept.taskId, 'on'])).toEqual({
+      code: 0,
+      out: `wake stays on for ${kept.taskId}, run as lark:on_kevin: it is 5 tasks deep, so it cannot be set again`,
+      err: '',
+    });
+    expect(getTask(db, kept.taskId)?.wakeBy).toBe('lark:on_kevin');
+  });
+
+  it('refuses on with no app id, naming the setting this shell lacks', async () => {
+    const id = await setup({ lines: ['kanban:', '  enabled: true'] });
+    expect(await kanban(['task', 'wake', id, 'on'])).toEqual({ code: 1, out: '', err: `mt: ${NO_APP_ID}` });
+  });
+
+  it('refuses on with no owner, naming the setting this shell lacks', async () => {
+    const id = await setup();
+    expect(await fx.run(['kanban', 'task', 'wake', id, 'on'], { env: {} })).toEqual({ code: 1, out: '', err: `mt: ${NO_OWNER}` });
+  });
+
   it('takes on or off, and nothing else', async () => {
     const id = await setup();
     for (const argv of [['task', 'wake', id], ['task', 'wake', id, 'maybe'], ['task', 'wake', id, 'on', 'now']]) {
@@ -187,6 +215,15 @@ describe('a workflow at the terminal', () => {
     const j = JSON.parse((await kanban(['workflow', 'apply', file, '--chat', 'oc_team', '--json'])).out);
     expect((j.tasks as Array<{ task_id: string }>).map((t) => getTask(db, t.task_id)?.wakeBy)).toEqual([null]);
     expect(j.wake_note).toBe('the owner has not used /kanban in Lark yet, so the steps that ask for a wake are notice-only');
+  });
+
+  it("ends a start whose steps ask for a wake with the setting the shell lacks when it cannot name the owner, those members notice-only", async () => {
+    await setup();
+    const r = await fx.run(['kanban', 'workflow', 'start', 'brief', '--chat', 'oc_team', '--json'], { env: {} });
+    expect(r.code, r.err).toBe(0);
+    const j = JSON.parse(r.out);
+    expect((j.tasks as Array<{ task_id: string }>).map((t) => getTask(db, t.task_id)?.wakeBy)).toEqual([null, null]);
+    expect(j.wake_note).toBe(`${NO_OWNER}, so the steps that ask for a wake are notice-only`);
   });
 
   it('says the owner note alone when the owner is not yet known and no chat follows the start', async () => {

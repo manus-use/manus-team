@@ -1089,13 +1089,15 @@ export class KanbanChat {
    */
   #wake(taskId: string, on: boolean, by: string, key: BindingKey): string {
     const service = this.#deps.service;
-    const follows = service.followOf(taskId, key.appId);
-    if (follows !== null && follows.chat !== key.conversationId) {
+    // Every chat of this bot that follows the task must be this one: a wake set here wakes each of them, as the sender.
+    if (service.followsOf(taskId, key.appId).some((f) => f.chat !== key.conversationId)) {
       return `Not done: ${id(taskId)} is followed by another chat, so its wake is set there, or from the terminal`;
     }
     const r = service.setWake(taskId, on ? { on: true, as: by } : { on: false }, by, key.appId);
     if (!r.ok) return refused(r);
     if (!on) return `Wake is off for ${id(taskId)}: its outcomes are notices only.`;
+    // Already on past a max_depth lowered since (wake spec §5.4): it stays on, as its setter.
+    if (r.kept) return `Wake stays on for ${id(taskId)}, run as ${personText(r.task.wakeBy ?? by, this.#nameOf)}: it is ${r.task.wakeDepth} tasks deep, so it cannot be set again.`;
     if (r.tooDeep) return `${tooDeepLine(taskId, r.task.wakeDepth)}.`;
     const as = personText(by, this.#nameOf);
     return r.changed

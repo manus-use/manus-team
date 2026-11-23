@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { loadTeamSettings, WAKE_DEFAULTS, type Env, type TeamSettings, type WakeSettings } from '../config.js';
 import { processZone } from '../cron/schedule.js';
 import { tierReader } from '../db/grants.js';
-import { hasWakeColumns, wakeOfShell } from '../db/kanban-read.js';
+import { wakeOfShell } from '../db/kanban-read.js';
 import { openDb } from '../db/open.js';
 import { peopleOf, personByOpenId } from '../db/people.js';
 import { PeopleDirectory } from '../kanban/people.js';
@@ -299,7 +299,7 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     return person === undefined ? { ok: false, code: 'invalid', message: OWNER_UNSEEN } : { ok: true, principal: `lark:${person.unionId}` };
   };
   const marker = io.env[SESSION_MARKER];
-  const shell = marker === undefined || marker === '' ? undefined : { sessionId: marker, wake: hasWakeColumns(db) ? wakeOfShell(db, marker) : undefined };
+  const shell = marker === undefined || marker === '' ? undefined : { sessionId: marker, wake: wakeOfShell(db, marker) };
   const zone = settings.cron?.tz ?? processZone();
   return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, wake, owner, shell, zone, close: () => db.close() };
 }

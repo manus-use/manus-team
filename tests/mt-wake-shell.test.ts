@@ -126,7 +126,11 @@ describe('a woken turn\'s shell, cron off', () => {
   it('turns on the wake of a deeper task in its conversation as its setter, and refuses one not deeper, or elsewhere', async () => {
     const shallow = await setup(true);
     const deep = made((await shell(['task', 'new', 'Deeper', '--chat', 'oc_team', '--thread', 'omt_topic'])).out);
-    expect((await shell(['task', 'wake', deep, 'on'])).code).toBe(0);
+    expect(await shell(['task', 'wake', deep, 'on'])).toEqual({
+      code: 0,
+      out: `wake on for ${deep}: its outcomes start a turn in oc_team/omt_topic, as ${SETTER}, who set this woken turn's wake`,
+      err: '',
+    });
     expect(getTask(db, deep)?.wakeBy).toBe(SETTER);
     expect(await shell(['task', 'wake', shallow, 'on'])).toEqual({
       code: 1,
@@ -138,6 +142,29 @@ describe('a woken turn\'s shell, cron off', () => {
       wake: { by: null, depth: 3 },
     });
     expect(await shell(['task', 'wake', other.taskId, 'on'])).toEqual({ code: 1, out: '', err: `mt: ${OWN}` });
+  });
+
+  it('refuses a deeper task no chat follows, before any write', async () => {
+    await setup(true);
+    const alone = made((await shell(['task', 'new', 'Alone'])).out);
+    const before = eventsOf(db, alone).length;
+    expect(await shell(['task', 'wake', alone, 'on'])).toEqual({
+      code: 1,
+      out: '',
+      err: `mt: a wake needs a chat that follows the task, and no chat follows ${alone}: a chat is chosen when a task is made`,
+    });
+    expect(eventsOf(db, alone)).toHaveLength(before);
+  });
+
+  it('refuses a task its own conversation follows when another chat follows it too', async () => {
+    await setup(true);
+    const deep = made((await shell(['task', 'new', 'Deeper', '--chat', 'oc_team', '--thread', 'omt_topic'])).out);
+    db.prepare(
+      `INSERT INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, created_at)
+       VALUES (?, 'lark', 'cli_app', 'oc_other', '', ?)`,
+    ).run(deep, NOW);
+    expect(await shell(['task', 'wake', deep, 'on'])).toEqual({ code: 1, out: '', err: `mt: ${OWN}` });
+    expect(getTask(db, deep)?.wakeBy).toBeNull();
   });
 
   it("starts a workflow with --wake in its own conversation as its setter, one level deeper", async () => {

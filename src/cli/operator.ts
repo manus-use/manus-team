@@ -12,7 +12,7 @@ import { DEFAULT_BOARD, type BoardRow, type Contract, type CreatedVia, type Foll
 import { WORKER_LIMITS } from '../kanban/limits.js';
 import { visible } from '../names.js';
 import { parse, UsageError } from './args.js';
-import { loadOperator, operatorName, personHint, withBoard, type BoardAccess, type OpenOptions, type PeopleMissing } from './gate.js';
+import { loadOperator, operatorName, OWNER_UNSEEN, personHint, withBoard, type BoardAccess, type OpenOptions, type PeopleMissing } from './gate.js';
 import { ask } from './kanban.js';
 import type { MtIo } from './mt.js';
 import { BIDI, decodeUtf8, INVISIBLE } from '../text.js';
@@ -408,8 +408,10 @@ function startWakeOf(board: BoardAccess, all: boolean, flags: ChatFlags | undefi
     return w.ok && w.wake !== undefined ? { by: null, depth: w.wake.depth, all: false } : undefined;
   }
   const owner = board.owner();
-  // An owner not yet seen: the asking members are made notice-only, and the answer says so (wake spec §19.16).
-  return { by: owner.ok ? owner.principal : null, depth: 0, all: false };
+  if (owner.ok) return { by: owner.principal, depth: 0, all: false };
+  // An owner not yet seen: the asking members are made notice-only, and the answer says so (wake spec §19.16);
+  // an owner this shell cannot name for want of a setting says that setting instead (§3.2).
+  return { by: null, depth: 0, all: false, ...(owner.message === OWNER_UNSEEN ? {} : { note: `${owner.message}, so the steps that ask for a wake are notice-only` }) };
 }
 
 /** One task id, and nothing else. */
@@ -770,13 +772,16 @@ function wake(rest: readonly string[], io: MtIo): Promise<number> {
       // In an agent's shell, only a woken turn sets a wake, as its setter, on a deeper task of its own conversation (wake spec §3.2a).
       const w = b.shell.wake;
       if (w === undefined) return notWoken(b.shell.sessionId);
-      const f = storedFollows(service, b, taskId);
-      if (f !== null) {
-        if (f.chat !== w.conversationId || (f.thread ?? '') !== w.threadId) return refused({ code: 'invalid', message: ownConversation(w) });
-        const shown = service.show(taskId);
-        if (shown.ok && shown.view.task.wakeDepth <= w.depth) {
-          return refused({ code: 'invalid', message: `\`${taskId}\` is not deeper than this woken turn (depth ${w.depth}), so a woken turn cannot set its wake` });
-        }
+      // Fail closed: every chat of this bot that follows the task is checked, and none following, or no task to read, is refused here.
+      const follows = b.appId === undefined ? [] : service.followsOf(taskId, b.appId);
+      if (follows.length === 0) {
+        return refused({ code: 'invalid', message: `a wake needs a chat that follows the task, and no chat follows ${taskId}: a chat is chosen when a task is made` });
+      }
+      if (follows.some((f) => f.chat !== w.conversationId || (f.thread ?? '') !== w.threadId)) return refused({ code: 'invalid', message: ownConversation(w) });
+      const shown = service.show(taskId);
+      if (!shown.ok) return refused(shown);
+      if (shown.view.task.wakeDepth <= w.depth) {
+        return refused({ code: 'invalid', message: `\`${taskId}\` is not deeper than this woken turn (depth ${w.depth}), so a woken turn cannot set its wake` });
       }
       as = w.principal;
     } else if (on === 'on') {
@@ -789,10 +794,13 @@ function wake(rest: readonly string[], io: MtIo): Promise<number> {
     const t = r.task;
     const json = { task_id: t.taskId, wake: wakeJson(t) };
     if (as === undefined) return { ok: true, lines: [`wake off for ${t.taskId}`], json };
+    // Already on past a max_depth lowered since (wake spec §5.4): it stays on, as its setter.
+    if (r.kept) return { ok: true, lines: [`wake stays on for ${t.taskId}, run as ${t.wakeBy ?? ''}: it is ${t.wakeDepth} tasks deep, so it cannot be set again`], json };
     if (r.tooDeep) return { ok: true, lines: [`${t.taskId} is ${t.wakeDepth} tasks deep in woken turns, so it stays notice-only`], json };
     const f = storedFollows(service, b, t.taskId);
     const at = f === null ? '' : ` in ${f.chat}${f.thread === null ? '' : `/${f.thread}`}`;
-    return { ok: true, lines: [`wake on for ${t.taskId}: its outcomes start a turn${at}, as ${as} (the owner)`], json };
+    const whose = b.shell === undefined ? ' (the owner)' : ", who set this woken turn's wake";
+    return { ok: true, lines: [`wake on for ${t.taskId}: its outcomes start a turn${at}, as ${as}${whose}`], json };
   });
 }
 

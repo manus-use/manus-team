@@ -91,10 +91,6 @@ class Rollback extends Error {
   }
 }
 
-/**
- * txImmediate, for a change that may be refused: a refusal rolls back whatever
- * the change had written, so a refused change never leaves half of itself.
- */
 /** Why a wake is refused on a database the gateway has not yet migrated (wake spec §4.1). */
 const NOT_MIGRATED = 'the database is not yet migrated to version 13: start the gateway once, so it is migrated';
 
@@ -108,6 +104,10 @@ function unmigratedWake(d: Db, wake: NewWake | undefined, via: CreatedVia): Refu
   return refuse('invalid', NOT_MIGRATED);
 }
 
+/**
+ * txImmediate, for a change that may be refused: a refusal rolls back whatever
+ * the change had written, so a refused change never leaves half of itself.
+ */
 function tx<T extends object>(db: Db, fn: (d: Db) => Result<T>): Result<T> {
   try {
     return txImmediate(db, (d) => {
@@ -2448,7 +2448,8 @@ export type WakeChange = { on: true; as: string; maxDepth: number } | { on: fals
  * changes nothing and writes nothing (`changed` false: "already on"). A task no
  * chat of this bot follows cannot be woken, and is refused; a task whose depth
  * is `maxDepth` or more is left as it is, with the too-deep `wake_set`, its note
- * (`tooDeep`, §3.4). Off clears `wake_by`, needs no chat, and leaves the cursor
+ * (`tooDeep`, §3.4); one already on there, `max_depth` lowered since, keeps its
+ * wake and records nothing (`kept`, §5.4). Off clears `wake_by`, needs no chat, and leaves the cursor
  * where it is: the waker reads only tasks with wake on, and a later on sets it
  * again. Off on a task with wake off changes nothing.
  */
@@ -2459,34 +2460,34 @@ export function setWake(
   by: string,
   appId: string,
   now: number,
-): Result<{ task: TaskRow; changed: boolean; tooDeep: boolean }> {
+): Result<{ task: TaskRow; changed: boolean; tooDeep: boolean; kept: boolean }> {
   return tx(db, (d) => {
     const task = getTask(d, taskId);
     if (task === undefined) return refuse('not_found', `no task ${taskId}`);
     if (!change.on) {
-      if (task.wakeBy === null) return { ok: true, task, changed: false, tooDeep: false };
+      if (task.wakeBy === null) return { ok: true, task, changed: false, tooDeep: false, kept: false };
       d.prepare('UPDATE kanban_tasks SET wake_by = NULL WHERE task_id = ?').run(taskId);
       record(d, { taskId, kind: 'wake_set', actor: by, payload: { on: false } }, now);
-      return { ok: true, task: mustGet(d, taskId), changed: true, tooDeep: false };
+      return { ok: true, task: mustGet(d, taskId), changed: true, tooDeep: false, kept: false };
     }
     if (!hasWakeColumns(d)) return refuse('invalid', NOT_MIGRATED);
     const subs = subscriptionsOf(d, taskId).filter((s) => s.appId === appId);
     if (subs.length === 0) {
       return refuse('invalid', `a wake needs a chat that follows the task, and no chat follows ${taskId}: a chat is chosen when a task is made`);
     }
-    if (task.wakeBy === change.as) return { ok: true, task, changed: false, tooDeep: false };
+    if (task.wakeBy === change.as) return { ok: true, task, changed: false, tooDeep: false, kept: false };
     if (task.wakeDepth >= change.maxDepth) {
       // A wake already set stays as it is, though max_depth was lowered since (wake spec §5.4): nothing is recorded.
-      if (task.wakeBy !== null) return { ok: true, task, changed: false, tooDeep: true };
+      if (task.wakeBy !== null) return { ok: true, task, changed: false, tooDeep: true, kept: true };
       record(d, { taskId, kind: 'wake_set', actor: by, payload: { on: false, refused: 'too_deep', depth: task.wakeDepth } }, now);
-      return { ok: true, task: mustGet(d, taskId), changed: false, tooDeep: true };
+      return { ok: true, task: mustGet(d, taskId), changed: false, tooDeep: true, kept: false };
     }
     d.prepare('UPDATE kanban_tasks SET wake_by = ? WHERE task_id = ?').run(change.as, taskId);
     record(d, { taskId, kind: 'wake_set', actor: by, payload: { on: true, as: change.as, depth: task.wakeDepth } }, now);
     const latest = d.prepare<[string], { id: number }>('SELECT max(id) AS id FROM kanban_events WHERE task_id = ?').get(taskId)?.id ?? 0;
     const move = d.prepare('UPDATE kanban_subscriptions SET wake_cursor = ? WHERE id = ?');
     for (const s of subs) move.run(latest, s.id);
-    return { ok: true, task: mustGet(d, taskId), changed: true, tooDeep: false };
+    return { ok: true, task: mustGet(d, taskId), changed: true, tooDeep: false, kept: false };
   });
 }
 

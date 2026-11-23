@@ -289,6 +289,12 @@ export interface StartWake {
   by: string | null;
   depth: number;
   all: boolean;
+  /**
+   * The note said when `by` is null because the terminal could not name the
+   * owner for want of a setting (no app id, no owner), in place of
+   * `OWNER_UNSEEN_NOTICE_ONLY`, which is for an owner not yet seen (§3.2, §19.16).
+   */
+  note?: string;
 }
 
 /** The note a start's answer ends with when its steps ask for a wake while wakes are off (wake spec §3.4). */
@@ -610,9 +616,11 @@ export class KanbanService {
    * Turn a task's wake on or off (wake spec §3.1, §3.4), for this bot's
    * subscriptions: on runs its woken turns as `as`, set by `by`. Refused while
    * wakes are off, though off still works; a task too deep is left with wake
-   * off, `tooDeep`, for the caller's note. Who may ask is the caller's.
+   * off, `tooDeep`, for the caller's note; one already on there, `max_depth`
+   * lowered since, keeps its wake, `kept` as well (§5.4). Who may ask is the
+   * caller's.
    */
-  setWake(taskId: string, change: WakeRequest, by: string, appId: string): Result<{ task: TaskRow; changed: boolean; tooDeep: boolean }> {
+  setWake(taskId: string, change: WakeRequest, by: string, appId: string): Result<{ task: TaskRow; changed: boolean; tooDeep: boolean; kept: boolean }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
     if (change.on && !this.#wake.enabled) return board.refuse('wake_off', WAKES_OFF);
@@ -692,6 +700,17 @@ export class KanbanService {
   followOf(taskId: string, appId: string): { chat: string; thread: string | null } | null {
     const s = subscriptionsOf(this.#db, taskId).find((x) => x.channel === 'lark' && x.appId === appId);
     return s === undefined ? null : { chat: s.conversationId, thread: s.threadId === '' ? null : s.threadId };
+  }
+
+  /**
+   * Every chat that follows a task for this bot, as stored, the thread null at
+   * chat scope: each subscription a wake set on it would wake (wake spec §3.1,
+   * §3.2a), so a wake's caller checks them all, not only the first.
+   */
+  followsOf(taskId: string, appId: string): Array<{ chat: string; thread: string | null }> {
+    return subscriptionsOf(this.#db, taskId)
+      .filter((x) => x.appId === appId)
+      .map((s) => ({ chat: s.conversationId, thread: s.threadId === '' ? null : s.threadId }));
   }
 
   assign(taskId: string, assignee: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
@@ -1683,7 +1702,7 @@ export class KanbanService {
     const chatless = req.createdVia?.kind === 'operator' && req.follow === undefined;
     if (chatless && w.all) return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
     // An owner the terminal could not name: the members that ask are notice-only, with one note (§19.16), which wins over the no-chat note.
-    if (w.by === null) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: OWNER_UNSEEN_NOTICE_ONLY };
+    if (w.by === null) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: w.note ?? OWNER_UNSEEN_NOTICE_ONLY };
     // The steps' wake is the chat session's, and no chat follows the members: they are made notice-only, with a note (§19.16).
     if (chatless) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: NO_CHAT_NOTICE_ONLY };
     return { ok: true, wake: { by: w.by, depth: w.depth, all: w.all, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}) } };

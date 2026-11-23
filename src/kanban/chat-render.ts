@@ -166,12 +166,12 @@ const LIST_MAX = 30;
 /** The statuses `/kanban task list` shows with no filter: everything someone may still act on. */
 const ACTIVE: readonly DisplayStatus[] = ['running', 'reviewing', 'review', 'ready', 'todo', 'blocked'];
 
-/** `/kanban help`: every command, with the tier it needs (spec §9.1). */
 /** A task too deep in woken turns to wake (wake spec §3.4): the note of a wake's answer, and its notice. */
 export function tooDeepLine(taskId: string, depth: number): string {
   return `${id(taskId)} is ${depth} tasks deep in woken turns, so it stays notice-only`;
 }
 
+/** `/kanban help`: every command, with the tier it needs (spec §9.1). */
 export function renderHelp(): string {
   const operate = 'operator';
   const talk = 'anyone allowed';
@@ -329,11 +329,6 @@ export function waitingLine(
   return `waiting: ${whose} is at its ${escape('max_running')}, ${runs}`;
 }
 
-/**
- * `/kanban task show` (spec §9.1): the task, its contract, gates, runs, latest output
- * and comments. Its board is named once anything is on a board but `default`:
- * the task's, or the chat's it is shown in (spec §16).
- */
 /** What a Wake line needs of the gateway (wake spec §10): its switch, its zone, and now, for the day. */
 export interface WakeShow {
   enabled: boolean;
@@ -363,6 +358,11 @@ export function wakeLine(task: TaskRow, lastWoke: number | undefined, show: Wake
   return `${head}; last woke ${day ? at.slice(11) : at.slice(5)}`;
 }
 
+/**
+ * `/kanban task show` (spec §9.1): the task, its contract, gates, runs, latest output
+ * and comments. Its board is named once anything is on a board but `default`:
+ * the task's, or the chat's it is shown in (spec §16).
+ */
 export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard: string = DEFAULT_BOARD, nameOf?: NameOf, wake: WakeShow = defaultWakeShow()): string {
   const { task } = view;
   const board = task.board === DEFAULT_BOARD && chatBoard === DEFAULT_BOARD ? '' : ` · board: ${label(task.board)}`;
