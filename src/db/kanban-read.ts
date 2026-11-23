@@ -24,6 +24,9 @@ import type {
   Waiting,
   WakeEventRow,
   WakeRow,
+  DeferredButtonRow,
+  DeferredState,
+  DeferredWhy,
   WakeState,
 } from '../kanban/types.js';
 
@@ -1175,6 +1178,10 @@ export interface UnblockButtonReading {
   blockEvent: number;
   /** The event it was last redrawn for; null until then. */
   redrawnFor: number | null;
+  /** False for a block the message told of without its button, deferred by the waker (wake spec §5.9). */
+  hasButton: boolean;
+  /** For a row with no button: its deferred button's state, if its row was written. */
+  deferred?: DeferredState;
   /**
    * The first `unblocked` or `archived` event of the task after its block: how,
    * who lifted it, and when. An archive clears a block with no `unblocked` event.
@@ -1207,6 +1214,8 @@ interface UnblockButtonRaw {
   lift_actor: string | null;
   lift_at: number | null;
   lift_woken: number | null;
+  has_button: number;
+  deferred_state: string | null;
 }
 
 /**
@@ -1250,11 +1259,18 @@ export function liftOf(db: Db, taskId: string, blockEvent: number): Lift | undef
  * message with no record, or another bot's.
  */
 export function unblockMessage(db: Db, appId: string, messageId: string): UnblockMessageReading | undefined {
+  // `has_button` and the deferred buttons (migration 013) only where they exist: every row before them is a button.
+  const deferred = hasWakeColumns(db)
+    ? `b.has_button,
+              (SELECT d.state FROM kanban_deferred_buttons d
+                WHERE d.app_id = b.app_id AND d.task_id = b.task_id AND d.event_id = b.block_event LIMIT 1) AS deferred_state`
+    : '1 AS has_button, NULL AS deferred_state';
   const rows = db
     .prepare<[string, string], UnblockButtonRaw>(
       `SELECT b.message_id, b.channel, b.app_id, b.task_id, b.block_event, b.markdown, b.sent_at, b.redrawn_for,
               e.id AS lift_id, e.kind AS lift_kind, e.actor AS lift_actor, e.created_at AS lift_at,
-              json_extract(e.payload, '$.wake') IS NOT NULL AS lift_woken
+              json_extract(e.payload, '$.wake') IS NOT NULL AS lift_woken,
+              ${deferred}
          FROM kanban_unblock_buttons b
          LEFT JOIN kanban_events e ON e.id = (${liftIdOf('b.task_id', 'b.block_event')})
         WHERE b.message_id = ? AND b.app_id = ?
@@ -1273,6 +1289,8 @@ export function unblockMessage(db: Db, appId: string, messageId: string): Unbloc
       taskId: r.task_id,
       blockEvent: r.block_event,
       redrawnFor: r.redrawn_for,
+      hasButton: r.has_button !== 0,
+      ...(r.has_button === 0 && r.deferred_state !== null ? { deferred: r.deferred_state as DeferredState } : {}),
       ...(r.lift_id === null || r.lift_actor === null || r.lift_at === null
         ? {}
         : {
@@ -1532,4 +1550,58 @@ export function hasUnblockButton(db: Db, appId: string, taskId: string, blockEve
       )
       .get(appId, taskId, blockEvent)?.n !== 0
   );
+}
+
+// ---------------------------------------------------------------------------
+// Deferred Unblock buttons (wake spec §5.9)
+// ---------------------------------------------------------------------------
+
+interface DeferredButtonRaw {
+  subscription_id: number;
+  event_id: number;
+  task_id: string;
+  app_id: string;
+  held_at: number;
+  state: string;
+  why: string | null;
+  attempts: number;
+  message_id: string | null;
+  ended_at: number | null;
+}
+
+const DEFERRED_COLS = 'subscription_id, event_id, task_id, app_id, held_at, state, why, attempts, message_id, ended_at';
+
+function decodeDeferred(r: DeferredButtonRaw): DeferredButtonRow {
+  return {
+    subscriptionId: r.subscription_id,
+    eventId: r.event_id,
+    taskId: r.task_id,
+    appId: r.app_id,
+    heldAt: r.held_at,
+    state: r.state as DeferredState,
+    why: r.why as DeferredWhy | null,
+    attempts: r.attempts,
+    messageId: r.message_id,
+    endedAt: r.ended_at,
+  };
+}
+
+/** A deferred button, by its subscription and block event; none on a database before migration 013. */
+export function deferredButton(db: Db, subscriptionId: number, eventId: number): DeferredButtonRow | undefined {
+  if (!hasWakeColumns(db)) return undefined;
+  const r = db
+    .prepare<[number, number], DeferredButtonRaw>(`SELECT ${DEFERRED_COLS} FROM kanban_deferred_buttons WHERE subscription_id = ? AND event_id = ?`)
+    .get(subscriptionId, eventId);
+  return r === undefined ? undefined : decodeDeferred(r);
+}
+
+/** This bot's deferred buttons still `held` or `due` (wake spec §5.9), the oldest held first: what each round releases and sends. */
+export function deferredButtons(db: Db, appId: string): DeferredButtonRow[] {
+  if (!hasWakeColumns(db)) return [];
+  return db
+    .prepare<[string], DeferredButtonRaw>(
+      `SELECT ${DEFERRED_COLS} FROM kanban_deferred_buttons WHERE app_id = ? AND state IN ('held', 'due') ORDER BY held_at, subscription_id, event_id`,
+    )
+    .all(appId)
+    .map(decodeDeferred);
 }

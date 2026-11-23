@@ -19,6 +19,9 @@ import type {
   CommentRow,
   Contract,
   CreatedVia,
+  DeferredKey,
+  DeferredState,
+  DeferredWhy,
   EndedOutcome,
   Follow,
   GateRow,
@@ -2390,8 +2393,13 @@ export interface UnblockMessage {
   appId: string;
   /** Its text as sent, masked. */
   markdown: string;
-  /** One for each button: the task, and the event that blocked it, which the button's `event` names. */
-  buttons: ReadonlyArray<{ taskId: string; blockEvent: number }>;
+  /**
+   * One for each button: the task, and the event that blocked it, which the
+   * button's `event` names. `hasButton` false for a block the message told of
+   * without its button, deferred by the waker (wake spec §5.9): recorded only so
+   * the redraw can add its lifted line.
+   */
+  buttons: ReadonlyArray<{ taskId: string; blockEvent: number; hasButton?: boolean }>;
 }
 
 /**
@@ -2402,13 +2410,22 @@ export interface UnblockMessage {
  */
 export function recordUnblockButtons(db: Db, message: UnblockMessage, now: number): Result<{ recorded: number }> {
   return tx(db, (d) => {
+    // `has_button` (migration 013) only where it exists: every row before it is a button.
+    const withFlag = hasWakeColumns(d);
+    if (!withFlag && message.buttons.some((b) => b.hasButton === false)) {
+      return refuse('invalid', 'a notice with no button is recorded only on a database at version 13');
+    }
     const insert = d.prepare(
-      `INSERT INTO kanban_unblock_buttons (message_id, channel, app_id, task_id, block_event, markdown, sent_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (message_id, task_id) DO NOTHING`,
+      withFlag
+        ? `INSERT INTO kanban_unblock_buttons (message_id, channel, app_id, task_id, block_event, markdown, sent_at, has_button)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (message_id, task_id) DO NOTHING`
+        : `INSERT INTO kanban_unblock_buttons (message_id, channel, app_id, task_id, block_event, markdown, sent_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (message_id, task_id) DO NOTHING`,
     );
     let recorded = 0;
     for (const b of message.buttons) {
-      recorded += insert.run(message.messageId, message.channel, message.appId, b.taskId, b.blockEvent, mask(message.markdown), now).changes;
+      const values = [message.messageId, message.channel, message.appId, b.taskId, b.blockEvent, mask(message.markdown), now];
+      recorded += insert.run(...values, ...(withFlag ? [b.hasButton === false ? 0 : 1] : [])).changes;
     }
     return { ok: true, recorded };
   });
@@ -2659,5 +2676,84 @@ export function passWake(db: Db, subscriptionId: number, cursor: number): Result
       .prepare('UPDATE kanban_subscriptions SET wake_cursor = ? WHERE id = ? AND wake_cursor < ?')
       .run(cursor, subscriptionId, cursor);
     return { ok: true, advanced: changes === 1 };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Deferred Unblock buttons (wake spec §5.9)
+// ---------------------------------------------------------------------------
+
+/**
+ * A block's Unblock button deferred for the agent's try (wake spec §5.9):
+ * written `held`, at most once a subscription and block event (`INSERT OR
+ * IGNORE`), by the notifier once a notice it rendered without that button has
+ * been sent, as a card or as text, `heldAt` the send's time. A batch sent again
+ * finds the row already there, and the first stands. Writes no event: the row is
+ * the waker's own, as a cursor is the notifier's.
+ */
+export function deferButton(db: Db, key: DeferredKey, heldAt: number): Result<{ deferred: boolean }> {
+  return tx(db, (d) => {
+    const sub = d
+      .prepare<[number], { task_id: string; account_id: string }>('SELECT task_id, account_id FROM kanban_subscriptions WHERE id = ?')
+      .get(key.subscriptionId);
+    if (sub === undefined) return refuse('not_found', `no subscription ${key.subscriptionId}`);
+    const event = d.prepare<[number], { task_id: string }>('SELECT task_id FROM kanban_events WHERE id = ?').get(key.eventId);
+    if (event === undefined || event.task_id !== sub.task_id) {
+      return refuse('invalid', `event ${key.eventId} is not of task ${sub.task_id}, which subscription ${key.subscriptionId} follows`);
+    }
+    const { changes } = d
+      .prepare(
+        `INSERT OR IGNORE INTO kanban_deferred_buttons (subscription_id, event_id, task_id, app_id, held_at, state)
+         VALUES (?, ?, ?, ?, ?, 'held')`,
+      )
+      .run(key.subscriptionId, key.eventId, sub.task_id, sub.account_id, heldAt);
+    return { ok: true, deferred: changes === 1 };
+  });
+}
+
+/** One move of a deferred button, only from the states named: answers whether it moved. */
+function moveButton(db: Db, key: DeferredKey, from: readonly DeferredState[], set: string, values: readonly unknown[]): Result<{ changed: boolean }> {
+  return tx(db, (d) => {
+    const { changes } = d
+      .prepare(
+        `UPDATE kanban_deferred_buttons SET ${set}
+          WHERE subscription_id = ? AND event_id = ? AND state IN (${from.map(() => '?').join(', ')})`,
+      )
+      .run(...values, key.subscriptionId, key.eventId, ...from);
+    return { ok: true, changed: changes === 1 };
+  });
+}
+
+/** A held button made due, with why (wake spec §5.9): the agent has had its try, or will get none. */
+export function buttonDue(db: Db, key: DeferredKey, why: DeferredWhy): Result<{ changed: boolean }> {
+  return moveButton(db, key, ['held'], "state = 'due', why = ?", [why]);
+}
+
+/** A held or due button whose block was lifted, by any path, or whose task was archived: no card is owed. */
+export function buttonLifted(db: Db, key: DeferredKey, now: number): Result<{ changed: boolean }> {
+  return moveButton(db, key, ['held', 'due'], "state = 'lifted', ended_at = ?", [now]);
+}
+
+/** A due button's card sent, with its message id. */
+export function buttonSent(db: Db, key: DeferredKey, messageId: string, now: number): Result<{ changed: boolean }> {
+  return moveButton(db, key, ['due'], "state = 'sent', message_id = ?, ended_at = ?", [messageId, now]);
+}
+
+/** A held or due button given up: its task is gone, or its card could not be sent. */
+export function buttonFailed(db: Db, key: DeferredKey, now: number): Result<{ changed: boolean }> {
+  return moveButton(db, key, ['held', 'due'], "state = 'failed', ended_at = ?", [now]);
+}
+
+/** One more send of a due button's card tried; answers the attempts so far. An ended row is not counted. */
+export function buttonTried(db: Db, key: DeferredKey): Result<{ attempts: number }> {
+  return tx(db, (d) => {
+    d.prepare(
+      "UPDATE kanban_deferred_buttons SET attempts = attempts + 1 WHERE subscription_id = ? AND event_id = ? AND state IN ('held', 'due')",
+    ).run(key.subscriptionId, key.eventId);
+    const row = d
+      .prepare<[number, number], { attempts: number }>('SELECT attempts FROM kanban_deferred_buttons WHERE subscription_id = ? AND event_id = ?')
+      .get(key.subscriptionId, key.eventId);
+    if (row === undefined) return refuse('not_found', `no deferred button for subscription ${key.subscriptionId} and event ${key.eventId}`);
+    return { ok: true, attempts: row.attempts };
   });
 }

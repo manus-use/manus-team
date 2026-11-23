@@ -342,6 +342,37 @@ export interface WakeRow {
   reactionTask: string | null;
 }
 
+/** Where a deferred Unblock button stands (wake spec §5.9): `held` for the agent, `due` to people, then ended once. */
+export type DeferredState = 'held' | 'due' | 'sent' | 'lifted' | 'failed';
+
+/** Why a deferred button is due (wake spec §5.9), which its card's text says. */
+export type DeferredWhy = 'tried' | 'not_woken' | 'turn_failed' | 'running' | 'restart';
+
+/** A deferred button's key: the subscription whose notice left it out, and the block event (wake spec §4.2). */
+export interface DeferredKey {
+  subscriptionId: number;
+  eventId: number;
+}
+
+/**
+ * A block's Unblock button the waker deferred (wake spec §5.9): written `held`
+ * once its notice, without the button, was sent; `due` once the agent has had
+ * its try or will get none; then `sent`, with its card, `lifted`, or `failed`.
+ */
+export interface DeferredButtonRow extends DeferredKey {
+  taskId: string;
+  appId: string;
+  /** When its notice, without the button, was sent. */
+  heldAt: number;
+  state: DeferredState;
+  why: DeferredWhy | null;
+  /** Sends of the button card tried. */
+  attempts: number;
+  /** The button card, once sent. */
+  messageId: string | null;
+  endedAt: number | null;
+}
+
 /** One outcome a woken turn was told of (wake spec §4.2). */
 export interface WakeEventRow {
   wakeId: number;

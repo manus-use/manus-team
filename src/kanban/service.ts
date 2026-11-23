@@ -75,8 +75,11 @@ import {
   type CommentRow,
   type CreateRequest,
   type CreatedVia,
+  type DeferredKey,
+  type DeferredWhy,
   type Follow,
   type GateRow,
+  type KanbanEvent,
   type Phase,
   type Refusal,
   type Rendering,
@@ -84,6 +87,7 @@ import {
   type Reporter,
   type Result,
   type RunRow,
+  type SubscriptionRow,
   type TaskRow,
   type Waiting,
   type WakeRow,
@@ -1341,6 +1345,41 @@ export class KanbanService {
       return board.refuse('invalid', 'a message id and a task id are text, and a block an event id');
     }
     return board.recordUnblockButtons(this.#db, message, this.#clock.now());
+  }
+
+  /**
+   * A notice rendered without a block's Unblock button, at the waker's word, has
+   * been sent (wake spec §5.9): the notifier writes the deferral, `held` since the
+   * send, before its cursor moves. A row already there stands.
+   */
+  deferButton(sub: SubscriptionRow, event: KanbanEvent, sentAt: number): Result<{ deferred: boolean }> {
+    return board.deferButton(this.#db, { subscriptionId: sub.id, eventId: event.id }, sentAt);
+  }
+
+  /** A held deferred button made due, with why (wake spec §5.9). */
+  buttonDue(key: DeferredKey, why: DeferredWhy): Result<{ changed: boolean }> {
+    return board.buttonDue(this.#db, key, why);
+  }
+
+  /** A deferred button whose block was lifted, or whose task was archived: no card (wake spec §5.9). */
+  buttonLifted(key: DeferredKey): Result<{ changed: boolean }> {
+    return board.buttonLifted(this.#db, key, this.#clock.now());
+  }
+
+  /** A due button's card sent (wake spec §5.9). */
+  buttonSent(key: DeferredKey, messageId: string): Result<{ changed: boolean }> {
+    if (!isText(messageId) || messageId === '') return board.refuse('invalid', 'a message id is text');
+    return board.buttonSent(this.#db, key, messageId, this.#clock.now());
+  }
+
+  /** A deferred button given up (wake spec §5.9). */
+  buttonFailed(key: DeferredKey): Result<{ changed: boolean }> {
+    return board.buttonFailed(this.#db, key, this.#clock.now());
+  }
+
+  /** One more send of a due button's card tried (wake spec §5.9). */
+  buttonTried(key: DeferredKey): Result<{ attempts: number }> {
+    return board.buttonTried(this.#db, key);
   }
 
   /** A recorded message's buttons were redrawn, or the redraw tried, for these lifts: never tried again. */
