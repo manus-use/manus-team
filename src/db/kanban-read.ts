@@ -1422,7 +1422,8 @@ export function dueWakes(db: Db, appId: string): DueWake[] {
         ORDER BY id`,
     )
     .all(appId)
-    .map((r) => ({ ...decodeSubscription(r), oldestDue: r.oldest_due ?? 0 }));
+    // `WHERE oldest_due IS NOT NULL` keeps only rows with a due event, so it is never null here.
+    .map((r) => ({ ...decodeSubscription(r), oldestDue: r.oldest_due as number }));
 }
 
 /** This bot's pending wakes, oldest first (wake spec §5.2 step 1). */
@@ -1456,6 +1457,7 @@ export function wakesInLastHour(db: Db, at: ThreadAt, now: number): number[] {
  * turn a person typed, between turns, and for a wake not yet delivered.
  */
 export function wakeOfShell(db: Db, sessionId: string): WakeRow | undefined {
+  if (!hasWakeColumns(db)) return undefined;
   const running = openTurns(db, sessionId).find((t) => t.state !== 'pending');
   if (running === undefined) return undefined;
   const r = db
@@ -1466,6 +1468,7 @@ export function wakeOfShell(db: Db, sessionId: string): WakeRow | undefined {
 
 /** When a task's latest delivered wake was delivered (wake spec §10), or none. */
 export function lastWokeOf(db: Db, taskId: string): number | undefined {
+  if (!hasWakeColumns(db)) return undefined;
   const r = db
     .prepare<[string], { at: number | null }>(
       `SELECT max(w.delivered_at) AS at FROM kanban_wake_events we JOIN kanban_wakes w ON w.wake_id = we.wake_id

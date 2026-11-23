@@ -1,12 +1,16 @@
+import { copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { advanceSubscription, advanceWake, archive, recordWake, setWake, unblock, wakeSubmitted } from '../src/db/kanban.js';
-import { dueWakes, eventsOf, liftOf, pendingWakes, subscriptionsOf, unblockMessage } from '../src/db/kanban-read.js';
+import { advanceSubscription, advanceWake, archive, createTask, recordWake, setWake, unblock, wakeSubmitted } from '../src/db/kanban.js';
+import { dueWakes, eventsOf, lastWokeOf, liftOf, pendingWakes, subscriptionsOf, unblockMessage, wakeOfShell } from '../src/db/kanban-read.js';
+import { migrate, openDb } from '../src/db/open.js';
 import { recordUnblockButtons } from '../src/db/kanban.js';
 import { bindSession, revokeBindingsAt } from '../src/db/bindings.js';
 import { createSession } from '../src/db/sessions.js';
 import type { BindingKey } from '../src/types.js';
 import type { TaskRow } from '../src/kanban/types.js';
-import { testDb, type TestDb } from './helpers/db.js';
+import { SCHEMA_DIR, testDb, type TestDb } from './helpers/db.js';
 import { ALICE, NOW, newTask } from './helpers/kanban.js';
 
 /**
@@ -139,11 +143,67 @@ describe('dueWakes', () => {
     expect(dueWakes(h.db, APP)).toEqual([expect.objectContaining({ taskId: a.taskId, oldestDue: later })]);
   });
 
+  it('lists a subscription whose task is gone from the board, so the waker can let it go', () => {
+    const task = woken();
+    const event = comment(task.taskId);
+    noticed(task);
+    h.db.pragma('foreign_keys = OFF');
+    h.db.prepare('DELETE FROM kanban_tasks WHERE task_id = ?').run(task.taskId);
+    h.db.pragma('foreign_keys = ON');
+    expect(dueWakes(h.db, APP)).toEqual([expect.objectContaining({ taskId: task.taskId, oldestDue: event })]);
+  });
+
+  it('does not hold the conversation for a stamped row whose key has no live binding', () => {
+    const a = woken();
+    const ea = comment(a.taskId);
+    noticed(a);
+    const sub = subscriptionsOf(h.db, a.taskId)[0]?.id ?? 0;
+    createSession(h.db, { id: 's_old', agentId: 'default', workspaceId: 'default', ownerPrincipal: ALICE }, NOW);
+    bindSession(h.db, KEY, 's_old', NOW);
+    const r = recordWake(h.db, { uuid: 'u1', channel: 'lark', appId: APP, conversationId: 'oc_chat', threadId: 'omt_1', principal: ALICE, depth: 0, events: [{ subscriptionId: sub, eventId: ea, taskId: a.taskId }] }, NOW);
+    if (!r.ok) throw new Error(r.message);
+    wakeSubmitted(h.db, r.wake.wakeId, 's_old', 'key-1', 'boot-a');
+    // The binding is revoked and none takes its place.
+    revokeBindingsAt(h.db, KEY, NOW + 1);
+    const later = comment(a.taskId);
+    noticed(a);
+    expect(dueWakes(h.db, APP)).toEqual([expect.objectContaining({ taskId: a.taskId, oldestDue: later })]);
+  });
+
   it('counts only events past the wake cursor', () => {
     const task = woken();
     comment(task.taskId);
     noticed(task);
     const [d] = dueWakes(h.db, APP);
     expect(d?.oldestDue).toBeGreaterThan(subscriptionsOf(h.db, task.taskId)[0]?.wakeCursor ?? 0);
+  });
+});
+
+describe('a database not yet migrated to 013', () => {
+  it("makes a chat's task with a chat type, followed as before, and reads no wake of a shell or a task", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mt-wake-due-'));
+    try {
+      const only = mkdtempSync(join(dir, 'schema-'));
+      for (const f of readdirSync(SCHEMA_DIR)) {
+        if (/^0(0[1-9]|1[0-2])_.*\.sql$/.test(f)) copyFileSync(join(SCHEMA_DIR, f), join(only, f));
+      }
+      const d = openDb(join(dir, 'team.db'));
+      try {
+        expect(migrate(d, only)).toBe(12);
+        const r = createTask(
+          d,
+          { title: 'a task', assignee: { kind: 'role', name: 'implementer' }, createdBy: ALICE, createdVia: { ...VIA_THREAD, chatType: 'group' } },
+          NOW,
+        );
+        if (!r.ok) throw new Error(r.message);
+        expect(subscriptionsOf(d, r.task.taskId)).toEqual([expect.objectContaining({ conversationId: 'oc_chat', threadId: 'omt_1', chatType: null })]);
+        expect(wakeOfShell(d, 's_any')).toBeUndefined();
+        expect(lastWokeOf(d, r.task.taskId)).toBeUndefined();
+      } finally {
+        d.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

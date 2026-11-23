@@ -95,6 +95,19 @@ class Rollback extends Error {
  * txImmediate, for a change that may be refused: a refusal rolls back whatever
  * the change had written, so a refused change never leaves half of itself.
  */
+/** Why a wake is refused on a database the gateway has not yet migrated (wake spec §4.1). */
+const NOT_MIGRATED = 'the database is not yet migrated to version 13: start the gateway once, so it is migrated';
+
+/**
+ * A refusal for a new task given a wake, or a depth, on a database not yet at
+ * version 13, which has no column to hold it. A run's follow-up inherits its
+ * creating task's, always off at depth 0 there, so it is never refused.
+ */
+function unmigratedWake(d: Db, wake: NewWake | undefined, via: CreatedVia): Refusal | undefined {
+  if (via.kind === 'run' || wake === undefined || (wake.by === null && wake.depth === 0) || hasWakeColumns(d)) return undefined;
+  return refuse('invalid', NOT_MIGRATED);
+}
+
 function tx<T extends object>(db: Db, fn: (d: Db) => Result<T>): Result<T> {
   try {
     return txImmediate(db, (d) => {
@@ -136,6 +149,8 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'step',
   // A wake's setter, a principal (wake spec §4.4).
   'as',
+  // The task an inherited wake came from (wake spec §9.1).
+  'from',
 ]);
 
 /** One row of the board's log, masked value by value. */
@@ -380,6 +395,8 @@ export function createTask(db: Db, t: NewTask, now: number): Result<{ task: Task
       if (p === undefined) return refuse('not_found', `no task ${parent} to be a parent`);
       if (p.board !== board) return refuse('other_board', onOtherBoard(parent, p.board, board));
     }
+    const unmigrated = unmigratedWake(d, t.wake, t.createdVia);
+    if (unmigrated !== undefined) return unmigrated;
     const taskId = insertTask(d, { ...t, board, createdFromTask, parents }, now);
     if (t.follow !== undefined) record(d, { taskId, kind: 'task_created_followed', actor: t.createdBy, payload: { by: t.createdBy } }, now);
     return { ok: true, task: mustGet(d, taskId), existing: false };
@@ -2250,6 +2267,10 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
     }
     const live = liveBoard(d, board);
     if (!live.ok) return refuse(live.code, `${live.message}; nothing is added to it`);
+    for (const m of members) {
+      const unmigrated = unmigratedWake(d, m.task.wake, instance.createdVia);
+      if (unmigrated !== undefined) return unmigrated;
+    }
     const instanceId = newWorkflowId();
     d.prepare(
       `INSERT INTO kanban_workflow_instances
@@ -2448,12 +2469,15 @@ export function setWake(
       record(d, { taskId, kind: 'wake_set', actor: by, payload: { on: false } }, now);
       return { ok: true, task: mustGet(d, taskId), changed: true, tooDeep: false };
     }
+    if (!hasWakeColumns(d)) return refuse('invalid', NOT_MIGRATED);
     const subs = subscriptionsOf(d, taskId).filter((s) => s.appId === appId);
     if (subs.length === 0) {
       return refuse('invalid', `a wake needs a chat that follows the task, and no chat follows ${taskId}: a chat is chosen when a task is made`);
     }
     if (task.wakeBy === change.as) return { ok: true, task, changed: false, tooDeep: false };
     if (task.wakeDepth >= change.maxDepth) {
+      // A wake already set stays as it is, though max_depth was lowered since (wake spec §5.4): nothing is recorded.
+      if (task.wakeBy !== null) return { ok: true, task, changed: false, tooDeep: true };
       record(d, { taskId, kind: 'wake_set', actor: by, payload: { on: false, refused: 'too_deep', depth: task.wakeDepth } }, now);
       return { ok: true, task: mustGet(d, taskId), changed: false, tooDeep: true };
     }
