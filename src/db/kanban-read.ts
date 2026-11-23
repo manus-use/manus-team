@@ -1,6 +1,7 @@
 import type { Db } from './open.js';
 import type { Dag } from '../kanban/dag.js';
 import { displayStatus, type DisplayStatus } from '../kanban/status.js';
+import { openTurns } from './turns.js';
 import { worktreeOf } from './workspaces.js';
 import type {
   ActivePhase,
@@ -1411,4 +1412,63 @@ export function pendingWakes(db: Db, appId: string): WakeRow[] {
     .prepare<[string], WakeRaw>("SELECT * FROM kanban_wakes WHERE app_id = ? AND state = 'pending' ORDER BY wake_id")
     .all(appId)
     .map(decodeWake);
+}
+
+/**
+ * The delivery times of a conversation's delivered wakes in the hour before
+ * `now`, oldest first (wake spec §5.4): the per-hour cap's count, all principals
+ * together, and when the oldest of them turns an hour old.
+ */
+export function wakesInLastHour(db: Db, at: ThreadAt, now: number): number[] {
+  return db
+    .prepare<[string, string, string, string, number], { delivered_at: number }>(
+      `SELECT delivered_at FROM kanban_wakes
+        WHERE app_id = ? AND channel = ? AND conversation_id = ? AND thread_id = ? AND state = 'delivered' AND delivered_at > ?
+        ORDER BY delivered_at`,
+    )
+    .all(at.appId, at.channel, at.conversationId, at.threadId, now - 60 * 60_000)
+    .map((r) => r.delivered_at);
+}
+
+/**
+ * The woken turn a shell is in (wake spec §9.1): the delivered wake whose session
+ * is the shell's marker's and whose turn key is that session's running turn's,
+ * the one open turn past `pending`, as the actor runs one at a time. None for a
+ * turn a person typed, between turns, and for a wake not yet delivered.
+ */
+export function wakeOfShell(db: Db, sessionId: string): WakeRow | undefined {
+  const running = openTurns(db, sessionId).find((t) => t.state !== 'pending');
+  if (running === undefined) return undefined;
+  const r = db
+    .prepare<[string, string], WakeRaw>("SELECT * FROM kanban_wakes WHERE session_id = ? AND turn_key = ? AND state = 'delivered'")
+    .get(sessionId, running.idempotencyKey);
+  return r === undefined ? undefined : decodeWake(r);
+}
+
+/** When a task's latest delivered wake was delivered (wake spec §10), or none. */
+export function lastWokeOf(db: Db, taskId: string): number | undefined {
+  const r = db
+    .prepare<[string], { at: number | null }>(
+      `SELECT max(w.delivered_at) AS at FROM kanban_wake_events we JOIN kanban_wakes w ON w.wake_id = we.wake_id
+        WHERE we.task_id = ? AND w.state = 'delivered'`,
+    )
+    .get(taskId);
+  return r?.at ?? undefined;
+}
+
+/**
+ * A task's unblocks by woken turns since it last completed, or since it was made
+ * (wake spec §9.2): its `unblocked` events with `wake` in their payload, whatever
+ * the block's kind.
+ */
+export function wokenUnblocksSince(db: Db, taskId: string): number {
+  return (
+    db
+      .prepare<[string, string], { n: number }>(
+        `SELECT count(*) AS n FROM kanban_events
+          WHERE task_id = ? AND kind = 'unblocked' AND json_extract(payload, '$.wake') IS NOT NULL
+            AND id > coalesce((SELECT max(id) FROM kanban_events WHERE task_id = ? AND kind = 'completed'), 0)`,
+      )
+      .get(taskId, taskId)?.n ?? 0
+  );
 }
