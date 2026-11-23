@@ -1624,6 +1624,9 @@ export function block(
  * Unblocking a `gave_up` task resets its failure count, and a `transient` one its
  * throttling count (spec §8.2): otherwise a person who fixed the cause would get
  * one attempt, or none, before the breaker tripped again.
+ *
+ * `wake`, for a woken turn's unblock (wake spec §9.3), is the wake's id, written
+ * into the event's payload; `by` is then the wake's principal.
  */
 export function unblock(
   db: Db,
@@ -1631,7 +1634,7 @@ export function unblock(
   by: string,
   comment: string | undefined,
   now: number,
-  opts: { blockedAt?: number } = {},
+  opts: { blockedAt?: number; wake?: number } = {},
 ): Result<{ task: TaskRow }> {
   return tx(db, (d) => {
     const task = getTask(d, taskId);
@@ -1666,9 +1669,13 @@ export function unblock(
               cooldown_until = CASE block_kind WHEN 'transient' THEN NULL ELSE cooldown_until END
         WHERE task_id = ?`,
     ).run(taskId);
-    record(d, { taskId, kind: 'unblocked', actor: by, payload: { kind: task.blockKind } }, now);
-    // An unblock is an operator's, so its comment steers the next run.
-    if (comment !== undefined && comment !== '') insertComment(d, taskId, by, comment, now, true);
+    // A woken turn's unblock names its wake, so the redraw says who lifted it truly (wake spec §9.3).
+    record(d, { taskId, kind: 'unblocked', actor: by, payload: { kind: task.blockKind, ...(opts.wake === undefined ? {} : { wake: opts.wake }) } }, now);
+    // An unblock is an operator's, so its comment steers the next run; a woken
+    // turn's says it was the board's, on that person's authority (wake spec §9.4).
+    if (comment !== undefined && comment !== '') {
+      insertComment(d, taskId, by, opts.wake === undefined ? comment : `(woken by the board) ${comment}`, now, true);
+    }
     return { ok: true, task: mustGet(d, taskId) };
   });
 }

@@ -1201,6 +1201,7 @@ interface UnblockButtonRaw {
   lift_kind: string | null;
   lift_actor: string | null;
   lift_at: number | null;
+  lift_woken: number | null;
 }
 
 /**
@@ -1214,22 +1215,26 @@ function liftIdOf(taskId: string, blockEvent: string): string {
   return `SELECT min(id) FROM kanban_events WHERE task_id = ${taskId} AND kind IN ('unblocked', 'archived') AND id > ${blockEvent}`;
 }
 
-/** A block's lift: the event that lifted it, its kind, who, and when. */
+/** A block's lift: the event that lifted it, its kind, who, when, and whether a woken turn did it (wake spec §9.3). */
 export interface Lift {
   eventId: number;
   kind: 'unblocked' | 'archived';
   actor: string;
   at: number;
+  woken: boolean;
 }
 
 /** The lift of a task's block (wake spec §5.3b), or none while it stands. */
 export function liftOf(db: Db, taskId: string, blockEvent: number): Lift | undefined {
   const r = db
-    .prepare<[string, number], { id: number; kind: string; actor: string; created_at: number }>(
-      `SELECT id, kind, actor, created_at FROM kanban_events WHERE id = (${liftIdOf('?', '?')})`,
+    .prepare<[string, number], { id: number; kind: string; actor: string; created_at: number; woken: number }>(
+      `SELECT id, kind, actor, created_at, json_extract(payload, '$.wake') IS NOT NULL AS woken
+         FROM kanban_events WHERE id = (${liftIdOf('?', '?')})`,
     )
     .get(taskId, blockEvent);
-  return r === undefined ? undefined : { eventId: r.id, kind: r.kind === 'archived' ? 'archived' : 'unblocked', actor: r.actor, at: r.created_at };
+  return r === undefined
+    ? undefined
+    : { eventId: r.id, kind: r.kind === 'archived' ? 'archived' : 'unblocked', actor: r.actor, at: r.created_at, woken: r.woken === 1 };
 }
 
 /**
@@ -1243,7 +1248,8 @@ export function unblockMessage(db: Db, appId: string, messageId: string): Unbloc
   const rows = db
     .prepare<[string, string], UnblockButtonRaw>(
       `SELECT b.message_id, b.channel, b.app_id, b.task_id, b.block_event, b.markdown, b.sent_at, b.redrawn_for,
-              e.id AS lift_id, e.kind AS lift_kind, e.actor AS lift_actor, e.created_at AS lift_at
+              e.id AS lift_id, e.kind AS lift_kind, e.actor AS lift_actor, e.created_at AS lift_at,
+              json_extract(e.payload, '$.wake') IS NOT NULL AS lift_woken
          FROM kanban_unblock_buttons b
          LEFT JOIN kanban_events e ON e.id = (${liftIdOf('b.task_id', 'b.block_event')})
         WHERE b.message_id = ? AND b.app_id = ?
@@ -1264,7 +1270,15 @@ export function unblockMessage(db: Db, appId: string, messageId: string): Unbloc
       redrawnFor: r.redrawn_for,
       ...(r.lift_id === null || r.lift_actor === null || r.lift_at === null
         ? {}
-        : { lift: { eventId: r.lift_id, kind: r.lift_kind === 'archived' ? ('archived' as const) : ('unblocked' as const), actor: r.lift_actor, at: r.lift_at } }),
+        : {
+            lift: {
+              eventId: r.lift_id,
+              kind: r.lift_kind === 'archived' ? ('archived' as const) : ('unblocked' as const),
+              actor: r.lift_actor,
+              at: r.lift_at,
+              woken: r.lift_woken === 1,
+            },
+          }),
     })),
   };
 }

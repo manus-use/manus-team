@@ -58,7 +58,7 @@ describe('liftOf', () => {
     expect(liftOf(h.db, task.taskId, block)).toBeUndefined();
     unblock(h.db, task.taskId, 'lark:on_bob', undefined, NOW + 5);
     const lift = eventsOf(h.db, task.taskId).at(-1);
-    expect(liftOf(h.db, task.taskId, block)).toEqual({ eventId: lift?.id, kind: 'unblocked', actor: 'lark:on_bob', at: NOW + 5 });
+    expect(liftOf(h.db, task.taskId, block)).toEqual({ eventId: lift?.id, kind: 'unblocked', actor: 'lark:on_bob', at: NOW + 5, woken: false });
   });
 
   it('counts an archive as a lift', () => {
