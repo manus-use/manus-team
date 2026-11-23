@@ -134,6 +134,8 @@ export interface WakeHarness {
   operate: Set<string>;
   names: Map<string, string>;
   waker: Waker;
+  /** A waker built anew on the same deps, the old one stopped: as a second waker in the same process (§5.2 step 1). */
+  rebuild(): Waker;
   /** A task in the thread, wake on as `by`, its notices sent. */
   woken(by?: string, extra?: Parameters<typeof newTask>[1]): TaskRow;
   /** An event on the task, as the board writes it, its notice sent unless `noticed` is false. */
@@ -160,7 +162,7 @@ export function wakeHarness(extra: Partial<WakerDeps> = {}): WakeHarness {
     [ALICE, 'Alice'],
     [BOB, 'Bob'],
   ]);
-  const waker = new Waker({
+  const deps: WakerDeps = {
     db,
     service,
     registry,
@@ -182,7 +184,8 @@ export function wakeHarness(extra: Partial<WakerDeps> = {}): WakeHarness {
     clock,
     note: (line) => notes.push(line),
     ...extra,
-  });
+  };
+  const waker = new Waker(deps);
   const h: WakeHarness = {
     t,
     db,
@@ -196,6 +199,11 @@ export function wakeHarness(extra: Partial<WakerDeps> = {}): WakeHarness {
     operate,
     names,
     waker,
+    rebuild() {
+      h.waker.stop();
+      h.waker = new Waker(deps);
+      return h.waker;
+    },
     woken(by = ALICE, more = {}) {
       const task = newTask(db, { createdVia: IN_THREAD, ...more });
       const r = setWake(db, task.taskId, { on: true, as: by, maxDepth: 5 }, by, APP, NOW);
@@ -222,7 +230,7 @@ export function wakeHarness(extra: Partial<WakerDeps> = {}): WakeHarness {
       }
     },
     async round() {
-      const n = await waker.wake();
+      const n = await h.waker.wake();
       await settle();
       return n;
     },

@@ -22,7 +22,7 @@ import {
 import type { Db } from '../db/open.js';
 import { formatWall } from '../cron/schedule.js';
 import { resolveBinding } from '../db/bindings.js';
-import { openTurns } from '../db/turns.js';
+import { openTurns, turnByKey } from '../db/turns.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
@@ -327,6 +327,8 @@ interface UnderWay {
   sessionId: string;
   key: string;
   settled?: { outcome: 'delivered' | 'refused'; error?: string };
+  /** A settling write has failed once, and been said: the next failures are not. */
+  failedOnce?: boolean;
 }
 
 function message(err: unknown): string {
@@ -455,7 +457,12 @@ export class Waker {
     // Pending rows first (§5.2 step 1): each a batch already fixed.
     for (const row of pendingWakes(this.#deps.db, this.#deps.appId)) {
       if (this.#stopped || submits >= ROUND_WAKES) break;
-      if (row.submitBoot === BOOT_ID) continue;
+      if (row.submitBoot === BOOT_ID) {
+        this.#underWayRow(row);
+        continue;
+      }
+      // Another boot's stamp (§5.7): its current attempt's turn says whether it was submitted.
+      if (row.sessionId !== null && this.#lookUp(row, row.sessionId)) continue;
       if (await this.#tryPending(row)) submits += 1;
     }
     for (const batch of await this.#batches()) {
@@ -597,6 +604,36 @@ export class Waker {
     } catch (err) {
       this.#note(`kanban: passing over subscription ${sub.id}'s events failed (${message(err)})`);
     }
+  }
+
+  /**
+   * A row this boot stamped (§5.2 step 1): never looked up, as its submit is
+   * under way here; settled from memory. One whose outcome is known has its
+   * settling write tried again until it lands; one still unsettled is left, and
+   * holds its conversation while its session is still the one bound at its key
+   * (`dueWakes`); one no entry holds, which only a waker built anew in the same
+   * process finds, is refused as lost, and retried.
+   */
+  #underWayRow(row: WakeRow): void {
+    const entry = this.#underWay.get(row.wakeId);
+    if (entry === undefined) {
+      this.#refused(row.wakeId, 'lost by the waker');
+      return;
+    }
+    if (entry.settled !== undefined) this.#settle(row.wakeId, entry);
+  }
+
+  /**
+   * Another boot's stamped row (§5.7), looked up by its current attempt's key:
+   * a turn with it means the attempt reached the actor before the stop, and the
+   * row is delivered, never submitted again, whatever the turn became. True
+   * when it was.
+   */
+  #lookUp(row: WakeRow, sessionId: string): boolean {
+    const messageId = row.attempt === 1 ? `wake:${row.uuid}` : `wake:${row.uuid}:${row.attempt}`;
+    if (turnByKey(this.#deps.db, sessionId, turnIdempotencyKey(this.#deps.appId, messageId)) === undefined) return false;
+    this.#writeDelivered(row.wakeId, (why) => this.#note(`kanban: wake ${row.wakeId} was delivered before a restart, but not recorded (${why})`));
+    return true;
   }
 
   /**
@@ -896,16 +933,7 @@ export class Waker {
     const entry = this.#underWay.get(wakeId);
     if (entry === undefined || entry.settled !== undefined) return;
     entry.settled = { outcome: 'delivered' };
-    const r = this.#deps.service.advanceWake(wakeId);
-    if (!r.ok) {
-      this.#note(`kanban: wake ${wakeId} was delivered, but not recorded (${r.message})`);
-      return;
-    }
-    this.#underWay.delete(wakeId);
-    const wake = getWake(this.#deps.db, wakeId);
-    if (wake === undefined) return;
-    this.#paused.delete(conversationOf(rowAt(wake)));
-    this.#backoff.delete(conversationOf(rowAt(wake)));
+    this.#settle(wakeId, entry);
   }
 
   /** The submit's promise settled without a delivery (§5.6): the attempt refused. */
@@ -914,7 +942,44 @@ export class Waker {
     const entry = this.#underWay.get(wakeId);
     if (entry === undefined || entry.settled !== undefined) return;
     entry.settled = { outcome: 'refused', error };
-    if (this.#refused(wakeId, error)) this.#underWay.delete(wakeId);
+    this.#settle(wakeId, entry);
+  }
+
+  /**
+   * The settling write of a submit's known outcome (§5.2 step 1): the entry is
+   * kept until it lands, so a failed write never leaves the row stamped for
+   * good; every round tries it again, said once, the first time.
+   */
+  #settle(wakeId: number, entry: UnderWay): void {
+    const settled = entry.settled;
+    if (settled === undefined) return;
+    const failed = (why: string): void => {
+      if (entry.failedOnce === true) return;
+      entry.failedOnce = true;
+      this.#note(`kanban: wake ${wakeId} was ${settled.outcome}, but not recorded (${why}); trying again each round`);
+    };
+    const landed = settled.outcome === 'delivered' ? this.#writeDelivered(wakeId, failed) : this.#refused(wakeId, settled.error ?? '', failed);
+    if (landed) this.#underWay.delete(wakeId);
+  }
+
+  /** `advanceWake`, and the conversation's pause and cap line forgotten. False when the write did not land. */
+  #writeDelivered(wakeId: number, failed: (why: string) => void): boolean {
+    try {
+      const r = this.#deps.service.advanceWake(wakeId);
+      if (!r.ok) {
+        failed(r.message);
+        return false;
+      }
+    } catch (err) {
+      failed(message(err));
+      return false;
+    }
+    const wake = getWake(this.#deps.db, wakeId);
+    if (wake !== undefined) {
+      this.#paused.delete(conversationOf(rowAt(wake)));
+      this.#backoff.delete(conversationOf(rowAt(wake)));
+    }
+    return true;
   }
 
   /**
@@ -923,16 +988,16 @@ export class Waker {
    * `WAKE_REFUSALS`th refusal in a row the batch dropped, with a line in the
    * conversation and one in the log. False when the write did not land.
    */
-  #refused(wakeId: number, error: string): boolean {
+  #refused(wakeId: number, error: string, failed: (why: string) => void = (why) => this.#note(`kanban: wake ${wakeId} was refused, but not recorded (${why})`)): boolean {
     let r: ReturnType<KanbanService['wakeRefused']>;
     try {
       r = this.#deps.service.wakeRefused(wakeId, error);
     } catch (err) {
-      this.#note(`kanban: wake ${wakeId} was refused, but not recorded (${message(err)})`);
+      failed(message(err));
       return false;
     }
     if (!r.ok) {
-      this.#note(`kanban: wake ${wakeId} was refused, but not recorded (${r.message})`);
+      failed(r.message);
       return false;
     }
     const wake = getWake(this.#deps.db, wakeId);
