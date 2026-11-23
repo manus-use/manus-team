@@ -91,7 +91,7 @@ export type WorkflowCommand =
   | { verb: 'workflow list' }
   | { verb: 'workflow instances'; all: boolean }
   | { verb: 'workflow show' | 'workflow archive'; instanceId: string }
-  | { verb: 'workflow preview' | 'workflow start'; name: string; pairs: ParamPair[] };
+  | { verb: 'workflow preview' | 'workflow start'; name: string; pairs: ParamPair[]; wake?: true };
 
 /** What `board set` changes (spec §16.6): a board's own max_running, or its workspace; null clears either. */
 export interface BoardSetting {
@@ -547,6 +547,9 @@ function parseNew(text: string): ParsedKanban {
   return { ok: true, command: out };
 }
 
+/** A start's last word, `wake`, alone: after white space, or as its only word. */
+const WAKE_WORD = /(?:^|\s)wake\s*$/i;
+
 /** What `/kanban workflow` says with no verb, or one it does not take. */
 const WORKFLOW_TAKES = `\`/kanban workflow\` takes ${WORKFLOW_VERBS.map((v) => `\`${USAGE[`workflow ${v}`]}\``).join(', ')}.`;
 
@@ -574,8 +577,11 @@ function parseWorkflow(text: string, mentions: readonly string[]): ParsedKanban 
       const command = `workflow ${verb}` as const;
       const [name, after] = shift(rest);
       if (name === '') return usage(command);
-      const pairs = parsePairs(after, mentions, command);
-      return pairs.ok ? { ok: true, command: { verb: command, name, pairs: pairs.pairs } } : pairs;
+      // A start's trailing bare word `wake` (wake spec §3.1), which no `key=value` pair can be: every member's wake.
+      const bare = verb === 'start' ? WAKE_WORD.exec(after) : null;
+      const pairs = parsePairs(bare === null ? after : after.slice(0, bare.index), mentions, command);
+      if (!pairs.ok) return pairs;
+      return { ok: true, command: { verb: command, name, pairs: pairs.pairs, ...(bare === null ? {} : { wake: true as const }) } };
     }
     default:
       return { ok: false, usage: WORKFLOW_TAKES };

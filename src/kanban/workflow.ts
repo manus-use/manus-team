@@ -65,6 +65,8 @@ export interface WorkflowStep {
   gates: WorkflowGate[];
   parents: string[];
   forEach: string | undefined;
+  /** `wake: true` (wake spec §3.1): its task's outcomes wake whoever starts it; default false. */
+  wake: boolean;
 }
 
 export interface Workflow {
@@ -120,6 +122,7 @@ const STEP_KEYS = [
   'gates',
   'parents',
   'for_each',
+  'wake',
 ] as const;
 
 /** The for_each item's name, which no param may take (workflows spec §1). */
@@ -271,6 +274,8 @@ function stepOf(name: string, value: unknown, path: string): WorkflowStep {
   if (!Array.isArray(parentsRaw) || !parentsRaw.every((p) => typeof p === 'string')) {
     fail(`${place}.parents is a list of step names`);
   }
+  const wake = map['wake'] ?? false;
+  if (typeof wake !== 'boolean') fail(`${place}.wake is true or false`);
   return {
     name,
     title: text(map['title'], `${place}.title`),
@@ -286,6 +291,7 @@ function stepOf(name: string, value: unknown, path: string): WorkflowStep {
     gates,
     parents: [...(parentsRaw as string[])],
     forEach: optionalText(map['for_each'], `${place}.for_each`),
+    wake: wake as boolean,
   };
 }
 
@@ -856,6 +862,7 @@ export function expand(w: Workflow, given: GivenParams, board: string, personOf?
         max_runtime_s: s.maxRuntimeS ?? null,
         parents: s.parents.flatMap((p) => refsOf.get(p) ?? []),
         gates: s.gates.map((g) => ({ command: g.command, timeout_s: g.timeoutS })),
+        ...(s.wake ? { wake: true as const } : {}),
       });
     }
     refsOf.set(s.name, refs);

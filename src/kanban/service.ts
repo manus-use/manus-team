@@ -232,6 +232,13 @@ export interface StartRequest {
   board?: string;
   /** The chat that follows every member, named at the terminal (workflows spec §18.1); the operator's alone. */
   follow?: Follow;
+  /**
+   * Its wake (wake spec §3.1): `by`, the principal its members' woken turns run
+   * as, at `depth`; every member's with `all` (chat's `wake`, the terminal's
+   * `--wake`), else only those whose step, or DAG task, says `wake: true`. A
+   * run's members inherit its task's, whatever this says.
+   */
+  wake?: StartWake;
 }
 
 /** A DAG to make (workflows spec §6), parsed but not yet checked: the terminal's file, or a run's `apply-dag` input without its own keys. */
@@ -244,13 +251,35 @@ export interface ApplyRequest {
   createdVia: CreatedVia;
   /** As a start's: not a key of the DAG, so its hash is the same wherever it is heard (workflows spec §18.1). */
   follow?: Follow;
+  /**
+   * Its wake (wake spec §3.1): `by`, the principal its members' woken turns run
+   * as, at `depth`; every member's with `all` (chat's `wake`, the terminal's
+   * `--wake`), else only those whose step, or DAG task, says `wake: true`. A
+   * run's members inherit its task's, whatever this says.
+   */
+  wake?: StartWake;
 }
+
+/** A start's or an apply's wake (wake spec §3.1): its setter and depth, and whether every member wakes or only those that ask. */
+export interface StartWake {
+  by: string;
+  depth: number;
+  all: boolean;
+}
+
+/** The note a start's answer ends with when its steps ask for a wake while wakes are off (wake spec §3.4). */
+export const STEPS_NOTICE_ONLY = 'wakes are off on this gateway (kanban.wake.enabled), so the steps that ask for one are notice-only';
+
+/** The note a terminal's start or apply with no chat ends with when its steps ask for the chat session's wake (wake spec §19.16). */
+export const NO_CHAT_NOTICE_ONLY = 'no chat follows this start (add --chat), so the steps that wake the chat session are notice-only';
 
 /** What a start or an apply made, or found made with its key: the instance, and its members with their tasks. */
 export interface WorkflowMade {
   instance: InstanceRow;
   tasks: Array<MemberRow & { task: TaskRow }>;
   existing: boolean;
+  /** `STEPS_NOTICE_ONLY`, for a start whose steps asked for a wake while wakes are off (wake spec §3.4), or `NO_CHAT_NOTICE_ONLY`, with no chat to follow them (§19.16). */
+  wakeNote?: string;
 }
 
 /** A dry run's answer (workflows spec §6): what the apply would make, or the instance its key already made; nothing written. */
@@ -1387,8 +1416,12 @@ export class KanbanService {
   }
 
   /** The writer's members of a checked DAG: each task's fields, its parents as earlier positions, its gates. */
-  #members(dag: Dag): board.NewMember[] {
+  #members(dag: Dag, wake?: board.NewWake & { all: boolean }): board.NewMember[] {
     const at = new Map(dag.tasks.map((t, i) => [t.ref, i]));
+    const wakeOf = (t: DagTask): board.NewWake | undefined => {
+      if (wake === undefined || (!wake.all && t.wake !== true)) return wake === undefined ? undefined : { by: null, depth: wake.depth };
+      return { by: wake.by, depth: wake.depth, ...(wake.tooDeep === true ? { tooDeep: true } : {}) };
+    };
     const as = (name: string | null): Assignee | null => (name === null ? null : { kind: name.includes(':') ? 'human' : 'role', name });
     return dag.tasks.map((t) => ({
       task: {
@@ -1402,6 +1435,7 @@ export class KanbanService {
         failureLimit: t.failure_limit,
         retryOnCrash: t.retry_on_crash,
         maxRuntimeS: t.max_runtime_s,
+        ...(wakeOf(t) === undefined ? {} : { wake: wakeOf(t) as board.NewWake }),
       },
       ref: t.ref,
       step: t.step,
@@ -1460,7 +1494,11 @@ export class KanbanService {
     if (!shaped.ok) return shaped;
     const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
+    const wake = this.#startWake(req, shaped.dag);
+    if (!wake.ok) return wake;
     return this.#write(shaped, {
+      ...(wake.wake === undefined ? {} : { wake: wake.wake }),
+      ...(wake.wakeNote === undefined ? {} : { wakeNote: wake.wakeNote }),
       name: shaped.workflow.name,
       source: 'start',
       board: on.board,
@@ -1502,8 +1540,12 @@ export class KanbanService {
     }
     const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
+    const wake = this.#startWake(req, shaped.dag);
+    if (!wake.ok) return wake;
     if (req.dryRun === true) return { ok: true, dryRun: true, existing: false, instanceId: null, board: on.board, tasks: shaped.dag.tasks };
     return this.#write(shaped, {
+      ...(wake.wake === undefined ? {} : { wake: wake.wake }),
+      ...(wake.wakeNote === undefined ? {} : { wakeNote: wake.wakeNote }),
       name: shaped.dag.workflow,
       source: 'apply',
       board: on.board,
@@ -1523,10 +1565,47 @@ export class KanbanService {
     return { ok: true, instance: keyed.instance, tasks: membersWithTasks(this.#db, keyed.instance.instanceId), existing: true };
   }
 
+  /**
+   * A start's or an apply's wake, checked (wake spec §3.1, §3.4): a wake for
+   * every member is refused while wakes are off, and at the terminal with no
+   * chat to follow them; a start whose steps ask for one while wakes are off,
+   * or at the terminal with no chat (§19.16), still starts, those members
+   * notice-only, with the note. A run's members
+   * inherit its task's in the writer, so nothing is asked for them.
+   */
+  #startWake(req: StartRequest | ApplyRequest, dag: Dag): Result<{ wake?: board.NewWake & { all: boolean }; wakeNote?: string }> {
+    const w = req.wake;
+    if (w === undefined || req.createdVia?.kind === 'run') return { ok: true };
+    const shape = wakeShapeRefused({ by: w.by, depth: w.depth });
+    if (shape !== undefined) return shape;
+    const asked = w.all || dag.tasks.some((t) => t.wake === true);
+    if (!asked) return { ok: true, wake: { by: null, depth: w.depth, all: false } };
+    if (!this.#wake.enabled) {
+      if (w.all) return board.refuse('wake_off', WAKES_OFF);
+      return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: STEPS_NOTICE_ONLY };
+    }
+    if (req.createdVia?.kind === 'operator' && req.follow === undefined) {
+      if (w.all) return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
+      // The steps' wake is the chat session's, and no chat follows the members: they are made notice-only, with a note (§19.16).
+      return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: NO_CHAT_NOTICE_ONLY };
+    }
+    return { ok: true, wake: { by: w.by, depth: w.depth, all: w.all, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}) } };
+  }
+
   /** The one transaction (workflows spec §6 step 3). */
   #write(
     shaped: ShapedDag,
-    i: { name: string | null; source: 'start' | 'apply'; board: string; key: string | null; createdBy: string; createdVia: CreatedVia; follow?: Follow },
+    i: {
+      name: string | null;
+      source: 'start' | 'apply';
+      board: string;
+      key: string | null;
+      createdBy: string;
+      createdVia: CreatedVia;
+      follow?: Follow;
+      wake?: board.NewWake & { all: boolean };
+      wakeNote?: string;
+    },
   ): Result<WorkflowMade> {
     const r = board.applyDag(
       this.#db,
@@ -1541,11 +1620,11 @@ export class KanbanService {
         idempotencyKey: i.key,
         ...(i.follow === undefined ? {} : { follow: i.follow }),
       },
-      this.#members(shaped.dag),
+      this.#members(shaped.dag, i.wake),
       this.#clock.now(),
     );
     if (!r.ok) return r;
-    return { ok: true, instance: r.instance, tasks: r.members, existing: r.existing };
+    return { ok: true, instance: r.instance, tasks: r.members, existing: r.existing, ...(i.wakeNote === undefined ? {} : { wakeNote: i.wakeNote }) };
   }
 
   /** The workflow files as the directory holds them now (workflows spec §10): `list`'s. */

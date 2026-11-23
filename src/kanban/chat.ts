@@ -537,7 +537,7 @@ export class KanbanChat {
    * is answered in a thread of its own, the instance's, in both wordings, and
    * every member is held until the router says where its reply went.
    */
-  #startWorkflow(command: { name: string; pairs: readonly ParamPair[] }, by: string, message: InboundMessage, key: BindingKey): string | KanbanAnswer {
+  #startWorkflow(command: { name: string; pairs: readonly ParamPair[]; wake?: true }, by: string, message: InboundMessage, key: BindingKey): string | KanbanAnswer {
     const board = this.#deps.service.chatBoard(chatAt(key));
     if (board.archivedAt !== null) {
       return `This chat is on board ${boardName(board)}, which is archived: \`/kanban board use <board>\` moves it to another first.`;
@@ -550,6 +550,8 @@ export class KanbanChat {
       createdBy: by,
       createdVia: this.#via(message, key),
       board: board.name,
+      // As the sender (wake spec §3.2): every member with `wake`, else the steps that ask for one.
+      wake: { by, depth: 0, all: command.wake === true },
     });
     if (!r.ok) return refused(r);
     if (r.existing) return `Already started, as ${id(r.instance.instanceId)}.`;
@@ -568,7 +570,9 @@ export class KanbanChat {
   }
 
   #started(made: WorkflowMade, where: 'thread' | 'chat'): string {
-    return renderStarted(startedReply(made), where, (a) => this.#whom(a), this.#nameOf);
+    const reply = renderStarted(startedReply(made), where, (a) => this.#whom(a), this.#nameOf);
+    // A start whose steps ask for a wake while wakes are off ends with the note (wake spec §3.4).
+    return made.wakeNote === undefined ? reply : `${reply}\n\n${made.wakeNote}`;
   }
 
   /**

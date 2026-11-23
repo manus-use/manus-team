@@ -141,7 +141,7 @@ describe('a DAG, at the top level', () => {
       message: 'a DAG takes no key "name" (it takes format, workflow, params, board, tasks)',
     });
     expect(refused(tiny({ colour: 'red' })).message).toBe(
-      'tasks[0] takes no key "colour" (it takes ref, step, item, title, body, assignee, reviewer, workspace, priority, contract, failure_limit, retry_on_crash, max_runtime_s, parents, gates)',
+      'tasks[0] takes no key "colour" (it takes ref, step, item, title, body, assignee, reviewer, workspace, priority, contract, failure_limit, retry_on_crash, max_runtime_s, parents, gates, wake)',
     );
     expect(refused(tiny({ contract: { outcome: 'x', colour: 'red' } })).message).toBe(
       'tasks[0] (a).contract takes no key "colour" (it takes outcome, verification, constraints, boundaries, stop_when)',

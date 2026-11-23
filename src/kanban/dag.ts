@@ -69,6 +69,11 @@ export interface DagTask {
   max_runtime_s: number | null;
   parents: string[];
   gates: DagGate[];
+  /**
+   * `"wake": true` (wake spec §3.1): the task's outcomes wake whoever makes it.
+   * Present only when true, so a DAG without wakes keeps its canonical form, and its hash.
+   */
+  wake?: true;
 }
 
 export interface Dag {
@@ -103,6 +108,7 @@ const TASK_KEYS = [
   'max_runtime_s',
   'parents',
   'gates',
+  'wake',
 ] as const;
 const GATE_KEYS = ['command', 'timeout_s'] as const;
 
@@ -299,6 +305,8 @@ function taskShape(raw: unknown, i: number, refs: ReadonlySet<string>, from: Dag
     }
     gates.push({ command: gate.command, timeout_s: timeoutS as number });
   }
+  const wake = raw.wake ?? false;
+  if (typeof wake !== 'boolean') return refuse('invalid', `${place}.wake is true or false`);
   const task: DagTask = {
     ref,
     step,
@@ -314,6 +322,7 @@ function taskShape(raw: unknown, i: number, refs: ReadonlySet<string>, from: Dag
     max_runtime_s: maxRuntime.value,
     parents: [...parents],
     gates,
+    ...(wake ? { wake: true as const } : {}),
   };
   if (from === 'run') {
     const set = (Object.keys(RUN_DEFAULTS) as (keyof typeof RUN_DEFAULTS)[]).filter((key) => task[key] !== RUN_DEFAULTS[key]);
@@ -434,6 +443,7 @@ function canonicalObject(dag: Dag): Record<string, unknown> {
         max_runtime_s: t.max_runtime_s,
         parents: t.parents,
         gates: t.gates.map((g) => ({ command: g.command, timeout_s: g.timeout_s })),
+        ...(t.wake === true ? { wake: true } : {}),
       };
     }),
   };

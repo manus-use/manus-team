@@ -2169,7 +2169,7 @@ const STARTED_TASKS = 30;
 export interface NewMember {
   task: Pick<
     NewTask,
-    'title' | 'body' | 'contract' | 'assignee' | 'reviewer' | 'workspace' | 'priority' | 'failureLimit' | 'retryOnCrash' | 'maxRuntimeS'
+    'title' | 'body' | 'contract' | 'assignee' | 'reviewer' | 'workspace' | 'priority' | 'failureLimit' | 'retryOnCrash' | 'maxRuntimeS' | 'wake'
   >;
   ref: string;
   step: string;
