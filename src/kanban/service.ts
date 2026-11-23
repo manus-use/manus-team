@@ -439,6 +439,10 @@ const RUN_KEY = 'run-task:';
 const CHAT_KEY = 'lark:';
 /** The operator's `mt kanban task new --key <k>`, stored as `operator:<k>`, so it never meets chat's or a run's. */
 const OPERATOR_KEY = 'operator:';
+/** A reaction task's key, `wake:<uuid>` (wake spec §19.3): the waker's own namespace, which no other creator may use. */
+const WAKE_KEY = 'wake:';
+/** Why the service makes no task by a wake: the waker writes a reaction task itself (wake spec §19.3). */
+const BY_A_WAKE = 'a task made by a wake is the waker\'s own: no other caller makes one';
 
 /**
  * Why a `follow` is refused (kanban spec §22.1, workflows spec §18.1), or
@@ -580,6 +584,7 @@ export class KanbanService {
     // The checks a task gets however it is made (workflows spec §15), then its key, which reads the database.
     const checked = checkTask(req, this.#facts());
     if (!checked.ok) return checked;
+    if (req.createdVia.kind === 'wake') return board.refuse('invalid', BY_A_WAKE);
     const follow = followRefused(req.follow, req.createdVia);
     if (follow !== undefined) return follow;
     const wake = this.#newWake(req);
@@ -1680,6 +1685,7 @@ export class KanbanService {
   startWorkflow(req: StartRequest): Result<WorkflowMade> {
     if (!isRecord(req)) return board.refuse('invalid', 'a start is an object');
     if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
+    if (req.createdVia?.kind === 'wake') return board.refuse('invalid', BY_A_WAKE);
     const follow = followRefused(req.follow, req.createdVia);
     if (follow !== undefined) return follow;
     const on = this.#boardFor(req.createdVia, req.board);
@@ -1716,6 +1722,7 @@ export class KanbanService {
    */
   applyDag(req: ApplyRequest): Result<WorkflowMade | WorkflowDryRun> {
     if (!isRecord(req)) return board.refuse('invalid', 'an apply is an object');
+    if (req.createdVia?.kind === 'wake') return board.refuse('invalid', BY_A_WAKE);
     const shaped = checkDagShape(req.dag, req.createdVia?.kind === 'run' ? 'run' : 'terminal');
     if (!shaped.ok) return shaped;
     const follow = followRefused(req.follow, req.createdVia);
@@ -2007,6 +2014,9 @@ export class KanbanService {
     if (redactKnownSecrets(key) !== key) return board.refuse('invalid', 'an idempotency key holds a known secret');
     if (key.startsWith(RUN_KEY)) {
       return board.refuse('invalid', `an idempotency key starting ${RUN_KEY} is the board's own`);
+    }
+    if (key.startsWith(WAKE_KEY)) {
+      return board.refuse('invalid', `an idempotency key starting ${WAKE_KEY} is the waker's own`);
     }
     if (via.kind !== 'chat' && key.startsWith(CHAT_KEY)) {
       return board.refuse('invalid', `an idempotency key starting ${CHAT_KEY} is for chat`);

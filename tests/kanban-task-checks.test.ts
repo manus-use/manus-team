@@ -57,7 +57,7 @@ const WRONG = {
 const STEPS: Array<[Record<string, unknown>, string, string]> = [
   [{}, 'invalid', 'a task needs a title'],
   [{ title: 'Write the notes' }, 'invalid', 'created_by is text'],
-  [{ createdBy: ALICE }, 'invalid', 'created_via is a chat, with text fields, a run id, or the operator'],
+  [{ createdBy: ALICE }, 'invalid', 'created_via is a chat, with text fields, a run id, the operator, or a wake id'],
   [{ createdVia: VIA }, 'invalid', 'a body is text'],
   [{ body: 'The body.' }, 'invalid', 'a workspace is a name'],
   [{ workspace: 'nowhere' }, 'invalid', 'a board is a name'],

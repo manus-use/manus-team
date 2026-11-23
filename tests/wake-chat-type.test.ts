@@ -47,6 +47,6 @@ describe("a subscription's chat type", () => {
     const check = (createdVia: unknown) => checkTask({ title: 'x', createdBy: ALICE, createdVia } as never, facts);
     expect(check(GROUP)).toMatchObject({ ok: true });
     expect(check(DM)).toMatchObject({ ok: true });
-    expect(check({ ...VIA, chatType: 'topic' })).toEqual({ ok: false, code: 'invalid', message: 'created_via is a chat, with text fields, a run id, or the operator' });
+    expect(check({ ...VIA, chatType: 'topic' })).toEqual({ ok: false, code: 'invalid', message: 'created_via is a chat, with text fields, a run id, the operator, or a wake id' });
   });
 });

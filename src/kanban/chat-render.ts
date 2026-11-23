@@ -1098,10 +1098,11 @@ export function renderInstances(
   return fitted([`Workflow instances${on}:`], lines, past, (more) => `… and ${more} more.`);
 }
 
-/** How an instance was made, as `show` says it: in chat, at the terminal, or by a run, by its task. */
+/** How an instance was made, as `show` says it: in chat, at the terminal, by a wake (wake spec §19.12), or by a run, by its task. */
 function howMade(via: { kind: string }, fromTask: string | null): string {
   if (via.kind === 'chat') return 'in chat';
   if (via.kind === 'operator') return 'at the terminal';
+  if (via.kind === 'wake') return fromTask === null ? 'by a wake' : `by a wake of ${id(fromTask)}`;
   return fromTask === null ? 'by a run' : `by a run of ${id(fromTask)}`;
 }
 

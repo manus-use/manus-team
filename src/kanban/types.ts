@@ -79,7 +79,9 @@ export type CreatedVia =
       chatType?: 'p2p' | 'group';
     }
   | { kind: 'run'; runId: string }
-  | { kind: 'operator' };
+  | { kind: 'operator' }
+  /** A reaction task (wake spec §19.3): made by the waker for a role's wake, `wakeId` its `kanban_wakes` row. */
+  | { kind: 'wake'; wakeId: number };
 
 /**
  * A chat the terminal names to follow what it makes (kanban spec §22.1,

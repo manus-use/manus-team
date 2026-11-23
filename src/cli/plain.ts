@@ -389,7 +389,9 @@ export function instanceText(view: {
       ? 'in chat'
       : instance.createdVia.kind === 'operator'
         ? 'at the terminal'
-        : `by a run of ${view.members[0]?.task.createdFromTask ?? 'a task'}`;
+        : instance.createdVia.kind === 'wake'
+          ? `by a wake of ${view.members[0]?.task.createdFromTask ?? 'a task'}`
+          : `by a run of ${view.members[0]?.task.createdFromTask ?? 'a task'}`;
   const out = [
     `${line(instance.name ?? '(no workflow)', 80)} (${instance.instanceId}): ${view.status === 'blocked' ? `blocked (${view.blocked})` : view.status}, ${membersDone(view)}, on board ${line(instance.board, 80)}`,
     ...(view.description === undefined ? [] : [line(view.description, 400)]),
