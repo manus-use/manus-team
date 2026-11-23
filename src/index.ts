@@ -361,6 +361,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     appId: config.lark.appId,
     // The configuration's lists and the grant, as the authorizer holds them, for a person named by principal (tier grants spec §4.3).
     canTalk: (person) => tiersOf(config.auth, person.openId, authorizer.grantOf(person.unionId)).talk,
+    // Operate as the authorizer judges it, a grant counting and operate still needing talk (wake spec §13).
+    canOperate: (person) => tiersOf(config.auth, person.openId, authorizer.grantOf(person.unionId)).operate,
   });
   // /auth, always on: the tiers are the gateway's, whatever kanban.enabled and cron.enabled say (tier grants spec §6.1).
   const authChat = new AuthChat({ db, appId: config.lark.appId, authorizer, auth: config.auth, people, zone, note });

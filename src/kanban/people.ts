@@ -28,6 +28,12 @@ export interface PeopleDeps {
    * configuration's lists, or by their union_id's active grant.
    */
   canTalk(person: { openId: string | null; unionId: string }): boolean;
+  /**
+   * Whether a person has operate tier (wake spec §13, tier grants spec §4.3),
+   * judged as `canTalk` is: in the configuration's lists or by their grant, and
+   * never without talk. Absent, nobody named by principal has it.
+   */
+  canOperate?(person: { openId: string | null; unionId: string }): boolean;
   clock?: Clock;
 }
 
@@ -79,6 +85,18 @@ export class PeopleDirectory implements People {
     if (unionId === undefined) return false;
     const person = personOf(this.#deps.db, this.#deps.appId, unionId);
     return this.#deps.canTalk({ openId: person?.openId ?? null, unionId });
+  }
+
+  /**
+   * Whether this person has operate tier now (wake spec §5.3, §9.2): by the
+   * open_id last seen for them, or by a grant of operate to their union_id.
+   * What a woken unblock needs of the person who set the wake.
+   */
+  canOperate(principal: string): boolean {
+    const unionId = unionIdOf(principal);
+    if (unionId === undefined || this.#deps.canOperate === undefined) return false;
+    const person = personOf(this.#deps.db, this.#deps.appId, unionId);
+    return this.#deps.canOperate({ openId: person?.openId ?? null, unionId });
   }
 
   /** The name Lark last gave for this person, if any: what a notice calls them. */
