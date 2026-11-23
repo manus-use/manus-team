@@ -9,6 +9,7 @@ import {
   getTask,
   getWake,
   hasUnblockButton,
+  liftOf,
   pendingWakes,
   threadRootOf,
   wakeEventsOf,
@@ -307,6 +308,8 @@ interface Covered {
   sub: SubscriptionRow;
   event: KanbanEvent;
   task: TaskRow;
+  /** The last event of its subscription read with it, for a batch passed over whole (§5.3b); its own id when not read in a round. */
+  last: number;
 }
 
 /** A conversation's batch for one principal (§5.2 step 4), not yet recorded. */
@@ -519,11 +522,12 @@ export class Waker {
         }
         if (!this.#deps.people.canTalk(task.wakeBy)) {
           this.#pass(sub, events);
-          await this.#lapse(c.at, task, outcomes[0]?.id ?? 0);
+          await this.#lapse(c.at, task.taskId, task.wakeBy, outcomes[0]?.id ?? 0);
           continue;
         }
         this.#lapsed.delete(task.taskId);
-        for (const event of outcomes) covered.push({ sub, event, task });
+        const last = events.at(-1)?.id ?? 0;
+        for (const event of outcomes) covered.push({ sub, event, task, last });
       }
       covered.sort((a, b) => a.event.id - b.event.id);
       const principal = covered[0]?.task.wakeBy;
@@ -563,11 +567,11 @@ export class Waker {
    * A setter who no longer has talk tier (§5.3): the conversation told once, by
    * chat name, else the principal; said again only after a check that passed.
    */
-  async #lapse(at: ThreadAt, task: TaskRow, firstEvent: number): Promise<void> {
-    if (this.#lapsed.has(task.taskId) || task.wakeBy === null) return;
-    this.#lapsed.add(task.taskId);
-    const setter = person(task.wakeBy, this.#deps.people.chatNames());
-    await this.#say(at, `wake is off for \`${task.taskId}\`: ${setter} no longer has talk tier`, replyUuid(this.#deps.appId, `wake-off:${task.taskId}`, `talk:${firstEvent}`), `the tier line of task ${task.taskId}`);
+  async #lapse(at: ThreadAt, taskId: string, principal: string, firstEvent: number): Promise<void> {
+    if (this.#lapsed.has(taskId)) return;
+    this.#lapsed.add(taskId);
+    const setter = person(principal, this.#deps.people.chatNames());
+    await this.#say(at, `wake is off for \`${taskId}\`: ${setter} no longer has talk tier`, replyUuid(this.#deps.appId, `wake-off:${taskId}`, `talk:${firstEvent}`), `the tier line of task ${taskId}`);
   }
 
   /** One of the waker's own lines to a conversation, replying to its thread's root (§8). */
@@ -583,9 +587,12 @@ export class Waker {
   /** A subscription's events passed over with no wake (§5.2 step 3): its `wake_cursor` past the last of them. */
   #pass(sub: SubscriptionRow, events: readonly KanbanEvent[]): void {
     const last = events.at(-1);
-    if (last === undefined) return;
+    if (last !== undefined) this.#passTo(sub, last.id);
+  }
+
+  #passTo(sub: SubscriptionRow, last: number): void {
     try {
-      const r = this.#deps.service.passWake(sub.id, last.id);
+      const r = this.#deps.service.passWake(sub.id, last);
       if (!r.ok) this.#note(`kanban: passing over subscription ${sub.id}'s events failed (${r.message})`);
     } catch (err) {
       this.#note(`kanban: passing over subscription ${sub.id}'s events failed (${message(err)})`);
@@ -641,6 +648,13 @@ export class Waker {
 
   /** A new batch (§5.5 step 2): recorded, then tried, unless it waits. */
   async #tryNew(batch: Batch): Promise<boolean> {
+    if (this.#unlifted(batch.covered).length === 0) {
+      // Every outcome a lifted block (§5.3b): no row, no marker, no turn.
+      const lastOf = new Map<number, { sub: SubscriptionRow; last: number }>();
+      for (const c of batch.covered) lastOf.set(c.sub.id, { sub: c.sub, last: Math.max(c.last, lastOf.get(c.sub.id)?.last ?? 0) });
+      for (const { sub, last } of lastOf.values()) this.#passTo(sub, last);
+      return false;
+    }
     if (await this.#waits(batch.at, true)) return false;
     const pairs = batch.covered.map((c) => [c.sub.id, c.event.id] as const);
     const recorded = this.#deps.service.recordWake({
@@ -671,7 +685,7 @@ export class Waker {
       const sub = getSubscription(db, o.subscriptionId);
       const task = getTask(db, o.event.taskId);
       if (sub === undefined || task === undefined) continue;
-      covered.push({ sub, event: o.event, task });
+      covered.push({ sub, event: o.event, task, last: o.event.id });
     }
     if (covered.length === 0) {
       // Its every task gone (§5.3a): dropped, so it holds its conversation no longer.
@@ -698,8 +712,15 @@ export class Waker {
       this.#note(`kanban: no channel ${row.channel} for wake ${row.wakeId}`);
       return false;
     }
+    // Checked again before the marker (§5.3a), and its lifted blocks dropped (§5.3b).
+    if (!this.#stillDue(row)) return false;
+    let left = this.#unlifted(covered);
+    if (left.length === 0) {
+      this.#closeLifted(row);
+      return false;
+    }
     if (row.markerAt === null) {
-      await this.#line(channel, targetOf(deps.db, at), markerText(covered.length), replyUuid(deps.appId, `wake:${row.uuid}`, 'marker'), `the marker of wake ${row.wakeId}`);
+      await this.#line(channel, targetOf(deps.db, at), markerText(left.length), replyUuid(deps.appId, `wake:${row.uuid}`, 'marker'), `the marker of wake ${row.wakeId}`);
       const marked = deps.service.wakeMarked(row.wakeId);
       if (!marked.ok) this.#note(`kanban: wake ${row.wakeId}'s marker was not recorded (${marked.message})`);
     }
@@ -723,11 +744,19 @@ export class Waker {
     // Busy again, with no await between this and the submit (§5.5 step 5): a
     // person's message that came in meanwhile goes first, the row stays pending.
     if (this.#busy(at)) return false;
+    // §5.3a's checks again, and the lifted blocks, after the marker's send and
+    // actorFor: every one a synchronous read, so nothing slips in before the submit.
+    if (!this.#stillDue(row)) return false;
+    left = this.#unlifted(left);
+    if (left.length === 0) {
+      this.#closeLifted(row);
+      return false;
+    }
     const nameOf = deps.people.chatNames();
     const prompt = wakePrompt({
       setter: row.principal,
       operate: deps.people.canOperate(row.principal),
-      outcomes: covered.map((c) => this.#outcome(c)),
+      outcomes: left.map((c) => this.#outcome(c)),
       nameOf,
       runAssignee: (runId) => getRun(deps.db, runId)?.assignee,
       blockRecurrenceLimit: deps.blockRecurrenceLimit,
@@ -769,6 +798,83 @@ export class Waker {
       (terminal) => this.#ended(row.wakeId, `the turn ended ${terminal} before its prompt reached the agent`),
       (err: unknown) => this.#ended(row.wakeId, message(err)),
     );
+    return true;
+  }
+
+  /** A batch's outcomes but its blocks lifted since (§5.3b): an `unblocked` or `archived` of the task after the block. */
+  #unlifted(covered: readonly Covered[]): Covered[] {
+    return covered.filter((c) => !isBlockOutcome(c.event) || liftOf(this.#deps.db, c.event.taskId, c.event.id) === undefined);
+  }
+
+  /** A pending row with nothing left but lifted blocks (§5.3b): closed `lifted`, its cursors moved, no line. */
+  #closeLifted(row: WakeRow): void {
+    this.#backoff.delete(conversationOf(rowAt(row)));
+    const r = this.#deps.service.liftedWake(row.wakeId);
+    if (!r.ok) this.#note(`kanban: wake ${row.wakeId} was not closed as lifted (${r.message})`);
+  }
+
+  /**
+   * A pending row checked again (§5.3a), each failure dropping it: its
+   * principal's talk tier lost, with the tier line for each of its tasks; a task
+   * whose wake is off or set by another now, archived, or no longer on the
+   * board, only those tasks' events passed, said in the log; the conversation no
+   * longer admitted, or let go of by the notifier, said once. True while it
+   * still stands. Every check is a synchronous read.
+   */
+  #stillDue(row: WakeRow): boolean {
+    const deps = this.#deps;
+    const at = rowAt(row);
+    const events = wakeEventsOf(deps.db, row.wakeId);
+    const taskIds = [...new Set(events.map((e) => e.taskId))];
+    const drop = (error: string, tasks?: readonly string[]): void => {
+      this.#backoff.delete(conversationOf(at));
+      const r = deps.service.dropWake(row.wakeId, error, tasks === undefined ? {} : { tasks });
+      if (!r.ok) this.#note(`kanban: wake ${row.wakeId} was not dropped (${r.message})`);
+    };
+    if (!deps.people.canTalk(row.principal)) {
+      drop(`${row.principal} no longer has talk tier`);
+      for (const taskId of taskIds) {
+        const first = events.find((e) => e.taskId === taskId)?.eventId ?? 0;
+        void this.#lapse(at, taskId, row.principal, first);
+      }
+      return false;
+    }
+    const failed: string[] = [];
+    const reasons: string[] = [];
+    for (const taskId of taskIds) {
+      const task = getTask(deps.db, taskId);
+      const why =
+        task === undefined
+          ? `task ${taskId} is not on the board`
+          : task.wakeBy === null
+            ? `task ${taskId} has wake off`
+            : task.wakeBy !== row.principal
+              ? `task ${taskId}'s wake is set by another now`
+              : task.phase === 'archived'
+                ? `task ${taskId} is archived`
+                : undefined;
+      if (why === undefined) continue;
+      failed.push(taskId);
+      reasons.push(why);
+    }
+    if (reasons.length > 0) {
+      const error = reasons.join('; ');
+      drop(error, failed);
+      this.#note(`kanban: wake ${row.wakeId} dropped for ${describe(at)}: ${error}`);
+      return false;
+    }
+    const chatType = getSubscription(deps.db, events[0]?.subscriptionId ?? 0)?.chatType ?? null;
+    const refused = deps.admitsConversation(at.conversationId, chatType);
+    if (refused !== undefined) {
+      drop(`the conversation is not admitted (${refused})`);
+      this.#sayOnce(at, `kanban: ${describe(at)} is not admitted (${refused}); passing over its wakes until the gateway restarts`);
+      return false;
+    }
+    if (deps.letGo(at)) {
+      drop('the notifier has let the conversation go');
+      this.#sayOnce(at, `kanban: ${describe(at)} has been let go of by the notifier; passing over its wakes until the gateway restarts`);
+      return false;
+    }
     return true;
   }
 
