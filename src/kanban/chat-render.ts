@@ -8,7 +8,7 @@ import { stripControl } from '../text.js';
 import { LIST_FILTERS, USAGE } from './chat-parse.js';
 import { describeReported } from './commit.js';
 import type { DisplayStatus } from './status.js';
-import { DEFAULT_BOARD, type Assignee, type DeferredWhy, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow, type Waiting } from './types.js';
+import { DEFAULT_BOARD, type Assignee, type DeferredState, type DeferredWhy, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow, type Waiting } from './types.js';
 
 /**
  * What `/kanban` says in chat (spec §9.3), and the notices a subscription hears
@@ -777,6 +777,21 @@ export function renderCardOutcome(task: { taskId: string; title: string }, outco
  */
 export const AGENT_FIRST_LINE = 'The agent is looking at it first.';
 
+/** What a deferred block's `AGENT_FIRST_LINE` reads once its button card is sent (wake spec §5.9). */
+export const AGENT_COULD_NOT_LINE = 'The agent could not lift it; the Unblock button is below.';
+
+/** The same, when Lark took the button's card as text, so no button came: the typed command lifts it. */
+export function agentCouldNotTyped(taskId: string): string {
+  return `The agent could not lift it; ${typedUnblock(taskId)} lifts it.`;
+}
+
+/**
+ * The line the notifier ends a deferred block's notice with, and only that: a
+ * line of its own, at a notice's end, so a reason that quotes the sentence is
+ * left as it is.
+ */
+const AGENT_FIRST_AT_END = /\nThe agent is looking at it first\.(?=\n\n|$)/;
+
 /**
  * The card a deferred Unblock button goes in once it is due (wake spec §5.9):
  * the task by id and title, the reason not repeated, worded by why it is due.
@@ -825,6 +840,12 @@ export interface UnblockShown {
   blockEvent: number;
   /** `woken`: lifted by a woken turn, on its setter's authority (wake spec §9.3). */
   lift?: { kind: 'unblocked' | 'archived'; actor: string; at: number; woken?: boolean };
+  /** False for a block the message told of without its button, deferred by the waker (wake spec §5.9); a button unless said. */
+  hasButton?: boolean;
+  /** For a row with no button: its deferred button's state, if its row was written. */
+  deferred?: DeferredState;
+  /** Its deferred button's card went as text: no button came. */
+  deferredAsText?: boolean;
 }
 
 /**
@@ -850,9 +871,19 @@ export function renderUnblockRedraw(
           `${id(b.taskId)}: ${b.lift.kind === 'archived' ? 'Archived' : 'Unblocked'} by ${personText(b.lift.actor, nameOf)}${b.lift.woken === true ? ' (woken by the board)' : ''} at ${when(b.lift.at)}`,
         ],
   );
+  // A notice that deferred buttons (wake spec §5.9): its Nth "looking at it first"
+  // is its Nth buttonless row's, in block event order, as the batch was sent in
+  // event order; a row whose button card was sent reads that the button is below.
+  const deferred = buttons.filter((b) => b.hasButton === false);
+  const parts = markdown.split(new RegExp(AGENT_FIRST_AT_END.source, 'g'));
+  const line = (b: UnblockShown | undefined): string =>
+    b?.deferred !== 'sent' ? AGENT_FIRST_LINE : b.deferredAsText === true ? agentCouldNotTyped(b.taskId) : AGENT_COULD_NOT_LINE;
+  const text = parts.reduce((acc, part, i) => (i === 0 ? part : `${acc}\n${line(deferred[i - 1])}${part}`), '');
   return {
-    markdown: lines.length === 0 ? markdown : `${markdown}\n\n${lines.join('\n')}`,
-    buttons: buttons.filter((b) => b.lift === undefined).map((b) => unblockButton(appId, { id: b.blockEvent, taskId: b.taskId })),
+    markdown: lines.length === 0 ? text : `${text}\n\n${lines.join('\n')}`,
+    buttons: buttons
+      .filter((b) => b.lift === undefined && b.hasButton !== false)
+      .map((b) => unblockButton(appId, { id: b.blockEvent, taskId: b.taskId })),
   };
 }
 

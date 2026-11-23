@@ -1182,6 +1182,8 @@ export interface UnblockButtonReading {
   hasButton: boolean;
   /** For a row with no button: its deferred button's state, if its row was written. */
   deferred?: DeferredState;
+  /** A deferred button sent, whose card Lark took as text: no button came, so the typed command lifts it (wake spec §5.9). */
+  deferredAsText?: boolean;
   /**
    * The first `unblocked` or `archived` event of the task after its block: how,
    * who lifted it, and when. An archive clears a block with no `unblocked` event.
@@ -1216,6 +1218,7 @@ interface UnblockButtonRaw {
   lift_woken: number | null;
   has_button: number;
   deferred_state: string | null;
+  deferred_text: number | null;
 }
 
 /**
@@ -1263,8 +1266,13 @@ export function unblockMessage(db: Db, appId: string, messageId: string): Unbloc
   const deferred = hasWakeColumns(db)
     ? `b.has_button,
               (SELECT d.state FROM kanban_deferred_buttons d
-                WHERE d.app_id = b.app_id AND d.task_id = b.task_id AND d.event_id = b.block_event LIMIT 1) AS deferred_state`
-    : '1 AS has_button, NULL AS deferred_state';
+                WHERE d.app_id = b.app_id AND d.task_id = b.task_id AND d.event_id = b.block_event LIMIT 1) AS deferred_state,
+              (SELECT d.state = 'sent' AND NOT EXISTS (
+                        SELECT 1 FROM kanban_unblock_buttons c
+                         WHERE c.message_id = d.message_id AND c.app_id = d.app_id AND c.task_id = d.task_id)
+                 FROM kanban_deferred_buttons d
+                WHERE d.app_id = b.app_id AND d.task_id = b.task_id AND d.event_id = b.block_event LIMIT 1) AS deferred_text`
+    : '1 AS has_button, NULL AS deferred_state, NULL AS deferred_text';
   const rows = db
     .prepare<[string, string], UnblockButtonRaw>(
       `SELECT b.message_id, b.channel, b.app_id, b.task_id, b.block_event, b.markdown, b.sent_at, b.redrawn_for,
@@ -1291,6 +1299,7 @@ export function unblockMessage(db: Db, appId: string, messageId: string): Unbloc
       redrawnFor: r.redrawn_for,
       hasButton: r.has_button !== 0,
       ...(r.has_button === 0 && r.deferred_state !== null ? { deferred: r.deferred_state as DeferredState } : {}),
+      ...(r.has_button === 0 && r.deferred_text === 1 ? { deferredAsText: true } : {}),
       ...(r.lift_id === null || r.lift_actor === null || r.lift_at === null
         ? {}
         : {
