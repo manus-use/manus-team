@@ -166,6 +166,11 @@ const LIST_MAX = 30;
 const ACTIVE: readonly DisplayStatus[] = ['running', 'reviewing', 'review', 'ready', 'todo', 'blocked'];
 
 /** `/kanban help`: every command, with the tier it needs (spec §9.1). */
+/** A task too deep in woken turns to wake (wake spec §3.4): the note of a wake's answer, and its notice. */
+export function tooDeepLine(taskId: string, depth: number): string {
+  return `${id(taskId)} is ${depth} tasks deep in woken turns, so it stays notice-only`;
+}
+
 export function renderHelp(): string {
   const operate = 'operator';
   const talk = 'anyone allowed';
@@ -181,6 +186,7 @@ export function renderHelp(): string {
     [USAGE.workspace, operate],
     [USAGE.comment, talk],
     [USAGE.unblock, operate],
+    [USAGE.wake, talk],
     [USAGE.stop, operate],
     [USAGE.archive, operate],
     [USAGE['gate add'], operate],
@@ -570,7 +576,7 @@ export function renderNotice(
     case 'wake_set':
       // Only a wake refused as too deep is a notice (wake spec §3.4, §4.4): every other change is the command's answer.
       if (p['refused'] !== 'too_deep') return undefined;
-      return `${id(task.taskId)} is ${typeof p['depth'] === 'number' ? p['depth'] : task.wakeDepth} tasks deep in woken turns, so it stays notice-only`;
+      return tooDeepLine(task.taskId, typeof p['depth'] === 'number' ? p['depth'] : task.wakeDepth);
     default:
       return undefined;
   }

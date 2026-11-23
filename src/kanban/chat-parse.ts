@@ -53,6 +53,8 @@ export interface NewTaskCommand {
   workspace?: string;
   parents: string[];
   contract: Contract;
+  /** The `wake:` line (wake spec §3.1): on, or off; absent, off. */
+  wake?: boolean;
 }
 
 export type KanbanCommand =
@@ -65,6 +67,7 @@ export type KanbanCommand =
   | { verb: 'workspace'; taskId: string; workspace: string }
   | { verb: 'comment'; taskId: string; text: string }
   | { verb: 'unblock'; taskId: string; comment: string | undefined }
+  | { verb: 'wake'; taskId: string; on: boolean }
   | { verb: 'stop'; taskId: string }
   | { verb: 'archive'; taskId: string }
   | { verb: 'gate add'; taskId: string; command: string; timeoutS: number | undefined }
@@ -117,6 +120,7 @@ export const TASK_VERBS = [
   'workspace',
   'comment',
   'unblock',
+  'wake',
   'stop',
   'archive',
   'done',
@@ -135,7 +139,7 @@ export function typed(verb: KanbanCommand['verb']): string {
 /** Each verb's usage line, as `/kanban help` shows it. */
 export const USAGE = {
   help: '/kanban help',
-  new: '/kanban task new <title>, then lines assignee:, reviewer:, workspace:, parent:, outcome:, verify:, constraints:, boundaries:, stop when:, and the body',
+  new: '/kanban task new <title>, then lines assignee:, reviewer:, workspace:, parent:, outcome:, verify:, constraints:, boundaries:, stop when:, wake:, and the body',
   list: `/kanban task list [${LIST_FILTERS.join('|')}]`,
   show: '/kanban task show <task>',
   assign: '/kanban task assign <task> <role or @person>',
@@ -143,6 +147,7 @@ export const USAGE = {
   workspace: '/kanban task workspace <task> <workspace>',
   comment: '/kanban task comment <task> <text>',
   unblock: '/kanban task unblock <task> [comment]',
+  wake: '/kanban task wake <task> on|off',
   stop: '/kanban task stop <task>',
   archive: '/kanban task archive <task>',
   'gate add': '/kanban gate add <task> [--timeout <seconds>] <command>',
@@ -184,6 +189,7 @@ const FIELDS = {
   constraints: 'constraints',
   boundaries: 'boundaries',
   'stop when': 'stop_when',
+  wake: 'wake',
 } as const;
 type FieldLabel = keyof typeof FIELDS;
 
@@ -192,7 +198,7 @@ const ZW = '\u200B-\u200D\u2060\uFEFF';
 
 /** A field line; a zero-width character next to the colon is passed over, as the line start's is. */
 const FIELD_LINE = new RegExp(
-  `^(assignee|reviewer|workspace|parent|outcome|verify|constraints|boundaries|stop[ \\t]+when)[ \\t${ZW}]*:[ \\t${ZW}]*(.*)$`,
+  `^(assignee|reviewer|workspace|parent|outcome|verify|constraints|boundaries|stop[ \\t]+when|wake)[ \\t${ZW}]*:[ \\t${ZW}]*(.*)$`,
   'i',
 );
 
@@ -374,6 +380,12 @@ function parseTask(text: string): ParsedKanban {
       const comment = text.trim();
       return { ok: true, command: { verb: 'unblock', taskId, comment: comment === '' ? undefined : comment } };
     }
+    case 'wake': {
+      const w = words(rest, 2);
+      const on = w?.[1]?.toLowerCase();
+      if (w?.[0] === undefined || (on !== 'on' && on !== 'off')) return usage('wake');
+      return { ok: true, command: { verb: 'wake', taskId: w[0], on: on === 'on' } };
+    }
     case 'done':
     case 'approve': {
       // A person finishing, or approving, may say nothing more.
@@ -521,6 +533,13 @@ function parseNew(text: string): ParsedKanban {
     if (seen.has(label)) return { ok: false, usage: `\`${label}:\` is given twice.` };
     seen.add(label);
     const field = FIELDS[label];
+    if (field === 'wake') {
+      // On or off (wake spec §3.1): chat takes field lines, never a flag.
+      const on = value.toLowerCase();
+      if (on !== 'on' && on !== 'off') return { ok: false, usage: '`wake:` is `on` or `off`.' };
+      out.wake = on === 'on';
+      continue;
+    }
     if (field === 'assignee' || field === 'reviewer' || field === 'workspace') out[field] = value;
     else out.contract[field] = value;
   }
