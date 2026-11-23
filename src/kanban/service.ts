@@ -167,11 +167,38 @@ export interface KanbanServiceDeps {
    * preview and start. Absent -- tests of the board alone -- there are none.
    */
   workflowsDir?: string;
+  /**
+   * The gateway's `kanban.wake` switch and depth (wake spec §3.4, §5.4). Absent
+   * -- tests of the board alone -- wakes are on, to `max_depth` 5.
+   */
+  wake?: { enabled: boolean; maxDepth: number };
 }
 
 /** A report's options: aborted when the gateway stops, which kills its gates and applies nothing. */
 export interface ReportOptions {
   signal?: AbortSignal;
+}
+
+/** Why a wake asked for is refused while wakes are off (wake spec §3.4). */
+export const WAKES_OFF =
+  'wakes are off on this gateway: an operator turns them on with kanban.wake.enabled: true in config.yaml, and a restart';
+
+/** A change of a task's wake, as chat or the terminal asks it (wake spec §3.1): on as a principal, or off. */
+export type WakeRequest = { on: true; as: string } | { on: false };
+
+/** A refusal unless a new task's wake is a principal, or none, and a whole depth (wake spec §3.1). */
+function wakeShapeRefused(wake: unknown): Refusal | undefined {
+  if (wake === undefined) return undefined;
+  if (
+    !isRecord(wake) ||
+    !(wake.by === null || (isText(wake.by) && wake.by.startsWith('lark:') && wake.by.length > 'lark:'.length)) ||
+    typeof wake.depth !== 'number' ||
+    !Number.isSafeInteger(wake.depth) ||
+    wake.depth < 0
+  ) {
+    return board.refuse('invalid', 'a wake is a principal, lark:<union_id>, or none, and a depth of 0 or more');
+  }
+  return undefined;
 }
 
 /** Whose environment a task's gates run with when no agent has run on it (spec §7.7). */
@@ -378,6 +405,7 @@ export class KanbanService {
   readonly #maxRunning: number;
   readonly #maxRunningPerRole: number | undefined;
   readonly #workflowsDir: string | undefined;
+  readonly #wake: { enabled: boolean; maxDepth: number };
   /**
    * Tasks a report is running its checks for, with where the gates run -- the
    * task's own directory, by its `wt:` id, or its workspace's shared one (spec
@@ -401,6 +429,7 @@ export class KanbanService {
     this.#maxRunning = deps.maxRunning ?? Number.MAX_SAFE_INTEGER;
     this.#maxRunningPerRole = deps.maxRunningPerRole;
     this.#workflowsDir = deps.workflowsDir;
+    this.#wake = deps.wake ?? { enabled: true, maxDepth: 5 };
   }
 
   /**
@@ -473,6 +502,8 @@ export class KanbanService {
     if (!checked.ok) return checked;
     const follow = followRefused(req.follow, req.createdVia);
     if (follow !== undefined) return follow;
+    const wake = this.#newWake(req);
+    if (!wake.ok) return wake;
     const key = this.#idempotencyKey(req.idempotencyKey, req.createdVia);
     if (!key.ok) return key;
     return board.createTask(
@@ -494,9 +525,86 @@ export class KanbanService {
         createdVia: req.createdVia,
         ...(req.board === undefined ? {} : { board: req.board }),
         ...(req.follow === undefined ? {} : { follow: req.follow }),
+        ...(wake.wake === undefined ? {} : { wake: wake.wake }),
       },
       this.#clock.now(),
     );
+  }
+
+  /**
+   * A new task's wake, checked (wake spec §3.1, §3.4): refused while wakes are
+   * off, and for a terminal's task no chat follows; made with wake off, as a
+   * note, at `max_depth` or more. A run's follow-up inherits its creating
+   * task's in the writer, whatever was asked, so nothing is refused for it.
+   */
+  #newWake(req: CreateRequest): Result<{ wake?: board.NewWake }> {
+    const shape = wakeShapeRefused(req.wake);
+    if (shape !== undefined) return shape;
+    const w = req.wake;
+    if (w === undefined || req.createdVia?.kind === 'run') return { ok: true };
+    if (w.by === null) return { ok: true, wake: { by: null, depth: w.depth } };
+    if (!this.#wake.enabled) return board.refuse('wake_off', WAKES_OFF);
+    if (req.createdVia?.kind === 'operator' && req.follow === undefined) {
+      return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
+    }
+    return { ok: true, wake: { by: w.by, depth: w.depth, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}) } };
+  }
+
+  /**
+   * Turn a task's wake on or off (wake spec §3.1, §3.4), for this bot's
+   * subscriptions: on runs its woken turns as `as`, set by `by`. Refused while
+   * wakes are off, though off still works; a task too deep is left with wake
+   * off, `tooDeep`, for the caller's note. Who may ask is the caller's.
+   */
+  setWake(taskId: string, change: WakeRequest, by: string, appId: string): Result<{ task: TaskRow; changed: boolean; tooDeep: boolean }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (change.on && !this.#wake.enabled) return board.refuse('wake_off', WAKES_OFF);
+    const writerChange: board.WakeChange = change.on ? { on: true, as: change.as, maxDepth: this.#wake.maxDepth } : { on: false };
+    return board.setWake(this.#db, taskId, writerChange, by, appId, this.#clock.now());
+  }
+
+  /** The waker's record of a batch (wake spec §5.5 step 2), through the writer. */
+  recordWake(batch: board.NewWakeBatch): ReturnType<typeof board.recordWake> {
+    return board.recordWake(this.#db, batch, this.#clock.now());
+  }
+
+  /** A wake's marker sent, or tried (wake spec §5.5 step 3). */
+  wakeMarked(wakeId: number): Result<{ marked: boolean }> {
+    return board.wakeMarked(this.#db, wakeId, this.#clock.now());
+  }
+
+  /** A wake's current attempt submitted, by this boot (wake spec §5.5 step 6). */
+  wakeSubmitted(wakeId: number, sessionId: string, turnKey: string, boot: string): Result<{ submitted: boolean }> {
+    return board.wakeSubmitted(this.#db, wakeId, sessionId, turnKey, boot);
+  }
+
+  /** A wake's attempt refused by its session (wake spec §5.6). */
+  wakeRefused(wakeId: number, error: string): Result<{ refused: boolean; attempt: number }> {
+    return board.wakeRefused(this.#db, wakeId, error);
+  }
+
+  /** A wake delivered, its cursors moved (wake spec §5.5 step 9). */
+  advanceWake(wakeId: number): Result<{ delivered: boolean }> {
+    return board.advanceWake(this.#db, wakeId, this.#clock.now());
+  }
+
+  /** A wake dropped, its cursors moved past all its events or only `tasks`' (wake spec §5.3a, §5.6). */
+  dropWake(wakeId: number, error: string, opts: { tasks?: readonly string[] } = {}): Result<{ dropped: boolean }> {
+    return board.dropWake(this.#db, wakeId, error, this.#clock.now(), opts);
+  }
+
+  /** A pending wake with nothing left once its lifted blocks are dropped (wake spec §5.3b). */
+  liftedWake(wakeId: number): Result<{ lifted: boolean }> {
+    return board.liftedWake(this.#db, wakeId, this.#clock.now());
+  }
+
+  /** A subscription's wake cursor moved past events the waker passes over (wake spec §5.2 step 3). */
+  passWake(subscriptionId: number, cursor: number): Result<{ advanced: boolean }> {
+    if (!Number.isSafeInteger(subscriptionId) || !Number.isSafeInteger(cursor) || cursor < 0) {
+      return board.refuse('invalid', 'a subscription and its cursor are whole numbers');
+    }
+    return board.passWake(this.#db, subscriptionId, cursor);
   }
 
   /**

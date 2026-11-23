@@ -434,7 +434,9 @@ export type RefusalCode =
   /** Something over its size: a DAG, the params, a value or a task's field (workflows spec §5). */
   | 'too_large'
   /** No usable workflow file of that name (workflows spec §6). */
-  | 'unknown_workflow';
+  | 'unknown_workflow'
+  /** A wake asked for while `kanban.wake.enabled` is false (wake spec §3.4). */
+  | 'wake_off';
 
 /** The gate that refused a report, as the reporter is shown it (spec §7.7). */
 export interface FailedGate {
@@ -487,4 +489,10 @@ export interface CreateRequest {
   board?: string;
   /** The chat that follows it, named at the terminal (kanban spec §22.1); the operator's alone. */
   follow?: Follow;
+  /**
+   * Its wake (wake spec §3.1, §9.1): `by`, the principal its woken turns run
+   * as, or null for none; `depth`, the woken turns in its making. A run's
+   * follow-up inherits its creating task's, whatever this says.
+   */
+  wake?: { by: string | null; depth: number };
 }
