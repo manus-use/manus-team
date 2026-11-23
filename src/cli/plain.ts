@@ -1,5 +1,19 @@
 import type { BoardEntry, BoardSummary, TaskView } from '../db/kanban-read.js';
-import { counted, defaultWakeShow, listed, memberLine, membersDone, runState, waitingLine, wakeLine, workdirLine, type NameOf, type PreviewLine, type WakeShow } from '../kanban/chat-render.js';
+import {
+  counted,
+  defaultWakeShow,
+  listed,
+  memberLine,
+  membersDone,
+  reactionLines,
+  runState,
+  waitingLine,
+  wakeLine,
+  workdirLine,
+  type NameOf,
+  type PreviewLine,
+  type WakeShow,
+} from '../kanban/chat-render.js';
 import type { DisplayStatus } from '../kanban/status.js';
 import type { Assignee, GateRow, TaskRow, Waiting } from '../kanban/types.js';
 import { redactKnownSecrets } from '../secrets.js';
@@ -134,6 +148,7 @@ export function showText(view: TaskView, gates: readonly GateRow[], wake: WakeSh
     `assignee: ${who(task.assignee, nameOf)} · reviewer: ${who(task.reviewer, nameOf)} · workspace: ${task.workspace === null ? 'not yet fixed' : line(task.workspace, 80)} · board: ${line(task.board, 80)}`,
     // The setter by principal, as the terminal names everyone (wake spec §10).
     wakeLine(task, view.lastWoke, wake, task.wakeBy === null ? '' : person(task.wakeBy, nameOf)),
+    ...reactionLines(view, (p) => person(p, nameOf), (t) => t, 'mt kanban task list'),
   ];
   if (view.member !== undefined) out.push(memberLine(view.member, (t) => line(t, 200)));
   for (const w of view.waiting ?? []) out.push(waitingLine(w, (t) => line(t, 80)));
@@ -235,6 +250,8 @@ export function showJson(view: TaskView, g: readonly GateRow[]): Record<string, 
       block_reason: task.blockReason,
       // Its wake (wake spec §10), its last wake in milliseconds as every --json time is.
       wake: { ...wakeJson(task), last_woke: view.lastWoke ?? null },
+      // The reaction tasks its outcomes made (wake spec §19.9), newest first; empty for none.
+      reactions: (view.reactions ?? []).map((r) => ({ task_id: r.taskId, status: r.status })),
       // The role whose max_running the task is waiting on (spec §6.3), or null.
       waiting_on_role: roleWait === undefined ? null : { role: roleWait.role, max_running: roleWait.maxRunning },
       // Every reason a pass skips it, in the order the pass checks them; empty for none.

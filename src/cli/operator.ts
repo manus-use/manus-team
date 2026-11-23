@@ -661,6 +661,8 @@ function list(rest: readonly string[], io: MtIo): Promise<number> {
       assignee_kind: e.task.assignee?.kind ?? null,
       created_at: e.task.createdAt,
       status_since: since.get(e.task.taskId) ?? e.task.createdAt,
+      // The tasks a reaction task's wake carried (wake spec §19.9), in event order; null for every other task.
+      reacts_to: service.reactsTo(e.task.taskId),
     }));
     return { ok: true, lines: listText(entries, filter, board, { since, now: Date.now() }), json: { board, tasks } };
   });

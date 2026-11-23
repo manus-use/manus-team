@@ -350,12 +350,38 @@ export function defaultWakeShow(): WakeShow {
  */
 export function wakeLine(task: TaskRow, lastWoke: number | undefined, show: WakeShow, setter: string): string {
   if (task.wakeBy === null) return 'Wake: off';
-  if (!show.enabled) return `Wake: on, set by ${setter}, but wakes are off on this gateway`;
-  const head = `Wake: on, set by ${setter}, depth ${task.wakeDepth}`;
+  // A role as its target (wake spec §10, §19).
+  const role = task.wakeRole === null ? '' : `, for role ${task.wakeRole}`;
+  if (!show.enabled) return `Wake: on, set by ${setter}${role}, but wakes are off on this gateway`;
+  const head = `Wake: on, set by ${setter}${role}, depth ${task.wakeDepth}`;
   if (lastWoke === undefined) return head;
   const at = formatWall(show.zone, lastWoke);
   const day = at.slice(0, 10) === formatWall(show.zone, show.now).slice(0, 10);
   return `${head}; last woke ${day ? at.slice(11) : at.slice(5)}`;
+}
+
+/** Reaction tasks a show names (wake spec §19.9): at most five, the rest counted. */
+export const REACTIONS_SHOWN = 5;
+
+/**
+ * `task show`'s lines of a wake's reaction tasks (wake spec §19.9), chat's and
+ * the terminal's in the same words: for a source task, `Reactions:` and the
+ * reaction tasks its outcomes made, newest first, at most five, each with its
+ * display status, then how many more and where they are listed; for a reaction
+ * task, the tasks its wake carried, its role and its setter.
+ */
+export function reactionLines(view: TaskView, setter: (principal: string) => string, code: (taskId: string) => string, list: string): string[] {
+  const out: string[] = [];
+  const shown = view.reactions?.slice(0, REACTIONS_SHOWN) ?? [];
+  if (shown.length > 0) {
+    const more = (view.reactions?.length ?? 0) - shown.length;
+    out.push(`Reactions: ${shown.map((r) => `${code(r.taskId)} (${r.status})`).join(', ')}${more > 0 ? `, and ${more} more: ${list}` : ''}`);
+  }
+  if (view.reactsTo !== undefined) {
+    const r = view.reactsTo;
+    out.push(`Made by a wake of ${r.tasks.map(code).join(', ')}, for role ${r.role}, set by ${setter(r.principal)}.`);
+  }
+  return out;
 }
 
 /**
@@ -370,6 +396,7 @@ export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard:
     `**${titleText(task.title, nameOf)}** ${id(task.taskId)}: ${view.status}`,
     `assignee: ${who(task.assignee, nameOf)} · reviewer: ${who(task.reviewer, nameOf)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}${board}`,
     wakeLine(task, view.lastWoke, wake, task.wakeBy === null ? '' : personText(task.wakeBy, nameOf)),
+    ...reactionLines(view, (p) => personText(p, nameOf), id, '/kanban task list'),
   ];
   if (view.member !== undefined) out.push(memberLine(view.member, label, id));
   for (const w of view.waiting ?? []) out.push(waitingLine(w, label, id));

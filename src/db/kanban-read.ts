@@ -622,6 +622,10 @@ export interface TaskView {
   member?: { instanceId: string; name: string | null; step: string; item: string | null };
   /** When the task's latest delivered wake was delivered (wake spec §10); absent before its first. */
   lastWoke?: number;
+  /** The reaction tasks its outcomes made (wake spec §19.9), newest first, with their display statuses; absent when none. */
+  reactions?: ReadonlyArray<{ taskId: string; status: DisplayStatus }>;
+  /** For a reaction task (wake spec §19.9): the tasks its wake carried, in event order, its role and its setter. */
+  reactsTo?: { tasks: readonly string[]; role: string; principal: string };
 }
 
 /** A task's display status (spec §4.1), derived from its parents and its runs. */
@@ -644,6 +648,9 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
   const member = memberOf(db, taskId);
   // None on a database not yet migrated to 013, which lastWokeOf reads as no wakes (wake spec §4).
   const lastWoke = lastWokeOf(db, taskId);
+  const reactions = hasWakeColumns(db) ? reactionsOf(db, taskId).map((t) => ({ taskId: t.taskId, status: statusOf(db, t) })) : [];
+  const wake = hasWakeColumns(db) ? wakeOfReaction(db, taskId) : undefined;
+  const carried = wake === undefined ? undefined : reactsTo(db, taskId);
   return {
     task,
     status: displayStatus({
@@ -659,6 +666,10 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
     ...(task.worktree === null ? {} : { workdir: workdirOf(db, task.worktree) }),
     ...(member === undefined ? {} : { member: { instanceId: member.instanceId, name: member.name, step: member.step, item: member.item } }),
     ...(lastWoke === undefined ? {} : { lastWoke }),
+    ...(reactions.length === 0 ? {} : { reactions }),
+    ...(wake === undefined || wake.targetRole === null || carried === null || carried === undefined
+      ? {}
+      : { reactsTo: { tasks: carried, role: wake.targetRole, principal: wake.principal } }),
   };
 }
 
@@ -1400,6 +1411,28 @@ export function wakeByUuid(db: Db, uuid: string): WakeRow | undefined {
 }
 
 /** A woken turn's events, in event order. */
+/** The reaction tasks a task's outcomes made (wake spec §19.9): those whose wake carried an event of it, newest first. */
+export function reactionsOf(db: Db, taskId: string): TaskRow[] {
+  return db
+    .prepare<[string], TaskRaw>(
+      `SELECT ${taskCols(db)} FROM kanban_tasks
+        WHERE reaction_of IN (SELECT wake_id FROM kanban_wake_events WHERE task_id = ?)
+        ORDER BY created_at DESC, rowid DESC`,
+    )
+    .all(taskId)
+    .map(decodeTask);
+}
+
+/**
+ * The tasks a reaction task's wake carried (wake spec §19.9), each once, in the
+ * order of their first event; null for a task that is no reaction task.
+ */
+export function reactsTo(db: Db, taskId: string): string[] | null {
+  const task = getTask(db, taskId);
+  if (task === undefined || task.reactionOf === null) return null;
+  return [...new Set(wakeEventsOf(db, task.reactionOf).sort((a, b) => a.eventId - b.eventId).map((e) => e.taskId))];
+}
+
 /** A reaction task's wake (wake spec §19.8): the `kanban_wakes` row its `reaction_of` names; none for any other task. */
 export function wakeOfReaction(db: Db, taskId: string): WakeRow | undefined {
   const task = getTask(db, taskId);

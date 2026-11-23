@@ -245,7 +245,7 @@ describe('mt kanban task new', () => {
     expect(JSON.parse(listed.out)).toEqual({
       ok: true,
       board: 'web-app',
-      tasks: [{ task_id: taskId, status: 'ready', title: 'On web', assignee: null, assignee_kind: null, created_at: getTask(gateway, taskId)?.createdAt, status_since: getTask(gateway, taskId)?.createdAt }],
+      tasks: [{ task_id: taskId, status: 'ready', title: 'On web', assignee: null, assignee_kind: null, created_at: getTask(gateway, taskId)?.createdAt, status_since: getTask(gateway, taskId)?.createdAt, reacts_to: null }],
     });
     expect(await mt(['task', 'list', '--board', 'nowhere'])).toMatchObject({ code: 1, err: 'mt: there is no board nowhere' });
     expect((await mt(['task', 'list', 'finished'])).code).toBe(2);

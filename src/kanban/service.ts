@@ -13,12 +13,14 @@ import {
   getRun,
   getTask,
   getTaskByKey,
+  hasWakeColumns,
   instanceByKey,
   instancesOn,
   memberOf,
   memberPhases,
   membersWithTasks,
   phaseSince,
+  reactsTo,
   relatedTasks,
   runsOf,
   statusOf,
@@ -1455,6 +1457,11 @@ export class KanbanService {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
     return board.archive(this.#db, taskId, by, this.#clock.now());
+  }
+
+  /** The tasks a reaction task's wake carried, in event order (wake spec §19.9); null for any other task. */
+  reactsTo(taskId: string): string[] | null {
+    return hasWakeColumns(this.#db) ? reactsTo(this.#db, taskId) : null;
   }
 
   show(taskId: string): Result<{ view: TaskView }> {

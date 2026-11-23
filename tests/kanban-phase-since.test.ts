@@ -154,8 +154,8 @@ describe('mt kanban task list', () => {
     const fresh = newTask(db, { title: 'Fresh', assignee: null }, now - 45 * MIN - 30_000);
     const json = JSON.parse((await fx.run(['kanban', 'task', 'list', '--json'])).out);
     expect(json.tasks).toEqual([
-      { task_id: fresh.taskId, status: 'ready', title: 'Fresh', assignee: null, assignee_kind: null, created_at: now - 45 * MIN - 30_000, status_since: now - 45 * MIN - 30_000 },
-      { task_id: old.taskId, status: 'blocked', title: 'Old', assignee: 'default', assignee_kind: 'role', created_at: now - 3 * DAY - HOUR, status_since: now - 5 * HOUR - MIN },
+      { task_id: fresh.taskId, status: 'ready', title: 'Fresh', assignee: null, assignee_kind: null, created_at: now - 45 * MIN - 30_000, status_since: now - 45 * MIN - 30_000, reacts_to: null },
+      { task_id: old.taskId, status: 'blocked', title: 'Old', assignee: 'default', assignee_kind: 'role', created_at: now - 3 * DAY - HOUR, status_since: now - 5 * HOUR - MIN, reacts_to: null },
     ]);
     const lines = (await fx.run(['kanban', 'task', 'list'])).out.split('\n');
     expect(lines[0]).toMatch(/^task\s+status\s+age\s+assignee\s+title$/);
