@@ -415,10 +415,10 @@ class Update {
     this.view = serviceView(this.io, deps.service);
     this.checkout = realpathOr(deps.service.checkout);
     this.node = deps.service.node;
-    // This shell's, never an agent's (no MT_KANBAN_*, no MT_CRON_* and no MT_AGENT_SESSION), and nothing git or npm starts may prompt.
+    // This shell's, never an agent's (no MT_KANBAN_*, MT_CRON_*, MT_WAKE_* or MT_AGENT_SESSION), and nothing git or npm starts may prompt.
     const env: Record<string, string | undefined> = {};
     for (const [name, value] of Object.entries(io.env)) {
-      if (!name.startsWith('MT_KANBAN_') && !name.startsWith('MT_CRON_') && name !== SESSION_MARKER) env[name] = value;
+      if (!name.startsWith('MT_KANBAN_') && !name.startsWith('MT_CRON_') && !name.startsWith('MT_WAKE_') && name !== SESSION_MARKER) env[name] = value;
     }
     this.shellEnv = { ...env, GIT_TERMINAL_PROMPT: '0' };
     // This shell's secrets, as the .env's are once read: an exported LARK_APP_SECRET is masked in what a failure shows.
