@@ -1,4 +1,5 @@
 import type { Channel, SendTarget } from '../channel/types.js';
+import { WAKE_DEFAULTS } from '../config.js';
 import { BOOT_ID, replyUuid, turnIdempotencyKey, wakeBatchUuid } from '../core/ids.js';
 import type { SubmitRequest } from '../core/session-actor.js';
 import {
@@ -31,7 +32,7 @@ import type { BindingKey, Principal, SessionRow, TurnTerminal } from '../types.j
 import { named, type NameOf } from './chat-render.js';
 import { NOTICE_SEND_MS, ROUND_EVENTS } from './notices.js';
 import type { KanbanService } from './service.js';
-import type { Assignee, KanbanEvent, SubscriptionRow, TaskRow, WakeRow } from './types.js';
+import type { Assignee, DeferredKey, DeferredWhy, KanbanEvent, Result, SubscriptionRow, TaskRow, WakeRow } from './types.js';
 
 /**
  * Wakes (the wake spec): a task's outcomes start a turn of the agent in the chat
@@ -82,8 +83,12 @@ export const PROMPT_MAX = 4_000;
 export interface WakeOutcome {
   event: KanbanEvent;
   task: { taskId: string; title: string };
-  /** For a block: whether its notice carries an Unblock button for this block event (§7). */
-  button?: 'recorded' | 'none';
+  /**
+   * For a block: its button deferred for the agent's try, its row still `held`
+   * at the submit (§5.9); else whether its notice carries an Unblock button for
+   * this block event (§7).
+   */
+  button?: 'deferred' | 'recorded' | 'none';
   /** For a block: the task's woken unblocks since it last completed (§9.2). */
   wokenUnblocks?: number;
 }
@@ -102,6 +107,8 @@ export interface WakePromptInput {
   blockRecurrenceLimit: number;
   /** `kanban.wake.max_depth`, the bound on woken unblocks too (§9.2). */
   maxDepth: number;
+  /** `kanban.wake.hold_minutes`, which the deferred note names (§5.9); 10 unless given. */
+  holdMinutes?: number;
 }
 
 export interface WakePrompt {
@@ -174,9 +181,12 @@ function recurrencesOf(e: KanbanEvent): number {
 /** A block's notes (§7): its button, then what the agent may do about it. */
 function blockNotes(o: WakeOutcome, input: WakePromptInput): string[] {
   const notes = [
-    o.button === 'recorded'
-      ? 'An Unblock button is on its notice in this thread.'
-      : 'Its notice in this thread has no Unblock button; /kanban task unblock lifts it.',
+    o.button === 'deferred'
+      ? 'People in this thread have seen this block, but have no Unblock button for it yet: you have the first try. ' +
+        `If it is still blocked when your turn ends, or after ${input.holdMinutes ?? WAKE_DEFAULTS.holdMinutes} minutes, the button goes to them.`
+      : o.button === 'recorded'
+        ? 'An Unblock button is on its notice in this thread.'
+        : 'Its notice in this thread has no Unblock button; /kanban task unblock lifts it.',
   ];
   const recurrences = recurrencesOf(o.event);
   const woken = o.wokenUnblocks ?? 0;
@@ -293,7 +303,8 @@ export interface WakerDeps {
   /** The notifier's. */
   letGo(at: ThreadAt): boolean;
   cronTurns?: { turnSubmitted(sessionId: string, idempotencyKey: string, operate: boolean): void };
-  settings: { perHour: number; maxDepth: number };
+  /** `kanban.wake`'s: `holdMinutes`, the deferred buttons' hold (§5.9), 10 unless given. */
+  settings: { perHour: number; maxDepth: number; holdMinutes?: number };
   blockRecurrenceLimit: number;
   /** `cron.tz`, else the process's. */
   zone: string;
@@ -330,6 +341,15 @@ interface UnderWay {
   settled?: { outcome: 'delivered' | 'refused'; error?: string };
   /** A settling write has failed once, and been said: the next failures are not. */
   failedOnce?: boolean;
+  /** The settling write has landed. */
+  written?: boolean;
+  /**
+   * How the turn ended, once its promise settled: for a delivered wake, what
+   * decides its deferred buttons (§5.9); the entry is kept until then.
+   */
+  terminal?: TurnTerminal;
+  /** Its deferred blocks have all been decided, every write landed (§5.9): until then the entry is kept, and each round tries again. */
+  decided?: boolean;
 }
 
 function message(err: unknown): string {
@@ -478,6 +498,12 @@ export class Waker {
     if (this.#stopped) return 0;
     this.#roundStart = this.#clock.now();
     let submits = 0;
+    // A delivered wake whose turn ended but whose deferred buttons were not all moved: tried again (§5.9).
+    for (const [wakeId, entry] of [...this.#underWay]) {
+      if (entry.settled?.outcome !== 'delivered' || entry.terminal === undefined || entry.decided === true) continue;
+      entry.decided = this.#decideButtons(wakeId, entry.terminal);
+      this.#forget(wakeId, entry);
+    }
     // Pending rows first (§5.2 step 1): each a batch already fixed.
     for (const row of pendingWakes(this.#deps.db, this.#deps.appId)) {
       if (this.#stopped || submits >= ROUND_WAKES) break;
@@ -644,7 +670,7 @@ export class Waker {
       this.#refused(row.wakeId, 'lost by the waker');
       return;
     }
-    if (entry.settled !== undefined) this.#settle(row.wakeId, entry);
+    if (entry.settled !== undefined && entry.written !== true) this.#settle(row.wakeId, entry);
   }
 
   /**
@@ -822,6 +848,7 @@ export class Waker {
       runAssignee: (runId) => getRun(deps.db, runId)?.assignee,
       blockRecurrenceLimit: deps.blockRecurrenceLimit,
       maxDepth: deps.settings.maxDepth,
+      ...(deps.settings.holdMinutes === undefined ? {} : { holdMinutes: deps.settings.holdMinutes }),
     });
     const messageId = row.attempt === 1 ? `wake:${row.uuid}` : `wake:${row.uuid}:${row.attempt}`;
     const turnKey = turnIdempotencyKey(deps.appId, messageId);
@@ -855,11 +882,84 @@ export class Waker {
       this.#refused(row.wakeId, message(err));
       return false;
     }
+    // A deferred block cut from the prompt (§7): the agent is not told of it, so its button goes now (§5.9).
+    const cut = new Set(prompt.cut.map((e) => e.id));
+    for (const c of left) if (cut.has(c.event.id)) this.#release(c, 'not_woken');
     submitted.then(
-      (terminal) => this.#ended(row.wakeId, `the turn ended ${terminal} before its prompt reached the agent`),
-      (err: unknown) => this.#ended(row.wakeId, message(err)),
+      (terminal) => this.#turnEnded(row.wakeId, terminal, `the turn ended ${terminal} before its prompt reached the agent`),
+      (err: unknown) => this.#turnEnded(row.wakeId, 'failed', message(err)),
     );
     return true;
+  }
+
+  /**
+   * The submit's promise settled (§5.5, §5.9): a wake not yet delivered is
+   * refused; a delivered one has its deferred blocks decided by how its turn
+   * ended, and its entry is let go of once its settling write has landed.
+   */
+  #turnEnded(wakeId: number, terminal: TurnTerminal, error: string): void {
+    if (this.#stopped) return;
+    const entry = this.#underWay.get(wakeId);
+    if (entry === undefined) return;
+    entry.terminal = terminal;
+    if (entry.settled === undefined) {
+      this.#ended(wakeId, error);
+      return;
+    }
+    if (entry.settled.outcome === 'delivered') entry.decided = this.#decideButtons(wakeId, terminal);
+    this.#forget(wakeId, entry);
+  }
+
+  /**
+   * A delivered wake's deferred blocks, once its turn ended (§5.9): each still
+   * held, its lift read: lifted, no card; still blocked, due, `tried` after a
+   * completed turn and `turn_failed` after a failed, cancelled or ambiguous one.
+   * True once every write landed; a write that failed is tried again by the
+   * next round, from the entry kept for it.
+   */
+  #decideButtons(wakeId: number, terminal: TurnTerminal): boolean {
+    const db = this.#deps.db;
+    let landed = true;
+    for (const e of wakeEventsOf(db, wakeId)) {
+      const row = deferredButton(db, e.subscriptionId, e.eventId);
+      if (row?.state !== 'held') continue;
+      const key = { subscriptionId: e.subscriptionId, eventId: e.eventId };
+      const wrote =
+        liftOf(db, e.taskId, e.eventId) !== undefined
+          ? this.#buttonWrite(key, () => this.#deps.service.buttonLifted(key))
+          : this.#buttonWrite(key, () => this.#deps.service.buttonDue(key, terminal === 'completed' ? 'tried' : 'turn_failed'));
+      landed &&= wrote;
+    }
+    return landed;
+  }
+
+  /** A held deferred button of an outcome released, due with `why` (§5.9). */
+  #release(c: Covered, why: DeferredWhy): void {
+    const key = { subscriptionId: c.sub.id, eventId: c.event.id };
+    if (deferredButton(this.#deps.db, key.subscriptionId, key.eventId)?.state !== 'held') return;
+    this.#buttonWrite(key, () => this.#deps.service.buttonDue(key, why));
+  }
+
+  /** One write of a deferred button, said when it fails: the next round reads the row again. True when it landed. */
+  #buttonWrite(key: DeferredKey, write: () => Result<{ changed: boolean }>): boolean {
+    try {
+      const r = write();
+      if (r.ok) return true;
+      this.#note(`kanban: the deferred button of subscription ${key.subscriptionId}, event ${key.eventId} was not moved (${r.message})`);
+    } catch (err) {
+      this.#note(`kanban: the deferred button of subscription ${key.subscriptionId}, event ${key.eventId} was not moved (${message(err)})`);
+    }
+    return false;
+  }
+
+  /**
+   * An entry let go of once its settling write has landed and, for a delivered
+   * wake, its turn has ended and its deferred blocks are all decided (§5.2 step 1, §5.9).
+   */
+  #forget(wakeId: number, entry: UnderWay): void {
+    if (entry.written !== true) return;
+    if (entry.settled?.outcome === 'delivered' && (entry.terminal === undefined || entry.decided !== true)) return;
+    this.#underWay.delete(wakeId);
   }
 
   /** A batch's outcomes but its blocks lifted since (§5.3b): an `unblocked` or `archived` of the task after the block. */
@@ -943,10 +1043,11 @@ export class Waker {
   #outcome(c: Covered): WakeOutcome {
     const task = { taskId: c.task.taskId, title: c.task.title };
     if (!isBlockOutcome(c.event)) return { event: c.event, task };
+    const held = deferredButton(this.#deps.db, c.sub.id, c.event.id)?.state === 'held';
     return {
       event: c.event,
       task,
-      button: hasUnblockButton(this.#deps.db, this.#deps.appId, c.task.taskId, c.event.id) ? 'recorded' : 'none',
+      button: held ? 'deferred' : hasUnblockButton(this.#deps.db, this.#deps.appId, c.task.taskId, c.event.id) ? 'recorded' : 'none',
       wokenUnblocks: wokenUnblocksSince(this.#deps.db, c.task.taskId),
     };
   }
@@ -983,7 +1084,9 @@ export class Waker {
       this.#note(`kanban: wake ${wakeId} was ${settled.outcome}, but not recorded (${why}); trying again each round`);
     };
     const landed = settled.outcome === 'delivered' ? this.#writeDelivered(wakeId, failed) : this.#refused(wakeId, settled.error ?? '', failed);
-    if (landed) this.#underWay.delete(wakeId);
+    if (!landed) return;
+    entry.written = true;
+    this.#forget(wakeId, entry);
   }
 
   /** `advanceWake`, and the conversation's pause and cap line forgotten. False when the write did not land. */
