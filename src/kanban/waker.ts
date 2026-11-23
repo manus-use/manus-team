@@ -832,6 +832,8 @@ export class Waker {
     }
     if (row.markerAt === null) {
       await this.#line(channel, targetOf(deps.db, at), markerText(left.length), replyUuid(deps.appId, `wake:${row.uuid}`, 'marker'), `the marker of wake ${row.wakeId}`);
+      // Stopped while the marker was on its way: a draining waker writes nothing more.
+      if (this.#stopped) return false;
       const marked = deps.service.wakeMarked(row.wakeId);
       if (!marked.ok) this.#note(`kanban: wake ${row.wakeId}'s marker was not recorded (${marked.message})`);
     }

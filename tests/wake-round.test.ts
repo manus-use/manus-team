@@ -3,6 +3,7 @@ import { replyUuid } from '../src/core/ids.js';
 import { getWake, subscriptionsOf, wakeEventsOf } from '../src/db/kanban-read.js';
 import { setWake } from '../src/db/kanban.js';
 import { markerText } from '../src/kanban/waker.js';
+import { settle } from './helpers/db.js';
 import { ALICE, NOW, newTask } from './helpers/kanban.js';
 import { APP, BOB, IN_THREAD, wakeHarness, type WakeHarness } from './helpers/waker.js';
 
@@ -62,6 +63,35 @@ describe('a completion with wake on', () => {
     h.noticed(task);
     await h.round();
     expect(h.wakes()).toHaveLength(1);
+  });
+
+  it('waits for the notice though an earlier event is due: an outcome past the notice cursor is left out of the batch', async () => {
+    const task = h.woken();
+    // Noticed, and not yet passed over: the subscription is due for it.
+    h.event(task, 'commented', ALICE, { body: 'on the way' });
+    // Its notice still on its way: the notice cursor is before it.
+    const event = completed(task, 'Booked.', false);
+    await h.round();
+    expect(h.wakes()).toEqual([]);
+    expect(h.lark.texts).toEqual([]);
+    h.noticed(task);
+    await h.round();
+    expect(wakeEventsOf(h.db, h.wakes()[0]?.wakeId ?? 0).map((e) => e.eventId)).toEqual([event]);
+  });
+
+  it('writes nothing after its marker once stopped while the marker was on its way', async () => {
+    const task = h.woken();
+    completed(task);
+    h.lark.hold();
+    const round = h.waker.wake();
+    await settle();
+    expect(h.lark.calls).toEqual(['sendText']);
+    h.waker.stop();
+    h.lark.release();
+    await round;
+    await settle();
+    expect(h.wakes()[0]).toMatchObject({ state: 'pending', markerAt: null });
+    expect(h.registry.submits).toEqual([]);
   });
 
   it('records nothing for a task with wake off', async () => {

@@ -895,7 +895,7 @@ The limits: at most `kanban.wake.per_hour` woken turns a conversation in any hou
 (past it the thread is told `wakes are paused here until HH:MM`, and what comes meanwhile waits
 for one later turn); a task made in a woken turn's own shell is one level deeper, and a task 5
 deep (`kanban.wake.max_depth`) stays notice-only; and a woken turn's agent may unblock one task
-at most 5 times between two completions. A setter who loses talk tier has their tasks' outcomes
+at most `kanban.wake.max_depth` times (5 by default) between two completions. A setter who loses talk tier has their tasks' outcomes
 noticed and not woken, and the thread is told once. The settings, with their defaults:
 
 <!-- example: config wake -->

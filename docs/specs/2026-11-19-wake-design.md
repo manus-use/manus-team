@@ -1192,7 +1192,11 @@ refuses the operator's `mt kanban` (cron §6.4); and the worker's commands need 
   after `/new` or `/attach`, a process an agent left running) is answered `not_woken`, so with cron
   off the shell falls back to the operator's command, as it would have before wakes; only a token
   never held, or one of another kind, is `unauthorized`. A gateway's restart forgets every hash, so
-  a process left from before it gets `unauthorized`, with no fallback (§16). **Not in `AGENT_VARIABLES`**,
+  a process left from before it gets `unauthorized`, with no fallback (§16). **A token belongs to the
+  actor build, not to one turn**: a process an agent left running from an earlier turn of the same
+  live actor holds the same token, so during a later woken turn of that session it gets `works`
+  too, acting within that later turn's wake. That is the same session, the same binding and the
+  setter's tiers as they stand, so it gains nothing the woken turn has not got. **Not in `AGENT_VARIABLES`**,
   so it makes no shell an agent's for any other command, and with cron off the operator's commands
   stay reachable as the user chose (grants §6.3). **Dropped where the others are**: `gateEnv`
   (`src/kanban/gates.ts`) and `mt update`'s child environment (`src/cli/update.ts`) drop every

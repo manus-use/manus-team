@@ -9,7 +9,7 @@ import { createTurn, endTurn, setTurnState } from '../src/db/turns.js';
 import { CronTokens } from '../src/cron/tokens.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { SocketHandler } from '../src/kanban/socket.js';
-import { NOT_WOKEN, WakeApi } from '../src/kanban/wake-api.js';
+import { LIMIT_LINES_HELD, NOT_WOKEN, WakeApi, rememberCapped } from '../src/kanban/wake-api.js';
 import { WakeTokens } from '../src/kanban/wake-tokens.js';
 import type { TaskRow, WakeRow } from '../src/kanban/types.js';
 import { clearSecrets } from '../src/secrets.js';
@@ -169,6 +169,21 @@ describe('the wake envelope: unblock', () => {
     ]);
     expect(lark.texts[0]?.target).toMatchObject({ chatId: 'oc_chat', threadId: 'omt_1' });
     expect(getTask(h.db, task.taskId)?.phase).toBe('blocked');
+  });
+});
+
+describe("the woken-unblock limit lines' memory", () => {
+  it(`holds at most LIMIT_LINES_HELD (${LIMIT_LINES_HELD}) tasks, forgetting the one said for longest ago`, () => {
+    const said = new Map<string, number>();
+    rememberCapped(said, 'k_a', 1, 2);
+    rememberCapped(said, 'k_b', 2, 2);
+    // Said again after a later completion: the newest now.
+    rememberCapped(said, 'k_a', 3, 2);
+    rememberCapped(said, 'k_c', 4, 2);
+    expect([...said]).toEqual([
+      ['k_a', 3],
+      ['k_c', 4],
+    ]);
   });
 });
 

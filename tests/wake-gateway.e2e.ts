@@ -214,6 +214,9 @@ describe('wakes through createGateway', () => {
     await start();
     // Slow, but inside a send's bound: the turn waits for it all the same (wake spec §5.5 step 3).
     lark.slowTexts.push({ match: 'Waking the agent', ms: 1_500 });
+    // A slow notice too: the waker reads only events the notifier has moved its cursor past,
+    // so the marker cannot overtake the notice (wake spec §5.2 step 3).
+    lark.slowTexts.push({ match: 'Done: **Book the SLOW venue**', ms: 1_500 });
     const command = await say(OWNER, '/kanban task new Book the SLOW venue\nassignee: default\nwake: on');
     expect(texts().at(-1)).toMatch(/^Created `k_[0-9a-z]+`.*Its outcomes wake the agent here\.$/s);
     const taskId = createdTask();

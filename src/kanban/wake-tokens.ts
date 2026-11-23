@@ -26,6 +26,12 @@ import { hashToken, mintToken, TOKEN_PATTERN } from './token.js';
  * cron off, fall back to the operator's command. A restart forgets them all: a
  * process left from before it is answered nothing, `unauthorized`.
  *
+ * A token belongs to the actor build, not to one turn: a process an agent left
+ * running from an earlier turn of the same live actor holds the same token, and
+ * during a later woken turn of that session it works too, within that turn's
+ * wake. It is the same session, the same binding and the setter's tiers as they
+ * stand, so it gains nothing the woken turn has not got.
+ *
  * Which tasks a woken turn may act on is the gateway's to say, from the token's
  * session and its running turn's wake (`wakeOfShell`), not the token's.
  */

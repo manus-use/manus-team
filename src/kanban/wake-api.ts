@@ -76,10 +76,27 @@ function text(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
+/**
+ * The tasks whose woken-unblock limit line `WakeApi` remembers having said, at
+ * most: past it the oldest is forgotten, and its line may be said once more,
+ * under the same uuid, which Lark takes as a repeat within its hour.
+ */
+export const LIMIT_LINES_HELD = 1_000;
+
+/** `map.set(key, value)`, the key made the newest, the oldest keys dropped past `max`. */
+export function rememberCapped<K, V>(map: Map<K, V>, key: K, value: V, max: number): void {
+  map.delete(key);
+  map.set(key, value);
+  for (const oldest of map.keys()) {
+    if (map.size <= max) break;
+    map.delete(oldest);
+  }
+}
+
 export class WakeApi {
   readonly #deps: WakeApiDeps;
   readonly #clock: Clock;
-  /** The tasks the limit's line was said for, with the completion it was said after. */
+  /** The tasks the limit's line was said for, with the completion it was said after: at most `LIMIT_LINES_HELD`. */
   readonly #limitSaid = new Map<string, number>();
 
   constructor(deps: WakeApiDeps) {
@@ -155,7 +172,7 @@ export class WakeApi {
         .prepare<[string], { id: number | null }>("SELECT max(id) AS id FROM kanban_events WHERE task_id = ? AND kind = 'completed'")
         .get(taskId)?.id ?? 0;
     if (this.#limitSaid.get(taskId) === completed) return;
-    this.#limitSaid.set(taskId, completed);
+    rememberCapped(this.#limitSaid, taskId, completed, LIMIT_LINES_HELD);
     const channel = this.#deps.channels.get(wake.channel);
     const note = this.#deps.note ?? (() => undefined);
     if (channel === undefined) {
