@@ -305,6 +305,51 @@ export interface KanbanEvent {
   createdAt: number;
 }
 
+/** Where a woken turn stands (wake spec §4.2): `pending` until it is delivered, dropped, or closed with its blocks lifted. */
+export type WakeState = 'pending' | 'delivered' | 'dropped' | 'lifted';
+
+/**
+ * A woken turn (wake spec §4.2): one row a batch, its events in
+ * `kanban_wake_events`, fixed once recorded; the current attempt's session, turn
+ * key and boot while it is submitted.
+ */
+export interface WakeRow {
+  wakeId: number;
+  /** `wakeBatchUuid` of its (subscription, event) pairs. */
+  uuid: string;
+  channel: string;
+  appId: string;
+  conversationId: string;
+  threadId: string;
+  /** `lark:<union_id>`: the turn runs as them. */
+  principal: string;
+  /** The highest `wake_depth` of its tasks. */
+  depth: number;
+  state: WakeState;
+  /** The submit it is on; a refusal adds one. */
+  attempt: number;
+  sessionId: string | null;
+  turnKey: string | null;
+  submitBoot: string | null;
+  markerAt: number | null;
+  createdAt: number;
+  deliveredAt: number | null;
+  closedAt: number | null;
+  /** The last refusal, or the check a drop failed, masked. */
+  error: string | null;
+  /** A role's wake (wake spec §19): the role, and the reaction task it made; null for a chat turn. */
+  targetRole: string | null;
+  reactionTask: string | null;
+}
+
+/** One outcome a woken turn was told of (wake spec §4.2). */
+export interface WakeEventRow {
+  wakeId: number;
+  subscriptionId: number;
+  eventId: number;
+  taskId: string;
+}
+
 /**
  * A chat following a task (spec §9.4): the binding key its notices go to, and
  * the last `kanban_events` id delivered there, or passed over as no notice.

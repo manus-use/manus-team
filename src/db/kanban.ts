@@ -34,6 +34,7 @@ import type {
   RunOutcome,
   RunRow,
   TaskRow,
+  WakeRow,
 } from '../kanban/types.js';
 import {
   getBoard,
@@ -52,6 +53,9 @@ import {
   parentsOf,
   runsOf,
   subscriptionsOf,
+  getWake,
+  wakeByUuid,
+  wakeEventsOf,
   type InstanceRow,
   type KeyedInstance,
   type MemberRow,
@@ -2452,5 +2456,176 @@ export function setWake(
     const move = d.prepare('UPDATE kanban_subscriptions SET wake_cursor = ? WHERE id = ?');
     for (const s of subs) move.run(latest, s.id);
     return { ok: true, task: mustGet(d, taskId), changed: true, tooDeep: false };
+  });
+}
+
+/** A batch of outcomes to wake a conversation with, as the waker formed it (wake spec §4.2, §5.2). */
+export interface NewWakeBatch {
+  /** `wakeBatchUuid` of its (subscription, event) pairs. */
+  uuid: string;
+  channel: string;
+  appId: string;
+  conversationId: string;
+  threadId: string;
+  /** `lark:<union_id>`: the turn runs as them. */
+  principal: string;
+  /** The highest `wake_depth` of its tasks. */
+  depth: number;
+  events: ReadonlyArray<{ subscriptionId: number; eventId: number; taskId: string }>;
+}
+
+/** A wake's error: masked, cut at 500 (wake spec §4.2). */
+function wakeError(error: string): string {
+  return mask(error).slice(0, 500);
+}
+
+/**
+ * Each subscription a wake covers, moved past the last of its events in the
+ * wake, forward only (wake spec §4.3): all of them, or only `tasks`' events.
+ */
+function moveWakeCursors(d: Db, wakeId: number, tasks?: readonly string[]): void {
+  const only = tasks === undefined ? undefined : new Set(tasks);
+  const last = new Map<number, number>();
+  for (const e of wakeEventsOf(d, wakeId)) {
+    if (only !== undefined && !only.has(e.taskId)) continue;
+    last.set(e.subscriptionId, Math.max(last.get(e.subscriptionId) ?? 0, e.eventId));
+  }
+  const move = d.prepare('UPDATE kanban_subscriptions SET wake_cursor = ? WHERE id = ? AND wake_cursor < ?');
+  for (const [sub, eventId] of last) move.run(eventId, sub, eventId);
+}
+
+/**
+ * Record a batch as one woken turn, `pending` at attempt 1, with its events, in
+ * one transaction, before its marker and its first submit (wake spec §4.2,
+ * §5.5 step 2): from here the batch is fixed. A uuid already recorded answers
+ * that row and writes nothing, as a batch's uuid is its events'.
+ */
+export function recordWake(db: Db, batch: NewWakeBatch, now: number): Result<{ wake: WakeRow; existing: boolean }> {
+  return tx(db, (d) => {
+    if (batch.events.length === 0) return refuse('invalid', 'a wake covers at least one event');
+    const existing = wakeByUuid(d, batch.uuid);
+    if (existing !== undefined) return { ok: true, wake: existing, existing: true };
+    const { lastInsertRowid } = d
+      .prepare(
+        `INSERT INTO kanban_wakes (uuid, channel, app_id, conversation_id, thread_id, principal, depth, state, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      )
+      .run(batch.uuid, batch.channel, batch.appId, batch.conversationId, batch.threadId, batch.principal, batch.depth, now);
+    const wakeId = Number(lastInsertRowid);
+    const insert = d.prepare('INSERT OR IGNORE INTO kanban_wake_events (wake_id, subscription_id, event_id, task_id) VALUES (?, ?, ?, ?)');
+    for (const e of batch.events) insert.run(wakeId, e.subscriptionId, e.eventId, e.taskId);
+    const wake = getWake(d, wakeId);
+    if (wake === undefined) throw new Error(`wake ${wakeId} vanished inside its own transaction`);
+    return { ok: true, wake, existing: false };
+  });
+}
+
+/** Its marker sent, or tried (wake spec §5.5 step 3): `marker_at`, written once. */
+export function wakeMarked(db: Db, wakeId: number, now: number): Result<{ marked: boolean }> {
+  return tx(db, (d) => {
+    if (getWake(d, wakeId) === undefined) return refuse('not_found', `no wake ${wakeId}`);
+    const { changes } = d.prepare('UPDATE kanban_wakes SET marker_at = ? WHERE wake_id = ? AND marker_at IS NULL').run(now, wakeId);
+    return { ok: true, marked: changes === 1 };
+  });
+}
+
+/**
+ * The current attempt submitted (wake spec §5.5 step 6): its session, its turn's
+ * idempotency key and this process's boot, set together, on a pending row only.
+ */
+export function wakeSubmitted(db: Db, wakeId: number, sessionId: string, turnKey: string, boot: string): Result<{ submitted: boolean }> {
+  return tx(db, (d) => {
+    if (getWake(d, wakeId) === undefined) return refuse('not_found', `no wake ${wakeId}`);
+    const { changes } = d
+      .prepare("UPDATE kanban_wakes SET session_id = ?, turn_key = ?, submit_boot = ? WHERE wake_id = ? AND state = 'pending'")
+      .run(sessionId, turnKey, boot, wakeId);
+    return { ok: true, submitted: changes === 1 };
+  });
+}
+
+/**
+ * The current attempt refused (wake spec §5.6): one added to `attempt`, its
+ * session, key and boot cleared together, and the reason kept, masked and cut,
+ * in one transaction, on a pending row only, so the next attempt has a key of
+ * its own and nothing names the refused one's turn. No cursor moves. Answers the
+ * attempt the row is now on.
+ */
+export function wakeRefused(db: Db, wakeId: number, error: string): Result<{ refused: boolean; attempt: number }> {
+  return tx(db, (d) => {
+    const wake = getWake(d, wakeId);
+    if (wake === undefined) return refuse('not_found', `no wake ${wakeId}`);
+    const { changes } = d
+      .prepare(
+        `UPDATE kanban_wakes SET attempt = attempt + 1, session_id = NULL, turn_key = NULL, submit_boot = NULL, error = ?
+          WHERE wake_id = ? AND state = 'pending'`,
+      )
+      .run(wakeError(error), wakeId);
+    return { ok: true, refused: changes === 1, attempt: changes === 1 ? wake.attempt + 1 : wake.attempt };
+  });
+}
+
+/**
+ * Delivered (wake spec §5.5 step 9): the prompt reached the agent, or the turn
+ * was found made. The row `delivered`, and each subscription it covers moved to
+ * the last of its events in the batch, notices or not, in one transaction; on a
+ * pending row only, so a late callback cannot undo a row another path settled.
+ */
+export function advanceWake(db: Db, wakeId: number, now: number): Result<{ delivered: boolean }> {
+  return tx(db, (d) => {
+    if (getWake(d, wakeId) === undefined) return refuse('not_found', `no wake ${wakeId}`);
+    const { changes } = d
+      .prepare("UPDATE kanban_wakes SET state = 'delivered', delivered_at = ? WHERE wake_id = ? AND state = 'pending'")
+      .run(now, wakeId);
+    if (changes === 1) moveWakeCursors(d, wakeId);
+    return { ok: true, delivered: changes === 1 };
+  });
+}
+
+/**
+ * Dropped (wake spec §5.3a, §5.6): the row `dropped`, with why, and the cursors
+ * moved past its events, in one transaction, on a pending row only: every
+ * task's, or only `tasks`', whose wake was turned off or taken over, or which
+ * left the board, so the others' outcomes are read again into a new batch.
+ */
+export function dropWake(db: Db, wakeId: number, error: string, now: number, opts: { tasks?: readonly string[] } = {}): Result<{ dropped: boolean }> {
+  return tx(db, (d) => {
+    if (getWake(d, wakeId) === undefined) return refuse('not_found', `no wake ${wakeId}`);
+    const { changes } = d
+      .prepare("UPDATE kanban_wakes SET state = 'dropped', closed_at = ?, error = ? WHERE wake_id = ? AND state = 'pending'")
+      .run(now, wakeError(error), wakeId);
+    if (changes === 1) moveWakeCursors(d, wakeId, opts.tasks);
+    return { ok: true, dropped: changes === 1 };
+  });
+}
+
+/**
+ * Closed with every block in it lifted before its turn (wake spec §5.3b): the
+ * row `lifted`, its cursors moved past its events, in one transaction, on a
+ * pending row only.
+ */
+export function liftedWake(db: Db, wakeId: number, now: number): Result<{ lifted: boolean }> {
+  return tx(db, (d) => {
+    if (getWake(d, wakeId) === undefined) return refuse('not_found', `no wake ${wakeId}`);
+    const { changes } = d
+      .prepare("UPDATE kanban_wakes SET state = 'lifted', closed_at = ? WHERE wake_id = ? AND state = 'pending'")
+      .run(now, wakeId);
+    if (changes === 1) moveWakeCursors(d, wakeId);
+    return { ok: true, lifted: changes === 1 };
+  });
+}
+
+/**
+ * A subscription's `wake_cursor` moved past events the waker passes over, with no
+ * wake (wake spec §5.2 step 3): forward only, and no event, as the notifier's
+ * cursor writes none.
+ */
+export function passWake(db: Db, subscriptionId: number, cursor: number): Result<{ advanced: boolean }> {
+  return tx(db, (d) => {
+    const found = d.prepare<[number], { id: number }>('SELECT id FROM kanban_subscriptions WHERE id = ?').get(subscriptionId);
+    if (found === undefined) return refuse('not_found', `no subscription ${subscriptionId}`);
+    const { changes } = d
+      .prepare('UPDATE kanban_subscriptions SET wake_cursor = ? WHERE id = ? AND wake_cursor < ?')
+      .run(cursor, subscriptionId, cursor);
+    return { ok: true, advanced: changes === 1 };
   });
 }

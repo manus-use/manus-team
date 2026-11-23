@@ -21,6 +21,9 @@ import type {
   SubscriptionRow,
   TaskRow,
   Waiting,
+  WakeEventRow,
+  WakeRow,
+  WakeState,
 } from '../kanban/types.js';
 
 /**
@@ -1257,4 +1260,76 @@ export function unblockMessagesDue(db: Db, appId: string, limit: number): string
     )
     .all(appId, limit)
     .map((r) => r.message_id);
+}
+
+// ---------------------------------------------------------------------------
+// Wakes (wake spec §4.2)
+// ---------------------------------------------------------------------------
+
+interface WakeRaw {
+  wake_id: number;
+  uuid: string;
+  channel: string;
+  app_id: string;
+  conversation_id: string;
+  thread_id: string;
+  principal: string;
+  depth: number;
+  state: string;
+  attempt: number;
+  session_id: string | null;
+  turn_key: string | null;
+  submit_boot: string | null;
+  marker_at: number | null;
+  created_at: number;
+  delivered_at: number | null;
+  closed_at: number | null;
+  error: string | null;
+  target_role: string | null;
+  reaction_task: string | null;
+}
+
+function decodeWake(r: WakeRaw): WakeRow {
+  return {
+    wakeId: r.wake_id,
+    uuid: r.uuid,
+    channel: r.channel,
+    appId: r.app_id,
+    conversationId: r.conversation_id,
+    threadId: r.thread_id,
+    principal: r.principal,
+    depth: r.depth,
+    state: r.state as WakeState,
+    attempt: r.attempt,
+    sessionId: r.session_id,
+    turnKey: r.turn_key,
+    submitBoot: r.submit_boot,
+    markerAt: r.marker_at,
+    createdAt: r.created_at,
+    deliveredAt: r.delivered_at,
+    closedAt: r.closed_at,
+    error: r.error,
+    targetRole: r.target_role,
+    reactionTask: r.reaction_task,
+  };
+}
+
+export function getWake(db: Db, wakeId: number): WakeRow | undefined {
+  const r = db.prepare<[number], WakeRaw>('SELECT * FROM kanban_wakes WHERE wake_id = ?').get(wakeId);
+  return r === undefined ? undefined : decodeWake(r);
+}
+
+export function wakeByUuid(db: Db, uuid: string): WakeRow | undefined {
+  const r = db.prepare<[string], WakeRaw>('SELECT * FROM kanban_wakes WHERE uuid = ?').get(uuid);
+  return r === undefined ? undefined : decodeWake(r);
+}
+
+/** A woken turn's events, in event order. */
+export function wakeEventsOf(db: Db, wakeId: number): WakeEventRow[] {
+  return db
+    .prepare<[number], { wake_id: number; subscription_id: number; event_id: number; task_id: string }>(
+      'SELECT wake_id, subscription_id, event_id, task_id FROM kanban_wake_events WHERE wake_id = ? ORDER BY event_id, subscription_id',
+    )
+    .all(wakeId)
+    .map((r) => ({ wakeId: r.wake_id, subscriptionId: r.subscription_id, eventId: r.event_id, taskId: r.task_id }));
 }
