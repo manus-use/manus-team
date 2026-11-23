@@ -1,6 +1,7 @@
 import { forDisplay, forMarkdown } from '../channel/escape.js';
 import type { CardButton, CardView } from '../channel/types.js';
 import { boardCardNonce } from '../core/ids.js';
+import { formatWall, processZone } from '../cron/schedule.js';
 import type { BoardEntry, BoardSummary, ReviewRequest, TaskView } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
@@ -333,12 +334,42 @@ export function waitingLine(
  * and comments. Its board is named once anything is on a board but `default`:
  * the task's, or the chat's it is shown in (spec §16).
  */
-export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard: string = DEFAULT_BOARD, nameOf?: NameOf): string {
+/** What a Wake line needs of the gateway (wake spec §10): its switch, its zone, and now, for the day. */
+export interface WakeShow {
+  enabled: boolean;
+  /** `cron.tz`, else the process's. */
+  zone: string;
+  now: number;
+}
+
+/** A Wake line when the caller says nothing of the gateway: wakes on, in the process's zone, now. */
+export function defaultWakeShow(): WakeShow {
+  return { enabled: true, zone: processZone(), now: Date.now() };
+}
+
+/**
+ * `task show`'s Wake line (wake spec §10), chat's and the terminal's in the same
+ * words, the setter named as the caller names people: off; on, by whom and at
+ * what depth, with the time of the task's last delivered wake, HH:MM in the
+ * zone, MM-DD HH:MM on another day; or on, but wakes off on the gateway.
+ */
+export function wakeLine(task: TaskRow, lastWoke: number | undefined, show: WakeShow, setter: string): string {
+  if (task.wakeBy === null) return 'Wake: off';
+  if (!show.enabled) return `Wake: on, set by ${setter}, but wakes are off on this gateway`;
+  const head = `Wake: on, set by ${setter}, depth ${task.wakeDepth}`;
+  if (lastWoke === undefined) return head;
+  const at = formatWall(show.zone, lastWoke);
+  const day = at.slice(0, 10) === formatWall(show.zone, show.now).slice(0, 10);
+  return `${head}; last woke ${day ? at.slice(11) : at.slice(5)}`;
+}
+
+export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard: string = DEFAULT_BOARD, nameOf?: NameOf, wake: WakeShow = defaultWakeShow()): string {
   const { task } = view;
   const board = task.board === DEFAULT_BOARD && chatBoard === DEFAULT_BOARD ? '' : ` · board: ${label(task.board)}`;
   const out: string[] = [
     `**${titleText(task.title, nameOf)}** ${id(task.taskId)}: ${view.status}`,
     `assignee: ${who(task.assignee, nameOf)} · reviewer: ${who(task.reviewer, nameOf)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}${board}`,
+    wakeLine(task, view.lastWoke, wake, task.wakeBy === null ? '' : personText(task.wakeBy, nameOf)),
   ];
   if (view.member !== undefined) out.push(memberLine(view.member, label, id));
   for (const w of view.waiting ?? []) out.push(waitingLine(w, label, id));

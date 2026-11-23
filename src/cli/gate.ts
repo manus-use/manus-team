@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { loadTeamSettings, WAKE_DEFAULTS, type Env, type TeamSettings, type WakeSettings } from '../config.js';
+import { processZone } from '../cron/schedule.js';
 import { tierReader } from '../db/grants.js';
 import { hasWakeColumns, wakeOfShell } from '../db/kanban-read.js';
 import { openDb } from '../db/open.js';
@@ -134,6 +135,8 @@ export interface BoardAccess {
    * or none; undefined in a shell with no marker.
    */
   shell: { sessionId: string; wake: WakeRow | undefined } | undefined;
+  /** The zone a time is said in, as the gateway says it (wake spec §10): `cron.tz`, else this shell's. */
+  zone: string;
   close(): void;
 }
 
@@ -297,7 +300,8 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   };
   const marker = io.env[SESSION_MARKER];
   const shell = marker === undefined || marker === '' ? undefined : { sessionId: marker, wake: hasWakeColumns(db) ? wakeOfShell(db, marker) : undefined };
-  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, wake, owner, shell, close: () => db.close() };
+  const zone = settings.cron?.tz ?? processZone();
+  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, wake, owner, shell, zone, close: () => db.close() };
 }
 
 /** A write the gateway held the lock through, every retry: not this command's fault. */

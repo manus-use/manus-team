@@ -111,6 +111,8 @@ export interface KanbanChatDeps {
   cancel?: (runId: string) => void;
   /** How long a task is held while its "Created" reply is under way (spec §19.4); `CARD_SEND_MS` unless a test says otherwise. */
   holdMs?: number;
+  /** `kanban.wake.enabled` and the gateway's zone, for `task show`'s Wake line (wake spec §10); absent, on, in the process's zone. */
+  wake?: { enabled: boolean; zone: string };
 }
 
 /** Who may run each command (spec §9.1, §10); a person's own reports check who is named, below. */
@@ -338,7 +340,8 @@ export class KanbanChat {
         const r = this.#deps.service.show(command.taskId);
         if (!r.ok) return refused(r);
         const gates = this.#deps.service.listGates(command.taskId);
-        return renderShow(r.view, gates.ok ? gates.gates : [], this.#deps.service.chatBoard(chatAt(key)).name, this.#nameOf);
+        const wake = this.#deps.wake === undefined ? undefined : { ...this.#deps.wake, now: Date.now() };
+        return renderShow(r.view, gates.ok ? gates.gates : [], this.#deps.service.chatBoard(chatAt(key)).name, this.#nameOf, wake);
       }
       case 'board list': {
         // This chat's own board is always listed, archived or not, so it is marked.

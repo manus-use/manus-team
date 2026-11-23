@@ -661,7 +661,7 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const taskId = oneTask(positionals, 'show');
   const board = boardFlag(values.board);
-  return act(io, values.json === true, 'mt kanban task show', (service) => {
+  return act(io, values.json === true, 'mt kanban task show', (service, _by, b) => {
     const guard = offBoard(service, board, taskId);
     if (guard !== undefined) return guard;
     const r = service.show(taskId);
@@ -672,7 +672,7 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
     const roleWait = r.view.waiting?.find((w) => w.kind === 'role');
     return {
       ok: true,
-      lines: showText(r.view, g),
+      lines: showText(r.view, g, { enabled: b.wake.enabled, zone: b.zone, now: Date.now() }),
       json: {
         task: {
           task_id: task.taskId,
@@ -698,6 +698,8 @@ function show(rest: readonly string[], io: MtIo): Promise<number> {
           board: task.board,
           block_kind: task.blockKind,
           block_reason: task.blockReason,
+          // Its wake (wake spec §10), its last wake in milliseconds as every --json time is.
+          wake: { ...wakeJson(task), last_woke: r.view.lastWoke ?? null },
           // The role whose max_running the task is waiting on (spec §6.3), or null.
           waiting_on_role: roleWait === undefined ? null : { role: roleWait.role, max_running: roleWait.maxRunning },
           // Every reason a pass skips it, in the order the pass checks them; empty for none.

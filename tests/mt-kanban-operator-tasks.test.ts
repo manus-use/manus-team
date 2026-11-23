@@ -259,6 +259,7 @@ describe('the task commands', () => {
     expect(shown.out.split('\n')).toEqual([
       `Show me (${taskId}): ready`,
       'assignee: role default · reviewer: nobody · workspace: not yet fixed · board: default',
+      'Wake: off',
       '',
       '    key ••••',
       '',

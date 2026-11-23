@@ -617,6 +617,8 @@ export interface TaskView {
   workdir?: { path: string | null; branch: string | null; first?: true };
   /** The workflow's instance the task is a member of (workflows spec §10), with its step and item; absent for a task that is none's. */
   member?: { instanceId: string; name: string | null; step: string; item: string | null };
+  /** When the task's latest delivered wake was delivered (wake spec §10); absent before its first. */
+  lastWoke?: number;
 }
 
 /** A task's display status (spec §4.1), derived from its parents and its runs. */
@@ -637,6 +639,8 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
   const undecided = runs.find((r) => r.outcome === null);
   // Read only when the members table is there: a database not yet migrated has none (workflows spec §7).
   const member = memberOf(db, taskId);
+  // A database not yet migrated to 013 has no wakes (wake spec §4).
+  const lastWoke = hasWakeColumns(db) ? lastWokeOf(db, taskId) : undefined;
   return {
     task,
     status: displayStatus({
@@ -651,6 +655,7 @@ export function taskView(db: Db, taskId: string): TaskView | undefined {
     comments: commentsOf(db, taskId),
     ...(task.worktree === null ? {} : { workdir: workdirOf(db, task.worktree) }),
     ...(member === undefined ? {} : { member: { instanceId: member.instanceId, name: member.name, step: member.step, item: member.item } }),
+    ...(lastWoke === undefined ? {} : { lastWoke }),
   };
 }
 
