@@ -352,6 +352,12 @@ export interface WakerDeps {
    * button's card is sent (§5.9). Never rejects.
    */
   redrawNotice?(messageId: string): Promise<void>;
+  /**
+   * A dispatcher pass, once a role's wake has made its reaction task (§19.3):
+   * the board runs it as any task, and a new task is claimed at the next pass.
+   * Never throws into a round.
+   */
+  nudge?(): void;
 }
 
 /** One outcome a batch covers: its subscription, the event, and its task as read this round. */
@@ -1001,6 +1007,13 @@ export class Waker {
       return false;
     }
     this.#paused.delete(key);
+    if (!made.existing) {
+      try {
+        deps.nudge?.();
+      } catch {
+        // The dispatcher's own sweep finds it.
+      }
+    }
     if (made.wake.markerAt === null) {
       await this.#line(
         channel,

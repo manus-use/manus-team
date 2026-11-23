@@ -592,6 +592,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       zone,
       // A due button's card sent, its notice redrawn (wake spec §5.9).
       redrawNotice: (messageId) => unblockRedraws?.redrawMessage(messageId) ?? Promise.resolve(),
+      // A reaction task made by a role's wake is claimed at the dispatcher's next pass (wake spec §19.3).
+      nudge: () => dispatcher?.pass(),
       note,
     });
     wakeApi = new WakeApi({

@@ -45,7 +45,10 @@
  *               a file `release` beside the log first when the prompt says SLOW;
  *               each chat turn's prompt,
  *               whether it had a wake token, and the unblock's answer, is
- *               appended to `wake.log` beside the log
+ *               appended to `wake.log` beside the log; a reaction task's run
+ *               (its body starts as a role's wake prompt) lifts the block its
+ *               body says it may with `mt kanban wake-show` and `wake-unblock`,
+ *               logging both to `reaction.log`, and completes
  *
  * Every invocation appends its argv to `FAKE_CLI_LOG` as one JSON line. That file
  * is how a test sees the composed prompt -- which is the whole of this driver's
@@ -382,6 +385,22 @@ switch (MODE) {
         task = JSON.parse(shown.answer).task;
       } catch {
         process.stderr.write(`mt kanban show failed: ${shown.error} ${shown.answer}\n`);
+      }
+      // A reaction task's run (wake spec §19.5): its body is the wake's prompt. It reads the task the
+      // prompt says it may lift with wake-show, lifts it with wake-unblock, logs both, and completes.
+      if ((task.body ?? '').startsWith("Board update: you are this task's run")) {
+        const lift = /lift it with mt kanban wake-unblock, given \{"task_id": "(k_[0-9a-z]+)"/.exec(task.body);
+        let shownSource = null;
+        let unblocked = null;
+        if (lift !== null) {
+          shownSource = mt('wake-show', { task_id: lift[1] });
+          unblocked = mt('wake-unblock', { task_id: lift[1], comment: 'Speaker two is confirmed.' });
+        }
+        appendFileSync(beside('reaction.log'), `${JSON.stringify({ body: task.body, shown: shownSource, unblocked })}\n`);
+        const done = mt('complete', { summary: lift === null ? 'nothing to lift' : `lifted ${lift[1]}` });
+        delta(`complete: ${done.answer}`);
+        summary('completed', 'reacted');
+        break;
       }
       // A task that says BLOCK blocks on its first run only: the next, after an unblock, completes.
       if (`${task.title} ${task.body ?? ''}`.includes('BLOCK') && !existsSync(beside(`blocked-${task.taskId}`))) {
