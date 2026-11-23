@@ -522,6 +522,7 @@ export class KanbanChat {
       conversationId: key.conversationId,
       threadId: key.threadId,
       ...(message.chatType !== 'group' || key.threadId === '' || message.rootId === undefined ? {} : { rootId: message.rootId }),
+      chatType: message.chatType,
     };
   }
 
@@ -1018,6 +1019,8 @@ export class KanbanChat {
         threadId: key.threadId,
         // In a group's thread, its root: where a card and a notice in it reply to (spec §19.4). A direct message has none (§19.1).
         ...(message.chatType !== 'group' || key.threadId === '' || message.rootId === undefined ? {} : { rootId: message.rootId }),
+        // A direct message or a group, so a wake can tell which (wake spec §2.1).
+        chatType: message.chatType,
       },
     });
     if (!r.ok) return refused(r);

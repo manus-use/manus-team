@@ -152,7 +152,15 @@ describe('/kanban workflow start', () => {
     expect(inTopic.text).toMatch(/\nThis thread hears when each task/);
     expect(inTopic).not.toHaveProperty('thread');
     const instance = getInstance(t.db, instanceOf(inTopic.text));
-    expect(instance?.createdVia).toEqual({ kind: 'chat', channel: 'lark', appId: 'cli_app', conversationId: 'oc_team', threadId: 'omt_topic', rootId: 'om_root' });
+    expect(instance?.createdVia).toEqual({
+      kind: 'chat',
+      channel: 'lark',
+      appId: 'cli_app',
+      conversationId: 'oc_team',
+      threadId: 'omt_topic',
+      rootId: 'om_root',
+      chatType: 'group',
+    });
   });
 
   it('answers a redelivery with the instance it made', async () => {

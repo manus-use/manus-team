@@ -68,7 +68,16 @@ export type Contract = Partial<Record<(typeof CONTRACT_FIELDS)[number], string>>
  * chat scope.
  */
 export type CreatedVia =
-  | { kind: 'chat'; channel: string; appId: string; conversationId: string; threadId: string; rootId?: string }
+  | {
+      kind: 'chat';
+      channel: string;
+      appId: string;
+      conversationId: string;
+      threadId: string;
+      rootId?: string;
+      /** The chat's kind, from the message (wake spec §2.1): written to the task's subscription, so a wake can tell a direct message. */
+      chatType?: 'p2p' | 'group';
+    }
   | { kind: 'run'; runId: string }
   | { kind: 'operator' };
 

@@ -81,7 +81,8 @@ function createdViaRefused(via: unknown): Refusal | undefined {
           isText(via.appId) &&
           isText(via.conversationId) &&
           isText(via.threadId) &&
-          (via.rootId === undefined || isText(via.rootId)));
+          (via.rootId === undefined || isText(via.rootId)) &&
+          (via.chatType === undefined || via.chatType === 'p2p' || via.chatType === 'group'));
   return fine ? undefined : refuse('invalid', 'created_via is a chat, with text fields, a run id, or the operator');
 }
 

@@ -42,6 +42,7 @@ import {
   getTask,
   getTaskByKey,
   gatesOf,
+  hasWakeColumns,
   instanceByKey,
   membersWithTasks,
   isFinished,
@@ -440,25 +441,39 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
  * task, so whoever follows that task hears about its follow-ups too, in its
  * thread, with its root (spec §19.4); or, for a terminal's, the chat it named,
  * `follow`, in Lark, for this bot (kanban spec §22.1). Each cursor starts at 0:
- * every event of the new task is newer than that. A root is written only with a
+ * every event of the new task is newer than that, the waker's `wake_cursor`
+ * too (wake spec §3.3). A root is written only with a
  * thread: at chat scope it comes from `threadSubscription` alone.
+ *
+ * Its chat's kind, `chat_type` (wake spec §2.1), is the command's for a chat's
+ * task, copied for a run's follow-up, and null for a terminal's `--chat`, which
+ * cannot ask Lark what it named. A database not yet migrated to 013 has no such
+ * column, and the task is followed as before.
  */
 function subscribe(d: Db, taskId: string, via: CreatedVia, createdFromTask: string | null, now: number, follow?: Follow): void {
+  const wake = hasWakeColumns(d);
   const insert = d.prepare(
-    `INSERT OR IGNORE INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, root_message_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    wake
+      ? `INSERT OR IGNORE INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, root_message_id, created_at, chat_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      : `INSERT OR IGNORE INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, root_message_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
+  const run = (channel: string, appId: string, chatId: string, threadId: string, root: string | null, chatType: string | null): void => {
+    if (wake) insert.run(taskId, channel, appId, chatId, threadId, root, now, chatType);
+    else insert.run(taskId, channel, appId, chatId, threadId, root, now);
+  };
   if (follow !== undefined) {
-    insert.run(taskId, 'lark', follow.appId, follow.chatId, follow.threadId, follow.threadId === '' ? null : follow.rootId, now);
+    run('lark', follow.appId, follow.chatId, follow.threadId, follow.threadId === '' ? null : follow.rootId, null);
   }
   if (via.kind === 'chat') {
     const root = via.threadId === '' || via.rootId === undefined || via.rootId === '' ? null : via.rootId;
-    insert.run(taskId, via.channel, via.appId, via.conversationId, via.threadId, root, now);
+    run(via.channel, via.appId, via.conversationId, via.threadId, root, via.chatType ?? null);
     return;
   }
   if (createdFromTask === null) return;
   for (const s of subscriptionsOf(d, createdFromTask)) {
-    insert.run(taskId, s.channel, s.appId, s.conversationId, s.threadId, s.rootMessageId, now);
+    run(s.channel, s.appId, s.conversationId, s.threadId, s.rootMessageId, s.chatType);
   }
 }
 
