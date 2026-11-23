@@ -312,6 +312,13 @@ export interface StartWake {
 export const STEPS_NOTICE_ONLY = 'wakes are off on this gateway (kanban.wake.enabled), so the steps that ask for one are notice-only';
 
 /** The note a terminal's start or apply with no chat ends with when its steps ask for the chat session's wake (wake spec §19.16). */
+/**
+ * A start's wake, as the writer's members take it: every member's, or the
+ * asking steps'; `rolesOnly` with no chat to follow them, when only a role's
+ * wake is kept (wake spec §19.16).
+ */
+type StartWakeOf = board.NewWake & { all: boolean; rolesOnly?: boolean };
+
 export const NO_CHAT_NOTICE_ONLY = 'no chat follows this start (add --chat), so the steps that wake the chat session are notice-only';
 
 /** The note a terminal's start or apply ends with when its steps ask for a wake and the owner is not yet known (wake spec §3.2, §19.16). */
@@ -617,7 +624,8 @@ export class KanbanService {
     if (w === undefined || req.createdVia?.kind === 'run') return { ok: true };
     if (w.by === null) return { ok: true, wake: { by: null, depth: w.depth } };
     if (!this.#wake.enabled) return board.refuse('wake_off', WAKES_OFF);
-    if (req.createdVia?.kind === 'operator' && req.follow === undefined) {
+    // A role's wake needs no chat (wake spec §19.16); the chat session's does.
+    if (req.createdVia?.kind === 'operator' && req.follow === undefined && w.role === undefined) {
       return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
     }
     const role = this.#wakeRole(w.role);
@@ -1597,12 +1605,14 @@ export class KanbanService {
   }
 
   /** The writer's members of a checked DAG: each task's fields, its parents as earlier positions, its gates. */
-  #members(dag: Dag, wake?: board.NewWake & { all: boolean }): board.NewMember[] {
+  #members(dag: Dag, wake?: StartWakeOf): board.NewMember[] {
     const at = new Map(dag.tasks.map((t, i) => [t.ref, i]));
     const wakeOf = (t: DagTask): board.NewWake | undefined => {
       if (wake === undefined || (!wake.all && t.wake === undefined)) return wake === undefined ? undefined : { by: null, depth: wake.depth };
       // The start's role, else the member's own step's (wake spec §19.1), else the chat session.
       const role = wake.role ?? (typeof t.wake === 'object' ? t.wake.role : undefined);
+      // With no chat to follow it, a member that would wake the chat session is notice-only (§19.16).
+      if (role === undefined && wake.rolesOnly === true) return { by: null, depth: wake.depth };
       return {
         by: wake.by,
         depth: wake.depth,
@@ -1761,7 +1771,7 @@ export class KanbanService {
    * notice-only, with the note. A run's members
    * inherit its task's in the writer, so nothing is asked for them.
    */
-  #startWake(req: StartRequest | ApplyRequest, dag: Dag): Result<{ wake?: board.NewWake & { all: boolean }; wakeNote?: string }> {
+  #startWake(req: StartRequest | ApplyRequest, dag: Dag): Result<{ wake?: StartWakeOf; wakeNote?: string }> {
     const w = req.wake;
     if (w === undefined || req.createdVia?.kind === 'run') return { ok: true };
     const shape = wakeShapeRefused({ by: w.by, depth: w.depth });
@@ -1773,12 +1783,14 @@ export class KanbanService {
       if (w.all) return board.refuse('wake_off', WAKES_OFF);
       return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: STEPS_NOTICE_ONLY };
     }
+    // No chat follows the members (§19.16): a role's wake needs none, the chat session's is notice-only, with a note.
     const chatless = req.createdVia?.kind === 'operator' && req.follow === undefined;
-    if (chatless && w.all) return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
+    if (chatless && w.all && w.role === undefined) return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
     // An owner the terminal could not name: the members that ask are notice-only, with one note (§19.16), which wins over the no-chat note.
     if (w.by === null) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: w.note ?? OWNER_UNSEEN_NOTICE_ONLY };
-    // The steps' wake is the chat session's, and no chat follows the members: they are made notice-only, with a note (§19.16).
-    if (chatless) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: NO_CHAT_NOTICE_ONLY };
+    const sessionSteps = chatless && !w.all && dag.tasks.some((t) => t.wake === true);
+    const chatlessOf = chatless ? { rolesOnly: true } : {};
+    const noChatNote = sessionSteps ? { wakeNote: NO_CHAT_NOTICE_ONLY } : {};
     const role = this.#wakeRole(w.role);
     if (!role.ok) return role;
     // A step's own role is checked as the start's is, when its member will wake (wake spec §19.1).
@@ -1791,7 +1803,8 @@ export class KanbanService {
     }
     return {
       ok: true,
-      wake: { by: w.by, depth: w.depth, all: w.all, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}), ...role.role },
+      wake: { by: w.by, depth: w.depth, all: w.all, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}), ...role.role, ...chatlessOf },
+      ...noChatNote,
     };
   }
 
@@ -1806,7 +1819,7 @@ export class KanbanService {
       createdBy: string;
       createdVia: CreatedVia;
       follow?: Follow;
-      wake?: board.NewWake & { all: boolean };
+      wake?: StartWakeOf;
       wakeNote?: string;
     },
   ): Result<WorkflowMade> {

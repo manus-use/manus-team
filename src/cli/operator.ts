@@ -385,11 +385,14 @@ function terminalWake(
   const depth = shell?.wake === undefined ? 0 : shell.wake.depth + 1;
   if (!asked) return depth === 0 ? { ok: true } : { ok: true, wake: { by: null, depth } };
   if (!board.wake.enabled) return refused({ code: 'wake_off', message: WAKES_OFF });
-  if (flags === undefined) return refused({ code: 'invalid', message: 'a wake needs a chat that follows the task: add --chat' });
+  // A role's wake needs no chat, outside an agent's shell (wake spec §19.16); the chat session's does.
+  if (flags === undefined && (role === undefined || shell !== undefined)) {
+    return refused({ code: 'invalid', message: 'a wake needs a chat that follows the task: add --chat' });
+  }
   const target = role === undefined ? {} : { role };
   if (shell !== undefined) {
     if (shell.wake === undefined) return notWoken(shell.sessionId);
-    if (flags.chat !== shell.wake.conversationId || flags.thread !== shell.wake.threadId) return refused({ code: 'invalid', message: ownConversation(shell.wake) });
+    if (flags === undefined || flags.chat !== shell.wake.conversationId || flags.thread !== shell.wake.threadId) return refused({ code: 'invalid', message: ownConversation(shell.wake) });
     if (role !== undefined && !board.canOperate(shell.wake.principal)) return refused({ code: 'invalid', message: roleNeedsOperate(shell.wake.principal) });
     return { ok: true, wake: { by: shell.wake.principal, depth, ...target } };
   }

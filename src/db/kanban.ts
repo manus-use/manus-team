@@ -483,7 +483,16 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
     now,
   );
   if (wake.event !== undefined) record(d, { taskId, kind: 'wake_set', actor: wake.event.actor, payload: wake.event.payload }, now);
+  // The task's own cursor starts at its latest event whatever follows it (wake spec §19.16), so a task that reads
+  // as chatless later, as when the bot's app id changes, replays none of its events: those it has now are no outcomes.
+  if (wake.by !== null) setOwnWakeCursor(d, taskId);
   return taskId;
+}
+
+/** A task's own `wake_cursor` set to its latest event (wake spec §19.16): at a wake's insert, and at each `on`. */
+function setOwnWakeCursor(d: Db, taskId: string): void {
+  const latest = d.prepare<[string], { id: number }>('SELECT max(id) AS id FROM kanban_events WHERE task_id = ?').get(taskId)?.id ?? 0;
+  d.prepare('UPDATE kanban_tasks SET wake_cursor = ? WHERE task_id = ?').run(latest, taskId);
 }
 
 /**
@@ -2515,10 +2524,11 @@ export function setWake(
     }
     if (!hasWakeColumns(d)) return refuse('invalid', NOT_MIGRATED);
     const subs = subscriptionsOf(d, taskId).filter((s) => s.appId === appId);
-    if (subs.length === 0) {
+    const role = change.role ?? null;
+    // A role's wake needs no chat: it is read through the task's own cursor (wake spec §19.16).
+    if (subs.length === 0 && role === null) {
       return refuse('invalid', `a wake needs a chat that follows the task, and no chat follows ${taskId}: a chat is chosen when a task is made`);
     }
-    const role = change.role ?? null;
     if (task.wakeBy === change.as && task.wakeRole === role) return { ok: true, task, changed: false, tooDeep: false, kept: false };
     if (task.wakeDepth >= change.maxDepth) {
       // A wake already set stays as it is, though max_depth was lowered since (wake spec §5.4): nothing is recorded.
@@ -2531,6 +2541,8 @@ export function setWake(
     const latest = d.prepare<[string], { id: number }>('SELECT max(id) AS id FROM kanban_events WHERE task_id = ?').get(taskId)?.id ?? 0;
     const move = d.prepare('UPDATE kanban_subscriptions SET wake_cursor = ? WHERE id = ?');
     for (const s of subs) move.run(latest, s.id);
+    // The task's own cursor too, whatever chat follows it, so it never replays once it reads as chatless (§19.16).
+    setOwnWakeCursor(d, taskId);
     return { ok: true, task: mustGet(d, taskId), changed: true, tooDeep: false, kept: false };
   });
 }
