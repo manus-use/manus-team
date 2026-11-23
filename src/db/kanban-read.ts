@@ -1491,3 +1491,21 @@ export function wokenUnblocksSince(db: Db, taskId: string): number {
       .get(taskId, taskId)?.n ?? 0
   );
 }
+
+/** A subscription by its id. */
+export function getSubscription(db: Db, subscriptionId: number): SubscriptionRow | undefined {
+  const r = db.prepare<[number], SubscriptionRaw>(`SELECT ${subscriptionCols(db)} FROM kanban_subscriptions WHERE id = ?`).get(subscriptionId);
+  return r === undefined ? undefined : decodeSubscription(r);
+}
+
+/** A wake's outcomes (wake spec §4.2): each pair's subscription and its event, in event order. */
+export function wakeOutcomesOf(db: Db, wakeId: number): Array<{ subscriptionId: number; event: KanbanEvent }> {
+  return db
+    .prepare<[number], EventRaw & { subscription_id: number }>(
+      `SELECT we.subscription_id, e.id, e.task_id, e.run_id, e.kind, e.actor, json(e.payload) AS payload, e.created_at
+         FROM kanban_wake_events we JOIN kanban_events e ON e.id = we.event_id
+        WHERE we.wake_id = ? ORDER BY e.id, we.subscription_id`,
+    )
+    .all(wakeId)
+    .map((r) => ({ subscriptionId: r.subscription_id, event: decodeEvent(r) }));
+}
