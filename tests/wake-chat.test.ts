@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eventsOf, getTask } from '../src/db/kanban-read.js';
 import { KanbanChat } from '../src/kanban/chat.js';
+import { parseKanban } from '../src/kanban/chat-parse.js';
 import { PeopleDirectory } from '../src/kanban/people.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { Authorizer, defaultAuthConfig } from '../src/policy/auth.js';
@@ -101,9 +102,9 @@ describe('/kanban task new with a wake: line', () => {
     }
   });
 
-  it('refuses a wake: line that is neither on nor off, and one given twice', async () => {
+  it('refuses a wake: line that is neither on, off nor one word, and one given twice', async () => {
     const { chat } = harness();
-    expect(await say(chat, 'task new Book the venue\nwake: maybe')).toBe('`wake:` is `on` or `off`.');
+    expect(await say(chat, 'task new Book the venue\nwake: maybe later')).toBe('`wake:` is `on`, `off` or a role.');
     expect(await say(chat, 'task new Book the venue\nwake: on\nwake: off')).toBe('`wake:` is given twice.');
   });
 
@@ -206,10 +207,58 @@ describe('/kanban task wake', () => {
     expect(getTask(t.db, taskId)?.wakeBy).toBeNull();
   });
 
-  it('answers its usage for anything but on or off', async () => {
+  it('answers its usage for anything but on, off or a role', async () => {
     const { chat } = harness();
-    for (const text of ['task wake', 'task wake k_one', 'task wake k_one maybe', 'task wake k_one on now']) {
-      expect(await say(chat, text)).toBe('Usage: `/kanban task wake <task> on|off`');
+    for (const text of ['task wake', 'task wake k_one', 'task wake k_one on now']) {
+      expect(await say(chat, text)).toBe('Usage: `/kanban task wake <task> on|off|<role>`');
     }
+  });
+});
+
+describe("chat's role forms (wake spec §19.1)", () => {
+  it('reads wake: <role> on task new, and wake:<role> as a start\'s last word', () => {
+    const made = parseKanban('task new Book the venue\nwake: reviewer');
+    expect(made).toMatchObject({ ok: true, command: { verb: 'new', wake: true, wakeRole: 'reviewer' } });
+    expect(parseKanban('workflow start flow topic=x wake:reviewer')).toEqual({
+      ok: true,
+      command: { verb: 'workflow start', name: 'flow', pairs: [{ key: 'topic', value: 'x', quoted: false }], wake: true, wakeRole: 'reviewer' },
+    });
+    // `on` and `off` are words, never roles.
+    expect(parseKanban('workflow start flow wake:on')).toEqual({ ok: true, command: { verb: 'workflow start', name: 'flow', pairs: [], wake: true } });
+    expect(parseKanban('workflow start flow wake:off')).toEqual({ ok: true, command: { verb: 'workflow start', name: 'flow', pairs: [] } });
+    expect(parseKanban('task wake k_one reviewer')).toEqual({ ok: true, command: { verb: 'wake', taskId: 'k_one', on: true, role: 'reviewer' } });
+    expect(parseKanban('task wake k_one ON')).toEqual({ ok: true, command: { verb: 'wake', taskId: 'k_one', on: true } });
+  });
+
+  it('makes a task whose wake targets a role, and says so', async () => {
+    const { chat } = harness();
+    const reply = await say(chat, 'task new Book the venue\nwake: reviewer');
+    expect(reply).toContain('Its outcomes wake role reviewer here.');
+    expect(getTask(t.db, created(reply))).toMatchObject({ wakeBy: 'lark:on_owner', wakeRole: 'reviewer' });
+  });
+
+  it('refuses a role that is not configured, and makes nothing', async () => {
+    const { chat } = harness();
+    expect(await say(chat, 'task new Book the venue\nwake: nobody')).toBe('Not done: role "nobody" is not configured');
+    expect(t.db.prepare('SELECT count(*) AS n FROM kanban_tasks').get()).toEqual({ n: 0 });
+  });
+
+  it('sets a role as the target at operate tier, switches it both ways, and refuses it at talk tier', async () => {
+    const { chat } = harness();
+    const taskId = created(await say(chat, 'task new Book the venue'));
+    expect(await say(chat, `task wake ${taskId} reviewer`, GUEST)).toBe(
+      '`/kanban task wake <task> <role>` gives a role work, and needs operator permission.',
+    );
+    expect(getTask(t.db, taskId)?.wakeBy).toBeNull();
+    expect(await say(chat, `task wake ${taskId} reviewer`)).toBe(
+      `Wake is on for \`${taskId}\`: its outcomes now make a task for role reviewer where it is followed, set by Zhixi Sun.`,
+    );
+    expect(getTask(t.db, taskId)).toMatchObject({ wakeBy: 'lark:on_owner', wakeRole: 'reviewer' });
+    expect(await say(chat, `task wake ${taskId} reviewer`)).toBe(`Wake is already on for \`${taskId}\`, for role reviewer, set by Zhixi Sun.`);
+    expect(await say(chat, `task wake ${taskId} on`)).toContain('start a turn of the agent');
+    expect(getTask(t.db, taskId)).toMatchObject({ wakeBy: 'lark:on_owner', wakeRole: null });
+    expect(await say(chat, `task wake ${taskId} reviewer`)).toContain('for role reviewer');
+    expect(await say(chat, `task wake ${taskId} off`, GUEST)).toBe(`Wake is off for \`${taskId}\`: its outcomes are notices only.`);
+    expect(getTask(t.db, taskId)).toMatchObject({ wakeBy: null, wakeRole: null });
   });
 });
