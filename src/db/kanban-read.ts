@@ -1595,6 +1595,22 @@ export function deferredButton(db: Db, subscriptionId: number, eventId: number):
   return r === undefined ? undefined : decodeDeferred(r);
 }
 
+/**
+ * The wakes that carry a subscription's event and may still tell the agent of
+ * it, `pending` or `delivered`, the newest first (wake spec §5.9): what a held
+ * deferred button waits on.
+ */
+export function wakesOfEvent(db: Db, subscriptionId: number, eventId: number): WakeRow[] {
+  return db
+    .prepare<[number, number], WakeRaw>(
+      `SELECT w.* FROM kanban_wakes w JOIN kanban_wake_events we ON we.wake_id = w.wake_id
+        WHERE we.subscription_id = ? AND we.event_id = ? AND w.state IN ('pending', 'delivered')
+        ORDER BY w.wake_id DESC`,
+    )
+    .all(subscriptionId, eventId)
+    .map(decodeWake);
+}
+
 /** This bot's deferred buttons still `held` or `due` (wake spec §5.9), the oldest held first: what each round releases and sends. */
 export function deferredButtons(db: Db, appId: string): DeferredButtonRow[] {
   if (!hasWakeColumns(db)) return [];

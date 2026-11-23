@@ -4,6 +4,7 @@ import { BOOT_ID, replyUuid, turnIdempotencyKey, wakeBatchUuid } from '../core/i
 import type { SubmitRequest } from '../core/session-actor.js';
 import {
   deferredButton,
+  deferredButtons,
   dueWakes,
   eventsAfter,
   getRun,
@@ -17,6 +18,7 @@ import {
   wakeEventsOf,
   wakeOutcomesOf,
   wakesInLastHour,
+  wakesOfEvent,
   wokenUnblocksSince,
   type DueWake,
   type ThreadAt,
@@ -32,7 +34,7 @@ import type { BindingKey, Principal, SessionRow, TurnTerminal } from '../types.j
 import { named, type NameOf } from './chat-render.js';
 import { NOTICE_SEND_MS, ROUND_EVENTS } from './notices.js';
 import type { KanbanService } from './service.js';
-import type { Assignee, DeferredKey, DeferredWhy, KanbanEvent, Result, SubscriptionRow, TaskRow, WakeRow } from './types.js';
+import type { Assignee, DeferredButtonRow, DeferredKey, DeferredWhy, KanbanEvent, Result, SubscriptionRow, TaskRow, WakeRow } from './types.js';
 
 /**
  * Wakes (the wake spec): a task's outcomes start a turn of the agent in the chat
@@ -313,6 +315,11 @@ export interface WakerDeps {
   note?: (line: string) => void;
   /** `NOTICE_SEND_MS` unless a test says otherwise. */
   sendTimeoutMs?: number;
+  /**
+   * Release mode (§5.9): a gateway started with wakes off that finds deferred
+   * buttons left from before forms no wakes, and only releases and sends them.
+   */
+  releaseOnly?: boolean;
 }
 
 /** One outcome a batch covers: its subscription, the event, and its task as read this round. */
@@ -497,6 +504,9 @@ export class Waker {
   async #roundOnce(): Promise<number> {
     if (this.#stopped) return 0;
     this.#roundStart = this.#clock.now();
+    // Every held deferred button first (§5.9): released at once when the agent will no longer get a real try.
+    this.#releaseButtons();
+    if (this.#deps.releaseOnly === true) return 0;
     let submits = 0;
     // A delivered wake whose turn ended but whose deferred buttons were not all moved: tried again (§5.9).
     for (const [wakeId, entry] of [...this.#underWay]) {
@@ -931,6 +941,65 @@ export class Waker {
       landed &&= wrote;
     }
     return landed;
+  }
+
+  /**
+   * Each round, every `held` deferred button checked (§5.9): its task gone,
+   * `failed`, with one log line; its block lifted or its task archived,
+   * `lifted`; in release mode, `due`, `not_woken`; otherwise `due` with the
+   * reason `#heldWhy` gives, or left held while the agent still gets its try.
+   */
+  #releaseButtons(): void {
+    const deps = this.#deps;
+    const db = deps.db;
+    for (const row of deferredButtons(db, deps.appId)) {
+      if (row.state !== 'held') continue;
+      const key = { subscriptionId: row.subscriptionId, eventId: row.eventId };
+      if (getTask(db, row.taskId) === undefined) {
+        this.#buttonWrite(key, () => deps.service.buttonFailed(key));
+        this.#note(
+          `kanban: the deferred Unblock button of task ${row.taskId} (subscription ${row.subscriptionId}, event ${row.eventId}) is dropped: the task is not on the board`,
+        );
+        continue;
+      }
+      if (liftOf(db, row.taskId, row.eventId) !== undefined) {
+        this.#buttonWrite(key, () => deps.service.buttonLifted(key));
+        continue;
+      }
+      const why = deps.releaseOnly === true ? 'not_woken' : this.#heldWhy(row);
+      if (why !== undefined) this.#buttonWrite(key, () => deps.service.buttonDue(key, why));
+    }
+  }
+
+  /**
+   * Why a held button, its task on the board and its block standing, goes to
+   * people now (§5.9), or undefined while the agent still gets its try: the
+   * conversation let go of or no longer admitted, wake turned off, its setter's
+   * talk or operate tier lost, or the wake taken over by another setter than
+   * the one its wake runs as, `not_woken`; the block never to be woken, its
+   * cursor past it and no wake carrying it (passed over, or its batch
+   * dropped), `not_woken`; its wake delivered by an earlier boot, its turn cut
+   * by the restart, `restart`; and once `hold_minutes` have passed since its
+   * notice, `running` while its woken turn runs, `not_woken` otherwise.
+   */
+  #heldWhy(row: DeferredButtonRow): DeferredWhy | undefined {
+    const deps = this.#deps;
+    const db = deps.db;
+    const sub = getSubscription(db, row.subscriptionId);
+    const task = getTask(db, row.taskId);
+    if (sub === undefined || task === undefined) return 'not_woken';
+    const at = threadAtOf(sub);
+    if (deps.letGo(at) || deps.admitsConversation(at.conversationId, sub.chatType) !== undefined) return 'not_woken';
+    const setter = task.wakeBy;
+    if (setter === null || !deps.people.canTalk(setter) || !deps.people.canOperate(setter)) return 'not_woken';
+    const wake = wakesOfEvent(db, row.subscriptionId, row.eventId)[0];
+    if (wake !== undefined && wake.principal !== setter) return 'not_woken';
+    if (wake === undefined && sub.wakeCursor >= row.eventId) return 'not_woken';
+    const entry = wake === undefined ? undefined : this.#underWay.get(wake.wakeId);
+    if (wake?.state === 'delivered' && entry === undefined) return 'restart';
+    const holdMs = (deps.settings.holdMinutes ?? WAKE_DEFAULTS.holdMinutes) * 60_000;
+    if (this.#clock.now() - row.heldAt < holdMs) return undefined;
+    return wake?.state === 'delivered' && entry?.terminal === undefined ? 'running' : 'not_woken';
   }
 
   /** A held deferred button of an outcome released, due with `why` (§5.9). */
