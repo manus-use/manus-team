@@ -1,15 +1,18 @@
 import type { Channel, SendTarget } from '../channel/types.js';
-import { BOOT_ID, replyUuid, wakeBatchUuid } from '../core/ids.js';
+import { BOOT_ID, replyUuid, turnIdempotencyKey, wakeBatchUuid } from '../core/ids.js';
 import type { SubmitRequest } from '../core/session-actor.js';
 import {
   dueWakes,
   eventsAfter,
+  getRun,
   getSubscription,
   getTask,
+  hasUnblockButton,
   pendingWakes,
   threadRootOf,
   wakeEventsOf,
   wakeOutcomesOf,
+  wokenUnblocksSince,
   type DueWake,
   type ThreadAt,
 } from '../db/kanban-read.js';
@@ -295,6 +298,16 @@ interface Batch {
   covered: Covered[];
 }
 
+/**
+ * A submit this boot made (§5.2 step 1): the session and key it went to, and
+ * what became of it once its promise or a callback said.
+ */
+interface UnderWay {
+  sessionId: string;
+  key: string;
+  settled?: { outcome: 'delivered' | 'refused'; error?: string };
+}
+
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -321,12 +334,16 @@ export function markerText(n: number): string {
  * outcomes past each subscription's `wake_cursor` and at or before its notice
  * cursor, so the notice always goes first (§5.8); batches them by conversation
  * and principal; records each batch as a `kanban_wakes` row, which fixes it;
- * and sends its marker, awaited, once a batch. The row stays pending: the
- * submit to the conversation's session is the step after the marker (§5.5).
+ * sends its marker, awaited; and submits the prompt to the conversation's
+ * session, as a typed message is submitted. A wake is delivered when the prompt
+ * reaches the agent (`onPrompted`), or when the actor finds its turn already
+ * made (`onTurn` with `created: false`); the round never awaits a turn.
  */
 export class Waker {
   readonly #deps: WakerDeps;
   readonly #note: (line: string) => void;
+  /** This boot's submits under way, by wake id (§5.2 step 1). */
+  readonly #underWay = new Map<number, UnderWay>();
   #round: Promise<number> | undefined;
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
@@ -379,7 +396,7 @@ export class Waker {
 
   /**
    * One round, or the one already under way (§5.1): never two at once. Resolves
-   * to the batches it marked. Never rejects: a failure is noted, and the next
+   * to the submits it made. Never rejects: a failure is noted, and the next
    * round tries again.
    */
   wake(): Promise<number> {
@@ -398,18 +415,18 @@ export class Waker {
 
   async #roundOnce(): Promise<number> {
     if (this.#stopped) return 0;
-    let marked = 0;
+    let submits = 0;
     // Pending rows first (§5.2 step 1): each a batch already fixed.
     for (const row of pendingWakes(this.#deps.db, this.#deps.appId)) {
       if (this.#stopped) break;
       if (row.submitBoot === BOOT_ID) continue;
-      if (await this.#tryPending(row)) marked += 1;
+      if (await this.#tryPending(row)) submits += 1;
     }
     for (const batch of this.#batches()) {
       if (this.#stopped) break;
-      if (await this.#tryNew(batch)) marked += 1;
+      if (await this.#tryNew(batch)) submits += 1;
     }
-    return marked;
+    return submits;
   }
 
   /**
@@ -488,7 +505,7 @@ export class Waker {
       this.#note(`kanban: recording a wake for ${describe(batch.at)} failed (${recorded.message})`);
       return false;
     }
-    return this.#mark(recorded.wake, batch.covered);
+    return this.#submit(recorded.wake, batch.covered);
   }
 
   /** A pending row (§5.2 step 1): its batch as recorded, read again, then tried. */
@@ -501,17 +518,24 @@ export class Waker {
       if (sub === undefined || task === undefined) continue;
       covered.push({ sub, event: o.event, task });
     }
-    if (covered.length === 0) return false;
-    return this.#mark(row, covered);
+    if (covered.length === 0) {
+      // Its every task gone (§5.3a): dropped, so it holds its conversation no longer.
+      const gone = [...new Set(wakeEventsOf(db, row.wakeId).map((e) => e.taskId))];
+      const error = gone.map((taskId) => `task ${taskId} is not on the board`).join('; ');
+      const r = this.#deps.service.dropWake(row.wakeId, error);
+      this.#note(`kanban: wake ${row.wakeId} dropped for ${describe(rowAt(row))}: ${r.ok ? error : `${error}, but the drop failed (${r.message})`}`);
+      return false;
+    }
+    return this.#submit(row, covered);
   }
 
   /**
-   * A recorded wake's marker (§5.5 step 3, §8): sent and awaited, once a batch,
-   * replying to the thread's root as the notifier's sends do, its uuid the
-   * batch's; `marker_at` then set whether the send succeeded, failed or timed
-   * out. True when it was sent or tried now.
+   * One attempt of a recorded wake (§5.5 steps 3 to 8): the marker, once a
+   * batch, awaited; the session bound or made, as the setter; its actor; the
+   * prompt; the attempt stamped; and the submit, its promise and callbacks
+   * handled when they come, outside the round.
    */
-  async #mark(row: WakeRow, covered: readonly Covered[]): Promise<boolean> {
+  async #submit(row: WakeRow, covered: readonly Covered[]): Promise<boolean> {
     const deps = this.#deps;
     const at = rowAt(row);
     const channel = deps.channels.get(row.channel);
@@ -519,13 +543,98 @@ export class Waker {
       this.#note(`kanban: no channel ${row.channel} for wake ${row.wakeId}`);
       return false;
     }
-    if (row.markerAt !== null) return false;
-    const root = threadRootOf(deps.db, at);
-    const target: SendTarget = { chatId: row.conversationId, threadId: row.threadId, ...(root === undefined ? {} : { root }) };
-    await this.#line(channel, target, markerText(covered.length), replyUuid(deps.appId, `wake:${row.uuid}`, 'marker'), `the marker of wake ${row.wakeId}`);
-    const marked = deps.service.wakeMarked(row.wakeId);
-    if (!marked.ok) this.#note(`kanban: wake ${row.wakeId}'s marker was not recorded (${marked.message})`);
+    if (row.markerAt === null) {
+      const root = threadRootOf(deps.db, at);
+      const target: SendTarget = { chatId: row.conversationId, threadId: row.threadId, ...(root === undefined ? {} : { root }) };
+      await this.#line(channel, target, markerText(covered.length), replyUuid(deps.appId, `wake:${row.uuid}`, 'marker'), `the marker of wake ${row.wakeId}`);
+      const marked = deps.service.wakeMarked(row.wakeId);
+      if (!marked.ok) this.#note(`kanban: wake ${row.wakeId}'s marker was not recorded (${marked.message})`);
+    }
+    const owner = deps.people.principalOf(row.principal);
+    if (owner === undefined) {
+      this.#note(`kanban: wake ${row.wakeId} runs as ${row.principal}, whom people does not hold`);
+      return false;
+    }
+    const key: BindingKey = { channel: row.channel, appId: row.appId, conversationId: row.conversationId, threadId: row.threadId };
+    const { session } = deps.registry.bindOrCreate(key, owner);
+    const actor = await deps.registry.actorFor(session.id, key);
+    if (this.#stopped) return false;
+    const nameOf = deps.people.chatNames();
+    const prompt = wakePrompt({
+      setter: row.principal,
+      operate: deps.people.canOperate(row.principal),
+      outcomes: covered.map((c) => this.#outcome(c)),
+      nameOf,
+      runAssignee: (runId) => getRun(deps.db, runId)?.assignee,
+      blockRecurrenceLimit: deps.blockRecurrenceLimit,
+      maxDepth: deps.settings.maxDepth,
+    });
+    const messageId = row.attempt === 1 ? `wake:${row.uuid}` : `wake:${row.uuid}:${row.attempt}`;
+    const turnKey = turnIdempotencyKey(deps.appId, messageId);
+    this.#underWay.set(row.wakeId, { sessionId: session.id, key: turnKey });
+    const stamped = deps.service.wakeSubmitted(row.wakeId, session.id, turnKey, BOOT_ID);
+    if (!stamped.ok) {
+      this.#underWay.delete(row.wakeId);
+      this.#note(`kanban: wake ${row.wakeId} was not stamped (${stamped.message})`);
+      return false;
+    }
+    deps.cronTurns?.turnSubmitted(session.id, turnKey, false);
+    const name = nameOf(row.principal) ?? row.principal;
+    const submitted = actor.submit({
+      messageId,
+      appId: deps.appId,
+      input: { text: prompt.text, paths: [] },
+      origin: { wake: { id: row.wakeId, by: row.principal, name } },
+      onTurn: (turn) => {
+        if (!turn.created) this.#delivered(row.wakeId);
+      },
+      onPrompted: () => this.#delivered(row.wakeId),
+    });
+    submitted.then(
+      (terminal) => this.#ended(row.wakeId, `the turn ended ${terminal} before its prompt reached the agent`),
+      (err: unknown) => this.#ended(row.wakeId, message(err)),
+    );
     return true;
+  }
+
+  /** What the prompt is told of one outcome (§7): for a block, its button and the task's woken unblocks. */
+  #outcome(c: Covered): WakeOutcome {
+    const task = { taskId: c.task.taskId, title: c.task.title };
+    if (!isBlockOutcome(c.event)) return { event: c.event, task };
+    return {
+      event: c.event,
+      task,
+      button: hasUnblockButton(this.#deps.db, this.#deps.appId, c.task.taskId, c.event.id) ? 'recorded' : 'none',
+      wokenUnblocks: wokenUnblocksSince(this.#deps.db, c.task.taskId),
+    };
+  }
+
+  /** The prompt reached the agent, or the turn was found made (§5.5 step 9): delivered, once. */
+  #delivered(wakeId: number): void {
+    if (this.#stopped) return;
+    const entry = this.#underWay.get(wakeId);
+    if (entry === undefined || entry.settled !== undefined) return;
+    entry.settled = { outcome: 'delivered' };
+    const r = this.#deps.service.advanceWake(wakeId);
+    if (!r.ok) {
+      this.#note(`kanban: wake ${wakeId} was delivered, but not recorded (${r.message})`);
+      return;
+    }
+    this.#underWay.delete(wakeId);
+  }
+
+  /** The submit's promise settled without a delivery (§5.6): the attempt refused. */
+  #ended(wakeId: number, error: string): void {
+    if (this.#stopped) return;
+    const entry = this.#underWay.get(wakeId);
+    if (entry === undefined || entry.settled !== undefined) return;
+    entry.settled = { outcome: 'refused', error };
+    const r = this.#deps.service.wakeRefused(wakeId, error);
+    if (!r.ok) {
+      this.#note(`kanban: wake ${wakeId} was refused, but not recorded (${r.message})`);
+      return;
+    }
+    this.#underWay.delete(wakeId);
   }
 
   /** One of the waker's own lines (§8): masked, bounded by the notifier's bound, never retried. */

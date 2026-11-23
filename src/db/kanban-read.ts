@@ -1509,3 +1509,15 @@ export function wakeOutcomesOf(db: Db, wakeId: number): Array<{ subscriptionId: 
     .all(wakeId)
     .map((r) => ({ subscriptionId: r.subscription_id, event: decodeEvent(r) }));
 }
+
+/** Whether a message of notices carries an Unblock button for this block event (wake spec §7), as recorded. */
+export function hasUnblockButton(db: Db, appId: string, taskId: string, blockEvent: number): boolean {
+  const button = hasWakeColumns(db) ? ' AND has_button = 1' : '';
+  return (
+    db
+      .prepare<[string, string, number], { n: number }>(
+        `SELECT count(*) AS n FROM kanban_unblock_buttons WHERE app_id = ? AND task_id = ? AND block_event = ?${button}`,
+      )
+      .get(appId, taskId, blockEvent)?.n !== 0
+  );
+}
