@@ -735,6 +735,14 @@ export class KanbanService {
     return board.passWake(this.#db, subscriptionId, cursor);
   }
 
+  /** A task's own wake cursor moved past events the waker passes over, for a role's wake with no chat (wake spec §19.16). */
+  passTaskWake(taskId: string, cursor: number): Result<{ advanced: boolean }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!Number.isSafeInteger(cursor) || cursor < 0) return board.refuse('invalid', 'a cursor is a whole number');
+    return board.passTaskWake(this.#db, taskId, cursor);
+  }
+
   /**
    * The root of a thread, as the notifier finds it (spec §19.7): the message a
    * subscription in it recorded, or undefined for none, or at chat scope. The

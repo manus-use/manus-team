@@ -1492,6 +1492,54 @@ export function dueWakes(db: Db, appId: string): DueWake[] {
     .map((r) => ({ ...decodeSubscription(r), oldestDue: r.oldest_due as number }));
 }
 
+/**
+ * The subscription id of a role's wake's events with no chat (wake spec
+ * §19.16): no subscription has it, as ids start at 1, and its cursor is the
+ * task's own `wake_cursor`.
+ */
+export const CHATLESS = 0;
+
+/** A task with a role's wake and no chat (wake spec §19.16), due: its oldest event past its own cursor. */
+export type DueTaskWake = TaskRow & { oldestDue: number };
+
+/**
+ * The tasks with a role's wake that no chat of this bot follows, with an event
+ * past their own `wake_cursor` (wake spec §19.16), oldest first: read as soon
+ * as written, as no notice comes first.
+ */
+export function dueTaskWakes(db: Db, appId: string): DueTaskWake[] {
+  if (!hasWakeColumns(db)) return [];
+  return db
+    .prepare<[string], TaskRaw & { oldest_due: number }>(
+      `SELECT * FROM (
+         SELECT ${taskCols(db)},
+                (SELECT min(e.id) FROM kanban_events e WHERE e.task_id = kanban_tasks.task_id AND e.id > kanban_tasks.wake_cursor) AS oldest_due
+           FROM kanban_tasks
+          WHERE wake_by IS NOT NULL AND wake_role IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM kanban_subscriptions s WHERE s.task_id = kanban_tasks.task_id AND s.account_id = ?))
+        WHERE oldest_due IS NOT NULL
+        ORDER BY oldest_due`,
+    )
+    .all(appId)
+    .map((r) => ({ ...decodeTask(r), oldestDue: r.oldest_due }));
+}
+
+/**
+ * The delivery times of a board's role wakes with no chat in the hour before
+ * `now`, oldest first (wake spec §19.16): the per-hour cap of a wake with no
+ * thread is the board's, its reaction tasks' board.
+ */
+export function boardWakesInLastHour(db: Db, appId: string, board: string, now: number): number[] {
+  return db
+    .prepare<[string, string, number], { delivered_at: number }>(
+      `SELECT w.delivered_at FROM kanban_wakes w JOIN kanban_tasks t ON t.task_id = w.reaction_task
+        WHERE w.app_id = ? AND w.conversation_id = '' AND w.state = 'delivered' AND t.board = ? AND w.delivered_at > ?
+        ORDER BY w.delivered_at`,
+    )
+    .all(appId, board, now - 60 * 60_000)
+    .map((r) => r.delivered_at);
+}
+
 /** This bot's pending wakes, oldest first (wake spec §5.2 step 1). */
 export function pendingWakes(db: Db, appId: string): WakeRow[] {
   return db

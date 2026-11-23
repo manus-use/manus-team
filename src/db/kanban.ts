@@ -62,6 +62,7 @@ import {
   getSubscription,
   getWake,
   wakeByUuid,
+  CHATLESS,
   wakeEventsOf,
   type InstanceRow,
   type KeyedInstance,
@@ -2611,8 +2612,17 @@ function moveWakeCursors(d: Db, wakeId: number, tasks?: readonly string[]): void
     last.set(e.subscriptionId, Math.max(last.get(e.subscriptionId) ?? 0, e.eventId));
   }
   const move = d.prepare('UPDATE kanban_subscriptions SET wake_cursor = ? WHERE id = ? AND wake_cursor < ?');
-  for (const [sub, eventId] of last) move.run(eventId, sub, eventId);
+  for (const [sub, eventId] of last) if (sub !== CHATLESS) move.run(eventId, sub, eventId);
+  // A role's wake with no chat (wake spec §19.16): its events are of no subscription, and its tasks' own cursors move.
+  const own = d.prepare('UPDATE kanban_tasks SET wake_cursor = ? WHERE task_id = ? AND wake_cursor < ?');
+  const lastOfTask = new Map<string, number>();
+  for (const e of wakeEventsOf(d, wakeId)) {
+    if (e.subscriptionId !== CHATLESS || (only !== undefined && !only.has(e.taskId))) continue;
+    lastOfTask.set(e.taskId, Math.max(lastOfTask.get(e.taskId) ?? 0, e.eventId));
+  }
+  for (const [taskId, eventId] of lastOfTask) own.run(eventId, taskId, eventId);
 }
+
 
 /**
  * Record a batch as one woken turn, `pending` at attempt 1, with its events, in
@@ -2691,9 +2701,14 @@ export function recordRoleWake(db: Db, batch: NewRoleWake, facts: TaskFacts, now
     if (!live.ok) return { ok: true, skipped: 'board', reason: live.message };
     const who = assignable(batch.role, facts);
     if (!who.ok) return { ok: true, skipped: 'role', reason: who.message };
-    const sub = getSubscription(d, oldest.subscriptionId);
-    // A batch of a conversation follows its subscription: one gone is skipped, as no later try would find it.
-    if (sub === undefined) return { ok: true, skipped: 'subscription', reason: `no subscription ${oldest.subscriptionId} for the reaction task to follow` };
+    // A batch of a conversation follows its subscription: one gone is skipped, as no later try would find it. One of no chat has none (§19.16),
+    // and subscription 0 stands for no chat only with no conversation: a conversation's batch naming it is refused.
+    const chatless = oldest.subscriptionId === CHATLESS;
+    if (chatless && (batch.conversationId !== '' || batch.threadId !== '')) {
+      return refuse('invalid', `a batch of conversation ${batch.conversationId}/${batch.threadId} names no subscription`);
+    }
+    const sub = chatless ? undefined : getSubscription(d, oldest.subscriptionId);
+    if (!chatless && sub === undefined) return { ok: true, skipped: 'subscription', reason: `no subscription ${oldest.subscriptionId} for the reaction task to follow` };
     const taskId = newTaskId();
     const { lastInsertRowid } = d
       .prepare(
@@ -2725,7 +2740,7 @@ export function recordRoleWake(db: Db, batch: NewRoleWake, facts: TaskFacts, now
         parents: [],
         wake: { by: null, depth: batch.depth + 1 },
         reaction: { taskId, wakeId },
-        copySubscription: sub,
+        ...(sub === undefined ? {} : { copySubscription: sub }),
       },
       now,
     );
@@ -2842,6 +2857,19 @@ export function passWake(db: Db, subscriptionId: number, cursor: number): Result
     const { changes } = d
       .prepare('UPDATE kanban_subscriptions SET wake_cursor = ? WHERE id = ? AND wake_cursor < ?')
       .run(cursor, subscriptionId, cursor);
+    return { ok: true, advanced: changes === 1 };
+  });
+}
+
+/**
+ * Move a task's own wake cursor to an event the waker passed over (wake spec
+ * §19.16): a role's wake with no chat, whose task has no subscription to hold
+ * one. Forward only, writing no event, as `passWake`.
+ */
+export function passTaskWake(db: Db, taskId: string, cursor: number): Result<{ advanced: boolean }> {
+  return tx(db, (d) => {
+    if (getTask(d, taskId) === undefined) return refuse('not_found', `no task ${taskId}`);
+    const { changes } = d.prepare('UPDATE kanban_tasks SET wake_cursor = ? WHERE task_id = ? AND wake_cursor < ?').run(cursor, taskId, cursor);
     return { ok: true, advanced: changes === 1 };
   });
 }
