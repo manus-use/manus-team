@@ -436,7 +436,20 @@ export type RefusalCode =
   /** No usable workflow file of that name (workflows spec §6). */
   | 'unknown_workflow'
   /** A wake asked for while `kanban.wake.enabled` is false (wake spec §3.4). */
-  | 'wake_off';
+  | 'wake_off'
+  /** A woken turn's show or unblock (wake spec §9.2): a token never held, or a task outside its wake for a show. */
+  | 'unauthorized'
+  /** A stale wake token, or a session with no running turn the board woke (wake spec §9.2). */
+  | 'not_woken'
+  /** A woken turn's unblock of a task whose block did not wake it (wake spec §9.2). */
+  | 'not_this_wake'
+  /** The wake's setter lacks the tier the act needs, checked live (wake spec §9.2). */
+  | 'needs_operator'
+  | 'needs_talk'
+  /** A block that has recurred `kanban.block_recurrence_limit` times: a person decides (wake spec §9.2). */
+  | 'recurring'
+  /** A task unblocked by woken turns `kanban.wake.max_depth` times since it last completed (wake spec §9.2). */
+  | 'woken_unblock_limit';
 
 /** The gate that refused a report, as the reporter is shown it (spec §7.7). */
 export interface FailedGate {

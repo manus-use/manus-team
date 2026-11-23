@@ -25,6 +25,8 @@ import {
   subscriptionsOf,
   taskView,
   threadRootOf,
+  wakeOutcomesOf,
+  wokenUnblocksSince,
   type BoardEntry,
   type BoardSummary,
   type CardReading,
@@ -45,6 +47,7 @@ import { holdsSecret } from './gate-command.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
 import { limitsReached, workspaceBusy } from './waiting.js';
+import { isBlockOutcome } from './waker.js';
 import type { DisplayStatus } from './status.js';
 import {
   expand,
@@ -83,6 +86,7 @@ import {
   type RunRow,
   type TaskRow,
   type Waiting,
+  type WakeRow,
 } from './types.js';
 
 /**
@@ -185,6 +189,21 @@ export const WAKES_OFF =
 
 /** A change of a task's wake, as chat or the terminal asks it (wake spec §3.1): on as a principal, or off. */
 export type WakeRequest = { on: true; as: string } | { on: false };
+
+/**
+ * Who judges a woken turn's show and unblock (wake spec §9.2): the setter's tiers,
+ * live, by `PeopleDirectory`; their name as the thread knows them, for the
+ * refusals that name them; and `kanban.block_recurrence_limit`.
+ */
+export interface WakeJudge {
+  canTalk(principal: string): boolean;
+  canOperate(principal: string): boolean;
+  nameOf(principal: string): string | undefined;
+  blockRecurrenceLimit: number;
+}
+
+/** A woken turn's show of a task outside its wake (wake spec §9.2): the same words whether the task exists or not. */
+export const NOT_IN_WAKE = 'a woken turn reads only the tasks whose events woke it';
 
 /** A refusal unless a new task's wake is a principal, or none, and a whole depth (wake spec §3.1). */
 function wakeShapeRefused(wake: unknown): Refusal | undefined {
@@ -1208,7 +1227,7 @@ export class KanbanService {
    * `blockedAt`: an Unblock button's, the event that blocked the task as its
    * notice told it (spec §9.2); refused once that block has been lifted.
    */
-  unblock(taskId: string, by: string, comment?: string, opts: { blockedAt?: number } = {}): Result<{ task: TaskRow }> {
+  unblock(taskId: string, by: string, comment?: string, opts: { blockedAt?: number; wake?: number } = {}): Result<{ task: TaskRow }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
     if (comment !== undefined && !isText(comment)) return board.refuse('invalid', 'a comment is text');
@@ -1217,6 +1236,74 @@ export class KanbanService {
     }
     return board.unblock(this.#db, taskId, by, comment, this.#clock.now(), opts);
   }
+  /**
+   * A woken turn's `task show` (wake spec §9.2), given its delivered wake: a task
+   * with an event among the wake's, of any kind, while the setter has talk tier.
+   * Any other task is `unauthorized`, in words that do not say whether it exists.
+   * Writes nothing.
+   */
+  showForWake(wake: WakeRow, taskId: string, judge: WakeJudge): Result<{ view: TaskView; gates: GateRow[] }> {
+    if (!isText(taskId) || !wakeOutcomesOf(this.#db, wake.wakeId).some((o) => o.event.taskId === taskId)) {
+      return board.refuse('unauthorized', NOT_IN_WAKE);
+    }
+    // A wake turned off or taken over since: the task is no longer this wake's.
+    if (!stillWakes(getTask(this.#db, taskId), wake)) return board.refuse('unauthorized', NOT_IN_WAKE);
+    if (!judge.canTalk(wake.principal)) {
+      return board.refuse('needs_talk', `${setterName(wake, judge)}, who set this wake, does not have talk tier, which task show needs`);
+    }
+    const shown = this.show(taskId);
+    if (!shown.ok) return shown;
+    return { ok: true, view: shown.view, gates: gatesOf(this.#db, taskId) };
+  }
+
+  /**
+   * A woken turn's `task unblock` (wake spec §9.2, §9.3), given its delivered
+   * wake, checked in the spec's order: the task's block among the wake's events,
+   * the latest when it has two; the setter's operate tier, live; the block's
+   * recurrences below the limit; fewer than `max_depth` woken unblocks since the
+   * task last completed; then the board's own, bound to that block, by the setter,
+   * with the wake in its event.
+   */
+  unblockForWake(wake: WakeRow, taskId: string, comment: string | undefined, judge: WakeJudge): Result<{ task: TaskRow; setter: string }> {
+    const blocks = isText(taskId)
+      ? wakeOutcomesOf(this.#db, wake.wakeId).filter((o) => o.event.taskId === taskId && isBlockOutcome(o.event))
+      : [];
+    const block = blocks.at(-1)?.event;
+    if (block === undefined) {
+      return board.refuse('not_this_wake', `\`${visible(taskId)}\` did not wake this turn: a woken turn unblocks only the tasks whose blocks woke it`);
+    }
+    if (!stillWakes(getTask(this.#db, taskId), wake)) {
+      return board.refuse(
+        'not_this_wake',
+        `\`${taskId}\`'s wake has been turned off or taken over since it woke this turn, so this turn does not unblock it`,
+      );
+    }
+    const setter = setterName(wake, judge);
+    if (!judge.canOperate(wake.principal)) {
+      return board.refuse(
+        'needs_operator',
+        `${setter}, who set this wake, does not have operate tier, which unblocking needs: ask in the thread for someone who can`,
+      );
+    }
+    const recurrences = (block.payload as Record<string, unknown>)['blockRecurrences'];
+    if (typeof recurrences === 'number' && recurrences >= judge.blockRecurrenceLimit) {
+      return board.refuse(
+        'recurring',
+        `\`${taskId}\` has been blocked ${recurrences} times in a row: a person decides whether it is unblocked again`,
+      );
+    }
+    const woken = wokenUnblocksSince(this.#db, taskId);
+    const limit = this.#wake.maxDepth;
+    if (woken >= limit) {
+      return board.refuse(
+        'woken_unblock_limit',
+        `\`${taskId}\` has been unblocked by woken turns ${woken} times since it last completed: a person decides whether it is unblocked again`,
+      );
+    }
+    const r = this.unblock(taskId, wake.principal, comment, { blockedAt: block.id, wake: wake.wakeId });
+    return r.ok ? { ok: true, task: r.task, setter } : r;
+  }
+
 
   /** What a person's card for this run shows of the board (spec §9.2); undefined for a run not on it. */
   cardReading(runId: string): CardReading | undefined {
@@ -1814,4 +1901,18 @@ export class KanbanService {
     if (run === undefined) return board.refuse('not_found', `no run ${via.runId}`);
     return { ok: true, key: `${RUN_KEY}${run.taskId}:${key}` };
   }
+}
+
+/**
+ * Whether a task still wakes as the wake that woke a turn did (wake spec §9.2):
+ * the same setter and the same target. A wake turned off, or taken over by
+ * another setter, since the turn was woken leaves the task outside that wake.
+ */
+function stillWakes(task: TaskRow | undefined, wake: WakeRow): boolean {
+  return task !== undefined && task.wakeBy === wake.principal && (task.wakeRole ?? null) === (wake.targetRole ?? null);
+}
+
+/** The setter of a wake, as the thread names them, else by principal. */
+function setterName(wake: WakeRow, judge: WakeJudge): string {
+  return judge.nameOf(wake.principal) ?? wake.principal;
 }
