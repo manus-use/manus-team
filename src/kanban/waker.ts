@@ -1049,7 +1049,7 @@ export class Waker {
 }
 
 /** Where the waker's lines go in a conversation: its thread, replying to its root, as the notifier's sends do (§8). */
-function targetOf(db: Db, at: ThreadAt): SendTarget {
+export function targetOf(db: Db, at: ThreadAt): SendTarget {
   const root = threadRootOf(db, at);
   return { chatId: at.conversationId, threadId: at.threadId, ...(root === undefined ? {} : { root }) };
 }

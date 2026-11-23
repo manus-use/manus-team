@@ -491,6 +491,8 @@ export interface SocketHandlers {
   board?: (request: Record<string, unknown>, signal: AbortSignal | undefined) => unknown;
   /** A cron command, `{cron, token, input}` or `{cron, run, token, input}`; absent with cron off. */
   cron?: (request: Record<string, unknown>) => unknown;
+  /** A woken turn's show or unblock, `{wake, token, input}` (wake spec §9.2); absent with the board or wakes off. */
+  wake?: (request: Record<string, unknown>) => unknown;
   /** What a nudge asks for: a dispatcher pass and a cron tick. Never throws into a request. */
   nudged: () => void;
 }
@@ -561,6 +563,13 @@ export class SocketHandler {
       return await cron(raw);
     }
     const board = this.#handlers.board;
+    if (Object.hasOwn(raw, 'wake')) {
+      const wake = this.#handlers.wake;
+      if (wake !== undefined) return await wake(raw);
+      if (board !== undefined) {
+        return { ok: false, code: 'wake_off', message: 'wakes are off on this gateway: an operator turns them on with kanban.wake.enabled: true in config.yaml, and a restart' };
+      }
+    }
     if (board === undefined) {
       return { ok: false, code: 'kanban_off', message: 'the task board is off on this gateway: an operator turns it on with kanban.enabled: true in config.yaml, and a restart' };
     }
