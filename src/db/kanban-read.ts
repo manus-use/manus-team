@@ -1173,7 +1173,7 @@ export interface UnblockButtonReading {
    * The first `unblocked` or `archived` event of the task after its block: how,
    * who lifted it, and when. An archive clears a block with no `unblocked` event.
    */
-  lift?: { eventId: number; kind: 'unblocked' | 'archived'; actor: string; at: number };
+  lift?: Lift;
 }
 
 /** A recorded message of notices with Unblock buttons (spec §9.2, amended by the unblock redraw), its buttons in the order sent. */
@@ -1203,6 +1203,35 @@ interface UnblockButtonRaw {
 }
 
 /**
+ * The id of a block's lift, as SQL over two column expressions: the first
+ * `unblocked` or `archived` event of the task past the event that blocked it, an
+ * archive clearing a block without an unblock (kanban spec §9.2, amended by the
+ * unblock redraw). The one reading of a lift, the unblock redraw's and the
+ * waker's (wake spec §5.3b), so the two cannot disagree.
+ */
+function liftIdOf(taskId: string, blockEvent: string): string {
+  return `SELECT min(id) FROM kanban_events WHERE task_id = ${taskId} AND kind IN ('unblocked', 'archived') AND id > ${blockEvent}`;
+}
+
+/** A block's lift: the event that lifted it, its kind, who, and when. */
+export interface Lift {
+  eventId: number;
+  kind: 'unblocked' | 'archived';
+  actor: string;
+  at: number;
+}
+
+/** The lift of a task's block (wake spec §5.3b), or none while it stands. */
+export function liftOf(db: Db, taskId: string, blockEvent: number): Lift | undefined {
+  const r = db
+    .prepare<[string, number], { id: number; kind: string; actor: string; created_at: number }>(
+      `SELECT id, kind, actor, created_at FROM kanban_events WHERE id = (${liftIdOf('?', '?')})`,
+    )
+    .get(taskId, blockEvent);
+  return r === undefined ? undefined : { eventId: r.id, kind: r.kind === 'archived' ? 'archived' : 'unblocked', actor: r.actor, at: r.created_at };
+}
+
+/**
  * A recorded message of notices, with each button's lift read from the log:
  * the first `unblocked` event of its task after the event that blocked it, as
  * the board's unblock reads it when it refuses a stale press, or the task's
@@ -1215,8 +1244,7 @@ export function unblockMessage(db: Db, appId: string, messageId: string): Unbloc
       `SELECT b.message_id, b.channel, b.app_id, b.task_id, b.block_event, b.markdown, b.sent_at, b.redrawn_for,
               e.id AS lift_id, e.kind AS lift_kind, e.actor AS lift_actor, e.created_at AS lift_at
          FROM kanban_unblock_buttons b
-         LEFT JOIN kanban_events e ON e.id = (
-           SELECT min(id) FROM kanban_events WHERE task_id = b.task_id AND kind IN ('unblocked', 'archived') AND id > b.block_event)
+         LEFT JOIN kanban_events e ON e.id = (${liftIdOf('b.task_id', 'b.block_event')})
         WHERE b.message_id = ? AND b.app_id = ?
         ORDER BY b.block_event`,
     )
@@ -1332,4 +1360,55 @@ export function wakeEventsOf(db: Db, wakeId: number): WakeEventRow[] {
     )
     .all(wakeId)
     .map((r) => ({ wakeId: r.wake_id, subscriptionId: r.subscription_id, eventId: r.event_id, taskId: r.task_id }));
+}
+
+/** A subscription with outcomes for the waker, and the id of its oldest due event. */
+export interface DueWake extends SubscriptionRow {
+  oldestDue: number;
+}
+
+/**
+ * This bot's subscriptions the waker has something for (wake spec §5.2 step 2):
+ * a task with wake on, or no longer on the board, with an event past its
+ * `wake_cursor` and at or before its notice `cursor`, so the notice always goes
+ * first (§5.8); each with its oldest such event. An event already in a pending
+ * row is never due again, so no event is in two pending rows; and a conversation
+ * with a pending row is left out altogether, every principal's batch in it,
+ * stamped rows of this boot included, but for a stamped row whose session is no
+ * longer the one bound at its key, as after `/new` or `/attach`.
+ */
+export function dueWakes(db: Db, appId: string): DueWake[] {
+  return db
+    .prepare<[string], SubscriptionRaw & { oldest_due: number | null }>(
+      `SELECT * FROM (
+         SELECT ${subscriptionCols(db)},
+                (SELECT min(e.id) FROM kanban_events e
+                  WHERE e.task_id = s.task_id AND e.id > s.wake_cursor AND e.id <= s.cursor
+                    AND NOT EXISTS (
+                      SELECT 1 FROM kanban_wake_events we JOIN kanban_wakes w ON w.wake_id = we.wake_id
+                       WHERE w.state = 'pending' AND we.subscription_id = s.id AND we.event_id = e.id)) AS oldest_due
+           FROM kanban_subscriptions s
+          WHERE s.account_id = ?
+            AND (SELECT t.wake_by IS NOT NULL FROM kanban_tasks t WHERE t.task_id = s.task_id) IS NOT 0
+            AND NOT EXISTS (
+              SELECT 1 FROM kanban_wakes w
+               WHERE w.state = 'pending' AND w.app_id = s.account_id AND w.channel = s.channel
+                 AND w.conversation_id = s.conversation_id AND w.thread_id = s.thread_id
+                 AND (w.session_id IS NULL OR w.session_id IS (
+                   SELECT b.session_id FROM channel_bindings b
+                    WHERE b.channel = w.channel AND b.account_id = w.app_id AND b.conversation_id = w.conversation_id
+                      AND b.thread_id = w.thread_id AND b.revoked_at IS NULL))))
+        WHERE oldest_due IS NOT NULL
+        ORDER BY id`,
+    )
+    .all(appId)
+    .map((r) => ({ ...decodeSubscription(r), oldestDue: r.oldest_due ?? 0 }));
+}
+
+/** This bot's pending wakes, oldest first (wake spec §5.2 step 1). */
+export function pendingWakes(db: Db, appId: string): WakeRow[] {
+  return db
+    .prepare<[string], WakeRaw>("SELECT * FROM kanban_wakes WHERE app_id = ? AND state = 'pending' ORDER BY wake_id")
+    .all(appId)
+    .map(decodeWake);
 }
