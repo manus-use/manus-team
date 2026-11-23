@@ -577,6 +577,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       people,
       admitsConversation: (chatId, chatType) => authorizer.admitsConversation(chatId, chatType),
       letGo: (at) => notices.letGo(at),
+      assignable: (role) => service.wakeRoleUsable(role),
       // A woken turn is recorded without operate tier, so its mt cron add is refused (wake spec §5.5 step 7).
       ...(tokens === undefined ? {} : { cronTurns: tokens }),
       settings: config.kanban.wake,
@@ -605,15 +606,17 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   // by a waker that forms no wakes; with none left, no waker at all.
   if (!config.kanban.wake.enabled && boardService !== undefined && notifier !== undefined && deferredButtons(db, config.lark.appId).length > 0) {
     const notices = notifier;
+    const releasing = boardService;
     waker = new Waker({
       db,
-      service: boardService,
+      service: releasing,
       registry,
       channels: new Map<string, Channel>([[adapter.id, adapter]]),
       appId: config.lark.appId,
       people,
       admitsConversation: (chatId, chatType) => authorizer.admitsConversation(chatId, chatType),
       letGo: (at) => notices.letGo(at),
+      assignable: (role) => releasing.wakeRoleUsable(role),
       settings: config.kanban.wake,
       blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
       zone,

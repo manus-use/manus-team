@@ -5,6 +5,7 @@ import type { Db } from '../../src/db/open.js';
 import { createSession, getSession } from '../../src/db/sessions.js';
 import type { SubmitRequest } from '../../src/core/session-actor.js';
 import { KanbanService } from '../../src/kanban/service.js';
+import type { Role } from '../../src/roles.js';
 import type { CreatedVia, TaskRow, WakeRow } from '../../src/kanban/types.js';
 import { Waker, type WakeActor, type WakerDeps } from '../../src/kanban/waker.js';
 import type { BindingKey, Principal, SessionRow, TurnTerminal } from '../../src/types.js';
@@ -148,11 +149,11 @@ export interface WakeHarness {
   wakes(): WakeRow[];
 }
 
-export function wakeHarness(extra: Partial<WakerDeps> = {}): WakeHarness {
+export function wakeHarness(extra: Partial<WakerDeps> = {}, opts: { roles?: ReadonlyMap<string, Role> } = {}): WakeHarness {
   const t = testDb();
   const db = t.db;
   const clock = new ManualClock(NOW);
-  const service = new KanbanService({ db, roles: new Map(), workspaces: WORKSPACES, clock });
+  const service = new KanbanService({ db, roles: opts.roles ?? new Map(), workspaces: WORKSPACES, clock });
   const lark = new FakeChannel({ clock });
   const registry = new FakeRegistry(db);
   const notes: string[] = [];
@@ -177,6 +178,7 @@ export function wakeHarness(extra: Partial<WakerDeps> = {}): WakeHarness {
         p.startsWith('lark:') ? { openId: `ou_${p.slice('lark:on_'.length)}`, unionId: p.slice('lark:'.length), displayName: names.get(p) ?? null } : undefined,
     },
     admitsConversation: () => undefined,
+    assignable: (role) => service.wakeRoleUsable(role),
     letGo: () => false,
     cronTurns: { turnSubmitted: (sessionId, key, op) => turnsSubmitted.push({ sessionId, key, operate: op }) },
     settings: { perHour: 6, maxDepth: 5 },

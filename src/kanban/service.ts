@@ -674,6 +674,14 @@ export class KanbanService {
   }
 
   /**
+   * Whether a role can be given work now (wake spec §19.2), as it is checked when
+   * a wake names it: the waker's live check of a role's wake.
+   */
+  wakeRoleUsable(role: string): Result<object> {
+    return this.#wakeRole(role);
+  }
+
+  /**
    * The waker's record of a role's batch (wake spec §19.3): its reaction task,
    * made with `createTask`'s checks against the team as it is now. The waker's
    * own write, the only one that makes a task by a wake.
