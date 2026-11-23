@@ -15,6 +15,7 @@ import {
   hasUnblockButton,
   liftOf,
   pendingWakes,
+  runsOf,
   threadRootOf,
   wakeEventsOf,
   wakeOutcomesOf,
@@ -516,6 +517,8 @@ export class Waker {
     const at = threadAtOf(sub);
     if (deps.letGo(at) || deps.admitsConversation(at.conversationId, sub.chatType) !== undefined) return false;
     if (!deps.people.canTalk(task.wakeBy) || !deps.people.canOperate(task.wakeBy)) return false;
+    // A role's wake (§19.6): a role that can no longer be given work never holds a button.
+    if (task.wakeRole !== null && !deps.assignable(task.wakeRole).ok) return false;
     if (recurrencesOf(event) >= deps.blockRecurrenceLimit) return false;
     return wokenUnblocksSince(deps.db, task.taskId) < deps.settings.maxDepth;
   }
@@ -1355,14 +1358,32 @@ export class Waker {
     if (deps.letGo(at) || deps.admitsConversation(at.conversationId, sub.chatType) !== undefined) return 'not_woken';
     const setter = task.wakeBy;
     if (setter === null || !deps.people.canTalk(setter) || !deps.people.canOperate(setter)) return 'not_woken';
+    if (task.wakeRole !== null && !deps.assignable(task.wakeRole).ok) return 'not_woken';
     const wake = wakesOfEvent(db, row.subscriptionId, row.eventId)[0];
     if (wake !== undefined && wake.principal !== setter) return 'not_woken';
     if (wake === undefined && sub.wakeCursor >= row.eventId) return 'not_woken';
+    if (wake !== undefined && wake.reactionTask !== null) return this.#reactionWhy(row, wake.reactionTask);
     const entry = wake === undefined ? undefined : this.#underWay.get(wake.wakeId);
     if (wake?.state === 'delivered' && entry === undefined) return 'restart';
     const holdMs = (deps.settings.holdMinutes ?? WAKE_DEFAULTS.holdMinutes) * 60_000;
     if (this.#clock.now() - row.heldAt < holdMs) return undefined;
     return wake?.state === 'delivered' && entry?.terminal === undefined ? 'running' : 'not_woken';
+  }
+
+  /**
+   * A held button of a role's wake (§19.6), read from the database each round,
+   * so a restart changes nothing: once the reaction task's first run is
+   * decided, `tried` after `completed` or `review_requested` and `turn_failed`
+   * after any other outcome (a lifted block is `lifted` before this is asked);
+   * before that, held until `hold_minutes` from the notice's send, the time in
+   * the queue counting, then `running` if a run has started, else `not_woken`.
+   */
+  #reactionWhy(row: DeferredButtonRow, reactionTask: string): DeferredWhy | undefined {
+    const first = runsOf(this.#deps.db, reactionTask)[0];
+    if (first !== undefined && first.outcome !== null) return first.outcome === 'completed' || first.outcome === 'review_requested' ? 'tried' : 'turn_failed';
+    const holdMs = (this.#deps.settings.holdMinutes ?? WAKE_DEFAULTS.holdMinutes) * 60_000;
+    if (this.#clock.now() - row.heldAt < holdMs) return undefined;
+    return first === undefined ? 'not_woken' : 'running';
   }
 
   /** A held deferred button of an outcome released, due with `why` (§5.9). */
