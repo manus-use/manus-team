@@ -65,8 +65,11 @@ export interface WorkflowStep {
   gates: WorkflowGate[];
   parents: string[];
   forEach: string | undefined;
-  /** `wake: true` (wake spec §3.1): its task's outcomes wake whoever starts it; default false. */
-  wake: boolean;
+  /**
+   * `wake: true` (wake spec §3.1): its task's outcomes wake whoever starts it;
+   * `wake: { role: <name> }` (§19.1), a reaction task for that role; default false.
+   */
+  wake: boolean | { role: string };
 }
 
 export interface Workflow {
@@ -274,8 +277,7 @@ function stepOf(name: string, value: unknown, path: string): WorkflowStep {
   if (!Array.isArray(parentsRaw) || !parentsRaw.every((p) => typeof p === 'string')) {
     fail(`${place}.parents is a list of step names`);
   }
-  const wake = map['wake'] ?? false;
-  if (typeof wake !== 'boolean') fail(`${place}.wake is true or false`);
+  const wake = stepWake(path, place, map['wake'] ?? false);
   return {
     name,
     title: text(map['title'], `${place}.title`),
@@ -291,8 +293,19 @@ function stepOf(name: string, value: unknown, path: string): WorkflowStep {
     gates,
     parents: [...(parentsRaw as string[])],
     forEach: optionalText(map['for_each'], `${place}.for_each`),
-    wake: wake as boolean,
+    wake,
   };
+}
+
+/** A step's `wake`: true or false, or `{ role: <name> }` (wake spec §3.1, §19.1), checked as the other fields are. */
+function stepWake(path: string, place: string, raw: unknown): boolean | { role: string } {
+  if (typeof raw === 'boolean') return raw;
+  if (!isRecord(raw)) fail(`${place}.wake is true, false or { role: <name> }`);
+  const map = raw as Record<string, unknown>;
+  reject(path, `${place}.wake`, map, ['role'], HINTS);
+  const role = map['role'];
+  if (typeof role !== 'string' || role.trim() === '') fail(`${place}.wake.role is a role's name`);
+  return { role: role as string };
 }
 
 /** A cycle among the steps, as `a -> b -> a`, or undefined: a walk of the parents (workflows spec §4). */
@@ -862,7 +875,7 @@ export function expand(w: Workflow, given: GivenParams, board: string, personOf?
         max_runtime_s: s.maxRuntimeS ?? null,
         parents: s.parents.flatMap((p) => refsOf.get(p) ?? []),
         gates: s.gates.map((g) => ({ command: g.command, timeout_s: g.timeoutS })),
-        ...(s.wake ? { wake: true as const } : {}),
+        ...(s.wake === true ? { wake: true as const } : s.wake === false ? {} : { wake: { role: s.wake.role } }),
       });
     }
     refsOf.set(s.name, refs);

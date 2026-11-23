@@ -129,6 +129,8 @@ export interface BoardAccess {
    * principal, found in `people` by the owner's open_id for this bot; or why not.
    */
   owner(): { ok: true; principal: string } | { ok: false; code: string; message: string };
+  /** Whether a person named by principal has operate tier, as the gateway judges it, by this shell's reading; false with no people to read. */
+  canOperate(principal: string): boolean;
   /**
    * An agent's shell (wake spec §3.2a, §9.1): the session `MT_AGENT_SESSION`
    * names, and the delivered wake of its running turn, read from this database,
@@ -301,7 +303,8 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
   const marker = io.env[SESSION_MARKER];
   const shell = marker === undefined || marker === '' ? undefined : { sessionId: marker, wake: wakeOfShell(db, marker) };
   const zone = settings.cron?.tz ?? processZone();
-  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, wake, owner, shell, zone, close: () => db.close() };
+  const canOperate = (principal: string): boolean => people?.canOperate(principal) ?? false;
+  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, wake, owner, canOperate, shell, zone, close: () => db.close() };
 }
 
 /** A write the gateway held the lock through, every retry: not this command's fault. */

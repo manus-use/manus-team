@@ -185,8 +185,9 @@ export function wokenShowText(view: TaskView, gates: readonly GateRow[], wake: W
 }
 
 /** A task's wake, as `--json` gives it (wake spec §3.4): on, by whom, and its depth. */
-export function wakeJson(task: TaskRow): { on: boolean; by: string | null; depth: number } {
-  return { on: task.wakeBy !== null, by: task.wakeBy, depth: task.wakeDepth };
+export function wakeJson(task: TaskRow): { on: boolean; by: string | null; depth: number; role?: string } {
+  // A role as its target, only when it has one (wake spec §19.1).
+  return { on: task.wakeBy !== null, by: task.wakeBy, depth: task.wakeDepth, ...(task.wakeRole === null ? {} : { role: task.wakeRole }) };
 }
 
 /** One reason a task waits, as `--json` gives it: snake_case, as the rest of the output is. */

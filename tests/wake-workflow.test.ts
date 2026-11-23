@@ -94,7 +94,7 @@ describe("a step's wake", () => {
     writeFileSync(join(dir, 'flow.yaml'), FLOW.replace('wake: true', 'wake: maybe'));
     const r = readWorkflow(dir, 'flow', FACTS);
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.message).toContain('steps.book.wake is true or false');
+    if (!r.ok) expect(r.message).toContain('steps.book.wake is true, false or { role: <name> }');
   });
 });
 
@@ -112,7 +112,7 @@ describe("a DAG task's wake", () => {
     expect(on.dag.tasks[0]?.wake).toBe(true);
     expect(off.sha256).toBe(none.sha256);
     expect(on.sha256).not.toBe(none.sha256);
-    expect(checkDagShape(dag('yes'), 'terminal')).toEqual({ ok: false, code: 'invalid', message: 'tasks[0] (a).wake is true or false' });
+    expect(checkDagShape(dag('yes'), 'terminal')).toEqual({ ok: false, code: 'invalid', message: 'tasks[0] (a).wake is true, false or {"role": "<name>"}' });
   });
 
   it("makes an apply's members with wake on where they say so, as the apply's setter", () => {

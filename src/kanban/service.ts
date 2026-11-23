@@ -1600,12 +1600,14 @@ export class KanbanService {
   #members(dag: Dag, wake?: board.NewWake & { all: boolean }): board.NewMember[] {
     const at = new Map(dag.tasks.map((t, i) => [t.ref, i]));
     const wakeOf = (t: DagTask): board.NewWake | undefined => {
-      if (wake === undefined || (!wake.all && t.wake !== true)) return wake === undefined ? undefined : { by: null, depth: wake.depth };
+      if (wake === undefined || (!wake.all && t.wake === undefined)) return wake === undefined ? undefined : { by: null, depth: wake.depth };
+      // The start's role, else the member's own step's (wake spec §19.1), else the chat session.
+      const role = wake.role ?? (typeof t.wake === 'object' ? t.wake.role : undefined);
       return {
         by: wake.by,
         depth: wake.depth,
         ...(wake.tooDeep === true ? { tooDeep: true } : {}),
-        ...(wake.role === undefined ? {} : { role: wake.role }),
+        ...(role === undefined ? {} : { role }),
       };
     };
     const as = (name: string | null): Assignee | null => (name === null ? null : { kind: name.includes(':') ? 'human' : 'role', name });
@@ -1765,7 +1767,7 @@ export class KanbanService {
     const shape = wakeShapeRefused({ by: w.by, depth: w.depth });
     if (shape !== undefined) return shape;
     // A woken shell's members that ask for none keep its depth alone (§9.1); a null setter with asking steps is an owner not yet seen.
-    const asked = w.all || dag.tasks.some((t) => t.wake === true);
+    const asked = w.all || dag.tasks.some((t) => t.wake !== undefined);
     if (!asked) return { ok: true, wake: { by: null, depth: w.depth, all: false } };
     if (!this.#wake.enabled) {
       if (w.all) return board.refuse('wake_off', WAKES_OFF);
@@ -1779,6 +1781,14 @@ export class KanbanService {
     if (chatless) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: NO_CHAT_NOTICE_ONLY };
     const role = this.#wakeRole(w.role);
     if (!role.ok) return role;
+    // A step's own role is checked as the start's is, when its member will wake (wake spec §19.1).
+    if (w.role === undefined) {
+      for (const t of dag.tasks) {
+        if (typeof t.wake !== 'object') continue;
+        const own = this.#wakeRole(t.wake.role);
+        if (!own.ok) return own;
+      }
+    }
     return {
       ok: true,
       wake: { by: w.by, depth: w.depth, all: w.all, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}), ...role.role },

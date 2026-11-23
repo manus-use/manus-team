@@ -375,19 +375,38 @@ function notWoken(sessionId: string): Refused {
  * runs as the owner. A wake asked for is refused while wakes are off, with no
  * `--chat`, and for an owner this bot has not seen, in that order.
  */
-function terminalWake(board: BoardAccess, asked: boolean, flags: ChatFlags | undefined): { ok: true; wake?: { by: string | null; depth: number } } | Refused {
+function terminalWake(
+  board: BoardAccess,
+  asked: boolean,
+  flags: ChatFlags | undefined,
+  role?: string,
+): { ok: true; wake?: { by: string | null; depth: number; role?: string } } | Refused {
   const shell = board.shell;
   const depth = shell?.wake === undefined ? 0 : shell.wake.depth + 1;
   if (!asked) return depth === 0 ? { ok: true } : { ok: true, wake: { by: null, depth } };
   if (!board.wake.enabled) return refused({ code: 'wake_off', message: WAKES_OFF });
   if (flags === undefined) return refused({ code: 'invalid', message: 'a wake needs a chat that follows the task: add --chat' });
+  const target = role === undefined ? {} : { role };
   if (shell !== undefined) {
     if (shell.wake === undefined) return notWoken(shell.sessionId);
     if (flags.chat !== shell.wake.conversationId || flags.thread !== shell.wake.threadId) return refused({ code: 'invalid', message: ownConversation(shell.wake) });
-    return { ok: true, wake: { by: shell.wake.principal, depth } };
+    if (role !== undefined && !board.canOperate(shell.wake.principal)) return refused({ code: 'invalid', message: roleNeedsOperate(shell.wake.principal) });
+    return { ok: true, wake: { by: shell.wake.principal, depth, ...target } };
   }
   const owner = board.owner();
-  return owner.ok ? { ok: true, wake: { by: owner.principal, depth } } : refused(owner);
+  return owner.ok ? { ok: true, wake: { by: owner.principal, depth, ...target } } : refused(owner);
+}
+
+/** A woken turn naming a role as a wake's target, its setter without operate tier (wake spec §19.1). */
+function roleNeedsOperate(principal: string): string {
+  return `a role as a wake's target gives the role work, which needs operate tier, and ${principal}, who set this woken turn's wake, does not have it`;
+}
+
+/** `--wake-role <role>`, which implies `--wake` (wake spec §19.1); a role's name is one word. */
+function wakeRoleFlag(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !/^\S+$/.test(raw)) throw new UsageError('--wake-role takes a role name');
+  return raw;
 }
 
 /**
@@ -397,11 +416,13 @@ function terminalWake(board: BoardAccess, asked: boolean, flags: ChatFlags | und
  * (§19.16), or in an agent's shell as `terminalWake` would set a wake, when any
  * asks.
  */
-function startWakeOf(board: BoardAccess, all: boolean, flags: ChatFlags | undefined, asks: boolean): StartWake | Refused | undefined {
+function startWakeOf(board: BoardAccess, all: boolean, flags: ChatFlags | undefined, asks: boolean, role?: string): StartWake | Refused | undefined {
   if (all || (board.shell !== undefined && asks)) {
-    const w = terminalWake(board, true, flags);
+    const w = terminalWake(board, true, flags, role);
     if (!w.ok) return w;
-    return w.wake?.by === null || w.wake === undefined ? undefined : { by: w.wake.by, depth: w.wake.depth, all };
+    return w.wake?.by === null || w.wake === undefined
+      ? undefined
+      : { by: w.wake.by, depth: w.wake.depth, all, ...(w.wake.role === undefined ? {} : { role: w.wake.role }) };
   }
   if (board.shell !== undefined) {
     const w = terminalWake(board, false, flags);
@@ -505,9 +526,11 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
     key: text,
     ...FOLLOW_FLAGS,
     wake: { type: 'boolean' },
+    'wake-role': text,
   });
   const json = values.json === true;
   const flags = chatFlags(values);
+  const wakeRole = wakeRoleFlag(values['wake-role']);
   const words = positionals.join(' ');
   // One line, as chat's title is: a line break, a control character or a bidi
   // control is refused, not silently changed. Checked before trimming, so a
@@ -557,7 +580,7 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
         const mention = name === undefined ? undefined : mentionRefused(name);
         if (mention !== undefined) return mention;
       }
-      const wake = terminalWake(b, values.wake === true, flags);
+      const wake = terminalWake(b, values.wake === true || wakeRole !== undefined, flags, wakeRole);
       if (!wake.ok) return wake;
       const follow = followOrRefusal(service, b, flags, key, 'task');
       if (follow !== undefined && 'ok' in follow) return follow;
@@ -599,7 +622,7 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
         ok: true,
         lines: [
           `created ${task.taskId}: ${line(task.title)}, for ${whom}${where}, on board ${line(task.board, 80)}${follows === null ? '' : `; ${followsText(follows, 'it')}`}` +
-            `${task.wakeBy === null ? '' : '; its outcomes wake the agent'}`,
+            `${task.wakeBy === null ? '' : task.wakeRole === null ? '; its outcomes wake the agent' : `; its outcomes wake role ${task.wakeRole}`}`,
           // A wake asked for at max_depth or more is a note, not a refusal (wake spec §3.4).
           ...(typeof wake.wake?.by === 'string' && task.wakeBy === null ? [`${task.taskId} is ${task.wakeDepth} tasks deep in woken turns, so it stays notice-only`] : []),
         ],
@@ -759,10 +782,13 @@ function decide(verb: 'unblock' | 'stop' | 'archive', rest: readonly string[], i
 function wake(rest: readonly string[], io: MtIo): Promise<number> {
   const { values, positionals } = parse(rest, BOARD_FLAGS);
   const [taskId, word, extra] = positionals;
-  const on = word?.toLowerCase();
-  if (taskId === undefined || (on !== 'on' && on !== 'off') || extra !== undefined) {
-    throw new UsageError('kanban task wake takes a task id, and on or off');
+  if (taskId === undefined || word === undefined || extra !== undefined) {
+    throw new UsageError('kanban task wake takes a task id, and on, off or a role');
   }
+  // `on` and `off` are the words; any other names the role the wake targets (wake spec §19.1).
+  const lower = word.toLowerCase();
+  const role = lower === 'on' || lower === 'off' ? undefined : word;
+  const on = role === undefined ? lower : 'on';
   const board = boardFlag(values.board);
   return act(io, values.json === true, 'mt kanban task wake', (service, by, b) => {
     const guard = offBoard(service, board, taskId);
@@ -783,13 +809,14 @@ function wake(rest: readonly string[], io: MtIo): Promise<number> {
       if (shown.view.task.wakeDepth <= w.depth) {
         return refused({ code: 'invalid', message: `\`${taskId}\` is not deeper than this woken turn (depth ${w.depth}), so a woken turn cannot set its wake` });
       }
+      if (role !== undefined && !b.canOperate(w.principal)) return refused({ code: 'invalid', message: roleNeedsOperate(w.principal) });
       as = w.principal;
     } else if (on === 'on') {
       const owner = b.owner();
       if (!owner.ok) return refused(owner);
       as = owner.principal;
     }
-    const r = service.setWake(taskId, as === undefined ? { on: false } : { on: true, as }, by, b.appId ?? '');
+    const r = service.setWake(taskId, as === undefined ? { on: false } : { on: true, as, ...(role === undefined ? {} : { role }) }, by, b.appId ?? '');
     if (!r.ok) return refused(r);
     const t = r.task;
     const json = { task_id: t.taskId, wake: wakeJson(t) };
@@ -800,7 +827,8 @@ function wake(rest: readonly string[], io: MtIo): Promise<number> {
     const f = storedFollows(service, b, t.taskId);
     const at = f === null ? '' : ` in ${f.chat}${f.thread === null ? '' : `/${f.thread}`}`;
     const whose = b.shell === undefined ? ' (the owner)' : ", who set this woken turn's wake";
-    return { ok: true, lines: [`wake on for ${t.taskId}: its outcomes start a turn${at}, as ${as}${whose}`], json };
+    const what = role === undefined ? 'start a turn' : `make a task for role ${role}`;
+    return { ok: true, lines: [`wake on for ${t.taskId}: its outcomes ${what}${at}, as ${as}${whose}`], json };
   });
 }
 
@@ -1039,8 +1067,10 @@ function start(rest: readonly string[], io: MtIo): Promise<number> {
     param: { type: 'string', multiple: true },
     key: { type: 'string' },
     wake: { type: 'boolean' },
+    'wake-role': { type: 'string' },
   });
   const [name, extra] = positionals;
+  const wakeRole = wakeRoleFlag(values['wake-role']);
   if (name === undefined || extra !== undefined) throw new UsageError('kanban workflow start takes a workflow name');
   const pairs = paramPairs(values.param);
   const boardName = boardFlag(values.board) ?? DEFAULT_BOARD;
@@ -1053,8 +1083,8 @@ function start(rest: readonly string[], io: MtIo): Promise<number> {
     (service, by, b) => {
       // In an agent's shell, whether the steps ask for a wake decides whether one is being set (wake spec §3.2a).
       const preview = b.shell === undefined ? undefined : service.previewWorkflow({ workflow: name, params: { from: 'terminal', pairs }, createdBy: by, createdVia: { kind: 'operator' }, board: boardName });
-      const asks = preview?.ok === true && preview.dag.tasks.some((t) => t.wake === true);
-      const wake = startWakeOf(b, values.wake === true, flags, asks);
+      const asks = preview?.ok === true && preview.dag.tasks.some((t) => t.wake !== undefined);
+      const wake = startWakeOf(b, values.wake === true || wakeRole !== undefined, flags, asks, wakeRole);
       if (wake !== undefined && 'ok' in wake) return wake;
       const follow = followOrRefusal(service, b, flags, key, 'instance');
       if (follow !== undefined && 'ok' in follow) return follow;
@@ -1123,7 +1153,7 @@ async function applyFile(rest: readonly string[], io: MtIo): Promise<number> {
     (service, by, b) => {
       // A DAG's tasks that say `"wake": true` wake as the owner (wake spec §3.1), or in a woken shell as its setter (§3.2a).
       const shaped = checkDagShape(dag, 'terminal');
-      const wake = startWakeOf(b, false, flags, shaped.ok && shaped.dag.tasks.some((t) => t.wake === true));
+      const wake = startWakeOf(b, false, flags, shaped.ok && shaped.dag.tasks.some((t) => t.wake !== undefined));
       if (wake !== undefined && 'ok' in wake) return wake;
       const follow = followOrRefusal(service, b, flags, key, 'instance');
       if (follow !== undefined && 'ok' in follow) return follow;

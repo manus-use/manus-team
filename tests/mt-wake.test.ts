@@ -160,12 +160,12 @@ describe('mt kanban task wake', () => {
     expect(await fx.run(['kanban', 'task', 'wake', id, 'on'], { env: {} })).toEqual({ code: 1, out: '', err: `mt: ${NO_OWNER}` });
   });
 
-  it('takes on or off, and nothing else', async () => {
+  it('takes on, off or a role, and nothing else', async () => {
     const id = await setup();
-    for (const argv of [['task', 'wake', id], ['task', 'wake', id, 'maybe'], ['task', 'wake', id, 'on', 'now']]) {
+    for (const argv of [['task', 'wake', id], ['task', 'wake', id, 'on', 'now']]) {
       const r = await kanban(argv);
       expect(r.code, argv.join(' ')).toBe(2);
-      expect(r.err.split('\n')[0]).toBe('mt: kanban task wake takes a task id, and on or off');
+      expect(r.err.split('\n')[0]).toBe('mt: kanban task wake takes a task id, and on, off or a role');
     }
   });
 });
