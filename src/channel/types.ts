@@ -198,15 +198,26 @@ export interface ApprovalOutcomeView {
   byOpenId?: string;
 }
 
+/** How a text is sent, beside its buttons. */
+export interface SendTextOptions {
+  /**
+   * Send it as a card even with no buttons, a card with no actions, so it can be
+   * redrawn later (wake spec §5.9: a notice whose block's Unblock button the
+   * waker deferred). A channel that cannot make one sends the text, and says so
+   * with `card: false`.
+   */
+  card?: boolean;
+}
+
 export interface Channel {
   readonly id: string;
 
   /**
    * Plain text message. Used for rejections, errors, command output and the
    * board's notices; with buttons under it, a card (spec §9.2: a blocked task's
-   * Unblock).
+   * Unblock); with `opts.card`, a card even with none (wake spec §5.9).
    */
-  sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[]): Promise<SendResult>;
+  sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[], opts?: SendTextOptions): Promise<SendResult>;
 
   /** Open a streaming card, showing `initial`. */
   openCard(target: SendTarget, initial: CardParts, uuid: string): Promise<CardSession>;

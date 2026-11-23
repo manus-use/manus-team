@@ -148,6 +148,36 @@ describe('LarkAdapter.sendText', () => {
   });
 });
 
+describe('LarkAdapter.sendText as a card with no actions (wake spec §5.9)', () => {
+  it('sends a text asked for as a card as a card of its markdown alone, so it can be redrawn', async () => {
+    const { a, calls } = adapter([undefined]);
+    const sent = await a.sendText(CHAT, 'Blocked. The agent is looking at it first.', 'u-1', [], { card: true });
+    expect(sent).toEqual({ messageId: 'om_1', deduped: false, card: true });
+    expect(calls.map((c) => c.payload.data.msg_type)).toEqual(['interactive']);
+    expect(JSON.parse(calls[0]?.payload.data.content ?? '{}')).toEqual({
+      schema: '2.0',
+      config: { update_multi: true },
+      body: { elements: [{ tag: 'markdown', content: 'Blocked. The agent is looking at it first.' }] },
+    });
+    expect(calls[0]?.payload.data.uuid).toBe('u-1');
+  });
+
+  it('sends it as text, and says so, when Lark refuses the card for a reason that is not the chat', async () => {
+    const fallback = adapter([refused(200621)]);
+    const sent = await fallback.a.sendText(CHAT, 'Blocked', 'u-2', undefined, { card: true });
+    expect(sent.card).toBe(false);
+    expect(fallback.calls.map((c) => c.payload.data.msg_type)).toEqual(['interactive', 'post']);
+    const outside = adapter([refused(230002)]);
+    await expect(outside.a.sendText(CHAT, 'Blocked', 'u-3', [], { card: true })).rejects.toMatchObject({ code: 230002 });
+  });
+
+  it('sends a text with no buttons and no card asked for as a post, as before', async () => {
+    const { a, calls } = adapter([]);
+    expect((await a.sendText(CHAT, 'hi', 'u-4', [], {})).card).toBeUndefined();
+    expect(calls.map((c) => c.payload.data.msg_type)).toEqual(['post']);
+  });
+});
+
 describe('LarkAdapter in a thread (spec §19.4, §19.7)', () => {
   const where = (calls: Call[]) => calls.map((c) => [c.kind, c.payload.path?.message_id ?? c.payload.data.receive_id]);
 
