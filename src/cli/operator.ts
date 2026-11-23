@@ -8,7 +8,7 @@ import { NO_MENTIONS } from '../kanban/task-checks.js';
 import { WAKES_OFF, WORKFLOW_MESSAGE_BYTES, type KanbanService, type StartWake, type WorkflowMade } from '../kanban/service.js';
 import { expand, listWorkflows, paramsLine, readWorkflow, usableMessage } from '../kanban/workflow.js';
 import { maskAll, NUDGE, workerSocketPath } from '../kanban/socket.js';
-import { DEFAULT_BOARD, type BoardRow, type Contract, type CreatedVia, type Follow, type Refusal, type TaskRow, type Waiting } from '../kanban/types.js';
+import { DEFAULT_BOARD, type BoardRow, type Contract, type CreatedVia, type Follow, type Refusal, type TaskRow, type Waiting, type WakeRow } from '../kanban/types.js';
 import { WORKER_LIMITS } from '../kanban/limits.js';
 import { visible } from '../names.js';
 import { parse, UsageError } from './args.js';
@@ -62,10 +62,11 @@ interface Done {
   makes?: 'task' | 'instance';
 }
 
-type Outcome = Done | { ok: false; code: string; message: string };
+type Refused = { ok: false; code: string; message: string };
+type Outcome = Done | Refused;
 
 /** A refusal as the board said it, masked and on one line: it may quote what was typed. */
-function refused(r: Refusal | { code: string; message: string }): Outcome {
+function refused(r: Refusal | { code: string; message: string }): Refused {
   return { ok: false, code: r.code, message: line(r.message, 600) };
 }
 
@@ -360,28 +361,55 @@ function wakeJson(task: TaskRow): { on: boolean; by: string | null; depth: numbe
   return { on: task.wakeBy !== null, by: task.wakeBy, depth: task.wakeDepth };
 }
 
-/**
- * The wake a terminal asks for (wake spec §3.2, §3.4), run as the owner: refused
- * while wakes are off, with no `--chat`, and for an owner this bot has not seen,
- * in that order. Undefined when none is asked.
- */
-function terminalWake(board: BoardAccess, asked: boolean, chat: boolean): { ok: true; by: string } | Outcome | undefined {
-  if (!asked) return undefined;
-  if (!board.wake.enabled) return refused({ code: 'wake_off', message: WAKES_OFF });
-  if (!chat) return refused({ code: 'invalid', message: 'a wake needs a chat that follows the task: add --chat' });
-  const owner = board.owner();
-  return owner.ok ? { ok: true, by: owner.principal } : refused(owner);
+/** The conversation a woken turn's tasks must be followed by (wake spec §3.2a), as `--chat` and `--thread` name it. */
+function ownConversation(w: WakeRow): string {
+  return `a woken turn's tasks are followed by its own conversation: --chat ${w.conversationId}${w.threadId === '' ? '' : ` --thread ${w.threadId}`}`;
+}
+
+/** A wake asked for in an agent's shell with no turn the board woke (wake spec §3.2a). */
+function notWoken(sessionId: string): Refused {
+  return refused({ code: 'invalid', message: `a wake set from an agent's shell needs a turn the board woke, and session ${sessionId} has none running` });
 }
 
 /**
- * A start's or an apply's wake (wake spec §3.1): every member's with `--wake`,
- * as `terminalWake` checks it; else the members that ask for one, as the owner
- * when this bot has seen them, and none otherwise, with a note (§19.16).
+ * The wake of what a terminal makes (wake spec §3.2, §3.2a, §3.4, §9.1). In an
+ * agent's shell, every task is made one level deeper than the woken turn it
+ * runs in, or at 0 in none, whether or not a wake is asked; a wake is set only
+ * in a woken turn, as its setter, in its own conversation. Anywhere else it
+ * runs as the owner. A wake asked for is refused while wakes are off, with no
+ * `--chat`, and for an owner this bot has not seen, in that order.
  */
-function startWakeOf(board: BoardAccess, all: boolean, chat: boolean): StartWake | Outcome | undefined {
-  if (all) {
-    const w = terminalWake(board, true, chat);
-    return w === undefined || !('by' in w) ? w : { by: w.by, depth: 0, all: true };
+function terminalWake(board: BoardAccess, asked: boolean, flags: ChatFlags | undefined): { ok: true; wake?: { by: string | null; depth: number } } | Refused {
+  const shell = board.shell;
+  const depth = shell?.wake === undefined ? 0 : shell.wake.depth + 1;
+  if (!asked) return depth === 0 ? { ok: true } : { ok: true, wake: { by: null, depth } };
+  if (!board.wake.enabled) return refused({ code: 'wake_off', message: WAKES_OFF });
+  if (flags === undefined) return refused({ code: 'invalid', message: 'a wake needs a chat that follows the task: add --chat' });
+  if (shell !== undefined) {
+    if (shell.wake === undefined) return notWoken(shell.sessionId);
+    if (flags.chat !== shell.wake.conversationId || flags.thread !== shell.wake.threadId) return refused({ code: 'invalid', message: ownConversation(shell.wake) });
+    return { ok: true, wake: { by: shell.wake.principal, depth } };
+  }
+  const owner = board.owner();
+  return owner.ok ? { ok: true, wake: { by: owner.principal, depth } } : refused(owner);
+}
+
+/**
+ * A start's or an apply's wake (wake spec §3.1, §3.2a): every member's with
+ * `--wake`, as `terminalWake` checks it; else the members that ask for one, as
+ * the owner when this bot has seen them and none otherwise, with a note
+ * (§19.16), or in an agent's shell as `terminalWake` would set a wake, when any
+ * asks.
+ */
+function startWakeOf(board: BoardAccess, all: boolean, flags: ChatFlags | undefined, asks: boolean): StartWake | Refused | undefined {
+  if (all || (board.shell !== undefined && asks)) {
+    const w = terminalWake(board, true, flags);
+    if (!w.ok) return w;
+    return w.wake?.by === null || w.wake === undefined ? undefined : { by: w.wake.by, depth: w.wake.depth, all };
+  }
+  if (board.shell !== undefined) {
+    const w = terminalWake(board, false, flags);
+    return w.ok && w.wake !== undefined ? { by: null, depth: w.wake.depth, all: false } : undefined;
   }
   const owner = board.owner();
   // An owner not yet seen: the asking members are made notice-only, and the answer says so (wake spec §19.16).
@@ -531,14 +559,14 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
         const mention = name === undefined ? undefined : mentionRefused(name);
         if (mention !== undefined) return mention;
       }
-      const wake = terminalWake(b, values.wake === true, flags !== undefined);
-      if (wake !== undefined && !('by' in wake)) return wake;
+      const wake = terminalWake(b, values.wake === true, flags);
+      if (!wake.ok) return wake;
       const follow = followOrRefusal(service, b, flags, key, 'task');
       if (follow !== undefined && 'ok' in follow) return follow;
       const r = service.create({
         board,
         title: command.title,
-        ...(wake === undefined ? {} : { wake: { by: wake.by, depth: 0 } }),
+        ...(wake.wake === undefined ? {} : { wake: wake.wake }),
         ...(command.body === '' ? {} : { body: command.body }),
         contract: command.contract,
         ...(command.assignee === undefined ? {} : { assignee: command.assignee }),
@@ -574,6 +602,8 @@ async function create(rest: readonly string[], io: MtIo): Promise<number> {
         lines: [
           `created ${task.taskId}: ${line(task.title)}, for ${whom}${where}, on board ${line(task.board, 80)}${follows === null ? '' : `; ${followsText(follows, 'it')}`}` +
             `${task.wakeBy === null ? '' : '; its outcomes wake the agent'}`,
+          // A wake asked for at max_depth or more is a note, not a refusal (wake spec §3.4).
+          ...(typeof wake.wake?.by === 'string' && task.wakeBy === null ? [`${task.taskId} is ${task.wakeDepth} tasks deep in woken turns, so it stays notice-only`] : []),
         ],
         json: { task_id: task.taskId, board: task.board, existing: false, follows, wake: wakeJson(task) },
         nudge: true,
@@ -802,7 +832,20 @@ function wake(rest: readonly string[], io: MtIo): Promise<number> {
     const guard = offBoard(service, board, taskId);
     if (guard !== undefined) return guard;
     let as: string | undefined;
-    if (on === 'on') {
+    if (on === 'on' && b.shell !== undefined) {
+      // In an agent's shell, only a woken turn sets a wake, as its setter, on a deeper task of its own conversation (wake spec §3.2a).
+      const w = b.shell.wake;
+      if (w === undefined) return notWoken(b.shell.sessionId);
+      const f = storedFollows(service, b, taskId);
+      if (f !== null) {
+        if (f.chat !== w.conversationId || (f.thread ?? '') !== w.threadId) return refused({ code: 'invalid', message: ownConversation(w) });
+        const shown = service.show(taskId);
+        if (shown.ok && shown.view.task.wakeDepth <= w.depth) {
+          return refused({ code: 'invalid', message: `\`${taskId}\` is not deeper than this woken turn (depth ${w.depth}), so a woken turn cannot set its wake` });
+        }
+      }
+      as = w.principal;
+    } else if (on === 'on') {
       const owner = b.owner();
       if (!owner.ok) return refused(owner);
       as = owner.principal;
@@ -1066,7 +1109,10 @@ function start(rest: readonly string[], io: MtIo): Promise<number> {
     values.json === true,
     'mt kanban workflow start',
     (service, by, b) => {
-      const wake = startWakeOf(b, values.wake === true, flags !== undefined);
+      // In an agent's shell, whether the steps ask for a wake decides whether one is being set (wake spec §3.2a).
+      const preview = b.shell === undefined ? undefined : service.previewWorkflow({ workflow: name, params: { from: 'terminal', pairs }, createdBy: by, createdVia: { kind: 'operator' }, board: boardName });
+      const asks = preview?.ok === true && preview.dag.tasks.some((t) => t.wake === true);
+      const wake = startWakeOf(b, values.wake === true, flags, asks);
       if (wake !== undefined && 'ok' in wake) return wake;
       const follow = followOrRefusal(service, b, flags, key, 'instance');
       if (follow !== undefined && 'ok' in follow) return follow;
@@ -1133,8 +1179,9 @@ async function applyFile(rest: readonly string[], io: MtIo): Promise<number> {
     json,
     'mt kanban workflow apply',
     (service, by, b) => {
-      // A DAG's tasks that say `"wake": true` wake as the owner (wake spec §3.1).
-      const wake = startWakeOf(b, false, flags !== undefined);
+      // A DAG's tasks that say `"wake": true` wake as the owner (wake spec §3.1), or in a woken shell as its setter (§3.2a).
+      const shaped = checkDagShape(dag, 'terminal');
+      const wake = startWakeOf(b, false, flags, shaped.ok && shaped.dag.tasks.some((t) => t.wake === true));
       if (wake !== undefined && 'ok' in wake) return wake;
       const follow = followOrRefusal(service, b, flags, key, 'instance');
       if (follow !== undefined && 'ok' in follow) return follow;

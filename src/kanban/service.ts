@@ -262,7 +262,11 @@ export interface ApplyRequest {
 
 /** A start's or an apply's wake (wake spec §3.1): its setter and depth, and whether every member wakes or only those that ask. */
 export interface StartWake {
-  /** Null at the terminal for an owner this bot has not seen (wake spec §3.2): the asking members are made notice-only, with a note (§19.16). */
+  /**
+   * Null for none: the members keep `depth` alone, as a woken turn's shell makes
+   * them (wake spec §9.1); at the terminal, an owner this bot has not seen
+   * (§3.2), the asking members then notice-only, with a note (§19.16).
+   */
   by: string | null;
   depth: number;
   all: boolean;
@@ -1582,6 +1586,7 @@ export class KanbanService {
     if (w === undefined || req.createdVia?.kind === 'run') return { ok: true };
     const shape = wakeShapeRefused({ by: w.by, depth: w.depth });
     if (shape !== undefined) return shape;
+    // A woken shell's members that ask for none keep its depth alone (§9.1); a null setter with asking steps is an owner not yet seen.
     const asked = w.all || dag.tasks.some((t) => t.wake === true);
     if (!asked) return { ok: true, wake: { by: null, depth: w.depth, all: false } };
     if (!this.#wake.enabled) {

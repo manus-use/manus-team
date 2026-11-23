@@ -3,13 +3,14 @@ import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { loadTeamSettings, WAKE_DEFAULTS, type Env, type TeamSettings, type WakeSettings } from '../config.js';
 import { tierReader } from '../db/grants.js';
+import { hasWakeColumns, wakeOfShell } from '../db/kanban-read.js';
 import { openDb } from '../db/open.js';
 import { peopleOf, personByOpenId } from '../db/people.js';
 import { PeopleDirectory } from '../kanban/people.js';
 import { SESSION_MARKER } from '../kanban/gates.js';
 import { KanbanService } from '../kanban/service.js';
 import { tiersOf } from '../policy/auth.js';
-import type { GateRow } from '../kanban/types.js';
+import type { GateRow, WakeRow } from '../kanban/types.js';
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { loadTeam, teamSecrets, type Team } from '../team.js';
 import type { Tier } from '../types.js';
@@ -127,6 +128,12 @@ export interface BoardAccess {
    * principal, found in `people` by the owner's open_id for this bot; or why not.
    */
   owner(): { ok: true; principal: string } | { ok: false; code: string; message: string };
+  /**
+   * An agent's shell (wake spec §3.2a, §9.1): the session `MT_AGENT_SESSION`
+   * names, and the delivered wake of its running turn, read from this database,
+   * or none; undefined in a shell with no marker.
+   */
+  shell: { sessionId: string; wake: WakeRow | undefined } | undefined;
   close(): void;
 }
 
@@ -288,7 +295,9 @@ export function openBoard(io: MtIo, what: string, opts: OpenOptions = {}): Board
     const person = personByOpenId(db, appId ?? '', settings.owner ?? '');
     return person === undefined ? { ok: false, code: 'invalid', message: OWNER_UNSEEN } : { ok: true, principal: `lark:${person.unionId}` };
   };
-  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, wake, owner, close: () => db.close() };
+  const marker = io.env[SESSION_MARKER];
+  const shell = marker === undefined || marker === '' ? undefined : { sessionId: marker, wake: hasWakeColumns(db) ? wakeOfShell(db, marker) : undefined };
+  return { service, home: settings.home, kanbanEnabled: settings.kanbanEnabled, appId, peopleMissing, seen, wake, owner, shell, close: () => db.close() };
 }
 
 /** A write the gateway held the lock through, every retry: not this command's fault. */
