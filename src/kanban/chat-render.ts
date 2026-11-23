@@ -567,6 +567,10 @@ export function renderNotice(
     case 'workflow_started':
       // A terminal start's reply (workflows spec §18.2), on its first member, whole: it may run to 3,800 characters.
       return renderStarted(startedOf(p), opts.where ?? 'chat', (a) => who(a, opts.nameOf), opts.nameOf);
+    case 'wake_set':
+      // Only a wake refused as too deep is a notice (wake spec §3.4, §4.4): every other change is the command's answer.
+      if (p['refused'] !== 'too_deep') return undefined;
+      return `${id(task.taskId)} is ${typeof p['depth'] === 'number' ? p['depth'] : task.wakeDepth} tasks deep in woken turns, so it stays notice-only`;
     default:
       return undefined;
   }
