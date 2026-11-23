@@ -41,6 +41,8 @@ describe('subscriptions', () => {
         rootMessageId: null,
         cursor: 0,
         createdAt: NOW,
+        wakeCursor: 0,
+        chatType: null,
       },
     ]);
     expect(eventsOf(h.db, task.taskId).map((e) => e.kind)).toEqual(['created']);

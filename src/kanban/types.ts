@@ -146,6 +146,24 @@ export interface TaskRow {
    * shared directory.
    */
   worktree: string | null;
+  /**
+   * The principal its woken turns run as, `lark:<union_id>` (wake spec §3.2,
+   * migration 013); null: wake off.
+   */
+  wakeBy: string | null;
+  /** Woken turns in its making (wake spec §5.4): 0 for a person's or the terminal's task. */
+  wakeDepth: number;
+  /** The role its wake targets (wake spec §19.1); null: the conversation's chat session. Only with `wakeBy` set. */
+  wakeRole: string | null;
+  /** For a reaction task (wake spec §19.3): the wake that made it; null for every other task. */
+  reactionOf: number | null;
+  /** Made under a wake (wake spec §19.8): the root reaction task's id, its own for a reaction task; null otherwise. */
+  wakeRoot: string | null;
+  /**
+   * A role's wake on a task no chat follows (wake spec §19.16): the last event the
+   * waker has covered for it, from the task's own cursor; unused while a chat follows it.
+   */
+  wakeCursor: number;
 }
 
 /** The board every task was on before there were others, and every chat starts on (spec §16). */
@@ -299,6 +317,13 @@ export interface SubscriptionRow {
   rootMessageId: string | null;
   cursor: number;
   createdAt: number;
+  /**
+   * The waker's cursor (wake spec §4.1, migration 013): the last event it has
+   * covered, woken, skipped or passed over, beside `cursor`, the notifier's.
+   */
+  wakeCursor: number;
+  /** The chat's kind, from the command that made the task (wake spec §2.1); null: not known. */
+  chatType: 'p2p' | 'group' | null;
 }
 
 export type RefusalCode =

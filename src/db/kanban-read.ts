@@ -72,6 +72,12 @@ interface TaskRaw {
   created_from_task: string | null;
   board: string;
   worktree: string | null;
+  wake_by: string | null;
+  wake_depth: number;
+  wake_role: string | null;
+  reaction_of: number | null;
+  wake_root: string | null;
+  wake_cursor: number;
 }
 
 function decodeTask(r: TaskRaw): TaskRow {
@@ -104,6 +110,12 @@ function decodeTask(r: TaskRaw): TaskRow {
     createdFromTask: r.created_from_task,
     board: r.board,
     worktree: r.worktree,
+    wakeBy: r.wake_by,
+    wakeDepth: r.wake_depth,
+    wakeRole: r.wake_role,
+    reactionOf: r.reaction_of,
+    wakeRoot: r.wake_root,
+    wakeCursor: r.wake_cursor,
   };
 }
 
@@ -112,6 +124,25 @@ const TASK_COLS = `task_id, title, body, json(contract) AS contract, assignee_ki
   idempotency_key, failure_limit, retry_on_crash, max_runtime_s, consecutive_failures,
   consecutive_transient, cooldown_until, block_recurrences, stranded_notified_at, created_by,
   json(created_via) AS created_via, created_at, closed_at, created_from_task, board, worktree`;
+
+/**
+ * Whether the database has migration 013's columns (wake spec §4.1). The
+ * terminal opens the gateway's database without migrating it, and reads one not
+ * yet migrated as the workflows and the grants do (workflows spec §7, tier
+ * grants spec §4.3): such a database's tasks have wake off, at depth 0, and its
+ * subscriptions' wake cursors are at 0. `user_version` is read from the file's
+ * header, so the check costs no table read.
+ */
+export function hasWakeColumns(db: Db): boolean {
+  return Number(db.pragma('user_version', { simple: true })) >= 13;
+}
+
+/** A task's columns: the wake's, or what a database before migration 013 has for them. */
+function taskCols(db: Db): string {
+  return hasWakeColumns(db)
+    ? `${TASK_COLS}, wake_by, wake_depth, wake_role, reaction_of, wake_root, wake_cursor`
+    : `${TASK_COLS}, NULL AS wake_by, 0 AS wake_depth, NULL AS wake_role, NULL AS reaction_of, NULL AS wake_root, 0 AS wake_cursor`;
+}
 
 interface RunRaw {
   run_id: string;
@@ -204,13 +235,13 @@ function decodeEvent(r: EventRaw): KanbanEvent {
 }
 
 export function getTask(db: Db, taskId: string): TaskRow | undefined {
-  const row = db.prepare<[string], TaskRaw>(`SELECT ${TASK_COLS} FROM kanban_tasks WHERE task_id = ?`).get(taskId);
+  const row = db.prepare<[string], TaskRaw>(`SELECT ${taskCols(db)} FROM kanban_tasks WHERE task_id = ?`).get(taskId);
   return row === undefined ? undefined : decodeTask(row);
 }
 
 export function getTaskByKey(db: Db, idempotencyKey: string): TaskRow | undefined {
   const row = db
-    .prepare<[string], TaskRaw>(`SELECT ${TASK_COLS} FROM kanban_tasks WHERE idempotency_key = ?`)
+    .prepare<[string], TaskRaw>(`SELECT ${taskCols(db)} FROM kanban_tasks WHERE idempotency_key = ?`)
     .get(idempotencyKey);
   return row === undefined ? undefined : decodeTask(row);
 }
@@ -218,7 +249,7 @@ export function getTaskByKey(db: Db, idempotencyKey: string): TaskRow | undefine
 export function parentsOf(db: Db, taskId: string): TaskRow[] {
   return db
     .prepare<[string], TaskRaw>(
-      `SELECT ${TASK_COLS} FROM kanban_tasks
+      `SELECT ${taskCols(db)} FROM kanban_tasks
         WHERE task_id IN (SELECT parent_id FROM kanban_links WHERE child_id = ?)
         ORDER BY created_at, rowid`,
     )
@@ -230,7 +261,7 @@ export function parentsOf(db: Db, taskId: string): TaskRow[] {
 export function parentsInLinkOrder(db: Db, taskId: string): TaskRow[] {
   return db
     .prepare<[string], TaskRaw>(
-      `SELECT ${TASK_COLS} FROM kanban_tasks
+      `SELECT ${taskCols(db)} FROM kanban_tasks
          JOIN (SELECT parent_id, rowid AS link FROM kanban_links WHERE child_id = ?) ON parent_id = task_id
         ORDER BY link`,
     )
@@ -241,7 +272,7 @@ export function parentsInLinkOrder(db: Db, taskId: string): TaskRow[] {
 export function childrenOf(db: Db, taskId: string): TaskRow[] {
   return db
     .prepare<[string], TaskRaw>(
-      `SELECT ${TASK_COLS} FROM kanban_tasks
+      `SELECT ${taskCols(db)} FROM kanban_tasks
         WHERE task_id IN (SELECT child_id FROM kanban_links WHERE parent_id = ?)
         ORDER BY created_at, rowid`,
     )
@@ -359,6 +390,8 @@ interface SubscriptionRaw {
   root_message_id: string | null;
   cursor: number;
   created_at: number;
+  wake_cursor: number;
+  chat_type: string | null;
 }
 
 function decodeSubscription(r: SubscriptionRaw): SubscriptionRow {
@@ -372,16 +405,23 @@ function decodeSubscription(r: SubscriptionRaw): SubscriptionRow {
     rootMessageId: r.root_message_id,
     cursor: r.cursor,
     createdAt: r.created_at,
+    wakeCursor: r.wake_cursor,
+    chatType: r.chat_type as SubscriptionRow['chatType'],
   };
 }
 
 const SUBSCRIPTION_COLS = 'id, task_id, channel, account_id, conversation_id, thread_id, root_message_id, cursor, created_at';
 
+/** A subscription's columns: the wake's, or what a database before migration 013 has for them. */
+function subscriptionCols(db: Db): string {
+  return hasWakeColumns(db) ? `${SUBSCRIPTION_COLS}, wake_cursor, chat_type` : `${SUBSCRIPTION_COLS}, 0 AS wake_cursor, NULL AS chat_type`;
+}
+
 /** The chats following a task, in the order they were subscribed (spec §9.4). */
 export function subscriptionsOf(db: Db, taskId: string): SubscriptionRow[] {
   return db
     .prepare<[string], SubscriptionRaw>(
-      `SELECT ${SUBSCRIPTION_COLS} FROM kanban_subscriptions WHERE task_id = ? ORDER BY id`,
+      `SELECT ${subscriptionCols(db)} FROM kanban_subscriptions WHERE task_id = ? ORDER BY id`,
     )
     .all(taskId)
     .map(decodeSubscription);
@@ -403,7 +443,7 @@ export function dueSubscriptions(db: Db, appId: string): DueSubscription[] {
   return db
     .prepare<[string], SubscriptionRaw & { oldest_pending: number | null }>(
       `SELECT * FROM (
-         SELECT ${SUBSCRIPTION_COLS},
+         SELECT ${subscriptionCols(db)},
                 (SELECT min(e.id) FROM kanban_events e WHERE e.task_id = s.task_id AND e.id > s.cursor) AS oldest_pending
            FROM kanban_subscriptions s
           WHERE s.account_id = ?)
@@ -630,7 +670,7 @@ export interface BoardEntry {
 export function boardList(db: Db, board?: string): BoardEntry[] {
   const where = board === undefined ? '' : 'WHERE board = ?';
   return db
-    .prepare<string[], TaskRaw>(`SELECT ${TASK_COLS} FROM kanban_tasks ${where} ORDER BY priority DESC, created_at, rowid`)
+    .prepare<string[], TaskRaw>(`SELECT ${taskCols(db)} FROM kanban_tasks ${where} ORDER BY priority DESC, created_at, rowid`)
     .all(...(board === undefined ? [] : [board]))
     .map(decodeTask)
     .map((task) => ({ task, status: statusOf(db, task) }));
@@ -783,7 +823,7 @@ export function openAgentRunCountAs(db: Db, role: string): number {
 export function claimableTasks(db: Db, now: number): TaskRow[] {
   return db
     .prepare<[number], TaskRaw>(
-      `SELECT ${TASK_COLS} FROM kanban_tasks t
+      `SELECT ${taskCols(db)} FROM kanban_tasks t
         WHERE t.phase IN ('open', 'review')
           AND (t.cooldown_until IS NULL OR t.cooldown_until <= ?)
           AND NOT EXISTS (SELECT 1 FROM kanban_runs r WHERE r.task_id = t.task_id AND r.ended_at IS NULL)
@@ -1042,7 +1082,7 @@ export function membersWithTasks(db: Db, instanceId: string): Array<MemberRow & 
   const tasks = new Map(
     db
       .prepare<[string], TaskRaw>(
-        `SELECT ${TASK_COLS} FROM kanban_tasks WHERE task_id IN (SELECT task_id FROM kanban_workflow_tasks WHERE instance_id = ?)`,
+        `SELECT ${taskCols(db)} FROM kanban_tasks WHERE task_id IN (SELECT task_id FROM kanban_workflow_tasks WHERE instance_id = ?)`,
       )
       .all(instanceId)
       .map((r) => [r.task_id, decodeTask(r)]),
@@ -1109,7 +1149,7 @@ export function instancesOn(db: Db, board: string, limit: number): { instances: 
 export function relatedTasks(db: Db, instanceId: string): TaskRow[] {
   return db
     .prepare<[string, string, string], TaskRaw>(
-      `SELECT ${TASK_COLS} FROM kanban_tasks
+      `SELECT ${taskCols(db)} FROM kanban_tasks
         WHERE task_id NOT IN (SELECT task_id FROM kanban_workflow_tasks WHERE instance_id = ?)
           AND (created_from_task IN (SELECT task_id FROM kanban_workflow_tasks WHERE instance_id = ?)
                OR task_id IN (SELECT l.child_id FROM kanban_links l JOIN kanban_workflow_tasks m ON m.task_id = l.parent_id
