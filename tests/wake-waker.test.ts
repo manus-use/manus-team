@@ -215,6 +215,8 @@ describe('the turn', () => {
     await h.round();
     const [refused] = h.wakes();
     expect(refused).toMatchObject({ state: 'pending', attempt: 2, sessionId: null, turnKey: null, submitBoot: null });
+    // Its conversation is paused 2 s after a refusal (§5.6).
+    await h.clock.delay(2_000);
     await h.round();
     expect(actor.submits.map((r) => r.messageId)).toEqual([`wake:${refused?.uuid}`, `wake:${refused?.uuid}:2`]);
     expect(h.wakes()[0]?.state).toBe('delivered');

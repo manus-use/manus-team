@@ -248,6 +248,10 @@ export function wakePrompt(input: WakePromptInput): WakePrompt {
 export const WAKE_POLL_MS = 2_000;
 /** What a round spends on markers, and the deferred buttons' cards, in all (§5.5 step 3). */
 export const ROUND_MARKER_MS = 30_000;
+/** Refusals in a row after which a batch is dropped (§5.6): about 13 minutes of pauses. */
+export const WAKE_REFUSALS = 10;
+/** The longest a refused conversation waits before it is tried again (§5.6). */
+export const WAKE_BACKOFF_MAX_MS = 5 * 60_000;
 /** Submits in one round, the longest waiting first (§5.2 step 6). */
 export const ROUND_WAKES = 5;
 const HOUR_MS = 60 * 60_000;
@@ -365,6 +369,8 @@ export class Waker {
   readonly #lapsed = new Set<string>();
   /** Conversations whose passing over has been said in the log, until a restart (§2.1): not admitted, or let go of. */
   readonly #said = new Set<string>();
+  /** Conversations held back after a refusal (§5.6), by key: in memory, so a restart tries a pending row at once. */
+  readonly #backoff = new Map<string, { until: number; waitMs: number }>();
   /** Conversations told they are paused by the cap (§5.4), until a wake is next delivered there. */
   readonly #paused = new Set<string>();
   /** When the round under way began: its markers' budget is counted from it (§5.5 step 3). */
@@ -656,6 +662,8 @@ export class Waker {
 
   /** A pending row (§5.2 step 1): its batch as recorded, read again, then tried, unless it waits. */
   async #tryPending(row: WakeRow): Promise<boolean> {
+    const held = this.#backoff.get(conversationOf(rowAt(row)));
+    if (held !== undefined && this.#clock.now() < held.until) return false;
     if (await this.#waits(rowAt(row), row.markerAt === null)) return false;
     const db = this.#deps.db;
     const covered: Covered[] = [];
@@ -697,12 +705,20 @@ export class Waker {
     }
     const owner = deps.people.principalOf(row.principal);
     if (owner === undefined) {
-      this.#note(`kanban: wake ${row.wakeId} runs as ${row.principal}, whom people does not hold`);
+      this.#refused(row.wakeId, `the setter ${row.principal} is not known to the gateway`);
       return false;
     }
     const key: BindingKey = { channel: row.channel, appId: row.appId, conversationId: row.conversationId, threadId: row.threadId };
-    const { session } = deps.registry.bindOrCreate(key, owner);
-    const actor = await deps.registry.actorFor(session.id, key);
+    let session: SessionRow;
+    let actor: WakeActor;
+    try {
+      session = deps.registry.bindOrCreate(key, owner).session;
+      actor = await deps.registry.actorFor(session.id, key);
+    } catch (err) {
+      // A role or workspace no longer configured, among others (§5.6).
+      if (!this.#stopped) this.#refused(row.wakeId, message(err));
+      return false;
+    }
     if (this.#stopped) return false;
     // Busy again, with no await between this and the submit (§5.5 step 5): a
     // person's message that came in meanwhile goes first, the row stays pending.
@@ -719,25 +735,36 @@ export class Waker {
     });
     const messageId = row.attempt === 1 ? `wake:${row.uuid}` : `wake:${row.uuid}:${row.attempt}`;
     const turnKey = turnIdempotencyKey(deps.appId, messageId);
-    this.#underWay.set(row.wakeId, { sessionId: session.id, key: turnKey });
-    const stamped = deps.service.wakeSubmitted(row.wakeId, session.id, turnKey, BOOT_ID);
-    if (!stamped.ok) {
+    const name = nameOf(row.principal) ?? row.principal;
+    // Steps 6 to 8, one guarded block (§5.5): anything that throws before the
+    // submit has returned its promise is a refusal, so no row is left stamped by
+    // a submit that never happened.
+    let submitted: Promise<TurnTerminal>;
+    try {
+      this.#underWay.set(row.wakeId, { sessionId: session.id, key: turnKey });
+      const stamped = deps.service.wakeSubmitted(row.wakeId, session.id, turnKey, BOOT_ID);
+      if (!stamped.ok) throw new Error(`wake ${row.wakeId} was not stamped (${stamped.message})`);
+      if (!stamped.submitted) {
+        // Settled by another path since it was read: nothing to submit.
+        this.#underWay.delete(row.wakeId);
+        return false;
+      }
+      deps.cronTurns?.turnSubmitted(session.id, turnKey, false);
+      submitted = actor.submit({
+        messageId,
+        appId: deps.appId,
+        input: { text: prompt.text, paths: [] },
+        origin: { wake: { id: row.wakeId, by: row.principal, name } },
+        onTurn: (turn) => {
+          if (!turn.created) this.#delivered(row.wakeId);
+        },
+        onPrompted: () => this.#delivered(row.wakeId),
+      });
+    } catch (err) {
       this.#underWay.delete(row.wakeId);
-      this.#note(`kanban: wake ${row.wakeId} was not stamped (${stamped.message})`);
+      this.#refused(row.wakeId, message(err));
       return false;
     }
-    deps.cronTurns?.turnSubmitted(session.id, turnKey, false);
-    const name = nameOf(row.principal) ?? row.principal;
-    const submitted = actor.submit({
-      messageId,
-      appId: deps.appId,
-      input: { text: prompt.text, paths: [] },
-      origin: { wake: { id: row.wakeId, by: row.principal, name } },
-      onTurn: (turn) => {
-        if (!turn.created) this.#delivered(row.wakeId);
-      },
-      onPrompted: () => this.#delivered(row.wakeId),
-    });
     submitted.then(
       (terminal) => this.#ended(row.wakeId, `the turn ended ${terminal} before its prompt reached the agent`),
       (err: unknown) => this.#ended(row.wakeId, message(err)),
@@ -770,7 +797,9 @@ export class Waker {
     }
     this.#underWay.delete(wakeId);
     const wake = getWake(this.#deps.db, wakeId);
-    if (wake !== undefined) this.#paused.delete(conversationOf(rowAt(wake)));
+    if (wake === undefined) return;
+    this.#paused.delete(conversationOf(rowAt(wake)));
+    this.#backoff.delete(conversationOf(rowAt(wake)));
   }
 
   /** The submit's promise settled without a delivery (§5.6): the attempt refused. */
@@ -779,12 +808,52 @@ export class Waker {
     const entry = this.#underWay.get(wakeId);
     if (entry === undefined || entry.settled !== undefined) return;
     entry.settled = { outcome: 'refused', error };
-    const r = this.#deps.service.wakeRefused(wakeId, error);
+    if (this.#refused(wakeId, error)) this.#underWay.delete(wakeId);
+  }
+
+  /**
+   * An attempt refused (§5.6): `wakeRefused`, its cursors unmoved; its
+   * conversation paused 2 s, doubling to `WAKE_BACKOFF_MAX_MS`; and at the
+   * `WAKE_REFUSALS`th refusal in a row the batch dropped, with a line in the
+   * conversation and one in the log. False when the write did not land.
+   */
+  #refused(wakeId: number, error: string): boolean {
+    let r: ReturnType<KanbanService['wakeRefused']>;
+    try {
+      r = this.#deps.service.wakeRefused(wakeId, error);
+    } catch (err) {
+      this.#note(`kanban: wake ${wakeId} was refused, but not recorded (${message(err)})`);
+      return false;
+    }
     if (!r.ok) {
       this.#note(`kanban: wake ${wakeId} was refused, but not recorded (${r.message})`);
-      return;
+      return false;
     }
-    this.#underWay.delete(wakeId);
+    const wake = getWake(this.#deps.db, wakeId);
+    if (!r.refused || wake === undefined) return true;
+    const at = rowAt(wake);
+    const key = conversationOf(at);
+    if (r.attempt - 1 < WAKE_REFUSALS) {
+      const waitMs = Math.min((this.#backoff.get(key)?.waitMs ?? WAKE_POLL_MS / 2) * 2, WAKE_BACKOFF_MAX_MS);
+      this.#backoff.set(key, { until: this.#clock.now() + waitMs, waitMs });
+      return true;
+    }
+    this.#backoff.delete(key);
+    const dropped = this.#deps.service.dropWake(wakeId, error);
+    if (!dropped.ok) {
+      this.#note(`kanban: wake ${wakeId} was not dropped (${dropped.message})`);
+      return true;
+    }
+    const tasks = [...new Set(wakeEventsOf(this.#deps.db, wakeId).map((e) => e.taskId))];
+    const reason = error.replace(/\s+/g, ' ').trim();
+    this.#note(`kanban: wake ${wakeId} for ${describe(at)} (tasks ${tasks.join(', ')}) dropped after ${WAKE_REFUSALS} refusals: ${reason}`);
+    void this.#say(
+      at,
+      `the agent could not be woken for ${tasks.map((t) => `\`${t}\``).join(', ')}: its session refused ${WAKE_REFUSALS} times (${reason}), so those updates are dropped`,
+      replyUuid(this.#deps.appId, `wake:${wake.uuid}`, 'dropped'),
+      `the dropped line of wake ${wakeId}`,
+    );
+    return true;
   }
 
   /** One of the waker's own lines (§8): masked, bounded by the notifier's bound, never retried. */
