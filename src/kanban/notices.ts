@@ -1,6 +1,6 @@
 import { ChannelError, type CardButton, type Channel, type SendResult, type SendTarget } from '../channel/types.js';
 import { noticeBatchUuid } from '../core/ids.js';
-import { dueSubscriptions, eventsAfter, getRun, getTask, threadRootOf, type DueSubscription } from '../db/kanban-read.js';
+import { dueSubscriptions, eventsAfter, getRun, getTask, threadRootOf, type DueSubscription, type ThreadAt } from '../db/kanban-read.js';
 import type { Db } from '../db/open.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
@@ -169,6 +169,14 @@ export class Notifier {
     this.#timer = setInterval(() => void this.deliver(), NOTICE_POLL_MS);
     this.#timer.unref();
     void this.deliver();
+  }
+
+  /**
+   * Whether a conversation is let go of until a restart (spec §9.4): its notices
+   * passed over, so the waker passes over its wakes too (wake spec §2.1).
+   */
+  letGo(at: ThreadAt): boolean {
+    return this.#dead.has([at.channel, at.conversationId, at.threadId].join('\u0000'));
   }
 
   /** No more rounds; one under way stops after its current send. */
