@@ -149,10 +149,10 @@ Each tied to §19.
 
 **Files:** `src/cli/workflow.ts`; test `tests/kanban-workflow-board-fronts.test.ts`.
 
-- [ ] **Step 1: Tests.** `mt workflow check vi-sync`: `vi-sync: ok, 1 step; params: none; board vi`, then `note: the gateway checks the board when the workflow is used, not here: this check opens no database`, exit 0 with no board `vi` anywhere; a check of every file prints the note once for two such workflows, none when no workflow names a board.
-- [ ] **Step 2: Verify they fail**: no `; board vi`.
-- [ ] **Step 3: Implement.** `okLine` adds `; board ${w.board}`; the note after the lines, before the ignored entries, when a usable workflow it printed names a board.
-- [ ] **Step 4: Run everything.** Unit `+N`; `docs-examples`' "says what each documented mt workflow check says" passes.
+- [ ] **Step 1: Tests**, two, through `runMt`. `mt workflow check vi-sync`: `vi-sync: ok, 1 step; params: none; board vi`, then `note: the gateway checks the board when the workflow is used, not here: this check opens no database`, exit 0 with no board `vi` anywhere; a check of every file prints the note once for two such workflows, none when no workflow names a board.
+- [ ] **Step 2: Verify they fail**: on Task 6's tree both fail, with no `; board vi` (`Tests  2 failed | 6 passed (8)`).
+- [ ] **Step 3: Implement.** `okLine` adds `; board ${w.board}`; `BOARDS_NOTE` after the lines, before the ignored entries, when a usable workflow it printed names a board, and after the one line of a check by name.
+- [ ] **Step 4: Run everything.** Unit: `Tests  3 failed | 3394 passed (3397)` once `tests/update-run.test.ts`'s flake is set aside, two new; `docs-examples`' "says what each documented mt workflow check says" passes, and the three start failures of Task 2 remain.
 - [ ] **Step 5: Commit** "Name a workflow's board in mt workflow check, saying the gateway checks it".
 
 ## Task 8: The terminal's start, preview and list

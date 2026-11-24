@@ -32,8 +32,12 @@ function noFile(path: string): boolean {
 }
 
 function okLine(w: Workflow): string {
-  return `${w.name}: ok, ${w.steps.length} step${w.steps.length === 1 ? '' : 's'}; params: ${paramsLine(w)}`;
+  const board = w.board === undefined ? '' : `; board ${w.board}`;
+  return `${w.name}: ok, ${w.steps.length} step${w.steps.length === 1 ? '' : 's'}; params: ${paramsLine(w)}${board}`;
 }
+
+/** Said once when a workflow checked names a board, which this check, opening no database, cannot see (workflows spec §19.4). */
+export const BOARDS_NOTE = 'note: the gateway checks the board when the workflow is used, not here: this check opens no database';
 
 export function workflowCheck(only: string | undefined, io: MtIo): number {
   // As roleCheck reads it (spec §2.6): never the gateway's .env in an agent's shell.
@@ -76,6 +80,7 @@ export function workflowCheck(only: string | undefined, io: MtIo): number {
     const r = readWorkflow(dir, only, facts);
     if (r.ok) {
       say(okLine(r.workflow));
+      if (r.workflow.board !== undefined) say(BOARDS_NOTE);
       return 0;
     }
     say(`${only}: not usable: ${r.message.replace(/^workflow \S+ is not usable: /, '').replace(/^there is no workflow \S+: /, '')}`);
@@ -95,6 +100,7 @@ export function workflowCheck(only: string | undefined, io: MtIo): number {
   ].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   if (lines.length === 0 && list.ignored.length === 0) say(`no workflows: ${dir} is missing or empty`);
   for (const l of lines) say(l.line);
+  if (list.usable.some((w) => w.board !== undefined)) say(BOARDS_NOTE);
   for (const l of list.ignored) say(l);
   return list.broken.length === 0 ? 0 : 1;
 }

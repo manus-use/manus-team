@@ -7,6 +7,7 @@ import { boardsAt } from '../src/db/boards-at.js';
 import { archiveBoard, createBoard } from '../src/db/kanban.js';
 import { migrate, openDb } from '../src/db/open.js';
 import { loadStartup } from '../src/index.js';
+import { runMt } from '../src/cli/mt.js';
 import { clearSecrets } from '../src/secrets.js';
 import { SCHEMA_DIR } from './helpers/db.js';
 import { ALICE, NOW } from './helpers/kanban.js';
@@ -127,5 +128,39 @@ describe('the startup', () => {
       holder.exec('ROLLBACK');
       holder.close();
     }
+  });
+});
+
+/** `mt` over the home `home()` made, its output joined. */
+async function mt(env: Record<string, string | undefined>, argv: string[]): Promise<{ code: number; out: string; err: string }> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await runMt(argv, { env: { ...env, PATH: process.env['PATH'], HOME: root }, out: (l) => out.push(l), err: (l) => err.push(l) });
+  return { code, out: out.join('\n'), err: err.join('\n') };
+}
+
+const NOTE = 'note: the gateway checks the board when the workflow is used, not here: this check opens no database';
+
+describe('mt workflow check', () => {
+  beforeEach(() => clearSecrets());
+  afterEach(() => clearSecrets());
+
+  it("names a workflow's board and says once that the gateway checks it, exit 0 with no such board", async () => {
+    const env = home({ 'vi-sync.yaml': fileOn('board: vi') });
+    expect(await mt(env, ['workflow', 'check', 'vi-sync'])).toMatchObject({ code: 0, out: ['vi-sync: ok, 1 step; params: none; board vi', NOTE].join('\n') });
+  });
+
+  it('says the note once for several workflows naming boards, and not at all when none does', async () => {
+    const env = home({ 'a-sync.yaml': fileOn('board: vi'), 'b-sync.yaml': fileOn('board: research'), 'c-sync.yaml': fileOn(''), 'notes.txt': 'x' });
+    const all = await mt(env, ['workflow', 'check']);
+    expect(all.code).toBe(0);
+    expect(all.out.split('\n')).toEqual([
+      'a-sync: ok, 1 step; params: none; board vi',
+      'b-sync: ok, 1 step; params: none; board research',
+      'c-sync: ok, 1 step; params: none',
+      NOTE,
+      `ignoring ${join(root, 'home', 'workflows', 'notes.txt')}: not a .yaml file, so not a workflow`,
+    ]);
+    expect((await mt(env, ['workflow', 'check', 'c-sync'])).out).toBe('c-sync: ok, 1 step; params: none');
   });
 });
