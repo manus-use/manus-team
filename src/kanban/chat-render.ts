@@ -242,20 +242,27 @@ export function renderList(
   filter: DisplayStatus | 'all' | undefined,
   board: string = DEFAULT_BOARD,
   nameOf?: NameOf,
+  named?: { archived: boolean },
 ): string {
-  const on = board === DEFAULT_BOARD ? '' : ` on board ${label(board)}`;
+  // A board named by `board:` is always named, `default` too, and its hints carry it (workflows spec §19.5).
+  const on = board === DEFAULT_BOARD && named === undefined ? '' : ` on board ${label(board)}`;
+  const also = named === undefined ? '' : ` board:${board}`;
+  const header = named?.archived === true ? [`Board **${label(board)}** is archived: nothing is added to it.`] : [];
   const ordered = listed(entries, filter);
   if (ordered.length === 0) {
-    return filter === undefined
-      ? `No open tasks${on}. \`/kanban task list all\` shows done and archived ones too.`
-      : `No ${filter === 'all' ? '' : `${filter} `}tasks${on}.`;
+    const empty =
+      filter === undefined
+        ? `No open tasks${on}. \`/kanban task list all${also}\` shows done and archived ones too.`
+        : `No ${filter === 'all' ? '' : `${filter} `}tasks${on}.`;
+    return [...header, empty].join('\n');
   }
   const lines = ordered
     .slice(0, LIST_MAX)
     .map((e) => `${id(e.task.taskId)} **${e.status}**: ${titleText(e.task.title, nameOf, 120)} · ${who(e.task.assignee, nameOf)}`);
   const more = ordered.length - LIST_MAX;
-  if (more > 0) lines.push(`… and ${more} more. \`/kanban task list <${LIST_FILTERS.join('|')}>\` narrows it.`);
-  if (on !== '') lines.unshift(`Board **${label(board)}**:`);
+  if (more > 0) lines.push(`… and ${more} more. \`/kanban task list <${LIST_FILTERS.join('|')}>${also}\` narrows it.`);
+  if (header.length > 0) lines.unshift(...header);
+  else if (on !== '') lines.unshift(`Board **${label(board)}**:`);
   return lines.join('\n');
 }
 

@@ -236,6 +236,7 @@ describe('the terminal', () => {
 // Chat (workflows spec §19.2, §19.3, §19.5)
 
 const OWNER: Principal = { openId: 'ou_owner', unionId: 'on_owner', displayName: 'Owner' };
+const GUEST: Principal = { openId: 'ou_guest', unionId: 'on_guest', displayName: 'Guest' };
 const DM: BindingKey = { channel: 'lark', appId: 'cli_app', conversationId: 'oc_dm', threadId: '' };
 const HEARS = 'This chat hears when each task is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.';
 
@@ -253,7 +254,7 @@ describe('chat', () => {
     writeFileSync(join(dir, 'plain.yaml'), fileOn(''));
     const people = new PeopleDirectory({ db: t.db, appId: 'cli_app', canTalk: () => true });
     service = new KanbanService({ db: t.db, roles: new Map([['worker', role('worker')]]), workspaces: new Set(['default']), people, supervisedRoles: true, workflowsDir: dir });
-    chat = new KanbanChat({ service, hasTier: (p, tier) => tier === 'talk' ? p.openId !== 'ou_nobody' : p.openId === OWNER.openId, people, appId: 'cli_app', changed: () => {} });
+    chat = new KanbanChat({ service, hasTier: (p, tier) => tier === 'talk' || p.openId === OWNER.openId, people, appId: 'cli_app', changed: () => {} });
     createBoard(t.db, 'vi', ALICE, NOW);
   });
   afterEach(() => t.close());
@@ -312,5 +313,36 @@ describe('chat', () => {
     expect(list).toContain('- **vi-sync** · params: none · board **vi**');
     expect(list).toContain('- **plain** · params: none');
     expect(list).not.toContain('- **plain** · params: none · board');
+  });
+
+  describe('task list board:', () => {
+    it("lists a named board's tasks under its header from a chat on another, the chat's board unchanged", async () => {
+      const started = await say('workflow start vi-sync');
+      const id = ids(started)[0] ?? '';
+      const r = await say('task list board:vi');
+      expect(r.split('\n')[0]).toBe('Board **vi**:');
+      expect(r).toContain(id);
+      expect(await say('task list blocked board:vi')).toBe('No blocked tasks on board vi.');
+      expect(await say('task list board:vi all')).toContain(id);
+      expect(await say('task list')).toBe('No open tasks. `/kanban task list all` shows done and archived ones too.');
+    });
+
+    it('refuses a board that does not exist, and names default when given', async () => {
+      expect(await say('task list board:nowhere')).toBe('Not done: there is no board nowhere');
+      expect(await say('task list board:default')).toBe('No open tasks on board default. `/kanban task list all board:default` shows done and archived ones too.');
+    });
+
+    it('lists an archived board under its archived line, and gives its empty answer after it', async () => {
+      createBoard(t.db, 'old', ALICE, NOW);
+      archiveBoard(t.db, 'old', ALICE, NOW);
+      expect(await say('task list board:old')).toBe(
+        ['Board **old** is archived: nothing is added to it.', 'No open tasks on board old. `/kanban task list all board:old` shows done and archived ones too.'].join('\n'),
+      );
+    });
+
+    it('is talk tier, as the list is: a sender without operator tier is answered, where a start is refused', async () => {
+      expect(await say('task list board:vi', GUEST)).toBe('No open tasks on board vi. `/kanban task list all board:vi` shows done and archived ones too.');
+      expect(await say('workflow start vi-sync', GUEST)).toMatch(/needs operator permission/);
+    });
   });
 });

@@ -41,6 +41,7 @@ import {
   type CardFacts,
   type NameOf,
 } from './chat-render.js';
+import { visible } from '../names.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { CARD_SEND_MS } from './cards.js';
 import { personPrincipal, type PeopleDirectory } from './people.js';
@@ -331,6 +332,12 @@ export class KanbanChat {
       case 'help':
         return renderHelp();
       case 'list': {
+        // A board named by `board:`, archived ones included, the chat's own unchanged (workflows spec §19.5).
+        if (command.board !== undefined) {
+          const named = this.#deps.service.boardNamed(command.board);
+          if (named === undefined) return refused({ ok: false, code: 'unknown_board', message: `there is no board ${visible(command.board)}` });
+          return renderList(this.#deps.service.list(named.name), command.filter, named.name, this.#nameOf, { archived: named.archivedAt !== null });
+        }
         // The chat's board alone (spec §16).
         const board = this.#deps.service.chatBoard(chatAt(key)).name;
         return renderList(this.#deps.service.list(board), command.filter, board, this.#nameOf);

@@ -127,6 +127,16 @@ describe('the other /kanban commands', () => {
     expect(parseKanban('task list')).toEqual({ ok: true, command: { verb: 'list', filter: undefined } });
     expect(parseKanban('task list Blocked')).toEqual({ ok: true, command: { verb: 'list', filter: 'blocked' } });
     expect(parseKanban('task list all')).toEqual({ ok: true, command: { verb: 'list', filter: 'all' } });
+    // A board, as one token, in either order with a filter (workflows spec §19.5); absent, no board key at all.
+    expect(parseKanban('task list board:vi')).toEqual({ ok: true, command: { verb: 'list', filter: undefined, board: 'vi' } });
+    expect(parseKanban('task list blocked board:vi')).toEqual({ ok: true, command: { verb: 'list', filter: 'blocked', board: 'vi' } });
+    expect(parseKanban('task list board:vi blocked')).toEqual({ ok: true, command: { verb: 'list', filter: 'blocked', board: 'vi' } });
+    expect(parseKanban('task list BOARD:vi')).toEqual({ ok: true, command: { verb: 'list', filter: undefined, board: 'vi' } });
+    expect(Object.keys((parseKanban('task list blocked') as { command: object }).command)).toEqual(['verb', 'filter']);
+    const listUsage = { ok: false, usage: 'Usage: `/kanban task list [todo|ready|running|review|reviewing|blocked|done|archived|all] [board:<name>]`' };
+    for (const bad of ['board:', 'board: vi', 'board:vi board:x', 'blocked done', 'blocked board:vi all', 'nonsense']) {
+      expect(parseKanban(`task list ${bad}`), bad).toEqual(listUsage);
+    }
     expect(parseKanban('task show k_1')).toEqual({ ok: true, command: { verb: 'show', taskId: 'k_1' } });
     expect(parseKanban('task stop k_1')).toEqual({ ok: true, command: { verb: 'stop', taskId: 'k_1' } });
     expect(parseKanban('task archive k_1')).toEqual({ ok: true, command: { verb: 'archive', taskId: 'k_1' } });
