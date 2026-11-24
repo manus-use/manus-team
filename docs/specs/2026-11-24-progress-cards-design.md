@@ -82,9 +82,26 @@ A run gets a card when all of these hold, checked at each round (§7.2):
    at a group's chat scope gets no card, though its notices go there as today: a message per long
    run in the group's main timeline is the clutter threads were made to remove (kanban §19). That
    covers a task from before threads, created at chat scope in a group, and a terminal's `--chat`
-   naming a group with no thread (kanban §22.1), whose `chat_type` is null; a null `chat_type` at
-   chat scope is not known to be a direct message, so a terminal's `--chat` naming a direct message
-   gets no card either.
+   naming a group with no thread (kanban §22.1).
+
+   **A null `chat_type`.** A subscription's `chat_type` is null when it was written by a terminal's
+   `--chat`, which cannot ask Lark what kind of chat it named (wake §2.1), before migration 013, or
+   copied from one of those by a follow-up. For such a subscription at chat scope the loop reads the
+   kind from another subscription of the same chat that knows it:
+
+   ```sql
+   SELECT chat_type FROM kanban_subscriptions
+    WHERE account_id = ? AND conversation_id = ? AND chat_type IS NOT NULL LIMIT 1
+   ```
+
+   through the `account_id` index (migration 004), kept in memory by chat for the boot once found,
+   and **never written back**: the subscription's `chat_type` is written at its insert only (wake §4.3,
+   WRITERS.md). A chat's kind does not change, so any subscription that knows it
+   serves. A `p2p` answer gives the task its card in the direct message; `group`, no card. **The
+   gap:** a chat where no task was ever created by a typed command, so no subscription knows its
+   kind, as a direct message the operator named only from a terminal, reads nothing, is taken as not
+   known to be a direct message, and gets no card. Asking Lark's chat info API (`GET
+   /open-apis/im/v1/chats/:chat_id`, its `chat_mode`) is the later seam that would close it.
 7. **Its task is not held** while its "Created" reply is under way (kanban §19.4): `KanbanChat.held`,
    asked as the card poster asks it, so a card does not go to the group in the moment before the
    subscription moves to its thread.
@@ -247,7 +264,10 @@ its last 8,000 code points only; the approvals open; and `throughSeq`, the last 
 
 - **Every fold is capped**, the first included: a round reads `readEvents(db, sessionId,
   throughSeq, min(lastSeq(db, sessionId), throughSeq + 5_000))`, at most 5,000 events a card a
-  round, `throughSeq` starting at 0 the first time a card is folded in this process. A run whose
+  round, `throughSeq` starting at 0 the first time a card is folded in this process. **Each read
+  moves `throughSeq` to the range's upper bound**, `min(lastSeq, throughSeq + 5_000)`, whatever
+  types it returned, not to the seq of the last row it got: a range with no row the fold takes, or
+  a tool-only read whose last events are not tools, still counts as read. A run whose
   session is longer is caught up over the next rounds, as the notifier reads at most 100 events a
   subscription a round (kanban §9.4), so no round reads a whole long session at once.
 - **A card is drawn only once it has caught up**: a send or a live update waits until `throughSeq`
@@ -258,7 +278,9 @@ its last 8,000 code points only; the approvals open; and `throughSeq`, the last 
   run has ended and its fold has not caught up, as after a restart, the final reads only the tool
   events, `tool_call` and `tool_call_update`, by the events' `(session_id, type, seq)` index
   (`idx_events_type`, migration 001), 5,000 a round from `throughSeq` as above, and is drawn once
-  `throughSeq === lastSeq`, every tool event folded.
+  `throughSeq === lastSeq`, every tool event folded: the read moves `throughSeq` to the range's
+  bound, so a session ending in text, a `turn_ended` or the boot's own events still reaches
+  `lastSeq`.
 - **The 8,000 code points** keep the text the tail is cut from (§6.3) far longer than the tail, so
   a known secret that the cut would split is still whole in what is masked, unless it is itself
   longer than 7,400 characters.
@@ -280,13 +302,19 @@ it stops. The total time is `ended_at - started_at`, but for a run closed by the
 
 **A run closed by the boot** (kanban §8.4), `interrupted` or decided before the restart and closed
 then, has `ended_at` at the next start, which may be hours after its agent died with the gateway.
-Its time ends instead at its session's last event, `lastEventAt(db, sessionId)` (`src/db/events.ts`,
-the cron idle limit's read), the agent's last sign of life; at `ended_at` when it has no session or
-no event. A run is known to be closed by the boot when it started before this process did and
+Its time ends instead at the agent's last sign of life: the latest event of the agent's own output,
+`agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update`, `plan` or `usage`
+(each written with `actor = 'agent'` by the session actor), read by a new `lastAgentEventAt(db,
+sessionId)` in `src/db/events.ts` as the greatest `ts` of the latest row of each type through the
+`(session_id, type, seq)` index (`idx_events_type`). Not `lastEventAt`, the session's last event of
+any kind: the boot writes events of its own into the session after the agent died,
+`reconcileBoot`'s `turn_ended` and `session_state_changed`, then the archive's, so its last event is
+the boot's. A run with no session, or no output from its agent, ends at its `started_at`, and is
+drawn `after 0 s`: nothing says the agent ever did anything. A run is known to be closed by the boot when it started before this process did and
 closed after: `started_at < bootedAt <= ended_at`, `bootedAt` being the time the gateway's
 `start()` began, given to the loop. No turn of such a run ran in this process, so only the boot
-can have closed it. Every `interrupted` run is one (§10); its time ends at `lastEventAt` as well
-when it lost its environment to a restart (`envFor`).
+can have closed it. Every `interrupted` run is one (§10); its time ends at `lastAgentEventAt` as
+well when it lost its environment to a restart (`envFor`).
 
 The outcome word is read from `kanban_runs.outcome`, and, for a counted failure, from the run's
 `run_ended` event, which says what came next (`next`, `blockKind`, kanban §9.4), read by a new
@@ -464,8 +492,11 @@ cardkit's 30,000 characters an element (render.ts's note).
 
 ### 6.8 What the thread sees, and the masking
 
-Until now a run's tool titles and its words mid-run were seen only by `/kanban task show`, at talk
-tier, and by a retry's prompt; a notice carried a summary the agent chose to write. The card shows
+Until now a run's tool titles and its words mid-run were never shown in any chat. `/kanban task
+show`, at talk tier, shows no tool titles at all, and of what the agent said only the latest run's
+`last_output`: the tail of its last turn, recorded when the run ended, cut to 800 characters
+("Latest output", `tail(output, 800)` in chat-render.ts). A retry's prompt is given the tool calls,
+and no person sees it; a notice carries a summary the agent chose to write. The card shows
 **every tool's title**, which an agent's driver may fill with a whole command line or a path, and
 **the tail of what the agent is saying**, before it has decided what to report, to **everyone in
 the thread**, talk tier or not, as a card in a thread is seen by the group (kanban §19.6).
@@ -549,8 +580,8 @@ rather than being told.
   one; the final draw is held the same way.
 - **Retry-after**: a failure that carries `retryAfterMs` (`ChannelError`, from Lark's throttle
   answer) holds the card at least that long, a send or an update.
-- **A Stop press's redraw** is not paced (§8.3); a stale press's is, one a message every 5 s
-  (§8.4).
+- **A Stop press's redraw** is not paced (§8.3); a stale press's and a tier refusal's are, one a
+  message every 5 s (§8.1, §8.4).
 
 ### 7.4 One draw at a time a message
 
@@ -583,7 +614,9 @@ button, `act: 'stop'` is taken before the person-card path, which refuses an age
 1. **Operate tier, live**: `hasTier(presser, 'operate')`, which reads the grants as they are now
    (tier grants spec). Without it: `Stop changes the board, and needs operator permission.`, and
    the card is redrawn as it stands with its `try` one higher (§6.5), so the person can press again
-   once granted.
+   once granted. Paced as a stale press's redraw is, one a message every 5 s (§8.4): a refusal
+   within 5 s of the last redraw of that message bumps `try` all the same, and the next redraw,
+   the refusal's or the loop's, carries the higher `try`.
 2. **The run**: the card's `run` must be a run of the card's task, and an agent's: otherwise
    `That button is not for a run of this task.` or `That button is not for an agent's run.`
 3. **Ended** (`ended_at` set): a stale press (§8.4).
@@ -635,9 +668,10 @@ actor, two of one name told apart (kanban §9.3), with no button. When the turn 
 run closes, the loop draws it final, `⏸ stopped after 6 min 12 s`.
 
 **A redraw the loop cannot make live.** `redrawNow` on a row that is `let_go`, or whose run has
-closed by the time its turn in the chain comes, draws the card final (§6.6), and marks the row
-`final` when that lands: the press shows the presser the card as it is now, and a row let go of for
-a lost update may well take a draw again.
+closed by the time its turn in the chain comes, draws the card final (§6.6): the press shows the
+presser the card as it is now, and a card let go of for a lost update may well take a draw again.
+An `open` row is marked `final` when that lands; a `let_go` row is left as it is, so `state` moves
+from `open` once only (§4.2), and the loop never reads it again either way.
 
 **An update in flight when the stop lands.** A loop update of the card already under way when the
 press comes was rendered before the stop: the press's redraw is chained behind it (§7.4), so the
@@ -727,8 +761,8 @@ masked before it is logged, as every error is.
   was tidying keeps its outcome, `✓ completed after 9 min`, not "interrupted", since what it
   reported stands (kanban §3.3). Recognised by the run's outcome alone: only the dispatcher's
   `#interrupt` writes `interrupted`, at boot or when an open run's session lost its environment to a
-  restart (`envFor`). The time of either ends at the session's last event, not at the boot's close
-  (§5.3), so a gateway down for a night does not draw "after 9 h". The retried run is a new run,
+  restart (`envFor`). The time of either ends at the agent's last output event, not at the boot's
+  close nor at the boot's own events in the session (§5.3), so a gateway down for a night does not draw "after 9 h". The retried run is a new run,
   which gets its own card past `min_seconds`. A row with no message, its send cut off by the stop,
   is let go of, as its run has ended.
 - **The stop.** The loop stops with the others, ending its round after the draw under way, which
@@ -816,7 +850,9 @@ card of its own beside it, from the log the session keeps.
   index; the tests of §4.1 that pin version 13 move to 14.
 - **`src/db/kanban.ts`**: the six writers of §4.2; `stop` gains `runId?`, refusing `run_superseded`
   inside its transaction (§8.2). **`src/db/kanban-read.ts`**: `progressDue`, `openProgressCards`,
-  `runEndedOf`, and the `stopped` event of a run for the stopping line. **`src/db/events.ts`**: a
+  `runEndedOf`, the `stopped` event of a run for the stopping line, and `chatKindOf(db, accountId,
+  conversationId)`, the query of §2's null `chat_type`. **`src/db/events.ts`** gains
+  `lastAgentEventAt` (§5.3) too. **`src/db/events.ts`**: a
   read of a session's events of given types past a seq, up to a seq, through `idx_events_type`, for
   the final draw (§5.2). **`src/db/WRITERS.md`**: the row of §4.2.
 - **`src/kanban/service.ts`**: the writers, as `KanbanService` methods, each refusing a bad id or
@@ -873,6 +909,10 @@ card of its own beside it, from the log the session keeps.
   - where: in the thread with its root, in a direct message, with the run's uuid; **none at a
     group's chat scope**, for a task created there, for one from before threads, and for a
     terminal's `--chat` naming a group with no thread (`chat_type` null), its notices still sent;
+    **a null `chat_type` at chat scope read from another subscription of the same chat**: `p2p` a card
+    in the direct message, `group` none, the subscription's own `chat_type` still null afterwards, the
+    read made once a chat a boot; a follow-up whose copied `chat_type` is null treated the same; a
+    direct message no other subscription knows: no card;
   - the row: `try_number` and `try_limit` written by the insert's `SELECT`, none for a run decided
     between the read and the insert;
   - what it shows: the header with the whole id, "run 1 of 2", "run 2 of 2" after a counted failure,
@@ -892,7 +932,9 @@ card of its own beside it, from the log the session keeps.
     masked in what the channel got);
   - incremental reads: every fold, the first included, at most 5,000 events a round, read through
     `min(lastSeq, throughSeq + 5000)`; no send or update until caught up; the final drawn only once
-    `throughSeq === lastSeq`, reading only tool events;
+    `throughSeq === lastSeq`, reading only tool events; **a session whose last events are not tool
+    events (text, then `turn_ended` and the boot's events) still reaching `lastSeq`, and its final
+    drawn**, `throughSeq` moved to each range's bound and not to its last row;
   - pace and caps: no update within 5 s of the last landed or last tried; a failing update held 5 s,
     10 s, … at most a minute, and cleared by a landed draw; no update when nothing shown changed, the
     state compared as well as the markdown; an update when the minute moves; at most ten draws a
@@ -915,16 +957,21 @@ card of its own beside it, from the log the session keeps.
     let go; a row with no message whose run ended let go with no line;
   - **the restart**: `open` rows with runs closed by the boot drawn final, `interrupted` as
     "interrupted by a restart", a reported one with its outcome; **the time of each ending at the
-    session's last event, the boot hours later on the fake clock, and at `ended_at` for a run with
-    no event**; the retry's new card;
-  - `redrawNow` on a `let_go` row, and on a row whose run has closed: drawn final and marked final;
+    agent's last output event, the boot hours later on the fake clock, the runs closed through the
+    real paths, `registry.reconcileBoot()` and then `Dispatcher.boot()`'s archive and close, so the
+    session holds the boot's `turn_ended`, `session_state_changed` and archive events after the
+    agent's, none of which moves the end; and at `started_at`, `after 0 s`, for a run whose agent
+    wrote nothing**; the retry's new card;
+  - `redrawNow` on a row whose run has closed: drawn final and marked final; on a `let_go` row:
+    drawn final and left `let_go`;
     a stale press's redraw paced to one a message every 5 s;
   - the switch: off, no loop and the startup line's count; on again, the old rows drawn final.
 - **Unit, the Stop press** (`KanbanChat.card`): an operator's press stops the run, blocks the task
   `needs_input` "stopped by" them, cancels the turn, and asks for the stopping redraw, its answer
   returned before the redraw settles; operate tier read live, a grant revoked a moment before
   refused; talk tier refused with the message of §8.1, the card redrawn with `try` one higher, and a
-  press of the new value by the same person, now granted, stopping the run; a bad nonce, a run of
+  press of the new value by the same person, now granted, stopping the run; two tier refusals within
+  5 s one redraw, `try` bumped twice, the card's next draw carrying the second; a bad nonce, a run of
   another task, a person's run refused; a stale press redrawn final with "This run has ended." and
   the board unchanged; `run_superseded` and `no_open_run` from the stop each taken as a stale press;
   a press on a stopping or ending run answered "That run is already ending." and changing nothing;
@@ -962,7 +1009,7 @@ On the user's tenant, with the board and progress cards on:
    outcome and the time.
 6. **Withdrawing the card**: the code Lark answers the next update with, which should be one of
    `CARD_GONE_CODES`, and the card let go of.
-7. **A restart mid-run**: the card "interrupted by a restart", its time to the agent's last event,
+7. **A restart mid-run**: the card "interrupted by a restart", its time to the agent's last output,
    and the retry's own card.
 8. **A supervised role**: the waiting line, and the approval card below the progress card.
 9. **Several cards in one thread**: three tasks of one thread running at once, their cards updating
@@ -970,7 +1017,10 @@ On the user's tenant, with the board and progress cards on:
    catch up, none let go.
 10. **A task at a group's chat scope**: a task from before threads, or a terminal's `--chat` naming
     the group, running past 30 s: no card in the group, and its notices there as before.
-11. **A direct message**: a task created in a direct message with the bot gets its card there.
+11. **A direct message**: a task created in a direct message with the bot gets its card there; a
+    terminal's `--chat` naming that same direct message, after a task was typed there, gets its card
+    too; one naming a direct message where nothing was ever typed gets none, and its notices still
+    come.
 
 ---
 
@@ -1002,8 +1052,11 @@ On the user's tenant, with the board and progress cards on:
 - **A card refused ten updates in a row stays as it last landed** until its final draw.
 - **Turning it off leaves cards as they are**, live-looking, until pressed.
 - **No card for a run shorter than `min_seconds`**, none after ten refusals of its send, and none at
-  a group's chat scope or for a terminal's `--chat` naming a direct message, whose `chat_type` is not
-  known (§2).
+  a group's chat scope (§2).
+- **A direct message whose kind nothing records gets no card**: a subscription with a null
+  `chat_type`, a terminal's `--chat` or one from before migration 013, in a direct message where no
+  task was ever created by a typed command, so no other subscription of that chat knows its kind
+  (§2). Asking Lark's chat info for its `chat_mode` is the seam that would close it.
 - **The migration runs with progress cards off**, so a build before it refuses the database (§4.1).
 
 ---
@@ -1042,7 +1095,8 @@ On the user's tenant, with the board and progress cards on:
   table row is what carries on (§10).
 - **D8. A run that had reported, closed by the boot, is drawn with its outcome**, `✓ completed`, not
   "interrupted by a restart": what it reported stands (kanban §3.3), and only an undecided run is
-  `interrupted`. Either's time ends at its session's last event, not at the boot (§5.3, §10).
+  `interrupted`. Either's time ends at its agent's last output event, not at the boot or the boot's
+  own events in its session (§5.3, §10).
 - **D9. The final card keeps the tool line.** The design's final redraw has the mark, the word and
   the time; the header and the tool line stay too, as what the run did, with no text, summary or
   reason (§6.6).
@@ -1056,7 +1110,10 @@ On the user's tenant, with the board and progress cards on:
 - **D12. A stop typed elsewhere** shows "stopping" within a round, not at once: only a press is a
   callback the card can be redrawn from at once (§8.3).
 - **D13. Only a thread or a direct message gets a card** (§2), by the user's answer to the first
-  draft's open question; the design said every run whose task a chat follows.
+  draft's open question; the design said every run whose task a chat follows. A subscription at
+  chat scope with a null `chat_type` takes its chat's kind from another subscription of the same
+  chat, read and kept in memory, never written back; a direct message no subscription knows the kind
+  of gets no card, which asking Lark's chat info would later fix (§2, §16).
 
 ---
 
@@ -1067,7 +1124,10 @@ Made while grounding the design in the code, or by the user, each where it appli
 - **Only a thread or a direct message**, decided by the user on 2026-11-24, answering the first
   draft's §19: a task followed at a group's chat scope gets no card, though its notices go there as
   today; that covers older tasks without a thread and a terminal's `--chat` naming a group with no
-  thread (§2).
+  thread (§2). A null `chat_type` is read from another subscription of the same chat, the
+  reviewer's first option, kept in memory and never written back (§2).
+- **A boot-closed run's time ends at its agent's last output event**, never `lastEventAt`, which is
+  the boot's own (§5.3); each capped read moves `throughSeq` to its range's bound (§5.2).
 - **The tools are the whole run's, the text the latest turn's** (§5.1): a nudge's turn adds tools,
   and starts the text again. An update's title replaces the known one, as `toolCallsOf` does.
 - **The reader is a fold kept in memory**, every fold capped at 5,000 events a round, the first
@@ -1078,7 +1138,7 @@ Made while grounding the design in the code, or by the user, each where it appli
 - **A restart-interrupted run is recognised by `outcome = 'interrupted'`**, which only the
   dispatcher's `#interrupt` writes, at boot or for a session that lost its environment to a restart
   (§10); and a run closed by the boot by `started_at < bootedAt <= ended_at`, its time ending at
-  `lastEventAt` (§5.3).
+  `lastAgentEventAt`, the agent's last output event, else `started_at` (§5.3).
 - **The Stop press is a board card's press**, `kind: 'kanban'`, `act: 'stop'`, `run`, the nonce
   `boardCardNonce(appId, taskId, runId)` and a `try` outside it, reaching `KanbanService.stop`
   through `KanbanChat.card`, then the dispatcher's `cancel` through `#decided` (§8).
