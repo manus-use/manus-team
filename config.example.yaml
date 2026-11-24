@@ -151,6 +151,18 @@ agent:
 #   # no max_running of its own. Unset, a role has no limit of its own. May not
 #   # be above max_running.
 #   max_running_per_role: 2
+#   # Wakes (docs/specs/2026-11-19-wake-design.md): a task with wake on starts
+#   # a turn of the agent in the thread that follows it when it completes, has
+#   # changes requested, is blocked by its run, or is stranded. On by default;
+#   # a wake is opt-in per task.
+#   wake:
+#     enabled: true
+#     # Woken turns per conversation in any hour, 1 to 60.
+#     per_hour: 6
+#     # A task this many woken turns deep stays notice-only, 1 to 20.
+#     max_depth: 5
+#     # How long a block's Unblock button waits for the agent's try, 1 to 60.
+#     hold_minutes: 10
 
 # Cron jobs (docs/specs/2026-11-16-cron-design.md): a schedule, a role, a prompt
 # and an optional script, fired by the gateway into a fresh session of the role,

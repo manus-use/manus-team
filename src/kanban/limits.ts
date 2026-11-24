@@ -5,6 +5,23 @@
  * parser loading the API.
  */
 
+/**
+ * `text` cut to at most `max` UTF-8 bytes, on a whole character: what a
+ * writer that must never refuse for length keeps (wake spec §19.3).
+ */
+export function cutToBytes(text: string, max: number): string {
+  if (Buffer.byteLength(text) <= max) return text;
+  let bytes = 0;
+  let end = 0;
+  for (const ch of text) {
+    const n = Buffer.byteLength(ch);
+    if (bytes + n > max) break;
+    bytes += n;
+    end += ch.length;
+  }
+  return text.slice(0, end);
+}
+
 /** Sizes, in UTF-8 bytes, of what a worker may send; chat and the terminal keep to them too. */
 export const WORKER_LIMITS = {
   title: 512,

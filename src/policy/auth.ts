@@ -224,15 +224,15 @@ export class Authorizer {
       };
     }
 
-    if (cfg.allowChats.length > 0 && !cfg.allowChats.includes(message.chatId)) {
+    const conversation = this.admitsConversation(message.chatId, message.chatType);
+    if (conversation === 'chat_not_allowed') {
       return { ok: false, reason: 'chat_not_allowed', detail: 'This chat is not allowlisted.' };
     }
+    if (conversation === 'dm_disabled') {
+      return { ok: false, reason: 'dm_disabled', detail: 'Direct messages are disabled.' };
+    }
 
-    if (message.chatType === 'p2p') {
-      if (!cfg.allowDirectMessages) {
-        return { ok: false, reason: 'dm_disabled', detail: 'Direct messages are disabled.' };
-      }
-    } else {
+    if (message.chatType !== 'p2p') {
       // In a group, an unmentioned message is not addressed to us. Acting on it
       // would make the bot answer every message in the room.
       if (!message.mentionedBot) {
@@ -256,6 +256,21 @@ export class Authorizer {
     }
 
     return OK;
+  }
+
+  /**
+   * Whether the gateway acts in this conversation at all, whoever is in it
+   * (wake spec §2.1, §13): a chat outside a non-empty `allowChats`, or a direct
+   * message while `allowDirectMessages` is off, is refused with the reason
+   * `admits` gives; undefined when admitted. A chat whose kind is not known,
+   * null, is judged by `allowChats` alone. `admits` calls it for those two
+   * checks, so the waker and the router cannot come to disagree.
+   */
+  admitsConversation(chatId: string, chatType: 'p2p' | 'group' | null): 'chat_not_allowed' | 'dm_disabled' | undefined {
+    const cfg = this.#config;
+    if (cfg.allowChats.length > 0 && !cfg.allowChats.includes(chatId)) return 'chat_not_allowed';
+    if (chatType === 'p2p' && !cfg.allowDirectMessages) return 'dm_disabled';
+    return undefined;
   }
 
   /** Tier check for a command, after `admits` has already passed. */

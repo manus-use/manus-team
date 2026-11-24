@@ -141,6 +141,14 @@ function taskCount(): number {
 }
 
 describe('/kanban task new', () => {
+  it("records the chat's kind from the message, a group's or a direct message's, on the task and its subscription (wake spec §2.1)", async () => {
+    const inGroup = created(await say('task new In the group'));
+    expect(getTask(t.db, inGroup)?.createdVia).toMatchObject({ kind: 'chat', chatType: 'group' });
+    expect(subscriptionsOf(t.db, inGroup).map((s) => [s.chatType, s.wakeCursor])).toEqual([['group', 0]]);
+    const direct = created((await chat.run('task new In a direct message', { ...message(OWNER), chatType: 'p2p' }, KEY)).text);
+    expect(subscriptionsOf(t.db, direct).map((s) => s.chatType)).toEqual(['p2p']);
+  });
+
   it("creates a task from its field lines, as the sender, from this chat, which follows it; and looks for work", async () => {
     const reply = await say('task new Draft the Q3 summary\nassignee: docs-writer\nworkspace: docs\noutcome: a page in the wiki\nUse last quarter as the model.');
     const taskId = created(reply);

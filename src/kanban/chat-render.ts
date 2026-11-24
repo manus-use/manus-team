@@ -1,13 +1,14 @@
 import { forDisplay, forMarkdown } from '../channel/escape.js';
 import type { CardButton, CardView } from '../channel/types.js';
 import { boardCardNonce } from '../core/ids.js';
+import { formatWall, processZone } from '../cron/schedule.js';
 import type { BoardEntry, BoardSummary, ReviewRequest, TaskView } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { stripControl } from '../text.js';
 import { LIST_FILTERS, USAGE } from './chat-parse.js';
 import { describeReported } from './commit.js';
 import type { DisplayStatus } from './status.js';
-import { DEFAULT_BOARD, type Assignee, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow, type Waiting } from './types.js';
+import { DEFAULT_BOARD, type Assignee, type DeferredState, type DeferredWhy, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow, type Waiting } from './types.js';
 
 /**
  * What `/kanban` says in chat (spec §9.3), and the notices a subscription hears
@@ -137,7 +138,7 @@ const PRINCIPAL_TOKEN = /lark:[A-Za-z0-9_-]+/g;
  * falling back to the token: at render time, in chat only, so what is stored,
  * hashed and shown at the terminal stays as the start made it.
  */
-function named(text: string, nameOf: NameOf | undefined): string {
+export function named(text: string, nameOf: NameOf | undefined): string {
   if (nameOf === undefined) return text;
   return text.replace(PRINCIPAL_TOKEN, (token) => {
     const name = nameOf(token);
@@ -165,6 +166,11 @@ const LIST_MAX = 30;
 /** The statuses `/kanban task list` shows with no filter: everything someone may still act on. */
 const ACTIVE: readonly DisplayStatus[] = ['running', 'reviewing', 'review', 'ready', 'todo', 'blocked'];
 
+/** A task too deep in woken turns to wake (wake spec §3.4): the note of a wake's answer, and its notice. */
+export function tooDeepLine(taskId: string, depth: number): string {
+  return `${id(taskId)} is ${depth} tasks deep in woken turns, so it stays notice-only`;
+}
+
 /** `/kanban help`: every command, with the tier it needs (spec §9.1). */
 export function renderHelp(): string {
   const operate = 'operator';
@@ -181,6 +187,7 @@ export function renderHelp(): string {
     [USAGE.workspace, operate],
     [USAGE.comment, talk],
     [USAGE.unblock, operate],
+    [USAGE.wake, talk],
     [USAGE.stop, operate],
     [USAGE.archive, operate],
     [USAGE['gate add'], operate],
@@ -322,17 +329,74 @@ export function waitingLine(
   return `waiting: ${whose} is at its ${escape('max_running')}, ${runs}`;
 }
 
+/** What a Wake line needs of the gateway (wake spec §10): its switch, its zone, and now, for the day. */
+export interface WakeShow {
+  enabled: boolean;
+  /** `cron.tz`, else the process's. */
+  zone: string;
+  now: number;
+}
+
+/** A Wake line when the caller says nothing of the gateway: wakes on, in the process's zone, now. */
+export function defaultWakeShow(): WakeShow {
+  return { enabled: true, zone: processZone(), now: Date.now() };
+}
+
+/**
+ * `task show`'s Wake line (wake spec §10), chat's and the terminal's in the same
+ * words, the setter named as the caller names people: off; on, by whom and at
+ * what depth, with the time of the task's last delivered wake, HH:MM in the
+ * zone, MM-DD HH:MM on another day; or on, but wakes off on the gateway.
+ */
+export function wakeLine(task: TaskRow, lastWoke: number | undefined, show: WakeShow, setter: string): string {
+  if (task.wakeBy === null) return 'Wake: off';
+  // A role as its target (wake spec §10, §19).
+  const role = task.wakeRole === null ? '' : `, for role ${task.wakeRole}`;
+  if (!show.enabled) return `Wake: on, set by ${setter}${role}, but wakes are off on this gateway`;
+  const head = `Wake: on, set by ${setter}${role}, depth ${task.wakeDepth}`;
+  if (lastWoke === undefined) return head;
+  const at = formatWall(show.zone, lastWoke);
+  const day = at.slice(0, 10) === formatWall(show.zone, show.now).slice(0, 10);
+  return `${head}; last woke ${day ? at.slice(11) : at.slice(5)}`;
+}
+
+/** Reaction tasks a show names (wake spec §19.9): at most five, the rest counted. */
+export const REACTIONS_SHOWN = 5;
+
+/**
+ * `task show`'s lines of a wake's reaction tasks (wake spec §19.9), chat's and
+ * the terminal's in the same words: for a source task, `Reactions:` and the
+ * reaction tasks its outcomes made, newest first, at most five, each with its
+ * display status, then how many more and where they are listed; for a reaction
+ * task, the tasks its wake carried, its role and its setter.
+ */
+export function reactionLines(view: TaskView, setter: (principal: string) => string, code: (taskId: string) => string, list: string): string[] {
+  const out: string[] = [];
+  const shown = view.reactions?.slice(0, REACTIONS_SHOWN) ?? [];
+  if (shown.length > 0) {
+    const more = (view.reactions?.length ?? 0) - shown.length;
+    out.push(`Reactions: ${shown.map((r) => `${code(r.taskId)} (${r.status})`).join(', ')}${more > 0 ? `, and ${more} more: ${list}` : ''}`);
+  }
+  if (view.reactsTo !== undefined) {
+    const r = view.reactsTo;
+    out.push(`Made by a wake of ${r.tasks.map(code).join(', ')}, for role ${r.role}, set by ${setter(r.principal)}.`);
+  }
+  return out;
+}
+
 /**
  * `/kanban task show` (spec §9.1): the task, its contract, gates, runs, latest output
  * and comments. Its board is named once anything is on a board but `default`:
  * the task's, or the chat's it is shown in (spec §16).
  */
-export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard: string = DEFAULT_BOARD, nameOf?: NameOf): string {
+export function renderShow(view: TaskView, gates: readonly GateRow[], chatBoard: string = DEFAULT_BOARD, nameOf?: NameOf, wake: WakeShow = defaultWakeShow()): string {
   const { task } = view;
   const board = task.board === DEFAULT_BOARD && chatBoard === DEFAULT_BOARD ? '' : ` · board: ${label(task.board)}`;
   const out: string[] = [
     `**${titleText(task.title, nameOf)}** ${id(task.taskId)}: ${view.status}`,
     `assignee: ${who(task.assignee, nameOf)} · reviewer: ${who(task.reviewer, nameOf)} · workspace: ${task.workspace === null ? 'not yet fixed' : label(task.workspace)}${board}`,
+    wakeLine(task, view.lastWoke, wake, task.wakeBy === null ? '' : personText(task.wakeBy, nameOf)),
+    ...reactionLines(view, (p) => personText(p, nameOf), id, '/kanban task list'),
   ];
   if (view.member !== undefined) out.push(memberLine(view.member, label, id));
   for (const w of view.waiting ?? []) out.push(waitingLine(w, label, id));
@@ -567,6 +631,10 @@ export function renderNotice(
     case 'workflow_started':
       // A terminal start's reply (workflows spec §18.2), on its first member, whole: it may run to 3,800 characters.
       return renderStarted(startedOf(p), opts.where ?? 'chat', (a) => who(a, opts.nameOf), opts.nameOf);
+    case 'wake_set':
+      // Only a wake refused as too deep is a notice (wake spec §3.4, §4.4): every other change is the command's answer.
+      if (p['refused'] !== 'too_deep') return undefined;
+      return tooDeepLine(task.taskId, typeof p['depth'] === 'number' ? p['depth'] : task.wakeDepth);
     default:
       return undefined;
   }
@@ -729,6 +797,60 @@ export function renderCardOutcome(task: { taskId: string; title: string }, outco
   };
 }
 
+/**
+ * The line a block's notice ends with when the waker deferred its Unblock
+ * button (wake spec §5.9): people have seen the block, and the agent gets the
+ * first try.
+ */
+export const AGENT_FIRST_LINE = 'The agent is looking at it first.';
+
+/** What a deferred block's `AGENT_FIRST_LINE` reads once its button card is sent (wake spec §5.9). */
+export const AGENT_COULD_NOT_LINE = 'The agent could not lift it; the Unblock button is below.';
+
+/** The same, when Lark took the button's card as text, so no button came: the typed command lifts it. */
+export function agentCouldNotTyped(taskId: string): string {
+  return `The agent could not lift it; ${typedUnblock(taskId)} lifts it.`;
+}
+
+/**
+ * The line the notifier ends a deferred block's notice with, and only that: a
+ * line of its own, at a notice's end, so a reason that quotes the sentence is
+ * left as it is.
+ */
+const AGENT_FIRST_AT_END = /\nThe agent is looking at it first\.(?=\n\n|$)/;
+
+/**
+ * The card a deferred Unblock button goes in once it is due (wake spec §5.9):
+ * the task by id and title, the reason not repeated, worded by why it is due.
+ */
+export function deferredButtonText(why: DeferredWhy, taskId: string, title: string, nameOf?: NameOf): string {
+  return `${deferredButtonLine(why, taskId, title, nameOf)}\n${typedUnblock(taskId)} also lifts it.`;
+}
+
+/** The card's first line, by why (wake spec §5.9). */
+function deferredButtonLine(why: DeferredWhy, taskId: string, title: string, nameOf?: NameOf): string {
+  const block = `the block on ${id(taskId)} **${titleText(title, nameOf)}**`;
+  switch (why) {
+    case 'tried':
+      return `The agent could not lift ${block}.`;
+    case 'turn_failed':
+      return `The agent's turn ended without lifting ${block}.`;
+    case 'running':
+      return `The agent is still working on ${block}; lift it here if you can answer it.`;
+    case 'not_woken':
+    case 'restart':
+      return `The agent was not woken for ${block}; lift it here.`;
+  }
+}
+
+/**
+ * The typed command that lifts a block, for a card whose button may not
+ * arrive: Lark can refuse a card and take its text alone.
+ */
+export function typedUnblock(taskId: string): string {
+  return `\`/kanban task unblock ${taskId}\``;
+}
+
 /** An Unblock under a notice of a block (spec §9.2), bound to the task and the event that blocked it. */
 export function unblockButton(appId: string, event: Pick<KanbanEvent, 'id' | 'taskId'>): CardButton {
   const ref = `event:${event.id}`;
@@ -743,13 +865,21 @@ export function unblockButton(appId: string, event: Pick<KanbanEvent, 'id' | 'ta
 export interface UnblockShown {
   taskId: string;
   blockEvent: number;
-  lift?: { kind: 'unblocked' | 'archived'; actor: string; at: number };
+  /** `woken`: lifted by a woken turn, on its setter's authority (wake spec §9.3). */
+  lift?: { kind: 'unblocked' | 'archived'; actor: string; at: number; woken?: boolean };
+  /** False for a block the message told of without its button, deferred by the waker (wake spec §5.9); a button unless said. */
+  hasButton?: boolean;
+  /** For a row with no button: its deferred button's state, if its row was written. */
+  deferred?: DeferredState;
+  /** Its deferred button's card went as text: no button came. */
+  deferredAsText?: boolean;
 }
 
 /**
  * A message of notices redrawn once a block it offered Unblock for has been
  * lifted (spec §9.2, amended by the unblock redraw): its text as it was sent,
  * then a line for each lifted block, "`<task>`: Unblocked by <name> at HH:MM",
+ * "Unblocked by <name> (woken by the board)" for a woken turn's (wake spec §9.3),
  * or "Archived by" for a task archived while blocked, at the time `when` says,
  * the person by chat name, else as recorded; and the buttons
  * of the blocks not yet lifted, as they were.
@@ -762,11 +892,25 @@ export function renderUnblockRedraw(
   nameOf?: NameOf,
 ): CardView {
   const lines = buttons.flatMap((b) =>
-    b.lift === undefined ? [] : [`${id(b.taskId)}: ${b.lift.kind === 'archived' ? 'Archived' : 'Unblocked'} by ${personText(b.lift.actor, nameOf)} at ${when(b.lift.at)}`],
+    b.lift === undefined
+      ? []
+      : [
+          `${id(b.taskId)}: ${b.lift.kind === 'archived' ? 'Archived' : 'Unblocked'} by ${personText(b.lift.actor, nameOf)}${b.lift.woken === true ? ' (woken by the board)' : ''} at ${when(b.lift.at)}`,
+        ],
   );
+  // A notice that deferred buttons (wake spec §5.9): its Nth "looking at it first"
+  // is its Nth buttonless row's, in block event order, as the batch was sent in
+  // event order; a row whose button card was sent reads that the button is below.
+  const deferred = buttons.filter((b) => b.hasButton === false);
+  const parts = markdown.split(new RegExp(AGENT_FIRST_AT_END.source, 'g'));
+  const line = (b: UnblockShown | undefined): string =>
+    b?.deferred !== 'sent' ? AGENT_FIRST_LINE : b.deferredAsText === true ? agentCouldNotTyped(b.taskId) : AGENT_COULD_NOT_LINE;
+  const text = parts.reduce((acc, part, i) => (i === 0 ? part : `${acc}\n${line(deferred[i - 1])}${part}`), '');
   return {
-    markdown: lines.length === 0 ? markdown : `${markdown}\n\n${lines.join('\n')}`,
-    buttons: buttons.filter((b) => b.lift === undefined).map((b) => unblockButton(appId, { id: b.blockEvent, taskId: b.taskId })),
+    markdown: lines.length === 0 ? text : `${text}\n\n${lines.join('\n')}`,
+    buttons: buttons
+      .filter((b) => b.lift === undefined && b.hasButton !== false)
+      .map((b) => unblockButton(appId, { id: b.blockEvent, taskId: b.taskId })),
   };
 }
 
@@ -981,10 +1125,11 @@ export function renderInstances(
   return fitted([`Workflow instances${on}:`], lines, past, (more) => `… and ${more} more.`);
 }
 
-/** How an instance was made, as `show` says it: in chat, at the terminal, or by a run, by its task. */
+/** How an instance was made, as `show` says it: in chat, at the terminal, by a wake (wake spec §19.12), or by a run, by its task. */
 function howMade(via: { kind: string }, fromTask: string | null): string {
   if (via.kind === 'chat') return 'in chat';
   if (via.kind === 'operator') return 'at the terminal';
+  if (via.kind === 'wake') return fromTask === null ? 'by a wake' : `by a wake of ${id(fromTask)}`;
   return fromTask === null ? 'by a run' : `by a run of ${id(fromTask)}`;
 }
 

@@ -141,6 +141,8 @@ export class SessionRegistry {
   readonly #note: (line: string) => void;
   readonly #maxLive: number;
   readonly #actors = new Map<string, Entry>();
+  /** Set by `closeAll`: a stopping gateway builds no actor after it, so nothing is left running past the stop. */
+  #closed = false;
 
   constructor(deps: SessionRegistryDeps) {
     this.#deps = deps;
@@ -162,6 +164,7 @@ export class SessionRegistry {
    * session nothing is running.
    */
   async actorFor(sessionId: string, key: BindingKey): Promise<SessionActor> {
+    if (this.#closed) throw new Error(`the gateway is stopping, so session ${sessionId} gets no actor`);
     const existing = this.#actors.get(sessionId);
     if (existing !== undefined) {
       existing.lastUsed = this.#clock.now();
@@ -193,6 +196,11 @@ export class SessionRegistry {
     await this.#makeRoom();
 
     const workspace = await this.#deps.workspaces.acquire(sessionId, workspaceId);
+    if (this.#closed) {
+      // `closeAll` ran while the workspace was being acquired: it will not close this actor, so none is made.
+      await this.#deps.workspaces.release(sessionId);
+      throw new Error(`the gateway is stopping, so session ${sessionId} gets no actor`);
+    }
     const target: SendTarget = { chatId: key.conversationId, threadId: key.threadId };
     const actor = new SessionActor({
       db: this.#deps.db,
@@ -317,6 +325,7 @@ export class SessionRegistry {
   }
 
   async closeAll(): Promise<void> {
+    this.#closed = true;
     const entries = [...this.#actors.entries()];
     this.#actors.clear();
     // Sequential, not concurrent. Each close awaits a final card write, and firing

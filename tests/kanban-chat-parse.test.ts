@@ -300,7 +300,7 @@ describe('the other /kanban commands', () => {
 
   it('answers task with no verb, or one it does not take, with the verbs it takes', () => {
     const takes =
-      '`/kanban task` takes new, list, show, assign, link, workspace, comment, unblock, stop, archive, done, block, review, approve or changes. `/kanban help` lists them.';
+      '`/kanban task` takes new, list, show, assign, link, workspace, comment, unblock, wake, stop, archive, done, block, review, approve or changes. `/kanban help` lists them.';
     expect(parseKanban('task')).toEqual({ ok: false, usage: takes });
     expect(parseKanban('task   ')).toEqual({ ok: false, usage: takes });
     for (const text of ['task help', 'task board list', 'task gate list k_1', 'task task new x']) {

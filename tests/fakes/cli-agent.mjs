@@ -37,6 +37,18 @@
  *               it says SLOW, and otherwise `Fired: ` and the job's prompt; each
  *               turn's PATH, its MT_CRON_FIRE if a fire's, and its
  *               MT_AGENT_SESSION, is appended to `cron-env.log` beside the log
+ *   wake        in a board run, report `mt kanban complete`, or, the first time a
+ *               task whose title or body says BLOCK is run, `mt kanban block` as
+ *               `needs_input`; in a chat turn the board woke (its prompt starts
+ *               `Board update`), unblock with `mt kanban task unblock` the task its
+ *               prompt says it may lift, unless the prompt says KEEP, and wait for
+ *               a file `release` beside the log first when the prompt says SLOW;
+ *               each chat turn's prompt,
+ *               whether it had a wake token, and the unblock's answer, is
+ *               appended to `wake.log` beside the log; a reaction task's run
+ *               (its body starts as a role's wake prompt) lifts the block its
+ *               body says it may with `mt kanban wake-show` and `wake-unblock`,
+ *               logging both to `reaction.log`, and completes
  *
  * Every invocation appends its argv to `FAKE_CLI_LOG` as one JSON line. That file
  * is how a test sees the composed prompt -- which is the whole of this driver's
@@ -359,6 +371,66 @@ switch (MODE) {
       break;
     }
     const answer = job.includes('QUIET') ? '[nothing to report]' : `Fired: ${job}`;
+    delta(answer);
+    summary('completed', answer);
+    break;
+  }
+
+  case 'wake': {
+    const beside = (name) => join(dirname(LOG ?? '.'), name);
+    if (process.env['MT_KANBAN_RUN'] !== undefined) {
+      const shown = mt('show');
+      let task = { taskId: '?', title: '?', body: '' };
+      try {
+        task = JSON.parse(shown.answer).task;
+      } catch {
+        process.stderr.write(`mt kanban show failed: ${shown.error} ${shown.answer}\n`);
+      }
+      // A reaction task's run (wake spec §19.5): its body is the wake's prompt. It reads the task the
+      // prompt says it may lift with wake-show, lifts it with wake-unblock, logs both, and completes.
+      if ((task.body ?? '').startsWith("Board update: you are this task's run")) {
+        const lift = /lift it with mt kanban wake-unblock, given \{"task_id": "(k_[0-9a-z]+)"/.exec(task.body);
+        let shownSource = null;
+        let unblocked = null;
+        if (lift !== null) {
+          shownSource = mt('wake-show', { task_id: lift[1] });
+          unblocked = mt('wake-unblock', { task_id: lift[1], comment: 'Speaker two is confirmed.' });
+        }
+        appendFileSync(beside('reaction.log'), `${JSON.stringify({ body: task.body, shown: shownSource, unblocked })}\n`);
+        const done = mt('complete', { summary: lift === null ? 'nothing to lift' : `lifted ${lift[1]}` });
+        delta(`complete: ${done.answer}`);
+        summary('completed', 'reacted');
+        break;
+      }
+      // A task that says BLOCK blocks on its first run only: the next, after an unblock, completes.
+      if (`${task.title} ${task.body ?? ''}`.includes('BLOCK') && !existsSync(beside(`blocked-${task.taskId}`))) {
+        writeFileSync(beside(`blocked-${task.taskId}`), '');
+        const blocked = mt('block', { kind: 'needs_input', reason: 'Which of the two speakers is confirmed?' });
+        delta(`block: ${blocked.answer}`);
+        summary('completed', 'blocked');
+        break;
+      }
+      const done = mt('complete', { summary: `did: ${task.title}` });
+      delta(`complete: ${done.answer}`);
+      summary('completed', `reported on ${task.title}`);
+      break;
+    }
+    const woken = prompt.startsWith('Board update');
+    let unblocked = null;
+    if (woken) {
+      if (prompt.includes('SLOW')) {
+        const until = Date.now() + 30_000;
+        while (!existsSync(beside('release')) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
+      const lift = /lift it with mt kanban task unblock (k_[0-9a-z]+) /.exec(prompt);
+      // A task whose title says KEEP is one the agent cannot answer: it replies, and lifts nothing.
+      if (lift !== null && !prompt.includes('KEEP')) {
+        const r = spawnSync('mt', ['kanban', 'task', 'unblock', lift[1], 'Speaker', 'two', 'is', 'confirmed.'], { encoding: 'utf8', timeout: 30_000 });
+        unblocked = { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
+      }
+    }
+    appendFileSync(beside('wake.log'), `${JSON.stringify({ prompt, token: process.env['MT_WAKE_TOKEN'] !== undefined, unblocked })}\n`);
+    const answer = woken ? `Noted ${prompt.split('\n').length} lines.` : 'hello';
     delta(answer);
     summary('completed', answer);
     break;

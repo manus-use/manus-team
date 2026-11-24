@@ -1,6 +1,6 @@
 import { roleOfSession } from '../core/registry.js';
 import type { CronChat, CronDelivery, CronRefusal, JobRow } from '../db/cron.js';
-import { runByTokenHash, subscriptionsOf } from '../db/kanban-read.js';
+import { getTask, runByTokenHash, subscriptionsOf } from '../db/kanban-read.js';
 import type { Db } from '../db/open.js';
 import { getSession } from '../db/sessions.js';
 import { getJob } from '../db/cron.js';
@@ -74,6 +74,9 @@ function jobShown(job: JobRow): Record<string, unknown> {
     created_by: job.createdBy,
   };
 }
+
+/** Why an add asked without operate tier is refused: a chat turn's, a woken turn's, and a run of work a wake made (wake spec §19.8). */
+const NEEDS_OPERATOR = 'this turn was asked by someone without operate tier, who cannot add cron jobs; an operator can, here or with /cron add';
 
 export class CronApi {
   readonly #deps: CronApiDeps;
@@ -203,14 +206,12 @@ export class CronApi {
         if (asker.kind === 'fire') return refused('in_cron_fire', 'a cron fire adds no job: a job that makes jobs would grow without anyone asking');
         let role: string;
         if (asker.kind === 'chat') {
-          if (!this.#deps.tokens.runningTurnOperate(asker.held.sessionId)) {
-            return refused(
-              'needs_operator',
-              'this turn was asked by someone without operate tier, who cannot add cron jobs; an operator can, here or with /cron add',
-            );
-          }
+          if (!this.#deps.tokens.runningTurnOperate(asker.held.sessionId)) return refused('needs_operator', NEEDS_OPERATOR);
           role = roleOfSession(getSession(this.#deps.db, asker.held.sessionId)?.agentId ?? '');
         } else {
+          // Work a wake put on the board, a reaction task's and every task made from one, adds no job (wake spec §19.8):
+          // no operator put it there, so a board run's usual leave does not hold for it.
+          if ((getTask(this.#deps.db, asker.run.taskId)?.wakeRoot ?? null) !== null) return refused('needs_operator', NEEDS_OPERATOR);
           role = asker.run.assignee.name;
         }
         const key = str('idempotency_key');

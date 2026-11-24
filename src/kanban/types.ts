@@ -68,9 +68,20 @@ export type Contract = Partial<Record<(typeof CONTRACT_FIELDS)[number], string>>
  * chat scope.
  */
 export type CreatedVia =
-  | { kind: 'chat'; channel: string; appId: string; conversationId: string; threadId: string; rootId?: string }
+  | {
+      kind: 'chat';
+      channel: string;
+      appId: string;
+      conversationId: string;
+      threadId: string;
+      rootId?: string;
+      /** The chat's kind, from the message (wake spec §2.1): written to the task's subscription, so a wake can tell a direct message. */
+      chatType?: 'p2p' | 'group';
+    }
   | { kind: 'run'; runId: string }
-  | { kind: 'operator' };
+  | { kind: 'operator' }
+  /** A reaction task (wake spec §19.3): made by the waker for a role's wake, `wakeId` its `kanban_wakes` row. */
+  | { kind: 'wake'; wakeId: number };
 
 /**
  * A chat the terminal names to follow what it makes (kanban spec §22.1,
@@ -146,6 +157,24 @@ export interface TaskRow {
    * shared directory.
    */
   worktree: string | null;
+  /**
+   * The principal its woken turns run as, `lark:<union_id>` (wake spec §3.2,
+   * migration 013); null: wake off.
+   */
+  wakeBy: string | null;
+  /** Woken turns in its making (wake spec §5.4): 0 for a person's or the terminal's task. */
+  wakeDepth: number;
+  /** The role its wake targets (wake spec §19.1); null: the conversation's chat session. Only with `wakeBy` set. */
+  wakeRole: string | null;
+  /** For a reaction task (wake spec §19.3): the wake that made it; null for every other task. */
+  reactionOf: number | null;
+  /** Made under a wake (wake spec §19.8): the root reaction task's id, its own for a reaction task; null otherwise. */
+  wakeRoot: string | null;
+  /**
+   * A role's wake on a task no chat follows (wake spec §19.16): the last event the
+   * waker has covered for it, from the task's own cursor; unused while a chat follows it.
+   */
+  wakeCursor: number;
 }
 
 /** The board every task was on before there were others, and every chat starts on (spec §16). */
@@ -278,6 +307,84 @@ export interface KanbanEvent {
   createdAt: number;
 }
 
+/** Where a woken turn stands (wake spec §4.2): `pending` until it is delivered, dropped, or closed with its blocks lifted. */
+export type WakeState = 'pending' | 'delivered' | 'dropped' | 'lifted';
+
+/**
+ * A woken turn (wake spec §4.2): one row a batch, its events in
+ * `kanban_wake_events`, fixed once recorded; the current attempt's session, turn
+ * key and boot while it is submitted.
+ */
+export interface WakeRow {
+  wakeId: number;
+  /** `wakeBatchUuid` of its (subscription, event) pairs. */
+  uuid: string;
+  channel: string;
+  appId: string;
+  conversationId: string;
+  threadId: string;
+  /** `lark:<union_id>`: the turn runs as them. */
+  principal: string;
+  /** The highest `wake_depth` of its tasks. */
+  depth: number;
+  state: WakeState;
+  /** The submit it is on; a refusal adds one. */
+  attempt: number;
+  sessionId: string | null;
+  turnKey: string | null;
+  submitBoot: string | null;
+  markerAt: number | null;
+  createdAt: number;
+  deliveredAt: number | null;
+  closedAt: number | null;
+  /** The last refusal, or the check a drop failed, masked. */
+  error: string | null;
+  /** A role's wake (wake spec §19): the role, and the reaction task it made; null for a chat turn. */
+  targetRole: string | null;
+  reactionTask: string | null;
+}
+
+/** Where a deferred Unblock button stands (wake spec §5.9): `held` for the agent, `due` to people, then ended once. */
+export type DeferredState = 'held' | 'due' | 'sent' | 'lifted' | 'failed';
+
+/** Why a deferred button is due (wake spec §5.9), which its card's text says. */
+export type DeferredWhy = 'tried' | 'not_woken' | 'turn_failed' | 'running' | 'restart';
+
+/** A deferred button's key: the subscription whose notice left it out, and the block event (wake spec §4.2). */
+export interface DeferredKey {
+  subscriptionId: number;
+  eventId: number;
+}
+
+/**
+ * A block's Unblock button the waker deferred (wake spec §5.9): written `held`
+ * once its notice, without the button, was sent; `due` once the agent has had
+ * its try or will get none; then `sent`, with its card, `lifted`, or `failed`.
+ */
+export interface DeferredButtonRow extends DeferredKey {
+  taskId: string;
+  appId: string;
+  /** When its notice, without the button, was sent. */
+  heldAt: number;
+  /** That notice's message id, which is redrawn once the button's card is sent; null when it went as text. */
+  noticeId: string | null;
+  state: DeferredState;
+  why: DeferredWhy | null;
+  /** Sends of the button card tried. */
+  attempts: number;
+  /** The button card, once sent. */
+  messageId: string | null;
+  endedAt: number | null;
+}
+
+/** One outcome a woken turn was told of (wake spec §4.2). */
+export interface WakeEventRow {
+  wakeId: number;
+  subscriptionId: number;
+  eventId: number;
+  taskId: string;
+}
+
 /**
  * A chat following a task (spec §9.4): the binding key its notices go to, and
  * the last `kanban_events` id delivered there, or passed over as no notice.
@@ -299,6 +406,13 @@ export interface SubscriptionRow {
   rootMessageId: string | null;
   cursor: number;
   createdAt: number;
+  /**
+   * The waker's cursor (wake spec §4.1, migration 013): the last event it has
+   * covered, woken, skipped or passed over, beside `cursor`, the notifier's.
+   */
+  wakeCursor: number;
+  /** The chat's kind, from the command that made the task (wake spec §2.1); null: not known. */
+  chatType: 'p2p' | 'group' | null;
 }
 
 export type RefusalCode =
@@ -355,7 +469,22 @@ export type RefusalCode =
   /** Something over its size: a DAG, the params, a value or a task's field (workflows spec §5). */
   | 'too_large'
   /** No usable workflow file of that name (workflows spec §6). */
-  | 'unknown_workflow';
+  | 'unknown_workflow'
+  /** A wake asked for while `kanban.wake.enabled` is false (wake spec §3.4). */
+  | 'wake_off'
+  /** A woken turn's show or unblock (wake spec §9.2): a token never held, or a task outside its wake for a show. */
+  | 'unauthorized'
+  /** A stale wake token, or a session with no running turn the board woke (wake spec §9.2). */
+  | 'not_woken'
+  /** A woken turn's unblock of a task whose block did not wake it (wake spec §9.2). */
+  | 'not_this_wake'
+  /** The wake's setter lacks the tier the act needs, checked live (wake spec §9.2). */
+  | 'needs_operator'
+  | 'needs_talk'
+  /** A block that has recurred `kanban.block_recurrence_limit` times: a person decides (wake spec §9.2). */
+  | 'recurring'
+  /** A task unblocked by woken turns `kanban.wake.max_depth` times since it last completed (wake spec §9.2). */
+  | 'woken_unblock_limit';
 
 /** The gate that refused a report, as the reporter is shown it (spec §7.7). */
 export interface FailedGate {
@@ -408,4 +537,11 @@ export interface CreateRequest {
   board?: string;
   /** The chat that follows it, named at the terminal (kanban spec §22.1); the operator's alone. */
   follow?: Follow;
+  /**
+   * Its wake (wake spec §3.1, §9.1): `by`, the principal its woken turns run
+   * as, or null for none; `depth`, the woken turns in its making. A run's
+   * follow-up inherits its creating task's, whatever this says. `role`, with
+   * `by`, names the role it targets (wake spec §19.1).
+   */
+  wake?: { by: string | null; depth: number; role?: string };
 }

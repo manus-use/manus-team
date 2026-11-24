@@ -41,6 +41,24 @@ export interface CronTokensDeps {
   max?: number;
 }
 
+/**
+ * How a chat session's agent reaches the gateway (§7.1, and the wake spec §9.2):
+ * the socket, and a PATH that finds the gateway's mt first: the shim's
+ * directory, then the session's role's own PATH if its agent.env sets one,
+ * else the gateway's, as a run's and a fire's. Nothing without a socket.
+ */
+export function chatAccess(
+  db: Db,
+  worker: WorkerAccess | undefined,
+  roles: ReadonlyMap<string, Role>,
+  sessionId: string,
+): Record<string, string> {
+  if (worker === undefined) return {};
+  const role = roles.get(roleOfSession(getSession(db, sessionId)?.agentId ?? ''));
+  const rest = role?.agent.env['PATH'] ?? worker.path;
+  return { MT_KANBAN_SOCKET: worker.socket, PATH: rest === undefined || rest === '' ? worker.mtDir : `${worker.mtDir}${delimiter}${rest}` };
+}
+
 export class CronTokens {
   readonly #db: Db;
   readonly #worker: WorkerAccess | undefined;
@@ -91,11 +109,7 @@ export class CronTokens {
    * else the gateway's, as a run's and a fire's.
    */
   #access(sessionId: string): Record<string, string> {
-    const worker = this.#worker;
-    if (worker === undefined) return {};
-    const role = this.#roles.get(roleOfSession(getSession(this.#db, sessionId)?.agentId ?? ''));
-    const rest = role?.agent.env['PATH'] ?? worker.path;
-    return { MT_KANBAN_SOCKET: worker.socket, PATH: rest === undefined || rest === '' ? worker.mtDir : `${worker.mtDir}${delimiter}${rest}` };
+    return chatAccess(this.#db, this.#worker, this.#roles, sessionId);
   }
 
   /**

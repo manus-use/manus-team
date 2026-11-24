@@ -10,6 +10,7 @@ import type {
   ChatMembers,
   SendResult,
   SendTarget,
+  SendTextOptions,
 } from '../../src/channel/types.js';
 import type { Clock } from '../../src/time.js';
 import { systemClock } from '../../src/time.js';
@@ -63,6 +64,8 @@ export interface TextCall {
   uuid: string;
   /** The buttons under it, when it was sent with some. */
   buttons?: readonly CardButton[];
+  /** Sent as a card even with no buttons, so it can be redrawn (wake spec §5.9). */
+  card?: true;
 }
 
 export interface BoardCardCall {
@@ -170,6 +173,18 @@ export class FakeChannel implements Channel {
    */
   replyThreads = true;
 
+  /**
+   * Sends of a text holding `match` that land only after `ms`, as a slow Lark
+   * would answer them: what a test of the order of a thread's messages slows.
+   */
+  readonly slowTexts: Array<{ match: string; ms: number }> = [];
+
+  /**
+   * What landed, in the order it landed: `text:<the text>` for a send once it is
+   * answered, `card` for a card once it is opened.
+   */
+  readonly landed: string[] = [];
+
   readonly #clock: Clock;
   readonly #failures = new Map<Method, unknown[]>();
   readonly #answers = new Map<Method, SendResult[]>();
@@ -244,10 +259,13 @@ export class FakeChannel implements Channel {
 
   // -- Channel ---------------------------------------------------------------
 
-  async sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[]): Promise<SendResult> {
+  async sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[], opts: SendTextOptions = {}): Promise<SendResult> {
     this.calls.push('sendText');
     await this.gate('sendText');
-    this.texts.push({ target, text, uuid, ...(buttons === undefined ? {} : { buttons }) });
+    const slow = this.slowTexts.find((s) => text.includes(s.match));
+    if (slow !== undefined) await new Promise((resolve) => setTimeout(resolve, slow.ms));
+    this.texts.push({ target, text, uuid, ...(buttons === undefined ? {} : { buttons }), ...(opts.card === true ? { card: true as const } : {}) });
+    this.landed.push(`text:${text}`);
     const result = this.#result(`om_text_${++this.#seq}`, target);
     return this.#answers.get('sendText')?.shift() ?? result;
   }
@@ -263,6 +281,7 @@ export class FakeChannel implements Channel {
     card.partSets.push(initial);
     this.cards.push(card);
     this.cardOpens.push({ target, uuid });
+    this.landed.push('card');
     return card;
   }
 

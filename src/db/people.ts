@@ -59,6 +59,23 @@ export function personOf(db: Db, appId: string, unionId: string): PersonRow | un
 }
 
 /**
+ * The person this bot last saw with this open_id; undefined if never (wake spec
+ * §3.2): how the terminal finds the owner's union_id, the principal a wake set
+ * from it runs as. An open_id is one person's for one app, so at most one row
+ * holds it; should two, the one seen last is taken.
+ */
+export function personByOpenId(db: Db, appId: string, openId: string): PersonRow | undefined {
+  const row = db
+    .prepare<[string, string], PersonRaw>(
+      'SELECT app_id, union_id, open_id, name, seen_at FROM people WHERE app_id = ? AND open_id = ? ORDER BY seen_at DESC LIMIT 1',
+    )
+    .get(appId, openId);
+  return row === undefined
+    ? undefined
+    : { appId: row.app_id, unionId: row.union_id, openId: row.open_id, name: row.name, seenAt: row.seen_at };
+}
+
+/**
  * Every person this bot has seen (kanban spec §22.2), for `mt kanban people`:
  * by the name Lark last gave, then by union_id, those with no name last.
  */

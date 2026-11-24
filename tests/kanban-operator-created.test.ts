@@ -41,7 +41,7 @@ describe('a task created by the operator', () => {
     expect(service.create({ title: 'x', createdBy: ME, createdVia: via })).toEqual({
       ok: false,
       code: 'invalid',
-      message: 'created_via is a chat, with text fields, a run id, or the operator',
+      message: 'created_via is a chat, with text fields, a run id, the operator, or a wake id',
     });
     expect(service.create({ title: 'x', createdBy: ME, createdVia: { kind: 'operator' }, idempotencyKey: 'lark:om_1' })).toMatchObject({
       ok: false,

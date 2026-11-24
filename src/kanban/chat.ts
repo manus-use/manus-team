@@ -36,6 +36,7 @@ import {
   renderShow,
   renderTaskCard,
   personText,
+  tooDeepLine,
   titleText,
   type CardFacts,
   type NameOf,
@@ -110,6 +111,8 @@ export interface KanbanChatDeps {
   cancel?: (runId: string) => void;
   /** How long a task is held while its "Created" reply is under way (spec §19.4); `CARD_SEND_MS` unless a test says otherwise. */
   holdMs?: number;
+  /** `kanban.wake.enabled` and the gateway's zone, for `task show`'s Wake line (wake spec §10); absent, on, in the process's zone. */
+  wake?: { enabled: boolean; zone: string };
 }
 
 /** Who may run each command (spec §9.1, §10); a person's own reports check who is named, below. */
@@ -123,6 +126,8 @@ const TIERS: Readonly<Record<KanbanCommand['verb'], Tier>> = {
   workspace: 'operate',
   comment: 'talk',
   unblock: 'operate',
+  // Turning a wake on or off needs talk tier (wake spec §3.1, D14).
+  wake: 'talk',
   stop: 'operate',
   archive: 'operate',
   'gate add': 'operate',
@@ -335,7 +340,8 @@ export class KanbanChat {
         const r = this.#deps.service.show(command.taskId);
         if (!r.ok) return refused(r);
         const gates = this.#deps.service.listGates(command.taskId);
-        return renderShow(r.view, gates.ok ? gates.gates : [], this.#deps.service.chatBoard(chatAt(key)).name, this.#nameOf);
+        const wake = this.#deps.wake === undefined ? undefined : { ...this.#deps.wake, now: Date.now() };
+        return renderShow(r.view, gates.ok ? gates.gates : [], this.#deps.service.chatBoard(chatAt(key)).name, this.#nameOf, wake);
       }
       case 'board list': {
         // This chat's own board is always listed, archived or not, so it is marked.
@@ -414,6 +420,12 @@ export class KanbanChat {
         this.#changed();
         return `${id(command.taskId)} is unblocked, back to ${r.task.phase}.`;
       }
+      case 'wake':
+        // A role as its target gives the role work, so it needs operate tier (wake spec §19.1).
+        if (command.role !== undefined && !this.#deps.hasTier(message.sender, 'operate')) {
+          return '`/kanban task wake <task> <role>` gives a role work, and needs operator permission.';
+        }
+        return this.#wake(command.taskId, command.on, by, key, command.role);
       case 'stop': {
         const r = service.stop(command.taskId, by);
         if (!r.ok) return refused(r);
@@ -522,6 +534,7 @@ export class KanbanChat {
       conversationId: key.conversationId,
       threadId: key.threadId,
       ...(message.chatType !== 'group' || key.threadId === '' || message.rootId === undefined ? {} : { rootId: message.rootId }),
+      chatType: message.chatType,
     };
   }
 
@@ -531,7 +544,12 @@ export class KanbanChat {
    * is answered in a thread of its own, the instance's, in both wordings, and
    * every member is held until the router says where its reply went.
    */
-  #startWorkflow(command: { name: string; pairs: readonly ParamPair[] }, by: string, message: InboundMessage, key: BindingKey): string | KanbanAnswer {
+  #startWorkflow(
+    command: { name: string; pairs: readonly ParamPair[]; wake?: true; wakeRole?: string },
+    by: string,
+    message: InboundMessage,
+    key: BindingKey,
+  ): string | KanbanAnswer {
     const board = this.#deps.service.chatBoard(chatAt(key));
     if (board.archivedAt !== null) {
       return `This chat is on board ${boardName(board)}, which is archived: \`/kanban board use <board>\` moves it to another first.`;
@@ -544,6 +562,8 @@ export class KanbanChat {
       createdBy: by,
       createdVia: this.#via(message, key),
       board: board.name,
+      // As the sender (wake spec §3.2): every member with `wake`, else the steps that ask for one.
+      wake: { by, depth: 0, all: command.wake === true, ...(command.wakeRole === undefined ? {} : { role: command.wakeRole }) },
     });
     if (!r.ok) return refused(r);
     if (r.existing) return `Already started, as ${id(r.instance.instanceId)}.`;
@@ -562,7 +582,9 @@ export class KanbanChat {
   }
 
   #started(made: WorkflowMade, where: 'thread' | 'chat'): string {
-    return renderStarted(startedReply(made), where, (a) => this.#whom(a), this.#nameOf);
+    const reply = renderStarted(startedReply(made), where, (a) => this.#whom(a), this.#nameOf);
+    // A start whose steps ask for a wake while wakes are off ends with the note (wake spec §3.4).
+    return made.wakeNote === undefined ? reply : `${reply}\n\n${made.wakeNote}`;
   }
 
   /**
@@ -1008,6 +1030,8 @@ export class KanbanChat {
       ...named,
       ...(command.workspace === undefined ? {} : { workspace: command.workspace }),
       ...(command.parents.length === 0 ? {} : { parents: command.parents }),
+      // A wake runs as the person who set it (wake spec §3.2): the sender, at no depth.
+      ...(command.wake === true ? { wake: { by, depth: 0, ...(command.wakeRole === undefined ? {} : { role: command.wakeRole }) } } : {}),
       idempotencyKey: `lark:${message.messageId}`,
       createdBy: by,
       createdVia: {
@@ -1018,6 +1042,8 @@ export class KanbanChat {
         threadId: key.threadId,
         // In a group's thread, its root: where a card and a notice in it reply to (spec §19.4). A direct message has none (§19.1).
         ...(message.chatType !== 'group' || key.threadId === '' || message.rootId === undefined ? {} : { rootId: message.rootId }),
+        // A direct message or a group, so a wake can tell which (wake spec §2.1).
+        chatType: message.chatType,
       },
     });
     if (!r.ok) return refused(r);
@@ -1059,8 +1085,38 @@ export class KanbanChat {
       `Created ${id(task.taskId)}: **${titleText(task.title, this.#nameOf)}**, for ${whom}` +
       `${task.workspace === null ? '' : `, in ${label(task.workspace)}`}` +
       `${task.board === DEFAULT_BOARD ? '' : `, on board ${boardName(task.board)}`}.${card} ` +
-      `${where === 'thread' ? 'This thread' : 'This chat'} hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.`
+      `${where === 'thread' ? 'This thread' : 'This chat'} hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.` +
+      (task.wakeBy === null ? '' : task.wakeRole === null ? ' Its outcomes wake the agent here.' : ` Its outcomes wake role ${task.wakeRole} here.`)
     );
+  }
+
+  /**
+   * `/kanban task wake <task> on|off` (wake spec §3.1, §3.4), typed in a chat
+   * that follows the task: its subscription of this bot is in this chat, in any
+   * thread of it or at its chat scope, as the wake runs a turn in that chat's
+   * session as the person who turned it on. On runs as the sender.
+   */
+  #wake(taskId: string, on: boolean, by: string, key: BindingKey, role?: string): string {
+    const service = this.#deps.service;
+    // Every chat of this bot that follows the task must be this one: a wake set here wakes each of them, as the sender.
+    if (service.followsOf(taskId, key.appId).some((f) => f.chat !== key.conversationId)) {
+      return `Not done: ${id(taskId)} is followed by another chat, so its wake is set there, or from the terminal`;
+    }
+    const r = service.setWake(taskId, on ? { on: true, as: by, ...(role === undefined ? {} : { role }) } : { on: false }, by, key.appId);
+    if (!r.ok) return refused(r);
+    if (!on) return `Wake is off for ${id(taskId)}: its outcomes are notices only.`;
+    // Already on past a max_depth lowered since (wake spec §5.4): it stays on, as its setter.
+    if (r.kept) return `Wake stays on for ${id(taskId)}, run as ${personText(r.task.wakeBy ?? by, this.#nameOf)}: it is ${r.task.wakeDepth} tasks deep, so it cannot be set again.`;
+    if (r.tooDeep) return `${tooDeepLine(taskId, r.task.wakeDepth)}.`;
+    const as = personText(by, this.#nameOf);
+    if (role !== undefined) {
+      return r.changed
+        ? `Wake is on for ${id(taskId)}: its outcomes now make a task for role ${role} where it is followed, set by ${as}.`
+        : `Wake is already on for ${id(taskId)}, for role ${role}, set by ${as}.`;
+    }
+    return r.changed
+      ? `Wake is on for ${id(taskId)}: its outcomes now start a turn of the agent where it is followed, run as ${as}.`
+      : `Wake is already on for ${id(taskId)}, run as ${as}.`;
   }
 
   /**

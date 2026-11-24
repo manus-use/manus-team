@@ -68,7 +68,11 @@ const PERSON = /^lark:[A-Za-z0-9_-]+$/;
  */
 export const NO_MENTIONS = 'there are no @-mentions at the terminal: a person is lark:<union_id>, which mt kanban people lists';
 
-/** A refusal unless createdVia is one of the three shapes, with text fields. */
+/**
+ * A refusal unless createdVia is one of the four shapes, with text fields, or a
+ * wake's whole id (wake spec §19.3). Whether a caller may make a task by a wake
+ * is the service's: only the waker's own write does.
+ */
 function createdViaRefused(via: unknown): Refusal | undefined {
   const fine =
     isRecord(via) &&
@@ -76,13 +80,16 @@ function createdViaRefused(via: unknown): Refusal | undefined {
       ? isText(via.runId)
       : via.kind === 'operator'
         ? Object.keys(via).length === 1
-        : via.kind === 'chat' &&
+        : via.kind === 'wake'
+          ? Number.isSafeInteger(via.wakeId) && (via.wakeId as number) > 0 && Object.keys(via).length === 2
+          : via.kind === 'chat' &&
           isText(via.channel) &&
           isText(via.appId) &&
           isText(via.conversationId) &&
           isText(via.threadId) &&
-          (via.rootId === undefined || isText(via.rootId)));
-  return fine ? undefined : refuse('invalid', 'created_via is a chat, with text fields, a run id, or the operator');
+          (via.rootId === undefined || isText(via.rootId)) &&
+          (via.chatType === undefined || via.chatType === 'p2p' || via.chatType === 'group'));
+  return fine ? undefined : refuse('invalid', 'created_via is a chat, with text fields, a run id, the operator, or a wake id');
 }
 
 /** A contract has only the five fields, each text (spec §4.3). */

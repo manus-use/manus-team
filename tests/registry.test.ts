@@ -447,6 +447,16 @@ describe('actors', () => {
     expect(h.workspaces.released.sort()).toEqual([one.id, two.id].sort());
   });
 
+  it('builds no actor once closed, so nothing is left running past the stop', async () => {
+    const h = harness();
+    const session = h.registry.bindOrCreate(key(), OWNER).session;
+    await h.registry.actorFor(session.id, key());
+    await h.registry.closeAll();
+    await expect(h.registry.actorFor(session.id, key())).rejects.toThrow(`the gateway is stopping, so session ${session.id} gets no actor`);
+    await expect(h.registry.actorForBoundSession(session.id)).rejects.toThrow('the gateway is stopping');
+    expect(h.registry.liveCount).toBe(0);
+  });
+
   it('keeps closing after one actor fails to close', async () => {
     const h = harness();
     const one = h.registry.bindOrCreate(key({ conversationId: 'oc_1' }), OWNER).session;

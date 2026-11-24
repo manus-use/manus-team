@@ -1,10 +1,10 @@
 import { ChannelError, type CardButton, type Channel, type SendResult, type SendTarget } from '../channel/types.js';
 import { noticeBatchUuid } from '../core/ids.js';
-import { dueSubscriptions, eventsAfter, getRun, getTask, threadRootOf, type DueSubscription } from '../db/kanban-read.js';
+import { dueSubscriptions, eventsAfter, getRun, getTask, threadRootOf, type DueSubscription, type ThreadAt } from '../db/kanban-read.js';
 import type { Db } from '../db/open.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
-import { blocksTask, renderNotice, unblockButton, type NameOf } from './chat-render.js';
+import { AGENT_FIRST_LINE, blocksTask, renderNotice, unblockButton, type NameOf } from './chat-render.js';
 import type { KanbanService } from './service.js';
 import type { KanbanEvent, SubscriptionRow } from './types.js';
 
@@ -108,6 +108,12 @@ export interface NotifierDeps {
   note?: (line: string) => void;
   /** How long a send is waited for; `NOTICE_SEND_MS` unless a test says otherwise. */
   sendTimeoutMs?: number;
+  /**
+   * The waker's word on a block's Unblock button (wake spec §5.9): true when the
+   * button waits for the agent's try. A read that writes nothing; given only
+   * when the waker runs.
+   */
+  wouldDefer?: (sub: SubscriptionRow, event: KanbanEvent) => boolean;
 }
 
 /** One conversation's due subscriptions, and what each has to say this round. */
@@ -136,6 +142,12 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Batches remembered with the blocks their notice was rendered to defer, at
+ * most: past it the oldest is forgotten.
+ */
+export const RENDERED_DEFERRED_HELD = 1_000;
+
 export class Notifier {
   readonly #deps: NotifierDeps;
   readonly #clock: Clock;
@@ -146,6 +158,13 @@ export class Notifier {
   readonly #dead = new Set<string>();
   /** Subscriptions whose task is not on the board, let go of until the gateway restarts. */
   readonly #gone = new Set<number>();
+  /**
+   * The blocks each batch uuid's notice was rendered to defer, until its send
+   * succeeds and its cursors move (wake spec §5.9): a send that timed out may
+   * have landed, and Lark keeps the first message of a uuid, so the same batch
+   * sent again defers them whatever the waker says now, as a written row would.
+   */
+  readonly #renderedDeferred = new Map<string, ReadonlySet<number>>();
   #round: Promise<number> | undefined;
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
@@ -169,6 +188,14 @@ export class Notifier {
     this.#timer = setInterval(() => void this.deliver(), NOTICE_POLL_MS);
     this.#timer.unref();
     void this.deliver();
+  }
+
+  /**
+   * Whether a conversation is let go of until a restart (spec §9.4): its notices
+   * passed over, so the waker passes over its wakes too (wake spec §2.1).
+   */
+  letGo(at: ThreadAt): boolean {
+    return this.#dead.has([at.channel, at.conversationId, at.threadId].join('\u0000'));
   }
 
   /** No more rounds; one under way stops after its current send. */
@@ -313,23 +340,25 @@ export class Notifier {
       chars += n.text.length + 2;
     }
     const more = all.length - batch.length;
-    const text = [...batch.map((n) => n.text), ...(more > 0 ? [`… and ${more} more, in the next message.`] : [])].join('\n\n');
-    const buttons = this.#unblockButtons(batch.map((n) => n.event));
+    const uuid = noticeBatchUuid(
+      this.#deps.appId,
+      batch.map((n) => [n.sub.id, n.event.id]),
+    );
+    const { buttons, deferred } = this.#unblocks(batch, this.#renderedDeferred.get(uuid));
+    const deferredIds = new Set(deferred.map((n) => n.event.id));
+    if (deferredIds.size > 0) this.#rendered(uuid, deferredIds);
+    const texts = batch.map((n) => (deferredIds.has(n.event.id) ? `${n.text}\n${AGENT_FIRST_LINE}` : n.text));
+    const text = [...texts, ...(more > 0 ? [`… and ${more} more, in the next message.`] : [])].join('\n\n');
     // The last event the message covers: each cursor moves to it, notices or not.
     const upTo = more > 0 ? (batch.at(-1)?.event.id ?? 0) : readTo;
     const markdown = redactKnownSecrets(text);
     let sent: SendResult;
     try {
       sent = await this.#bounded(
-        channel.sendText(
-          c.target,
-          markdown,
-          noticeBatchUuid(
-            this.#deps.appId,
-            batch.map((n) => [n.sub.id, n.event.id]),
-          ),
-          ...(buttons.length === 0 ? [] : [buttons]),
-        ),
+        deferred.length > 0
+          ? // A notice with a deferred block goes as a card even with no button left, so it can be redrawn (wake spec §5.9).
+            channel.sendText(c.target, markdown, uuid, buttons.length === 0 ? undefined : buttons, { card: true })
+          : channel.sendText(c.target, markdown, uuid, ...(buttons.length === 0 ? [] : [buttons])),
       );
     } catch (err) {
       this.#sendFailed(c, pending, err);
@@ -337,8 +366,14 @@ export class Notifier {
     }
     this.#backoff.delete(c.key);
     // A notice that went as text alone has no buttons to redraw.
-    if (buttons.length > 0 && sent.card !== false) this.#recordButtons(c.channel, sent.messageId, markdown, buttons);
+    if ((buttons.length > 0 || deferred.length > 0) && sent.card !== false) {
+      this.#recordButtons(c.channel, sent.messageId, markdown, buttons, deferred.map((n) => n.event));
+    }
+    // Owed whether the notice went as a card or as text, and written before the cursor moves (wake spec §5.9).
+    const noticeId = sent.card !== false ? sent.messageId : null;
+    for (const n of deferred) this.#defer(n.sub, n.event, noticeId);
     this.#advanceAll(pending, upTo, true);
+    this.#renderedDeferred.delete(uuid);
     return { notices: batch.length, sent: true };
   }
 
@@ -366,15 +401,70 @@ export class Notifier {
   /**
    * An Unblock for each task a batch's notices left blocked: the latest such
    * notice of each, since an earlier one's block was lifted before it, in the
-   * order the batch tells them, at most `UNBLOCK_BUTTONS`.
+   * order the batch tells them, at most `UNBLOCK_BUTTONS`; but for a block the
+   * waker defers (wake spec §5.9), which is left out of the buttons, its notice
+   * telling it waits for the agent.
    */
-  #unblockButtons(events: readonly KanbanEvent[]): CardButton[] {
-    const latest = new Map<string, KanbanEvent>();
-    for (const e of events) if (blocksTask(e)) latest.set(e.taskId, e);
-    return [...latest.values()]
-      .sort((a, b) => a.id - b.id)
-      .slice(0, UNBLOCK_BUTTONS)
-      .map((e) => unblockButton(this.#deps.appId, e));
+  #unblocks<N extends { event: KanbanEvent; sub: SubscriptionRow }>(
+    batch: readonly N[],
+    rendered: ReadonlySet<number> = new Set(),
+  ): { buttons: CardButton[]; deferred: N[] } {
+    const latest = new Map<string, N>();
+    for (const n of batch) if (blocksTask(n.event)) latest.set(n.event.taskId, n);
+    const blocks = [...latest.values()].sort((a, b) => a.event.id - b.event.id);
+    const wouldDefer = this.#deps.wouldDefer;
+    // A block this batch's notice was rendered to defer before stays deferred, as its notice may have landed.
+    const deferred = blocks.filter((n) => rendered.has(n.event.id) || (wouldDefer !== undefined && this.#asks(wouldDefer, n.sub, n.event)));
+    return {
+      buttons: blocks
+        .filter((n) => !deferred.includes(n))
+        .slice(0, UNBLOCK_BUTTONS)
+        .map((n) => unblockButton(this.#deps.appId, n.event)),
+      deferred,
+    };
+  }
+
+  /** A batch's deferred blocks remembered under its uuid, the oldest batch forgotten past `RENDERED_DEFERRED_HELD`. */
+  #rendered(uuid: string, ids: ReadonlySet<number>): void {
+    this.#renderedDeferred.delete(uuid);
+    this.#renderedDeferred.set(uuid, ids);
+    for (const oldest of this.#renderedDeferred.keys()) {
+      if (this.#renderedDeferred.size <= RENDERED_DEFERRED_HELD) break;
+      this.#renderedDeferred.delete(oldest);
+    }
+  }
+
+  /** The waker's word, a read; one that throws keeps the button on the notice, as without a waker. */
+  #asks(wouldDefer: NonNullable<NotifierDeps['wouldDefer']>, sub: SubscriptionRow, event: KanbanEvent): boolean {
+    try {
+      return wouldDefer(sub, event);
+    } catch (err) {
+      this.#note(`kanban: asking whether to defer the Unblock button of task ${event.taskId} failed (${message(err)}); it stays on its notice`);
+      return false;
+    }
+  }
+
+  /**
+   * A deferred block's row, `held` since the send, with the notice's message id,
+   * null for a notice that went as text (wake spec §5.9). One that cannot be written is said, and the cursor still moves: the notice then says
+   * the agent is looking at it first, with no button to follow, and its typed
+   * commands still unblock it.
+   */
+  #defer(sub: SubscriptionRow, event: KanbanEvent, noticeId: string | null): void {
+    let why: string | undefined;
+    try {
+      const r = this.#deps.service.deferButton(sub, event, this.#clock.now(), noticeId);
+      if (!r.ok) why = r.message;
+      else if (!r.deferred) {
+        // A batch sent again, after a failed send or a restart: the first send's row stands, its time with it.
+        this.#note(`kanban: the Unblock button of task ${event.taskId} (event ${event.id}) was deferred already; its row is kept as it was`);
+      }
+    } catch (err) {
+      why = message(err);
+    }
+    if (why !== undefined) {
+      this.#note(`kanban: deferring the Unblock button of task ${event.taskId} (event ${event.id}) failed (${why}); its notice will get no button card`);
+    }
   }
 
   /**
@@ -383,12 +473,15 @@ export class Notifier {
    * (spec §9.2, amended by the unblock redraw). A record that fails is said, and
    * the message stays as sent: its cursors still move, as the notices went.
    */
-  #recordButtons(channel: string, messageId: string, markdown: string, buttons: readonly CardButton[]): void {
-    const recorded = buttons.flatMap((b) => {
-      const taskId = b.value['task'];
-      const blockEvent = Number(b.value['event']);
-      return taskId === undefined || !Number.isSafeInteger(blockEvent) ? [] : [{ taskId, blockEvent }];
-    });
+  #recordButtons(channel: string, messageId: string, markdown: string, buttons: readonly CardButton[], deferred: readonly KanbanEvent[] = []): void {
+    const recorded = [
+      ...deferred.map((e) => ({ taskId: e.taskId, blockEvent: e.id, hasButton: false })),
+      ...buttons.flatMap((b) => {
+        const taskId = b.value['task'];
+        const blockEvent = Number(b.value['event']);
+        return taskId === undefined || !Number.isSafeInteger(blockEvent) ? [] : [{ taskId, blockEvent }];
+      }),
+    ];
     let why: string | undefined;
     try {
       const r = this.#deps.service.recordUnblockButtons({ messageId, channel, appId: this.#deps.appId, markdown, buttons: recorded });

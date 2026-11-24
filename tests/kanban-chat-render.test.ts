@@ -144,6 +144,7 @@ describe('/kanban task show', () => {
     expect(text.split('\n')).toEqual([
       `**Write \\*the\\* notes** \`${k.taskId}\`: ready`,
       'assignee: role implementer · reviewer: nobody · workspace: docs',
+      'Wake: off',
       '> Line one hi \\<at id=all\\>\\</at\\> team',
       '> # not a heading',
       '**Contract**',
@@ -223,7 +224,7 @@ describe('/kanban task show', () => {
     const k = newTask(h.db, { body: 'before\n```\n~~~~ tilde\n  ```js\nafter' });
     const view = taskView(h.db, k.taskId);
     if (view === undefined) throw new Error('no view');
-    expect(renderShow(view, []).split('\n').slice(2, 7)).toEqual([
+    expect(renderShow(view, []).split('\n').slice(3, 8)).toEqual([
       '> before',
       '> \\```',
       '> \\~~~~ tilde',
@@ -238,7 +239,7 @@ describe('/kanban task show', () => {
     if (view === undefined) throw new Error('no view');
     const text = renderShow(view, []);
     expect(text).not.toContain('\r');
-    expect(text.split('\n').slice(2, 6)).toEqual(['> intro', '> \\```', expect.stringMatching(/^> .*Heading$/), expect.stringMatching(/^> .*item$/)]);
+    expect(text.split('\n').slice(3, 7)).toEqual(['> intro', '> \\```', expect.stringMatching(/^> .*Heading$/), expect.stringMatching(/^> .*item$/)]);
   });
 
   it('cuts a piece on a character boundary, never leaving half of an emoji', () => {

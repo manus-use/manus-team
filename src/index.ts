@@ -44,6 +44,13 @@ import { CronApi } from './cron/worker.js';
 import { writeGatewayZone } from './cron/zone-file.js';
 import { jobCounts } from './db/cron.js';
 import { grantCounts, tierReader } from './db/grants.js';
+import { deferredButtons, tasksWithWakeOn } from './db/kanban-read.js';
+import type { KanbanEvent, SubscriptionRow } from './kanban/types.js';
+import { Waker } from './kanban/waker.js';
+import { WakeTokens } from './kanban/wake-tokens.js';
+import { WakeApi } from './kanban/wake-api.js';
+import { showJson, wokenShowText } from './cli/plain.js';
+import type { WakeSettings } from './config.js';
 import { lockDatabase } from './kanban/socket.js';
 import { SinkChannel } from './kanban/sink.js';
 import { PackagesInUse } from './render/native.js';
@@ -82,6 +89,33 @@ export interface Gateway {
   readonly chat: KanbanChat | undefined;
   /** The cron scheduler, when `cron.enabled` is set. */
   readonly cron: CronScheduler | undefined;
+  /** What wakes the agent for a task's outcomes, when `kanban.enabled` and `kanban.wake.enabled` are set (wake spec §5.1). */
+  readonly waker: Waker | undefined;
+}
+
+/**
+ * The wakes' startup line (wake spec §11), after the board's: the cap and the
+ * depth with wakes on; with them off, how many tasks with wake on stay
+ * notice-only; and nothing when off with none.
+ */
+export function wakeLine(wake: WakeSettings, withWakeOn: number): string | undefined {
+  if (!wake.enabled) {
+    return withWakeOn === 0 ? undefined : `kanban: wakes off (kanban.wake.enabled is false); ${withWakeOn} task(s) with wake on stay notice-only`;
+  }
+  return `kanban: wakes on; at most ${wake.perHour} woken turns a conversation an hour, tasks up to ${wake.maxDepth - 1} woken turns deep`;
+}
+
+/**
+ * A chat session's environment (wake spec §13): the cron token's and the wake
+ * token's merged, the socket and `PATH` being the same in both; nothing when
+ * neither is given.
+ */
+export function chatEnv(
+  cron: Readonly<Record<string, string>> | undefined,
+  wake: Readonly<Record<string, string>> | undefined,
+): Readonly<Record<string, string>> | undefined {
+  if (cron === undefined && wake === undefined) return undefined;
+  return { ...cron, ...wake };
 }
 
 /**
@@ -314,6 +348,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   let dispatcher: Dispatcher | undefined;
   let scheduler: CronScheduler | undefined;
   let tokens: CronTokens | undefined;
+  let wakeTokens: WakeTokens | undefined;
   const registry = new SessionRegistry({
     db,
     drivers,
@@ -325,8 +360,13 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       ['kanban', new KanbanSink(undefined, { db, channels: new Map<string, Channel>([[adapter.id, adapter]]), appId: config.lark.appId })],
       ['cron', new SinkChannel('cron', { subject: (jobId) => `cron job ${jobId}` })],
     ]),
-    // A run's, else a fire's, else a chat session's cron token (the cron spec, §7); and the session marker, always (tier grants spec §6.3).
-    envFor: (sessionId, key) => sessionEnv(sessionId, dispatcher?.envFor(sessionId) ?? scheduler?.envFor(sessionId) ?? tokens?.envFor(sessionId, key)),
+    // A run's, else a fire's, else a chat session's cron token and wake token (the cron spec, §7; wake spec §9.2, §13);
+    // and the session marker, always (tier grants spec §6.3).
+    envFor: (sessionId, key) =>
+      sessionEnv(
+        sessionId,
+        dispatcher?.envFor(sessionId) ?? scheduler?.envFor(sessionId) ?? chatEnv(tokens?.envFor(sessionId, key), wakeTokens?.envFor(sessionId, key)),
+      ),
     argsFor: (sessionId) => dispatcher?.argsFor(sessionId) ?? scheduler?.argsFor(sessionId),
     pinned: (sessionId) => (dispatcher?.pinned(sessionId) ?? false) || (scheduler?.pinned(sessionId) ?? false),
     // A kanban run in a task's own directory works there, as recorded when it was made (spec §18).
@@ -341,6 +381,9 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   let worker: { handler: SocketHandler; socket: string } | undefined;
   let kanbanChat: KanbanChat | undefined;
   let notifier: Notifier | undefined;
+  let waker: Waker | undefined;
+  let boardService: KanbanService | undefined;
+  let wakeApi: WakeApi | undefined;
   let unblockRedraws: UnblockRedraws | undefined;
   let cards: CardPoster | undefined;
   let workerServer: WorkerServer | undefined;
@@ -361,6 +404,9 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     appId: config.lark.appId,
     // The configuration's lists and the grant, as the authorizer holds them, for a person named by principal (tier grants spec §4.3).
     canTalk: (person) => tiersOf(config.auth, person.openId, authorizer.grantOf(person.unionId)).talk,
+    // Operate as the authorizer judges it, a grant counting and operate still needing talk (wake spec §13).
+    canOperate: (person) => tiersOf(config.auth, person.openId, authorizer.grantOf(person.unionId)).operate,
+    ownerOpenId: config.auth.ownerOpenId,
   });
   // /auth, always on: the tiers are the gateway's, whatever kanban.enabled and cron.enabled say (tier grants spec §6.1).
   const authChat = new AuthChat({ db, appId: config.lark.appId, authorizer, auth: config.auth, people, zone, note });
@@ -386,7 +432,10 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       ...(config.kanban.maxRunningPerRole === undefined ? {} : { maxRunningPerRole: config.kanban.maxRunningPerRole }),
       // Read at each use, as the startup's check and the terminal's read them (workflows spec §4, §10).
       workflowsDir: join(config.home, 'workflows'),
+      // The switch and the depth, for a wake asked for (wake spec §3.4, §5.4).
+      wake: { enabled: config.kanban.wake.enabled, maxDepth: config.kanban.wake.maxDepth },
     });
+    boardService = service;
     dispatcher = new Dispatcher({
       db,
       service,
@@ -413,7 +462,14 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       }),
     });
     // A worker's create, link or report can make a task claimable.
-    boardApi = new WorkerApi({ db, service, changed: () => dispatcher?.pass(), nameOf: (principal) => people.nameOf(principal) });
+    boardApi = new WorkerApi({
+      db,
+      service,
+      changed: () => dispatcher?.pass(),
+      nameOf: (principal) => people.nameOf(principal),
+      // A reaction task's run's wake-show and wake-unblock (wake spec §19.8), through the woken show and unblock.
+      wakes: () => wakeApi,
+    });
     // A notice's message redrawn once a block it offered Unblock for is lifted, by any path,
     // the terminal's and an agent's mt included (spec §9.2, amended by the unblock redraw).
     const redraws = new UnblockRedraws({
@@ -434,6 +490,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       appId: config.lark.appId,
       redraw: (messageId, view) => adapter.updateCard(messageId, view),
       liftedNotice: (messageId) => redraws.redrawMessage(messageId),
+      // task show's Wake line, in the gateway's zone (wake spec §10).
+      wake: { enabled: config.kanban.wake.enabled, zone },
       note,
       changed: () => dispatcher?.pass(),
       cancel: (runId) => {
@@ -449,6 +507,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
       // By name, two of one name told apart (spec §9.3); the agent's prompts keep nameOf.
       nameOf: (principal) => people.chatName(principal),
+      // With wakes on, a block's Unblock button may wait for the agent (wake spec §5.9); the waker answers.
+      ...(config.kanban.wake.enabled ? { wouldDefer: (sub: SubscriptionRow, event: KanbanEvent) => waker?.wouldDefer(sub, event) ?? false } : {}),
       note,
     });
     // A person's run is sent its card: in its task's thread when they are in the group, else as a
@@ -465,6 +525,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       note,
     });
     note(`kanban: dispatching up to ${config.kanban.maxRunning} agent run(s) at once`);
+    const wakeNote = wakeLine(config.kanban.wake, tasksWithWakeOn(db));
+    if (wakeNote !== undefined) note(wakeNote);
     const isolated = Object.keys(config.isolated ?? {}).sort();
     if (isolated.length > 0) note(`kanban: each task in ${isolated.join(', ')} gets a directory of its own`);
   }
@@ -506,14 +568,83 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   const cronNote = cronLine(config.cron, jobCounts(db), zone);
   if (cronNote !== undefined) note(cronNote);
 
+  // Wakes (wake spec §5.1, §9.2): with the board on and kanban.wake.enabled, a waker beside the notifier, and a
+  // wake token in every Lark chat session's environment, cron on or off. With them off there is no waker:
+  // a wake's pending rows wait, and a wake asked for is refused.
+  if (config.kanban.wake.enabled && boardService !== undefined && notifier !== undefined) {
+    const service = boardService;
+    const notices = notifier;
+    wakeTokens = new WakeTokens({ db, worker: access, roles: team.roles });
+    waker = new Waker({
+      db,
+      service,
+      registry,
+      channels: new Map<string, Channel>([[adapter.id, adapter]]),
+      appId: config.lark.appId,
+      people,
+      admitsConversation: (chatId, chatType) => authorizer.admitsConversation(chatId, chatType),
+      letGo: (at) => notices.letGo(at),
+      assignable: (role) => service.wakeRoleUsable(role),
+      // A woken turn is recorded without operate tier, so its mt cron add is refused (wake spec §5.5 step 7).
+      ...(tokens === undefined ? {} : { cronTurns: tokens }),
+      settings: config.kanban.wake,
+      blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
+      zone,
+      // A due button's card sent, its notice redrawn (wake spec §5.9).
+      redrawNotice: (messageId) => unblockRedraws?.redrawMessage(messageId) ?? Promise.resolve(),
+      // A reaction task made by a role's wake is claimed at the dispatcher's next pass (wake spec §19.3).
+      nudge: () => dispatcher?.pass(),
+      note,
+    });
+    wakeApi = new WakeApi({
+      db,
+      service,
+      tokens: wakeTokens,
+      people,
+      blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
+      render: { lines: wokenShowText, json: showJson },
+      channels: new Map<string, Channel>([[adapter.id, adapter]]),
+      appId: config.lark.appId,
+      zone,
+      nudge: () => dispatcher?.pass(),
+      note,
+    });
+  }
+
+  // Release mode (wake spec §5.9): with wakes off, deferred buttons left from before are made due and sent,
+  // by a waker that forms no wakes; with none left, no waker at all.
+  if (!config.kanban.wake.enabled && boardService !== undefined && notifier !== undefined && deferredButtons(db, config.lark.appId).length > 0) {
+    const notices = notifier;
+    const releasing = boardService;
+    waker = new Waker({
+      db,
+      service: releasing,
+      registry,
+      channels: new Map<string, Channel>([[adapter.id, adapter]]),
+      appId: config.lark.appId,
+      people,
+      admitsConversation: (chatId, chatType) => authorizer.admitsConversation(chatId, chatType),
+      letGo: (at) => notices.letGo(at),
+      assignable: (role) => releasing.wakeRoleUsable(role),
+      settings: config.kanban.wake,
+      blockRecurrenceLimit: config.kanban.blockRecurrenceLimit,
+      zone,
+      redrawNotice: (messageId) => unblockRedraws?.redrawMessage(messageId) ?? Promise.resolve(),
+      releaseOnly: true,
+      note,
+    });
+  }
+
   // One handler, by envelope; a nudge's throttle is its own, and asks for both (the cron spec, §7.4).
   if (boardApi !== undefined || cronApi !== undefined) {
     const board = boardApi;
     const cron = cronApi;
+    const wakes = wakeApi;
     worker = {
       handler: new SocketHandler({
         ...(board === undefined ? {} : { board: (request, signal) => board.handle(request, signal === undefined ? {} : { signal }) }),
         ...(cron === undefined ? {} : { cron: (request) => cron.handle(request) }),
+        ...(wakes === undefined ? {} : { wake: (request) => wakes.handle(request) }),
         nudged: () => {
           dispatcher?.pass();
           scheduler?.tick();
@@ -560,6 +691,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       return kanbanChat;
     },
     cron: scheduler,
+    waker,
 
     async start(): Promise<void> {
       // First, the home's lock and then the worker socket's path: a second gateway
@@ -605,6 +737,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       note(`connected as ${adapter.botOpenId ?? 'unknown bot identity'}`);
       // Once connected: its first round catches up on what the chats missed while the gateway was down.
       notifier?.start();
+      // And wakes the agent for what came while down, its notices first (wake spec §5.7, §5.8).
+      waker?.start();
       // And redraws the notices whose blocks were lifted while it was down.
       unblockRedraws?.start();
       // And the first tick, which sends what is pending and fires what came due while down.
@@ -660,6 +794,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       scheduler?.stop();
       // No more notices, nor cards; what was not sent is sent by the next boot, from the board.
       notifier?.stop();
+      // No more wakes; a turn already submitted runs on until the registry closes it (wake spec §5.5).
+      waker?.stop();
       unblockRedraws?.stop();
       cards?.stop();
       // And the gates of a report from chat, a press's or typed: killed, nothing applied,
@@ -680,7 +816,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       // Together, under one bound: the notices, the cards, the card presses being
       // worked on, whose redraws need the channel, and a cron fire's message being
       // posted, which a send failed by the disconnect leaves pending for the next boot.
-      const [notices, sent, pressed, , posted, redrawn] = await Promise.all([
+      const [notices, sent, pressed, , posted, redrawn, woken] = await Promise.all([
         notifier?.idle(SHUTDOWN_DRAIN_MS),
         cards?.idle(SHUTDOWN_DRAIN_MS),
         kanbanChat?.idle(SHUTDOWN_DRAIN_MS),
@@ -688,6 +824,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
         scheduler?.idle(SHUTDOWN_DRAIN_MS),
         // A notice being redrawn: best effort, and one the stop cuts short before it is marked is tried again by the next boot.
         unblockRedraws?.idle(SHUTDOWN_DRAIN_MS),
+        // A wake's marker being sent, or its actor being made: never the turns it started (wake spec §5.5).
+        waker?.idle(SHUTDOWN_DRAIN_MS),
       ]);
       // Past the bound, the database closes under whatever is still in flight: its write is dropped.
       if (notices === false) {
@@ -701,6 +839,9 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       }
       if (redrawn === false) {
         note('kanban: stopped with a notice still being redrawn; the next boot tries it again');
+      }
+      if (woken === false) {
+        note('kanban: stopped with a wake still being sent; its batch stays pending, and the next boot goes on with it');
       }
       if (posted === false) {
         note('cron: stopped with a fire\'s message still being posted; it stays pending, and the next boot posts it again with the same uuids');

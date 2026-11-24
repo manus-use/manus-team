@@ -80,6 +80,22 @@ weekly-report: ok, 2 steps; params: week (required), sources (list, default supp
 $ mt kanban workflow start weekly-report --board reports --param week=2026-W47 --param reviewer=reviewer --key weekly-2026-47
 ```
 
+To have the thread's agent woken by the report's outcomes, a write-up done or a gather blocked,
+end the start with the word `wake`: each outcome's notice comes as before, and then the agent is
+woken in the thread to decide what to do next (the guide's section 8, "Wakes", says how):
+
+<!-- example: wake weekly-report chat -->
+```
+/kanban workflow start weekly-report week=2026-W47 reviewer=@Bob Li wake
+```
+
+From a terminal, a wake needs a chat to follow the tasks, and runs as the owner:
+
+<!-- example: wake weekly-report terminal -->
+```
+$ mt kanban workflow start weekly-report --param week=2026-W47 --param reviewer=reviewer --chat <chat_id> --wake
+```
+
 What happens: four tasks at once. The three gathers start together; the write-up waits for all
 three, and its prompt holds their summaries. When `worker` is done writing, the report goes to
 Bob Li as a review card, and is done when he approves it. The three gathers run side by side

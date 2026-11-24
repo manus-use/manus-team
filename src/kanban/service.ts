@@ -13,18 +13,22 @@ import {
   getRun,
   getTask,
   getTaskByKey,
+  hasWakeColumns,
   instanceByKey,
   instancesOn,
   memberOf,
   memberPhases,
   membersWithTasks,
   phaseSince,
+  reactsTo,
   relatedTasks,
   runsOf,
   statusOf,
   subscriptionsOf,
   taskView,
   threadRootOf,
+  wakeOutcomesOf,
+  wokenUnblocksSince,
   type BoardEntry,
   type BoardSummary,
   type CardReading,
@@ -45,6 +49,7 @@ import { holdsSecret } from './gate-command.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
 import { limitsReached, workspaceBusy } from './waiting.js';
+import { isBlockOutcome } from './waker.js';
 import type { DisplayStatus } from './status.js';
 import {
   expand,
@@ -72,8 +77,11 @@ import {
   type CommentRow,
   type CreateRequest,
   type CreatedVia,
+  type DeferredKey,
+  type DeferredWhy,
   type Follow,
   type GateRow,
+  type KanbanEvent,
   type Phase,
   type Refusal,
   type Rendering,
@@ -81,8 +89,10 @@ import {
   type Reporter,
   type Result,
   type RunRow,
+  type SubscriptionRow,
   type TaskRow,
   type Waiting,
+  type WakeRow,
 } from './types.js';
 
 /**
@@ -167,11 +177,58 @@ export interface KanbanServiceDeps {
    * preview and start. Absent -- tests of the board alone -- there are none.
    */
   workflowsDir?: string;
+  /**
+   * The gateway's `kanban.wake` switch and depth (wake spec §3.4, §5.4). Absent
+   * -- tests of the board alone -- wakes are on, to `max_depth` 5.
+   */
+  wake?: { enabled: boolean; maxDepth: number };
 }
 
 /** A report's options: aborted when the gateway stops, which kills its gates and applies nothing. */
 export interface ReportOptions {
   signal?: AbortSignal;
+}
+
+/** Why a wake asked for is refused while wakes are off (wake spec §3.4). */
+export const WAKES_OFF =
+  'wakes are off on this gateway: an operator turns them on with kanban.wake.enabled: true in config.yaml, and a restart';
+
+/**
+ * A change of a task's wake, as chat or the terminal asks it (wake spec §3.1):
+ * on as a principal, for the chat session or, with `role`, for that role
+ * (§19.1); or off.
+ */
+export type WakeRequest = { on: true; as: string; role?: string } | { on: false };
+
+/**
+ * Who judges a woken turn's show and unblock (wake spec §9.2): the setter's tiers,
+ * live, by `PeopleDirectory`; their name as the thread knows them, for the
+ * refusals that name them; and `kanban.block_recurrence_limit`.
+ */
+export interface WakeJudge {
+  canTalk(principal: string): boolean;
+  canOperate(principal: string): boolean;
+  nameOf(principal: string): string | undefined;
+  blockRecurrenceLimit: number;
+}
+
+/** A woken turn's show of a task outside its wake (wake spec §9.2): the same words whether the task exists or not. */
+export const NOT_IN_WAKE = 'a woken turn reads only the tasks whose events woke it';
+
+/** A refusal unless a new task's wake is a principal, or none, and a whole depth (wake spec §3.1). */
+function wakeShapeRefused(wake: unknown): Refusal | undefined {
+  if (wake === undefined) return undefined;
+  if (
+    !isRecord(wake) ||
+    !(wake.by === null || (isText(wake.by) && wake.by.startsWith('lark:') && wake.by.length > 'lark:'.length)) ||
+    !(wake.role === undefined || (isText(wake.role) && wake.by !== null)) ||
+    typeof wake.depth !== 'number' ||
+    !Number.isSafeInteger(wake.depth) ||
+    wake.depth < 0
+  ) {
+    return board.refuse('invalid', 'a wake is a principal, lark:<union_id>, or none, and a depth of 0 or more');
+  }
+  return undefined;
 }
 
 /** Whose environment a task's gates run with when no agent has run on it (spec §7.7). */
@@ -205,6 +262,13 @@ export interface StartRequest {
   board?: string;
   /** The chat that follows every member, named at the terminal (workflows spec §18.1); the operator's alone. */
   follow?: Follow;
+  /**
+   * Its wake (wake spec §3.1): `by`, the principal its members' woken turns run
+   * as, at `depth`; every member's with `all` (chat's `wake`, the terminal's
+   * `--wake`), else only those whose step, or DAG task, says `wake: true`. A
+   * run's members inherit its task's, whatever this says.
+   */
+  wake?: StartWake;
 }
 
 /** A DAG to make (workflows spec §6), parsed but not yet checked: the terminal's file, or a run's `apply-dag` input without its own keys. */
@@ -217,13 +281,58 @@ export interface ApplyRequest {
   createdVia: CreatedVia;
   /** As a start's: not a key of the DAG, so its hash is the same wherever it is heard (workflows spec §18.1). */
   follow?: Follow;
+  /**
+   * Its wake (wake spec §3.1): `by`, the principal its members' woken turns run
+   * as, at `depth`; every member's with `all` (chat's `wake`, the terminal's
+   * `--wake`), else only those whose step, or DAG task, says `wake: true`. A
+   * run's members inherit its task's, whatever this says.
+   */
+  wake?: StartWake;
 }
+
+/** A start's or an apply's wake (wake spec §3.1): its setter and depth, and whether every member wakes or only those that ask. */
+export interface StartWake {
+  /**
+   * Null for none: the members keep `depth` alone, as a woken turn's shell makes
+   * them (wake spec §9.1); at the terminal, an owner this bot has not seen
+   * (§3.2), the asking members then notice-only, with a note (§19.16).
+   */
+  by: string | null;
+  depth: number;
+  all: boolean;
+  /** The role every member that wakes targets (wake spec §19.1); absent, the chat session. */
+  role?: string;
+  /**
+   * The note said when `by` is null because the terminal could not name the
+   * owner for want of a setting (no app id, no owner), in place of
+   * `OWNER_UNSEEN_NOTICE_ONLY`, which is for an owner not yet seen (§3.2, §19.16).
+   */
+  note?: string;
+}
+
+/** The note a start's answer ends with when its steps ask for a wake while wakes are off (wake spec §3.4). */
+export const STEPS_NOTICE_ONLY = 'wakes are off on this gateway (kanban.wake.enabled), so the steps that ask for one are notice-only';
+
+/**
+ * A start's wake, as the writer's members take it: every member's, or the
+ * asking steps'; `rolesOnly` with no chat to follow them, when only a role's
+ * wake is kept (wake spec §19.16).
+ */
+type StartWakeOf = board.NewWake & { all: boolean; rolesOnly?: boolean };
+
+/** The note a terminal's start or apply with no chat ends with when its steps ask for the chat session's wake (wake spec §19.16). */
+export const NO_CHAT_NOTICE_ONLY = 'no chat follows this start (add --chat), so the steps that wake the chat session are notice-only';
+
+/** The note a terminal's start or apply ends with when its steps ask for a wake and the owner is not yet known (wake spec §3.2, §19.16). */
+export const OWNER_UNSEEN_NOTICE_ONLY = 'the owner has not used /kanban in Lark yet, so the steps that ask for a wake are notice-only';
 
 /** What a start or an apply made, or found made with its key: the instance, and its members with their tasks. */
 export interface WorkflowMade {
   instance: InstanceRow;
   tasks: Array<MemberRow & { task: TaskRow }>;
   existing: boolean;
+  /** `STEPS_NOTICE_ONLY`, for a start whose steps asked for a wake while wakes are off (wake spec §3.4), or `NO_CHAT_NOTICE_ONLY`, with no chat to follow them (§19.16). */
+  wakeNote?: string;
 }
 
 /** A dry run's answer (workflows spec §6): what the apply would make, or the instance its key already made; nothing written. */
@@ -332,6 +441,10 @@ const RUN_KEY = 'run-task:';
 const CHAT_KEY = 'lark:';
 /** The operator's `mt kanban task new --key <k>`, stored as `operator:<k>`, so it never meets chat's or a run's. */
 const OPERATOR_KEY = 'operator:';
+/** A reaction task's key, `wake:<uuid>` (wake spec §19.3): the waker's own namespace, which no other creator may use. */
+const WAKE_KEY = 'wake:';
+/** Why the service makes no task by a wake: the waker writes a reaction task itself (wake spec §19.3). */
+const BY_A_WAKE = 'a task made by a wake is the waker\'s own: no other caller makes one';
 
 /**
  * Why a `follow` is refused (kanban spec §22.1, workflows spec §18.1), or
@@ -378,6 +491,7 @@ export class KanbanService {
   readonly #maxRunning: number;
   readonly #maxRunningPerRole: number | undefined;
   readonly #workflowsDir: string | undefined;
+  readonly #wake: { enabled: boolean; maxDepth: number };
   /**
    * Tasks a report is running its checks for, with where the gates run -- the
    * task's own directory, by its `wt:` id, or its workspace's shared one (spec
@@ -401,6 +515,7 @@ export class KanbanService {
     this.#maxRunning = deps.maxRunning ?? Number.MAX_SAFE_INTEGER;
     this.#maxRunningPerRole = deps.maxRunningPerRole;
     this.#workflowsDir = deps.workflowsDir;
+    this.#wake = deps.wake ?? { enabled: true, maxDepth: 5 };
   }
 
   /**
@@ -471,8 +586,11 @@ export class KanbanService {
     // The checks a task gets however it is made (workflows spec §15), then its key, which reads the database.
     const checked = checkTask(req, this.#facts());
     if (!checked.ok) return checked;
+    if (req.createdVia.kind === 'wake') return board.refuse('invalid', BY_A_WAKE);
     const follow = followRefused(req.follow, req.createdVia);
     if (follow !== undefined) return follow;
+    const wake = this.#newWake(req);
+    if (!wake.ok) return wake;
     const key = this.#idempotencyKey(req.idempotencyKey, req.createdVia);
     if (!key.ok) return key;
     return board.createTask(
@@ -494,9 +612,135 @@ export class KanbanService {
         createdVia: req.createdVia,
         ...(req.board === undefined ? {} : { board: req.board }),
         ...(req.follow === undefined ? {} : { follow: req.follow }),
+        ...(wake.wake === undefined ? {} : { wake: wake.wake }),
       },
       this.#clock.now(),
     );
+  }
+
+  /**
+   * A new task's wake, checked (wake spec §3.1, §3.4): refused while wakes are
+   * off, and for a terminal's task no chat follows; made with wake off, as a
+   * note, at `max_depth` or more. A run's follow-up inherits its creating
+   * task's in the writer, whatever was asked, so nothing is refused for it.
+   */
+  #newWake(req: CreateRequest): Result<{ wake?: board.NewWake }> {
+    const shape = wakeShapeRefused(req.wake);
+    if (shape !== undefined) return shape;
+    const w = req.wake;
+    if (w === undefined || req.createdVia?.kind === 'run') return { ok: true };
+    if (w.by === null) return { ok: true, wake: { by: null, depth: w.depth } };
+    if (!this.#wake.enabled) return board.refuse('wake_off', WAKES_OFF);
+    // A role's wake needs no chat (wake spec §19.16); the chat session's does.
+    if (req.createdVia?.kind === 'operator' && req.follow === undefined && w.role === undefined) {
+      return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
+    }
+    const role = this.#wakeRole(w.role);
+    if (!role.ok) return role;
+    return {
+      ok: true,
+      wake: { by: w.by, depth: w.depth, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}), ...role.role },
+    };
+  }
+
+  /**
+   * The role a wake targets, checked when it is set (wake spec §19.1): configured,
+   * and taken by `assignable` as an assignee, which judges the role alone; refused
+   * `invalid` in `assignable`'s words, as `task assign` would refuse it. A
+   * person's principal is not a role.
+   */
+  #wakeRole(role: string | undefined): Result<{ role: { role?: string } }> {
+    if (role === undefined) return { ok: true, role: {} };
+    const who = assignable(role, this.#facts());
+    if (!who.ok) return board.refuse('invalid', who.message);
+    if (who.assignee.kind !== 'role') return board.refuse('invalid', `${JSON.stringify(role)} is not a role: a wake targets a role, or the chat session`);
+    return { ok: true, role: { role } };
+  }
+
+  /**
+   * Turn a task's wake on or off (wake spec §3.1, §3.4), for this bot's
+   * subscriptions: on runs its woken turns as `as`, set by `by`. Refused while
+   * wakes are off, though off still works; a task too deep is left with wake
+   * off, `tooDeep`, for the caller's note; one already on there, `max_depth`
+   * lowered since, keeps its wake, `kept` as well (§5.4). Who may ask is the
+   * caller's.
+   */
+  setWake(taskId: string, change: WakeRequest, by: string, appId: string): Result<{ task: TaskRow; changed: boolean; tooDeep: boolean; kept: boolean }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (change.on && !this.#wake.enabled) return board.refuse('wake_off', WAKES_OFF);
+    const role = change.on ? this.#wakeRole(change.role) : { ok: true as const, role: {} };
+    if (!role.ok) return role;
+    const writerChange: board.WakeChange = change.on ? { on: true, as: change.as, maxDepth: this.#wake.maxDepth, ...role.role } : { on: false };
+    return board.setWake(this.#db, taskId, writerChange, by, appId, this.#clock.now());
+  }
+
+  /**
+   * Whether a role can be given work now (wake spec §19.2), as it is checked when
+   * a wake names it: the waker's live check of a role's wake.
+   */
+  wakeRoleUsable(role: string): Result<object> {
+    return this.#wakeRole(role);
+  }
+
+  /**
+   * The waker's record of a role's batch (wake spec §19.3): its reaction task,
+   * made with `createTask`'s checks against the team as it is now. The waker's
+   * own write, the only one that makes a task by a wake.
+   */
+  recordRoleWake(batch: board.NewRoleWake): Result<board.RoleWakeMade> {
+    return board.recordRoleWake(this.#db, batch, this.#facts(), this.#clock.now());
+  }
+
+  /** The waker's record of a batch (wake spec §5.5 step 2), through the writer. */
+  recordWake(batch: board.NewWakeBatch): ReturnType<typeof board.recordWake> {
+    return board.recordWake(this.#db, batch, this.#clock.now());
+  }
+
+  /** A wake's marker sent, or tried (wake spec §5.5 step 3). */
+  wakeMarked(wakeId: number): Result<{ marked: boolean }> {
+    return board.wakeMarked(this.#db, wakeId, this.#clock.now());
+  }
+
+  /** A wake's current attempt submitted, by this boot (wake spec §5.5 step 6). */
+  wakeSubmitted(wakeId: number, sessionId: string, turnKey: string, boot: string): Result<{ submitted: boolean }> {
+    return board.wakeSubmitted(this.#db, wakeId, sessionId, turnKey, boot);
+  }
+
+  /** A wake's attempt refused by its session (wake spec §5.6). */
+  wakeRefused(wakeId: number, error: string): Result<{ refused: boolean; attempt: number }> {
+    return board.wakeRefused(this.#db, wakeId, error);
+  }
+
+  /** A wake delivered, its cursors moved (wake spec §5.5 step 9). */
+  advanceWake(wakeId: number): Result<{ delivered: boolean }> {
+    return board.advanceWake(this.#db, wakeId, this.#clock.now());
+  }
+
+  /** A wake dropped, its cursors moved past all its events or only `tasks`' (wake spec §5.3a, §5.6). */
+  dropWake(wakeId: number, error: string, opts: { tasks?: readonly string[] } = {}): Result<{ dropped: boolean }> {
+    return board.dropWake(this.#db, wakeId, error, this.#clock.now(), opts);
+  }
+
+  /** A pending wake with nothing left once its lifted blocks are dropped (wake spec §5.3b). */
+  liftedWake(wakeId: number): Result<{ lifted: boolean }> {
+    return board.liftedWake(this.#db, wakeId, this.#clock.now());
+  }
+
+  /** A subscription's wake cursor moved past events the waker passes over (wake spec §5.2 step 3). */
+  passWake(subscriptionId: number, cursor: number): Result<{ advanced: boolean }> {
+    if (!Number.isSafeInteger(subscriptionId) || !Number.isSafeInteger(cursor) || cursor < 0) {
+      return board.refuse('invalid', 'a subscription and its cursor are whole numbers');
+    }
+    return board.passWake(this.#db, subscriptionId, cursor);
+  }
+
+  /** A task's own wake cursor moved past events the waker passes over, for a role's wake with no chat (wake spec §19.16). */
+  passTaskWake(taskId: string, cursor: number): Result<{ advanced: boolean }> {
+    const ids = idsRefused(taskId);
+    if (ids !== undefined) return ids;
+    if (!Number.isSafeInteger(cursor) || cursor < 0) return board.refuse('invalid', 'a cursor is a whole number');
+    return board.passTaskWake(this.#db, taskId, cursor);
   }
 
   /**
@@ -528,6 +772,17 @@ export class KanbanService {
   followOf(taskId: string, appId: string): { chat: string; thread: string | null } | null {
     const s = subscriptionsOf(this.#db, taskId).find((x) => x.channel === 'lark' && x.appId === appId);
     return s === undefined ? null : { chat: s.conversationId, thread: s.threadId === '' ? null : s.threadId };
+  }
+
+  /**
+   * Every chat that follows a task for this bot, as stored, the thread null at
+   * chat scope: each subscription a wake set on it would wake (wake spec §3.1,
+   * §3.2a), so a wake's caller checks them all, not only the first.
+   */
+  followsOf(taskId: string, appId: string): Array<{ chat: string; thread: string | null }> {
+    return subscriptionsOf(this.#db, taskId)
+      .filter((x) => x.appId === appId)
+      .map((s) => ({ chat: s.conversationId, thread: s.threadId === '' ? null : s.threadId }));
   }
 
   assign(taskId: string, assignee: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
@@ -1063,7 +1318,7 @@ export class KanbanService {
    * `blockedAt`: an Unblock button's, the event that blocked the task as its
    * notice told it (spec §9.2); refused once that block has been lifted.
    */
-  unblock(taskId: string, by: string, comment?: string, opts: { blockedAt?: number } = {}): Result<{ task: TaskRow }> {
+  unblock(taskId: string, by: string, comment?: string, opts: { blockedAt?: number; wake?: number } = {}): Result<{ task: TaskRow }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
     if (comment !== undefined && !isText(comment)) return board.refuse('invalid', 'a comment is text');
@@ -1072,6 +1327,74 @@ export class KanbanService {
     }
     return board.unblock(this.#db, taskId, by, comment, this.#clock.now(), opts);
   }
+  /**
+   * A woken turn's `task show` (wake spec §9.2), given its delivered wake: a task
+   * with an event among the wake's, of any kind, while the setter has talk tier.
+   * Any other task is `unauthorized`, in words that do not say whether it exists.
+   * Writes nothing.
+   */
+  showForWake(wake: WakeRow, taskId: string, judge: WakeJudge): Result<{ view: TaskView; gates: GateRow[] }> {
+    if (!isText(taskId) || !wakeOutcomesOf(this.#db, wake.wakeId).some((o) => o.event.taskId === taskId)) {
+      return board.refuse('unauthorized', NOT_IN_WAKE);
+    }
+    // A wake turned off or taken over since: the task is no longer this wake's.
+    if (!stillWakes(getTask(this.#db, taskId), wake)) return board.refuse('unauthorized', NOT_IN_WAKE);
+    if (!judge.canTalk(wake.principal)) {
+      return board.refuse('needs_talk', `${setterName(wake, judge)}, who set this wake, does not have talk tier, which task show needs`);
+    }
+    const shown = this.show(taskId);
+    if (!shown.ok) return shown;
+    return { ok: true, view: shown.view, gates: gatesOf(this.#db, taskId) };
+  }
+
+  /**
+   * A woken turn's `task unblock` (wake spec §9.2, §9.3), given its delivered
+   * wake, checked in the spec's order: the task's block among the wake's events,
+   * the latest when it has two; the setter's operate tier, live; the block's
+   * recurrences below the limit; fewer than `max_depth` woken unblocks since the
+   * task last completed; then the board's own, bound to that block, by the setter,
+   * with the wake in its event.
+   */
+  unblockForWake(wake: WakeRow, taskId: string, comment: string | undefined, judge: WakeJudge): Result<{ task: TaskRow; setter: string }> {
+    const blocks = isText(taskId)
+      ? wakeOutcomesOf(this.#db, wake.wakeId).filter((o) => o.event.taskId === taskId && isBlockOutcome(o.event))
+      : [];
+    const block = blocks.at(-1)?.event;
+    if (block === undefined) {
+      return board.refuse('not_this_wake', `\`${visible(taskId)}\` did not wake this turn: a woken turn unblocks only the tasks whose blocks woke it`);
+    }
+    if (!stillWakes(getTask(this.#db, taskId), wake)) {
+      return board.refuse(
+        'not_this_wake',
+        `\`${taskId}\`'s wake has been turned off or taken over since it woke this turn, so this turn does not unblock it`,
+      );
+    }
+    const setter = setterName(wake, judge);
+    if (!judge.canOperate(wake.principal)) {
+      return board.refuse(
+        'needs_operator',
+        `${setter}, who set this wake, does not have operate tier, which unblocking needs: ask in the thread for someone who can`,
+      );
+    }
+    const recurrences = (block.payload as Record<string, unknown>)['blockRecurrences'];
+    if (typeof recurrences === 'number' && recurrences >= judge.blockRecurrenceLimit) {
+      return board.refuse(
+        'recurring',
+        `\`${taskId}\` has been blocked ${recurrences} times in a row: a person decides whether it is unblocked again`,
+      );
+    }
+    const woken = wokenUnblocksSince(this.#db, taskId);
+    const limit = this.#wake.maxDepth;
+    if (woken >= limit) {
+      return board.refuse(
+        'woken_unblock_limit',
+        `\`${taskId}\` has been unblocked by woken turns ${woken} times since it last completed: a person decides whether it is unblocked again`,
+      );
+    }
+    const r = this.unblock(taskId, wake.principal, comment, { blockedAt: block.id, wake: wake.wakeId });
+    return r.ok ? { ok: true, task: r.task, setter } : r;
+  }
+
 
   /** What a person's card for this run shows of the board (spec §9.2); undefined for a run not on it. */
   cardReading(runId: string): CardReading | undefined {
@@ -1092,6 +1415,42 @@ export class KanbanService {
     return board.recordUnblockButtons(this.#db, message, this.#clock.now());
   }
 
+  /**
+   * A notice rendered without a block's Unblock button, at the waker's word, has
+   * been sent (wake spec §5.9): the notifier writes the deferral, `held` since the
+   * send, before its cursor moves, with the notice's message id when it went as
+   * a card, null as text. A row already there stands.
+   */
+  deferButton(sub: SubscriptionRow, event: KanbanEvent, sentAt: number, noticeId: string | null = null): Result<{ deferred: boolean }> {
+    return board.deferButton(this.#db, { subscriptionId: sub.id, eventId: event.id }, sentAt, noticeId);
+  }
+
+  /** A held deferred button made due, with why (wake spec §5.9). */
+  buttonDue(key: DeferredKey, why: DeferredWhy): Result<{ changed: boolean }> {
+    return board.buttonDue(this.#db, key, why);
+  }
+
+  /** A deferred button whose block was lifted, or whose task was archived: no card (wake spec §5.9). */
+  buttonLifted(key: DeferredKey): Result<{ changed: boolean }> {
+    return board.buttonLifted(this.#db, key, this.#clock.now());
+  }
+
+  /** A due button's card sent (wake spec §5.9). */
+  buttonSent(key: DeferredKey, messageId: string): Result<{ changed: boolean }> {
+    if (!isText(messageId) || messageId === '') return board.refuse('invalid', 'a message id is text');
+    return board.buttonSent(this.#db, key, messageId, this.#clock.now());
+  }
+
+  /** A deferred button given up (wake spec §5.9). */
+  buttonFailed(key: DeferredKey): Result<{ changed: boolean }> {
+    return board.buttonFailed(this.#db, key, this.#clock.now());
+  }
+
+  /** One more send of a due button's card tried (wake spec §5.9). */
+  buttonTried(key: DeferredKey): Result<{ attempts: number }> {
+    return board.buttonTried(this.#db, key);
+  }
+
   /** A recorded message's buttons were redrawn, or the redraw tried, for these lifts: never tried again. */
   markUnblockRedrawn(messageId: string, lifts: ReadonlyArray<{ taskId: string; liftEvent: number }>): Result<{ marked: number }> {
     return board.markUnblockRedrawn(this.#db, messageId, lifts);
@@ -1107,6 +1466,11 @@ export class KanbanService {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
     return board.archive(this.#db, taskId, by, this.#clock.now());
+  }
+
+  /** The tasks a reaction task's wake carried, in event order (wake spec §19.9); null for any other task. */
+  reactsTo(taskId: string): string[] | null {
+    return hasWakeColumns(this.#db) ? reactsTo(this.#db, taskId) : null;
   }
 
   show(taskId: string): Result<{ view: TaskView }> {
@@ -1279,8 +1643,21 @@ export class KanbanService {
   }
 
   /** The writer's members of a checked DAG: each task's fields, its parents as earlier positions, its gates. */
-  #members(dag: Dag): board.NewMember[] {
+  #members(dag: Dag, wake?: StartWakeOf): board.NewMember[] {
     const at = new Map(dag.tasks.map((t, i) => [t.ref, i]));
+    const wakeOf = (t: DagTask): board.NewWake | undefined => {
+      if (wake === undefined || (!wake.all && t.wake === undefined)) return wake === undefined ? undefined : { by: null, depth: wake.depth };
+      // The start's role, else the member's own step's (wake spec §19.1), else the chat session.
+      const role = wake.role ?? (typeof t.wake === 'object' ? t.wake.role : undefined);
+      // With no chat to follow it, a member that would wake the chat session is notice-only (§19.16).
+      if (role === undefined && wake.rolesOnly === true) return { by: null, depth: wake.depth };
+      return {
+        by: wake.by,
+        depth: wake.depth,
+        ...(wake.tooDeep === true ? { tooDeep: true } : {}),
+        ...(role === undefined ? {} : { role }),
+      };
+    };
     const as = (name: string | null): Assignee | null => (name === null ? null : { kind: name.includes(':') ? 'human' : 'role', name });
     return dag.tasks.map((t) => ({
       task: {
@@ -1294,6 +1671,7 @@ export class KanbanService {
         failureLimit: t.failure_limit,
         retryOnCrash: t.retry_on_crash,
         maxRuntimeS: t.max_runtime_s,
+        ...(wakeOf(t) === undefined ? {} : { wake: wakeOf(t) as board.NewWake }),
       },
       ref: t.ref,
       step: t.step,
@@ -1340,6 +1718,7 @@ export class KanbanService {
   startWorkflow(req: StartRequest): Result<WorkflowMade> {
     if (!isRecord(req)) return board.refuse('invalid', 'a start is an object');
     if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
+    if (req.createdVia?.kind === 'wake') return board.refuse('invalid', BY_A_WAKE);
     const follow = followRefused(req.follow, req.createdVia);
     if (follow !== undefined) return follow;
     const on = this.#boardFor(req.createdVia, req.board);
@@ -1352,7 +1731,11 @@ export class KanbanService {
     if (!shaped.ok) return shaped;
     const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
+    const wake = this.#startWake(req, shaped.dag);
+    if (!wake.ok) return wake;
     return this.#write(shaped, {
+      ...(wake.wake === undefined ? {} : { wake: wake.wake }),
+      ...(wake.wakeNote === undefined ? {} : { wakeNote: wake.wakeNote }),
       name: shaped.workflow.name,
       source: 'start',
       board: on.board,
@@ -1372,6 +1755,7 @@ export class KanbanService {
    */
   applyDag(req: ApplyRequest): Result<WorkflowMade | WorkflowDryRun> {
     if (!isRecord(req)) return board.refuse('invalid', 'an apply is an object');
+    if (req.createdVia?.kind === 'wake') return board.refuse('invalid', BY_A_WAKE);
     const shaped = checkDagShape(req.dag, req.createdVia?.kind === 'run' ? 'run' : 'terminal');
     if (!shaped.ok) return shaped;
     const follow = followRefused(req.follow, req.createdVia);
@@ -1394,8 +1778,12 @@ export class KanbanService {
     }
     const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
+    const wake = this.#startWake(req, shaped.dag);
+    if (!wake.ok) return wake;
     if (req.dryRun === true) return { ok: true, dryRun: true, existing: false, instanceId: null, board: on.board, tasks: shaped.dag.tasks };
     return this.#write(shaped, {
+      ...(wake.wake === undefined ? {} : { wake: wake.wake }),
+      ...(wake.wakeNote === undefined ? {} : { wakeNote: wake.wakeNote }),
       name: shaped.dag.workflow,
       source: 'apply',
       board: on.board,
@@ -1415,10 +1803,65 @@ export class KanbanService {
     return { ok: true, instance: keyed.instance, tasks: membersWithTasks(this.#db, keyed.instance.instanceId), existing: true };
   }
 
+  /**
+   * A start's or an apply's wake, checked (wake spec §3.1, §3.4): a wake for
+   * every member is refused while wakes are off, and at the terminal with no
+   * chat to follow them; a start whose steps ask for one while wakes are off,
+   * or at the terminal with no chat (§19.16), still starts, those members
+   * notice-only, with the note. A run's members
+   * inherit its task's in the writer, so nothing is asked for them.
+   */
+  #startWake(req: StartRequest | ApplyRequest, dag: Dag): Result<{ wake?: StartWakeOf; wakeNote?: string }> {
+    const w = req.wake;
+    if (w === undefined || req.createdVia?.kind === 'run') return { ok: true };
+    const shape = wakeShapeRefused({ by: w.by, depth: w.depth });
+    if (shape !== undefined) return shape;
+    // A woken shell's members that ask for none keep its depth alone (§9.1); a null setter with asking steps is an owner not yet seen.
+    const asked = w.all || dag.tasks.some((t) => t.wake !== undefined);
+    if (!asked) return { ok: true, wake: { by: null, depth: w.depth, all: false } };
+    if (!this.#wake.enabled) {
+      if (w.all) return board.refuse('wake_off', WAKES_OFF);
+      return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: STEPS_NOTICE_ONLY };
+    }
+    // No chat follows the members (§19.16): a role's wake needs none, the chat session's is notice-only, with a note.
+    const chatless = req.createdVia?.kind === 'operator' && req.follow === undefined;
+    if (chatless && w.all && w.role === undefined) return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
+    // An owner the terminal could not name: the members that ask are notice-only, with one note (§19.16), which wins over the no-chat note.
+    if (w.by === null) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: w.note ?? OWNER_UNSEEN_NOTICE_ONLY };
+    const sessionSteps = chatless && !w.all && dag.tasks.some((t) => t.wake === true);
+    const chatlessOf = chatless ? { rolesOnly: true } : {};
+    const noChatNote = sessionSteps ? { wakeNote: NO_CHAT_NOTICE_ONLY } : {};
+    const role = this.#wakeRole(w.role);
+    if (!role.ok) return role;
+    // A step's own role is checked as the start's is, when its member will wake (wake spec §19.1).
+    if (w.role === undefined) {
+      for (const t of dag.tasks) {
+        if (typeof t.wake !== 'object') continue;
+        const own = this.#wakeRole(t.wake.role);
+        if (!own.ok) return own;
+      }
+    }
+    return {
+      ok: true,
+      wake: { by: w.by, depth: w.depth, all: w.all, ...(w.depth >= this.#wake.maxDepth ? { tooDeep: true } : {}), ...role.role, ...chatlessOf },
+      ...noChatNote,
+    };
+  }
+
   /** The one transaction (workflows spec §6 step 3). */
   #write(
     shaped: ShapedDag,
-    i: { name: string | null; source: 'start' | 'apply'; board: string; key: string | null; createdBy: string; createdVia: CreatedVia; follow?: Follow },
+    i: {
+      name: string | null;
+      source: 'start' | 'apply';
+      board: string;
+      key: string | null;
+      createdBy: string;
+      createdVia: CreatedVia;
+      follow?: Follow;
+      wake?: StartWakeOf;
+      wakeNote?: string;
+    },
   ): Result<WorkflowMade> {
     const r = board.applyDag(
       this.#db,
@@ -1433,11 +1876,11 @@ export class KanbanService {
         idempotencyKey: i.key,
         ...(i.follow === undefined ? {} : { follow: i.follow }),
       },
-      this.#members(shaped.dag),
+      this.#members(shaped.dag, i.wake),
       this.#clock.now(),
     );
     if (!r.ok) return r;
-    return { ok: true, instance: r.instance, tasks: r.members, existing: r.existing };
+    return { ok: true, instance: r.instance, tasks: r.members, existing: r.existing, ...(i.wakeNote === undefined ? {} : { wakeNote: i.wakeNote }) };
   }
 
   /** The workflow files as the directory holds them now (workflows spec §10): `list`'s. */
@@ -1605,6 +2048,9 @@ export class KanbanService {
     if (key.startsWith(RUN_KEY)) {
       return board.refuse('invalid', `an idempotency key starting ${RUN_KEY} is the board's own`);
     }
+    if (key.startsWith(WAKE_KEY)) {
+      return board.refuse('invalid', `an idempotency key starting ${WAKE_KEY} is the waker's own`);
+    }
     if (via.kind !== 'chat' && key.startsWith(CHAT_KEY)) {
       return board.refuse('invalid', `an idempotency key starting ${CHAT_KEY} is for chat`);
     }
@@ -1617,4 +2063,18 @@ export class KanbanService {
     if (run === undefined) return board.refuse('not_found', `no run ${via.runId}`);
     return { ok: true, key: `${RUN_KEY}${run.taskId}:${key}` };
   }
+}
+
+/**
+ * Whether a task still wakes as the wake that woke a turn did (wake spec §9.2):
+ * the same setter and the same target. A wake turned off, or taken over by
+ * another setter, since the turn was woken leaves the task outside that wake.
+ */
+function stillWakes(task: TaskRow | undefined, wake: WakeRow): boolean {
+  return task !== undefined && task.wakeBy === wake.principal && (task.wakeRole ?? null) === (wake.targetRole ?? null);
+}
+
+/** The setter of a wake, as the thread names them, else by principal. */
+function setterName(wake: WakeRow, judge: WakeJudge): string {
+  return judge.nameOf(wake.principal) ?? wake.principal;
 }

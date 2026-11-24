@@ -12,6 +12,7 @@ import {
   type ChatMembers,
   type SendResult,
   type SendTarget,
+  type SendTextOptions,
   ONE_MESSAGE,
 } from '../types.js';
 import { forPlainText, truncate } from '../escape.js';
@@ -151,10 +152,12 @@ export class LarkAdapter implements Channel {
     return this.#botOpenId;
   }
 
-  async sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[]): Promise<SendResult> {
-    if (buttons !== undefined && buttons.length > 0) {
+  async sendText(target: SendTarget, text: string, uuid: string, buttons?: readonly CardButton[], opts: SendTextOptions = {}): Promise<SendResult> {
+    // A card with no buttons is a card with no actions, asked for so the message
+    // can be redrawn (wake spec §5.9).
+    if ((buttons !== undefined && buttons.length > 0) || opts.card === true) {
       try {
-        return { ...(await this.sendCard(target, { markdown: text, buttons }, uuid)), card: true };
+        return { ...(await this.sendCard(target, { markdown: text, buttons: buttons ?? [] }, uuid)), card: true };
       } catch (err) {
         // A card Lark will not take, for a reason that is not the chat's, must not
         // hold back the text it carries: the text goes alone, without its buttons,

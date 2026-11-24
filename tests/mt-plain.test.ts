@@ -128,6 +128,7 @@ describe('showText', () => {
     expect(showText(shown.view, gates.gates)).toEqual([
       `Fix [31mthe[0m parser (${taskId}): ready`,
       'assignee: role implementer · reviewer: nobody · workspace: web · board: default',
+      'Wake: off',
       '',
       '    Line one',
       '    key ••••',

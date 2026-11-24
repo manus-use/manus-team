@@ -207,7 +207,35 @@ export interface KanbanSettings {
    * notice stops inviting another unblock and suggests rewriting the task (spec §5.4).
    */
   blockRecurrenceLimit: number;
+  /** `kanban.wake` (wake spec §11): a task's outcomes starting a turn. */
+  wake: WakeSettings;
 }
+
+/**
+ * The `kanban.wake` subsection (wake spec §11), snake case and file only, as
+ * the section's keys are. On by default, unlike the board itself: a wake is
+ * opt-in per task already, so the switch is for an operator who wants none at
+ * all. It does nothing while `kanban.enabled` is off.
+ */
+export interface WakeSettings {
+  /** False: no waker, and a wake asked for is refused. */
+  enabled: boolean;
+  /** Wake turns per conversation per hour (wake spec §5.4). */
+  perHour: number;
+  /** A task this many woken turns deep stays notice-only (wake spec §5.4). */
+  maxDepth: number;
+  /** How long a block's Unblock button waits for the agent's try (wake spec §5.9). */
+  holdMinutes: number;
+}
+
+export const WAKE_DEFAULTS: WakeSettings = { enabled: true, perHour: 6, maxDepth: 5, holdMinutes: 10 };
+
+/** The subsection's numeric keys, as the file spells them, the setting each sets, and its range (wake spec §11). */
+const WAKE_NUMBERS = {
+  per_hour: { setting: 'perHour', min: 1, max: 60 },
+  max_depth: { setting: 'maxDepth', min: 1, max: 20 },
+  hold_minutes: { setting: 'holdMinutes', min: 1, max: 60 },
+} as const;
 
 /** The setting the session limit came from. */
 export type SessionLimitSource = 'MT_MAX_LIVE_SESSIONS' | 'maxLiveSessions';
@@ -257,6 +285,7 @@ export const KANBAN_DEFAULTS: Omit<KanbanSettings, 'maxRunning' | 'maxRunningFro
   strandedAfterS: 30 * 60,
   nudgeLimit: 2,
   blockRecurrenceLimit: 2,
+  wake: WAKE_DEFAULTS,
 };
 
 /** The section's numeric keys, as the file spells them, and the setting each sets. */
@@ -344,6 +373,12 @@ export interface TeamSettings {
    * then off): so the operator's `mt kanban` can say the board is off, and why.
    */
   kanbanEnabled?: boolean;
+  /**
+   * `kanban.wake` as the gateway reads it (wake spec §11): so the terminal's
+   * `--wake` reads the switch and the depth as the gateway does. Absent --
+   * settings a test builds by hand -- the defaults hold.
+   */
+  wake?: WakeSettings;
   /** Workspace name → declared absolute path. Always has `default`. */
   workspaces: Readonly<Record<string, string>>;
   /** The isolated workspaces (spec §18), by name; absent when there are none. */
@@ -471,6 +506,7 @@ export function loadConfig(
       strandedAfterS: file.kanban.strandedAfterS ?? KANBAN_DEFAULTS.strandedAfterS,
       nudgeLimit: file.kanban.nudgeLimit ?? KANBAN_DEFAULTS.nudgeLimit,
       blockRecurrenceLimit: file.kanban.blockRecurrenceLimit ?? KANBAN_DEFAULTS.blockRecurrenceLimit,
+      wake: { ...WAKE_DEFAULTS, ...file.kanban.wake },
     },
     cron: {
       enabled: file.cron.enabled ?? CRON_DEFAULTS.enabled,
@@ -607,6 +643,7 @@ function teamSettingsFrom(env: Env, { home, path, text, file }: Located, opts: L
     configPath: text === undefined ? undefined : path,
     dbPath: envString(env, 'MT_DB') ?? file.db ?? join(home, 'team.db'),
     ...(file.kanban.enabled === undefined ? {} : { kanbanEnabled: file.kanban.enabled }),
+    wake: { ...WAKE_DEFAULTS, ...file.kanban.wake },
     ...(appId === undefined ? {} : { appId }),
     ...(owner === undefined ? {} : { owner, talk: talkOf(env, file, owner), operate: operateOf(env, file, owner) }),
     from: listSources(env),
@@ -883,7 +920,7 @@ interface FileConfig {
     readOnlyTools: readonly string[];
     maskExempt: readonly string[];
   };
-  kanban: { enabled?: boolean } & Partial<Record<(typeof KANBAN_NUMBERS)[keyof typeof KANBAN_NUMBERS], number>>;
+  kanban: { enabled?: boolean; wake?: Partial<WakeSettings> } & Partial<Record<(typeof KANBAN_NUMBERS)[keyof typeof KANBAN_NUMBERS], number>>;
   cron: { enabled?: boolean; maxRunning?: number; idleTimeoutS?: number; tz?: string };
 }
 
@@ -977,7 +1014,9 @@ function parseFile(path: string, text: string): FileConfig {
     'readOnlyTools',
     'maskExempt',
   ]);
-  reject(path, 'kanban', kanbanRaw, ['enabled', ...Object.keys(KANBAN_NUMBERS)]);
+  reject(path, 'kanban', kanbanRaw, ['enabled', ...Object.keys(KANBAN_NUMBERS), 'wake']);
+  const wakeRaw = kanbanRaw['wake'] === undefined || kanbanRaw['wake'] === null ? {} : section(path, 'kanban.wake', kanbanRaw['wake']);
+  reject(path, 'kanban.wake', wakeRaw, ['enabled', ...Object.keys(WAKE_NUMBERS)]);
   reject(path, 'cron', cronRaw, ['enabled', ...Object.keys(CRON_NUMBERS), 'tz']);
 
   out.workspace = str(path, 'workspace', root['workspace']);
@@ -1024,6 +1063,16 @@ function parseFile(path: string, text: string): FileConfig {
     if (n > max) throw new ConfigError(`${path}: kanban.${key} must be at most ${max}, got ${n}`);
     out.kanban[setting] = n;
   }
+  const wake: Partial<WakeSettings> = {};
+  const wakeEnabled = bool(path, 'kanban.wake.enabled', wakeRaw['enabled']);
+  if (wakeEnabled !== undefined) wake.enabled = wakeEnabled;
+  for (const [key, { setting, min, max }] of Object.entries(WAKE_NUMBERS)) {
+    const n = positiveInt(path, `kanban.wake.${key}`, wakeRaw[key]);
+    if (n === undefined) continue;
+    if (n < min || n > max) throw new ConfigError(`${path}: kanban.wake.${key} must be from ${min} to ${max}, got ${n}`);
+    wake[setting] = n;
+  }
+  if (Object.keys(wake).length > 0) out.kanban.wake = wake;
 
   const cronEnabled = bool(path, 'cron.enabled', cronRaw['enabled']);
   if (cronEnabled !== undefined) out.cron.enabled = cronEnabled;

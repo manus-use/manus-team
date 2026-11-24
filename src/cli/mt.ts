@@ -14,6 +14,7 @@ import { updateCommand, type UpdateDeps } from './update.js';
 import { AUTH_USAGE, authCommand } from './auth.js';
 import { CRON_USAGE, cronAgent, cronOperator } from './cron.js';
 import { CRON_COMMANDS } from '../cron/worker.js';
+import { asksWake, wokenTask } from './wake.js';
 import { workflowCheck } from './workflow.js';
 import { workspaceAdd, workspaceList } from './workspace.js';
 
@@ -90,12 +91,13 @@ const USAGE = [
   '  mt kanban board archive <name> [--json]',
   '  mt kanban task new <title> [--board <name>] [--assignee <role|lark:<union_id>>] [--reviewer <role|lark:<union_id>>]',
   '      [--workspace <name>] [--parent <task>]... [--outcome "..."] [--verify "..."] [--constraints "..."] [--boundaries "..."]',
-  '      [--stop-when "..."] [--body "..." | --body-file <path|->] [--key <key>] [--chat <chat_id> [--thread <thread_id>]] [--json]',
+  '      [--stop-when "..."] [--body "..." | --body-file <path|->] [--key <key>] [--chat <chat_id> [--thread <thread_id>] [--wake]] [--wake-role <role>] [--json]',
   `  mt kanban task list [${LIST_FILTERS.join('|')}] [--board <name>] [--json]`,
   '  mt kanban task show <task_id> [--board <name>] [--json]',
   '  mt kanban task assign <task_id> <role|lark:<union_id>> [--board <name>] [--json]',
   '  mt kanban task link <parent_id> <child_id> [--board <name>] [--json]',
   '  mt kanban task unblock <task_id> [comment...] [--board <name>] [--json]',
+  '  mt kanban task wake <task_id> on|off|<role> [--board <name>] [--json]',
   '  mt kanban task stop <task_id> [--board <name>] [--json]',
   '  mt kanban task archive <task_id> [--board <name>] [--json]',
   '  mt kanban task comment <task_id> <text...> [--board <name>] [--json]',
@@ -108,7 +110,7 @@ const USAGE = [
   '  mt kanban workflow show <instance> [--board <name>] [--dag | --json]',
   '  mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]... [--json]',
   '  mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>]',
-  '      [--chat <chat_id> [--thread <thread_id>]] [--json]',
+  '      [--chat <chat_id> [--thread <thread_id>] [--wake]] [--wake-role <role>] [--json]',
   '  mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--chat <chat_id> [--thread <thread_id>]] [--json]',
   '  mt kanban workflow archive <instance> [--board <name>] [--json]',
   '  mt kanban people [--json]',
@@ -199,6 +201,12 @@ function refuseInRun(command: string | undefined, rest: readonly string[], io: M
  */
 async function kanban(command: string | undefined, rest: readonly string[], io: MtIo): Promise<number> {
   if (command !== undefined && OPERATOR_GROUPS.includes(command)) {
+    // A woken turn's show and unblock ask the gateway first (wake spec §9.2); on not_woken, as before wakes.
+    const verb = rest[0];
+    if (command === 'task' && asksWake(io.env, verb)) {
+      const woken = await wokenTask(verb, rest.slice(1), io);
+      if (woken !== undefined) return woken;
+    }
     if (inAgentRun(io.env)) return refuseInRun(command, rest, io);
     const operator = withGatewayFile(io);
     return command === 'gate' ? gate(rest, operator) : await operatorCommand(command, rest, operator);

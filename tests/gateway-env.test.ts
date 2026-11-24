@@ -113,7 +113,7 @@ describe('readGatewayEnv', () => {
     expect([...read].filter((name) => !(GATEWAY_ENV_NAMES as readonly string[]).includes(name))).toEqual([]);
   });
 
-  it('knows every MT_ and LARK_ name read from an environment anywhere in src/, but for MT_KANBAN_* and MT_CRON_*', () => {
+  it('knows every MT_ and LARK_ name read from an environment anywhere in src/, but for MT_KANBAN_*, MT_CRON_* and MT_WAKE_*', () => {
     const root = new URL('../src/', import.meta.url);
     const files = readdirSync(root, { recursive: true, encoding: 'utf8' }).filter((f) => f.endsWith('.ts'));
     const read = new Set<string>();
@@ -122,8 +122,8 @@ describe('readGatewayEnv', () => {
     for (const file of files) {
       for (const m of readFileSync(new URL(file, root), 'utf8').matchAll(pattern)) read.add(m[1] ?? '');
     }
-    // An agent's own environment, as a run's is (the cron spec, §7): no gateway setting.
-    const names = [...read].filter((name) => !name.startsWith('MT_KANBAN_') && !name.startsWith('MT_CRON_'));
+    // An agent's own environment, as a run's is (the cron spec, §7, the wake spec §9.2): no gateway setting.
+    const names = [...read].filter((name) => !name.startsWith('MT_KANBAN_') && !name.startsWith('MT_CRON_') && !name.startsWith('MT_WAKE_'));
     // Found at all, so the scan is not vacuous.
     expect(names).toContain('LARK_APP_SECRET');
     expect(names).toContain('MT_CONFIG');

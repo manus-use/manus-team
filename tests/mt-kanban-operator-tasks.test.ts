@@ -245,7 +245,7 @@ describe('mt kanban task new', () => {
     expect(JSON.parse(listed.out)).toEqual({
       ok: true,
       board: 'web-app',
-      tasks: [{ task_id: taskId, status: 'ready', title: 'On web', assignee: null, assignee_kind: null, created_at: getTask(gateway, taskId)?.createdAt, status_since: getTask(gateway, taskId)?.createdAt }],
+      tasks: [{ task_id: taskId, status: 'ready', title: 'On web', assignee: null, assignee_kind: null, created_at: getTask(gateway, taskId)?.createdAt, status_since: getTask(gateway, taskId)?.createdAt, reacts_to: null }],
     });
     expect(await mt(['task', 'list', '--board', 'nowhere'])).toMatchObject({ code: 1, err: 'mt: there is no board nowhere' });
     expect((await mt(['task', 'list', 'finished'])).code).toBe(2);
@@ -259,6 +259,7 @@ describe('the task commands', () => {
     expect(shown.out.split('\n')).toEqual([
       `Show me (${taskId}): ready`,
       'assignee: role default · reviewer: nobody · workspace: not yet fixed · board: default',
+      'Wake: off',
       '',
       '    key ••••',
       '',
@@ -423,7 +424,7 @@ describe('the task commands', () => {
   });
 
   it('takes a task verb after task, and says which it takes', async () => {
-    const takes = 'mt: kanban task takes new, list, show, assign, link, unblock, stop, archive, comment or worktree';
+    const takes = 'mt: kanban task takes new, list, show, assign, link, unblock, wake, stop, archive, comment or worktree';
     for (const argv of [['task'], ['task', 'finish'], ['task', 'board', 'list'], ['task', 'gate', 'list', 'k_1']]) {
       const r = await mt(argv);
       expect(r.code).toBe(2);

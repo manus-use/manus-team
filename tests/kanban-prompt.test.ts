@@ -37,6 +37,12 @@ function task(extra: Partial<TaskRow> = {}): TaskRow {
     createdFromTask: null,
     board: 'default',
     worktree: null,
+    wakeBy: null,
+    wakeDepth: 0,
+    wakeRole: null,
+    reactionOf: null,
+    wakeRoot: null,
+    wakeCursor: 0,
     ...extra,
   };
 }

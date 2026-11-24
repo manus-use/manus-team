@@ -114,6 +114,18 @@ export function getTurn(db: Db, sessionId: string, turnId: string): TurnRow | un
   return row === undefined ? undefined : decode(row);
 }
 
+/**
+ * The session's turn with this idempotency key, if one was made (wake spec
+ * §5.7): how a restart finds whether a woken turn's submit reached the actor,
+ * which writes the turn before anything else.
+ */
+export function turnByKey(db: Db, sessionId: string, idempotencyKey: string): TurnRow | undefined {
+  const row = db
+    .prepare<[string, string], TurnRaw>(`SELECT ${COLS} FROM turns WHERE session_id = ? AND idempotency_key = ?`)
+    .get(sessionId, idempotencyKey);
+  return row === undefined ? undefined : decode(row);
+}
+
 export function openTurns(db: Db, sessionId: string): TurnRow[] {
   const holes = OPEN_STATES.map(() => '?').join(',');
   return db

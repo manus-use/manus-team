@@ -38,6 +38,7 @@ import type {
   TurnTerminal,
 } from '../types.js';
 import { BOOT_ID, approvalNonce, newApprovalId, newTurnId, sendUuid, turnIdempotencyKey } from './ids.js';
+import { redactKnownSecrets } from '../secrets.js';
 import { projectSessionStatus, type StatusView } from './status.js';
 import type { Clock } from '../time.js';
 import { systemClock } from '../time.js';
@@ -102,6 +103,22 @@ export interface SubmitRequest {
   input: PromptInput;
   /** The message this turn's card should quote. See `SendTarget.replyTo`. */
   replyTo?: string;
+  /** A turn the board woke (wake spec §6.2): recorded in its `turn_submitted`, and shown on its card. */
+  origin?: { wake: { id: number; by: string; name: string } };
+  /** Called once, just after `createTurn`: whether this submit made the turn, or found it made (wake spec §5.5). */
+  onTurn?: (turn: { created: boolean }) => void;
+  /** Called once, when the prompt is handed to the agent, after the runtime started (wake spec §5.5). */
+  onPrompted?: () => void;
+}
+
+/** How long a woken turn's setter's name may be in its `turn_submitted`: a name's cut in chat (kanban spec §9.3). */
+const WAKE_NAME_MAX = 80;
+
+/** A woken turn's setter's name as recorded (wake spec §6.1): masked, on one line, cut at 80. */
+function wakeName(name: string): string {
+  const line = redactKnownSecrets(name).replace(/\s+/g, ' ').trim();
+  const chars = [...line];
+  return chars.length <= WAKE_NAME_MAX ? line : `${chars.slice(0, WAKE_NAME_MAX - 1).join('')}…`;
 }
 
 export interface CardResolution {
@@ -262,6 +279,15 @@ export class SessionActor {
     return result;
   }
 
+  /** A submitter's callback (wake spec §6.1): a throw from it is noted, and never fails the turn. */
+  #callback(name: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (err) {
+      this.#note(`${name} threw: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   async #runTurn(req: SubmitRequest): Promise<TurnTerminal> {
     const session = this.#requireSession();
     const idempotencyKey = turnIdempotencyKey(req.appId, req.messageId);
@@ -276,6 +302,8 @@ export class SessionActor {
       },
       this.#clock.now(),
     );
+
+    this.#callback('onTurn', () => req.onTurn?.({ created }));
 
     // A redelivery that got past `seen_messages` lands here. The turn already
     // exists, so re-prompting would run the same instruction twice -- which for an
@@ -299,6 +327,9 @@ export class SessionActor {
         paths: req.input.paths,
         messageId: req.messageId,
         ...(req.replyTo === undefined ? {} : { replyTo: req.replyTo }),
+        ...(req.origin === undefined
+          ? {}
+          : { wake: { id: req.origin.wake.id, by: req.origin.wake.by, name: wakeName(req.origin.wake.name) } }),
       },
     });
 
@@ -330,6 +361,8 @@ export class SessionActor {
 
       setTurnState(this.#db, this.sessionId, turnId, 'running');
       promptSent = true;
+      // The prompt reaches the runtime here: the waker counts its wake delivered (wake spec §5.5).
+      this.#callback('onPrompted', () => req.onPrompted?.());
 
       let terminal: TurnTerminal | undefined;
       for await (const event of runtime.prompt(req.input)) {

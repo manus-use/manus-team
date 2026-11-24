@@ -53,6 +53,10 @@ export interface NewTaskCommand {
   workspace?: string;
   parents: string[];
   contract: Contract;
+  /** The `wake:` line (wake spec §3.1): on, or off; absent, off. */
+  wake?: boolean;
+  /** The `wake:` line naming a role (wake spec §19.1), with `wake` true: its outcomes make a task for that role. */
+  wakeRole?: string;
 }
 
 export type KanbanCommand =
@@ -65,6 +69,7 @@ export type KanbanCommand =
   | { verb: 'workspace'; taskId: string; workspace: string }
   | { verb: 'comment'; taskId: string; text: string }
   | { verb: 'unblock'; taskId: string; comment: string | undefined }
+  | { verb: 'wake'; taskId: string; on: boolean; role?: string }
   | { verb: 'stop'; taskId: string }
   | { verb: 'archive'; taskId: string }
   | { verb: 'gate add'; taskId: string; command: string; timeoutS: number | undefined }
@@ -88,7 +93,7 @@ export type WorkflowCommand =
   | { verb: 'workflow list' }
   | { verb: 'workflow instances'; all: boolean }
   | { verb: 'workflow show' | 'workflow archive'; instanceId: string }
-  | { verb: 'workflow preview' | 'workflow start'; name: string; pairs: ParamPair[] };
+  | { verb: 'workflow preview' | 'workflow start'; name: string; pairs: ParamPair[]; wake?: true; wakeRole?: string };
 
 /** What `board set` changes (spec §16.6): a board's own max_running, or its workspace; null clears either. */
 export interface BoardSetting {
@@ -117,6 +122,7 @@ export const TASK_VERBS = [
   'workspace',
   'comment',
   'unblock',
+  'wake',
   'stop',
   'archive',
   'done',
@@ -135,7 +141,7 @@ export function typed(verb: KanbanCommand['verb']): string {
 /** Each verb's usage line, as `/kanban help` shows it. */
 export const USAGE = {
   help: '/kanban help',
-  new: '/kanban task new <title>, then lines assignee:, reviewer:, workspace:, parent:, outcome:, verify:, constraints:, boundaries:, stop when:, and the body',
+  new: '/kanban task new <title>, then lines assignee:, reviewer:, workspace:, parent:, outcome:, verify:, constraints:, boundaries:, stop when:, wake:, and the body',
   list: `/kanban task list [${LIST_FILTERS.join('|')}]`,
   show: '/kanban task show <task>',
   assign: '/kanban task assign <task> <role or @person>',
@@ -143,6 +149,7 @@ export const USAGE = {
   workspace: '/kanban task workspace <task> <workspace>',
   comment: '/kanban task comment <task> <text>',
   unblock: '/kanban task unblock <task> [comment]',
+  wake: '/kanban task wake <task> on|off|<role>',
   stop: '/kanban task stop <task>',
   archive: '/kanban task archive <task>',
   'gate add': '/kanban gate add <task> [--timeout <seconds>] <command>',
@@ -184,6 +191,7 @@ const FIELDS = {
   constraints: 'constraints',
   boundaries: 'boundaries',
   'stop when': 'stop_when',
+  wake: 'wake',
 } as const;
 type FieldLabel = keyof typeof FIELDS;
 
@@ -192,7 +200,7 @@ const ZW = '\u200B-\u200D\u2060\uFEFF';
 
 /** A field line; a zero-width character next to the colon is passed over, as the line start's is. */
 const FIELD_LINE = new RegExp(
-  `^(assignee|reviewer|workspace|parent|outcome|verify|constraints|boundaries|stop[ \\t]+when)[ \\t${ZW}]*:[ \\t${ZW}]*(.*)$`,
+  `^(assignee|reviewer|workspace|parent|outcome|verify|constraints|boundaries|stop[ \\t]+when|wake)[ \\t${ZW}]*:[ \\t${ZW}]*(.*)$`,
   'i',
 );
 
@@ -374,6 +382,15 @@ function parseTask(text: string): ParsedKanban {
       const comment = text.trim();
       return { ok: true, command: { verb: 'unblock', taskId, comment: comment === '' ? undefined : comment } };
     }
+    case 'wake': {
+      const w = words(rest, 2);
+      const word = w?.[1];
+      if (w?.[0] === undefined || word === undefined) return usage('wake');
+      // `on` and `off` are the words, never roles; any other word names a role (wake spec §19.1).
+      const on = word.toLowerCase();
+      if (on === 'on' || on === 'off') return { ok: true, command: { verb: 'wake', taskId: w[0], on: on === 'on' } };
+      return { ok: true, command: { verb: 'wake', taskId: w[0], on: true, role: word } };
+    }
     case 'done':
     case 'approve': {
       // A person finishing, or approving, may say nothing more.
@@ -521,12 +538,31 @@ function parseNew(text: string): ParsedKanban {
     if (seen.has(label)) return { ok: false, usage: `\`${label}:\` is given twice.` };
     seen.add(label);
     const field = FIELDS[label];
+    if (field === 'wake') {
+      // On or off (wake spec §3.1): chat takes field lines, never a flag.
+      const on = value.toLowerCase();
+      if (on === 'on' || on === 'off') {
+        out.wake = on === 'on';
+        continue;
+      }
+      // Any other one word names a role (wake spec §19.1).
+      if (!/^\S+$/.test(value)) return { ok: false, usage: '`wake:` is `on`, `off` or a role.' };
+      out.wake = true;
+      out.wakeRole = value;
+      continue;
+    }
     if (field === 'assignee' || field === 'reviewer' || field === 'workspace') out[field] = value;
     else out.contract[field] = value;
   }
   out.body = body.join('\n').replace(/^\s*\n/, '').trimEnd();
   return { ok: true, command: out };
 }
+
+/**
+ * A start's last word, `wake`, alone, or `wake:<role>`, one word (wake spec
+ * §19.1): after white space, or as its only word.
+ */
+const WAKE_WORD = /(?:^|\s)wake(?::(\S+))?\s*$/i;
 
 /** What `/kanban workflow` says with no verb, or one it does not take. */
 const WORKFLOW_TAKES = `\`/kanban workflow\` takes ${WORKFLOW_VERBS.map((v) => `\`${USAGE[`workflow ${v}`]}\``).join(', ')}.`;
@@ -555,8 +591,24 @@ function parseWorkflow(text: string, mentions: readonly string[]): ParsedKanban 
       const command = `workflow ${verb}` as const;
       const [name, after] = shift(rest);
       if (name === '') return usage(command);
-      const pairs = parsePairs(after, mentions, command);
-      return pairs.ok ? { ok: true, command: { verb: command, name, pairs: pairs.pairs } } : pairs;
+      // A start's trailing bare word `wake` (wake spec §3.1), which no `key=value` pair can be: every member's wake.
+      const bare = verb === 'start' ? WAKE_WORD.exec(after) : null;
+      const pairs = parsePairs(bare === null ? after : after.slice(0, bare.index), mentions, command);
+      if (!pairs.ok) return pairs;
+      // `on` and `off` are words, never roles (wake spec §19.1): `wake:on` is `wake`, and `wake:off` no wake.
+      const word = bare?.[1];
+      const off = word?.toLowerCase() === 'off';
+      const role = word === undefined || ['on', 'off'].includes(word.toLowerCase()) ? undefined : word;
+      return {
+        ok: true,
+        command: {
+          verb: command,
+          name,
+          pairs: pairs.pairs,
+          ...(bare === null || off ? {} : { wake: true as const }),
+          ...(role === undefined ? {} : { wakeRole: role }),
+        },
+      };
     }
     default:
       return { ok: false, usage: WORKFLOW_TAKES };
