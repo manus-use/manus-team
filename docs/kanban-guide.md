@@ -1327,7 +1327,8 @@ vendor-eval: ok, 3 steps; params: topic (required), vendors (list, required), re
 
 The gateway checks them at startup too, and notes the broken ones; a broken workflow does not
 stop it. A workflow whose `board` does not exist, or is archived, is noted there as not usable;
-`mt workflow check` names a file's board, but opens no database, so it leaves that to the gateway. The files are read at each preview and start, so an edit needs no restart.
+`mt workflow check` names a file's board, but opens no database, so it leaves that to the
+gateway. The files are read at each preview and start, so an edit needs no restart.
 
 ### Starting it
 
@@ -1348,8 +1349,9 @@ stop it. A workflow whose `board` does not exist, or is archived, is noted there
   that lands in `assignee` or `reviewer`.
 - **An operator's command**, as `/kanban task new` is: a start starts agents. The tasks go on the
   file's board when it names one, else on this chat's board, and this chat follows every one;
-  the reply names a board that is not this chat's, with `/kanban task list board:<name>` to list it; in a group the reply opens a thread of its own,
-  the instance's, where its cards and notices go.
+  the reply names a board that is not this chat's, with `/kanban task list board:<name>` to list
+  it; in a group the reply opens a thread of its own, the instance's, where its cards and notices
+  go.
 - **One failure refuses the whole start**, naming the task, and nothing is made:
 
   > Not done: evaluate:2, step evaluate, item "globex": role "evaluator" is not configured

@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   checkWorkflow,
   listWorkflows,
@@ -274,6 +274,21 @@ describe('the service', () => {
       expect(start({ ...op, board: 'default' })).toMatchObject({ ok: false, code: 'other_board' });
     });
 
+    it('counts a root that is no mapping, and a board outside the grammar, as naming none: other_board', () => {
+      made(start({ idempotencyKey: 'lark:om_5' }));
+      writeFileSync(join(wf, 'vi-sync.yaml'), '- board: vi\n');
+      expect(start({ idempotencyKey: 'lark:om_5' })).toMatchObject({ ok: false, code: 'other_board' });
+      writeFileSync(join(wf, 'vi-sync.yaml'), VI_SYNC.replace('board: vi', 'board: none'));
+      expect(start({ idempotencyKey: 'lark:om_5' })).toMatchObject({ ok: false, code: 'other_board' });
+    });
+
+    it("answers an instance on the path's board without reading the file", () => {
+      made(start({ board: 'vi', idempotencyKey: 'lark:om_6' }));
+      const read = vi.spyOn(service, 'workflowBoard');
+      expect(made(start({ board: 'vi', idempotencyKey: 'lark:om_6' })).existing).toBe(true);
+      expect(read).not.toHaveBeenCalled();
+    });
+
     it('refuses invalid a key reused for another workflow whose file is missing, its instance on another board', () => {
       made(start({ idempotencyKey: 'lark:om_9' }));
       expect(start({ workflow: 'gone', idempotencyKey: 'lark:om_9' })).toMatchObject({ ok: false, code: 'invalid' });
@@ -315,6 +330,17 @@ describe('the service', () => {
       unlinkSync(join(wf, 'vi-sync.yaml'));
       const gone = apply({ ...dag, board: 'default' });
       expect(gone.ok && 'instance' in gone ? gone.instance.board : gone).toBe('default');
+    });
+
+    it('checks nothing for a file that does not parse, or names no board', () => {
+      createBoard(h.db, 'vi', ALICE, NOW);
+      const edited = { ...preview(), board: 'default' };
+      writeFileSync(join(wf, 'vi-sync.yaml'), 'board: vi\nsteps: [unclosed\n');
+      const broken = apply(edited);
+      expect(broken.ok && 'instance' in broken ? broken.instance.board : broken).toBe('default');
+      writeFileSync(join(wf, 'vi-sync.yaml'), PLAIN);
+      const plain = apply(edited);
+      expect(plain.ok && 'instance' in plain ? plain.instance.board : plain).toBe('default');
     });
 
     it("refuses an apply on its file's archived board naming the workflow", () => {

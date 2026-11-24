@@ -222,7 +222,9 @@ function startupWorkflows(config: GatewayConfig, team: Team): string[] {
   const dir = join(config.home, 'workflows');
   try {
     const list = listWorkflows(dir, { roles: team.roles, workspaces: new Set(team.workspaces.keys()), supervisedRoles: true });
-    // The boards, read-only, before the gateway opens and migrates its database (workflows spec §19.4).
+    // The boards, read-only, before the gateway opens and migrates its database, and only when a
+    // usable workflow names one (workflows spec §19.4): with none, nothing is opened and nothing said.
+    if (!list.usable.some((w) => w.board !== undefined)) return workflowLines(list);
     const boards = boardsAt(config.dbPath);
     if (!boards.ok) return [`workflow boards are not checked: the database cannot be read: ${boards.why}`, ...workflowLines(list)];
     return workflowLines(withBoards(list, boards.boards));

@@ -1734,6 +1734,9 @@ preview both call, so the routing is the same everywhere:
     rather than by looking for the table: the boards are what the migration makes, `default`
     alone, so a file naming `default` is usable and one naming another board is said to name one
     that does not exist, which is so once the gateway starts.
+  - **Only when a usable workflow names a board** is the database read at all; with none, the
+    startup opens nothing, judges nothing against boards and says no line about them, so without
+    the key the startup is as before.
   - **A database that cannot be read** leaves the boards unchecked, with one line, `workflow boards
     are not checked: the database cannot be read: <why>`, which `mt service check` prints as a
     warning, as it prints every line but the summary; the files are judged as today.
@@ -1981,7 +1984,8 @@ Where the code forced a detail the design did not settle, thirteen decisions:
    or another says the key is being used where its instance does not belong, which is what
    `other_board` is for; and an unreadable file says nothing either way, so only the board
    comparison is waived, the source and the name still refusing a key used for something else, as a
-   missing file must not refuse a repeat (§6).
+   missing file must not refuse a repeat (§6). The waiver makes nothing, so it also answers a
+   repeat whose file never named a board.
 2. **Apply checks the DAG against the file as it is now**, by its `workflow` label, since nothing
    in a DAG says where it came from; with a light read, so a file broken otherwise still holds its
    DAGs to its board, and no file means no check. A DAG with no board counts as `default`. A guard

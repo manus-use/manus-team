@@ -141,7 +141,7 @@ Each tied to §19.
 
 - [ ] **Step 1: Tests**, three, in `tests/kanban-workflow-board-fronts.test.ts`'s `describe('the startup')`. `loadStartup` over a home whose workflow names `vi`: with no database, `workflow vi-sync is not usable: its board vi does not exist (create it with /kanban board create vi, or mt kanban board create vi)` and `not usable: vi-sync` in the summary; with `vi` archived, the archived words; with `vi` live, usable; a workflow naming `default`, usable with no database; a locked database, the line `workflow boards are not checked: the database cannot be read: …`, the workflow judged by its file.
 - [ ] **Step 2: Verify they fail**: on Task 5's tree the three fail, the workflow usable (`Tests  3 failed | 3 passed (6)`).
-- [ ] **Step 3: Implement.** `startupWorkflows` reads `boardsAt(config.dbPath)`, applies `withBoards`, and puts the unreadable line first.
+- [ ] **Step 3: Implement.** `startupWorkflows` reads `boardsAt(config.dbPath)`, applies `withBoards`, and puts the unreadable line first. *After the final review:* it reads the boards only when a usable workflow names one, so with none it opens nothing and says nothing of boards.
 - [ ] **Step 4: Run everything.** Unit: `Tests  4 failed | 3392 passed (3396)`, three new; the same four docs failures. `mt service check` needs no change: its `startupWarnings` prints every line but the summary as a warning, which `tests/kanban-workflow-check.test.ts`'s "mt service check's warnings" already tests.
 - [ ] **Step 5: Commit** "Say at startup when a workflow's board is missing or archived".
 
@@ -215,3 +215,7 @@ On a test home, never `~/.manus-team`:
 4. `mt kanban workflow start vi-sync --board default`: refused `other_board`.
 5. `mt kanban workflow preview vi-sync --json > dag.json`, edit `board` to `default`, `mt kanban workflow apply dag.json --dry-run`: refused `other_board`.
 6. `/kanban board archive vi` once its tasks are done: the next start is refused with the archived words, and `/kanban workflow list` shows the workflow as not usable.
+
+## After the final review
+
+One commit, "Say in chat's help where a start's tasks go, and read boards at startup only when a workflow names one": chat's help names the file's board and `task list board:`; the startup reads boards only when a usable workflow names one; seven tests more (step 0 with a non-mapping root and an out-of-grammar board, an instance on the path's board answered without reading the file, an apply with an unparseable file or one naming no board, the reply's pointer kept when task lines are cut, the list's 30-line hint carrying `board:`, a sender without talk tier never reaching the board through the router, the startup reading no database when no workflow names a board). Unit `Tests  3419 passed (3419)`, e2e `Tests  183 passed (183)`, typecheck and `npm run build` clean.

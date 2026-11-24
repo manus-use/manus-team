@@ -9,6 +9,7 @@ import { migrate, openDb } from '../src/db/open.js';
 import { SCHEMA_DIR } from './helpers/db.js';
 import { loadStartup } from '../src/index.js';
 import { KanbanChat } from '../src/kanban/chat.js';
+import { renderStarted } from '../src/kanban/chat-render.js';
 import { PeopleDirectory } from '../src/kanban/people.js';
 import { KanbanService } from '../src/kanban/service.js';
 import type { BindingKey, InboundMessage, Principal } from '../src/types.js';
@@ -16,7 +17,7 @@ import { testDb, type TestDb } from './helpers/db.js';
 import { role } from './helpers/dispatch.js';
 import { runMt } from '../src/cli/mt.js';
 import { clearSecrets } from '../src/secrets.js';
-import { ALICE, NOW } from './helpers/kanban.js';
+import { ALICE, NOW, newTask } from './helpers/kanban.js';
 
 /**
  * A workflow's own board at the fronts (workflows spec §19.4, §19.5): the boards
@@ -119,6 +120,19 @@ describe('the startup', () => {
     rmSync(join(root, 'home', 'team.db'));
     boards(['vi']);
     expect(loadStartup(env).workflows).toEqual(['workflows: vi-sync']);
+  });
+
+  it('reads no database, and says nothing of boards, when no usable workflow names a board', () => {
+    const env = home({ 'plain.yaml': fileOn('') });
+    const holder = new Database(join(root, 'home', 'team.db'));
+    holder.pragma('journal_mode = DELETE');
+    holder.exec('CREATE TABLE kanban_boards (name TEXT, archived_at INTEGER); PRAGMA user_version = 6; BEGIN EXCLUSIVE; INSERT INTO kanban_boards VALUES (1, NULL);');
+    try {
+      expect(loadStartup(env).workflows).toEqual(['workflows: plain']);
+    } finally {
+      holder.exec('ROLLBACK');
+      holder.close();
+    }
   });
 
   it('says once when the database cannot be read, and judges the files alone', () => {
@@ -340,9 +354,26 @@ describe('chat', () => {
       );
     });
 
+    it("carries board: in the 30-line cut's hint", async () => {
+      for (let n = 0; n < 31; n += 1) newTask(t.db, { board: 'vi', title: `Task ${n}` });
+      const lines = (await say('task list board:vi')).split('\n');
+      expect(lines.at(-1)).toBe('… and 1 more. `/kanban task list <todo|ready|running|review|reviewing|blocked|done|archived|all> board:vi` narrows it.');
+    });
+
     it('is talk tier, as the list is: a sender without operator tier is answered, where a start is refused', async () => {
       expect(await say('task list board:vi', GUEST)).toBe('No open tasks on board vi. `/kanban task list all board:vi` shows done and archived ones too.');
       expect(await say('workflow start vi-sync', GUEST)).toMatch(/needs operator permission/);
     });
+  });
+});
+
+describe("the reply's pointer", () => {
+  it('is kept when task lines are cut to fit', () => {
+    const tasks = Array.from({ length: 100 }, (_, n) => ({ taskId: `k_${n}`, title: `${'A long title '.repeat(40)}${n}`, assignee: 'worker', assigneeKind: 'role' as const }));
+    const text = renderStarted({ instance: { instanceId: 'w_1', name: 'vi-sync', board: 'vi' }, tasks, count: 100, people: false }, 'chat', (a) => `role ${a.name}`, undefined, 'default');
+    const lines = text.split('\n');
+    expect(text.length).toBeLessThan(3800);
+    expect(lines.at(-2)).toBe('Its tasks are on board **vi**: `/kanban task list board:vi` lists that board.');
+    expect(lines.at(-3)).toMatch(/^… and \d+ more: `\/kanban workflow show w_1` lists them all\.$/);
   });
 });

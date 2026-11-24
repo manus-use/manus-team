@@ -738,10 +738,10 @@ preview` shows what a start would make. A workflow has no conditions: one that m
 deciding step, whose agent reads its parents' handoffs and creates the branch it chose. Params
 never reach a gate. `mt workflow check` checks the files, and the gateway says at startup which
 are usable, a file whose `board` is missing or archived among the unusable; a broken one does not
-stop it. At the terminal, `mt kanban workflow preview … --json`
-writes the DAG a start would make as a file, which `mt kanban workflow apply` makes, with
-`--dry-run` to check it first; an agent starts a workflow with `mt kanban start-workflow`, or
-makes a graph of its own at once with `mt kanban apply-dag`, which takes no gates.
+stop it. At the terminal, `mt kanban workflow preview … --json` writes the DAG a start would make
+as a file, which `mt kanban workflow apply` makes, with `--dry-run` to check it first; an agent
+starts a workflow with `mt kanban start-workflow`, or makes a graph of its own at once with `mt
+kanban apply-dag`, which takes no gates.
 
 ```
 /kanban task new Draft the Q3 summary
