@@ -139,10 +139,10 @@ Each tied to §19.
 
 **Files:** `src/index.ts`; test `tests/kanban-workflow-board-fronts.test.ts`.
 
-- [ ] **Step 1: Tests.** `loadStartup` over a home whose workflow names `vi`: with no database, `workflow vi-sync is not usable: its board vi does not exist (create it with /kanban board create vi, or mt kanban board create vi)` and `not usable: vi-sync` in the summary; with `vi` archived, the archived words; with `vi` live, usable; a workflow naming `default`, usable with no database; a locked database, the line `workflow boards are not checked: the database cannot be read: …`, the workflow judged by its file.
-- [ ] **Step 2: Verify they fail**: the workflow is usable.
+- [ ] **Step 1: Tests**, three, in `tests/kanban-workflow-board-fronts.test.ts`'s `describe('the startup')`. `loadStartup` over a home whose workflow names `vi`: with no database, `workflow vi-sync is not usable: its board vi does not exist (create it with /kanban board create vi, or mt kanban board create vi)` and `not usable: vi-sync` in the summary; with `vi` archived, the archived words; with `vi` live, usable; a workflow naming `default`, usable with no database; a locked database, the line `workflow boards are not checked: the database cannot be read: …`, the workflow judged by its file.
+- [ ] **Step 2: Verify they fail**: on Task 5's tree the three fail, the workflow usable (`Tests  3 failed | 3 passed (6)`).
 - [ ] **Step 3: Implement.** `startupWorkflows` reads `boardsAt(config.dbPath)`, applies `withBoards`, and puts the unreadable line first.
-- [ ] **Step 4: Run everything.** Unit `+N`; `tests/mt-service-check.test.ts` unchanged.
+- [ ] **Step 4: Run everything.** Unit: `Tests  4 failed | 3392 passed (3396)`, three new; the same four docs failures. `mt service check` needs no change: its `startupWarnings` prints every line but the summary as a warning, which `tests/kanban-workflow-check.test.ts`'s "mt service check's warnings" already tests.
 - [ ] **Step 5: Commit** "Say at startup when a workflow's board is missing or archived".
 
 ## Task 7: mt workflow check
