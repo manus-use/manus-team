@@ -197,10 +197,10 @@ Each tied to §19.
 
 **Files:** `docs/kanban-guide.md`, `README.md`, `tests/docs-examples.test.ts`, `tests/docs-wake.test.ts`.
 
-- [ ] **Step 1: Tests.** `tests/docs-examples.test.ts`: the terminal start test asserts the answer's `board` is `reports` for weekly-report, and the chat start test the instance's board; `tests/docs-wake.test.ts` creates `reports` with `mt kanban board create reports` before its start.
-- [ ] **Step 2: Verify**: both files pass once `reports` exists.
+- [ ] **Step 1: Tests.** `tests/docs-examples.test.ts`: the terminal start test asserts the answer's `board` is `reports` for weekly-report, and the chat start test the instance's board; `tests/docs-wake.test.ts` creates `reports` (`createBoard`, on the database it migrates) before its start.
+- [ ] **Step 2: Verify**: `docs-wake`'s start, which failed `unknown_board` since Task 8, passes; both files `Tests  37 passed (37)`.
 - [ ] **Step 3: The documents.** The guide's §12 ("The file", "Starting it", "From a terminal, and from an agent") and §10's task-list bullet; the README's workflow notes, its chat command table's `/kanban task list` row, and its line on what acts on the chat's board.
-- [ ] **Step 4: Run everything.** Unit: everything passes but a flake of `tests/update-run.test.ts`; e2e `183 passed (183)`; `npm run build` clean.
+- [ ] **Step 4: Run everything.** Unit: `Tests  3412 passed (3412)`, 44 more than the baseline's 3368; e2e `Tests  183 passed (183)`; typecheck and `npm run build` clean.
 - [ ] **Step 5: Commit** "Document a workflow's board and chat's board option in the guide and the README".
 
 ---

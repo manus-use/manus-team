@@ -351,7 +351,9 @@ roles/implementer/
 
 Workflows live beside the roles, one file each, `$MT_HOME/workflows/<name>.yaml`, named as roles
 are; the files are read at each preview and start, so an edit needs no restart. `mt workflow
-check` checks them, and the board guide's section 12 says what they hold.
+check` checks them, and the board guide's section 12 says what they hold. A file may name the board
+its tasks go on, `board: <name>`; the gateway says at startup when that board is missing or
+archived.
 
 ```yaml
 # roles/implementer/config.yaml
@@ -735,7 +737,8 @@ tasks and their links at once, as one instance, `w_…`, or none of them; `/kanb
 preview` shows what a start would make. A workflow has no conditions: one that must branch has a
 deciding step, whose agent reads its parents' handoffs and creates the branch it chose. Params
 never reach a gate. `mt workflow check` checks the files, and the gateway says at startup which
-are usable; a broken one does not stop it. At the terminal, `mt kanban workflow preview … --json`
+are usable, a file whose `board` is missing or archived among the unusable; a broken one does not
+stop it. At the terminal, `mt kanban workflow preview … --json`
 writes the DAG a start would make as a file, which `mt kanban workflow apply` makes, with
 `--dry-run` to check it first; an agent starts a workflow with `mt kanban start-workflow`, or
 makes a graph of its own at once with `mt kanban apply-dag`, which takes no gates.
@@ -773,7 +776,7 @@ typed without `task`, such as `/kanban new`, is an unknown command.
 | Command | Tier |
 |---|---|
 | `/kanban task new <title>` + lines | operate |
-| `/kanban task list [todo\|ready\|running\|review\|reviewing\|blocked\|done\|archived\|all]` | talk; without a status, the tasks someone may still act on |
+| `/kanban task list [todo\|ready\|running\|review\|reviewing\|blocked\|done\|archived\|all] [board:<name>]` | talk; without a status, the tasks someone may still act on; with `board:`, another board's, the chat staying on its own |
 | `/kanban task show <task>` | talk: the task, its parents and children with their status, its contract, gates, runs, latest output and comments; for a claimable task the dispatcher passes over, a `waiting:` line for each reason |
 | `/kanban task assign <task> <role or @person>` | operate: an undecided run ends `superseded` |
 | `/kanban task link <parent> <child>` | operate: refused for a child past `open`, or with a run open |
@@ -839,8 +842,9 @@ tasks with its own list, its turn in each dispatcher pass, and optionally its ow
 `max_running`, inside the gateway's, and default workspace. One database and one dispatcher
 serve every board. A board called `default` always exists, holds every task from before boards,
 and is where every chat starts; `/kanban board use` moves a chat, and `/kanban task new` and
-`/kanban task list` act on the chat's board. `/kanban task show` and the commands that name a task work
-on any board, by id. A task's follow-ups, its parents and its links stay on its board, and its
+`/kanban task list` act on the chat's board, though `board:<name>` lists another, and a workflow
+whose file names a board puts its tasks there. `/kanban task show` and the commands that name a
+task work on any board, by id. A task's follow-ups, its parents and its links stay on its board, and its
 notices go to the chat it was created in, as before. One agent at a time per workspace still
 holds across boards. See section 10 of [docs/kanban-guide.md](docs/kanban-guide.md). From a
 terminal, `mt kanban board …` and `mt kanban task new|list --board <name>` do the same (see "The mt

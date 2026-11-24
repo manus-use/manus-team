@@ -1112,7 +1112,9 @@ bot can move between boards as you need.
   `default`.
 - `/kanban task list` shows this chat's board alone. On a board other than `default`, a line of its
   own names the board above the tasks; on `default` there is none, as before. `all` still means
-  every status, on this board.
+  every status, on this board. `/kanban task list board:<name>`, as `/kanban task list blocked
+  board:vi`, shows another board's tasks instead, an archived one's too, and leaves the chat on its
+  board.
 - `/kanban task show k_…` shows a task on any board, by its id, and names its board once any board
   but `default` is involved.
 - Every other command that names a task (`assign`, `comment`, `approve` and the rest) works on
@@ -1313,6 +1315,8 @@ steps:
   error. A gate that needs a value names it as an environment variable, `$NAME`, from the role's
   environment.
 - **At most 100 tasks** an instance, and a file of at most 64 KiB.
+- **`board: <name>`**, at the top beside `description`, puts every task of the workflow on that
+  board, whichever chat starts it. Without it, the tasks go where the start is made, as below.
 
 `mt workflow check` reads the files, and says of each whether it is usable, and why not:
 
@@ -1322,7 +1326,8 @@ vendor-eval: ok, 3 steps; params: topic (required), vendors (list, required), re
 ```
 
 The gateway checks them at startup too, and notes the broken ones; a broken workflow does not
-stop it. The files are read at each preview and start, so an edit needs no restart.
+stop it. A workflow whose `board` does not exist, or is archived, is noted there as not usable;
+`mt workflow check` names a file's board, but opens no database, so it leaves that to the gateway. The files are read at each preview and start, so an edit needs no restart.
 
 ### Starting it
 
@@ -1341,8 +1346,9 @@ stop it. The files are read at each preview and start, so an edit needs no resta
   is comma-separated, or its key repeated, and a quoted value is one item, so
   `vendors="Acme, Inc"` is one vendor. A person is an @-mention, `owner=@Alice Smith`, for a param
   that lands in `assignee` or `reviewer`.
-- **An operator's command**, as `/kanban task new` is: a start starts agents. The tasks go on this
-  chat's board, and this chat follows every one; in a group the reply opens a thread of its own,
+- **An operator's command**, as `/kanban task new` is: a start starts agents. The tasks go on the
+  file's board when it names one, else on this chat's board, and this chat follows every one;
+  the reply names a board that is not this chat's, with `/kanban task list board:<name>` to list it; in a group the reply opens a thread of its own,
   the instance's, where its cards and notices go.
 - **One failure refuses the whole start**, naming the task, and nothing is made:
 
@@ -1404,7 +1410,8 @@ names none, is refused by the check: set its `workspace`.
 
 At the terminal, `mt kanban workflow start vendor-eval --param topic="log storage" --param
 vendors=acme,globex --key ls-1` starts it, with `--board` and `--json` as the other commands
-take them, and `mt kanban workflow preview … --json > dag.json` writes the **DAG** a start would
+take them (for a file that names its board, `--board` may be left out, and any other board is
+refused), and `mt kanban workflow preview … --json > dag.json` writes the **DAG** a start would
 make: a JSON file of every task, its parents by ref, and its gates. Edit it if need be, check it
 with `mt kanban workflow apply dag.json --dry-run`, which lists every task and gate command and
 makes nothing, and make it with `mt kanban workflow apply dag.json --key ls-1` (recipe 4). `mt
@@ -1417,7 +1424,8 @@ instance and its tasks. A param that lands in a person field, and a DAG's `assig
 `reviewer`, take `lark:<union_id>`, checked at the start and by `apply --dry-run`; the preview
 opens no database, so it leaves people unchecked and says so.
 
-An agent starts a workflow from its run with `mt kanban start-workflow < start.json`, as
+An agent's run starts a workflow on its own task's board, and a file naming another board is
+refused. An agent starts a workflow from its run with `mt kanban start-workflow < start.json`, as
 `{"workflow": "vendor-eval", "params": {"topic": "log storage", "vendors": ["acme", "globex"]}}`,
 and makes a graph of its own at once with `mt kanban apply-dag < dag.json` (recipe 3), which
 takes no gates: gates are the operator's.

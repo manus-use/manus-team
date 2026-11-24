@@ -433,6 +433,8 @@ describe('/kanban workflow start and preview', () => {
         };
         const r = command.verb === 'workflow start' ? service.startWorkflow(req) : service.previewWorkflow(req);
         expect(r.ok ? 'ok' : r.message, where(b)).toBe('ok');
+        // weekly-report names its board, so a chat on default starts it there (workflows spec §19.2).
+        if (r.ok && 'instance' in r && command.name === 'weekly-report') expect(r.instance.board, where(b)).toBe('reports');
         n += 1;
       }
     }
@@ -448,6 +450,7 @@ describe('/kanban workflow start and preview', () => {
         const argv = [...shellWords(c.command).slice(1), '--json'];
         const first = await h.mt(argv);
         expect(first.code, `${where(b)}: ${first.out}${first.err}`).toBe(0);
+        if (argv.includes('weekly-report')) expect(JSON.parse(first.out).board, where(b)).toBe('reports');
         const again = await h.mt(argv);
         expect(JSON.parse(again.out), where(b)).toMatchObject({ ok: true, existing: true, instance_id: JSON.parse(first.out).instance_id });
         n += 1;
