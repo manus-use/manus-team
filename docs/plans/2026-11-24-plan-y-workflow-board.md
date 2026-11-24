@@ -120,9 +120,9 @@ Each tied to §19.
 **Files:** `src/kanban/service.ts`; test `tests/kanban-workflow-board.test.ts`.
 
 - [ ] **Step 1: Tests.** A preview's DAG applied on `vi`; its `board` edited to `default`, or deleted: `apply` and a dry run refused `other_board`, `the DAG names workflow vi-sync, which puts its tasks on board vi, not default`; with `workflow: null`, made on `default`; with the file removed, made; a repeat answered before the check. `vi` archived after the preview: the apply refused with the workflow's message. `workflows()` lists a workflow on a missing board as not usable; `startWorkflow` of an unknown name leaves it out of the usable ones. `workflowBoard('vi-sync')` and `boardNamed('vi')`.
-- [ ] **Step 2: Verify they fail**: the edited DAG is made.
+- [ ] **Step 2: Verify they fail**: on Task 3's tree four of the five new tests fail, the edited DAG made (`Tests  4 failed | 18 passed (22)`); the one with `workflow: null` and a removed file passes there already, a guard that the check stays narrow.
 - [ ] **Step 3: Implement.** In `applyDag`, after the repeat and for a caller not a run, with `shaped.dag.workflow !== null`: `workflowBoard`; on `{ file: 'read', board }` a board other than `shaped.dag.board ?? DEFAULT_BOARD` refused, and the same board passed to `#checkDag` as the workflow's. `#boards()` from `boardsOf(this.#db, { archived: true })`; `workflows()` and `#usable` apply `withBoards`. `boardNamed(name)` is `getBoard`.
-- [ ] **Step 4: Run everything.** Unit `+N`.
+- [ ] **Step 4: Run everything.** Unit: `Tests  4 failed | 3386 passed (3390)`, five new; the same four docs failures.
 - [ ] **Step 5: Commit** "Hold an applied DAG to its workflow's board, and judge the boards in the service's lists".
 
 ## Task 5: The boards at a path

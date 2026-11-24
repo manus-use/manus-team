@@ -5,6 +5,7 @@ import * as board from '../db/kanban.js';
 import {
   boardList,
   boardSummaries,
+  boardsOf,
   cardReading,
   chatBoardOf,
   gatesOf,
@@ -60,6 +61,7 @@ import {
   readWorkflow,
   startBoard,
   usableMessage,
+  withBoards,
   workflowBoard,
   type BoardPath,
   type GivenParams,
@@ -1625,7 +1627,7 @@ export class KanbanService {
 
   /** `message`, then the usable workflows and their params, at most 4 KiB. */
   #usable(message: string): string {
-    const usable = this.#workflowsDir === undefined ? [] : listWorkflows(this.#workflowsDir, this.#workflowFacts()).usable;
+    const usable = this.workflows().usable;
     return usableMessage(message, usable, WORKFLOW_MESSAGE_BYTES);
   }
 
@@ -1801,7 +1803,19 @@ export class KanbanService {
       if (!repeat.ok || req.dryRun !== true) return repeat;
       return { ok: true, dryRun: true, existing: true, instanceId: repeat.instance.instanceId, board: on.board, tasks: shaped.dag.tasks };
     }
-    const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
+    // A DAG that names a workflow whose file names a board is held to it, by the file as it is now (workflows spec §19.3).
+    let fromFile: string | undefined;
+    if (req.createdVia?.kind !== 'run' && shaped.dag.workflow !== null) {
+      const read = this.workflowBoard(shaped.dag.workflow);
+      if (read.file === 'read' && read.board !== undefined) {
+        const asked = shaped.dag.board ?? DEFAULT_BOARD;
+        if (asked !== read.board) {
+          return board.refuse('other_board', `the DAG names workflow ${shaped.dag.workflow}, which puts its tasks on board ${read.board}, not ${visible(asked)}`);
+        }
+        fromFile = shaped.dag.workflow;
+      }
+    }
+    const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia, fromFile);
     if (refused !== undefined) return refused;
     const wake = this.#startWake(req, shaped.dag);
     if (!wake.ok) return wake;
@@ -1921,7 +1935,15 @@ export class KanbanService {
 
   /** The workflow files as the directory holds them now (workflows spec §10): `list`'s. */
   workflows(): WorkflowList {
-    return this.#workflowsDir === undefined ? { usable: [], broken: [], ignored: [] } : listWorkflows(this.#workflowsDir, this.#workflowFacts());
+    if (this.#workflowsDir === undefined) return { usable: [], broken: [], ignored: [] };
+    // Judged against the boards, as the startup judges them (workflows spec §19.4).
+    const boards = new Map(boardsOf(this.#db, { archived: true }).map((b) => [b.name, b.archivedAt !== null]));
+    return withBoards(listWorkflows(this.#workflowsDir, this.#workflowFacts()), boards);
+  }
+
+  /** A board by its name, archived or not, or undefined (workflows spec §19.5): chat's `task list board:`. */
+  boardNamed(name: string): BoardRow | undefined {
+    return getBoard(this.#db, name);
   }
 
   /**

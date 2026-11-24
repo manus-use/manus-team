@@ -279,4 +279,74 @@ describe('the service', () => {
       expect(start({ workflow: 'gone', idempotencyKey: 'lark:om_9' })).toMatchObject({ ok: false, code: 'invalid' });
     });
   });
+
+  describe('an apply, the lists and the reads', () => {
+    const preview = () => {
+      const r = service.previewWorkflow({ workflow: 'vi-sync', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA, board: 'default' });
+      if (!r.ok) throw new Error(r.message);
+      return JSON.parse(JSON.stringify(r.dag)) as Record<string, unknown>;
+    };
+    const apply = (dag: unknown, over: { idempotencyKey?: string; dryRun?: boolean } = {}) =>
+      service.applyDag({ dag, createdBy: 'operator:me', createdVia: OPERATOR, ...over });
+
+    it("makes a preview's DAG on the file's board, and refuses one whose board was edited or deleted, a dry run too", () => {
+      createBoard(h.db, 'vi', ALICE, NOW);
+      const dag = preview();
+      const edited = { ...dag, board: 'default' };
+      const { board: _gone, ...deleted } = dag;
+      const refusal = { ok: false, code: 'other_board', message: 'the DAG names workflow vi-sync, which puts its tasks on board vi, not default' };
+      expect(apply(edited)).toEqual(refusal);
+      expect(apply(deleted)).toEqual(refusal);
+      expect(apply(edited, { dryRun: true })).toEqual(refusal);
+      expect(tasks()).toBe(0);
+      const r = apply(dag);
+      expect(r.ok && 'instance' in r ? r.instance.board : r).toBe('vi');
+    });
+
+    it('makes the edited DAG once its workflow is null, or its file is gone, and answers a repeat before the check', () => {
+      createBoard(h.db, 'vi', ALICE, NOW);
+      const dag = preview();
+      const first = apply(dag, { idempotencyKey: 'k1' });
+      expect(first.ok).toBe(true);
+      writeFileSync(join(wf, 'vi-sync.yaml'), VI_SYNC.replace('board: vi', 'board: research'));
+      expect(apply(dag, { idempotencyKey: 'k1' })).toMatchObject({ ok: true, existing: true });
+      const r = apply({ ...dag, board: 'default', workflow: null });
+      expect(r.ok && 'instance' in r ? [r.instance.board, r.instance.name] : r).toEqual(['default', null]);
+      unlinkSync(join(wf, 'vi-sync.yaml'));
+      const gone = apply({ ...dag, board: 'default' });
+      expect(gone.ok && 'instance' in gone ? gone.instance.board : gone).toBe('default');
+    });
+
+    it("refuses an apply on its file's archived board naming the workflow", () => {
+      createBoard(h.db, 'vi', ALICE, NOW);
+      const dag = preview();
+      archiveBoard(h.db, 'vi', ALICE, NOW);
+      expect(apply(dag)).toEqual({
+        ok: false,
+        code: 'board_archived',
+        message: 'workflow vi-sync is not usable: its board vi is archived, and nothing is added to it (name another board in its file)',
+      });
+    });
+
+    it("lists a workflow on a missing board as not usable, leaving it out of unknown_workflow's usable ones", () => {
+      const list = service.workflows();
+      expect(list.usable.map((w) => w.name)).toEqual(['plain']);
+      expect(list.broken).toEqual([{ name: 'vi-sync', problem: 'its board vi does not exist (create it with /kanban board create vi, or mt kanban board create vi)' }]);
+      const r = start({ workflow: 'nowhere' });
+      expect(r.ok ? '' : r.message).toMatch(/the usable ones are plain;/);
+      createBoard(h.db, 'vi', ALICE, NOW);
+      expect(service.workflows().usable.map((w) => w.name)).toEqual(['plain', 'vi-sync']);
+    });
+
+    it("reads a file's board and a board by name for chat", () => {
+      expect(service.workflowBoard('vi-sync')).toEqual({ file: 'read', board: 'vi' });
+      expect(service.workflowBoard('plain')).toEqual({ file: 'read', board: undefined });
+      expect(service.workflowBoard('gone')).toEqual({ file: 'unreadable' });
+      expect(service.boardNamed('vi')).toBeUndefined();
+      createBoard(h.db, 'vi', ALICE, NOW);
+      archiveBoard(h.db, 'vi', ALICE, NOW);
+      expect(service.boardNamed('vi')).toMatchObject({ name: 'vi' });
+      expect(service.boardNamed('vi')?.archivedAt).not.toBeNull();
+    });
+  });
 });
