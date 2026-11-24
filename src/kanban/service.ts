@@ -52,11 +52,15 @@ import { limitsReached, workspaceBusy } from './waiting.js';
 import { isBlockOutcome } from './waker.js';
 import type { DisplayStatus } from './status.js';
 import {
+  archivedBoardProblem,
   expand,
   instanceStatus,
   listWorkflows,
+  missingBoardProblem,
   readWorkflow,
+  startBoard,
   usableMessage,
+  type BoardPath,
   type GivenParams,
   type InstanceState,
   type PersonOf,
@@ -258,7 +262,11 @@ export interface StartRequest {
   idempotencyKey?: string;
   createdBy: string;
   createdVia: CreatedVia;
-  /** Chat's board, or the terminal's `--board`, else `default`; a run's is its task's, whatever this says. */
+  /**
+   * Chat's board, or the terminal's `--board` only when given; a run's is its
+   * task's, whatever this says. A file's own board overrules chat's, and the
+   * terminal's when absent (workflows spec §19.2).
+   */
   board?: string;
   /** The chat that follows every member, named at the terminal (workflows spec §18.1); the operator's alone. */
   follow?: Follow;
@@ -1635,10 +1643,18 @@ export class KanbanService {
    * against the team and the people as this process holds them, just before the
    * transaction, so a refusal costs none.
    */
-  #checkDag(dag: Dag, onBoard: string, createdBy: string, createdVia: CreatedVia): Refusal | undefined {
+  #checkDag(dag: Dag, onBoard: string, createdBy: string, createdVia: CreatedVia, workflow?: string): Refusal | undefined {
     const found = getBoard(this.#db, onBoard);
-    if (found === undefined) return board.refuse('unknown_board', `there is no board ${visible(onBoard)}`);
-    if (found.archivedAt !== null) return board.refuse('board_archived', `board ${onBoard} is archived; nothing is added to it`);
+    // A file's own board is refused naming the workflow (workflows spec §19.4).
+    if (found === undefined) {
+      return board.refuse('unknown_board', workflow === undefined ? `there is no board ${visible(onBoard)}` : `workflow ${workflow} is not usable: ${missingBoardProblem(onBoard)}`);
+    }
+    if (found.archivedAt !== null) {
+      return board.refuse(
+        'board_archived',
+        workflow === undefined ? `board ${onBoard} is archived; nothing is added to it` : `workflow ${workflow} is not usable: ${archivedBoardProblem(onBoard)}`,
+      );
+    }
     return checkDagTasks(dag, { facts: this.#facts(), createdBy, createdVia });
   }
 
@@ -1682,17 +1698,22 @@ export class KanbanService {
   }
 
   /** A start's expansion (workflows spec §6 step 1): the file read now, its params, the DAG made, shaped and measured. */
-  #expanded(req: StartRequest, onBoard: string): Result<ShapedDag & { workflow: Workflow }> {
+  #expanded(req: StartRequest, onBoard: string): Result<ShapedDag & { workflow: Workflow; board: string; fromFile: boolean }> {
     if (!isRecord(req)) return board.refuse('invalid', 'a start is an object');
     if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
     const read = this.#workflow(req.workflow);
     if (!read.ok) return read;
+    // The board, now the file is read (workflows spec §19.2): chat's is overruled by the file, the terminal's only when not asked for.
+    const kind = req.createdVia?.kind;
+    const path: BoardPath = kind === 'chat' ? { kind: 'chat', board: onBoard } : kind === 'run' ? { kind: 'run', board: onBoard } : { kind: 'terminal', board: req.board };
+    const routed = startBoard(read.workflow, path);
+    if (!routed.ok) return routed;
     // The start's kind, for an `@` with no mention to resolve it by: the terminal's refusal, or a run's (workflows spec §18.3).
-    const expanded = expand(read.workflow, req.params, onBoard, req.personOf, req.createdVia?.kind);
+    const expanded = expand(read.workflow, req.params, routed.board, req.personOf, kind);
     if (!expanded.ok) return expanded;
     const shaped = checkDagShape(expanded.dag, 'expansion');
     if (!shaped.ok) return shaped;
-    return { ...shaped, workflow: read.workflow };
+    return { ...shaped, workflow: read.workflow, board: routed.board, fromFile: routed.fromFile };
   }
 
   /**
@@ -1705,7 +1726,7 @@ export class KanbanService {
     if (!on.ok) return on;
     const shaped = this.#expanded(req, on.board);
     if (!shaped.ok) return shaped;
-    const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
+    const refused = this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined);
     if (refused !== undefined) return refused;
     return { ok: true, dag: shaped.dag, workflow: shaped.workflow };
   }
@@ -1729,7 +1750,7 @@ export class KanbanService {
     if (repeat !== undefined) return repeat;
     const shaped = this.#expanded(req, on.board);
     if (!shaped.ok) return shaped;
-    const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
+    const refused = this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined);
     if (refused !== undefined) return refused;
     const wake = this.#startWake(req, shaped.dag);
     if (!wake.ok) return wake;
@@ -1738,7 +1759,7 @@ export class KanbanService {
       ...(wake.wakeNote === undefined ? {} : { wakeNote: wake.wakeNote }),
       name: shaped.workflow.name,
       source: 'start',
-      board: on.board,
+      board: shaped.board,
       key: key.key,
       createdBy: req.createdBy,
       createdVia: req.createdVia,

@@ -11,8 +11,13 @@ import {
   type Workflow,
   type WorkflowFacts,
 } from '../src/kanban/workflow.js';
+import { archiveBoard, createBoard } from '../src/db/kanban.js';
+import { KanbanService, type StartRequest, type WorkflowMade } from '../src/kanban/service.js';
+import type { CreatedVia, Result } from '../src/kanban/types.js';
 import type { Role } from '../src/roles.js';
+import { testDb, type TestDb } from './helpers/db.js';
 import { role } from './helpers/dispatch.js';
+import { ALICE, NOW, VIA, claimed, newTask } from './helpers/kanban.js';
 
 /**
  * A workflow's own board (workflows spec §19): the key, the routing of a start,
@@ -139,5 +144,105 @@ describe('withBoards', () => {
   it('keeps a workflow naming default usable when only default is known, as with no database', () => {
     writeFileSync(join(dir, 'd-default.yaml'), withTop('board: default'));
     expect(withBoards(listWorkflows(dir, FACTS), new Map([['default', false]])).usable.map((w) => w.name)).toEqual(['d-default']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The service (workflows spec §19.2 to §19.4)
+
+const OPERATOR: CreatedVia = { kind: 'operator' };
+const VI_SYNC = 'board: vi\nsteps:\n  sync:\n    title: Sync the vi team\n    assignee: worker\n';
+const PLAIN = 'steps:\n  sync:\n    title: Sync anyone\n    assignee: worker\n';
+
+describe('the service', () => {
+  let h: TestDb;
+  let wf: string;
+  let service: KanbanService;
+  beforeEach(() => {
+    h = testDb();
+    wf = join(h.dir, 'workflows');
+    mkdirSync(wf);
+    writeFileSync(join(wf, 'vi-sync.yaml'), VI_SYNC);
+    writeFileSync(join(wf, 'plain.yaml'), PLAIN);
+    service = new KanbanService({
+      db: h.db,
+      roles: new Map([['worker', role('worker')], ['implementer', role('implementer')]]),
+      workspaces: new Set(['default']),
+      people: { canTalk: () => true },
+      supervisedRoles: true,
+      workflowsDir: wf,
+    });
+  });
+  afterEach(() => h.close());
+
+  const tasks = (): number => (h.db.prepare('SELECT count(*) AS n FROM kanban_tasks').get() as { n: number }).n;
+  /** A start; `board: null` gives none, as the terminal with no --board and a run. */
+  const start = (over: Omit<Partial<StartRequest>, 'board'> & { board?: string | null } = {}): Result<WorkflowMade> => {
+    const { board, ...rest } = over;
+    const req: StartRequest = { workflow: 'vi-sync', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA, ...rest };
+    return service.startWorkflow(board === null ? req : { ...req, board: board ?? 'default' });
+  };
+  function made(r: Result<WorkflowMade>): WorkflowMade {
+    if (!r.ok) throw new Error(`${r.code}: ${r.message}`);
+    return r;
+  }
+
+  describe('a start and a preview', () => {
+    it("puts a chat's start on the file's board, from any chat board, the chat following its tasks", () => {
+      createBoard(h.db, 'vi', ALICE, NOW);
+      createBoard(h.db, 'research', ALICE, NOW);
+      const r = made(start());
+      expect(r.instance.board).toBe('vi');
+      for (const t of r.tasks) expect(t.task.board).toBe('vi');
+      const subs = h.db.prepare<[string], { conversation_id: string }>('SELECT conversation_id FROM kanban_subscriptions WHERE task_id = ?').all(r.tasks[0]?.taskId ?? '');
+      expect(subs.map((x) => x.conversation_id)).toEqual(['oc_chat']);
+      expect(made(start({ board: 'research', idempotencyKey: 'lark:om_2' })).instance.board).toBe('vi');
+      expect(made(start({ workflow: 'plain', board: 'research', idempotencyKey: 'lark:om_3' })).instance.board).toBe('research');
+    });
+
+    it('puts a terminal start on the file\'s board with no --board or the same one, refusing another', () => {
+      createBoard(h.db, 'vi', ALICE, NOW);
+      const op = { createdBy: 'operator:me', createdVia: OPERATOR };
+      expect(made(start({ ...op, board: null })).instance.board).toBe('vi');
+      expect(made(start({ ...op, board: 'vi' })).instance.board).toBe('vi');
+      const before = tasks();
+      expect(start({ ...op, board: 'x' })).toEqual({ ok: false, code: 'other_board', message: 'workflow vi-sync puts its tasks on board vi, not x' });
+      expect(tasks()).toBe(before);
+      expect(made(start({ ...op, workflow: 'plain', board: null })).instance.board).toBe('default');
+    });
+
+    it("makes a run's start on its task's board when the file names it, and refuses it from another board", () => {
+      createBoard(h.db, 'vi', ALICE, NOW);
+      const onVi = newTask(h.db, { board: 'vi' });
+      const run = claimed(h.db, onVi.taskId);
+      expect(made(start({ createdVia: { kind: 'run', runId: run.runId }, createdBy: `run:${run.runId}`, board: null })).instance.board).toBe('vi');
+      const onDefault = newTask(h.db, { workspace: 'web' });
+      const other = claimed(h.db, onDefault.taskId);
+      expect(start({ createdVia: { kind: 'run', runId: other.runId }, createdBy: `run:${other.runId}`, board: null })).toEqual({
+        ok: false,
+        code: 'other_board',
+        message: "workflow vi-sync puts its tasks on board vi, and a run's work stays on its task's board, default",
+      });
+    });
+
+    it("refuses a missing and an archived file's board naming the workflow, a file naming none keeping today's words", () => {
+      const missing = { ok: false, code: 'unknown_board', message: 'workflow vi-sync is not usable: its board vi does not exist (create it with /kanban board create vi, or mt kanban board create vi)' };
+      expect(start()).toEqual(missing);
+      expect(service.previewWorkflow({ workflow: 'vi-sync', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA, board: 'default' })).toEqual(missing);
+      createBoard(h.db, 'vi', ALICE, NOW);
+      archiveBoard(h.db, 'vi', ALICE, NOW);
+      expect(start()).toEqual({ ok: false, code: 'board_archived', message: 'workflow vi-sync is not usable: its board vi is archived, and nothing is added to it (name another board in its file)' });
+      expect(tasks()).toBe(0);
+      createBoard(h.db, 'old', ALICE, NOW);
+      archiveBoard(h.db, 'old', ALICE, NOW);
+      expect(start({ workflow: 'plain', board: 'old' })).toEqual({ ok: false, code: 'board_archived', message: 'board old is archived; nothing is added to it' });
+    });
+
+    it("writes the file's board into the preview's DAG", () => {
+      createBoard(h.db, 'vi', ALICE, NOW);
+      const r = service.previewWorkflow({ workflow: 'vi-sync', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA, board: 'default' });
+      if (!r.ok) throw new Error(r.message);
+      expect(r.dag.board).toBe('vi');
+    });
   });
 });

@@ -100,9 +100,9 @@ Each tied to §19.
   - a run whose task is on `vi` makes it there; on `default`, refused `other_board`, `workflow vi-sync puts its tasks on board vi, and a run's work stays on its task's board, default`;
   - `vi` missing, then archived: start and preview refused `unknown_board` and `board_archived` with §19.4's messages, nothing made; a file with no board on an archived chat board keeps `board … is archived; nothing is added to it`;
   - the preview's DAG carries `board: 'vi'`.
-- [ ] **Step 2: Verify they fail**: the chat start is on `default`.
+- [ ] **Step 2: Verify they fail**: with the tests on Task 1's tree, the five new tests fail, the chat start on `default` (`Tests  5 failed | 9 passed (14)`).
 - [ ] **Step 3: Implement.** `#expanded(req, on)` routes with `startBoard` after `#workflow`, the path built from `req.createdVia.kind`, and returns `board` and `fromFile`; `expand` takes the routed board. `previewWorkflow` and `startWorkflow` use it for `#checkDag` and `#write`. `#checkDag(dag, onBoard, createdBy, createdVia, workflow?)` says `workflow ${w} is not usable: ${missingBoardProblem(b)}` when given the name.
-- [ ] **Step 4: Run everything.** Unit `+N`; the two docs-examples start tests now fail only for want of the board `reports`, which their home creates already, so they pass.
+- [ ] **Step 4: Run everything.** Unit: `Tests  4 failed | 3378 passed (3382)`, five new. The terminal's start still passes `--board`'s default, `default`, so a terminal start of weekly-report is now refused `other_board`: `docs-examples`' terminal start and cron script tests and `docs-wake`'s start fail until Task 8, and its `mt workflow check` test until Task 7. (`tests/update-run.test.ts` may add a flake; it passes alone.)
 - [ ] **Step 5: Commit** "Put a workflow's tasks on its file's board, refusing another --board and a run on another board".
 
 ## Task 3: Step 0 allows for the file's board
