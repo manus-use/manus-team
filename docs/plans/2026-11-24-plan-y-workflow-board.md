@@ -152,21 +152,21 @@ Each tied to §19.
 - [ ] **Step 1: Tests**, two, through `runMt`. `mt workflow check vi-sync`: `vi-sync: ok, 1 step; params: none; board vi`, then `note: the gateway checks the board when the workflow is used, not here: this check opens no database`, exit 0 with no board `vi` anywhere; a check of every file prints the note once for two such workflows, none when no workflow names a board.
 - [ ] **Step 2: Verify they fail**: on Task 6's tree both fail, with no `; board vi` (`Tests  2 failed | 6 passed (8)`).
 - [ ] **Step 3: Implement.** `okLine` adds `; board ${w.board}`; `BOARDS_NOTE` after the lines, before the ignored entries, when a usable workflow it printed names a board, and after the one line of a check by name.
-- [ ] **Step 4: Run everything.** Unit: `Tests  3 failed | 3394 passed (3397)` once `tests/update-run.test.ts`'s flake is set aside, two new; `docs-examples`' "says what each documented mt workflow check says" passes, and the three start failures of Task 2 remain.
+- [ ] **Step 4: Run everything.** Unit: `Tests  4 failed | 3394 passed (3398)`, two new, one of the failures `tests/update-run.test.ts`'s flake (it passes alone); `docs-examples`' "says what each documented mt workflow check says" passes, and the three start failures of Task 2 remain.
 - [ ] **Step 5: Commit** "Name a workflow's board in mt workflow check, saying the gateway checks it".
 
 ## Task 8: The terminal's start, preview and list
 
-**Files:** `src/cli/operator.ts`, `src/cli/plain.ts`; test `tests/kanban-workflow-board-fronts.test.ts`.
+**Files:** `src/cli/operator.ts`, `src/cli/plain.ts`; tests `tests/kanban-workflow-board-fronts.test.ts`, `tests/mt-wake-shell.test.ts`.
 
 - [ ] **Step 1: Tests**, through `runMt` over a home:
   - `mt kanban workflow start vi-sync` with no `--board`: `on board vi`; `--board vi` the same; `--board x` refused, `mt: workflow vi-sync puts its tasks on board vi, not x`;
-  - in an agent's shell woken by a chat turn (as `tests/wake-workflow.test.ts` makes one), a start with no `--board` of a file naming `vi` whose step says `wake: true`: the member's wake set;
+  - in `tests/mt-wake-shell.test.ts`, a woken turn's shell (its `setup(true)`), a start with no `--board` and no `--wake` of a file naming `vi` whose second step says `wake: true`: both members on `vi`, the second's wake set as the setter at depth 2, the first's not;
   - `preview vi-sync --json`: `"board": "vi"`; with `vi` missing, refused on stderr with the workflow's message and nothing on stdout; with no database at all, refused as missing; a file naming no board with `--board nowhere`: made, as today; a database that cannot be read: the stderr line `mt: the boards are not checked: the database cannot be read: …`, exit 0, stdout the DAG alone; an unknown name: the message leaving out a workflow on a missing board;
   - `mt kanban workflow list`: `vi-sync: params none · board vi`, `--json` `board: 'vi'`, and `null` for a file naming none.
-- [ ] **Step 2: Verify they fail**: the start is on `default`.
-- [ ] **Step 3: Implement.** `start` passes `board` only when `--board` is given, in its preview and its start. `preview` routes with `startBoard`; when the file names a board it reads `boardsAt(settings.dbPath)`, refusing a missing or archived one with the workflow's message, and saying the stderr line on `ok: false`; its `unknown_workflow` reads the boards only when a usable workflow names one. `workflowsText` and the list's JSON name the board.
-- [ ] **Step 4: Run everything.** Unit `+N`; `docs-wake`'s test now fails only for want of `reports`, fixed in Task 11.
+- [ ] **Step 2: Verify they fail**: on Task 7's tree the five terminal tests and the woken shell's fail, the start refused `other_board` for `--board`'s default (`Tests  6 failed | 22 passed (28)` over the two files).
+- [ ] **Step 3: Implement.** `start` passes `board` only when `--board` is given, in its preview and its start (`onBoard`). `preview` routes with `startBoard`; when the file names a board it reads `boardsAt(settings.dbPath)`, refusing a missing or archived one with the workflow's message, and saying the stderr line on `ok: false`; its `unknown_workflow` reads the boards only when a usable workflow names one. `workflowsText` and the list's JSON name the board.
+- [ ] **Step 4: Run everything.** Unit: `Tests  2 failed | 3402 passed (3404)`, six new; `docs-examples` passes whole, its home having `reports`; `docs-wake`'s start now fails only for want of `reports` in its home (`unknown_board`), fixed in Task 11; the other failure is `tests/update-run.test.ts`'s flake.
 - [ ] **Step 5: Commit** "Route the terminal's start and preview by the file's board, and name it in the list".
 
 ## Task 9: Chat's start, preview and workflow list

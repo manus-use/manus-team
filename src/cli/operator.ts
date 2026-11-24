@@ -6,7 +6,8 @@ import { CHAT_ID, NEEDS_BOT, THREAD_ID, chatRefused } from '../core/lark-ids.js'
 import { DAG_LIMITS, checkDagShape, checkDagTasks, dagFile } from '../kanban/dag.js';
 import { NO_MENTIONS } from '../kanban/task-checks.js';
 import { WAKES_OFF, WORKFLOW_MESSAGE_BYTES, type KanbanService, type StartWake, type WorkflowMade } from '../kanban/service.js';
-import { expand, listWorkflows, paramsLine, readWorkflow, usableMessage } from '../kanban/workflow.js';
+import { archivedBoardProblem, expand, listWorkflows, missingBoardProblem, paramsLine, readWorkflow, startBoard, usableMessage, withBoards } from '../kanban/workflow.js';
+import { boardsAt } from '../db/boards-at.js';
 import { maskAll, NUDGE, workerSocketPath } from '../kanban/socket.js';
 import { DEFAULT_BOARD, type BoardRow, type Contract, type CreatedVia, type Follow, type Refusal, type WakeRow } from '../kanban/types.js';
 import { WORKER_LIMITS } from '../kanban/limits.js';
@@ -1023,7 +1024,7 @@ function preview(rest: readonly string[], io: MtIo): number {
   if (name === undefined || extra !== undefined) throw new UsageError('kanban workflow preview takes a workflow name');
   if (values.chat !== undefined || values.thread !== undefined) throw new UsageError("--chat is start's and apply's: a preview makes nothing to follow");
   const pairs = paramPairs(values.param);
-  const boardName = boardFlag(values.board) ?? DEFAULT_BOARD;
+  const asked = boardFlag(values.board);
   const json = values.json === true;
   const no = (_code: string, message: string): number => {
     io.err(`mt: ${line(message, 4096)}`);
@@ -1037,9 +1038,28 @@ function preview(rest: readonly string[], io: MtIo): number {
   const facts = { roles: team.roles, workspaces: new Set(team.workspaces.keys()), supervisedRoles: true };
   const anyone = { ...facts, canTalk: () => true };
   const dir = join(settings.home, 'workflows');
+  // The boards, read-only, only when a file names one (workflows spec §19.3); a database that cannot be read is said, not refused.
+  const boardsOrSaid = (): ReadonlyMap<string, boolean> | undefined => {
+    const at = boardsAt(settings.dbPath);
+    if (at.ok) return at.boards;
+    io.err(`mt: the boards are not checked: the database cannot be read: ${line(at.why, 400)}`);
+    return undefined;
+  };
   const read = readWorkflow(dir, name, facts);
   if (!read.ok) {
-    return no(read.code, read.code === 'unknown_workflow' ? usableMessage(read.message, listWorkflows(dir, facts).usable, WORKFLOW_MESSAGE_BYTES) : read.message);
+    if (read.code !== 'unknown_workflow') return no(read.code, read.message);
+    const list = listWorkflows(dir, facts);
+    const boards = list.usable.some((w) => w.board !== undefined) ? boardsOrSaid() : undefined;
+    return no(read.code, usableMessage(read.message, (boards === undefined ? list : withBoards(list, boards)).usable, WORKFLOW_MESSAGE_BYTES));
+  }
+  const routed = startBoard(read.workflow, { kind: 'terminal', board: asked });
+  if (!routed.ok) return no(routed.code, routed.message);
+  const boardName = routed.board;
+  const boards = routed.fromFile ? boardsOrSaid() : undefined;
+  if (boards !== undefined) {
+    const archived = boards.get(boardName);
+    if (archived === undefined) return no('unknown_board', `workflow ${name} is not usable: ${missingBoardProblem(boardName)}`);
+    if (archived) return no('board_archived', `workflow ${name} is not usable: ${archivedBoardProblem(boardName)}`);
   }
   const expanded = expand(read.workflow, { from: 'terminal', pairs }, boardName, undefined, 'operator');
   if (!expanded.ok) return no(expanded.code, expanded.message);
@@ -1088,7 +1108,9 @@ function start(rest: readonly string[], io: MtIo): Promise<number> {
   const wakeRole = wakeRoleFlag(values['wake-role']);
   if (name === undefined || extra !== undefined) throw new UsageError('kanban workflow start takes a workflow name');
   const pairs = paramPairs(values.param);
-  const boardName = boardFlag(values.board) ?? DEFAULT_BOARD;
+  // Passed only when given, so a file's own board can stand (workflows spec §19.2): in the agent's-shell preview and the start.
+  const asked = boardFlag(values.board);
+  const onBoard = asked === undefined ? {} : { board: asked };
   const key = keyFlag(values.key);
   const flags = chatFlags(values);
   return act(
@@ -1097,7 +1119,7 @@ function start(rest: readonly string[], io: MtIo): Promise<number> {
     'mt kanban workflow start',
     (service, by, b) => {
       // In an agent's shell, whether the steps ask for a wake decides whether one is being set (wake spec §3.2a).
-      const preview = b.shell === undefined ? undefined : service.previewWorkflow({ workflow: name, params: { from: 'terminal', pairs }, createdBy: by, createdVia: { kind: 'operator' }, board: boardName });
+      const preview = b.shell === undefined ? undefined : service.previewWorkflow({ workflow: name, params: { from: 'terminal', pairs }, createdBy: by, createdVia: { kind: 'operator' }, ...onBoard });
       const asks = preview?.ok === true && preview.dag.tasks.some((t) => t.wake !== undefined);
       // A step's own role is its target only when the start names none (wake spec §19.1).
       const stepRole = wakeRole === undefined && preview?.ok === true && preview.dag.tasks.some((t) => typeof t.wake === 'object');
@@ -1112,7 +1134,7 @@ function start(rest: readonly string[], io: MtIo): Promise<number> {
         ...(key === undefined ? {} : { idempotencyKey: key }),
         createdBy: by,
         createdVia: { kind: 'operator' },
-        board: boardName,
+        ...onBoard,
         ...(follow === undefined ? {} : { follow }),
       });
       if (!r.ok) return refused(r);
@@ -1228,6 +1250,7 @@ function listWorkflowFiles(rest: readonly string[], io: MtIo): Promise<number> {
           workflows: list.usable.map((w) => ({
             name: w.name,
             description: w.description ?? null,
+            board: w.board ?? null,
             params: w.params.map((p) => ({ name: p.name, list: p.list, required: p.required, default: p.default ?? null, description: p.description ?? null })),
           })),
           not_usable: list.broken,

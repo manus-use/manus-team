@@ -164,3 +164,64 @@ describe('mt workflow check', () => {
     expect((await mt(env, ['workflow', 'check', 'c-sync'])).out).toBe('c-sync: ok, 1 step; params: none');
   });
 });
+
+describe('the terminal', () => {
+  beforeEach(() => clearSecrets());
+  afterEach(() => clearSecrets());
+
+  it("starts on the file's board with no --board or the same one, refusing another", async () => {
+    const env = home({ 'vi-sync.yaml': fileOn('board: vi') });
+    boards(['vi']);
+    expect(JSON.parse((await mt(env, ['kanban', 'workflow', 'start', 'vi-sync', '--json'])).out)).toMatchObject({ ok: true, board: 'vi' });
+    expect(JSON.parse((await mt(env, ['kanban', 'workflow', 'start', 'vi-sync', '--board', 'vi', '--json'])).out)).toMatchObject({ ok: true, board: 'vi' });
+    expect(await mt(env, ['kanban', 'workflow', 'start', 'vi-sync', '--board', 'x'])).toMatchObject({ code: 1, err: 'mt: workflow vi-sync puts its tasks on board vi, not x' });
+  });
+
+  it("previews on the file's board, refusing a missing one on stderr with nothing on stdout, and leaving a file naming none as today", async () => {
+    const env = home({ 'vi-sync.yaml': fileOn('board: vi'), 'plain.yaml': fileOn('') });
+    expect(await mt(env, ['kanban', 'workflow', 'preview', 'vi-sync', '--json'])).toEqual({ code: 1, out: '', err: `mt: ${MISSING}` });
+    boards(['vi']);
+    const r = await mt(env, ['kanban', 'workflow', 'preview', 'vi-sync', '--json']);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ board: 'vi' });
+    expect(await mt(env, ['kanban', 'workflow', 'preview', 'vi-sync', '--board', 'x'])).toMatchObject({ code: 1, err: 'mt: workflow vi-sync puts its tasks on board vi, not x' });
+    const plain = await mt(env, ['kanban', 'workflow', 'preview', 'plain', '--board', 'nowhere', '--json']);
+    expect(plain.code).toBe(0);
+    expect(JSON.parse(plain.out)).toMatchObject({ board: 'nowhere' });
+  });
+
+  it('refuses an archived board, and says on stderr, going on, when the database cannot be read', async () => {
+    const env = home({ 'vi-sync.yaml': fileOn('board: vi') });
+    boards(['vi'], ['vi']);
+    expect((await mt(env, ['kanban', 'workflow', 'preview', 'vi-sync'])).err).toBe(
+      'mt: workflow vi-sync is not usable: its board vi is archived, and nothing is added to it (name another board in its file)',
+    );
+    rmSync(join(root, 'home', 'team.db'));
+    const holder = new Database(join(root, 'home', 'team.db'));
+    holder.pragma('journal_mode = DELETE');
+    holder.exec('CREATE TABLE kanban_boards (name TEXT, archived_at INTEGER); PRAGMA user_version = 6; BEGIN EXCLUSIVE; INSERT INTO kanban_boards VALUES (1, NULL);');
+    try {
+      const r = await mt(env, ['kanban', 'workflow', 'preview', 'vi-sync', '--json']);
+      expect(r.code).toBe(0);
+      expect(r.err).toMatch(/^mt: the boards are not checked: the database cannot be read: .*(locked|busy)/i);
+      expect(JSON.parse(r.out)).toMatchObject({ board: 'vi' });
+    } finally {
+      holder.exec('ROLLBACK');
+      holder.close();
+    }
+  });
+
+  it("leaves a workflow on a missing board out of a preview's unknown_workflow message", async () => {
+    const env = home({ 'vi-sync.yaml': fileOn('board: vi'), 'plain.yaml': fileOn('') });
+    const r = await mt(env, ['kanban', 'workflow', 'preview', 'nowhere']);
+    expect(r.err).toMatch(/the usable ones are plain;/);
+  });
+
+  it("names a workflow's board in the list, and in its --json", async () => {
+    const env = home({ 'vi-sync.yaml': fileOn('board: vi'), 'plain.yaml': fileOn('') });
+    boards(['vi']);
+    expect((await mt(env, ['kanban', 'workflow', 'list'])).out.split('\n')).toEqual(['plain: params none', 'vi-sync: params none · board vi']);
+    const json = JSON.parse((await mt(env, ['kanban', 'workflow', 'list', '--json'])).out) as { workflows: { name: string; board: string | null }[] };
+    expect(json.workflows.map((w) => [w.name, w.board])).toEqual([['plain', null], ['vi-sync', 'vi']]);
+  });
+});
