@@ -110,9 +110,9 @@ Each tied to §19.
 **Files:** `src/kanban/service.ts`; test `tests/kanban-workflow-board.test.ts`.
 
 - [ ] **Step 1: Tests.** A chat start keyed `lark:om_1` on `vi`, repeated from a chat on `default`: `existing: true`; repeated after the file is removed, or made unparseable: `existing: true`; after the file names `research`, or no board: `other_board`. The same for an operator start with `--key` and no board; with `board: 'default'` given, `other_board` as today. A key reused for another workflow whose file is missing, the instance on another board: `invalid`.
-- [ ] **Step 2: Verify they fail**: the first repeat is `other_board`.
-- [ ] **Step 3: Implement.** `#repeat(key, want, relax?: string)`: when `keyRefused` answers `other_board` and `relax` names the workflow, `this.workflowBoard(relax)` is read; on `unreadable`, or `read` naming the instance's board, `keyRefused(keyed, { ...want, board: keyed.instance.board })` decides. `startWorkflow` passes the workflow's name for a chat start, and for an operator start with no `board`.
-- [ ] **Step 4: Run everything.** Unit `+N`.
+- [ ] **Step 2: Verify they fail**: on Task 2's tree the three new tests fail, the first repeat `other_board` (`Tests  3 failed | 14 passed (17)`).
+- [ ] **Step 3: Implement.** The service's `workflowBoard(name)`, the light read over `this.#workflowsDir`, `unreadable` without one, is added here, as step 0 is its first reader. `#repeat(key, want, fileOf?: string)`: when `keyRefused` answers `other_board`, `fileOf` names the workflow and the instance is on another board than `want.board`, `this.workflowBoard(fileOf)` is read; on `unreadable`, or `read` naming the instance's board, `keyRefused(keyed, { ...want, board: keyed.instance.board })` decides. `startWorkflow` passes the workflow's name for a chat start, and for an operator start with no `board`.
+- [ ] **Step 4: Run everything.** Unit: `Tests  4 failed | 3381 passed (3385)`, three new; the same four docs failures as Task 2.
 - [ ] **Step 5: Commit** "Answer a start's repeat on its file's board, waiving only the board when the file cannot be read".
 
 ## Task 4: Apply against its workflow's file, and the lists and reads for chat
@@ -121,7 +121,7 @@ Each tied to §19.
 
 - [ ] **Step 1: Tests.** A preview's DAG applied on `vi`; its `board` edited to `default`, or deleted: `apply` and a dry run refused `other_board`, `the DAG names workflow vi-sync, which puts its tasks on board vi, not default`; with `workflow: null`, made on `default`; with the file removed, made; a repeat answered before the check. `vi` archived after the preview: the apply refused with the workflow's message. `workflows()` lists a workflow on a missing board as not usable; `startWorkflow` of an unknown name leaves it out of the usable ones. `workflowBoard('vi-sync')` and `boardNamed('vi')`.
 - [ ] **Step 2: Verify they fail**: the edited DAG is made.
-- [ ] **Step 3: Implement.** In `applyDag`, after the repeat and for a caller not a run, with `shaped.dag.workflow !== null`: `workflowBoard`; on `{ file: 'read', board }` a board other than `shaped.dag.board ?? DEFAULT_BOARD` refused, and the same board passed to `#checkDag` as the workflow's. `#boards()` from `boardsOf(this.#db, { archived: true })`; `workflows()` and `#usable` apply `withBoards`. `workflowBoard(name)` reads `this.#workflowsDir`, `unreadable` without one; `boardNamed(name)` is `getBoard`.
+- [ ] **Step 3: Implement.** In `applyDag`, after the repeat and for a caller not a run, with `shaped.dag.workflow !== null`: `workflowBoard`; on `{ file: 'read', board }` a board other than `shaped.dag.board ?? DEFAULT_BOARD` refused, and the same board passed to `#checkDag` as the workflow's. `#boards()` from `boardsOf(this.#db, { archived: true })`; `workflows()` and `#usable` apply `withBoards`. `boardNamed(name)` is `getBoard`.
 - [ ] **Step 4: Run everything.** Unit `+N`.
 - [ ] **Step 5: Commit** "Hold an applied DAG to its workflow's board, and judge the boards in the service's lists".
 

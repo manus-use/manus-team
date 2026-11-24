@@ -60,11 +60,13 @@ import {
   readWorkflow,
   startBoard,
   usableMessage,
+  workflowBoard,
   type BoardPath,
   type GivenParams,
   type InstanceState,
   type PersonOf,
   type Workflow,
+  type WorkflowBoardRead,
   type WorkflowFacts,
   type WorkflowList,
 } from './workflow.js';
@@ -1746,7 +1748,9 @@ export class KanbanService {
     if (!on.ok) return on;
     const key = this.#idempotencyKey(req.idempotencyKey, req.createdVia);
     if (!key.ok) return key;
-    const repeat = key.key === null ? undefined : this.#repeat(key.key, { board: on.board, source: 'start', name: req.workflow });
+    // A chat's board, or an unasked terminal one, is one the file may overrule (workflows spec §19.2).
+    const overruled = req.createdVia?.kind === 'chat' || (req.createdVia?.kind === 'operator' && req.board === undefined);
+    const repeat = key.key === null ? undefined : this.#repeat(key.key, { board: on.board, source: 'start', name: req.workflow }, overruled ? req.workflow : undefined);
     if (repeat !== undefined) return repeat;
     const shaped = this.#expanded(req, on.board);
     if (!shaped.ok) return shaped;
@@ -1816,10 +1820,16 @@ export class KanbanService {
   }
 
   /** A key's instance, read-only (workflows spec §6 step 0): the repeat's answer, or why the key is another's; undefined for a key not used. */
-  #repeat(key: string, want: Parameters<typeof board.keyRefused>[1]): Result<WorkflowMade> | undefined {
+  #repeat(key: string, want: Parameters<typeof board.keyRefused>[1], fileOf?: string): Result<WorkflowMade> | undefined {
     const keyed = instanceByKey(this.#db, key);
     if (keyed === undefined) return undefined;
-    const refused = board.keyRefused(keyed, want);
+    let refused = board.keyRefused(keyed, want);
+    // The instance on another board than the path's: a repeat when the file names that board, or cannot be
+    // read, only the board's comparison waived; the source and the name still refuse (workflows spec §19.2).
+    if (refused?.code === 'other_board' && fileOf !== undefined && keyed.instance.board !== want.board) {
+      const read = this.workflowBoard(fileOf);
+      if (read.file === 'unreadable' || read.board === keyed.instance.board) refused = board.keyRefused(keyed, { ...want, board: keyed.instance.board });
+    }
     if (refused !== undefined) return refused;
     return { ok: true, instance: keyed.instance, tasks: membersWithTasks(this.#db, keyed.instance.instanceId), existing: true };
   }
@@ -1902,6 +1912,11 @@ export class KanbanService {
     );
     if (!r.ok) return r;
     return { ok: true, instance: r.instance, tasks: r.members, existing: r.existing, ...(i.wakeNote === undefined ? {} : { wakeNote: i.wakeNote }) };
+  }
+
+  /** A workflow file's board alone, by the light read (workflows spec §19.3); unreadable with no directory. */
+  workflowBoard(name: string): WorkflowBoardRead {
+    return this.#workflowsDir === undefined ? { file: 'unreadable' } : workflowBoard(this.#workflowsDir, name);
   }
 
   /** The workflow files as the directory holds them now (workflows spec §10): `list`'s. */

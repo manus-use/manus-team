@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -243,6 +243,40 @@ describe('the service', () => {
       const r = service.previewWorkflow({ workflow: 'vi-sync', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA, board: 'default' });
       if (!r.ok) throw new Error(r.message);
       expect(r.dag.board).toBe('vi');
+    });
+  });
+
+  describe('step 0', () => {
+    beforeEach(() => {
+      createBoard(h.db, 'vi', ALICE, NOW);
+      createBoard(h.db, 'research', ALICE, NOW);
+    });
+
+    it("answers a chat start's redelivery on the file's board, also once the file cannot be read, and refuses it once the file names another or none", () => {
+      const first = made(start({ idempotencyKey: 'lark:om_1' }));
+      expect(made(start({ idempotencyKey: 'lark:om_1' }))).toMatchObject({ existing: true, instance: { instanceId: first.instance.instanceId } });
+      unlinkSync(join(wf, 'vi-sync.yaml'));
+      expect(made(start({ idempotencyKey: 'lark:om_1' })).existing).toBe(true);
+      writeFileSync(join(wf, 'vi-sync.yaml'), 'board: vi\nsteps: [unclosed\n');
+      expect(made(start({ idempotencyKey: 'lark:om_1' })).existing).toBe(true);
+      writeFileSync(join(wf, 'vi-sync.yaml'), VI_SYNC.replace('board: vi', 'board: research'));
+      expect(start({ idempotencyKey: 'lark:om_1' })).toMatchObject({ ok: false, code: 'other_board' });
+      writeFileSync(join(wf, 'vi-sync.yaml'), VI_SYNC.replace('board: vi\n', ''));
+      expect(start({ idempotencyKey: 'lark:om_1' })).toMatchObject({ ok: false, code: 'other_board' });
+    });
+
+    it('answers a terminal start with --key and no --board the same way, and compares one with --board as today', () => {
+      const op = { createdBy: 'operator:me', createdVia: OPERATOR, idempotencyKey: 'weekly' };
+      made(start({ ...op, board: null }));
+      expect(made(start({ ...op, board: null })).existing).toBe(true);
+      unlinkSync(join(wf, 'vi-sync.yaml'));
+      expect(made(start({ ...op, board: null })).existing).toBe(true);
+      expect(start({ ...op, board: 'default' })).toMatchObject({ ok: false, code: 'other_board' });
+    });
+
+    it('refuses invalid a key reused for another workflow whose file is missing, its instance on another board', () => {
+      made(start({ idempotencyKey: 'lark:om_9' }));
+      expect(start({ workflow: 'gone', idempotencyKey: 'lark:om_9' })).toMatchObject({ ok: false, code: 'invalid' });
     });
   });
 });
