@@ -129,10 +129,10 @@ Each tied to §19.
 
 **Files:** `src/db/open.ts`, `src/db/boards-at.ts` (new); test `tests/kanban-workflow-board-fronts.test.ts` (new).
 
-- [ ] **Step 1: Tests.** `boardsAt` of no file: `default` alone; of a database at `user_version` 5: `default` alone; of a migrated one with `vi` and an archived `old`: all three, `old` archived; of a database held by `BEGIN EXCLUSIVE` in a second connection with a journal mode that blocks readers (`journal_mode = DELETE`): `{ ok: false }` with a reason, after the busy timeout.
-- [ ] **Step 2: Verify they fail**: the module does not exist.
+- [ ] **Step 1: Tests.** `boardsAt` of no file: `default` alone; of a database at `user_version` 5: `default` alone; of a migrated one with `vi` and an archived `old`: all three, `old` archived; of a database held by `BEGIN EXCLUSIVE` in a second connection with a journal mode that blocks readers (`journal_mode = DELETE`): `{ ok: false }` with a reason matching `/locked|busy/i`, after the busy timeout. Three tests.
+- [ ] **Step 2: Verify they fail**: the file fails to collect, as `src/db/boards-at.ts` does not exist.
 - [ ] **Step 3: Implement.** `openDbReadOnly(path, busyTimeoutMs?)` sets the pragma when given. `boardsAt(dbPath): { ok: true; boards: Map<string, boolean> } | { ok: false; why: string }`, opening with 1000 ms, `user_version` below 6 giving `default` alone, and closing in `finally`.
-- [ ] **Step 4: Run everything.** Unit `+N`.
+- [ ] **Step 4: Run everything.** Unit: `Tests  4 failed | 3389 passed (3393)`, three new; the same four docs failures.
 - [ ] **Step 5: Commit** "Read the boards at a database path, read-only, for the startup and the terminal".
 
 ## Task 6: The startup and mt service check
