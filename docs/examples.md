@@ -102,9 +102,10 @@ $ mt kanban workflow start weekly-report --param week=2026-W47 --param reviewer=
 What happens: four tasks at once, on the board `reports`, which the file names: from any chat,
 whatever board the chat is on, and from a terminal with no `--board`. The chat that started it
 still hears each task, and the reply names the board. The three gathers start together; the
-write-up waits for all three, and its prompt holds their summaries. When `worker` is done writing, the report goes to
-Bob Li as a review card, and is done when he approves it. The three gathers run side by side
-only if `worker` is an isolated workspace (guide, section 6); in a shared one they queue.
+write-up waits for all three, and its prompt holds their summaries. When `worker` is done
+writing, the report goes to Bob Li as a review card, and is done when he approves it. The three
+gathers run side by side only if `worker` is an isolated workspace (guide, section 6); in a
+shared one they queue.
 
 **The pattern:** fan-out over a list param, `for_each: sources`, and a fan-in, `parents:
 [gather]`, which waits for every task the fan-out made. `reviewer: "{{reviewer}}"`, with no
