@@ -186,8 +186,13 @@ export class WakeApi {
         .get(taskId)?.id ?? 0;
     if (this.#limitSaid.get(taskId) === completed) return;
     rememberCapped(this.#limitSaid, taskId, completed, LIMIT_LINES_HELD);
-    const channel = this.#deps.channels.get(wake.channel);
     const note = this.#deps.note ?? (() => undefined);
+    if (wake.conversationId === '') {
+      // A role's wake with no chat (§19.16): no thread to tell, so the line is logged.
+      note(`kanban: ${redactKnownSecrets(line)}`);
+      return;
+    }
+    const channel = this.#deps.channels.get(wake.channel);
     if (channel === undefined) {
       note(`kanban: the woken-unblock limit's line for ${taskId} was not sent: no channel ${wake.channel}`);
       return;

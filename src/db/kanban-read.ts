@@ -1411,7 +1411,6 @@ export function wakeByUuid(db: Db, uuid: string): WakeRow | undefined {
   return r === undefined ? undefined : decodeWake(r);
 }
 
-/** A woken turn's events, in event order. */
 /** The reaction tasks a task's outcomes made (wake spec §19.9): those whose wake carried an event of it, newest first. */
 export function reactionsOf(db: Db, taskId: string): TaskRow[] {
   return db
@@ -1440,6 +1439,7 @@ export function wakeOfReaction(db: Db, taskId: string): WakeRow | undefined {
   return task === undefined || task.reactionOf === null ? undefined : getWake(db, task.reactionOf);
 }
 
+/** A woken turn's events, in event order. */
 export function wakeEventsOf(db: Db, wakeId: number): WakeEventRow[] {
   return db
     .prepare<[number], { wake_id: number; subscription_id: number; event_id: number; task_id: string }>(

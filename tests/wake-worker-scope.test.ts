@@ -290,3 +290,28 @@ describe('a run linking a reaction task', () => {
     });
   });
 });
+
+describe("the woken-unblock limit's line of a role's wake with no chat", () => {
+  it('is logged, never sent, as no thread follows the task', () => {
+    const notes: string[] = [];
+    const wakes = new WakeApi({
+      db: t.db,
+      service,
+      tokens: { lookup: () => undefined },
+      people: { canTalk: () => true, canOperate: () => true, chatNames: () => () => undefined },
+      blockRecurrenceLimit: 3,
+      render: { lines: wokenShowText, json: showJson },
+      channels: new Map([['lark', lark]]),
+      appId: APP,
+      zone: 'UTC',
+      note: (line) => notes.push(line),
+    });
+    const task = newTask(t.db, { createdVia: { kind: 'operator' } });
+    const line = `\`${task.taskId}\` has been unblocked by woken turns 5 times since it last completed`;
+    service.unblockForWake = () => ({ ok: false, code: 'woken_unblock_limit', message: line });
+    const wake = { wakeId: 1, channel: 'lark', appId: APP, conversationId: '', threadId: '', principal: ALICE } as Parameters<WakeApi['unblock']>[0];
+    expect(wakes.unblock(wake, task.taskId, undefined)).toMatchObject({ ok: false, code: 'woken_unblock_limit' });
+    expect(notes).toEqual([`kanban: ${line}`]);
+    expect(lark.texts).toEqual([]);
+  });
+});

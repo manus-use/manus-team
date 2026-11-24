@@ -313,7 +313,6 @@ export interface StartWake {
 /** The note a start's answer ends with when its steps ask for a wake while wakes are off (wake spec §3.4). */
 export const STEPS_NOTICE_ONLY = 'wakes are off on this gateway (kanban.wake.enabled), so the steps that ask for one are notice-only';
 
-/** The note a terminal's start or apply with no chat ends with when its steps ask for the chat session's wake (wake spec §19.16). */
 /**
  * A start's wake, as the writer's members take it: every member's, or the
  * asking steps'; `rolesOnly` with no chat to follow them, when only a role's
@@ -321,6 +320,7 @@ export const STEPS_NOTICE_ONLY = 'wakes are off on this gateway (kanban.wake.ena
  */
 type StartWakeOf = board.NewWake & { all: boolean; rolesOnly?: boolean };
 
+/** The note a terminal's start or apply with no chat ends with when its steps ask for the chat session's wake (wake spec §19.16). */
 export const NO_CHAT_NOTICE_ONLY = 'no chat follows this start (add --chat), so the steps that wake the chat session are notice-only';
 
 /** The note a terminal's start or apply ends with when its steps ask for a wake and the owner is not yet known (wake spec §3.2, §19.16). */

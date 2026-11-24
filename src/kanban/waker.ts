@@ -211,20 +211,31 @@ function blockNotes(o: WakeOutcome, input: WakePromptInput): string[] {
   ];
   const recurrences = recurrencesOf(o.event);
   const woken = o.wokenUnblocks ?? 0;
+  // A reaction run has nobody to ask in a chat: it hands the decision to people by blocking its own task (§19.5).
+  const escalate = 'block your own task with mt kanban block, saying what a person must decide';
+  const role = input.role !== undefined;
   if (recurrences >= input.blockRecurrenceLimit) {
-    notes.push(`It has been blocked ${recurrences} times in a row: ask a person here whether to unblock it again, or to rewrite the task.`);
+    notes.push(
+      role
+        ? `It has been blocked ${recurrences} times in a row: whether to unblock it again, or to rewrite the task, is for a person, so ${escalate}.`
+        : `It has been blocked ${recurrences} times in a row: ask a person here whether to unblock it again, or to rewrite the task.`,
+    );
   } else if (woken >= input.maxDepth) {
-    notes.push(`Woken turns have unblocked it ${woken} times since it last completed: ask a person here to decide.`);
+    notes.push(
+      role
+        ? `Woken turns have unblocked it ${woken} times since it last completed: a person must decide, so ${escalate}.`
+        : `Woken turns have unblocked it ${woken} times since it last completed: ask a person here to decide.`,
+    );
   } else if (input.operate) {
     const lift =
       input.role === undefined
         ? `mt kanban task unblock ${o.task.taskId} <comment>`
         : `mt kanban wake-unblock, given {"task_id": "${o.task.taskId}", "comment": "<comment>"} on stdin`;
-    notes.push(`If you can answer the block yourself, lift it with ${lift}: the comment goes to the task's next run. Otherwise ask a person here.`);
+    const otherwise = role ? `Otherwise ${escalate}.` : 'Otherwise ask a person here.';
+    notes.push(`If you can answer the block yourself, lift it with ${lift}: the comment goes to the task's next run. ${otherwise}`);
   } else {
-    notes.push(
-      `You cannot lift this block: ${person(input.setter, input.nameOf)}, who set this wake, does not have operate tier. Ask here for someone who can.`,
-    );
+    const who = `${person(input.setter, input.nameOf)}, who set this wake, does not have operate tier`;
+    notes.push(role ? `You cannot lift this block: ${who}, so ${escalate}.` : `You cannot lift this block: ${who}. Ask here for someone who can.`);
   }
   return notes;
 }
@@ -1077,7 +1088,8 @@ export class Waker {
     };
     const by = task.wakeBy;
     const role = task.wakeRole;
-    const outcomes = events.filter(isOutcome);
+    // A block already lifted is no outcome to react to (§5.3b): left out, its event still covered by the cursor's move.
+    const outcomes = events.filter((e) => isOutcome(e) && (!isBlockOutcome(e) || liftOf(deps.db, task.taskId, e.id) === undefined));
     if (by === null || role === null || task.phase === 'archived' || outcomes.length === 0) return pass();
     const setter = person(by, deps.people.chatNames());
     if (!deps.people.canTalk(by)) {

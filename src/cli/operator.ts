@@ -417,12 +417,22 @@ function wakeRoleFlag(raw: unknown): string | undefined {
  * `--wake`, as `terminalWake` checks it; else the members that ask for one, as
  * the owner when this bot has seen them and none otherwise, with a note
  * (§19.16), or in an agent's shell as `terminalWake` would set a wake, when any
- * asks.
+ * asks. In a woken shell, a step that names a role (`stepRole`) needs the
+ * wake's setter's operate tier, as `--wake-role` does (§19.1).
  */
-function startWakeOf(board: BoardAccess, all: boolean, flags: ChatFlags | undefined, asks: boolean, role?: string): StartWake | Refused | undefined {
+function startWakeOf(
+  board: BoardAccess,
+  all: boolean,
+  flags: ChatFlags | undefined,
+  asks: boolean,
+  role?: string,
+  stepRole = false,
+): StartWake | Refused | undefined {
   if (all || (board.shell !== undefined && asks)) {
     const w = terminalWake(board, true, flags, role);
     if (!w.ok) return w;
+    const principal = board.shell?.wake?.principal;
+    if (principal !== undefined && stepRole && !board.canOperate(principal)) return refused({ code: 'invalid', message: roleNeedsOperate(principal) });
     return w.wake?.by === null || w.wake === undefined
       ? undefined
       : { by: w.wake.by, depth: w.wake.depth, all, ...(w.wake.role === undefined ? {} : { role: w.wake.role }) };
@@ -1089,7 +1099,9 @@ function start(rest: readonly string[], io: MtIo): Promise<number> {
       // In an agent's shell, whether the steps ask for a wake decides whether one is being set (wake spec §3.2a).
       const preview = b.shell === undefined ? undefined : service.previewWorkflow({ workflow: name, params: { from: 'terminal', pairs }, createdBy: by, createdVia: { kind: 'operator' }, board: boardName });
       const asks = preview?.ok === true && preview.dag.tasks.some((t) => t.wake !== undefined);
-      const wake = startWakeOf(b, values.wake === true || wakeRole !== undefined, flags, asks, wakeRole);
+      // A step's own role is its target only when the start names none (wake spec §19.1).
+      const stepRole = wakeRole === undefined && preview?.ok === true && preview.dag.tasks.some((t) => typeof t.wake === 'object');
+      const wake = startWakeOf(b, values.wake === true || wakeRole !== undefined, flags, asks, wakeRole, stepRole);
       if (wake !== undefined && 'ok' in wake) return wake;
       const follow = followOrRefusal(service, b, flags, key, 'instance');
       if (follow !== undefined && 'ok' in follow) return follow;
@@ -1158,7 +1170,8 @@ async function applyFile(rest: readonly string[], io: MtIo): Promise<number> {
     (service, by, b) => {
       // A DAG's tasks that say `"wake": true` wake as the owner (wake spec §3.1), or in a woken shell as its setter (§3.2a).
       const shaped = checkDagShape(dag, 'terminal');
-      const wake = startWakeOf(b, false, flags, shaped.ok && shaped.dag.tasks.some((t) => t.wake !== undefined));
+      const stepRole = shaped.ok && shaped.dag.tasks.some((t) => typeof t.wake === 'object');
+      const wake = startWakeOf(b, false, flags, shaped.ok && shaped.dag.tasks.some((t) => t.wake !== undefined), undefined, stepRole);
       if (wake !== undefined && 'ok' in wake) return wake;
       const follow = followOrRefusal(service, b, flags, key, 'instance');
       if (follow !== undefined && 'ok' in follow) return follow;

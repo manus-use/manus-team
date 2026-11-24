@@ -150,4 +150,23 @@ describe("a woken turn's shell naming a role", () => {
     expect(r.code, r.err).toBe(0);
     expect(getTask(db, deeper.taskId)).toMatchObject({ wakeBy: SETTER, wakeRole: 'default' });
   });
+
+  it("refuses a start or an apply whose step names a role when the wake's setter does not have operate tier, and takes it when they do", async () => {
+    const id = await setup();
+    woken(id);
+    writeFileSync(join(fx.home, 'workflows', 'react.yaml'), 'steps:\n  a: { title: "Draft the brief", assignee: default, wake: { role: default } }\n');
+    const file = join(fx.home, 'react.json');
+    writeFileSync(file, JSON.stringify({ format: 1, tasks: [{ ref: 'a', title: 'A', wake: { role: 'default' } }] }));
+    const refusal = `a role as a wake's target gives the role work, which needs operate tier, and ${SETTER}, who set this woken turn's wake, does not have it`;
+    const shell = { MT_AGENT_SESSION: 's_1' };
+    const at = ['--chat', 'oc_team', '--thread', 'omt_topic'];
+    expect(await kanban(['workflow', 'start', 'react', ...at], shell)).toEqual({ code: 1, out: '', err: `mt: ${refusal}` });
+    expect(await kanban(['workflow', 'apply', file, ...at], shell)).toEqual({ code: 1, out: '', err: `mt: ${refusal}` });
+    notePerson(db, { appId: 'cli_app', unionId: 'on_kevin', openId: 'ou_kevin', name: 'Kevin Tu' }, NOW);
+    const operator = { ...shell, MT_ALLOW_TALK: 'ou_kevin', MT_ALLOW_OPERATE: 'ou_kevin' };
+    const started = await kanban(['workflow', 'start', 'react', ...at], operator);
+    expect(started.code, started.err).toBe(0);
+    const applied = await kanban(['workflow', 'apply', file, ...at], operator);
+    expect(applied.code, applied.err).toBe(0);
+  });
 });

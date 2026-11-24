@@ -92,6 +92,27 @@ describe("a role's wake with no chat", () => {
     expect(getTask(h.db, task.taskId)?.wakeCursor).toBe(event);
   });
 
+  it('leaves out a block lifted before the round, passing it over with no wake when nothing else is left', async () => {
+    const task = chatless();
+    h.event(task, 'blocked', 'run:r_1', { kind: 'needs_input', reason: 'Which one?', blockRecurrences: 1 }, false);
+    const lift = h.event(task, 'unblocked', ALICE, { kind: 'needs_input' }, false);
+    expect(await h.round()).toBe(0);
+    expect(reactionTasks()).toBe(0);
+    expect(getTask(h.db, task.taskId)?.wakeCursor).toBe(lift);
+  });
+
+  it('makes its reaction task of the outcomes left when a block among them was lifted', async () => {
+    const task = chatless();
+    const block = h.event(task, 'blocked', 'run:r_1', { kind: 'needs_input', reason: 'Which one?', blockRecurrences: 1 }, false);
+    h.event(task, 'unblocked', ALICE, { kind: 'needs_input' }, false);
+    const done = completed(task);
+    expect(await h.round()).toBe(1);
+    const carried = h.db.prepare('SELECT event_id FROM kanban_wake_events ORDER BY event_id').all() as Array<{ event_id: number }>;
+    expect(carried.map((e) => e.event_id)).toEqual([done]);
+    expect(carried.map((e) => e.event_id)).not.toContain(block);
+    expect(getTask(h.db, task.taskId)?.wakeCursor).toBe(done);
+  });
+
   it("skips its outcomes while its setter has no operate tier, and logs it once", async () => {
     const task = chatless();
     h.operate.delete(ALICE);

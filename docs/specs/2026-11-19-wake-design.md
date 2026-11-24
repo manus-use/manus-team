@@ -2109,7 +2109,9 @@ Board update: you are this task's run because wake is on for the tasks below (se
 
 The blocks follow as in §7, the unblock notes naming `mt kanban wake-unblock` with JSON on stdin,
 `{"task_id": "k_…", "comment": "…"}`, and the deferred note saying the button goes to people "if it
-is still blocked when your run ends, or 10 minutes after its notice". The prompt is made when the task is,
+is still blocked when your run ends, or 10 minutes after its notice". A run has no person to ask in
+a chat, so where §7's notes say to ask a person here, a role's say to block its own task instead:
+`block your own task with mt kanban block, saying what a person must decide`. The prompt is made when the task is,
 and fixed: a run that starts later reads the board as it was then, as the note on lifted blocks says
 (§7), and `wake-show` reads it as it is.
 
@@ -2324,8 +2326,8 @@ chat to follow the task:
   `--wake` and `wake <id> on`, the chat session's, without a chat stay refused (§3.4).
 - **Its own cursor.** The waker reads such a task's outcomes through `kanban_tasks.wake_cursor`
   (migration 013), used only while the task has no subscription of this bot: set to the task's
-  latest event by `setWake` when the role's wake is turned on, 0 for a task made with one, moved
-  forward only, as a subscription's `wake_cursor` is. With no notifier behind it, an event is read
+  latest event by `setWake` when a wake is turned on, and at the insert of a task made with one
+  (its latest events then its `created` and `wake_set`, no outcomes), moved forward only, as a subscription's `wake_cursor` is. With no notifier behind it, an event is read
   as soon as it is written: there is no notice to come first (§5.8).
 - **Its batch** is the task's own outcomes for one setter and role; there is no conversation to
   group by. The checks of §5.3 and §19.2 hold, `admitsConversation` and `letGo` excepted; the

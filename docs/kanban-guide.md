@@ -939,7 +939,7 @@ one word, at its end; a step says `wake: { role: vi-coordinator }`; at a termina
 `--wake-role vi-coordinator`, which implies `--wake`, and `mt kanban task wake <task_id> <role>`.
 
 What the thread sees: the notice; then `Waking vi-coordinator for 1 board update (k_…).`, naming
-the reaction task; then the reaction task's own notices as its run claims and completes it. No
+the reaction task; then the reaction task's own notices as its run completes or blocks it. No
 card streams: a reaction task is not a conversation, and a person who wants to steer it comments
 on it. Its body is the update, as the woken agent's prompt would be, and its run may read the
 tasks that woke it with `mt kanban wake-show` and, when the setter has operate tier, lift a block

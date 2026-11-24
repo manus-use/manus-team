@@ -133,6 +133,24 @@ describe('wakePrompt', () => {
     expect(p.text).not.toContain('If you can answer');
   });
 
+  it("tells a role's reaction run to block its own task where a chat turn would ask a person here", () => {
+    const ESCALATE = 'block your own task with mt kanban block, saying what a person must decide';
+    const block = ev('blocked', 'run:r_3', { kind: 'needs_input', reason: 'Which?', blockRecurrences: 1 }, 'k_agenda');
+    const lift = wakePrompt(input([{ event: block, task: AGENDA, button: 'recorded', wokenUnblocks: 0 }], { role: 'vi-coordinator' }));
+    expect(lift.text).toContain(`the comment goes to the task's next run. Otherwise ${ESCALATE}.`);
+    const talk = wakePrompt(input([{ event: block, task: AGENDA, button: 'recorded', wokenUnblocks: 0 }], { role: 'vi-coordinator', operate: false }));
+    expect(talk.text).toContain(`You cannot lift this block: Zhixi Sun, who set this wake, does not have operate tier, so ${ESCALATE}.`);
+    const recurring = ev('blocked', 'run:r_3', { kind: 'needs_input', reason: 'Which?', blockRecurrences: 3 }, 'k_agenda');
+    const r = wakePrompt(input([{ event: recurring, task: AGENDA, button: 'recorded', wokenUnblocks: 0 }], { role: 'vi-coordinator' }));
+    expect(r.text).toContain(`It has been blocked 3 times in a row: whether to unblock it again, or to rewrite the task, is for a person, so ${ESCALATE}.`);
+    const l = wakePrompt(input([{ event: block, task: AGENDA, button: 'none', wokenUnblocks: 5 }], { role: 'vi-coordinator' }));
+    expect(l.text).toContain(`Woken turns have unblocked it 5 times since it last completed: a person must decide, so ${ESCALATE}.`);
+    for (const p of [lift, talk, r, l]) {
+      expect(p.text).not.toContain('ask a person here');
+      expect(p.text).not.toContain('Ask here');
+    }
+  });
+
   it('offers no unblock of a block at its recurrence limit, nor of a task at its woken-unblock limit', () => {
     const recurring = ev('blocked', 'run:r_3', { kind: 'needs_input', reason: 'Which?', blockRecurrences: 3 }, 'k_agenda');
     const r = wakePrompt(input([{ event: recurring, task: AGENDA, button: 'recorded', wokenUnblocks: 0 }]));
