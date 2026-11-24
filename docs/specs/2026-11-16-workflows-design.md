@@ -1683,11 +1683,12 @@ preview both call, so the routing is the same everywhere:
   not `default`, as today, and also when it is not the chat's: ``Started vi-workflow as `w_…`, 6
   tasks, on board **vi**:``. **When the board is not the chat's**, one more line follows the task
   lines, before the line saying who hears: ``Its tasks are on board **vi**: `/kanban task list
-  board:vi` lists them.`` (§19.5). It is part of the reply's fixed lines, as the last line is, so
-  the 30-line and 3,800-character cut (§9) drops task lines before it. `renderStarted`
+  board:vi` lists that board.`` (§19.5). It is part of the reply's fixed lines, as the last line is,
+  so the 30-line and 3,800-character cut (§9) drops task lines before it. `renderStarted`
   (`src/kanban/chat-render.ts`) is given the chat's board for this, and `renderPreview` likewise.
-  The notifier's `workflow_started` reply (§18.2) keeps today's rule, as it reads no chat's board.
-  The terminal's answer names the board already: `started vi-workflow as w_…, on board vi, 6 tasks`.
+  The notifier's `workflow_started` reply (§18.2), for a terminal start with `--chat`, keeps today's
+  rule, as it reads no chat's board, and carries no pointer line. The terminal's answer names the
+  board already: `started vi-workflow as w_…, on board vi, 6 tasks`.
 
 ### 19.4 A missing or archived board
 
@@ -1783,7 +1784,9 @@ list its tasks. The list now takes a board:
   `board:` matched in any case and the name after it as typed, with no space between. `board:`
   with no name, the label twice, a filter twice, a third word, or `board: vi` with a space, is the
   usage line, which becomes `/kanban task list [todo|…|all] [board:<name>]`. The command gains
-  `board: string | undefined`. The name is not checked by the parser: the service refuses it.
+  `board?: string`, set only when given (`...(board === undefined ? {} : { board })`), so a list
+  without it is `{ verb: 'list', filter }`, today's shape. The name is not checked by the parser:
+  the service refuses it.
 - **Talk tier**, as `list` is today (`'list': 'talk'`, `src/kanban/chat.ts`) and as `/kanban board
   list` is: it reads, and boards are queues, not permissions (kanban spec §16). The chat's own board
   is unchanged: `board:` names the board this one list shows, and nothing else.
@@ -1791,14 +1794,17 @@ list its tasks. The list now takes a board:
   a read of `getBoard`; for no board it is refused `unknown_board` with the existing words, `there
   is no board vi`, as `#checkDag` and the writer say it, said in chat as any refusal is, "Not done:
   …". **An archived board is listed**, as `/kanban board list all` lists one (kanban spec §16.3),
-  its tasks staying by id (kanban spec §16.8), under a line saying so: `Board **vi** is archived:
-  nothing is added to it.`
+  its tasks staying by id (kanban spec §16.8). **Its archived line replaces the header**:
+  `Board **vi** is archived: nothing is added to it.`, then the tasks; and when none matches, the
+  archived line, then the empty answer, ``No open tasks on board vi. `/kanban task list all
+  board:vi` shows done and archived ones too.``
 - **The header** names the board, as `renderList` (`src/kanban/chat-render.ts`) does today for a
   board that is not `default`, `Board **vi**:`, and the empty answer `No open tasks on board vi.`;
   given by `board:`, it is named even when it is `default`, as the chat's own board may be another.
   The hints in the answer name the board too, so they work as typed: ``No open tasks on board vi.
   `/kanban task list all board:vi` shows done and archived ones too.``, and the 30-line cut's ``…
-  `/kanban task list <todo|…|all> board:vi` narrows it.``
+  `/kanban task list <todo|…|all> board:vi` narrows it.`` **Without `board:`, the header, the empty
+  answer and both hints are today's, word for word.**
 - **`all`** keeps its meaning, every status, on the named board, and a filter its own.
 - **The terminal** is unchanged: `mt kanban task list` has `--board` already (kanban spec §16.5).
 
@@ -1884,7 +1890,8 @@ list its tasks. The list now takes a board:
   commands (line 59) are unchanged, as `task list` is listed there already.
 - **`README.md`**'s workflow notes (around lines 352 to 354 and 733 to 741): a file may name the
   board its tasks go on, and the startup says when that board is missing or archived; its chat
-  command list, where it gives `/kanban task list`, gains `board:<name>`.
+  command list, where it gives `/kanban task list`, gains `board:<name>`; and its line 842, "`/kanban
+  task list` act on the chat's board", gains the exception, `board:<name>` naming another.
 - **`docs/specs/2026-11-02-kanban-design.md`**: §16.3 and §16.4 gain a note, "*Amended by the
   workflows spec §19*", for `board:` on chat's task list.
 
