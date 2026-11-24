@@ -91,13 +91,17 @@ A run gets a card when all of these hold, checked at each round (§7.2):
 
    ```sql
    SELECT chat_type FROM kanban_subscriptions
-    WHERE account_id = ? AND conversation_id = ? AND chat_type IS NOT NULL LIMIT 1
+    WHERE account_id = ? AND channel = ? AND conversation_id = ? AND chat_type IS NOT NULL LIMIT 1
    ```
 
-   through the `account_id` index (migration 004), kept in memory by chat for the boot once found,
-   and **never written back**: the subscription's `chat_type` is written at its insert only (wake §4.3,
-   WRITERS.md). A chat's kind does not change, so any subscription that knows it
-   serves. A `p2p` answer gives the task its card in the direct message; `group`, no card. **The
+   through the `account_id` index (migration 004), as `chatKindOf(db, accountId, channel,
+   conversationId)`, and **never written back**: the subscription's `chat_type` is written at its
+   insert only (wake §4.3, WRITERS.md). `progressDue` returns these subscriptions too, at chat scope
+   with a null `chat_type`, and the loop filters them through `chatKindOf` before writing a row
+   (§7.2). **Only a found kind is cached**, in memory by channel and chat for the boot: a chat's kind
+   does not change, so any subscription that knows it serves. **A miss is not cached**; it is looked
+   up again at most once a round, so a task typed later in that chat makes its kind known at the
+   next round. A `p2p` answer gives the task its card in the direct message; `group`, no card. **The
    gap:** a chat where no task was ever created by a typed command, so no subscription knows its
    kind, as a direct message the operator named only from a terminal, reads nothing, is taken as not
    known to be a direct message, and gets no card. Asking Lark's chat info API (`GET
@@ -309,12 +313,17 @@ sessionId)` in `src/db/events.ts` as the greatest `ts` of the latest row of each
 `(session_id, type, seq)` index (`idx_events_type`). Not `lastEventAt`, the session's last event of
 any kind: the boot writes events of its own into the session after the agent died,
 `reconcileBoot`'s `turn_ended` and `session_state_changed`, then the archive's, so its last event is
-the boot's. A run with no session, or no output from its agent, ends at its `started_at`, and is
-drawn `after 0 s`: nothing says the agent ever did anything. A run is known to be closed by the boot when it started before this process did and
-closed after: `started_at < bootedAt <= ended_at`, `bootedAt` being the time the gateway's
-`start()` began, given to the loop. No turn of such a run ran in this process, so only the boot
-can have closed it. Every `interrupted` run is one (§10); its time ends at `lastAgentEventAt` as
-well when it lost its environment to a restart (`envFor`).
+the boot's. A run whose agent wrote no output ends at its session's last event from before the
+boot, `ts < bootedAt` (its `turn_submitted`, say), read by `lastEventBefore(db, sessionId,
+bootedAt)`. A run with no session, or no event before the boot, has no end known: its final line
+is drawn with no time, `⏸ interrupted by a restart`, or its reported word alone; `started_at` is
+its start only, and an end at it would draw a false `after 0 s`.
+
+A run is known to be closed by the boot when it started before this process did and closed after:
+`started_at < bootedAt <= ended_at`, `bootedAt` being the time the gateway's `start()` began, given
+to the loop. No turn of such a run ran in this process, so only the boot can have closed it. Every
+`interrupted` run is one (§10); its time ends at `lastAgentEventAt` as well when it lost its
+environment to a restart (`envFor`).
 
 The outcome word is read from `kanban_runs.outcome`, and, for a counted failure, from the run's
 `run_ended` event, which says what came next (`next`, `blockKind`, kanban §9.4), read by a new
@@ -477,8 +486,9 @@ implementer · run 1 of 2
 - **The final line**: the mark and word of §5.3, then `after` and the total time to the second
   below an hour, `after 47 s`, `after 14 min 3 s`, and to the minute above, `after 1 h 12 min`.
 - **The tool line**, every tool event folded (§5.2): what the run did.
-- **The total time** ends at `ended_at`, or, for a run closed by the boot, at its session's last
-  event (§5.3).
+- **The total time** ends at `ended_at`, or, for a run closed by the boot, at its agent's last
+  output, else its session's last event before the boot; with neither, the final line has no time
+  (§5.3).
 - **No text, no summary, no reason**: the notice that follows says those (kanban §9.4); the tail
   of what the agent said last is often the start of its summary, cut.
 - **Unchanged:** the notice, the Unblock button under it, wake (wake §5), and the agent-first hold
@@ -541,7 +551,10 @@ rather than being told.
 1. **New cards.** For each run due a card (§2), oldest `started_at` first, read by a new
    `progressDue(db, appId, now - minSeconds × 1000)` in `kanban-read.ts`: open undecided role runs
    started by then with no `kanban_progress_cards` row, whose task has a subscription of this bot
-   in a thread or a direct message. Each is given its row (`openProgressCard`), `try_number` and
+   in a thread, at chat scope with `chat_type = 'p2p'`, or at chat scope with a null `chat_type`.
+   The last are filtered here through `chatKindOf` (§2), its found kinds cached and each miss
+   looked up at most once a round; a `group`, or a miss, writes no row, and the run is due again at
+   the next round. Each run kept is given its row (`openProgressCard`), `try_number` and
    `try_limit` read by the insert, `opened_at` now. A run whose subscription is on a channel this
    gateway has not got is passed over, said once a boot for each channel: `kanban: progress cards
    cannot go to channel <id>, which this gateway has not got`.
@@ -555,8 +568,10 @@ rather than being told.
      failures are under ten (§9), its fold has caught up (§5.2), and what it would show differs
      from what it last drew. The cheap check first: nothing has changed when the session's
      `last_seq` is not past `read_seq`, the shown minute is the one shown at `drawn_at`, and the
-     run's state (undecided, reported, stopping or ending, §5.3) is the one drawn last, both kept in
-     memory; only otherwise is the session folded and the card rendered, and its markdown compared
+     run's state (undecided, reported, stopping or ending, §5.3) is the one drawn last, and the
+     Stop button's `try` (§6.5) is the one drawn last, the state and the `try` both kept in memory.
+     A `try` bumped by a tier refusal whose redraw was paced away (§8.1) therefore makes the card
+     due once the pace allows, with nothing else changed; only otherwise is the session folded and the card rendered, and its markdown compared
      with the markdown last drawn.
 3. **The longest waiting first.** The due sends, finals and updates are ordered by how long each
    has waited: a send since `opened_at`, a final or an update since `drawn_at`. At most
@@ -851,10 +866,9 @@ card of its own beside it, from the log the session keeps.
 - **`src/db/kanban.ts`**: the six writers of §4.2; `stop` gains `runId?`, refusing `run_superseded`
   inside its transaction (§8.2). **`src/db/kanban-read.ts`**: `progressDue`, `openProgressCards`,
   `runEndedOf`, the `stopped` event of a run for the stopping line, and `chatKindOf(db, accountId,
-  conversationId)`, the query of §2's null `chat_type`. **`src/db/events.ts`** gains
-  `lastAgentEventAt` (§5.3) too. **`src/db/events.ts`**: a
-  read of a session's events of given types past a seq, up to a seq, through `idx_events_type`, for
-  the final draw (§5.2). **`src/db/WRITERS.md`**: the row of §4.2.
+  channel, conversationId)`, the query of §2's null `chat_type`. **`src/db/events.ts`**: a read of a
+  session's events of given types past a seq, up to a seq, through `idx_events_type`, for the final
+  draw (§5.2); `lastAgentEventAt` and `lastEventBefore`, for a boot-closed run's time (§5.3). **`src/db/WRITERS.md`**: the row of §4.2.
 - **`src/kanban/service.ts`**: the writers, as `KanbanService` methods, each refusing a bad id or
   message id `invalid`, as `buttonSent` does; `stop(taskId, by, opts?: { runId?: string })`.
 - **`src/kanban/progress.ts`** (new): `ProgressCards`, with `start()`, `stop()`, `idle(boundMs)`,
@@ -909,9 +923,12 @@ card of its own beside it, from the log the session keeps.
   - where: in the thread with its root, in a direct message, with the run's uuid; **none at a
     group's chat scope**, for a task created there, for one from before threads, and for a
     terminal's `--chat` naming a group with no thread (`chat_type` null), its notices still sent;
-    **a null `chat_type` at chat scope read from another subscription of the same chat**: `p2p` a card
-    in the direct message, `group` none, the subscription's own `chat_type` still null afterwards, the
-    read made once a chat a boot; a follow-up whose copied `chat_type` is null treated the same; a
+    **a null `chat_type` at chat scope, returned by `progressDue` and filtered in the loop through
+    `chatKindOf`, read from another subscription of the same channel and chat**: `p2p` a card in the
+    direct message, `group` none, the subscription's own `chat_type` still null afterwards; a found
+    kind read once a boot and cached; a miss not cached, looked up again at the next round and no
+    more than once a round, and a task typed in that chat meanwhile giving the run its card at the
+    next round; a subscription of another channel with the same conversation id not read; a follow-up whose copied `chat_type` is null treated the same; a
     direct message no other subscription knows: no card;
   - the row: `try_number` and `try_limit` written by the insert's `SELECT`, none for a run decided
     between the read and the insert;
@@ -960,8 +977,9 @@ card of its own beside it, from the log the session keeps.
     agent's last output event, the boot hours later on the fake clock, the runs closed through the
     real paths, `registry.reconcileBoot()` and then `Dispatcher.boot()`'s archive and close, so the
     session holds the boot's `turn_ended`, `session_state_changed` and archive events after the
-    agent's, none of which moves the end; and at `started_at`, `after 0 s`, for a run whose agent
-    wrote nothing**; the retry's new card;
+    agent's, none of which moves the end; at the session's last event before the boot for a run
+    whose agent wrote nothing, the boot's events after it ignored; and no time at all, `⏸
+    interrupted by a restart`, for a run with no session or no event before the boot**; the retry's new card;
   - `redrawNow` on a row whose run has closed: drawn final and marked final; on a `let_go` row:
     drawn final and left `let_go`;
     a stale press's redraw paced to one a message every 5 s;
@@ -971,7 +989,8 @@ card of its own beside it, from the log the session keeps.
   returned before the redraw settles; operate tier read live, a grant revoked a moment before
   refused; talk tier refused with the message of §8.1, the card redrawn with `try` one higher, and a
   press of the new value by the same person, now granted, stopping the run; two tier refusals within
-  5 s one redraw, `try` bumped twice, the card's next draw carrying the second; a bad nonce, a run of
+  5 s one redraw, `try` bumped twice, and at the pace's end the loop's update landing with the
+  second `try` and nothing else changed in the card (the session and the run unchanged meanwhile); a bad nonce, a run of
   another task, a person's run refused; a stale press redrawn final with "This run has ended." and
   the board unchanged; `run_superseded` and `no_open_run` from the stop each taken as a stale press;
   a press on a stopping or ending run answered "That run is already ending." and changing nothing;
@@ -1138,7 +1157,8 @@ Made while grounding the design in the code, or by the user, each where it appli
 - **A restart-interrupted run is recognised by `outcome = 'interrupted'`**, which only the
   dispatcher's `#interrupt` writes, at boot or for a session that lost its environment to a restart
   (§10); and a run closed by the boot by `started_at < bootedAt <= ended_at`, its time ending at
-  `lastAgentEventAt`, the agent's last output event, else `started_at` (§5.3).
+  `lastAgentEventAt`, the agent's last output event, else the session's last event before the
+  boot, else drawn with no time (§5.3).
 - **The Stop press is a board card's press**, `kind: 'kanban'`, `act: 'stop'`, `run`, the nonce
   `boardCardNonce(appId, taskId, runId)` and a `try` outside it, reaching `KanbanService.stop`
   through `KanbanChat.card`, then the dispatcher's `cancel` through `#decided` (§8).
