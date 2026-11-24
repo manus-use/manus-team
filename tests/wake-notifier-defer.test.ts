@@ -219,6 +219,35 @@ describe('the notifier, asked to defer a block', () => {
     expect(deferredButton(t.db, b.sub.id, b.block)?.heldAt).toBe(1_760_000_001_000);
   });
 
+  it("writes the notice's message id with the deferral, and none for a notice that went as text", async () => {
+    const card = blocked('Draft the agenda');
+    defer.add(card.task.taskId);
+    await notifier().deliver();
+    expect(deferredButton(t.db, card.sub.id, card.block)?.noticeId).toBe('om_text_1');
+    const text = blocked('Check the links');
+    defer.add(text.task.taskId);
+    lark.answerNext('sendText', { messageId: 'om_plain', deduped: false, card: false });
+    await notifier().deliver();
+    expect(deferredButton(t.db, text.sub.id, text.block)?.noticeId).toBeNull();
+  });
+
+  it('defers a block again when the same batch is sent again after a send that may have landed, whatever the waker says now', async () => {
+    const b = blocked('Draft the agenda');
+    defer.add(b.task.taskId);
+    const n = notifier();
+    lark.failNext('sendText', new Error('the send took longer than 30 s'));
+    await n.deliver();
+    expect(deferredButton(t.db, b.sub.id, b.block)).toBeUndefined();
+    defer.delete(b.task.taskId);
+    clock.advance(10 * 60_000);
+    await n.deliver();
+    const again = lark.texts.at(-1);
+    expect(again?.buttons).toBeUndefined();
+    expect(again?.text.endsWith(`\n${LOOKING}`)).toBe(true);
+    expect(deferredButton(t.db, b.sub.id, b.block)?.state).toBe('held');
+    expect(cursorOf(b.task)).toBe(b.block);
+  });
+
   it('asks nothing, and defers nothing, with no waker', async () => {
     const b = blocked('Draft the agenda');
     defer.add(b.task.taskId);

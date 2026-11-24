@@ -77,6 +77,7 @@ CREATE TABLE kanban_deferred_buttons (
   task_id          TEXT NOT NULL,
   app_id           TEXT NOT NULL,
   held_at          INTEGER NOT NULL,                -- when its notice, without the button, was sent
+  notice_id        TEXT,                            -- that notice's message id; null when it went as text
   state            TEXT NOT NULL CHECK (state IN ('held', 'due', 'sent', 'lifted', 'failed')),
   why              TEXT,                            -- why it is due: tried, not_woken, turn_failed, running, restart
   attempts         INTEGER NOT NULL DEFAULT 0,      -- sends of the button card tried

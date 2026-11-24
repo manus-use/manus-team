@@ -366,6 +366,8 @@ export interface DeferredButtonRow extends DeferredKey {
   appId: string;
   /** When its notice, without the button, was sent. */
   heldAt: number;
+  /** That notice's message id, which is redrawn once the button's card is sent; null when it went as text. */
+  noticeId: string | null;
   state: DeferredState;
   why: DeferredWhy | null;
   /** Sends of the button card tried. */

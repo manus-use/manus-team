@@ -176,6 +176,20 @@ describe('a held button released at once', () => {
     expect(h.lark.texts).toHaveLength(0);
   });
 
+  it('goes failed, with one log line naming it and no card, when its subscription is gone', async () => {
+    const task = h.woken();
+    const b = deferredBlock(task);
+    h.db.pragma('foreign_keys = OFF');
+    h.db.prepare('DELETE FROM kanban_subscriptions WHERE id = ?').run(b.sub);
+    h.db.pragma('foreign_keys = ON');
+    await h.round();
+    expect(state(b)?.state).toBe('failed');
+    expect(h.notes.filter((n) => n.includes(`deferred Unblock button of task ${task.taskId}`))).toEqual([
+      `kanban: the deferred Unblock button of task ${task.taskId} (subscription ${b.sub}, event ${b.event}) is dropped: subscription ${b.sub} is gone`,
+    ]);
+    expect(h.lark.texts).toHaveLength(0);
+  });
+
   it('stays held while the agent still gets its try', async () => {
     const b = deferredBlock(h.woken());
     h.registry.actor('s_w1').answers.push('hold');

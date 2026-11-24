@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buttonDue, buttonSent, deferButton, unblock } from '../src/db/kanban.js';
-import { subscriptionsOf } from '../src/db/kanban-read.js';
+import { subscriptionsOf, unblockMessage } from '../src/db/kanban-read.js';
 import { AGENT_FIRST_LINE, AGENT_COULD_NOT_LINE, agentCouldNotTyped, renderUnblockRedraw, unblockButton, type UnblockShown } from '../src/kanban/chat-render.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { UnblockRedraws } from '../src/kanban/unblock-redraw.js';
@@ -112,7 +112,7 @@ describe('UnblockRedraws of a buttonless notice', () => {
     const sub = subscriptionsOf(t.db, task.taskId)[0]?.id ?? 0;
     const key = { subscriptionId: sub, eventId: event };
     for (const r of [
-      deferButton(t.db, key, clock.now()),
+      deferButton(t.db, key, clock.now(), 'om_notice'),
       service.recordUnblockButtons({
         messageId: 'om_notice',
         channel: 'lark',
@@ -141,6 +141,40 @@ describe('UnblockRedraws of a buttonless notice', () => {
     expect(lark.cardUpdates).toEqual([
       { messageId: 'om_notice', view: { markdown: `\`${n.task.taskId}\` is blocked: which?\n${AGENT_COULD_NOT_LINE}`, buttons: [] } },
     ]);
+  });
+
+  it('reads, for a task followed in two threads, each notice by its own row: one sent, the other held', async () => {
+    const n = deferredNotice();
+    t.db
+      .prepare(
+        `INSERT INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, cursor, created_at)
+         VALUES (?, 'lark', ?, 'oc_team', 'omt_other', ?, ?)`,
+      )
+      .run(n.task.taskId, APP, n.event, clock.now());
+    const other = subscriptionsOf(t.db, n.task.taskId).find((x) => x.threadId === 'omt_other')?.id ?? 0;
+    const text = `\`${n.task.taskId}\` is blocked: which?\n${AGENT_FIRST_LINE}`;
+    const key = { subscriptionId: n.sub, eventId: n.event };
+    for (const r of [
+      deferButton(t.db, { subscriptionId: other, eventId: n.event }, clock.now(), 'om_other'),
+      service.recordUnblockButtons({
+        messageId: 'om_other',
+        channel: 'lark',
+        appId: APP,
+        markdown: text,
+        buttons: [{ taskId: n.task.taskId, blockEvent: n.event, hasButton: false }],
+      }),
+      buttonDue(t.db, key, 'tried'),
+      buttonSent(t.db, key, 'om_card', clock.now()),
+      service.recordUnblockButtons({ messageId: 'om_card', channel: 'lark', appId: APP, markdown: 'card', buttons: [{ taskId: n.task.taskId, blockEvent: n.event }] }),
+    ]) {
+      if (!r.ok) throw new Error(r.message);
+    }
+    expect(unblockMessage(t.db, APP, 'om_notice')?.buttons[0]?.deferred).toBe('sent');
+    expect(unblockMessage(t.db, APP, 'om_other')?.buttons[0]?.deferred).toBe('held');
+    await redraws().redrawMessage('om_notice');
+    await redraws().redrawMessage('om_other');
+    expect(lark.cardUpdates.find((u) => u.messageId === 'om_notice')?.view.markdown).toBe(`\`${n.task.taskId}\` is blocked: which?\n${AGENT_COULD_NOT_LINE}`);
+    expect(lark.cardUpdates.find((u) => u.messageId === 'om_other')?.view.markdown ?? text).toBe(text);
   });
 
   it('redraws it with the typed command when the button card went as text, unrecorded', async () => {

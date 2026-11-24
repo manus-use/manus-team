@@ -19,7 +19,7 @@ import { wakeHarness, type WakeHarness } from './helpers/waker.js';
  */
 
 const DEFERRED_NOTE =
-  'People in this thread have seen this block, but have no Unblock button for it yet: you have the first try. If it is still blocked when your turn ends, or after 10 minutes, the button goes to them.';
+  'People in this thread have seen this block, but have no Unblock button for it yet: you have the first try. If it is still blocked when your turn ends, or 10 minutes after its notice, the button goes to them.';
 
 let h: WakeHarness;
 beforeEach(() => {
@@ -70,6 +70,16 @@ describe("a woken turn's end", () => {
     await h.round();
     await turnEnds(terminal);
     expect(deferredButton(h.db, b.sub, b.event)).toMatchObject({ state: 'due', why: 'turn_failed' });
+  });
+
+  it.each(['cancelled', 'ambiguous'] as const)('makes it due as turn_failed when the submit resolves %s right after the prompt reached the agent', async (terminal) => {
+    const task = h.woken();
+    const b = deferredBlock(task);
+    h.registry.actor('s_w1').answers.push({ endAfterPrompt: terminal });
+    await h.round();
+    await settle();
+    expect(h.wakes()[0]?.state).toBe('delivered');
+    expect(deferredButton(h.db, b.sub, b.event)).toMatchObject({ why: 'turn_failed' });
   });
 
   it('makes it lifted, with no card owed, when the agent lifted the block during its turn', async () => {
@@ -138,7 +148,7 @@ describe("a woken turn's end", () => {
     h = wakeHarness({ settings: { perHour: 6, maxDepth: 5, holdMinutes: 15 } });
     deferredBlock(h.woken());
     await h.round();
-    expect(h.registry.submits[0]?.input.text).toContain('If it is still blocked when your turn ends, or after 15 minutes, the button goes to them.');
+    expect(h.registry.submits[0]?.input.text).toContain('If it is still blocked when your turn ends, or 15 minutes after its notice, the button goes to them.');
   });
 });
 

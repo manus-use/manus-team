@@ -1274,15 +1274,16 @@ export function liftOf(db: Db, taskId: string, blockEvent: number): Lift | undef
  */
 export function unblockMessage(db: Db, appId: string, messageId: string): UnblockMessageReading | undefined {
   // `has_button` and the deferred buttons (migration 013) only where they exist: every row before them is a button.
+  // A deferred row is this message's by its notice_id: a task followed in two threads has a notice, and a row, in each.
   const deferred = hasWakeColumns(db)
     ? `b.has_button,
               (SELECT d.state FROM kanban_deferred_buttons d
-                WHERE d.app_id = b.app_id AND d.task_id = b.task_id AND d.event_id = b.block_event LIMIT 1) AS deferred_state,
+                WHERE d.app_id = b.app_id AND d.notice_id = b.message_id AND d.event_id = b.block_event) AS deferred_state,
               (SELECT d.state = 'sent' AND NOT EXISTS (
                         SELECT 1 FROM kanban_unblock_buttons c
                          WHERE c.message_id = d.message_id AND c.app_id = d.app_id AND c.task_id = d.task_id)
                  FROM kanban_deferred_buttons d
-                WHERE d.app_id = b.app_id AND d.task_id = b.task_id AND d.event_id = b.block_event LIMIT 1) AS deferred_text`
+                WHERE d.app_id = b.app_id AND d.notice_id = b.message_id AND d.event_id = b.block_event) AS deferred_text`
     : '1 AS has_button, NULL AS deferred_state, NULL AS deferred_text';
   const rows = db
     .prepare<[string, string], UnblockButtonRaw>(
@@ -1658,6 +1659,7 @@ interface DeferredButtonRaw {
   task_id: string;
   app_id: string;
   held_at: number;
+  notice_id: string | null;
   state: string;
   why: string | null;
   attempts: number;
@@ -1665,7 +1667,7 @@ interface DeferredButtonRaw {
   ended_at: number | null;
 }
 
-const DEFERRED_COLS = 'subscription_id, event_id, task_id, app_id, held_at, state, why, attempts, message_id, ended_at';
+const DEFERRED_COLS = 'subscription_id, event_id, task_id, app_id, held_at, notice_id, state, why, attempts, message_id, ended_at';
 
 function decodeDeferred(r: DeferredButtonRaw): DeferredButtonRow {
   return {
@@ -1674,6 +1676,7 @@ function decodeDeferred(r: DeferredButtonRaw): DeferredButtonRow {
     taskId: r.task_id,
     appId: r.app_id,
     heldAt: r.held_at,
+    noticeId: r.notice_id,
     state: r.state as DeferredState,
     why: r.why as DeferredWhy | null,
     attempts: r.attempts,
@@ -1705,22 +1708,6 @@ export function wakesOfEvent(db: Db, subscriptionId: number, eventId: number): W
     )
     .all(subscriptionId, eventId)
     .map(decodeWake);
-}
-
-/**
- * The notice that told of a block whose Unblock button the waker deferred: its
- * message's `has_button` 0 record, the latest if two (wake spec §5.9), which is
- * redrawn once the button's card is sent.
- */
-export function deferredNoticeOf(db: Db, appId: string, taskId: string, blockEvent: number): string | undefined {
-  if (!hasWakeColumns(db)) return undefined;
-  return db
-    .prepare<[string, string, number], { message_id: string }>(
-      `SELECT message_id FROM kanban_unblock_buttons
-        WHERE app_id = ? AND task_id = ? AND block_event = ? AND has_button = 0
-        ORDER BY sent_at DESC, message_id DESC LIMIT 1`,
-    )
-    .get(appId, taskId, blockEvent)?.message_id;
 }
 
 /** This bot's deferred buttons still `held` or `due` (wake spec §5.9), the oldest held first: what each round releases and sends. */

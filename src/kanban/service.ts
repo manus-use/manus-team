@@ -1418,10 +1418,11 @@ export class KanbanService {
   /**
    * A notice rendered without a block's Unblock button, at the waker's word, has
    * been sent (wake spec §5.9): the notifier writes the deferral, `held` since the
-   * send, before its cursor moves. A row already there stands.
+   * send, before its cursor moves, with the notice's message id when it went as
+   * a card, null as text. A row already there stands.
    */
-  deferButton(sub: SubscriptionRow, event: KanbanEvent, sentAt: number): Result<{ deferred: boolean }> {
-    return board.deferButton(this.#db, { subscriptionId: sub.id, eventId: event.id }, sentAt);
+  deferButton(sub: SubscriptionRow, event: KanbanEvent, sentAt: number, noticeId: string | null = null): Result<{ deferred: boolean }> {
+    return board.deferButton(this.#db, { subscriptionId: sub.id, eventId: event.id }, sentAt, noticeId);
   }
 
   /** A held deferred button made due, with why (wake spec §5.9). */

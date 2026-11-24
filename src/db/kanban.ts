@@ -2882,11 +2882,13 @@ export function passTaskWake(db: Db, taskId: string, cursor: number): Result<{ a
  * A block's Unblock button deferred for the agent's try (wake spec §5.9):
  * written `held`, at most once a subscription and block event (`INSERT OR
  * IGNORE`), by the notifier once a notice it rendered without that button has
- * been sent, as a card or as text, `heldAt` the send's time. A batch sent again
- * finds the row already there, and the first stands. Writes no event: the row is
- * the waker's own, as a cursor is the notifier's.
+ * been sent, as a card or as text, `heldAt` the send's time, `noticeId` that
+ * notice's message id, null when it went as text: the notice that is redrawn
+ * once the button's card is sent, a task followed in two threads having one a
+ * thread. A batch sent again finds the row already there, and the first stands.
+ * Writes no event: the row is the waker's own, as a cursor is the notifier's.
  */
-export function deferButton(db: Db, key: DeferredKey, heldAt: number): Result<{ deferred: boolean }> {
+export function deferButton(db: Db, key: DeferredKey, heldAt: number, noticeId: string | null = null): Result<{ deferred: boolean }> {
   return tx(db, (d) => {
     const sub = d
       .prepare<[number], { task_id: string; account_id: string }>('SELECT task_id, account_id FROM kanban_subscriptions WHERE id = ?')
@@ -2898,10 +2900,10 @@ export function deferButton(db: Db, key: DeferredKey, heldAt: number): Result<{ 
     }
     const { changes } = d
       .prepare(
-        `INSERT OR IGNORE INTO kanban_deferred_buttons (subscription_id, event_id, task_id, app_id, held_at, state)
-         VALUES (?, ?, ?, ?, ?, 'held')`,
+        `INSERT OR IGNORE INTO kanban_deferred_buttons (subscription_id, event_id, task_id, app_id, held_at, notice_id, state)
+         VALUES (?, ?, ?, ?, ?, ?, 'held')`,
       )
-      .run(key.subscriptionId, key.eventId, sub.task_id, sub.account_id, heldAt);
+      .run(key.subscriptionId, key.eventId, sub.task_id, sub.account_id, heldAt, noticeId);
     return { ok: true, deferred: changes === 1 };
   });
 }

@@ -39,9 +39,18 @@ export const THREAD_KEY: BindingKey = { channel: 'lark', appId: APP, conversatio
  * How a submit is answered: the prompt delivered and the turn completed; found
  * made (`created: false`); the agent failing to start; the prompt delivered and
  * the turn held until `release`; the turn made and never prompted, until
- * `release`; or the promise rejecting, before the turn is made or after its prompt.
+ * `release`; the promise rejecting, before the turn is made or after its prompt;
+ * or the turn ending at once after its prompt, as `endAfterPrompt` says.
  */
-export type Answer = 'prompt' | 'duplicate' | 'fail_start' | 'hold' | 'hang' | { reject: Error } | { rejectAfterPrompt: Error };
+export type Answer =
+  | 'prompt'
+  | 'duplicate'
+  | 'fail_start'
+  | 'hold'
+  | 'hang'
+  | { reject: Error }
+  | { rejectAfterPrompt: Error }
+  | { endAfterPrompt: TurnTerminal };
 
 export class FakeActor implements WakeActor {
   readonly submits: SubmitRequest[] = [];
@@ -63,6 +72,7 @@ export class FakeActor implements WakeActor {
     if (answer === 'fail_start') return 'failed';
     if (answer === 'hang') return new Promise<TurnTerminal>((resolve) => this.#held.push(resolve));
     req.onPrompted?.();
+    if (typeof answer === 'object' && 'endAfterPrompt' in answer) return answer.endAfterPrompt;
     if (typeof answer === 'object') throw answer.rejectAfterPrompt;
     if (answer === 'hold') return new Promise<TurnTerminal>((resolve) => this.#held.push(resolve));
     return 'completed';

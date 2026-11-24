@@ -49,7 +49,7 @@ function dueBlock(why: DeferredWhy, title = 'Draft the agenda'): { task: TaskRow
   const event = h.event(task, 'blocked', 'run:r_1', { kind: 'needs_input', reason: 'which speaker?', blockRecurrences: 1 });
   const sub = subscriptionsOf(h.db, task.taskId)[0]?.id ?? 0;
   const key = { subscriptionId: sub, eventId: event };
-  const deferred = deferButton(h.db, key, h.clock.now());
+  const deferred = deferButton(h.db, key, h.clock.now(), `om_notice_${event}`);
   if (!deferred.ok) throw new Error(deferred.message);
   const recorded = h.service.recordUnblockButtons({
     messageId: `om_notice_${event}`,
@@ -68,7 +68,7 @@ function dueBlock(why: DeferredWhy, title = 'Draft the agenda'): { task: TaskRow
 
 /** A card's words: its line by why, then the typed command, as Lark may take the card as text. */
 function words(line: string, taskId: string): string {
-  return `${line}\n\`/kanban task unblock ${taskId}\` lifts it too.`;
+  return `${line}\n\`/kanban task unblock ${taskId}\` also lifts it.`;
 }
 
 function buttonCards(): typeof h.lark.texts {
@@ -105,6 +105,61 @@ describe('a due button', () => {
     const b = dueBlock(why);
     await h.round();
     expect(buttonCards()[0]?.text).toBe(words(line.replace('{id}', b.task.taskId), b.task.taskId));
+  });
+
+  it('redraws, for a task followed in two threads, each notice once, for its own row', async () => {
+    const b = dueBlock('tried');
+    // A second thread follows the task, its own notice of the same block deferred in its own row.
+    h.db
+      .prepare(
+        `INSERT INTO kanban_subscriptions (task_id, channel, account_id, conversation_id, thread_id, root_message_id, cursor, wake_cursor, created_at)
+         VALUES (?, 'lark', ?, 'oc_chat', 'omt_2', 'om_root_2', ?, ?, ?)`,
+      )
+      .run(b.task.taskId, APP, b.event, b.event, NOW);
+    const other = subscriptionsOf(h.db, b.task.taskId).find((x) => x.threadId === 'omt_2')?.id ?? 0;
+    const key = { subscriptionId: other, eventId: b.event };
+    for (const r of [
+      deferButton(h.db, key, h.clock.now(), 'om_notice_two'),
+      h.service.recordUnblockButtons({
+        messageId: 'om_notice_two',
+        channel: 'lark',
+        appId: APP,
+        markdown: 'blocked: which speaker?\nThe agent is looking at it first.',
+        buttons: [{ taskId: b.task.taskId, blockEvent: b.event, hasButton: false }],
+      }),
+      h.service.buttonDue(key, 'tried'),
+    ]) {
+      if (!r.ok) throw new Error(r.message);
+    }
+    await h.round();
+    expect(buttonCards()).toHaveLength(2);
+    expect([...redrawn].sort()).toEqual([`om_notice_${b.event}`, 'om_notice_two'].sort());
+  });
+
+  it("records a card that went while the waker was stopped, and redraws no notice", async () => {
+    const b = dueBlock('tried');
+    h.lark.hold();
+    const round = h.round();
+    await h.clock.delay(0);
+    h.waker.stop();
+    h.lark.release();
+    await round;
+    expect(buttonCards()).toHaveLength(1);
+    expect(deferredButton(h.db, b.sub, b.event)?.state).toBe('sent');
+    expect(redrawn).toEqual([]);
+  });
+
+  it('is failed, with a line naming it, when its subscription is gone', async () => {
+    const b = dueBlock('tried');
+    h.db.pragma('foreign_keys = OFF');
+    h.db.prepare('DELETE FROM kanban_subscriptions WHERE id = ?').run(b.sub);
+    h.db.pragma('foreign_keys = ON');
+    await h.round();
+    expect(deferredButton(h.db, b.sub, b.event)?.state).toBe('failed');
+    expect(h.notes).toContain(
+      `kanban: the deferred Unblock button of task ${b.task.taskId} (subscription ${b.sub}, event ${b.event}) is dropped: subscription ${b.sub} is gone`,
+    );
+    expect(buttonCards()).toHaveLength(0);
   });
 
   it('owes no card once its block is lifted before the send', async () => {

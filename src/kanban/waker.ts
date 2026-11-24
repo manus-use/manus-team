@@ -7,7 +7,6 @@ import {
   CHATLESS,
   deferredButton,
   deferredButtons,
-  deferredNoticeOf,
   dueTaskWakes,
   dueWakes,
   eventsAfter,
@@ -203,7 +202,7 @@ function blockNotes(o: WakeOutcome, input: WakePromptInput): string[] {
   const notes = [
     o.button === 'deferred'
       ? 'People in this thread have seen this block, but have no Unblock button for it yet: you have the first try. ' +
-        `If it is still blocked when your ${input.role === undefined ? 'turn' : 'run'} ends, or after ${input.holdMinutes ?? WAKE_DEFAULTS.holdMinutes} minutes, the button goes to them.`
+        `If it is still blocked when your ${input.role === undefined ? 'turn' : 'run'} ends, or ${input.holdMinutes ?? WAKE_DEFAULTS.holdMinutes} minutes after its notice, the button goes to them.`
       : o.button === 'recorded'
         ? 'An Unblock button is on its notice in this thread.'
         : o.button === 'nochat'
@@ -1348,8 +1347,8 @@ export class Waker {
   }
 
   /**
-   * Each round, every `held` deferred button checked (§5.9): its task gone,
-   * `failed`, with one log line; its block lifted or its task archived,
+   * Each round, every `held` deferred button checked (§5.9): its task or its
+   * subscription gone, `failed`, with one log line naming which; its block lifted or its task archived,
    * `lifted`; in release mode, `due`, `not_woken`; otherwise `due` with the
    * reason `#heldWhy` gives, or left held while the agent still gets its try.
    */
@@ -1359,11 +1358,15 @@ export class Waker {
     for (const row of deferredButtons(db, deps.appId)) {
       if (row.state !== 'held') continue;
       const key = { subscriptionId: row.subscriptionId, eventId: row.eventId };
-      if (getTask(db, row.taskId) === undefined) {
+      const gone =
+        getTask(db, row.taskId) === undefined
+          ? 'the task is not on the board'
+          : getSubscription(db, row.subscriptionId) === undefined
+            ? `subscription ${row.subscriptionId} is gone`
+            : undefined;
+      if (gone !== undefined) {
         this.#buttonWrite(key, () => deps.service.buttonFailed(key));
-        this.#note(
-          `kanban: the deferred Unblock button of task ${row.taskId} (subscription ${row.subscriptionId}, event ${row.eventId}) is dropped: the task is not on the board`,
-        );
+        this.#note(`kanban: the deferred Unblock button of task ${row.taskId} (subscription ${row.subscriptionId}, event ${row.eventId}) is dropped: ${gone}`);
         continue;
       }
       if (liftOf(db, row.taskId, row.eventId) !== undefined) {
@@ -1400,7 +1403,8 @@ export class Waker {
       const sub = getSubscription(db, row.subscriptionId);
       if (task === undefined || sub === undefined) {
         this.#buttonWrite(key, () => deps.service.buttonFailed(key));
-        this.#note(`kanban: the deferred Unblock button of ${which} is dropped: the task is not on the board`);
+        const gone = task === undefined ? 'the task is not on the board' : `subscription ${row.subscriptionId} is gone`;
+        this.#note(`kanban: the deferred Unblock button of ${which} is dropped: ${gone}`);
         continue;
       }
       if (liftOf(db, row.taskId, row.eventId) !== undefined) {
@@ -1428,12 +1432,13 @@ export class Waker {
       let sent: SendResult;
       try {
         sent = await this.#bounded(channel.sendText(targetOf(db, at), text, uuid, [unblockButton(deps.appId, { id: row.eventId, taskId: row.taskId })]));
+        // Written as soon as the card went, a stop meanwhile included: a sent card is never sent again.
+        this.#buttonWrite(key, () => deps.service.buttonSent(key, sent.messageId));
       } catch (err) {
         this.#buttonFailedSend(key, which, pauseKey, message(err));
         continue;
       }
       this.#buttonPause.delete(pauseKey);
-      this.#buttonWrite(key, () => deps.service.buttonSent(key, sent.messageId));
       // Recorded as any Unblock card, so a later lift redraws it; a card that went as text has no button to redraw.
       if (sent.card !== false) {
         try {
@@ -1449,8 +1454,15 @@ export class Waker {
           this.#note(`kanban: recording the Unblock button of ${which} failed (${message(err)}); it will not be redrawn`);
         }
       }
-      const notice = deferredNoticeOf(db, deps.appId, row.taskId, row.eventId);
-      if (notice !== undefined) void deps.redrawNotice?.(notice);
+      if (this.#stopped) continue;
+      // The notice that deferred it, its own row's (§5.9): a task followed in two threads has one in each.
+      if (row.noticeId !== null) {
+        try {
+          void deps.redrawNotice?.(row.noticeId)?.catch((err: unknown) => this.#note(`kanban: redrawing the notice of ${which} failed (${message(err)})`));
+        } catch (err) {
+          this.#note(`kanban: redrawing the notice of ${which} failed (${message(err)})`);
+        }
+      }
     }
   }
 

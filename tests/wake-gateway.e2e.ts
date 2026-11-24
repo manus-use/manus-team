@@ -286,7 +286,7 @@ describe('wakes through createGateway', () => {
     await start();
     await say(OWNER, '/kanban task new Draft the BLOCK KEEP agenda\nassignee: default\nwake: on');
     const taskId = createdTask();
-    const words = `The agent could not lift the block on \`${taskId}\` **Draft the BLOCK KEEP agenda**.\n\`/kanban task unblock ${taskId}\` lifts it too.`;
+    const words = `The agent could not lift the block on \`${taskId}\` **Draft the BLOCK KEEP agenda**.\n\`/kanban task unblock ${taskId}\` also lifts it.`;
     await until('the button card', () => texts().includes(words));
     const turnAt = lark.landed.indexOf('card');
     const card = lark.texts.find((m) => m.text === words);

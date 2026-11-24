@@ -157,6 +157,16 @@ describe('migration 013', () => {
     expect(() => button()).toThrow(/UNIQUE constraint failed/);
   });
 
+  it("gives a deferred button its notice's message id, null for a notice that went as text", () => {
+    expect(columns('kanban_deferred_buttons').find((c) => c.name === 'notice_id')).toEqual({ name: 'notice_id', notnull: 0, dflt_value: null });
+    button({ notice_id: 'om_notice' });
+    button({ event_id: 2 });
+    expect(h.db.prepare('SELECT event_id, notice_id FROM kanban_deferred_buttons ORDER BY event_id').all()).toEqual([
+      { event_id: 1, notice_id: 'om_notice' },
+      { event_id: 2, notice_id: null },
+    ]);
+  });
+
   it('migrates a database at version 12, with a task and its notice record in it, wake off and every button a button', () => {
     const dir = mkdtempSync(join(tmpdir(), 'mt-wake-schema-'));
     try {

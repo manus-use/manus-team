@@ -142,6 +142,12 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Batches remembered with the blocks their notice was rendered to defer, at
+ * most: past it the oldest is forgotten.
+ */
+export const RENDERED_DEFERRED_HELD = 1_000;
+
 export class Notifier {
   readonly #deps: NotifierDeps;
   readonly #clock: Clock;
@@ -152,6 +158,13 @@ export class Notifier {
   readonly #dead = new Set<string>();
   /** Subscriptions whose task is not on the board, let go of until the gateway restarts. */
   readonly #gone = new Set<number>();
+  /**
+   * The blocks each batch uuid's notice was rendered to defer, until its send
+   * succeeds and its cursors move (wake spec §5.9): a send that timed out may
+   * have landed, and Lark keeps the first message of a uuid, so the same batch
+   * sent again defers them whatever the waker says now, as a written row would.
+   */
+  readonly #renderedDeferred = new Map<string, ReadonlySet<number>>();
   #round: Promise<number> | undefined;
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
@@ -327,8 +340,13 @@ export class Notifier {
       chars += n.text.length + 2;
     }
     const more = all.length - batch.length;
-    const { buttons, deferred } = this.#unblocks(batch);
+    const uuid = noticeBatchUuid(
+      this.#deps.appId,
+      batch.map((n) => [n.sub.id, n.event.id]),
+    );
+    const { buttons, deferred } = this.#unblocks(batch, this.#renderedDeferred.get(uuid));
     const deferredIds = new Set(deferred.map((n) => n.event.id));
+    if (deferredIds.size > 0) this.#rendered(uuid, deferredIds);
     const texts = batch.map((n) => (deferredIds.has(n.event.id) ? `${n.text}\n${AGENT_FIRST_LINE}` : n.text));
     const text = [...texts, ...(more > 0 ? [`… and ${more} more, in the next message.`] : [])].join('\n\n');
     // The last event the message covers: each cursor moves to it, notices or not.
@@ -336,10 +354,6 @@ export class Notifier {
     const markdown = redactKnownSecrets(text);
     let sent: SendResult;
     try {
-      const uuid = noticeBatchUuid(
-        this.#deps.appId,
-        batch.map((n) => [n.sub.id, n.event.id]),
-      );
       sent = await this.#bounded(
         deferred.length > 0
           ? // A notice with a deferred block goes as a card even with no button left, so it can be redrawn (wake spec §5.9).
@@ -356,8 +370,10 @@ export class Notifier {
       this.#recordButtons(c.channel, sent.messageId, markdown, buttons, deferred.map((n) => n.event));
     }
     // Owed whether the notice went as a card or as text, and written before the cursor moves (wake spec §5.9).
-    for (const n of deferred) this.#defer(n.sub, n.event);
+    const noticeId = sent.card !== false ? sent.messageId : null;
+    for (const n of deferred) this.#defer(n.sub, n.event, noticeId);
     this.#advanceAll(pending, upTo, true);
+    this.#renderedDeferred.delete(uuid);
     return { notices: batch.length, sent: true };
   }
 
@@ -389,12 +405,16 @@ export class Notifier {
    * waker defers (wake spec §5.9), which is left out of the buttons, its notice
    * telling it waits for the agent.
    */
-  #unblocks<N extends { event: KanbanEvent; sub: SubscriptionRow }>(batch: readonly N[]): { buttons: CardButton[]; deferred: N[] } {
+  #unblocks<N extends { event: KanbanEvent; sub: SubscriptionRow }>(
+    batch: readonly N[],
+    rendered: ReadonlySet<number> = new Set(),
+  ): { buttons: CardButton[]; deferred: N[] } {
     const latest = new Map<string, N>();
     for (const n of batch) if (blocksTask(n.event)) latest.set(n.event.taskId, n);
     const blocks = [...latest.values()].sort((a, b) => a.event.id - b.event.id);
     const wouldDefer = this.#deps.wouldDefer;
-    const deferred = wouldDefer === undefined ? [] : blocks.filter((n) => this.#asks(wouldDefer, n.sub, n.event));
+    // A block this batch's notice was rendered to defer before stays deferred, as its notice may have landed.
+    const deferred = blocks.filter((n) => rendered.has(n.event.id) || (wouldDefer !== undefined && this.#asks(wouldDefer, n.sub, n.event)));
     return {
       buttons: blocks
         .filter((n) => !deferred.includes(n))
@@ -402,6 +422,16 @@ export class Notifier {
         .map((n) => unblockButton(this.#deps.appId, n.event)),
       deferred,
     };
+  }
+
+  /** A batch's deferred blocks remembered under its uuid, the oldest batch forgotten past `RENDERED_DEFERRED_HELD`. */
+  #rendered(uuid: string, ids: ReadonlySet<number>): void {
+    this.#renderedDeferred.delete(uuid);
+    this.#renderedDeferred.set(uuid, ids);
+    for (const oldest of this.#renderedDeferred.keys()) {
+      if (this.#renderedDeferred.size <= RENDERED_DEFERRED_HELD) break;
+      this.#renderedDeferred.delete(oldest);
+    }
   }
 
   /** The waker's word, a read; one that throws keeps the button on the notice, as without a waker. */
@@ -415,15 +445,15 @@ export class Notifier {
   }
 
   /**
-   * A deferred block's row, `held` since the send (wake spec §5.9). One that
-   * cannot be written is said, and the cursor still moves: the notice then says
+   * A deferred block's row, `held` since the send, with the notice's message id,
+   * null for a notice that went as text (wake spec §5.9). One that cannot be written is said, and the cursor still moves: the notice then says
    * the agent is looking at it first, with no button to follow, and its typed
    * commands still unblock it.
    */
-  #defer(sub: SubscriptionRow, event: KanbanEvent): void {
+  #defer(sub: SubscriptionRow, event: KanbanEvent, noticeId: string | null): void {
     let why: string | undefined;
     try {
-      const r = this.#deps.service.deferButton(sub, event, this.#clock.now());
+      const r = this.#deps.service.deferButton(sub, event, this.#clock.now(), noticeId);
       if (!r.ok) why = r.message;
       else if (!r.deferred) {
         // A batch sent again, after a failed send or a restart: the first send's row stands, its time with it.

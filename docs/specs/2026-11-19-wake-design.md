@@ -374,6 +374,7 @@ CREATE TABLE kanban_deferred_buttons (
   task_id          TEXT NOT NULL,
   app_id           TEXT NOT NULL,
   held_at          INTEGER NOT NULL,                -- when its notice, without the button, was sent
+  notice_id        TEXT,                            -- that notice's message id; null when it went as text
   state            TEXT NOT NULL CHECK (state IN ('held', 'due', 'sent', 'lifted', 'failed')),
   why              TEXT,                            -- why it is due: tried, not_woken, turn_failed, running, restart (§5.9)
   attempts         INTEGER NOT NULL DEFAULT 0,      -- sends of the button card tried
@@ -447,7 +448,8 @@ All in `db/kanban.ts`, the board's tables' one writer. WRITERS.md gains:
   subscription and block event (`INSERT OR IGNORE`), in the notifier's after-send step, beside the
   Unblock buttons' record and before its cursor moves, once a notice it rendered without the
   block's Unblock button, at the waker's word, has been sent, as a card or as text (wake spec
-  §5.9). `state` moves forward only:
+  §5.9), with `notice_id` that notice's message id, or null when it went as text. `state` moves
+  forward only:
   `held` to `due` by `buttonDue`, with `why`; `held` or `due` to `lifted` by `buttonLifted`; `due`
   to `sent` by `buttonSent`, with the card's message id, or `held` or `due` to `failed` by
   `buttonFailed`; each in
@@ -837,9 +839,12 @@ redrawn; and, once the send succeeded:
 - **records the message** in `kanban_unblock_buttons` with `has_button` 0 for the deferred block,
   beside the rows of any real buttons, when Lark answered a card (`sent.card !== false`), as it
   records buttons today (`#recordButtons`);
-- **writes the deferral**, `deferButton(sub, event, sentAt)`, a `kanban_deferred_buttons` row
-  `held` with `held_at` the send's time, `INSERT OR IGNORE`, **whether the notice went as a card or
-  as text**: a text notice cannot be redrawn, but its button is owed all the same;
+- **writes the deferral**, `deferButton(sub, event, sentAt, noticeId)`, a `kanban_deferred_buttons`
+  row `held` with `held_at` the send's time and `notice_id` the notice's message id (null when it
+  went as text), `INSERT OR IGNORE`, **whether the notice went as a card or as text**: a text notice
+  cannot be redrawn, but its button is owed all the same. The row is keyed by its subscription, so
+  a task followed in two threads has a row, and a notice, in each, and each is read by its own
+  `notice_id`;
 - both **before `#advanceAll`** moves the cursor. A send that failed writes neither, and the next
   try decides afresh; a record or a deferral whose write fails is logged, and the cursor still
   moves, as a failed `#recordButtons` does today. A deferral never written leaves a notice that
@@ -847,6 +852,11 @@ redrawn; and, once the send succeeded:
   block in its batch with no row, uses the prompt's other note (§7), and nothing is owed; the
   notice's typed commands still unblock it. Logged, and accepted as the cost of writing after the
   send.
+- **a send that timed out may have landed**, and Lark keeps the first message of a uuid: the
+  notifier remembers, in memory, the blocks each batch uuid's notice was rendered to defer, until
+  its send succeeds and its cursors move, and the same batch sent again defers them whatever the
+  waker says then, as a written row would. A restart forgets them, as it forgets the notifier's
+  pauses.
 
 The notifier holds nothing back, so its cursor, its batches and the order of notices in a
 conversation are exactly as before: *the simpler correct choice*, as holding the notice would have
@@ -904,18 +914,24 @@ holds. The card's text, by `why`, the task by id and title, the reason not repea
 - `running`: `` The agent is still working on the block on `k_…` **Draft the agenda**; lift it here if you can answer it. ``
 - `not_woken`, `restart`: `` The agent was not woken for the block on `k_…` **Draft the agenda**; lift it here. ``
 
-Once sent: `buttonSent` with its message id; the card **recorded for the unblock redraw**
+Each with a second line, the typed command, as Lark may take the card as text:
+`` `/kanban task unblock k_…` also lifts it. ``
+
+Once sent: `buttonSent` with its message id, written as soon as the send answers, so a waker
+stopped meanwhile still records it and redraws nothing; the card **recorded for the unblock redraw**
 (`recordUnblockButtons`, `has_button` 1), like any Unblock card, so a later lift redraws it; and
 **the notice redrawn** by the existing path, `UnblockRedraws.redrawMessage(messageId)` for the
-notice's message (its `has_button` 0 row), so its line `The agent is looking at it first.` reads
+row's own notice, its `notice_id`, when it went as a card, so its line `The agent is looking at it first.` reads
 `The agent could not lift it; the Unblock button is below.` (below). A send that fails is tried
 again with the notifier's pause, 2 s doubling to five minutes (`buttonTried`); after
 `WAKE_REFUSALS` (10) failures, or at once when the notifier has let the conversation go, it is
-`failed`, with one log line; `/kanban task unblock` still lifts the block, as the notice's own typed
+`failed`, with one log line; a row whose task or subscription is gone is `failed` too, its line
+saying which; `/kanban task unblock` still lifts the block, as the notice's own typed
 commands say.
 
 **The redraw of a notice that deferred a button.** `unblockMessage` reads `has_button` and, for a
-`has_button` 0 row, its deferred button's state. `renderUnblockRedraw`:
+`has_button` 0 row, the state of the deferred button whose `notice_id` is that message and whose
+event is the row's block. `renderUnblockRedraw`:
 
 - replaces, for each `has_button` 0 row whose deferred button is `sent`, that block's `The agent is
   looking at it first.` with `The agent could not lift it; the Unblock button is below.`. The
@@ -1039,7 +1055,7 @@ k_9Lm4…: Draft the agenda
 Outcome: blocked (needs_input), by its run
 The run wrote:
 > Which of the two keynote speakers is confirmed?
-People in this thread have seen this block, but have no Unblock button for it yet: you have the first try. If it is still blocked when your turn ends, or after 10 minutes, the button goes to them. If you can answer the block yourself, lift it with `mt kanban task unblock k_9Lm4… <comment>`: the comment goes to the task's next run. Otherwise ask a person here.
+People in this thread have seen this block, but have no Unblock button for it yet: you have the first try. If it is still blocked when your turn ends, or 10 minutes after its notice, the button goes to them. If you can answer the block yourself, lift it with `mt kanban task unblock k_9Lm4… <comment>`: the comment goes to the task's next run. Otherwise ask a person here.
 ```
 
 - **The header** says what the agent may do, and only that (*decided by the user*, Q2 of the
@@ -1071,7 +1087,7 @@ the operator's commands would run. The approved header's "or use mt kanban as in
     the submit, which it is only when the agent could lift the block, so this note never stands
     beside "You cannot lift this block" or a recurrence note: `People in this thread have seen this block,
     but have no Unblock button for it yet: you have the first try. If it is still blocked when your
-    turn ends, or after 10 minutes, the button goes to them.`, the minutes `hold_minutes`;
+    turn ends, or 10 minutes after its notice, the button goes to them.`, the minutes `hold_minutes`;
   - otherwise, with an Unblock button recorded for that block event (`kanban_unblock_buttons`,
     `has_button` 1): `An Unblock button is on its notice in this thread.`; without one (the batch
     had more than five blocks, or the card was refused and went as text), `Its notice in this
@@ -2093,7 +2109,7 @@ Board update: you are this task's run because wake is on for the tasks below (se
 
 The blocks follow as in §7, the unblock notes naming `mt kanban wake-unblock` with JSON on stdin,
 `{"task_id": "k_…", "comment": "…"}`, and the deferred note saying the button goes to people "if it
-is still blocked when your run ends, or after 10 minutes". The prompt is made when the task is,
+is still blocked when your run ends, or 10 minutes after its notice". The prompt is made when the task is,
 and fixed: a run that starts later reads the board as it was then, as the note on lifted blocks says
 (§7), and `wake-show` reads it as it is.
 

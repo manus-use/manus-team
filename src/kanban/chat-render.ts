@@ -824,7 +824,7 @@ const AGENT_FIRST_AT_END = /\nThe agent is looking at it first\.(?=\n\n|$)/;
  * the task by id and title, the reason not repeated, worded by why it is due.
  */
 export function deferredButtonText(why: DeferredWhy, taskId: string, title: string, nameOf?: NameOf): string {
-  return `${deferredButtonLine(why, taskId, title, nameOf)}\n${typedUnblock(taskId)} lifts it too.`;
+  return `${deferredButtonLine(why, taskId, title, nameOf)}\n${typedUnblock(taskId)} also lifts it.`;
 }
 
 /** The card's first line, by why (wake spec §5.9). */

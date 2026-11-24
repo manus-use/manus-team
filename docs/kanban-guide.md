@@ -909,6 +909,12 @@ kanban:
     hold_minutes: 10
 ```
 
+For a block the agent could lift itself, the agent gets the first try: the thread's notice comes
+without its Unblock button and ends `The agent is looking at it first.`. If the block is still
+there when the woken turn ends, or `hold_minutes` after the notice, a card follows with the
+button, saying why, and `/kanban task unblock <id>` beneath it for a card Lark shows as text; the
+notice is then redrawn to say the button is below. A block lifted meanwhile gets no card.
+
 With `kanban.wake.enabled: false` nothing is woken, and a wake asked for is refused; turned on
 again, what waited is woken, one turn a conversation and setter. `/kanban task show` says each
 task's wake: `Wake: on, set by Zhixi Sun, depth 0`, with when it last woke.

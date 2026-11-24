@@ -43,16 +43,17 @@ function blocked(): { task: TaskRow; sub: number; block: number } {
 }
 
 describe('deferButton', () => {
-  it('writes the row held, with its task, its bot and the send time, at most once a subscription and block', () => {
+  it('writes the row held, with its task, its bot, the send time and its notice, at most once a subscription and block', () => {
     const b = blocked();
     const key = { subscriptionId: b.sub, eventId: b.block };
-    expect(deferButton(h.db, key, NOW + 10)).toEqual({ ok: true, deferred: true });
+    expect(deferButton(h.db, key, NOW + 10, 'om_notice')).toEqual({ ok: true, deferred: true });
     expect(deferredButton(h.db, b.sub, b.block)).toEqual({
       subscriptionId: b.sub,
       eventId: b.block,
       taskId: b.task.taskId,
       appId: APP,
       heldAt: NOW + 10,
+      noticeId: 'om_notice',
       state: 'held',
       why: null,
       attempts: 0,
@@ -127,7 +128,7 @@ describe('a buttonless notice, recorded for the redraw', () => {
   it('records has_button 0 beside a real button, and reads each with its deferred state', () => {
     const deferred = blocked();
     const real = blocked();
-    deferButton(h.db, { subscriptionId: deferred.sub, eventId: deferred.block }, NOW);
+    deferButton(h.db, { subscriptionId: deferred.sub, eventId: deferred.block }, NOW, 'om_n');
     const r = recordUnblockButtons(
       h.db,
       {
