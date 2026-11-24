@@ -68,7 +68,8 @@ Each tied to §19.
 **Files:** `src/kanban/workflow.ts`; test `tests/kanban-workflow-board.test.ts` (new).
 
 - [ ] **Step 1: Write the tests.** A `describe('the board key')`: `board: vi` read into `workflow.board`; absent and `board:` with nothing after it both `undefined`; `""`, `none`, `all`, `"{{team}}"`, `Vi`, `vi-`, `3` and `[vi]` each refused with a problem starting `board`. A `describe('startBoard')` with the six rows of §19.2's table, and the file with no board giving each path's own. A `describe('workflowBoard')`: a missing file, a symlink, a directory, a file over 64 KiB and one that does not parse give `{ file: 'unreadable' }`; a file with no key, a list at the root and `board: none` give `{ file: 'read', board: undefined }`; `board: vi` gives `{ file: 'read', board: 'vi' }`, also when the file is otherwise broken (an unknown role). A `describe('withBoards')`: a usable workflow on a missing board and one on an archived board moved to `broken` with §19.4's problems; one naming no board, and one naming `default` with only `default` known, kept.
-- [ ] **Step 2: Verify they fail.** `npx vitest run tests/kanban-workflow-board.test.ts`: the import of `startBoard` fails, every test of the file failing.
+- [ ] **Step 2: Verify they fail.** `npx vitest run tests/kanban-workflow-board.test.ts`: the file fails to collect, `Error: unknown setting board (known: description, params, steps)`, as its `describe('startBoard')` parses a file at collection.
+- [ ] **Step 2a: Update** `tests/kanban-workflow-file.test.ts`'s unknown-key test to `unknown setting name (known: description, board, params, steps)`.
 - [ ] **Step 3: Implement.**
   - `checkWorkflow`: `'board'` in the root's `reject` list; after `description`:
 
@@ -86,7 +87,7 @@ Each tied to §19.
   - `startBoard(w, path: BoardPath): Result<{ board: string; fromFile: boolean }>`, `BoardPath` being `{ kind: 'chat'; board: string } | { kind: 'terminal'; board: string | undefined } | { kind: 'run'; board: string }`, with §19.2's two messages.
   - `workflowBoard(dir, name): WorkflowBoardRead`, `{ file: 'unreadable' } | { file: 'read'; board: string | undefined }`: `NAME_PATTERN`, `statOf`, `notAWorkflow` and `readFile` as `readWorkflow` uses them, then `parseYaml` in a `try`, a root that `isRecord`, and a `board` that is text with no `nameProblem('board', …)`.
   - `missingBoardProblem(b)`, `archivedBoardProblem(b)`, and `withBoards(list, boards: ReadonlyMap<string, boolean>)`.
-- [ ] **Step 4: Run everything.** Unit: the new file's tests pass, `+N` on the baseline, and `tests/docs-examples.test.ts`'s weekly-report check passes (`docs/examples.md:45 … passes the check`). Typecheck clean.
+- [ ] **Step 4: Run everything.** Unit: `Tests  1 failed | 3376 passed (3377)`: the nine new tests pass, and the docs tests that only needed the key accepted pass with it (their starts still land on `default`, which their assertions do not yet check); the one failure is `docs-examples`' "says what each documented mt workflow check says", fixed by Task 7. Typecheck clean.
 - [ ] **Step 5: Commit** "Read a workflow file's board, route a start by it, and judge the boards a list names".
 
 ## Task 2: The service routes a start and a preview, and names the workflow in a board's refusal

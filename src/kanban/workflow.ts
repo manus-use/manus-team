@@ -75,6 +75,8 @@ export interface WorkflowStep {
 export interface Workflow {
   name: string;
   description: string | undefined;
+  /** The board its tasks go on (workflows spec §19.1), or undefined for the path's own. */
+  board: string | undefined;
   params: WorkflowParam[];
   /** In the file's order, which is the order their tasks are made in, and `show` lists them in. */
   steps: WorkflowStep[];
@@ -463,8 +465,16 @@ export function checkWorkflow(name: string, source: string, facts: WorkflowFacts
       fail(`the YAML does not parse: ${(err as Error).message.split('\n')[0] ?? ''}`);
     }
     const root = section(path, '', parsed ?? {});
-    reject(path, '', root, ['description', 'params', 'steps'], HINTS);
+    reject(path, '', root, ['description', 'board', 'params', 'steps'], HINTS);
     const description = optionalText(root['description'], 'description');
+    // A board in the board grammar (workflows spec §19.1); null is absent, and "" no name.
+    let board: string | undefined;
+    if (root['board'] !== undefined && root['board'] !== null) {
+      const b = text(root['board'], 'board');
+      const bad = nameProblem('board', b);
+      if (bad !== undefined) fail(`board: ${bad}`);
+      board = b;
+    }
     const paramsMap = root['params'] === undefined || root['params'] === null ? {} : section(path, 'params', root['params']);
     const params = Object.entries(paramsMap).map(([n, v]) => paramOf(n, v, path));
     if (root['steps'] === undefined || root['steps'] === null) fail('the file needs steps, at least one');
@@ -477,7 +487,7 @@ export function checkWorkflow(name: string, source: string, facts: WorkflowFacts
     const steps = Object.entries(stepsMap).map(([n, v]) => stepOf(n, v, path));
     if (steps.length === 0) fail('the file needs steps, at least one');
     checkWhole(steps, new Map(params.map((p) => [p.name, p])), facts);
-    return { ok: true, workflow: { name, description, params, steps } };
+    return { ok: true, workflow: { name, description, board, params, steps } };
   } catch (err) {
     if (err instanceof Problem) return { ok: false, problem: err.message };
     if (err instanceof ConfigError) {
@@ -575,6 +585,84 @@ export function readWorkflow(dir: string, name: string, facts: WorkflowFacts): R
   const checked = read.ok ? checkWorkflow(name, read.text, facts) : read;
   if (!checked.ok) return refuse('invalid', `workflow ${name} is not usable: ${checked.problem}`);
   return { ok: true, workflow: checked.workflow };
+}
+
+// ---------------------------------------------------------------------------
+// A workflow's own board (workflows spec §19)
+// ---------------------------------------------------------------------------
+
+/** Where a start comes from, as the routing of workflows spec §19.2 reads it: the chat's board, the terminal's `--board` if given, a run's task's. */
+export type BoardPath = { kind: 'chat'; board: string } | { kind: 'terminal'; board: string | undefined } | { kind: 'run'; board: string };
+
+/**
+ * The board a start goes on (workflows spec §19.2): the file's, from chat on any
+ * board and from the terminal with no `--board` or the same one; a different
+ * `--board`, and a run on another board, refused `other_board`. A file naming
+ * none leaves the path's own, `default` at the terminal with no `--board`.
+ */
+export function startBoard(w: Workflow, path: BoardPath): Result<{ board: string; fromFile: boolean }> {
+  const own = w.board;
+  if (own === undefined) return { ok: true, board: path.board ?? 'default', fromFile: false };
+  if (path.kind === 'terminal' && path.board !== undefined && path.board !== own) {
+    return refuse('other_board', `workflow ${w.name} puts its tasks on board ${own}, not ${visible(path.board)}`);
+  }
+  if (path.kind === 'run' && path.board !== own) {
+    return refuse('other_board', `workflow ${w.name} puts its tasks on board ${own}, and a run's work stays on its task's board, ${path.board}`);
+  }
+  return { ok: true, board: own, fromFile: true };
+}
+
+/** What the light read of a workflow file finds (workflows spec §19.3). */
+export type WorkflowBoardRead = { file: 'unreadable' } | { file: 'read'; board: string | undefined };
+
+/**
+ * A workflow file's board alone (workflows spec §19.3): the entry as
+ * `readWorkflow` takes it, the YAML parsed, and no team check. Unreadable for no
+ * file, a name outside the grammar, an entry that is no regular file, one past
+ * 64 KiB or YAML that does not parse; read with no board for a root that is no
+ * mapping, or a board outside the grammar.
+ */
+export function workflowBoard(dir: string, name: string): WorkflowBoardRead {
+  if (typeof name !== 'string' || !NAME_PATTERN.test(name)) return { file: 'unreadable' };
+  const entry = `${name}.yaml`;
+  if (statOf(join(dir, entry)) === undefined || notAWorkflow(dir, entry) !== undefined) return { file: 'unreadable' };
+  const read = readFile(join(dir, entry));
+  if (!read.ok) return { file: 'unreadable' };
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(read.text, { logLevel: 'error' });
+  } catch {
+    return { file: 'unreadable' };
+  }
+  const b = isRecord(parsed) ? parsed['board'] : undefined;
+  return { file: 'read', board: typeof b === 'string' && nameProblem('board', b) === undefined ? b : undefined };
+}
+
+/** Why a workflow is not usable when its board does not exist (workflows spec §19.4). */
+export function missingBoardProblem(board: string): string {
+  return `its board ${board} does not exist (create it with /kanban board create ${board}, or mt kanban board create ${board})`;
+}
+
+/** Why a workflow is not usable when its board is archived (workflows spec §19.4). */
+export function archivedBoardProblem(board: string): string {
+  return `its board ${board} is archived, and nothing is added to it (name another board in its file)`;
+}
+
+/**
+ * A list judged against the boards (workflows spec §19.4): each usable workflow
+ * whose board is missing or archived moved to `broken`, with its problem.
+ * `boards` maps a board's name to whether it is archived.
+ */
+export function withBoards(list: WorkflowList, boards: ReadonlyMap<string, boolean>): WorkflowList {
+  const usable: Workflow[] = [];
+  const broken = [...list.broken];
+  for (const w of list.usable) {
+    const archived = w.board === undefined ? false : boards.get(w.board);
+    if (w.board === undefined || archived === false) usable.push(w);
+    else broken.push({ name: w.name, problem: archived === undefined ? missingBoardProblem(w.board) : archivedBoardProblem(w.board) });
+  }
+  broken.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return { usable, broken, ignored: list.ignored };
 }
 
 /**

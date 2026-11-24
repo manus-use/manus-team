@@ -74,7 +74,7 @@ describe('the example of the spec', () => {
 
 describe('the keys', () => {
   it('refuses an unknown one at each level, naming it and its place', () => {
-    expect(problem('steps:\n  a: { title: A }\nname: x\n')).toBe('unknown setting name (known: description, params, steps)');
+    expect(problem('steps:\n  a: { title: A }\nname: x\n')).toBe('unknown setting name (known: description, board, params, steps)');
     expect(problem(oneStep('    timeout: 3\n'))).toMatch(/^unknown setting steps\.a\.timeout \(known: title, body, assignee, /);
     expect(problem(oneStep('', '  topic: { required: true, kind: text }'))).toBe(
       'unknown setting params.topic.kind (known: list, required, default, description)',
