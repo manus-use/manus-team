@@ -173,14 +173,14 @@ Each tied to §19.
 
 **Files:** `src/kanban/chat.ts`, `src/kanban/chat-render.ts`; test `tests/kanban-workflow-board-fronts.test.ts`.
 
-- [ ] **Step 1: Tests**, through `KanbanChat` as `tests/kanban-workflow-chat.test.ts` builds it:
+- [ ] **Step 1: Tests**, four, through a `KanbanChat` in a direct message, as `tests/kanban-workflow-chat.test.ts` builds one, its board moved with `/kanban board use`:
   - `/kanban workflow start vi-sync` from a chat on `default`: ``Started vi-sync as `w_…`, 1 task, on board **vi**:``, the task line, then ``Its tasks are on board **vi**: `/kanban task list board:vi` lists that board.``, then the line saying who hears; from a chat on `vi`, no pointer; a file naming `default` from a chat on `vi`: named `**default**`, with the pointer;
   - a chat on an archived board starts it on `vi`; a file with no board there gets today's sentence;
   - a preview names the board as the reply does;
   - `/kanban workflow list`: `- **vi-sync** · params: none · board **vi**`.
-- [ ] **Step 2: Verify they fail**: the start is refused for the archived chat board, and no pointer.
+- [ ] **Step 2: Verify they fail**: on Task 8's tree the four fail, no pointer and the start refused for the archived chat board (`Tests  4 failed | 13 passed (17)`).
 - [ ] **Step 3: Implement.** `#startWorkflow` makes its archived check only when `service.workflowBoard(name)` is not `{ file: 'read', board }` with a board. `renderStarted(reply, where, whom, nameOf, chatBoard?)` names the board when it is not `default` or not `chatBoard`, and adds the pointer as the first of the fixed last lines; `renderPreview(…, chatBoard?)` names it alike; `renderWorkflows` adds ` · board **b**`.
-- [ ] **Step 4: Run everything.** Unit `+N`.
+- [ ] **Step 4: Run everything.** Unit: `Tests  1 failed | 3407 passed (3408)`, four new; the one failure is `docs-wake`'s, for want of `reports`.
 - [ ] **Step 5: Commit** "Name a workflow's board in chat's reply, preview and list, and point to its task list".
 
 ## Task 10: Chat's task list on a named board

@@ -6,10 +6,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { boardsAt } from '../src/db/boards-at.js';
 import { archiveBoard, createBoard } from '../src/db/kanban.js';
 import { migrate, openDb } from '../src/db/open.js';
+import { SCHEMA_DIR } from './helpers/db.js';
 import { loadStartup } from '../src/index.js';
+import { KanbanChat } from '../src/kanban/chat.js';
+import { PeopleDirectory } from '../src/kanban/people.js';
+import { KanbanService } from '../src/kanban/service.js';
+import type { BindingKey, InboundMessage, Principal } from '../src/types.js';
+import { testDb, type TestDb } from './helpers/db.js';
+import { role } from './helpers/dispatch.js';
 import { runMt } from '../src/cli/mt.js';
 import { clearSecrets } from '../src/secrets.js';
-import { SCHEMA_DIR } from './helpers/db.js';
 import { ALICE, NOW } from './helpers/kanban.js';
 
 /**
@@ -223,5 +229,88 @@ describe('the terminal', () => {
     expect((await mt(env, ['kanban', 'workflow', 'list'])).out.split('\n')).toEqual(['plain: params none', 'vi-sync: params none · board vi']);
     const json = JSON.parse((await mt(env, ['kanban', 'workflow', 'list', '--json'])).out) as { workflows: { name: string; board: string | null }[] };
     expect(json.workflows.map((w) => [w.name, w.board])).toEqual([['plain', null], ['vi-sync', 'vi']]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chat (workflows spec §19.2, §19.3, §19.5)
+
+const OWNER: Principal = { openId: 'ou_owner', unionId: 'on_owner', displayName: 'Owner' };
+const DM: BindingKey = { channel: 'lark', appId: 'cli_app', conversationId: 'oc_dm', threadId: '' };
+const HEARS = 'This chat hears when each task is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.';
+
+describe('chat', () => {
+  let t: TestDb;
+  let service: KanbanService;
+  let chat: KanbanChat;
+  let seq = 0;
+  beforeEach(() => {
+    t = testDb();
+    const dir = join(t.dir, 'workflows');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'vi-sync.yaml'), fileOn('board: vi'));
+    writeFileSync(join(dir, 'home-sync.yaml'), fileOn('board: default'));
+    writeFileSync(join(dir, 'plain.yaml'), fileOn(''));
+    const people = new PeopleDirectory({ db: t.db, appId: 'cli_app', canTalk: () => true });
+    service = new KanbanService({ db: t.db, roles: new Map([['worker', role('worker')]]), workspaces: new Set(['default']), people, supervisedRoles: true, workflowsDir: dir });
+    chat = new KanbanChat({ service, hasTier: (p, tier) => tier === 'talk' ? p.openId !== 'ou_nobody' : p.openId === OWNER.openId, people, appId: 'cli_app', changed: () => {} });
+    createBoard(t.db, 'vi', ALICE, NOW);
+  });
+  afterEach(() => t.close());
+
+  const say = async (text: string, sender: Principal = OWNER): Promise<string> => {
+    const m: InboundMessage = {
+      messageId: `om_${++seq}`,
+      appId: 'cli_app',
+      chatId: DM.conversationId,
+      chatType: 'p2p',
+      threadId: '',
+      sender,
+      senderIsBot: false,
+      text,
+      mentionedBot: true,
+      mentionAll: false,
+      mentions: [],
+      attachments: [],
+      createTime: 0,
+    };
+    const r = await chat.run(text, m, DM);
+    return typeof r === 'string' ? r : r.text;
+  };
+  const ids = (text: string): string[] => [...text.matchAll(/`(k_[0-9a-z]+)`/g)].map((m) => m[1] ?? '');
+
+  it("names the file's board in the reply and points to its task list, from a chat on another board", async () => {
+    const r = await say('workflow start vi-sync');
+    const lines = r.split('\n');
+    expect(lines[0]).toMatch(/^Started vi-sync as `w_[0-9a-z]+`, 1 task, on board \*\*vi\*\*:$/);
+    expect(lines.slice(2)).toEqual(['Its tasks are on board **vi**: `/kanban task list board:vi` lists that board.', HEARS]);
+    expect(service.show(ids(r)[0] ?? '')).toMatchObject({ ok: true, view: { task: { board: 'vi' } } });
+  });
+
+  it('gives no pointer from a chat on the board, and names default with the pointer from a chat on another', async () => {
+    expect(await say('board use vi')).toMatch(/board \*\*vi\*\*/);
+    const onVi = await say('workflow start vi-sync');
+    expect(onVi.split('\n')[0]).toMatch(/, on board \*\*vi\*\*:$/);
+    expect(onVi).not.toMatch(/Its tasks are on board/);
+    const home = await say('workflow start home-sync');
+    expect(home.split('\n')[0]).toMatch(/, on board \*\*default\*\*:$/);
+    expect(home).toMatch(/Its tasks are on board \*\*default\*\*: `\/kanban task list board:default` lists that board\./);
+  });
+
+  it("starts a file naming its board from a chat on an archived board, a file naming none refused in today's sentence", async () => {
+    createBoard(t.db, 'old', ALICE, NOW);
+    await say('board use old');
+    archiveBoard(t.db, 'old', ALICE, NOW);
+    expect(await say('workflow start vi-sync')).toMatch(/^Started vi-sync as /);
+    expect(await say('workflow start plain')).toBe('This chat is on board **old**, which is archived: `/kanban board use <board>` moves it to another first.');
+  });
+
+  it("names the board in a preview as the reply does, and in the workflow list", async () => {
+    expect((await say('workflow preview vi-sync')).split('\n')[0]).toBe('vi-sync would make 1 task, on board **vi**:');
+    expect((await say('workflow preview plain')).split('\n')[0]).toBe('plain would make 1 task:');
+    const list = await say('workflow list');
+    expect(list).toContain('- **vi-sync** · params: none · board **vi**');
+    expect(list).toContain('- **plain** · params: none');
+    expect(list).not.toContain('- **plain** · params: none · board');
   });
 });
