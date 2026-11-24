@@ -1553,8 +1553,12 @@ steps:
   Text, checked by `nameProblem('board', …)` (`src/names.ts`): the grammar of role names, with
   `none` and `all` refused, as `/kanban board create` refuses them (kanban spec §16.3). A problem
   names its place as the file's other checks do: `board: board name "none" is reserved: none
-  clears a setting, and all lists every board`, and `board is text` for a number or a list. Empty
-  or `null` is absent, as `description` is read (`optionalText`).
+  clears a setting, and all lists every board`, and `board is text` for a number or a list. `null`,
+  as `board:` with nothing after it, is absent, as for `description` (`optionalText`). **An empty
+  string, `board: ""`, is refused**, unlike an empty `description`: `optionalText` returns it as
+  text, and the board grammar refuses it, `board: board name "" must be lowercase letters, …`. A
+  reference, `board: "{{team}}"`, is refused the same way: no param reaches the board, which the
+  file must fix before any start (§2).
 - **`Workflow` gains `board: string | undefined`** (`src/kanban/workflow.ts`), which
   `checkWorkflow` returns and `readWorkflow` and `listWorkflows` carry.
 - **The file alone cannot say whether the board exists**: a board is a row of the database, and the
@@ -1579,20 +1583,37 @@ preview both call, so the routing is the same everywhere:
   this start. **`--board` is a choice**, so a different one is refused rather than overruled. **A
   run's board is its task's** (kanban spec §16.5), so a file naming another is refused as an
   `apply-dag` DAG naming another is (§6), in the same words after the first clause.
-- **The service learns whether `--board` was given.** The terminal's `start` passes
-  `StartRequest.board` as `boardFlag(values.board) ?? DEFAULT_BOARD` today (`src/cli/operator.ts`);
-  it now passes it only when given. Chat passes the chat's board as today, and the service tells it
-  from an asked board by `createdVia.kind`, `chat`.
+- **The service learns whether `--board` was given.** The terminal's `start` computes
+  `boardFlag(values.board) ?? DEFAULT_BOARD` today (`src/cli/operator.ts`) and passes it as
+  `StartRequest.board` in **both** of its calls: the `previewWorkflow` it makes in an agent's shell
+  to learn whether the steps ask for a wake (wake spec §3.2a), and the `startWorkflow` itself. Both
+  now pass `board` only when `--board` is given. Were the preview still given `default`, a file
+  naming another board would be refused `other_board` there, the preview would answer no steps that
+  ask for a wake, and an agent's shell would start the workflow with its wake silently unset. Chat
+  passes the chat's board as today, and the service tells it from an asked board by
+  `createdVia.kind`, `chat`.
 - **The expansion writes the decided board** into the DAG (`expand(…, board)`), so `preview --json`
   carries `"board": "<b>"`, and the instance is made on it.
 - **Step 0 stays first** (§6): a key's instance is answered before the file is read. It compares
   the key's board (`keyRefused`, `src/db/kanban.ts`) with the path's, `default` for a terminal
-  start with no `--board`, which the file may since have overruled. So for a chat start, and a
-  terminal start with no `--board`, **a key's instance on another board than the path's is a repeat
-  when the file names that board now**, read by `workflowBoard` (§19.3), and `other_board`
-  otherwise, as today. A terminal start with `--board`, and a run's, compare as today: there the
-  file never moves the board, it can only refuse. The writer's own lookup in its transaction (§8) is
-  given the decided board.
+  start with no `--board`, which the file may have overruled. So for a chat start, and a terminal
+  start with no `--board`, a key's instance on another board than the path's is looked at once
+  more, by `workflowBoard` (§19.3):
+  - **no readable file**, removed, unreadable or not parsing: **the repeat is answered**,
+    `existing: true`, as §6 answers a repeat whatever has become of the file;
+  - **a readable file naming the instance's board**: the repeat is answered;
+  - **a readable file naming no board, or another**: refused `other_board`, as today.
+
+  **An edited `board` is a deliberate exception to §6's principle** that a repeat is answered
+  whatever the file says now. When the instance is on the path's board, nothing is read and the
+  principle holds whole. When it is not, the board comparison is kanban spec §16.5's guard that a
+  key does not cross boards, and the file is the only evidence that the instance was this start's
+  own: a file that can be read and names the instance's board says it was; one that names no board
+  or another says the key is being used where its instance does not belong, which is what
+  `other_board` is for; and no file says nothing either way, so the repeat is answered rather than
+  refused, as a missing file must not refuse a repeat (§6). A terminal start with `--board`, and a
+  run's, compare as today: there the file never moves the board, it can only refuse. The writer's
+  own lookup in its transaction (§8) is given the decided board.
 - **A chat on an archived board.** `#startWorkflow` (`src/kanban/chat.ts`) refuses before the
   service is asked when the chat's board is archived: "This chat is on board …, which is archived:
   `/kanban board use <board>` moves it to another first." That stays for a file with no board, and
@@ -1600,8 +1621,9 @@ preview both call, so the routing is the same everywhere:
   `KanbanService.workflowBoard(name)`, the light read of §19.3. A file it cannot read answers none,
   so the chat's check is made, as today.
 - **The chat still follows the tasks.** A subscription follows the chat a task was made from,
-  whatever its board (kanban spec §16.4): every member is subscribed to the starting chat, in plan
-  L's thread for a group at chat scope (§9), and their notices and wakes come there as for any
+  whatever its board (kanban spec §16.4): every member is subscribed to the starting chat, and in a
+  group at chat scope to the thread the reply opens on the command (§9), and their notices and
+  wakes come there as for any
   start; a role's reaction task goes on its source task's board, the file's (wake spec §19.3). What
   the chat lists is unchanged: `/kanban task list` and `/kanban workflow instances` show the chat's
   board, so from a chat on another board the instance is found by the reply's ids and `/kanban
@@ -1609,12 +1631,18 @@ preview both call, so the routing is the same everywhere:
 
 ### 19.3 Preview, apply and the reply
 
-- **Preview** routes as a start does (§19.2). In chat its checks are a start's, the board's
-  included (§6), so a missing or archived board refuses it (§19.4). At the terminal it opens no
-  database (§6): it routes, refusing a different `--board`, but leaves the board's being there and
-  live to `apply --dry-run` and the start, as it does today. Its first line names the board, as
-  `previewText` (`src/cli/plain.ts`) does today: `vi-workflow would make 6 tasks, on board vi:`.
-  `preview --json` writes `"board": "vi"`.
+- **Preview** routes as a start does (§19.2), and is refused for a missing or archived board
+  (§19.4), in chat and at the terminal. In chat its checks are a start's, the board's included
+  (§6). **At the terminal it now opens the database read-only**, for the boards alone, as the
+  startup reads them (§19.4): `openDbReadOnly` (`src/db/open.ts`), `busy_timeout` 1000 ms, the
+  routed board's row read from `kanban_boards`, and closed; with no database, or one whose
+  `user_version` is below 6, `default` alone exists. *This amends §6*, where the terminal's preview
+  opens no database: it still checks neither the key nor the people there (§18.3), and writes
+  nothing. Its `unknown_workflow` message, which names the usable workflows, applies `withBoards`
+  with the same boards, so it leaves out a workflow whose board is missing or archived, as the
+  service's does (§19.4). Its first line names the board, as `previewText` (`src/cli/plain.ts`)
+  does today: `vi-workflow would make 6 tasks, on board vi:`. `preview --json` writes `"board":
+  "vi"`.
 - **Apply cannot know that a DAG came from a file.** A DAG's `workflow` is a label (§5), which a
   hand-written DAG may set, and the file may have changed since the preview; nothing in a DAG
   proves where it came from, and nothing is signed. So **what is checked is the DAG against the file
@@ -1630,9 +1658,10 @@ preview both call, so the routing is the same everywhere:
     to its board.
   - **When**: after step 0, so a repeat is answered whatever the file says, and before step 2's
     checks; `apply --dry-run` makes it too.
-  - A run's `apply-dag` has no `workflow` (§5), so the check never applies there. An operator who
-    means another board says so in the DAG, by setting its `workflow` to `null`, as any DAG made by
-    hand may.
+  - A run's `apply-dag` has no `workflow` (§5), so the check never applies there.
+  - **A guard against a stale preview, not a control.** An operator who means another board sets
+    the DAG's `workflow` to `null`, as any DAG made by hand may, and the apply is made; the instance
+    is then listed as "(no workflow)" (§10), as it no longer says the file made it.
 - **The reply names the board.** Chat's reply (§9) keeps its shape, and names the board when it is
   not `default`, as today, and also when it is not the chat's: ``Started vi-workflow as `w_…`, 6
   tasks, on board **vi**:``. `renderStarted` (`src/kanban/chat-render.ts`) is given the chat's
@@ -1646,19 +1675,22 @@ preview both call, so the routing is the same everywhere:
   (`src/kanban/service.ts`) gives today, before the transaction, and nothing is made. When the board
   is the file's, the message names the workflow:
   - `unknown_board`: `workflow vi-workflow is not usable: its board vi does not exist (create it
-    with /kanban board create vi)`;
+    with /kanban board create vi, or mt kanban board create vi)`;
   - `board_archived`: `workflow vi-workflow is not usable: its board vi is archived, and nothing is
     added to it (name another board in its file)`.
 
-  A board from the path, for a file naming none, keeps today's messages. The writer checks the
-  board again in its transaction (`liveBoard`, §8), as for every apply. The words are the same in
-  chat, at the terminal and from a run; the hint names chat's command, whose terminal form is `mt
-  kanban board create vi` (kanban spec §16.3).
+  A board from the path, for a file naming none, keeps today's messages. **An apply** names the
+  workflow when the light read of §19.3 found its file naming the DAG's board; otherwise, a DAG with
+  no workflow, or one whose file names none or cannot be read, it keeps today's messages. **The
+  writer's re-check** in its transaction (`liveBoard`, §8), the guard against a board archived in
+  the instant since step 2, keeps today's wording, `board vi is archived; nothing is added to it`:
+  it knows the instance, not the file. The words are the same in chat, at the terminal and from a
+  run, the hint naming both forms of the command (kanban spec §16.3).
 - **The startup lines and `mt service check`** list such a workflow as not usable, in the same
   words:
 
   ```
-  workflow vi-workflow is not usable: its board vi does not exist (create it with /kanban board create vi)
+  workflow vi-workflow is not usable: its board vi does not exist (create it with /kanban board create vi, or mt kanban board create vi)
   workflows: release, vendor-eval; not usable: vi-workflow
   ```
 
@@ -1666,10 +1698,17 @@ preview both call, so the routing is the same everywhere:
   an archived one. `loadStartup` (`src/index.ts`) runs before the gateway opens its database, and
   `mt service check` calls it alone (§4), so `startupWorkflows` reads the boards itself: the
   database opened read-only (`openDbReadOnly`, `src/db/open.ts`, as `mt service check`'s version
-  line opens it), `name` and `archived_at` read from `kanban_boards`, and closed.
-  - **No database, or one from before migration `006`**: the boards are what the migration makes,
-    `default` alone, so a file naming another board is said to name one that does not exist, which
-    is so once the gateway starts.
+  line opens it), `busy_timeout` set to 1000 ms, as `openDb` sets it, so a gateway writing at that
+  moment delays the read rather than failing it, `name` and `archived_at` read from
+  `kanban_boards`, and closed.
+  - **Before the migration.** The read is made before `createGateway` migrates the database
+    (§4: the lines are noted before `openDb`), so it sees the database as the previous build left
+    it; a migration adds no board but `006`'s `default`, so what it reads is what the gateway will
+    find.
+  - **No database, or one from before migration `006`**, told by `PRAGMA user_version` below 6
+    rather than by looking for the table: the boards are what the migration makes, `default`
+    alone, so a file naming `default` is usable and one naming another board is said to name one
+    that does not exist, which is so once the gateway starts.
   - **A database that cannot be read** leaves the boards unchecked, with one line, `workflow boards
     are not checked: the database cannot be read: <why>`, which `mt service check` prints as a
     warning, as it prints every line but the summary; the files are judged as today.
@@ -1686,7 +1725,7 @@ preview both call, so the routing is the same everywhere:
 
   ```
   vi-workflow: ok, 6 steps; params: week (required); board vi
-  note: a board a workflow names is checked by the gateway, at its startup and at each start, not here: this check opens no database
+  note: the gateway checks the board when the workflow is used, not here: this check opens no database
   ```
 
   On stdout, as its agent's-shell note is. A `board` outside the grammar makes the workflow not
@@ -1713,9 +1752,14 @@ preview both call, so the routing is the same everywhere:
   is refused `board_archived`.
 - **A chat on an archived board** starting a workflow whose board is live: started, on the file's
   board.
+- **The file edited between chat's light read and the service's read** (`#startWorkflow`,
+  `src/kanban/chat.ts`): a `board` removed in that instant, from a chat on an archived board, skips
+  chat's own check and is refused by the service's, `board_archived`, in the service's words, `board
+  … is archived; nothing is added to it`, rather than chat's sentence; nothing is made either way.
+  Chat does not translate it: the instant is too short to be worth a second wording path.
 - **The file's `board` changed between a chat start and its redelivery**: the repeat is answered
-  when the file still, or again, names the instance's board, and refused `other_board` otherwise,
-  as a redelivery after its chat moved is (§6).
+  when the file still, or again, names the instance's board, or cannot be read at all, and refused
+  `other_board` when it names no board or another, as a redelivery after its chat moved is (§6).
 - **The file's `board` changed between `preview --json` and its apply**: refused `other_board`;
   preview again.
 - **A deciding step's run on board `x` starting a workflow whose file names `y`**: refused
@@ -1731,8 +1775,7 @@ preview both call, so the routing is the same everywhere:
   with `/kanban board create` (kanban spec §16.3).
 - **No instance is moved.** An instance's tasks keep their board (kanban spec §16.2): an edit of a
   file's `board` changes the next start, never an instance already made.
-- **`mt workflow check` cannot see boards**, and the terminal's preview does not check them, as
-  neither opens the database.
+- **`mt workflow check` cannot see boards**, as it opens no database.
 
 ### 19.8 Wiring
 
@@ -1748,21 +1791,30 @@ preview both call, so the routing is the same everywhere:
   board; the chat's board given to the reply's and the preview's renderers.
   **`src/kanban/chat-render.ts`**: `renderStarted` and `renderPreview` naming a board that is not
   the chat's; `renderWorkflows`' ` · board **b**`.
-- **`src/cli/operator.ts`**: `start` passing `--board` only when given; `preview` routing with
-  `startBoard`, its refusal on stderr. **`src/cli/plain.ts`**: `workflowsText`' ` · board b`; the
-  list's `--json` `board`.
+- **`src/cli/operator.ts`**: `start` passing `board` only when `--board` is given, in both its
+  calls, the agent's-shell `previewWorkflow` and the `startWorkflow`; `preview` routing with
+  `startBoard`, its refusal on stderr, opening the database read-only for the boards, and its
+  `unknown_workflow` message applying `withBoards`. **`src/cli/plain.ts`**: `workflowsText`'
+  ` · board b`; the list's `--json` `board`.
 - **`src/cli/workflow.ts`**: `okLine`'s `; board b`, and the note, once.
-- **`src/index.ts`**: `startupWorkflows` reading the boards read-only and applying `withBoards`,
-  with the line for a database that cannot be read.
+- **`src/index.ts`**: `startupWorkflows` reading the boards read-only, with `busy_timeout` and the
+  `user_version` test, and applying `withBoards`, with the line for a database that cannot be read.
 - **`docs/examples.md`**: workflow 1, weekly-report, names `board: reports`; its terminal start and
   cron example 6's script drop `--board reports`, which the file now says; its `mt workflow check`
   shows the board and the note.
+- **`docs/kanban-guide.md` §12**: "The file" gains `board` among the file's keys, beside params and
+  steps; "Starting it" (around lines 1344 to 1346), "The tasks go on this chat's board", becomes the
+  file's board when it names one, else this chat's; "From a terminal, and from an agent" says that
+  `--board` must match a file's board and may be left out, and that a run's start is refused for a
+  file naming another board; its `mt workflow check` sample stays, as its vendor-eval names none.
+- **`README.md`**'s workflow notes (around lines 352 to 354 and 733 to 741): a file may name the
+  board its tasks go on, and the startup says when that board is missing or archived.
 
 ### 19.9 Testing
 
-- **The parse**: `board: vi` read into `Workflow.board`; absent, empty and `null` the same as none;
-  `none`, `all`, an upper-case name, one ending in `-`, a number and a list refused, each naming
-  `board`; a file without the key giving every answer it gives today.
+- **The parse**: `board: vi` read into `Workflow.board`; absent and `null` the same as none; `""`,
+  `none`, `all`, `"{{team}}"`, an upper-case name, one ending in `-`, a number and a list refused,
+  each naming `board`; a file without the key giving every answer it gives today.
 - **The routing**, each row of §19.2:
   - in chat, from a chat on `default`, on the file's board, and on another board, and on an
     archived one, the tasks on the file's board; a file with no board on the chat's, and refused on
@@ -1770,23 +1822,33 @@ preview both call, so the routing is the same everywhere:
   - at the terminal, no `--board` on the file's board; `--board` equal to it made; a different
     `--board` refused `other_board` with the message, by `start` and by `preview`, nothing made and
     nothing on stdout for `preview --json`;
+  - in an agent's shell (wake spec §3.2a), `mt kanban workflow start` with no `--board` of a file
+    naming a board whose steps ask for a wake: its in-shell preview routed to the file's board, and
+    the wake set on those members;
   - from a run, `start-workflow` on its task's board when the file names it, and refused
     `other_board` with the message when the task is on another;
-  - step 0: a chat start's redelivery answered `existing: true` on the file's board, and refused
-    `other_board` once the file names another; a terminal start with `--key` and no `--board`
-    repeated the same way; with `--board`, compared as today.
+  - step 0: a chat start's redelivery answered `existing: true` on the file's board; answered too
+    once the file is removed, or cannot be read or parsed; refused `other_board` once the file
+    names another board or none; a terminal start with `--key` and no `--board` repeated the same
+    way; with `--board`, compared as today; an instance on the path's board answered with no read
+    of the file.
 - **Preview and apply**: preview's DAG carrying `"board": "vi"` in chat and at the terminal; an
   apply of that DAG made on `vi`; the same DAG with `board` edited, or deleted, refused
   `other_board` by `apply` and `apply --dry-run`, and made once its `workflow` is `null`; a DAG
   whose workflow has no file, a file that does not parse, or a file with no board, not checked; a
   repeat by key answered before the check.
-- **A missing or archived board**: a start, a chat preview and an apply refused `unknown_board` and
-  `board_archived` with the workflow's messages, nothing written; a file naming none keeping
-  today's messages.
+- **A missing or archived board**: a start, a preview in chat and at the terminal, and an apply
+  refused `unknown_board` and `board_archived` with the workflow's messages, nothing written; an
+  apply of a DAG with no workflow, and a file naming none, keeping today's messages; the writer's
+  re-check keeping today's wording; the terminal's preview with no database, and one at version 5,
+  refusing a file naming another board than `default`; its `unknown_workflow` message leaving out a
+  workflow whose board is missing.
 - **The startup line**: a missing board and an archived one, each listed as not usable with its
   words, the summary naming it; no database, and one at version 5, judged with `default` alone; a
-  database that cannot be read giving its one line and judging the files alone; `mt service
-  check` printing them as warnings and passing; the gateway still starting.
+  database that cannot be read giving its one line and judging the files alone; a database locked
+  by a writer read within the `busy_timeout`; `mt service check` printing them as warnings and
+  passing; the gateway still starting. `withBoards` with no database keeping a workflow that names
+  `default` usable.
 - **The list line**: `/kanban workflow list` and `mt kanban workflow list` with ` · board vi`, its
   `--json` `board`; a workflow with no board as today; one with a missing board listed as not
   usable, and left out of `unknown_workflow`'s usable ones.
@@ -1794,41 +1856,57 @@ preview both call, so the routing is the same everywhere:
   boards, none when none does, exit 0 with a board that does not exist.
 - **The reply**: the board named when it is not the chat's, and not named when it is the chat's and
   `default`; the members subscribed to the starting chat and its thread whatever the board.
-- **`tests/docs-examples.test.ts`**: unchanged; it checks the new weekly-report file, its chat
-  start on `reports`, its terminal start and its documented `mt workflow check` lines. Until §19.1
-  is built it fails on weekly-report, as today's check refuses the key: `unknown setting board
-  (known: description, params, steps)`.
+- **`tests/docs-examples.test.ts`** checks the new weekly-report file, its chat start, its terminal
+  start and its documented `mt workflow check` lines; it gains one assertion, that the instances
+  its chat and terminal starts of weekly-report make are on board `reports`
+  (`instance.board`, and its `--json` answer's `board`). Until §19.1 is built it fails on
+  weekly-report, as today's check refuses the key: `unknown setting board (known: description,
+  params, steps)`.
+- **`tests/docs-wake.test.ts`** writes weekly-report from docs/examples.md into a new home and
+  starts it from a terminal with `--wake`; that home has only `default`, so the test creates the
+  board `reports` (`mt kanban board create reports`) before its start, else the start is refused
+  `unknown_board`.
 
 ### 19.10 Decisions
 
-Where the code forced a detail the design did not settle:
+Where the code forced a detail the design did not settle, twelve decisions:
 
-- **Step 0 and the file's board.** A key is looked up before the file is read (§6), and compared
-  with the path's board, which the file may overrule. Reading the file first would let a removed or
-  broken file refuse a repeat, which §6 forbids; comparing no board would drop the `other_board` of
-  kanban spec §16.5 for every workflow, not only these. So the file's board is read only when the
-  boards disagree, for a chat start or a terminal start with no `--board`.
-- **Apply checks agreement with the file now**, by its `workflow` label, since nothing in a DAG
-  says where it came from; with a light read, so a file broken otherwise still holds its DAGs to its
-  board, and no file means no check. A DAG with no board counts as `default`.
-- **The terminal's preview leaves the board's existence unchecked**, as it opens no database (§6);
-  it still routes, and refuses a different `--board`.
-- **The startup reads the boards itself, read-only**, as `loadStartup` runs before the gateway
-  opens its database and is all `mt service check` calls; with no database, or one before `006`,
-  only `default` exists; a database that cannot be read is one line, not a failure.
-- **`list` judges boards too**, so a person in chat learns why a start would be refused (§10), and
-  `unknown_workflow` names only workflows that could start.
-- **A chat on an archived board** is refused up front only for a file with no board, through the
-  light read, so a file with a board starts from it.
-- **The reply keeps its shape**, ``Started vi-workflow as `w_…`, 6 tasks, on board **vi**:``, rather
-  than the design's "Started w_… on board vi: 6 tasks", and names the board when it is not
-  `default` or not the chat's; the notifier's reply keeps today's rule.
-- **One wording on every path**, the hint naming chat's `/kanban board create`, as the design gave
-  it for the startup line.
-- **The note of `mt workflow check`** is on stdout, after the workflows' lines, once, and only when
-  a checked workflow names a board; a board that does not exist does not change the exit code.
-- **The run's refusal** reuses `apply-dag`'s words after its first clause.
-- **Empty or `null` `board`** is absent, as the file's other optional text is read.
+1. **Step 0 and the file's board.** A key is looked up before the file is read (§6), and compared
+   with the path's board, which the file may overrule. For a chat start, or a terminal start with
+   no `--board`, whose key's instance is on another board, the file's board is read: no readable
+   file answers the repeat, a file naming the instance's board answers it, and one naming no board
+   or another is `other_board`. A deliberate exception to §6's principle, for the reason in §19.2.
+2. **Apply checks the DAG against the file as it is now**, by its `workflow` label, since nothing
+   in a DAG says where it came from; with a light read, so a file broken otherwise still holds its
+   DAGs to its board, and no file means no check. A DAG with no board counts as `default`. A guard
+   against a stale preview, not a control: `workflow: null` passes it, and the instance is then
+   "(no workflow)".
+3. **The terminal's preview opens the database read-only**, for the boards alone, so it refuses a
+   missing or archived board as the other paths do, and its `unknown_workflow` message leaves such
+   a workflow out; it still checks neither the key nor the people.
+4. **The startup reads the boards itself, read-only**, before the migration, as `loadStartup` runs
+   before the gateway opens its database and is all `mt service check` calls; `user_version` below
+   6, or no database, means `default` alone; `busy_timeout` 1000 ms; a database that cannot be read
+   is one line, not a failure.
+5. **`list` judges boards too**, so a person in chat learns why a start would be refused (§10), and
+   `unknown_workflow` names only workflows that could start.
+6. **A chat on an archived board** is refused up front only for a file with no board, through the
+   light read, so a file with a board starts from it; the instant between that read and the
+   service's is left to the service's wording (§19.6).
+7. **The reply keeps its shape**, ``Started vi-workflow as `w_…`, 6 tasks, on board **vi**:``, rather
+   than the design's "Started w_… on board vi: 6 tasks", and names the board when it is not
+   `default` or not the chat's; the notifier's reply keeps today's rule.
+8. **One wording on every path**, the hint naming both `/kanban board create` and `mt kanban board
+   create`; an apply names the workflow only when its file names the DAG's board; the writer's
+   in-transaction re-check keeps today's wording.
+9. **The note of `mt workflow check`** is on stdout, after the workflows' lines, once, and only when
+   a checked workflow names a board; a board that does not exist does not change the exit code.
+10. **The run's refusal** reuses `apply-dag`'s words after its first clause.
+11. **`null` is absent and `""` is refused**, as an empty board name is no name.
+12. **The terminal's `start` passes `board` only when `--board` is given**, in both its calls, so
+    the service can tell an unasked board from an asked one and an agent's shell keeps its wake.
+
+Kanban spec §16.4 needed no edit: it speaks of `task new`, which keeps the chat's board.
 
 *Added on 2026-11-24.* The user chose: an optional top-level `board` in a workflow file, in the
 board grammar, `none` and `all` refused, nothing changed without it; the tasks on the file's board
@@ -1839,4 +1917,7 @@ board, the chat still following the tasks; a missing or archived board refusing 
 apply with the existing codes, named in the startup line and `mt service check` as not usable, and
 said by `mt workflow check` to be checked at start; `· board <b>` in both lists; and no board per
 instance, no board made automatically, no instance moved. The main agent decided the points of
-§19.10.
+§19.10. *Amended on 2026-11-24.* A first review found no critical issue; this revision answers a
+repeat when the file cannot be read, keeps an agent's shell's wake by passing `--board` only when
+given, has the terminal's preview read the boards, refuses an empty `board`, and settles the
+messages, the startup read's order and timeout, the docs to update and the tests.

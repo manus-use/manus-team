@@ -22,10 +22,10 @@ tier. At a terminal, which has no mentions, a person is `lark:<union_id>`: `mt k
 lists the people the gateway knows, with their ids and whether they have talk tier.
 
 **Where things go.** A workflow is one file, `~/.manus-team/workflows/<name>.yaml`, read at
-each preview and start, so an edit needs no restart. A workflow may name the board its tasks go
-on, with `board: <name>`, as weekly-report does. `mt workflow check <name>` checks it on
-the gateway's host. Starting one is an operator's command. Cron needs `cron.enabled: true` in
-the gateway's config, and a restart.
+each preview and start, so an edit needs no restart. A workflow may name the board its tasks
+go on, with `board: <name>`, as weekly-report does. `mt workflow check <name>` checks it on the
+gateway's host. Starting one is an operator's command. Cron needs `cron.enabled: true` in the
+gateway's config, and a restart.
 
 **Ids.** `k_…` is a task, `w_…` a workflow's instance, `c_…` a cron job. Use the ones the
 chat gives you. `oc_xxx` stands for a chat's id, as Lark gives it; `mt cron list` shows the
@@ -79,7 +79,7 @@ would be `--param reviewer=lark:<union_id>`:
 ```
 $ mt workflow check weekly-report
 weekly-report: ok, 2 steps; params: week (required), sources (list, default support tickets, sales calls, release notes), reviewer (required); board reports
-note: a board a workflow names is checked by the gateway, at its startup and at each start, not here: this check opens no database
+note: the gateway checks the board when the workflow is used, not here: this check opens no database
 $ mt kanban workflow start weekly-report --param week=2026-W47 --param reviewer=reviewer --key weekly-2026-47
 ```
 
@@ -101,8 +101,8 @@ $ mt kanban workflow start weekly-report --param week=2026-W47 --param reviewer=
 
 What happens: four tasks at once, on the board `reports`, which the file names: from any chat,
 whatever board the chat is on, and from a terminal with no `--board`. The chat that started it
-still hears each task, and the reply names the board. The three gathers start together; the write-up waits for all
-three, and its prompt holds their summaries. When `worker` is done writing, the report goes to
+still hears each task, and the reply names the board. The three gathers start together; the
+write-up waits for all three, and its prompt holds their summaries. When `worker` is done writing, the report goes to
 Bob Li as a review card, and is done when he approves it. The three gathers run side by side
 only if `worker` is an isolated workspace (guide, section 6); in a shared one they queue.
 
