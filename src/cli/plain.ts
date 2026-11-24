@@ -352,11 +352,14 @@ export function dryRunText(
 
 /** `mt kanban workflow list` (workflows spec §10): every usable workflow with its params and description, and each broken one with why. */
 export function workflowsText(
-  list: { usable: readonly { name: string; description: string | undefined }[]; broken: readonly { name: string; problem: string }[] },
+  list: { usable: readonly { name: string; description: string | undefined; board?: string | undefined }[]; broken: readonly { name: string; problem: string }[] },
   params: (name: string) => string,
 ): string[] {
   const rows = [
-    ...list.usable.map((w) => ({ name: w.name, text: `${line(w.name, 80)}: params ${line(params(w.name), 400)}${w.description === undefined ? '' : ` · ${line(w.description, 200)}`}` })),
+    ...list.usable.map((w) => ({
+      name: w.name,
+      text: `${line(w.name, 80)}: params ${line(params(w.name), 400)}${w.board === undefined ? '' : ` · board ${line(w.board, 80)}`}${w.description === undefined ? '' : ` · ${line(w.description, 200)}`}`,
+    })),
     ...list.broken.map((b) => ({ name: b.name, text: `${line(b.name, 80)}: not usable: ${line(b.problem, 600)}` })),
   ].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return rows.length === 0 ? ['no workflows: a workflow is a file, $MT_HOME/workflows/<name>.yaml'] : rows.map((r) => r.text);

@@ -5,6 +5,7 @@ import * as board from '../db/kanban.js';
 import {
   boardList,
   boardSummaries,
+  boardsOf,
   cardReading,
   chatBoardOf,
   gatesOf,
@@ -52,15 +53,22 @@ import { limitsReached, workspaceBusy } from './waiting.js';
 import { isBlockOutcome } from './waker.js';
 import type { DisplayStatus } from './status.js';
 import {
+  archivedBoardProblem,
   expand,
   instanceStatus,
   listWorkflows,
+  missingBoardProblem,
   readWorkflow,
+  startBoard,
   usableMessage,
+  withBoards,
+  workflowBoard,
+  type BoardPath,
   type GivenParams,
   type InstanceState,
   type PersonOf,
   type Workflow,
+  type WorkflowBoardRead,
   type WorkflowFacts,
   type WorkflowList,
 } from './workflow.js';
@@ -258,7 +266,11 @@ export interface StartRequest {
   idempotencyKey?: string;
   createdBy: string;
   createdVia: CreatedVia;
-  /** Chat's board, or the terminal's `--board`, else `default`; a run's is its task's, whatever this says. */
+  /**
+   * Chat's board, or the terminal's `--board` only when given; a run's is its
+   * task's, whatever this says. A file's own board overrules chat's, and the
+   * terminal's when absent (workflows spec §19.2).
+   */
   board?: string;
   /** The chat that follows every member, named at the terminal (workflows spec §18.1); the operator's alone. */
   follow?: Follow;
@@ -1615,7 +1627,7 @@ export class KanbanService {
 
   /** `message`, then the usable workflows and their params, at most 4 KiB. */
   #usable(message: string): string {
-    const usable = this.#workflowsDir === undefined ? [] : listWorkflows(this.#workflowsDir, this.#workflowFacts()).usable;
+    const usable = this.workflows().usable;
     return usableMessage(message, usable, WORKFLOW_MESSAGE_BYTES);
   }
 
@@ -1635,10 +1647,18 @@ export class KanbanService {
    * against the team and the people as this process holds them, just before the
    * transaction, so a refusal costs none.
    */
-  #checkDag(dag: Dag, onBoard: string, createdBy: string, createdVia: CreatedVia): Refusal | undefined {
+  #checkDag(dag: Dag, onBoard: string, createdBy: string, createdVia: CreatedVia, workflow?: string): Refusal | undefined {
     const found = getBoard(this.#db, onBoard);
-    if (found === undefined) return board.refuse('unknown_board', `there is no board ${visible(onBoard)}`);
-    if (found.archivedAt !== null) return board.refuse('board_archived', `board ${onBoard} is archived; nothing is added to it`);
+    // A file's own board is refused naming the workflow (workflows spec §19.4).
+    if (found === undefined) {
+      return board.refuse('unknown_board', workflow === undefined ? `there is no board ${visible(onBoard)}` : `workflow ${workflow} is not usable: ${missingBoardProblem(onBoard)}`);
+    }
+    if (found.archivedAt !== null) {
+      return board.refuse(
+        'board_archived',
+        workflow === undefined ? `board ${onBoard} is archived; nothing is added to it` : `workflow ${workflow} is not usable: ${archivedBoardProblem(onBoard)}`,
+      );
+    }
     return checkDagTasks(dag, { facts: this.#facts(), createdBy, createdVia });
   }
 
@@ -1682,17 +1702,22 @@ export class KanbanService {
   }
 
   /** A start's expansion (workflows spec §6 step 1): the file read now, its params, the DAG made, shaped and measured. */
-  #expanded(req: StartRequest, onBoard: string): Result<ShapedDag & { workflow: Workflow }> {
+  #expanded(req: StartRequest, onBoard: string): Result<ShapedDag & { workflow: Workflow; board: string; fromFile: boolean }> {
     if (!isRecord(req)) return board.refuse('invalid', 'a start is an object');
     if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
     const read = this.#workflow(req.workflow);
     if (!read.ok) return read;
+    // The board, now the file is read (workflows spec §19.2): chat's is overruled by the file, the terminal's only when not asked for.
+    const kind = req.createdVia?.kind;
+    const path: BoardPath = kind === 'chat' ? { kind: 'chat', board: onBoard } : kind === 'run' ? { kind: 'run', board: onBoard } : { kind: 'terminal', board: req.board };
+    const routed = startBoard(read.workflow, path);
+    if (!routed.ok) return routed;
     // The start's kind, for an `@` with no mention to resolve it by: the terminal's refusal, or a run's (workflows spec §18.3).
-    const expanded = expand(read.workflow, req.params, onBoard, req.personOf, req.createdVia?.kind);
+    const expanded = expand(read.workflow, req.params, routed.board, req.personOf, kind);
     if (!expanded.ok) return expanded;
     const shaped = checkDagShape(expanded.dag, 'expansion');
     if (!shaped.ok) return shaped;
-    return { ...shaped, workflow: read.workflow };
+    return { ...shaped, workflow: read.workflow, board: routed.board, fromFile: routed.fromFile };
   }
 
   /**
@@ -1705,7 +1730,7 @@ export class KanbanService {
     if (!on.ok) return on;
     const shaped = this.#expanded(req, on.board);
     if (!shaped.ok) return shaped;
-    const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
+    const refused = this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined);
     if (refused !== undefined) return refused;
     return { ok: true, dag: shaped.dag, workflow: shaped.workflow };
   }
@@ -1725,11 +1750,13 @@ export class KanbanService {
     if (!on.ok) return on;
     const key = this.#idempotencyKey(req.idempotencyKey, req.createdVia);
     if (!key.ok) return key;
-    const repeat = key.key === null ? undefined : this.#repeat(key.key, { board: on.board, source: 'start', name: req.workflow });
+    // A chat's board, or an unasked terminal one, is one the file may overrule (workflows spec §19.2).
+    const overruled = req.createdVia?.kind === 'chat' || (req.createdVia?.kind === 'operator' && req.board === undefined);
+    const repeat = key.key === null ? undefined : this.#repeat(key.key, { board: on.board, source: 'start', name: req.workflow }, overruled ? req.workflow : undefined);
     if (repeat !== undefined) return repeat;
     const shaped = this.#expanded(req, on.board);
     if (!shaped.ok) return shaped;
-    const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
+    const refused = this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined);
     if (refused !== undefined) return refused;
     const wake = this.#startWake(req, shaped.dag);
     if (!wake.ok) return wake;
@@ -1738,7 +1765,7 @@ export class KanbanService {
       ...(wake.wakeNote === undefined ? {} : { wakeNote: wake.wakeNote }),
       name: shaped.workflow.name,
       source: 'start',
-      board: on.board,
+      board: shaped.board,
       key: key.key,
       createdBy: req.createdBy,
       createdVia: req.createdVia,
@@ -1776,7 +1803,19 @@ export class KanbanService {
       if (!repeat.ok || req.dryRun !== true) return repeat;
       return { ok: true, dryRun: true, existing: true, instanceId: repeat.instance.instanceId, board: on.board, tasks: shaped.dag.tasks };
     }
-    const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia);
+    // A DAG that names a workflow whose file names a board is held to it, by the file as it is now (workflows spec §19.3).
+    let fromFile: string | undefined;
+    if (req.createdVia?.kind !== 'run' && shaped.dag.workflow !== null) {
+      const read = this.workflowBoard(shaped.dag.workflow);
+      if (read.file === 'read' && read.board !== undefined) {
+        const asked = shaped.dag.board ?? DEFAULT_BOARD;
+        if (asked !== read.board) {
+          return board.refuse('other_board', `the DAG names workflow ${shaped.dag.workflow}, which puts its tasks on board ${read.board}, not ${visible(asked)}`);
+        }
+        fromFile = shaped.dag.workflow;
+      }
+    }
+    const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia, fromFile);
     if (refused !== undefined) return refused;
     const wake = this.#startWake(req, shaped.dag);
     if (!wake.ok) return wake;
@@ -1795,10 +1834,16 @@ export class KanbanService {
   }
 
   /** A key's instance, read-only (workflows spec §6 step 0): the repeat's answer, or why the key is another's; undefined for a key not used. */
-  #repeat(key: string, want: Parameters<typeof board.keyRefused>[1]): Result<WorkflowMade> | undefined {
+  #repeat(key: string, want: Parameters<typeof board.keyRefused>[1], fileOf?: string): Result<WorkflowMade> | undefined {
     const keyed = instanceByKey(this.#db, key);
     if (keyed === undefined) return undefined;
-    const refused = board.keyRefused(keyed, want);
+    let refused = board.keyRefused(keyed, want);
+    // The instance on another board than the path's: a repeat when the file names that board, or cannot be
+    // read, only the board's comparison waived; the source and the name still refuse (workflows spec §19.2).
+    if (refused?.code === 'other_board' && fileOf !== undefined && keyed.instance.board !== want.board) {
+      const read = this.workflowBoard(fileOf);
+      if (read.file === 'unreadable' || read.board === keyed.instance.board) refused = board.keyRefused(keyed, { ...want, board: keyed.instance.board });
+    }
     if (refused !== undefined) return refused;
     return { ok: true, instance: keyed.instance, tasks: membersWithTasks(this.#db, keyed.instance.instanceId), existing: true };
   }
@@ -1883,9 +1928,22 @@ export class KanbanService {
     return { ok: true, instance: r.instance, tasks: r.members, existing: r.existing, ...(i.wakeNote === undefined ? {} : { wakeNote: i.wakeNote }) };
   }
 
+  /** A workflow file's board alone, by the light read (workflows spec §19.3); unreadable with no directory. */
+  workflowBoard(name: string): WorkflowBoardRead {
+    return this.#workflowsDir === undefined ? { file: 'unreadable' } : workflowBoard(this.#workflowsDir, name);
+  }
+
   /** The workflow files as the directory holds them now (workflows spec §10): `list`'s. */
   workflows(): WorkflowList {
-    return this.#workflowsDir === undefined ? { usable: [], broken: [], ignored: [] } : listWorkflows(this.#workflowsDir, this.#workflowFacts());
+    if (this.#workflowsDir === undefined) return { usable: [], broken: [], ignored: [] };
+    // Judged against the boards, as the startup judges them (workflows spec §19.4).
+    const boards = new Map(boardsOf(this.#db, { archived: true }).map((b) => [b.name, b.archivedAt !== null]));
+    return withBoards(listWorkflows(this.#workflowsDir, this.#workflowFacts()), boards);
+  }
+
+  /** A board by its name, archived or not, or undefined (workflows spec §19.5): chat's `task list board:`. */
+  boardNamed(name: string): BoardRow | undefined {
+    return getBoard(this.#db, name);
   }
 
   /**

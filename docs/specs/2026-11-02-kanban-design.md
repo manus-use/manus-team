@@ -2395,6 +2395,10 @@ in it would overwrite each other as two tasks' would.
 | `/kanban board set <name> max_running <number\|none>` · `… workspace <workspace\|none>` | operate | §16.6 |
 | `/kanban board archive <name>` | operate | §16.8 |
 
+*Amended by the workflows spec §19.* `/kanban task list [status|all] board:<name>`, at talk tier,
+lists another board's tasks from chat, archived boards included, without moving the chat; a board
+that does not exist is refused `unknown_board`.
+
 **`use` needs operator tier** because it changes where the chat's tasks go, and a board's workspace
 can change where their agents run: a talk-tier person moving an operator's chat would choose the
 directory of the operator's next unsupervised agent. There is no rename: tasks carry the name, and
@@ -2422,6 +2426,9 @@ that cannot be valid does not look like one that is. A `set` that changes neithe
   `default`. A chat on an archived board is told to move first, and nothing is created.
 - **`/kanban task list`** shows the chat's board alone, under a line naming it unless it is `default`.
   `all` keeps its meaning, every status, on this board; `/kanban board list` is the view across boards.
+  *Amended by the workflows spec §19.* With `board:<name>`, as `/kanban task list blocked board:vi`,
+  it shows that board instead, under a line naming it, `default` included, with a line saying so
+  when the board is archived; `all` keeps its meaning there. The chat stays on its board.
 - **`/kanban task show <id>`**, and every command that names a task, work on any board by the task's id:
   task ids are unique across boards, and a chat that moved still follows the tasks it created, whose
   notices give their ids and an Unblock button. `show` names the task's board once any board but

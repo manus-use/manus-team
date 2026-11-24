@@ -22,9 +22,10 @@ tier. At a terminal, which has no mentions, a person is `lark:<union_id>`: `mt k
 lists the people the gateway knows, with their ids and whether they have talk tier.
 
 **Where things go.** A workflow is one file, `~/.manus-team/workflows/<name>.yaml`, read at
-each preview and start, so an edit needs no restart. `mt workflow check <name>` checks it on
-the gateway's host. Starting one is an operator's command. Cron needs `cron.enabled: true` in
-the gateway's config, and a restart.
+each preview and start, so an edit needs no restart. A workflow may name the board its tasks
+go on, with `board: <name>`, as weekly-report does. `mt workflow check <name>` checks it on the
+gateway's host. Starting one is an operator's command. Cron needs `cron.enabled: true` in the
+gateway's config, and a restart.
 
 **Ids.** `k_…` is a task, `w_…` a workflow's instance, `c_…` a cron job. Use the ones the
 chat gives you. `oc_xxx` stands for a chat's id, as Lark gives it; `mt cron list` shows the
@@ -43,6 +44,7 @@ at once, write it up when all are in, and have a person read it before it goes o
 <!-- example: workflow weekly-report -->
 ```yaml
 description: Gather the week from several sources at once, write the report, and have it reviewed
+board: reports
 params:
   week:     { required: true, description: "the week the report covers, such as 2026-W47" }
   sources:  { list: true, default: [support tickets, sales calls, release notes] }
@@ -76,8 +78,9 @@ would be `--param reviewer=lark:<union_id>`:
 <!-- example: start weekly-report terminal -->
 ```
 $ mt workflow check weekly-report
-weekly-report: ok, 2 steps; params: week (required), sources (list, default support tickets, sales calls, release notes), reviewer (required)
-$ mt kanban workflow start weekly-report --board reports --param week=2026-W47 --param reviewer=reviewer --key weekly-2026-47
+weekly-report: ok, 2 steps; params: week (required), sources (list, default support tickets, sales calls, release notes), reviewer (required); board reports
+note: the gateway checks the board when the workflow is used, not here: this check opens no database
+$ mt kanban workflow start weekly-report --param week=2026-W47 --param reviewer=reviewer --key weekly-2026-47
 ```
 
 To have the thread's agent woken by the report's outcomes, a write-up done or a gather blocked,
@@ -96,14 +99,19 @@ From a terminal, a wake needs a chat to follow the tasks, and runs as the owner:
 $ mt kanban workflow start weekly-report --param week=2026-W47 --param reviewer=reviewer --chat <chat_id> --wake
 ```
 
-What happens: four tasks at once. The three gathers start together; the write-up waits for all
-three, and its prompt holds their summaries. When `worker` is done writing, the report goes to
-Bob Li as a review card, and is done when he approves it. The three gathers run side by side
-only if `worker` is an isolated workspace (guide, section 6); in a shared one they queue.
+What happens: four tasks at once, on the board `reports`, which the file names: from any chat,
+whatever board the chat is on, and from a terminal with no `--board`. The chat that started it
+still hears each task, and the reply names the board. The three gathers start together; the
+write-up waits for all three, and its prompt holds their summaries. When `worker` is done
+writing, the report goes to Bob Li as a review card, and is done when he approves it. The three
+gathers run side by side only if `worker` is an isolated workspace (guide, section 6); in a
+shared one they queue.
 
 **The pattern:** fan-out over a list param, `for_each: sources`, and a fan-in, `parents:
 [gather]`, which waits for every task the fan-out made. `reviewer: "{{reviewer}}"`, with no
-`role:` or `person:`, takes either, so one file serves chat and the terminal.
+`role:` or `person:`, takes either, so one file serves chat and the terminal. `board: reports`
+keeps every report on its own board, so nobody starting it has to say where; a `--board` other
+than `reports` is refused.
 
 ### 2. content-pipeline
 
@@ -658,7 +666,7 @@ Use it to start a workflow by the clock: here, workflow 1, weekly-report, every 
 ```text
 /cron add "every monday 09:00" worker The script below has just started this week's report workflow, and printed its answer as JSON; the gateway posts the start's reply in this chat. If existing is true, say in one line that this week's report was already started. Otherwise answer [nothing to report].
 name: Weekly report
-script: mt kanban workflow start weekly-report --board reports --param week=$(date +%G-W%V) --param reviewer=lark:on_5d1e7a --key weekly-$(date +%G-%V) --chat oc_xxx --json
+script: mt kanban workflow start weekly-report --param week=$(date +%G-W%V) --param reviewer=lark:on_5d1e7a --key weekly-$(date +%G-%V) --chat oc_xxx --json
 ```
 
 <!-- example: cron weekly-workflow terminal -->
@@ -666,11 +674,12 @@ script: mt kanban workflow start weekly-report --board reports --param week=$(da
 mt cron add "every monday 09:00" worker \
     "The script below has just started this week's report workflow, and printed its answer as JSON; the gateway posts the start's reply in this chat. If existing is true, say in one line that this week's report was already started. Otherwise answer [nothing to report]." \
     --name "Weekly report" --chat oc_xxx \
-    --script 'mt kanban workflow start weekly-report --board reports --param week=$(date +%G-W%V) --param reviewer=lark:on_5d1e7a --key weekly-$(date +%G-%V) --chat oc_xxx --json'
+    --script 'mt kanban workflow start weekly-report --param week=$(date +%G-W%V) --param reviewer=lark:on_5d1e7a --key weekly-$(date +%G-%V) --chat oc_xxx --json'
 ```
 
-The board `reports` is made once, with `/kanban board create reports` or `mt kanban board create
-reports`.
+The board `reports`, which weekly-report's file names, is made once, with `/kanban board create
+reports` or `mt kanban board create reports`; until then the workflow is not usable, and the
+gateway's startup says so.
 
 What happens: each Monday at 09:00 the script starts weekly-report as the operator, with the
 week filled in, such as `2026-W47`, and Dana Wu, `lark:on_5d1e7a`, as the reviewer: the start

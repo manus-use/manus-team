@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { ConfigError, loadConfig, type Env, type GatewayConfig } from './config.js';
 import { loadGatewayEnv, type GatewayEnvFile } from './gateway-env.js';
 import { loadTeam, teamSecrets, type Team } from './team.js';
+import { boardsAt } from './db/boards-at.js';
 import { SchemaTooNewError, migrate, openDb, type Db } from './db/open.js';
 import { sweepSeen } from './db/dedup.js';
 import { registerWorkspaces, worktreeOf } from './db/workspaces.js';
@@ -33,7 +34,7 @@ import { KanbanSink } from './kanban/sink.js';
 import { claimSocketPath, listenWorker, lockGateway, SocketHandler, workerSocketPath, type GatewayLock, type WorkerServer } from './kanban/socket.js';
 import { WorkerApi } from './kanban/worker.js';
 import { TaskDirectories } from './kanban/worktree.js';
-import { listWorkflows, workflowLines } from './kanban/workflow.js';
+import { listWorkflows, withBoards, workflowLines } from './kanban/workflow.js';
 import type { Channel } from './channel/types.js';
 import { CronChat } from './cron/chat.js';
 import { CronScheduler } from './cron/scheduler.js';
@@ -214,14 +215,19 @@ export function loadStartup(env: Env = process.env): { config: GatewayConfig; te
 /**
  * The workflow check's lines (workflows spec §4): notes, as a broken workflow does not
  * stop the gateway; only it is unusable. With the team as the gateway's service
- * judges it, supervised roles accepted. `mt service check` prints them too.
+ * judges it, supervised roles accepted, and a file's board judged against the
+ * database's boards (§19.4). `mt service check` prints them too.
  */
 function startupWorkflows(config: GatewayConfig, team: Team): string[] {
   const dir = join(config.home, 'workflows');
   try {
-    return workflowLines(
-      listWorkflows(dir, { roles: team.roles, workspaces: new Set(team.workspaces.keys()), supervisedRoles: true }),
-    );
+    const list = listWorkflows(dir, { roles: team.roles, workspaces: new Set(team.workspaces.keys()), supervisedRoles: true });
+    // The boards, read-only, before the gateway opens and migrates its database, and only when a
+    // usable workflow names one (workflows spec §19.4): with none, nothing is opened and nothing said.
+    if (!list.usable.some((w) => w.board !== undefined)) return workflowLines(list);
+    const boards = boardsAt(config.dbPath);
+    if (!boards.ok) return [`workflow boards are not checked: the database cannot be read: ${boards.why}`, ...workflowLines(list)];
+    return workflowLines(withBoards(list, boards.boards));
   } catch (err) {
     // Only the directory itself throws, a ConfigError; a file that cannot be read is one broken workflow.
     if (!(err instanceof ConfigError)) throw err;

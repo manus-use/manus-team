@@ -62,7 +62,7 @@ export interface NewTaskCommand {
 export type KanbanCommand =
   | { verb: 'help' }
   | NewTaskCommand
-  | { verb: 'list'; filter: DisplayStatus | 'all' | undefined }
+  | { verb: 'list'; filter: DisplayStatus | 'all' | undefined; board?: string }
   | { verb: 'show'; taskId: string }
   | { verb: 'assign'; taskId: string; assignee: string }
   | { verb: 'link'; parentId: string; childId: string }
@@ -142,7 +142,7 @@ export function typed(verb: KanbanCommand['verb']): string {
 export const USAGE = {
   help: '/kanban help',
   new: '/kanban task new <title>, then lines assignee:, reviewer:, workspace:, parent:, outcome:, verify:, constraints:, boundaries:, stop when:, wake:, and the body',
-  list: `/kanban task list [${LIST_FILTERS.join('|')}]`,
+  list: `/kanban task list [${LIST_FILTERS.join('|')}] [board:<name>]`,
   show: '/kanban task show <task>',
   assign: '/kanban task assign <task> <role or @person>',
   link: '/kanban task link <parent> <child>',
@@ -338,12 +338,23 @@ function parseTask(text: string): ParsedKanban {
     case 'new':
       return parseNew(rest);
     case 'list': {
-      const w = words(rest, 0) ?? words(rest, 1);
-      const filter = w?.[0]?.toLowerCase();
-      if (w === undefined) return usage('list');
-      if (filter === undefined) return { ok: true, command: { verb: 'list', filter: undefined } };
-      const known = LIST_FILTERS.find((f) => f === filter);
-      return known === undefined ? usage('list') : { ok: true, command: { verb: 'list', filter: known } };
+      // At most a filter and a `board:<name>`, one token, in either order (workflows spec §19.5).
+      const w = rest.trim() === '' ? [] : rest.trim().split(/\s+/);
+      if (w.length > 2) return usage('list');
+      let filter: DisplayStatus | 'all' | undefined;
+      let board: string | undefined;
+      for (const word of w) {
+        const named = /^board:(.*)$/i.exec(word);
+        if (named !== null) {
+          if (board !== undefined || named[1] === '' || named[1] === undefined) return usage('list');
+          board = named[1];
+          continue;
+        }
+        const known = LIST_FILTERS.find((f) => f === word.toLowerCase());
+        if (filter !== undefined || known === undefined) return usage('list');
+        filter = known;
+      }
+      return { ok: true, command: { verb: 'list', filter, ...(board === undefined ? {} : { board }) } };
     }
     case 'show':
     case 'stop':

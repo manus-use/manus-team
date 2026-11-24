@@ -20,7 +20,7 @@ export function openDb(path: string): Db {
 }
 
 /**
- * Read-only, for the `mt` commands (spec §2.6). It never migrates, writes or
+ * Read-only, for the `mt` commands (spec §2.6), with a busy timeout when given. It never migrates, writes or
  * checkpoints, so a running gateway is not disturbed. A database that does not
  * exist yet -- a fresh install -- is undefined, and is not created.
  *
@@ -29,9 +29,12 @@ export function openDb(path: string): Db {
  * gateway's user, so run mt as that user, not with sudo: root-owned sidecars
  * would stop the gateway from opening its own database.
  */
-export function openDbReadOnly(path: string): Db | undefined {
+export function openDbReadOnly(path: string, busyTimeoutMs?: number): Db | undefined {
   if (!existsSync(path)) return undefined;
-  return new Database(path, { readonly: true, fileMustExist: true });
+  const db = new Database(path, { readonly: true, fileMustExist: true });
+  // A WAL reader is not blocked by a writer; the timeout guards the rare SQLITE_BUSY a read still meets, as a WAL recovery.
+  if (busyTimeoutMs !== undefined) db.pragma(`busy_timeout = ${Math.max(0, Math.floor(busyTimeoutMs))}`);
+  return db;
 }
 
 /** The migration files in `schemaDir`, `NNN_name.sql`, with their numbers. */

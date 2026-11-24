@@ -41,6 +41,7 @@ import {
   type CardFacts,
   type NameOf,
 } from './chat-render.js';
+import { visible } from '../names.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { CARD_SEND_MS } from './cards.js';
 import { personPrincipal, type PeopleDirectory } from './people.js';
@@ -331,6 +332,12 @@ export class KanbanChat {
       case 'help':
         return renderHelp();
       case 'list': {
+        // A board named by `board:`, archived ones included, the chat's own unchanged (workflows spec §19.5).
+        if (command.board !== undefined) {
+          const named = this.#deps.service.boardNamed(command.board);
+          if (named === undefined) return refused({ ok: false, code: 'unknown_board', message: `there is no board ${visible(command.board)}` });
+          return renderList(this.#deps.service.list(named.name), command.filter, named.name, this.#nameOf, { archived: named.archivedAt !== null });
+        }
         // The chat's board alone (spec §16).
         const board = this.#deps.service.chatBoard(chatAt(key)).name;
         return renderList(this.#deps.service.list(board), command.filter, board, this.#nameOf);
@@ -518,7 +525,7 @@ export class KanbanChat {
           board: board.name,
         });
         if (!r.ok) return refused(r);
-        return renderPreview(command.name, r.dag, (name) => this.#whom({ kind: name.includes(':') ? 'human' : 'role', name }), this.#nameOf);
+        return renderPreview(command.name, r.dag, (name) => this.#whom({ kind: name.includes(':') ? 'human' : 'role', name }), this.#nameOf, board.name);
       }
       default:
         return renderHelp();
@@ -551,7 +558,9 @@ export class KanbanChat {
     key: BindingKey,
   ): string | KanbanAnswer {
     const board = this.#deps.service.chatBoard(chatAt(key));
-    if (board.archivedAt !== null) {
+    // A file naming its board is not decided by the chat's (workflows spec §19.2).
+    const own = this.#deps.service.workflowBoard(command.name);
+    if (board.archivedAt !== null && !(own.file === 'read' && own.board !== undefined)) {
       return `This chat is on board ${boardName(board)}, which is archived: \`/kanban board use <board>\` moves it to another first.`;
     }
     const r = this.#deps.service.startWorkflow({
@@ -573,16 +582,16 @@ export class KanbanChat {
     if (thread) for (const t of r.tasks) this.#hold(t.taskId);
     try {
       this.#changed();
-      if (thread) return { text: this.#started(r, 'thread'), quoted: this.#started(r, 'chat'), thread: r.instance.instanceId };
-      return this.#started(r, message.chatType === 'group' && key.threadId !== '' && message.rootId !== undefined ? 'thread' : 'chat');
+      if (thread) return { text: this.#started(r, 'thread', board.name), quoted: this.#started(r, 'chat', board.name), thread: r.instance.instanceId };
+      return this.#started(r, message.chatType === 'group' && key.threadId !== '' && message.rootId !== undefined ? 'thread' : 'chat', board.name);
     } catch (err) {
       if (thread) for (const t of r.tasks) this.#release(t.taskId);
       throw err;
     }
   }
 
-  #started(made: WorkflowMade, where: 'thread' | 'chat'): string {
-    const reply = renderStarted(startedReply(made), where, (a) => this.#whom(a), this.#nameOf);
+  #started(made: WorkflowMade, where: 'thread' | 'chat', chatBoard: string): string {
+    const reply = renderStarted(startedReply(made), where, (a) => this.#whom(a), this.#nameOf, chatBoard);
     // A start whose steps ask for a wake while wakes are off ends with the note (wake spec §3.4).
     return made.wakeNote === undefined ? reply : `${reply}\n\n${made.wakeNote}`;
   }

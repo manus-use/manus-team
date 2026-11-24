@@ -653,6 +653,15 @@ describe('Router: /kanban', () => {
     expect(h.notes).toContain("kanban: where task k_1's reply went was not recorded: database_locked");
   });
 
+  it('never hands the board a task list naming a board from a sender without talk tier (workflows spec §19.5)', async () => {
+    const kanban = board(async () => 'the board');
+    const h = harness({ kanban });
+    await h.router.onMessage(msg({ sender: GUEST, text: '/kanban task list board:vi' }));
+    expect(kanban.calls).toEqual([]);
+    await h.router.onMessage(msg({ text: '/kanban task list board:vi' }));
+    expect(kanban.calls.map((c) => c.arg)).toEqual(['task list board:vi']);
+  });
+
   it('says the board is off when kanban.enabled is not set, and opens no session', async () => {
     const h = harness();
     await h.router.onMessage(msg({ text: '/kanban task list' }));

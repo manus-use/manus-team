@@ -216,8 +216,8 @@ export function renderHelp(): string {
     "Name a person with an @-mention: they are sent the task as a card, in the task's thread when they are in its group, else by direct message, with Done and Block, or a review with Approve and Request changes. A person named may comment on, and report on, their own task.",
     "A task with a `reviewer:` is reviewed before it is done: its assignee's done, or its agent's, goes to the reviewer. An operator may answer any review, ending a reviewer role's run.",
     'The chat a task is created in hears when it is done, needs review, has changes requested, blocks, is retried after a failure, gives up, or is stranded, and who a person was given it.',
-    "A board is a queue of tasks of its own. Each chat is on one, `default` until `/kanban board use` moves it, and its `/kanban task new` and `/kanban task list` act on that board; a task's follow-ups and parents are on its board.",
-    "A workflow is a graph of tasks written once, in a file the operator keeps; a start makes all of its tasks at once, on this chat's board, and this chat hears each of them.",
+    "A board is a queue of tasks of its own. Each chat is on one, `default` until `/kanban board use` moves it, and its `/kanban task new` and `/kanban task list` act on that board, though `/kanban task list board:<name>` lists another; a task's follow-ups and parents are on its board.",
+    "A workflow is a graph of tasks written once, in a file the operator keeps; a start makes all of its tasks at once, on the board its file names, else on this chat's board, and this chat hears each of them.",
   ].join('\n');
 }
 
@@ -242,20 +242,27 @@ export function renderList(
   filter: DisplayStatus | 'all' | undefined,
   board: string = DEFAULT_BOARD,
   nameOf?: NameOf,
+  named?: { archived: boolean },
 ): string {
-  const on = board === DEFAULT_BOARD ? '' : ` on board ${label(board)}`;
+  // A board named by `board:` is always named, `default` too, and its hints carry it (workflows spec §19.5).
+  const on = board === DEFAULT_BOARD && named === undefined ? '' : ` on board ${label(board)}`;
+  const also = named === undefined ? '' : ` board:${board}`;
+  const header = named?.archived === true ? [`Board **${label(board)}** is archived: nothing is added to it.`] : [];
   const ordered = listed(entries, filter);
   if (ordered.length === 0) {
-    return filter === undefined
-      ? `No open tasks${on}. \`/kanban task list all\` shows done and archived ones too.`
-      : `No ${filter === 'all' ? '' : `${filter} `}tasks${on}.`;
+    const empty =
+      filter === undefined
+        ? `No open tasks${on}. \`/kanban task list all${also}\` shows done and archived ones too.`
+        : `No ${filter === 'all' ? '' : `${filter} `}tasks${on}.`;
+    return [...header, empty].join('\n');
   }
   const lines = ordered
     .slice(0, LIST_MAX)
     .map((e) => `${id(e.task.taskId)} **${e.status}**: ${titleText(e.task.title, nameOf, 120)} · ${who(e.task.assignee, nameOf)}`);
   const more = ordered.length - LIST_MAX;
-  if (more > 0) lines.push(`… and ${more} more. \`/kanban task list <${LIST_FILTERS.join('|')}>\` narrows it.`);
-  if (on !== '') lines.unshift(`Board **${label(board)}**:`);
+  if (more > 0) lines.push(`… and ${more} more. \`/kanban task list <${LIST_FILTERS.join('|')}>${also}\` narrows it.`);
+  if (header.length > 0) lines.unshift(...header);
+  else if (on !== '') lines.unshift(`Board **${label(board)}**:`);
   return lines.join('\n');
 }
 
@@ -971,8 +978,11 @@ export function renderPreview(
   dag: { board: string | null; tasks: readonly { ref: string; title: string; assignee: string | null; parents: readonly string[]; gates: readonly unknown[] }[] },
   whom: (name: string) => string,
   nameOf?: NameOf,
+  chatBoard?: string,
 ): string {
-  const board = dag.board === null || dag.board === DEFAULT_BOARD ? '' : `, on board **${label(dag.board)}**`;
+  // Named when not default, or not the chat's (workflows spec §19.3).
+  const on = dag.board ?? DEFAULT_BOARD;
+  const board = on === DEFAULT_BOARD && (chatBoard === undefined || chatBoard === on) ? '' : `, on board **${label(on)}**`;
   const n = dag.tasks.length;
   const lines = previewLines(dag).map((t) => {
     const after = t.parents.length === 0 ? '' : `, after ${t.parents.map((p) => `\`${label(p, 64)}\``).join(', ')}`;
@@ -1040,9 +1050,12 @@ function startedOf(p: Record<string, unknown>): StartedReply {
  * with its id, its title and its assignee, and who hears, in the words of the
  * thread or of the chat. A terminal's names who started it (§18.2).
  */
-export function renderStarted(reply: StartedReply, where: 'thread' | 'chat', whom: (a: Assignee) => string, nameOf?: NameOf): string {
+export function renderStarted(reply: StartedReply, where: 'thread' | 'chat', whom: (a: Assignee) => string, nameOf?: NameOf, chatBoard?: string): string {
   const { instance, tasks, count: n } = reply;
-  const board = instance.board === DEFAULT_BOARD ? '' : `, on board **${label(instance.board)}**`;
+  // Named when not default, or not the chat's; on another board than the chat's, pointed to (workflows spec §19.3).
+  const elsewhere = chatBoard !== undefined && instance.board !== chatBoard;
+  const board = instance.board === DEFAULT_BOARD && !elsewhere ? '' : `, on board **${label(instance.board)}**`;
+  const pointer = elsewhere ? [`Its tasks are on board **${label(instance.board)}**: \`/kanban task list board:${instance.board}\` lists that board.`] : [];
   const lines = tasks.map((t) => {
     const assignee = t.assignee === null ? 'nobody yet' : whom({ kind: t.assigneeKind === 'human' ? 'human' : 'role', name: t.assignee });
     return `- ${id(t.taskId)} ${titleText(t.title, nameOf, WORKFLOW_TITLE_MAX)}, for ${assignee}`;
@@ -1059,6 +1072,7 @@ export function renderStarted(reply: StartedReply, where: 'thread' | 'chat', who
     [`${head}, ${n} task${n === 1 ? '' : 's'}${board}:`],
     lines,
     [
+      ...pointer,
       `${where === 'thread' ? 'This thread' : 'This chat'} hears when each task is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.${cards}`,
     ],
     (more) => `… and ${more} more: \`/kanban workflow show ${instance.instanceId}\` lists them all.`,
@@ -1068,13 +1082,13 @@ export function renderStarted(reply: StartedReply, where: 'thread' | 'chat', who
 
 /** `/kanban workflow list` (workflows spec §10): each usable workflow with its description and params, and each that is not with why. */
 export function renderWorkflows(list: {
-  usable: readonly { name: string; description: string | undefined }[];
+  usable: readonly { name: string; description: string | undefined; board?: string | undefined }[];
   broken: readonly { name: string; problem: string }[];
 }, params: (name: string) => string): string {
   const lines = [
     ...list.usable.map((w) => ({
       name: w.name,
-      line: `- **${label(w.name)}**${w.description === undefined ? '' : `: ${label(w.description, 200)}`} · params: ${label(params(w.name), 400)}`,
+      line: `- **${label(w.name)}**${w.description === undefined ? '' : `: ${label(w.description, 200)}`} · params: ${label(params(w.name), 400)}${w.board === undefined ? '' : ` · board **${label(w.board)}**`}`,
     })),
     ...list.broken.map((b) => ({ name: b.name, line: `- **${label(b.name)}** is not usable: ${label(b.problem, 300)}` })),
   ]

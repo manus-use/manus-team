@@ -6,6 +6,7 @@ import { parse as parseYaml } from 'yaml';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runMt } from '../src/cli/mt.js';
 import { loadConfig } from '../src/config.js';
+import { createBoard } from '../src/db/kanban.js';
 import { migrate, openDb } from '../src/db/open.js';
 import { notePerson } from '../src/db/people.js';
 import { parseKanban } from '../src/kanban/chat-parse.js';
@@ -138,6 +139,8 @@ describe("docs/examples.md's workflow with a wake", () => {
     const db = openDb(join(home, 'team.db'));
     try {
       migrate(db, SCHEMA_DIR);
+      // weekly-report names its board, which the operator makes once (docs/examples.md).
+      createBoard(db, 'reports', 'operator:me', 1);
       // The owner, as the gateway notes them once they have used /kanban in Lark (wake spec §3.2).
       notePerson(db, { appId: 'cli_app', unionId: 'on_owner', openId: 'ou_owner', name: 'Owner' }, 1);
       const command = example('docs/examples.md', 'wake weekly-report terminal').replace(/^\$ mt /, '').replace('<chat_id>', 'oc_team');

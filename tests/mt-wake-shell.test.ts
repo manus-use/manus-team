@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { advanceWake, recordWake, wakeSubmitted } from '../src/db/kanban.js';
+import { advanceWake, createBoard, recordWake, wakeSubmitted } from '../src/db/kanban.js';
 import { eventsOf, getTask } from '../src/db/kanban-read.js';
 import { migrate, openDb, type Db } from '../src/db/open.js';
 import { notePerson } from '../src/db/people.js';
@@ -174,6 +174,21 @@ describe('a woken turn\'s shell, cron off', () => {
       [SETTER, 2],
       [SETTER, 2],
     ]);
+  });
+});
+
+describe("a woken turn's shell, and a file naming its board", () => {
+  it('starts with no --board on the file\'s board, the wake of the step that asks for one set', async () => {
+    await setup(true);
+    createBoard(db, 'vi', SETTER, NOW);
+    writeFileSync(
+      join(fx.home, 'workflows', 'vi-brief.yaml'),
+      'board: vi\nsteps:\n  a: { title: "Draft the brief", assignee: default }\n  b: { parents: [a], title: "Check the brief", assignee: default, wake: true }\n',
+    );
+    const r = await json(['workflow', 'start', 'vi-brief', '--chat', 'oc_team', '--thread', 'omt_topic']);
+    expect(r['board']).toBe('vi');
+    const [a, b] = (r['tasks'] as Array<{ task_id: string }>).map((t) => getTask(db, t.task_id));
+    expect([a?.board, a?.wakeBy, b?.board, b?.wakeBy, b?.wakeDepth]).toEqual(['vi', null, 'vi', SETTER, 2]);
   });
 });
 
