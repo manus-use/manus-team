@@ -260,6 +260,10 @@ describe('loadConfig: the file is validated, not trusted', () => {
     expect(() => load({}, yamlFile({ agent: { skills: ['lark-doc'] } }))).toThrow(/unknown setting agent\.skills \(known: driver, /);
   });
 
+  it('refuses agent.maxSteps in the agent: block, which no renderer takes', () => {
+    expect(() => load({}, yamlFile({ agent: { maxSteps: 200 } }))).toThrow(/unknown setting agent\.maxSteps \(known: driver, /);
+  });
+
   it('refuses a value of the wrong type', () => {
     expect(() => load({}, yamlFile({ auth: { talk: 'ou_a' } }))).toThrow('auth.talk must be a list');
     expect(() => load({}, yamlFile({ auth: { talk: ['ou_a', ''] } }))).toThrow(

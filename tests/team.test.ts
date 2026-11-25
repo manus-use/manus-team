@@ -151,3 +151,47 @@ describe("loadTeam: a role's max_running", () => {
     expect(team.roles.get('reviewer')?.maxRunning).toBe(1);
   });
 });
+
+describe("loadTeam: a role's agent.maxSteps", () => {
+  const configPath = (name: string) => join(home, 'roles', name, 'config.yaml');
+  function withRoleMd(name: string, config: string): void {
+    roleDir(name, config);
+    writeFileSync(join(home, 'roles', name, 'role.md'), 'You change code.\n');
+  }
+
+  it('keeps it for a role rendered by a renderer that sets it', () => {
+    withRoleMd('implementer', `${ROLE_AGENT}  maxSteps: 200\n`);
+    expect(teamFor(env()).roles.get('implementer')?.agent.maxSteps).toBe(200);
+  });
+
+  it("refuses it for a role whose agent no renderer takes", () => {
+    withRoleMd('reviewer', 'agent:\n  driver: acp\n  command: claude-agent-acp\n  maxSteps: 200\n');
+    expect(() => teamFor(env())).toThrow(
+      `${configPath('reviewer')}: agent.maxSteps: this role's agent (claude-agent-acp over acp) has no step limit the gateway can set`,
+    );
+    // A bytesec behind a wrapper is not rendered either.
+    withRoleMd('reviewer', 'agent:\n  driver: structured-cli\n  command: bytesec-wrapper\n  unsupervised: true\n  maxSteps: 200\n');
+    expect(() => teamFor(env())).toThrow(
+      `${configPath('reviewer')}: agent.maxSteps: this role's agent (bytesec-wrapper over structured-cli) has no step limit the gateway can set`,
+    );
+  });
+
+  it('refuses it for a role that is not rendered: native false, or nothing to render', () => {
+    withRoleMd('implementer', `${ROLE_AGENT}  native: false\n  maxSteps: 200\n`);
+    expect(() => teamFor(env())).toThrow(
+      `${configPath('implementer')}: agent.maxSteps: the gateway sets it in the role's native package, and this role is not rendered: agent.native is false`,
+    );
+    roleDir('bare', `${ROLE_AGENT}  maxSteps: 200\n`);
+    writeFileSync(configPath('implementer'), ROLE_AGENT);
+    expect(() => teamFor(env())).toThrow(
+      `${configPath('bare')}: agent.maxSteps: the gateway sets it in the role's native package, and this role is not rendered: it has no role.md and no skills`,
+    );
+  });
+
+  it('refuses it for the role default, whose chat sessions are not rendered', () => {
+    withRoleMd('default', `${ROLE_AGENT}  maxSteps: 200\n`);
+    expect(() => teamFor(env({ MT_AGENT_COMMAND: undefined }))).toThrow(
+      `${configPath('default')}: agent.maxSteps: the role default runs chat sessions, which are not rendered, so it would not apply to them; set it on another role`,
+    );
+  });
+});

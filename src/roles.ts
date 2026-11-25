@@ -81,6 +81,12 @@ export function roleLimit(role: Pick<Role, 'maxRunning'>, perRole: number | unde
   return perRole === undefined ? undefined : { limit: perRole, from: 'default' };
 }
 
+/**
+ * The most `agent.maxSteps` may be. A ceiling well above any turn's real need,
+ * so a typo of an extra digit or two is caught, not run for hours.
+ */
+export const MAX_STEPS = 1000;
+
 /** Drivers that can enforce a role's tool policy. None yet (spec §2.2). */
 const TOOL_POLICY_DRIVERS: readonly KnownDriver[] = [];
 
@@ -172,7 +178,7 @@ export function loadRoleDir(
     configPath,
     'agent',
     agentRaw,
-    ['driver', 'command', 'args', 'unsupervised', 'passEnv', 'readOnlyTools', 'maskExempt', 'native', 'skills'],
+    ['driver', 'command', 'args', 'unsupervised', 'passEnv', 'readOnlyTools', 'maskExempt', 'native', 'skills', 'maxSteps'],
     HINTS,
   );
   if (root['agent'] === undefined || root['agent'] === null) {
@@ -217,6 +223,10 @@ export function loadRoleDir(
   const skills = [...own, ...imported];
   const maskExempt = strings(configPath, 'agent.maskExempt', agentRaw['maskExempt']);
   const native = bool(configPath, 'agent.native', agentRaw['native']);
+  const maxSteps = positiveInt(configPath, 'agent.maxSteps', agentRaw['maxSteps']);
+  if (maxSteps !== undefined && maxSteps > MAX_STEPS) {
+    throw new ConfigError(`${configPath}: agent.maxSteps must be at most ${MAX_STEPS}, got ${maxSteps}`);
+  }
   const maxRunning = positiveInt(configPath, 'max_running', root['max_running']);
   return {
     role: {
@@ -235,6 +245,7 @@ export function loadRoleDir(
         readOnlyTools: strings(configPath, 'agent.readOnlyTools', agentRaw['readOnlyTools']),
         maskExempt,
         ...(native === undefined ? {} : { native }),
+        ...(maxSteps === undefined ? {} : { maxSteps }),
       },
       roleMdPath: readRoleMd(dir),
       skills,

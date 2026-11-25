@@ -111,6 +111,31 @@ describe('loadRoleDir: config.yaml', () => {
     expect(() => load('bad')).toThrow(/agent\.native must be true or false, got "no"/);
   });
 
+  it('reads agent.maxSteps, a whole number from 1 to 1000', () => {
+    role('plain', AGENT);
+    expect(load('plain').role.agent.maxSteps).toBeUndefined();
+    role('one', `${AGENT}  maxSteps: 1\n`);
+    expect(load('one').role.agent.maxSteps).toBe(1);
+    role('some', `${AGENT}  maxSteps: 200\n`);
+    expect(load('some').role.agent.maxSteps).toBe(200);
+    role('most', `${AGENT}  maxSteps: 1000\n`);
+    expect(load('most').role.agent.maxSteps).toBe(1000);
+  });
+
+  it('refuses an agent.maxSteps that is not a whole number from 1 to 1000', () => {
+    const cases: [string, string][] = [
+      ['0', 'agent.maxSteps must be a positive integer, got 0'],
+      ['-3', 'agent.maxSteps must be a positive integer, got -3'],
+      ['2.5', 'agent.maxSteps must be a positive integer, got 2.5'],
+      ['"200"', 'agent.maxSteps must be a positive integer, got "200"'],
+      ['1001', 'agent.maxSteps must be at most 1000, got 1001'],
+    ];
+    for (const [value, message] of cases) {
+      const dir = role('bad', `${AGENT}  maxSteps: ${value}\n`);
+      expect(() => load('bad')).toThrow(`${join(dir, 'config.yaml')}: ${message}`);
+    }
+  });
+
   it('requires every passEnv name to be set', () => {
     role('r', `${AGENT}  passEnv: [GH_TOKEN]\n`);
     expect(() => load('r')).toThrow(/names GH_TOKEN, which is not set/);

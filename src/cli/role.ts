@@ -27,6 +27,7 @@ import { gatewayEnvPath, readGatewayEnv, withGatewayEnv, type GatewayEnvFile } f
 import { inAgentRun } from './gate.js';
 import { RESUME_MIN_VERSION } from '../driver/cli/driver.js';
 import { isReservedRoleName, nameProblem } from '../names.js';
+import { BYTESEC_DEFAULT_STEPS, bytesecRenderer } from '../render/bytesec.js';
 import { nativeFor } from '../render/native.js';
 import { discoverRoles, gatewayOwnsVariable, roleLimit, type Role } from '../roles.js';
 import { loadTeam } from '../team.js';
@@ -492,6 +493,8 @@ export function roleCheck(only: string | undefined, io: MtIo): number {
   }
   // One line a role: how many of its runs may be open at once, and why (spec §6.3).
   for (const role of real.roles ?? []) io.out(limitLine(role, real.perRole));
+  // One line a role: the most agent steps a turn may take, and whose limit it is.
+  for (const role of real.roles ?? []) io.out(stepsLine(role));
   for (const line of servicePassEnv(real.roles ?? [], io)) io.out(line);
   resumeVersions(real.roles ?? [], io);
   for (const note of real.notes) io.out(`note: ${note}`);
@@ -537,6 +540,14 @@ function servicePassEnv(roles: readonly Role[], io: MtIo): string[] {
 }
 
 /** `mt role check`'s line for a role's max_running, and where it comes from. */
+function stepsLine(role: Role): string {
+  const steps = role.agent.maxSteps;
+  if (steps !== undefined) return `max steps: role ${role.name} stops a turn after ${steps} step${steps === 1 ? '' : 's'}, from agent.maxSteps`;
+  return bytesecRenderer.handles(role)
+    ? `max steps: role ${role.name} sets none: bytesec's default of ${BYTESEC_DEFAULT_STEPS} applies`
+    : `max steps: role ${role.name} sets none: its agent's own limit applies`;
+}
+
 function limitLine(role: Role, perRole: number | undefined): string {
   const limit = roleLimit(role, perRole);
   if (limit === undefined) {

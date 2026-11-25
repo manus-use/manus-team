@@ -600,6 +600,27 @@ describe('mt role check', () => {
     ]);
   });
 
+  it("says, a line a role, its agent.maxSteps, or whose default applies, and reports one the gateway cannot set", async () => {
+    fx = mtFixture();
+    roleDir('implementer', 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n  maxSteps: 200\n');
+    writeFileSync(join(fx.home, 'roles', 'implementer', 'role.md'), 'You change code.\n');
+    roleDir('reviewer', ACP_AGENT);
+    const r = await fx.run(['role', 'check']);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out.split('\n').filter((l) => l.startsWith('max steps: '))).toEqual([
+      "max steps: role default sets none: bytesec's default of 50 applies",
+      'max steps: role implementer stops a turn after 200 steps, from agent.maxSteps',
+      "max steps: role reviewer sets none: its agent's own limit applies",
+    ]);
+
+    roleDir('reviewer', `${ACP_AGENT}  maxSteps: 200\n`);
+    const refused = await fx.run(['role', 'check']);
+    expect(refused.code).toBe(1);
+    expect(refused.out).toMatch(
+      /^files:\n {2}.*reviewer\/config\.yaml: agent\.maxSteps: this role's agent \(claude-agent-acp over acp\) has no step limit the gateway can set$/m,
+    );
+  });
+
   it('warns of a bytesec role whose bytesec cannot resume a session, asking each command once', async () => {
     fx = mtFixture();
     roleDir('implementer', 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n');

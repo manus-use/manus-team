@@ -35,6 +35,12 @@ export interface Renderer {
   readonly id: string;
   /** Whether the role's agent is this renderer's. */
   handles(role: Role): boolean;
+  /**
+   * Whether `files` writes the role's `agent.maxSteps` into the package, as its
+   * agent's own step limit. A role that sets it is refused at startup unless
+   * its renderer does.
+   */
+  readonly maxSteps?: boolean;
   /** Why a role it handles cannot be rendered, or undefined when it can. */
   refuses(role: Role): string | undefined;
   /** The package's files, from the role.md bytes the claim read and the skills as read now. */

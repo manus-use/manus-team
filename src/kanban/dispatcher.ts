@@ -14,7 +14,7 @@ import {
 } from '../db/kanban-read.js';
 import { getSession } from '../db/sessions.js';
 import { isWorktreeId } from '../db/workspaces.js';
-import { nativeFor, PackagesInUse, renderNative, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
+import { nativeFor, PackagesInUse, renderNative, stepsDropped, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
 import { roleLimit, type Role } from '../roles.js';
 import { addSecrets, removeSecrets } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
@@ -921,7 +921,7 @@ export class Dispatcher {
     } catch (err) {
       this.#note(
         `kanban: run ${runId}: rendering role ${role.name} for ${native.renderer.id} failed, ` +
-          `so its role.md and skills go in the prompt: ${message(err)}`,
+          `so its role.md and skills go in the prompt${stepsDropped(role)}: ${message(err)}`,
       );
       return undefined;
     }

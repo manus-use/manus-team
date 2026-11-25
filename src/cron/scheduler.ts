@@ -34,7 +34,7 @@ import type { WorkerAccess } from '../kanban/dispatcher.js';
 import { gateEnv, spawnGate, type GateExit, type GateRunner } from '../kanban/gates.js';
 import { roleSections } from '../kanban/prompt.js';
 import { turnText } from '../kanban/session-log.js';
-import { nativeFor, PackagesInUse, renderNative, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
+import { nativeFor, PackagesInUse, renderNative, stepsDropped, sweepRole, sweepRoles, type Rendered } from '../render/native.js';
 import type { Role } from '../roles.js';
 import { redactKnownSecrets, withholdSecretSuffix } from '../secrets.js';
 import { systemClock, type Clock } from '../time.js';
@@ -772,7 +772,7 @@ export class CronScheduler {
     try {
       rendered = renderNative(root, role, native.renderer, bytes);
     } catch (err) {
-      this.#note(`cron: fire ${entry.fireId}: rendering role ${role.name} for ${native.renderer.id} failed, so its role.md and skills go in the prompt: ${message(err)}`);
+      this.#note(`cron: fire ${entry.fireId}: rendering role ${role.name} for ${native.renderer.id} failed, so its role.md and skills go in the prompt${stepsDropped(role)}: ${message(err)}`);
       return undefined;
     }
     entry.packageDir = rendered.dir;

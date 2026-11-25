@@ -23,9 +23,15 @@ import type { Launch, PackageFile, Renderer, SkillFiles } from './types.js';
  *   out of its reach, so a role brings a user skill in by naming it in
  *   `agent.skills`, and it is copied into the package. `BYTESEC_NO_GLOBAL_APM`
  *   is not set: it changes what bytesec loads, not what the agent may use.
+ * - `steps: <n>` in the agent file's front matter is the most agent steps one
+ *   prompt may take: with `steps: 3`, a run stopped after 3 tool calls with
+ *   `"finish": "error"` and "prompt runtime exceeded max steps 3". Without it,
+ *   bytesec's default of 50 applies. A role's `agent.maxSteps` is written there.
  */
 
 const COMMAND = 'bytesec';
+/** bytesec's own step limit for an agent with no `steps`, as `mt role check` says. */
+export const BYTESEC_DEFAULT_STEPS = 50;
 /** bytesec's own pattern for an agent package's name. */
 const PACKAGE_NAME = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 /** Agent names bytesec keeps for itself: `--agent bytesec-agent` runs its built-in agent, not a package. */
@@ -40,6 +46,7 @@ function oneLine(text: string): string {
 
 export const bytesecRenderer: Renderer = {
   id: 'bytesec',
+  maxSteps: true,
 
   /**
    * The structured-CLI driver speaks bytesec's `run --format json` and nothing
@@ -85,6 +92,7 @@ export const bytesecRenderer: Renderer = {
       `name: ${JSON.stringify(role.name)}`,
       `description: ${JSON.stringify(description)}`,
       'mode: primary',
+      ...(role.agent.maxSteps === undefined ? [] : [`steps: ${role.agent.maxSteps}`]),
       '---',
       '',
     ];
