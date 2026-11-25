@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { type AgentConfig, ConfigError, type Env, type LoadOptions, type TeamSettings, maxRunningText } from './config.js';
+import { nativeFor, rendererFor } from './render/native.js';
 import { discoverRoles, loadRoleDir, secretValuesOf, type Role } from './roles.js';
 import { resolveWorkspaces } from './workspaces.js';
 
@@ -47,6 +48,8 @@ export function loadTeam(config: TeamSettings, env: Env, opts: LoadOptions = {})
           `${maxRunningText(config.kanban)}; a role's max_running is a whole number from 1 to it`,
       );
     }
+    const steps = maxStepsProblem(loaded.role);
+    if (steps !== undefined) throw new ConfigError(`${join(rolesDir, name, 'config.yaml')}: agent.maxSteps: ${steps}`);
     roles.set(name, loaded.role);
     notes.push(...loaded.notes);
   }
@@ -68,6 +71,26 @@ export function loadTeam(config: TeamSettings, env: Env, opts: LoadOptions = {})
   }
 
   return { roles, workspaces: resolved.workspaces, notes };
+}
+
+/**
+ * Why a role's `agent.maxSteps` would not reach its agent, or undefined when it
+ * would. The gateway has no step limit of its own: only a renderer that writes
+ * one into the role's native package applies it, so a role not rendered, or
+ * rendered by one that cannot, would have it silently dropped. Chat sessions
+ * run the role default without rendering it, so it is refused there too.
+ */
+function maxStepsProblem(role: Role): string | undefined {
+  if (role.agent.maxSteps === undefined) return undefined;
+  if (rendererFor(role)?.maxSteps !== true) {
+    return `this role's agent (${role.agent.command} over ${role.agent.driver}) has no step limit the gateway can set`;
+  }
+  const native = nativeFor(role);
+  if (!native.ok) return `the gateway sets it in the role's native package, and this role is not rendered: ${native.reason}`;
+  if (role.name === 'default') {
+    return 'the role default runs chat sessions, which are not rendered, so it would not apply to them; set it on another role';
+  }
+  return undefined;
 }
 
 /** The gateway's `agent:` block, standing in for a roles/default directory. */

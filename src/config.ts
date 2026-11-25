@@ -84,6 +84,15 @@ export interface AgentConfig {
    * its role has no role.md and no skills to render.
    */
   native?: boolean;
+  /**
+   * A role directory's `agent.maxSteps`: the most agent steps (model calls, with
+   * their tool uses) one turn may take before the agent stops it. The gateway
+   * has no limit of its own: a renderer writes it into the role's package, in
+   * its agent's own terms, and a role whose agent no renderer sets it for is
+   * refused at startup (`team.ts`). The `agent:` block has no such key, as no
+   * renderer takes its role.
+   */
+  maxSteps?: number;
 }
 
 export interface GatewayConfig {

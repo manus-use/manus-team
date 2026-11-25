@@ -115,6 +115,19 @@ describe('bytesecRenderer: the package', () => {
     expect(bare['agents/implementer.md']).toBe('---\nname: "implementer"\ndescription: "the implementer role"\nmode: primary\n---\n');
   });
 
+  it('writes agent.maxSteps as the agent\'s steps, after mode, and no steps line without it', () => {
+    const body = Buffer.from('You change code.\n');
+    const set = text(bytesecRenderer.files(role('implementer', {}, { maxSteps: 200 }), body, []));
+    expect(set['agents/implementer.md']).toBe(
+      '---\nname: "implementer"\ndescription: "the implementer role"\nmode: primary\nsteps: 200\n---\nYou change code.\n',
+    );
+    const unset = text(bytesecRenderer.files(role('implementer'), body, []));
+    expect(unset['agents/implementer.md']).toBe(
+      '---\nname: "implementer"\ndescription: "the implementer role"\nmode: primary\n---\nYou change code.\n',
+    );
+    expect(bytesecRenderer.maxSteps).toBe(true);
+  });
+
   it('launches the package by its directory and the role as the agent', () => {
     expect(bytesecRenderer.launch(role('implementer'), '/home/rendered/implementer/abc')).toEqual({
       args: ['--agent', 'implementer'],

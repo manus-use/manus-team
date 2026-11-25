@@ -385,6 +385,17 @@ describe('renderNative', () => {
     expect(tree(out.dir)).toEqual(tree(expected.dir));
   });
 
+  it("gives each agent.maxSteps its own package, so a changed value is rendered afresh", () => {
+    const unset = renderNative(root, roleOnDisk(), bytesecRenderer, md(roleOnDisk()));
+    const r200 = roleOnDisk('implementer', { maxSteps: 200 });
+    const at200 = renderNative(root, r200, bytesecRenderer, md(r200));
+    const r300 = roleOnDisk('implementer', { maxSteps: 300 });
+    const at300 = renderNative(root, r300, bytesecRenderer, md(r300));
+    expect(new Set([unset.hash, at200.hash, at300.hash]).size).toBe(3);
+    expect(readFileSync(join(at300.dir, 'agents', 'implementer.md'), 'utf8')).toMatch(/^mode: primary\nsteps: 300\n---\n/m);
+    expect(renderNative(root, r200, bytesecRenderer, md(r200)).hash).toBe(at200.hash);
+  });
+
   it('hashes paths and bytes so that moving bytes between files changes it', () => {
     const a = packageHash([{ path: 'a', bytes: Buffer.from('bc') }]);
     expect(packageHash([{ path: 'ab', bytes: Buffer.from('c') }])).not.toBe(a);

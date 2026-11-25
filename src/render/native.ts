@@ -79,12 +79,22 @@ export function nativeFor(role: Role): Native {
   if (role.roleMdPath === undefined && role.skills.length === 0) {
     return { ok: false, reason: 'it has no role.md and no skills' };
   }
-  const renderer = RENDERERS.find((r) => r.handles(role));
+  const renderer = rendererFor(role);
   if (renderer === undefined) {
     return { ok: false, reason: `no renderer for its agent (${role.agent.driver}, ${basename(role.agent.command)})` };
   }
   const refused = renderer.refuses(role);
   return refused === undefined ? { ok: true, renderer } : { ok: false, reason: refused };
+}
+
+/** What a failed render's note adds for a role whose agent.maxSteps it was to carry: the run goes without it. */
+export function stepsDropped(role: Role): string {
+  return role.agent.maxSteps === undefined ? '' : `, and its agent.maxSteps (${role.agent.maxSteps}) does not apply`;
+}
+
+/** The renderer whose agent the role's is, whether or not the role is rendered. */
+export function rendererFor(role: Role): Renderer | undefined {
+  return RENDERERS.find((r) => r.handles(role));
 }
 
 export interface Rendered extends Launch {
