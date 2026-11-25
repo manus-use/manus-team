@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -561,6 +562,23 @@ describe('mt role check', () => {
     mkdirSync(join(home, '.agents', 'skills', 'lark-doc'), { recursive: true });
     writeFileSync(join(home, '.agents', 'skills', 'lark-doc', 'SKILL.md'), '---\nname: lark-doc\ndescription: Lark docs\n---\n');
     expect((await fx.run(['role', 'check'], { env: { HOME: home } })).code).toBe(0);
+  });
+
+  it("names each role's skills, the board's skill imported by agent.skills among them, and says nothing for a role without", async () => {
+    fx = mtFixture();
+    roleDir('implementer', 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n  skills: [mt-kanban]\n');
+    mkdirSync(join(fx.home, 'roles', 'implementer', 'skills', 'tdd'), { recursive: true });
+    writeFileSync(join(fx.home, 'roles', 'implementer', 'skills', 'tdd', 'SKILL.md'), '---\nname: tdd\ndescription: Test first\n---\n');
+    roleDir('plain', 'agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n');
+    // A made-up home, never the real one, with the skill as install.sh copies it.
+    const home = join(fx.root, 'user');
+    const skill = join(home, '.agents', 'skills', 'mt-kanban');
+    cpSync(new URL('../skills/mt-kanban', import.meta.url).pathname, skill, { recursive: true });
+    const r = await fx.run(['role', 'check'], { env: { HOME: home } });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out.split('\n').filter((l) => l.startsWith('skills: '))).toEqual([
+      `skills: role implementer loads tdd (its own), mt-kanban (from ${skill})`,
+    ]);
   });
 
   it('says, a line a role, whether its runs get role.md and skills as a native agent package', async () => {

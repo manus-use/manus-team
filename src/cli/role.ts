@@ -11,7 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { isMap, parseDocument, parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
   AGENT_ENV_PREFIX,
@@ -482,6 +482,13 @@ export function roleCheck(only: string | undefined, io: MtIo): number {
         ? `native: role ${role.name} runs as a ${native.renderer.id} agent package`
         : `native: role ${role.name} does not: ${native.reason}`,
     );
+  }
+  // One line a role with skills: each by name, its own or imported by agent.skills, and from where.
+  for (const role of real.roles ?? []) {
+    if (role.skills.length === 0) continue;
+    const own = role.dir === undefined ? undefined : join(role.dir, 'skills');
+    const named = role.skills.map((s) => (own !== undefined && dirname(s.dir) === own ? `${s.name} (its own)` : `${s.name} (from ${s.dir})`));
+    io.out(`skills: role ${role.name} loads ${named.join(', ')}`);
   }
   // One line a role: how many of its runs may be open at once, and why (spec §6.3).
   for (const role of real.roles ?? []) io.out(limitLine(role, real.perRole));
