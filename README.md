@@ -80,9 +80,9 @@ Bot:   Waking the agent for 1 board update.
 - **Two agent drivers.** `acp` (the default) speaks the Agent Client Protocol, for agents such
   as `claude-agent-acp`, and is the only driver with approval cards. `structured-cli` runs one
   process per turn and reads JSON back; it is written for bytesec's `run --format json`, acts
-  with no approvals, and needs `agent.unsupervised: true`. bytesec over `structured-cli` is the
-  agent this build has been measured with in real use. The `acp` driver is tested end to end
-  against a fake agent only. See [Protocol strategy](#protocol-strategy).
+  with no approvals, and needs `agent.unsupervised: true`. Both have been run in real use:
+  Claude Code (`claude-agent-acp`) over `acp`, and bytesec over `structured-cli`. The test
+  suite drives each driver end to end with a fake agent. See [Protocol strategy](#protocol-strategy).
 - **A restart ends live agent runs.** The broker that would keep agents alive across a gateway
   restart is designed, not built. A board run cut short by a restart is retried quietly; a chat
   session's history survives and resumes on the next message.

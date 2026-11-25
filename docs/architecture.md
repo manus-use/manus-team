@@ -21,7 +21,7 @@ order was **inverted in practice**, and the doc reads as though it wasn't. What 
 | Structured-CLI driver (§6.3) | Worktrees, checkpoints (§9) |
 | Approvals schema + card surface | Snapshot *writer* (§3.6) — table only |
 | Policy/auth tiers (§13) | PTY driver (§6.4) |
-| ACP driver, written but unusable against the available agent | Cold/rehydrate tiering (§5) as a real tier |
+| ACP driver, run with Claude Code (`claude-agent-acp`) | Cold/rehydrate tiering (§5) as a real tier |
 | | Kanban task board (§17, `docs/specs/2026-11-02-kanban-design.md`) |
 
 Two reasons for the inversion, both worth keeping in view because they are still true:
