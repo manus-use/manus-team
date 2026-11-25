@@ -105,11 +105,14 @@ agent:
   #                   is the only one where approval cards and the operate tier
   #                   mean anything. Use this.
   #   structured-cli  One process per turn, prompt on the command line, output
-  #                   read back as JSON. For agents whose ACP server is broken.
-  #                   It cannot ask before acting and cannot resume a session --
-  #                   each turn re-sends the conversation as text -- so it costs
-  #                   both the approval flow and input tokens. Requires
-  #                   unsupervised: true below.
+  #                   read back as JSON (bytesec's run --format json). For agents
+  #                   whose ACP server is broken. It cannot ask before acting, so
+  #                   it costs the approval flow. Each turn resumes the agent's
+  #                   own session by its id, on bytesec 0.7.4 or later; below
+  #                   that, resume is unmeasured, and mt role check warns. When
+  #                   the agent refuses the id, the turn re-sends the conversation
+  #                   as text, which costs input tokens and loses the tool state
+  #                   behind it. Requires unsupervised: true below.
   driver: acp
 
   # The agent binary, on PATH or absolute.
