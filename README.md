@@ -1,11 +1,31 @@
 # manus-team
 
-manus-team runs a team of AI agents from Lark (Feishu). You chat with an agent in any group or
-direct message, and you give work to roles, such as an analyst, a reviewer or a report author,
-on a kanban board. Each role's agent works in its own workspace, a directory on the gateway's
-host, and reports back in the task's thread. A task can be any work: research, a document, an
-operation in Lark, a chore, or a change to code. Lark is the only chat channel today; the
-gateway is built so that more channels, such as Telegram and Discord, can be added later.
+manus-team runs a team of AI agents from Lark (Feishu) today, with Telegram, Discord and more
+planned. You chat with an agent in any group or direct message, and you give work to roles,
+such as an analyst, a reviewer or a report author, on a kanban board. Each role's agent works
+in its own workspace, a directory on the gateway's host, and reports back in the task's thread.
+A task can be any work: research, a document, an operation in Lark, a chore, or a change to
+code.
+
+## Channels
+
+| Channel | Status |
+|---|---|
+| Lark / Feishu | Built: chat, streaming reply cards, threads, buttons, approvals |
+| Telegram | Planned |
+| Discord | Planned |
+| Others (Slack, a web page, …) | Possible later |
+
+A channel is one adapter behind the gateway's channel port, [src/channel/types.ts](src/channel/types.ts).
+It receives messages and button presses, and sends text, cards, card updates and reactions.
+Chat, reply cards, approvals, the board's notices and person cards, wakes, progress cards and
+cron jobs all build on that port. An adapter also has to give threads or an equivalent, where a
+task's conversation lives; a stable person id, as Lark's union_id is; a message id, so a
+repeated delivery is dropped; sends that a repeated key does not post twice; and a group's
+members, without which person cards go by direct message. Some code above the port is Lark's
+today: a person is `lark:<union_id>`, the configured tiers are by open_id, failures are told
+apart by Lark's error codes, a few places write or check the channel name `lark`, and the
+gateway starts one Lark adapter only. A second channel needs that work first.
 
 ## What you can do
 
