@@ -186,9 +186,9 @@ The loop keeps, by run, a `Live`: the fold, the markdown, state and `try` last d
 
 **Files:** `README.md`, `docs/kanban-guide.md`.
 
-- [ ] **Step 1: Write.** The README's configuration table gains `kanban.progress.enabled` and `kanban.progress.min_seconds`, with the exposure: the tools' titles and the agent's words mid-run go to everyone in the thread, and only the secrets the gateway knows are masked; its board section a paragraph on the card and Stop. The guide's §8 ("Watching and steering") gains "Progress cards", and §9's "Stop, assign and archive" the Stop button.
-- [ ] **Step 2: Verify.** `tests/docs-*.test.ts` pass; typecheck and `npm run build` clean.
-- [ ] **Step 3: Run everything.** Unit: `Tests  3501 passed (3501)`, 82 more than the baseline's 3419; e2e `Tests  187 passed (187)`, four more than its 183.
+- [ ] **Step 1: Write.** The README's configuration table gains `kanban.progress.enabled` and `kanban.progress.min_seconds`, with the exposure: the tools' titles and the agent's words mid-run go to everyone in the thread, and only the secrets the gateway knows are masked; its board section a paragraph, "Progress cards.", on the card, Stop, and no card at a group's chat scope. The guide's §8 ("Watching and steering") gains "Progress cards", after "Notices", with an example card and the same exposure, and §9's "Stop, assign and archive" the Stop button.
+- [ ] **Step 2: Verify.** `tests/docs-examples.test.ts`, `tests/docs-wake.test.ts` and `tests/roles.test.ts`, which read the README and the guide: `Tests  70 passed (70)`; typecheck and `npm run build` clean.
+- [ ] **Step 3: Run everything.** Unit: `Tests  3501 passed (3501)`, 82 more than the baseline's 3419 (one run gave `1 failed | 3500 passed`, `tests/update-run.test.ts`'s flake, which passes alone); e2e `Tests  187 passed (187)`, four more than its 183.
 - [ ] **Step 4: Commit** "Document progress cards and their Stop button, and what they show the thread".
 
 ---
