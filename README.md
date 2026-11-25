@@ -131,6 +131,9 @@ Bot:   Waking the agent for 1 board update.
 - [The configuration guide](docs/configuration.md): the setup step by step, from the minimum
   that starts to each feature turned on, and the full reference of every setting.
 - [The cookbook](docs/examples.md): workflows and cron jobs ready to copy.
+- [The board's skill](skills/mt-kanban/SKILL.md): how an agent works the board well, in a run, a
+  chat or a woken turn; a role turns it on with `agent.skills: [mt-kanban]`
+  ([how](docs/kanban-guide.md#the-boards-skill)).
 - The specs in [docs/specs/](docs/specs/): the [Lark channel](docs/specs/2026-08-21-lark-channel-design.md),
   the [board](docs/specs/2026-11-02-kanban-design.md), [workflows](docs/specs/2026-11-16-workflows-design.md),
   [cron](docs/specs/2026-11-16-cron-design.md), [tier grants](docs/specs/2026-11-18-tier-grants-design.md),
@@ -172,7 +175,10 @@ the running `tsx watch`.
   ran it last;
 - prints the line that puts `$MT_HOME/bin` on `PATH`, and appends it, once, to `~/.zshrc` for
   zsh, or for bash to `~/.bash_profile` on macOS (whose terminals start login shells) and
-  `~/.bashrc` elsewhere, only with `--yes` or when you answer yes at a terminal.
+  `~/.bashrc` elsewhere, only with `--yes` or when you answer yes at a terminal;
+- copies the board's skill, `skills/mt-kanban/`, to `~/.agents/skills/mt-kanban/`, replacing
+  only a copy it made itself, as `mt update` does after its backup. A role uses it once its
+  config lists it in `agent.skills`.
 
 To run it by hand instead: `npm ci && npm run build && npm start`. `npm run dev` runs the
 source under `tsx watch`, which restarts at every change to it, a merge included.
@@ -1078,7 +1084,8 @@ src/driver/cli/         CLI fallback: one process per turn, argv in, NDJSON out
 src/policy/auth.ts      allowlist tiers and the silent-refusal rule
 src/config.ts           the file/environment split, validated at boot
 src/service/            the launchd plist and systemd unit mt service writes, and the log's rotation
-install.sh              build, make the home, put mt on PATH, optionally install the service
+install.sh              build, make the home, put mt on PATH, copy the board's skill, optionally install the service
+skills/mt-kanban/       the board's skill for agents, copied to ~/.agents/skills/ by install.sh and mt update
 schema/                 migrations; the event log is the system of record
 docs/architecture.md    full design document
 docs/specs/             the designs: the Lark channel, kanban, workflows, cron, tier grants, wake

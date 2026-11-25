@@ -318,6 +318,26 @@ agent:
 - `agent` is required, with the same keys as the gateway's `agent:` block, plus `native` (false
   sends `role.md` and the skills in the task prompt instead of a bytesec agent package) and
   `skills` (skills imported by name from the user's own skill directories).
+- `agent.skills` names skills found in the user's skill folders, the first that has one winning:
+  `$XDG_CONFIG_HOME/bytesec/skills` and `skill` (else `~/.config/bytesec/`), then `~/.trae/skills`,
+  `~/.coco/skills`, `~/.agents/skills` and `~/.claude/skills`. A name found in none stops the
+  gateway, naming the role; a symlinked skill directory or SKILL.md is not followed. The board's
+  own skill, `mt-kanban`, which `install.sh` and `mt update` copy to `~/.agents/skills/`, is
+  enabled per role this way:
+
+  ```yaml
+  # roles/worker/config.yaml
+  agent:
+    driver: structured-cli
+    command: bytesec
+    unsupervised: true
+    skills: [mt-kanban]
+  ```
+
+  The role's board runs and cron fires get it; a role that does not list it gets nothing new. The
+  gateway gives a chat session no skills, `roles/default/` included: a chat agent sees only what its
+  own command loads from those folders. The guide's
+  [The board's skill](kanban-guide.md#the-boards-skill) says what it covers.
 - `description` is shown by `/role list` to anyone at talk tier; with none, the first line of
   `role.md` is. Keep in neither anything a talk-tier person should not read.
 - `workspace` names a configured workspace the role always works in.

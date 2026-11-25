@@ -733,6 +733,53 @@ What to know:
 - A follow-up has the same limits as a task from chat, and can be given to a role or to a person
   the gateway knows, by `lark:<union_id>`.
 
+### The board's skill
+
+The checkout ships a skill for agents, `skills/mt-kanban/SKILL.md`, and `install.sh` and
+`mt update` copy it to `~/.agents/skills/mt-kanban/`. It tells an agent how to tell where it is,
+from its environment and its first message, and what to do there:
+
+- **in a board run**, the judgement the run's protocol leaves to it: one terminal report and then
+  stop, a summary that says what was done, where the output is and what is left, which block kind
+  fits, `create` against `apply-dag` against `start-workflow` for follow-ups, gates, reading the
+  task's comments before blocking for input, and never guessing past the contract;
+- **in a chat session**, turning a person's request into a task or a workflow only when they ask,
+  choosing the assignee and a reviewer, turning wake on, and handing the person the exact
+  `/kanban` message to send rather than making the work itself, since a chat shell either refuses
+  the operator's commands (cron on) or runs them as the operator (cron off), past the person's
+  tier;
+- **in a woken turn**, reading each task with `mt kanban task show` first, unblocking only with an
+  answer the comments, the thread or the repository give, and asking in the thread otherwise;
+- and what never to do: cron jobs from runs or woken turns, tasks on another board, secrets in
+  task text, or `mt auth`.
+
+A role opts in by naming it, in `roles/<name>/config.yaml`:
+
+```yaml
+agent:
+  driver: structured-cli
+  command: bytesec
+  unsupervised: true
+  skills: [mt-kanban]
+```
+
+Its board runs and cron fires then get the skill: in its bytesec agent package, or listed in the
+prompt when the role is not rendered as one. A role that does not list it gets nothing new from
+the gateway. `mt role check` names each role's skills, `mt-kanban (from /Users/you/.agents/skills/mt-kanban)`
+among them, and refuses a role that lists it when it is not installed.
+
+A chat session is different: the gateway gives it no role.md and no skills, the `default` role's
+included. Its agent loads whatever skills its own command loads from the user's folders, so a
+bytesec chat agent finds `~/.agents/skills/mt-kanban` by itself once it is installed, listed or
+not, and an agent that reads only `~/.claude/skills` does not. Listing it in
+`roles/default/config.yaml` gives it to the `default` role's board runs and cron fires.
+
+Only a copy the installer made is replaced: it is known by `.installed-by-manus-team`, the list of
+the files it wrote. A directory without that list, a symlink, or a file at that path is left as it
+is, with a warning, so a skill of your own by that name, or a link to a checkout you work on, is
+never overwritten. In its own copy the installer replaces the files it lists and keeps any other,
+naming it, as it is yours. `mt update --check` says which it would do.
+
 ## 8. Watching and steering
 
 ### The board
