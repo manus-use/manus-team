@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { stringify } from 'yaml';
 import { loadConfig } from '../src/config.js';
+import { progressLine } from '../src/index.js';
 
 /**
  * `kanban.progress` (progress cards spec §3): off by default, `min_seconds` 30,
@@ -50,5 +51,13 @@ describe('kanban.progress', () => {
 
   it('is a key of kanban', () => {
     expect(() => load({ progres: {} })).toThrow(/unknown setting kanban\.progres \(known: .*wake, progress\)/);
+  });
+});
+
+describe('the startup line', () => {
+  it('says the cards are on, with min_seconds; off with cards left open, how many; and nothing when off with none', () => {
+    expect(progressLine({ enabled: true, minSeconds: 30 }, 0)).toBe('kanban: progress cards on, for agent runs past 30 s');
+    expect(progressLine({ enabled: false, minSeconds: 30 }, 2)).toBe('kanban: progress cards off (kanban.progress.enabled is false); 2 card(s) left as they were');
+    expect(progressLine({ enabled: false, minSeconds: 30 }, 0)).toBeUndefined();
   });
 });

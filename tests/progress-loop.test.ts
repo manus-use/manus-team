@@ -560,7 +560,7 @@ describe('a restart', () => {
     const bootedAt = h.clock.now();
     h.registry.reconcileBoot();
     await h.dispatcher.boot();
-    const next = new ProgressCards({ db: h.t.db, service: h.service, channels: new Map([['lark', h.lark]]), appId: APP, minSeconds: 30, failureLimit: 2, clock: h.clock, bootedAt });
+    const next = new ProgressCards({ db: h.t.db, service: h.service, channels: new Map([['lark', h.lark]]), appId: APP, minSeconds: 30, failureLimit: 2, clock: h.clock, bootedAt: () => bootedAt });
     await next.round();
     return { h, drawn: h.lark.cardUpdates.at(-1)?.view.markdown };
   }

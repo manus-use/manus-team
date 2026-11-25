@@ -62,7 +62,7 @@ Each tied to the spec.
 | `src/kanban/progress.ts` | new: `foldProgress`, `ProgressCards` |
 | `src/kanban/chat.ts` | `act: 'stop'` |
 | `src/index.ts` | built, wired, started, stopped; the startup line |
-| `tests/fakes/cli-agent.mjs` | a `progress` mode |
+| `tests/fakes/cli-agent.mjs` | a `staged` mode |
 | `README.md`, `docs/kanban-guide.md` | the setting, the card, Stop, the exposure |
 | `tests/progress-schema.test.ts` | new: Task 1 |
 | `tests/progress-reads.test.ts` | new: Task 2 |
@@ -174,12 +174,12 @@ The loop keeps, by run, a `Live`: the fold, the markdown, state and `try` last d
 
 ## Task 7: The wiring, end to end
 
-**Files:** `src/index.ts`, `tests/fakes/cli-agent.mjs`; test `tests/progress-gateway.e2e.ts` (new).
+**Files:** `src/index.ts`, `src/kanban/progress.ts`, `tests/fakes/cli-agent.mjs`; tests `tests/progress-gateway.e2e.ts` (new), `tests/progress-config.test.ts`, `tests/progress-loop.test.ts`.
 
-- [ ] **Step 1: Write the tests**, through `createGateway` with the fake Lark channel and the fake CLI agent in a new `progress` mode (a tool running, then, once `release-1` is beside the log, the tool done and a line of text, then, once `release-2` is there, `mt kanban complete`): a run in a task's thread gets one card there with `min_seconds: 0`; it is updated as the tool completes; when the run completes the card is drawn final, `✓ completed`, and the notice comes after the card; a Stop pressed on the card stops the run, the card drawn final `⏸ stopped`; a task in a group at chat scope gets no card and its notice; off, nothing is sent; the startup lines.
-- [ ] **Step 2: Verify they fail**: no card is sent.
-- [ ] **Step 3: Implement.** In `createGateway`, inside `if (config.kanban.enabled)`, after `KanbanChat`, when `config.kanban.progress.enabled`, a `ProgressCards` with `held: (taskId) => chat.held(taskId)`; `KanbanChat` given the three closures through a `let progress`; the startup line of §3; `Gateway.progress`; `bootedAt` the clock at the top of `start()`; `progress?.start()` after `cards?.start()`; `progress?.stop()` after `cards?.stop()`, and `progress?.idle(SHUTDOWN_DRAIN_MS)` in the drain, with its line.
-- [ ] **Step 4: Run everything.** Unit: `Tests  3500 passed (3500)`; e2e: `Tests  187 passed (187)`, four new.
+- [ ] **Step 1: Write the tests**, through `createGateway` with the fake Lark channel and the fake CLI agent in a new `staged` mode (a tool running, then, once `release-1` is beside the log, the tool done and a line of text, then, once `release-2` is there, `mt kanban complete`, each event written at once with `writeSync`): a run in a task's thread gets one card there with `min_seconds: 0`; it is updated as the tool completes; when the run completes the card is drawn final, `✓ completed`, and the notice comes after the card; a Stop pressed on the card stops the run, the card drawn final `⏸ stopped`; a task at a group's chat scope (Lark answering the "Created" reply with no thread) gets no card from a round while its run is open, and its notice; off, nothing is sent; the startup line on. `tests/progress-config.test.ts` gains `progressLine`'s three answers. The mode is not called `progress`: the agent's environment values are known secrets, and the word would be masked in every log line, the startup line's included.
+- [ ] **Step 2: Verify they fail**: with `src/index.ts` as it was, the first e2e test gives up waiting for the card.
+- [ ] **Step 3: Implement.** In `createGateway`, inside `if (config.kanban.enabled)`, after the card poster, when `config.kanban.progress.enabled`, a `ProgressCards` with `held: (taskId) => chat.held(taskId)` and `bootedAt: () => bootedAt`; `KanbanChat` given the three closures through a `let progress`, read late as `dispatcher` is; `progressLine` and the startup line of §3; `Gateway.progress`; `bootedAt` the clock at the top of `start()`; `progress?.start()` after `cards?.start()`; `progress?.stop()` after `cards?.stop()`, and `progress?.idle(SHUTDOWN_DRAIN_MS)` in the drain, with its line. `ProgressCardsDeps.bootedAt` becomes a function, as the loop is built before `start()` knows the time.
+- [ ] **Step 4: Run everything.** Unit: `Tests  3501 passed (3501)`, one new; e2e: `Tests  187 passed (187)`, four new.
 - [ ] **Step 5: Commit** "Wire the progress cards into the gateway, started after the boot and drained before the channel closes".
 
 ## Task 8: The documents
@@ -188,7 +188,7 @@ The loop keeps, by run, a `Live`: the fold, the markdown, state and `try` last d
 
 - [ ] **Step 1: Write.** The README's configuration table gains `kanban.progress.enabled` and `kanban.progress.min_seconds`, with the exposure: the tools' titles and the agent's words mid-run go to everyone in the thread, and only the secrets the gateway knows are masked; its board section a paragraph on the card and Stop. The guide's §8 ("Watching and steering") gains "Progress cards", and §9's "Stop, assign and archive" the Stop button.
 - [ ] **Step 2: Verify.** `tests/docs-*.test.ts` pass; typecheck and `npm run build` clean.
-- [ ] **Step 3: Run everything.** Unit: `Tests  3500 passed (3500)`, 81 more than the baseline's 3419; e2e `Tests  187 passed (187)`.
+- [ ] **Step 3: Run everything.** Unit: `Tests  3501 passed (3501)`, 82 more than the baseline's 3419; e2e `Tests  187 passed (187)`, four more than its 183.
 - [ ] **Step 4: Commit** "Document progress cards and their Stop button, and what they show the thread".
 
 ---

@@ -154,8 +154,12 @@ export interface ProgressCardsDeps {
   minSeconds: number;
   /** `kanban.failure_limit`, for "run N of M" of a task with no limit of its own. */
   failureLimit: number;
-  /** When the gateway's `start()` began: a run started before it and closed after was closed by the boot (spec §5.3). */
-  bootedAt?: number;
+  /**
+   * When the gateway's `start()` began, asked at each final draw: a run started
+   * before it and closed after was closed by the boot (spec §5.3). Undefined
+   * before the start, or with no boot to tell.
+   */
+  bootedAt?: () => number | undefined;
   /** What a card calls a person: the people directory's chat name. */
   nameOf?: NameOf;
   /** Whether a task is held while its "Created" reply is under way: `KanbanChat`'s. */
@@ -518,7 +522,7 @@ export class ProgressCards {
   /** A run's total time (spec §5.3): to its close, or, closed by the boot, to its agent's last output. */
   #ranMs(run: RunRow): number | null {
     if (run.endedAt === null) return null;
-    const boot = this.#deps.bootedAt;
+    const boot = this.#deps.bootedAt?.();
     const byBoot = boot !== undefined && run.startedAt < boot && boot <= run.endedAt;
     if (!byBoot) return run.endedAt - run.startedAt;
     if (run.sessionId === null) return null;
