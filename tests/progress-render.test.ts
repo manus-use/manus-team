@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { toolGroups, renderCard } from '../src/channel/render.js';
 import { boardCardNonce, boardCardUuid, progressCardUuid } from '../src/core/ids.js';
-import { outcomeWord, progressState, renderProgressCard, type ProgressFacts } from '../src/kanban/chat-render.js';
+import { PROGRESS_TITLE_CHARS, outcomeWord, progressState, progressTail, renderProgressCard, type ProgressFacts } from '../src/kanban/chat-render.js';
+import { TEXT_KEEP, foldProgress, newProgress } from '../src/kanban/progress.js';
 import type { KanbanEvent, RunOutcome, RunRow, TaskRow } from '../src/kanban/types.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import type { Event } from '../src/types.js';
@@ -230,6 +231,40 @@ describe('masking and escaping', () => {
     });
     expect(out).not.toContain('sk-title-secret-0002');
     expect(out.split(MASK).length - 1).toBe(2);
+  });
+
+  it('masks a tool title before it is cut, so no run of a secret crossing character 80 shows', () => {
+    const secret = 'sk-cross-SECRET-abcdefghijklmnop-0004';
+    addSecrets([secret]);
+    for (const at of [60, 70, 75, 79]) {
+      const out = md({ tools: [{ title: `${'x'.repeat(at)}${secret} tail`, status: 'completed' }] });
+      for (let i = 0; i + 8 <= secret.length; i += 1) expect(out).not.toContain(secret.slice(i, i + 8));
+      if (at < 76) expect(out).toContain(MASK);
+    }
+    expect(PROGRESS_TITLE_CHARS).toBe(80);
+  });
+
+  it("masks the agent's text before the fold cuts it, so a secret the cut splits shows no run of it", () => {
+    // 96 does not divide the keep: an unmasked cut would leave part of a secret at the front.
+    const secret = `sk-fold-${'Q'.repeat(84)}0005`;
+    addSecrets([secret]);
+    const p = newProgress();
+    const events: Event[] = Array.from({ length: 334 }, (_, i) => ({
+      sessionId: 's',
+      seq: i + 1,
+      ts: NOW,
+      generation: 0,
+      brokerSeq: null,
+      turnId: 't',
+      type: 'agent_message_chunk',
+      actor: 'agent',
+      payload: { text: secret },
+    }));
+    foldProgress(p, events);
+    expect(secret.length * 334).toBeGreaterThan(TEXT_KEEP * 4);
+    const out = progressTail(p.text);
+    for (let i = 0; i + 8 <= secret.length; i += 1) expect(out).not.toContain(secret.slice(i, i + 8));
+    expect(out).toContain(MASK);
   });
 
   it('masks a secret registered after the event was stored, at render', () => {

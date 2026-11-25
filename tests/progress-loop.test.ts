@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChannelError } from '../src/channel/types.js';
 import { progressCardUuid } from '../src/core/ids.js';
 import { appendEvents } from '../src/db/events.js';
-import { getRun, progressCard, runsOf } from '../src/db/kanban-read.js';
+import { chatKindOf, getRun, progressCard, runsOf } from '../src/db/kanban-read.js';
 import { createSession, setExecution } from '../src/db/sessions.js';
 import { CARD_BACKOFF_MAX_MS } from '../src/kanban/cards.js';
 import { FOLD_EVENTS, ProgressCards, type ProgressCardsDeps } from '../src/kanban/progress.js';
@@ -21,6 +21,12 @@ import { ALICE } from './helpers/kanban.js';
  * with the fake channel, driven round by round: which runs get a card and
  * where, the fold, the pace and the holds, the final draw, and the errors.
  */
+
+// Called through, and counted: how often the loop looks a chat's kind up.
+vi.mock('../src/db/kanban-read.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/db/kanban-read.js')>();
+  return { ...actual, chatKindOf: vi.fn(actual.chatKindOf) };
+});
 
 const APP = 'cli_app';
 const PLACES = Array.from({ length: 14 }, (_, i) => `w${i + 1}`);
@@ -175,6 +181,26 @@ describe('which runs get a card, and where', () => {
     expect(kinds?.chat_type).toBeNull();
   });
 
+  it('looks a found chat kind up once a boot, and a miss at most once a round', async () => {
+    const lookups = (conversationId: string): number => vi.mocked(chatKindOf).mock.calls.filter((c) => c[3] === conversationId).length;
+    vi.mocked(chatKindOf).mockClear();
+    expect(service.create({ title: 'Known', assignee: ALICE, createdBy: ALICE, createdVia: chat({ conversationId: 'oc_known', chatType: 'p2p' }) }).ok).toBe(true);
+    const found = started(create(chat({ conversationId: 'oc_known' })).taskId);
+    started(create(chat({ conversationId: 'oc_nobody' })).taskId);
+    started(create(chat({ conversationId: 'oc_nobody' })).taskId);
+    await after(30_000);
+    expect(lark.boardCards.map((c) => c.target.chatId)).toEqual(['oc_known']);
+    let rounds = 1;
+    for (let i = 0; i < 4; i += 1) {
+      say(found, [tool(`c${i}`, 'Read')]);
+      await after(5_000);
+      rounds += 1;
+    }
+    expect(lark.cardUpdates.length).toBeGreaterThan(0);
+    expect(lookups('oc_known')).toBe(1);
+    expect(lookups('oc_nobody')).toBe(rounds);
+  });
+
   it("gives a group's chat kind no card", async () => {
     expect(service.create({ title: 'Known', assignee: ALICE, createdBy: ALICE, createdVia: chat({ conversationId: 'oc_big', chatType: 'group' }) }).ok).toBe(true);
     started(create(chat({ conversationId: 'oc_big' })).taskId);
@@ -235,6 +261,69 @@ describe('the fold', () => {
   });
 });
 
+describe("a press's reads", () => {
+  it('reads at most four folds a press, and the loop reads the rest and draws it', async () => {
+    const run = started(create().taskId);
+    await after(30_000);
+    say(run, Array.from({ length: 4 * FOLD_EVENTS + 1_000 }, (_, i) => words(i === 4 * FOLD_EVENTS + 999 ? ' the end' : '.')));
+    await cards.redrawNow(run.runId);
+    expect(lark.cardUpdates).toHaveLength(1);
+    expect(lark.cardUpdates[0]?.view.markdown).not.toContain('the end');
+    await after(5_000);
+    expect(lark.cardUpdates).toHaveLength(2);
+    expect(lark.cardUpdates[1]?.view.markdown).toContain('the end');
+  });
+
+  it("draws a press's final from four folds, and leaves the row open for the loop to finish and mark final", async () => {
+    const run = started(create().taskId);
+    await after(30_000);
+    say(run, [...Array.from({ length: 4 * FOLD_EVENTS }, () => words('.')), tool('c1', 'Read'), done('c1')]);
+    closeAs(run, 'failed');
+    await cards.redrawNow(run.runId);
+    expect(lark.cardUpdates).toHaveLength(1);
+    expect(lark.cardUpdates[0]?.view.markdown).toContain('✗ failed');
+    expect(lark.cardUpdates[0]?.view.markdown).not.toContain('Read');
+    expect(progressCard(t.db, run.runId)?.state).toBe('open');
+    await after(5_000);
+    expect(lark.cardUpdates.at(-1)?.view.markdown).toContain('✅ Read');
+    expect(progressCard(t.db, run.runId)?.state).toBe('final');
+  });
+});
+
+describe('old cards', () => {
+  it("forgets an old card once a press has drawn it, landed or not, and bumps no try for a run with no card", async () => {
+    const run = started(create().taskId);
+    await after(30_000);
+    const messageId = progressCard(t.db, run.runId)?.messageId ?? '';
+    closeAs(run, 'failed');
+    await after(5_000);
+    expect(progressCard(t.db, run.runId)?.state).toBe('final');
+    await cards.refusedTier(messageId, run.runId);
+    expect(lark.cardUpdates).toHaveLength(2);
+    expect(cards.tryOf(run.runId)).toBe(0);
+    clock.advance(5_000);
+    lark.failNext('updateCard', new ChannelError(500, 'server error', true));
+    await cards.refusedTier(messageId, run.runId);
+    expect(lark.calls.filter((c) => c === 'updateCard')).toHaveLength(3);
+    expect(cards.tryOf(run.runId)).toBe(0);
+    await cards.refusedTier('om_none', 'r_none');
+    expect(cards.tryOf('r_none')).toBe(0);
+  });
+
+  it("keeps a let-go card's try while its run is open, so a second refusal draws a higher one", async () => {
+    const run = started(create().taskId);
+    await after(30_000);
+    const messageId = progressCard(t.db, run.runId)?.messageId ?? '';
+    service.progressCardLetGo(run.runId);
+    await cards.refusedTier(messageId, run.runId);
+    expect(lark.cardUpdates.at(-1)?.view.buttons[0]?.value['try']).toBe('1');
+    clock.advance(5_000);
+    await cards.refusedTier(messageId, run.runId);
+    expect(lark.cardUpdates.at(-1)?.view.buttons[0]?.value['try']).toBe('2');
+    expect(progressCard(t.db, run.runId)?.state).toBe('let_go');
+  });
+});
+
 describe('the pace', () => {
   it('redraws as tools run, at most once every 5 s, and not when nothing changed', async () => {
     const run = started(create().taskId);
@@ -282,6 +371,30 @@ describe('the pace', () => {
     expect(lark.boardCards.map((c) => c.uuid)).toEqual(runs.slice(0, 10).map((r) => progressCardUuid(APP, r.runId)));
     await after(3_000);
     expect(lark.boardCards).toHaveLength(12);
+  });
+});
+
+describe("the round's ten", () => {
+  it('counts only the draws made, not cards due that had not caught up', async () => {
+    const runs: RunRow[] = [];
+    for (let i = 0; i < 12; i += 1) runs.push(started(create().taskId));
+    for (const r of runs.slice(0, 2)) say(r, Array.from({ length: FOLD_EVENTS + 1 }, () => words('.')));
+    expect(await after(30_000)).toBe(10);
+    expect(lark.boardCards.map((c) => c.uuid)).toEqual(runs.slice(2).map((r) => progressCardUuid(APP, r.runId)));
+  });
+
+  it('counts no draw for a card due whose view had not changed', async () => {
+    const runs: RunRow[] = [];
+    for (let i = 0; i < 11; i += 1) runs.push(started(create().taskId));
+    for (const r of runs) say(r, [words('hello')]);
+    await after(30_000);
+    await after(3_000);
+    expect(lark.boardCards).toHaveLength(11);
+    // A usage event makes every card due by the cheap check; the first one's view is all that changed.
+    for (const r of runs) say(r, [{ type: 'usage', actor: 'agent', payload: {} }]);
+    say(runs[10]!, [tool('c1', 'Read')]);
+    expect(await after(5_000)).toBe(1);
+    expect(lark.cardUpdates.map((u) => u.messageId)).toEqual([progressCard(t.db, runs[10]!.runId)?.messageId]);
   });
 });
 
@@ -382,7 +495,7 @@ describe('errors', () => {
     lark.failNext('sendCard', new ChannelError(230002, 'bot not in chat', false));
     await after(30_000);
     expect(progressCard(t.db, run.runId)?.state).toBe('let_go');
-    expect(notes.some((n) => n.includes('cannot reach its chat'))).toBe(true);
+    expect(notes.some((n) => n.includes('cannot reach oc_team ('))).toBe(true);
   });
 
   it('lets a row go quietly whose run ended, or whose subscription went, before its send landed', async () => {
@@ -460,6 +573,26 @@ describe('errors', () => {
     expect(progressCard(t.db, run.runId)?.failures).toBe(0);
   });
 
+  it("skips a tier refusal's redraw while the card is held, and the loop draws the bumped try once the hold ends", async () => {
+    const run = started(create().taskId);
+    await after(30_000);
+    const messageId = progressCard(t.db, run.runId)?.messageId ?? '';
+    say(run, [tool('c1', 'Read')]);
+    lark.failNext('updateCard', new ChannelError(230020, 'chat rate limit', true, 20_000));
+    await after(5_000);
+    const tries = (): number => lark.calls.filter((c) => c === 'updateCard').length;
+    expect(tries()).toBe(1);
+    clock.advance(1_000);
+    await cards.refusedTier(messageId, run.runId);
+    expect(tries()).toBe(1);
+    expect(cards.tryOf(run.runId)).toBe(1);
+    await after(14_000);
+    expect(tries()).toBe(1);
+    await after(5_000);
+    expect(tries()).toBe(2);
+    expect(lark.cardUpdates.at(-1)?.view.buttons[0]?.value['try']).toBe('1');
+  });
+
   it('lets a card go when Lark no longer holds it, or the bot left the chat', async () => {
     const a = started(create().taskId);
     const b = started(create().taskId);
@@ -500,6 +633,28 @@ describe('the stop', () => {
     expect(await round).toBe(1);
     expect(await cards.idle(1_000)).toBe(true);
     expect(lark.calls.filter((c) => c === 'sendCard')).toHaveLength(1);
+  });
+});
+
+describe('a run closed by the boot, with nothing to time it by', () => {
+  it('draws no time for a run with no session, or with no event before the boot', async () => {
+    const bare = started(create().taskId, false);
+    const quiet = started(create().taskId);
+    const bootAt = clock.now() + 60_000;
+    cards = loop({ bootedAt: () => bootAt });
+    await after(30_000);
+    expect(lark.boardCards).toHaveLength(2);
+    clock.advance(60_000);
+    say(quiet, [{ type: 'turn_ended', actor: 'gateway', payload: {} }]);
+    for (const r of [bare, quiet]) {
+      expect(service.endRun(r.runId, { outcome: 'interrupted', hadSideEffects: false }).ok).toBe(true);
+      expect(service.closeRun(r.runId).ok).toBe(true);
+    }
+    await after(5_000);
+    const finals = lark.cardUpdates.map((u) => u.view.markdown.split('\n')[2]);
+    expect(finals).toEqual(['⏸ interrupted by a restart', '⏸ interrupted by a restart']);
+    expect(progressCard(t.db, bare.runId)?.state).toBe('final');
+    expect(progressCard(t.db, quiet.runId)?.state).toBe('final');
   });
 });
 

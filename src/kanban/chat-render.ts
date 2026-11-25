@@ -9,7 +9,7 @@ import { stripControl } from '../text.js';
 import { LIST_FILTERS, USAGE } from './chat-parse.js';
 import { describeReported } from './commit.js';
 import type { DisplayStatus } from './status.js';
-import { DEFAULT_BOARD, type Assignee, type DeferredState, type DeferredWhy, type FailedGate, type GateRow, type KanbanEvent, type RunOutcome, type RunRow, type TaskRow, type Waiting } from './types.js';
+import { DEFAULT_BOARD, REPORTED_OUTCOMES, type Assignee, type DeferredState, type DeferredWhy, type FailedGate, type GateRow, type KanbanEvent, type RunOutcome, type RunRow, type TaskRow, type Waiting } from './types.js';
 
 /**
  * What `/kanban` says in chat (spec §9.3), and the notices a subscription hears
@@ -1244,7 +1244,7 @@ const PROGRESS_TAIL_SEEK = 200;
  */
 export type ProgressState = 'undecided' | 'reported' | 'stopping' | 'ending' | 'ended';
 
-const REPORTED: ReadonlySet<string> = new Set(['completed', 'review_requested', 'changes_requested', 'blocked']);
+const REPORTED: ReadonlySet<string> = new Set(REPORTED_OUTCOMES);
 
 export function progressState(run: RunRow): ProgressState {
   if (run.endedAt !== null) return 'ended';
@@ -1336,12 +1336,15 @@ function headChars(text: string, max: number): string {
 }
 
 /**
- * The tool line (spec §6.2): each title cut to 80 characters before the calls
- * are grouped, then cut from the front to 1,500 characters, whole groups
- * dropped and counted by their calls, so the latest tools stay.
+ * The tool line (spec §6.2): each title masked whole, a trailing prefix of a
+ * known secret withheld, then cut to 80 characters before the calls are
+ * grouped, so a cut cannot leave part of a secret; then the line cut from the
+ * front to 1,500 characters, whole groups dropped and counted by their calls,
+ * so the latest tools stay.
  */
 function progressTools(tools: readonly ToolLine[]): string {
-  const groups = toolGroupsCounted(tools.map((t) => ({ title: headChars(t.title, PROGRESS_TITLE_CHARS), status: t.status })));
+  const title = (t: ToolLine): string => headChars(withholdSecretPrefix(redactKnownSecrets(stripControl(t.title))), PROGRESS_TITLE_CHARS);
+  const groups = toolGroupsCounted(tools.map((t) => ({ title: title(t), status: t.status })));
   let from = 0;
   let dropped = 0;
   const line = (): string => `${from > 0 ? `… ${dropped} earlier · ` : ''}${groups.slice(from).map((g) => (g.count === 1 ? g.label : `${g.label} ×${g.count}`)).join(' · ')}`;

@@ -16,6 +16,7 @@ import {
 } from '../db/kanban-read.js';
 import type { Db } from '../db/open.js';
 import { redactKnownSecrets } from '../secrets.js';
+import { stripControl } from '../text.js';
 import { systemClock, type Clock } from '../time.js';
 import type { Event, EventType } from '../types.js';
 import { CARD_BACKOFF_MAX_MS, CARD_SEND_MS } from './cards.js';
@@ -62,7 +63,13 @@ export const ROUND_DRAWS = 10;
 export const REFUSALS_LIMIT = 10;
 /** Session events folded for one card in one round. */
 export const FOLD_EVENTS = 5_000;
-/** The agent's latest text kept, in code points: far past the tail, so a secret the cut would split is whole when masked. */
+/** Session events a press's redraw folds, at most: the loop folds the rest. */
+export const PRESS_FOLD_EVENTS = 4 * FOLD_EVENTS;
+/**
+ * The agent's latest text kept, in code points: far past the tail. The text is
+ * masked before it is cut, so a secret known then is whole when masked, and
+ * the kept text does not shrink at render to bring the cut into the tail.
+ */
 export const TEXT_KEEP = 8_000;
 
 const TOOL_TYPES: readonly EventType[] = ['tool_call', 'tool_call_update'];
@@ -109,8 +116,8 @@ export function foldProgress(p: RunProgress, events: readonly Event[]): void {
         if (p.toolSinceText && p.text.trim() !== '' && !/\n\s*$/.test(p.text)) p.text += '\n\n';
         p.toolSinceText = false;
         p.text += text;
-        // Cut now and then, not at every chunk: two keeps' worth before it is cut to one.
-        if (p.text.length > TEXT_KEEP * 4) p.text = Array.from(p.text).slice(-TEXT_KEEP).join('');
+        // Cut now and then, not at every chunk: four keeps' worth before it is cut to one, masked first.
+        if (p.text.length > TEXT_KEEP * 4) p.text = Array.from(redactKnownSecrets(stripControl(p.text))).slice(-TEXT_KEEP).join('');
         break;
       }
       case 'tool_call':
@@ -312,9 +319,12 @@ export class ProgressCards {
    * whose redraw was paced away makes the card due at the pace's end.
    */
   refusedTier(messageId: string, runId: string): Promise<void> {
-    this.#tries.set(runId, (this.#tries.get(runId) ?? 0) + 1);
-    if (this.#stopped || !this.#mayPress(messageId)) return Promise.resolve();
     if (progressCard(this.#deps.db, runId) === undefined) return Promise.resolve();
+    this.#tries.set(runId, (this.#tries.get(runId) ?? 0) + 1);
+    // A card held after a failure is not drawn: the loop draws the bumped try once the hold ends.
+    const hold = this.#live.get(runId)?.hold;
+    if (hold !== undefined && hold.until > this.#clock.now()) return Promise.resolve();
+    if (this.#stopped || !this.#mayPress(messageId)) return Promise.resolve();
     return this.#chain(messageId, () => this.#pressDraw(runId, false, messageId));
   }
 
@@ -389,11 +399,15 @@ export class ProgressCards {
     }
     // The longest waiting first, so a busy card cannot keep a quiet one waiting.
     due.sort((a, b) => a.since - b.since);
+    // Only a draw tried counts to the ten: not a card that had not caught up, nor one whose view had not changed.
     let drawn = 0;
-    for (const d of due.slice(0, ROUND_DRAWS)) {
-      if (this.#stopped) break;
-      await this.#chain(d.key, () => this.#draw(d.runId, d.kind));
-      drawn += 1;
+    for (const d of due) {
+      if (this.#stopped || drawn >= ROUND_DRAWS) break;
+      let tried = false;
+      await this.#chain(d.key, async () => {
+        tried = await this.#draw(d.runId, d.kind);
+      });
+      if (tried) drawn += 1;
     }
     return drawn;
   }
@@ -512,11 +526,12 @@ export class ProgressCards {
     return upTo >= last;
   }
 
-  /** A press's redraw reads until caught up, however long the session. */
-  #readAll(live: Live, run: RunRow, toolsOnly: boolean): void {
-    while (!this.#read(live, run, toolsOnly)) {
-      // Each read moves throughSeq; the loop ends at the session's last seq.
+  /** A press's redraw reads at most `PRESS_FOLD_EVENTS`: true once caught up; the loop folds the rest. */
+  #readPress(live: Live, run: RunRow, toolsOnly: boolean): boolean {
+    for (let read = 0; read < PRESS_FOLD_EVENTS; read += FOLD_EVENTS) {
+      if (this.#read(live, run, toolsOnly)) return true;
     }
+    return run.sessionId === null || live.progress.throughSeq >= lastSeq(this.#deps.db, run.sessionId);
   }
 
   /** A run's total time (spec §5.3): to its close, or, closed by the boot, to its agent's last output. */
@@ -560,49 +575,61 @@ export class ProgressCards {
     return { ...view, markdown: redactKnownSecrets(view.markdown) };
   }
 
-  /** A draw the round decided on, made with the board and the session as they are now. */
-  async #draw(runId: string, kind: Kind): Promise<void> {
-    if (this.#stopped) return;
+  /** A draw the round decided on, made with the board and the session as they are now: true once a send or an update was tried. */
+  async #draw(runId: string, kind: Kind): Promise<boolean> {
+    if (this.#stopped) return false;
     const row = progressCard(this.#deps.db, runId);
-    if (row === undefined || row.state !== 'open') return;
+    if (row === undefined || row.state !== 'open') return false;
     const run = getRun(this.#deps.db, runId);
-    if (run === undefined) return;
+    if (run === undefined) return false;
     const live = this.#liveOf(runId);
-    if (kind === 'send') await this.#send(row, run, live);
-    else if (kind === 'final' || run.endedAt !== null) await this.#final(row, run, live, { force: false });
-    else await this.#update(row, run, live, false);
+    if (kind === 'send') return this.#send(row, run, live);
+    if (kind === 'final' || run.endedAt !== null) return this.#final(row, run, live, { force: false });
+    return this.#update(row, run, live, false);
   }
 
-  /** A press's redraw: final for an ended run or a row not open, else an update now. */
+  /**
+   * A press's redraw: final for an ended run or a row not open, else an update
+   * now. A row not open, which the loop never reads again, is forgotten once
+   * drawn, landed or not: its fold, and its try once its run has ended (an open
+   * run's card still has its Stop button, whose next refusal must draw a higher try).
+   */
   async #pressDraw(runId: string, pressedEnded: boolean, pressedOn?: string): Promise<void> {
     const row = progressCard(this.#deps.db, runId);
     if (row === undefined) return;
     const run = getRun(this.#deps.db, runId);
     if (run === undefined) return;
-    const live = this.#liveOf(runId);
-    const messageId = pressedOn ?? row.messageId ?? live.messageId;
-    if (messageId === undefined || messageId === null) return;
-    if (pressedEnded || run.endedAt !== null || row.state !== 'open') {
-      await this.#final(row, run, live, { force: true, messageId, pressedEnded });
-      return;
+    try {
+      const live = this.#liveOf(runId);
+      const messageId = pressedOn ?? row.messageId ?? live.messageId;
+      if (messageId === undefined || messageId === null) return;
+      if (pressedEnded || run.endedAt !== null || row.state !== 'open') {
+        await this.#final(row, run, live, { force: true, messageId, pressedEnded });
+        return;
+      }
+      await this.#update(row, run, live, true, messageId);
+    } finally {
+      if (row.state !== 'open') {
+        if (run.endedAt !== null) this.#forget(runId);
+        else this.#live.delete(runId);
+      }
     }
-    await this.#update(row, run, live, true, messageId);
   }
 
-  async #send(row: ProgressCardRow, run: RunRow, live: Live): Promise<void> {
+  async #send(row: ProgressCardRow, run: RunRow, live: Live): Promise<boolean> {
     if (run.endedAt !== null) {
       this.#letGo(row.runId);
-      return;
+      return false;
     }
     const target = this.#target(row);
     const channel = this.#deps.channels.get(row.channel);
     if (target === undefined || channel === undefined) {
       this.#letGo(row.runId);
-      return;
+      return false;
     }
-    if (!this.#read(live, run, false)) return;
+    if (!this.#read(live, run, false)) return false;
     const view = this.#view(row, run, live);
-    if (view === undefined) return;
+    if (view === undefined) return false;
     let messageId: string;
     try {
       const sent = await this.#bounded(
@@ -611,8 +638,8 @@ export class ProgressCards {
       );
       messageId = sent.messageId;
     } catch (err) {
-      this.#failed(row, live, err, 'send');
-      return;
+      this.#failed(row, live, err, 'send', target.chatId);
+      return true;
     }
     this.#landed(live, view, run);
     let why: string | undefined;
@@ -626,24 +653,25 @@ export class ProgressCards {
       live.messageId = messageId;
       this.#note(`kanban: the progress card of run ${row.runId} was sent as ${messageId}, and not recorded (${why})`);
     }
+    return true;
   }
 
-  async #update(row: ProgressCardRow, run: RunRow, live: Live, force: boolean, pressedOn?: string): Promise<void> {
+  async #update(row: ProgressCardRow, run: RunRow, live: Live, force: boolean, pressedOn?: string): Promise<boolean> {
     const messageId = pressedOn ?? row.messageId ?? live.messageId;
     const channel = this.#deps.channels.get(row.channel);
-    if (messageId === undefined || messageId === null || channel === undefined) return;
-    if (force) this.#readAll(live, run, false);
-    else if (!this.#read(live, run, false)) return;
+    if (messageId === undefined || messageId === null || channel === undefined) return false;
+    if (force) this.#readPress(live, run, false);
+    else if (!this.#read(live, run, false)) return false;
     const view = this.#view(row, run, live);
-    if (view === undefined) return;
+    if (view === undefined) return false;
     const state = progressState(run);
-    if (!force && view.markdown === live.markdown && state === live.state && this.tryOf(row.runId) === live.tried) return;
+    if (!force && view.markdown === live.markdown && state === live.state && this.tryOf(row.runId) === live.tried) return false;
     live.lastTriedAt = this.#clock.now();
     try {
       await this.#bounded(Promise.resolve().then(() => channel.updateCard(messageId, view)), this.#deps.redrawTimeoutMs ?? REDRAW_MS);
     } catch (err) {
       this.#failed(row, live, err, 'update');
-      return;
+      return true;
     }
     this.#landed(live, view, run);
     try {
@@ -652,30 +680,33 @@ export class ProgressCards {
     } catch (err) {
       this.#note(`kanban: the progress card of run ${row.runId} was drawn, and not recorded (${message(err)})`);
     }
+    return true;
   }
 
   /**
    * The final draw (spec §6.6): once every tool event is folded, read by type;
-   * an `open` row marked `final` when it lands, any other left as it is.
+   * an `open` row marked `final` when it lands, any other left as it is. A
+   * press's draws what its capped read folded; a row it left behind is not
+   * marked, and the loop folds the rest and draws it final.
    */
-  async #final(row: ProgressCardRow, run: RunRow, live: Live, opts: { force: boolean; messageId?: string; pressedEnded?: boolean }): Promise<void> {
+  async #final(row: ProgressCardRow, run: RunRow, live: Live, opts: { force: boolean; messageId?: string; pressedEnded?: boolean }): Promise<boolean> {
     const messageId = opts.messageId ?? row.messageId ?? live.messageId;
     const channel = this.#deps.channels.get(row.channel);
-    if (messageId === undefined || messageId === null || channel === undefined) return;
-    if (opts.force) this.#readAll(live, run, true);
-    else if (!this.#read(live, run, true)) return;
+    if (messageId === undefined || messageId === null || channel === undefined) return false;
+    const caughtUp = opts.force ? this.#readPress(live, run, true) : this.#read(live, run, true);
+    if (!caughtUp && !opts.force) return false;
     const view = this.#view(row, run, live, opts.pressedEnded === true ? { pressedEnded: true } : {});
-    if (view === undefined) return;
+    if (view === undefined) return false;
     live.lastTriedAt = this.#clock.now();
     try {
       await this.#bounded(Promise.resolve().then(() => channel.updateCard(messageId, view)), this.#deps.redrawTimeoutMs ?? REDRAW_MS);
     } catch (err) {
       if (row.state === 'open') this.#failed(row, live, err, 'final');
       else this.#note(`kanban: the progress card of run ${row.runId} (message ${messageId}) was not redrawn (${message(err)})`);
-      return;
+      return true;
     }
     this.#landed(live, view, run);
-    if (row.state !== 'open' || run.endedAt === null) return;
+    if (row.state !== 'open' || run.endedAt === null || !caughtUp) return true;
     try {
       const r = this.#deps.service.progressCardFinal(row.runId, live.progress.throughSeq);
       if (!r.ok) this.#note(`kanban: the progress card of run ${row.runId} was drawn final, and not recorded (${r.code})`);
@@ -683,6 +714,7 @@ export class ProgressCards {
       this.#note(`kanban: the progress card of run ${row.runId} was drawn final, and not recorded (${message(err)})`);
     }
     this.#forget(row.runId);
+    return true;
   }
 
   #landed(live: Live, view: CardView, run: RunRow): void {
@@ -699,7 +731,7 @@ export class ProgressCards {
    * refusal counts, ten in a row letting a send or a final go and leaving a
    * card as it is; anything else is held back, never counted.
    */
-  #failed(row: ProgressCardRow, live: Live, err: unknown, kind: Kind): void {
+  #failed(row: ProgressCardRow, live: Live, err: unknown, kind: Kind, chatId?: string): void {
     live.dirty = true;
     const why = message(err);
     const code = err instanceof ChannelError ? err.code : 0;
@@ -708,7 +740,7 @@ export class ProgressCards {
       this.#letGo(row.runId);
       this.#note(
         kind === 'send'
-          ? `kanban: the progress card of run ${row.runId} cannot reach its chat (${why}); the run goes without one`
+          ? `kanban: the progress card of run ${row.runId} cannot reach ${chatId ?? 'its chat'} (${why}); the run goes without one`
           : `kanban: the progress card of run ${row.runId} (message ${row.messageId ?? live.messageId ?? 'none'}) is gone (${why}); letting it go`,
       );
       return;

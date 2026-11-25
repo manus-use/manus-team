@@ -285,9 +285,14 @@ its last 8,000 code points only; the approvals open; and `throughSeq`, the last 
   `throughSeq === lastSeq`, every tool event folded: the read moves `throughSeq` to the range's
   bound, so a session ending in text, a `turn_ended` or the boot's own events still reaches
   `lastSeq`.
-- **The 8,000 code points** keep the text the tail is cut from (§6.3) far longer than the tail, so
-  a known secret that the cut would split is still whole in what is masked, unless it is itself
-  longer than 7,400 characters.
+- **The 8,000 code points** keep the text the tail is cut from (§6.3) far longer than the tail, and
+  the text is masked before it is cut to them, so a secret known then is masked whole, and the kept
+  text does not shrink at the draw's mask to bring a split secret into the tail. A secret registered
+  after the cut, and split by it, is shown in part only if it is itself longer than 7,400 characters.
+- **A press's redraw folds at most 20,000 events** (`4 * FOLD_EVENTS`, §8.3, §8.4), drawn from
+  what it has folded; the loop folds the rest over its rounds, and redraws the card, or draws it
+  final and marks it so, once caught up. A row the loop no longer reads, `final` or let go of, is
+  forgotten once a press has drawn it, landed or not.
 - **Forgotten** once the card is `final` or let go of. Memory only: after a restart every card's
   run is closed (§10), and its final draw folds its tool events once more from seq 0.
 
@@ -415,7 +420,10 @@ before. `ToolLine` is exported with it. Calls of one tool with one state are one
 
 - **Each title cut to 80 characters** (on a code point, with `…`) before the calls are grouped, so
   a title carrying a whole command or a file's text cannot fill the line, and two calls whose titles
-  differ only past 80 characters are one group.
+  differ only past 80 characters are one group. The title is masked whole before it is cut, then a
+  trailing prefix of a known secret withheld (`withholdSecretPrefix(redactKnownSecrets(
+  stripControl(title)))`), so a secret crossing the 80th character is masked, not cut into a part
+  no mask would match.
 - **At most 1,500 characters.** A long run's line is cut from its front, so the latest tools stay:
   whole groups are dropped from `toolGroups`'s start until the rest, joined, fits with its prefix,
   `… 37 earlier · `. The number counts the **calls** in the dropped groups, a group "×4" counting
@@ -575,7 +583,9 @@ rather than being told.
      with the markdown last drawn.
 3. **The longest waiting first.** The due sends, finals and updates are ordered by how long each
    has waited: a send since `opened_at`, a final or an update since `drawn_at`. At most
-   `ROUND_DRAWS = 10` are made a round, one at a time; the rest wait for the next round. A restart
+   `ROUND_DRAWS = 10` are made a round, one at a time; the rest wait for the next round. Only a
+   send or an update tried counts to the ten: a card due whose fold has not caught up, or whose
+   view has not changed, takes none of them. A restart
    that finds many cards to finish therefore spreads them over rounds.
 4. **Each is made** with the newest render, read when its turn comes: never a view a round read
    before an earlier draw's await.
@@ -596,7 +606,7 @@ rather than being told.
 - **Retry-after**: a failure that carries `retryAfterMs` (`ChannelError`, from Lark's throttle
   answer) holds the card at least that long, a send or an update.
 - **A Stop press's redraw** is not paced (§8.3); a stale press's and a tier refusal's are, one a
-  message every 5 s (§8.1, §8.4).
+  message every 5 s (§8.1, §8.4), and a tier refusal's waits out a hold.
 
 ### 7.4 One draw at a time a message
 
@@ -631,7 +641,9 @@ button, `act: 'stop'` is taken before the person-card path, which refuses an age
    the card is redrawn as it stands with its `try` one higher (§6.5), so the person can press again
    once granted. Paced as a stale press's redraw is, one a message every 5 s (§8.4): a refusal
    within 5 s of the last redraw of that message bumps `try` all the same, and the next redraw,
-   the refusal's or the loop's, carries the higher `try`.
+   the refusal's or the loop's, carries the higher `try`. A card held back after a failure (§7.3)
+   is not redrawn for the refusal: the `try` is bumped, and the loop draws it once the hold ends.
+   A press on a run with no card bumps nothing.
 2. **The run**: the card's `run` must be a run of the card's task, and an agent's: otherwise
    `That button is not for a run of this task.` or `That button is not for an agent's run.`
 3. **Ended** (`ended_at` set): a stale press (§8.4).
@@ -1069,6 +1081,10 @@ On the user's tenant, with the board and progress cards on:
   not recorded before a restart, leaves a card that looks live, with a Stop button that answers "This
   run has ended" and draws it final when pressed.
 - **A card refused ten updates in a row stays as it last landed** until its final draw.
+- **A Stop pressed on a let-go card whose run is still open shows "stopping" for good**: the press
+  stops the run and redraws the card, `⏸ stopping, asked by <name>`, but the loop no longer reads a
+  let-go row, so nothing draws it final when the run closes. A later press on it, a stale one,
+  draws it final.
 - **Turning it off leaves cards as they are**, live-looking, until pressed.
 - **No card for a run shorter than `min_seconds`**, none after ten refusals of its send, and none at
   a group's chat scope (§2).
