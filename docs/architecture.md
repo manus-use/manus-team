@@ -4,7 +4,7 @@
 
 **Version:** 0.2 — design, reconciled against the code
 **Primary constraint:** long-lived durable sessions
-**Primary protocol:** ACP by design; **structured CLI is the only one that currently works**
+**Primary protocol:** ACP by design; both ACP and structured CLI have been run in real use
 
 ---
 
@@ -15,14 +15,20 @@ order was **inverted in practice**, and the doc reads as though it wasn't. What 
 
 | Built | Designed, not built |
 |---|---|
-| Event log, sessions, bindings, turns, approvals, workspaces, snapshots *tables* (`schema/001`) | Broker sidecar and spool (§4) — nothing |
-| Per-session actor, single writer, generations (§11) | `ExecutionBackend` (§7) — no interface; only the `execution_backend` column |
-| Lark channel end to end (§12, and `docs/specs/2026-08-21-lark-channel-design.md`) | Two-phase start, boot reconciliation (§8) |
-| Structured-CLI driver (§6.3) | Worktrees, checkpoints (§9) |
-| Approvals schema + card surface | Snapshot *writer* (§3.6) — table only |
-| Policy/auth tiers (§13) | PTY driver (§6.4) |
-| ACP driver, run with Claude Code (`claude-agent-acp`) | Cold/rehydrate tiering (§5) as a real tier |
-| | Kanban task board (§17, `docs/specs/2026-11-02-kanban-design.md`) |
+| Event log, sessions, bindings, turns, approvals, workspaces, snapshots *tables* (`schema/001`) | Broker sidecar and spool (§4): nothing, so no agent survives a gateway restart |
+| Per-session actor, single writer, generations (§11) | `ExecutionBackend` (§7): no interface; only the `execution_backend` column |
+| Lark channel end to end (§12, and `docs/specs/2026-08-21-lark-channel-design.md`) | Two-phase start (§8.1): no `start_requested` record before a spawn |
+| Structured-CLI driver (§6.3), run with bytesec | Checkpoints (§9): no commit at turn boundaries, no `refs/mt/checkpoints/` |
+| ACP driver, run with Claude Code (`claude-agent-acp`) | A worktree per *session* (§9): chat sessions share their workspace |
+| Approvals schema + card surface | Snapshot *writer* (§3.6): table only |
+| Policy/auth tiers (§13), and tier grants (`docs/specs/2026-11-18-tier-grants-design.md`) | PTY driver (§6.4) |
+| Boot reconciliation (§8.2), as `Registry.reconcileBoot`: with no broker there is nothing to probe, adopt or reap, so it parks overdue approvals, ends the turns an earlier boot left open, and holds a session whose prompt may not have been delivered | Cold/rehydrate tiering (§5) as a real tier |
+| Kanban task board (§17, `docs/specs/2026-11-02-kanban-design.md`) | |
+| A directory per board task: isolated workspaces, a git worktree on `mt/<task_id>` or an empty folder (kanban spec §18) | |
+| Workflows (`docs/specs/2026-11-16-workflows-design.md`) | |
+| Cron jobs (`docs/specs/2026-11-16-cron-design.md`) | |
+| Wakes (`docs/specs/2026-11-19-wake-design.md`) | |
+| Progress cards (`docs/specs/2026-11-24-progress-cards-design.md`) | |
 
 Two reasons for the inversion, both worth keeping in view because they are still true:
 
