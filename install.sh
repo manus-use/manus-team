@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Installs manus-team from this checkout: builds it, makes the gateway's home,
-# and puts mt on PATH. Safe to run again: it rebuilds, and never overwrites a
-# config.yaml or a .env, nor adds the PATH line twice.
+# puts mt on PATH, and copies the board's skill, mt-kanban, to
+# ~/.agents/skills. Safe to run again: it rebuilds, replaces only its own copy
+# of the skill, and never overwrites a config.yaml or a .env, nor adds the PATH
+# line twice.
 #
 #   ./install.sh [--yes] [--service] [--node <path>]
 #
@@ -193,6 +195,90 @@ case ":$PATH:" in
     fi
     ;;
 esac
+
+# --- the board's skill -------------------------------------------------------
+#
+# skills/mt-kanban/ copied to ~/.agents/skills/mt-kanban/, one of the user skill
+# folders a role's agent.skills is looked up in; mt update copies it by the same
+# rules. Only a copy this script or mt update made, known by the list of its
+# files in .installed-by-manus-team, is replaced: a symlink, a file, or a
+# directory without the list is someone else's, and is left as it is. In our
+# copy, the source's files are written and the files the old list named that
+# the source no longer has are removed; any other file is kept, and named, as
+# someone added it, and removing it would lose their work.
+
+skill_src="$root/skills/mt-kanban"
+skill_mark='.installed-by-manus-team'
+
+# The regular files under a directory, relative to it, sorted; the list left out.
+skill_files() {
+  (cd "$1" && find . \( -type f -o -type l \) ! -name "$skill_mark" ! -name '*.mt-install.*' | sed 's|^\./||' | LC_ALL=C sort)
+}
+
+install_skill() {
+  local dest="$1" fresh=true file old kept='' n=0
+  if [ -L "$dest" ]; then
+    say "warning: left $dest as it is: it is a symlink, not a copy manus-team made"
+    return 0
+  fi
+  if [ -e "$dest" ] && [ ! -d "$dest" ]; then
+    say "warning: left $dest as it is: it is not a directory"
+    return 0
+  fi
+  if [ -d "$dest" ]; then
+    if [ ! -f "$dest/$skill_mark" ] || [ -L "$dest/$skill_mark" ]; then
+      say "warning: left $dest as it is: manus-team did not install it (it has no $skill_mark); move it aside to have the skill installed"
+      return 0
+    fi
+    fresh=false
+  fi
+  mkdir -p "$dest"
+  local files
+  files="$(cd "$skill_src" && find . -type f ! -name "$skill_mark" | sed 's|^\./||' | LC_ALL=C sort)"
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    mkdir -p "$(dirname "$dest/$file")"
+    cp "$skill_src/$file" "$dest/$file.mt-install.$$"
+    mv -f "$dest/$file.mt-install.$$" "$dest/$file"
+  done <<<"$files"
+  if ! $fresh; then
+    # A line of the old list that would reach outside the copy is passed over.
+    while IFS= read -r old; do
+      case "$old" in '' | '#'* | /* | ../* | */../* | */.. | ..) continue ;; esac
+      if ! printf '%s\n' "$files" | grep -qxF -- "$old" && [ -f "$dest/$old" ] && [ ! -L "$dest/$old" ]; then
+        rm -f "$dest/$old"
+      fi
+    done <"$dest/$skill_mark"
+  fi
+  {
+    printf '# Installed by manus-team. These files are replaced at each install and mt update; any other file here is kept.\n'
+    printf '%s\n' "$files"
+  } >"$dest/$skill_mark.mt-install.$$"
+  mv -f "$dest/$skill_mark.mt-install.$$" "$dest/$skill_mark"
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    printf '%s\n' "$files" | grep -qxF -- "$file" && continue
+    kept="${kept:+$kept, }$file"
+    n=$((n + 1))
+  done <<<"$(skill_files "$dest")"
+  local done_word=replaced
+  if $fresh; then done_word=installed; fi
+  if [ "$n" -eq 0 ]; then
+    say "$done_word the mt-kanban skill at $dest"
+  elif [ "$n" -eq 1 ]; then
+    say "$done_word the mt-kanban skill at $dest; kept a file not from manus-team: $kept"
+  else
+    say "$done_word the mt-kanban skill at $dest; kept $n files not from manus-team: $kept"
+  fi
+}
+
+if [ ! -f "$skill_src/SKILL.md" ]; then
+  say "warning: this checkout has no $skill_src/SKILL.md, so the mt-kanban skill is not installed"
+elif [ -z "${HOME:-}" ]; then
+  say 'warning: HOME is not set, so the mt-kanban skill is not installed'
+else
+  install_skill "$HOME/.agents/skills/mt-kanban"
+fi
 
 # --- the service -------------------------------------------------------------
 
