@@ -310,7 +310,9 @@ function statusIcon(status: string): string {
       return '✅';
     case 'failed':
       return '❌';
+    // ACP says in_progress; the structured-cli driver says running.
     case 'in_progress':
+    case 'running':
       return '⏳';
     default:
       return '•';

@@ -182,6 +182,15 @@ describe('renderCard', () => {
     expect(lines[0]).toContain('✅');
   });
 
+  it('shows a tool still running as running, whether its driver says in_progress or running', () => {
+    const view = renderCard([
+      ev('tool_call', { toolCallId: 'a', title: 'Read', status: 'in_progress' }),
+      ev('tool_call', { toolCallId: 'b', title: 'Bash', status: 'running' }),
+      ev('tool_call', { toolCallId: 'c', title: 'Grep', status: 'pending' }),
+    ]);
+    expect(view.text.split('\n\n')[0]).toBe('⏳ Read · ⏳ Bash · • Grep');
+  });
+
   it('puts every tool call on one line, a repeated one counted rather than listed again', () => {
     const view = renderCard([
       ev('turn_submitted', { text: 'who am I?' }),
