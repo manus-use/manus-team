@@ -1,44 +1,121 @@
 # manus-team
 
-A vendor-neutral gateway for driving coding agents (Claude Code, Gemini CLI, Codex, and any
-other ACP-compatible agent) from any channel — Feishu/Lark, Telegram, web, Slack, REST.
+manus-team runs a team of AI agents from Lark (Feishu). You chat with an agent in any group or
+direct message, and you give work to roles, such as an analyst, a reviewer or a report author,
+on a kanban board. Each role's agent works in its own workspace, a directory on the gateway's
+host, and reports back in the task's thread. A task can be any work: research, a document, an
+operation in Lark, a chore, or a change to code. Lark is the only chat channel today; the
+gateway is built so that more channels, such as Telegram and Discord, can be added later.
 
-**Status:** first channel implemented. A Feishu/Lark message drives Claude Code in a
-configured repository and the answer streams back into an interactive card. The broker
-sidecar is not built yet, so **restarting the gateway kills every live agent**; sessions
-themselves survive and cold-resume on the next message.
+## What you can do
 
-Design: [`docs/architecture.md`](docs/architecture.md) (whole system),
-[`docs/specs/2026-08-21-lark-channel-design.md`](docs/specs/2026-08-21-lark-channel-design.md)
-(this slice).
+Each item has an example of what you would type. In a group, start a message with an
+@-mention of the bot; in a direct message, just type.
 
-## What it is
+- **Chat with an agent.** Plain text starts or continues a session, and the answer streams into
+  a card. `/status`, `/stop` and `/new` steer it.
+  Example: `@bot What changed in the API since Monday?`
+- **Give work to a role on the board.** A task names its role, and optionally a reviewer, a
+  contract and gates, commands that must pass before the work counts as done. A failed run is
+  retried, then the task blocks for a person. Examples: `/kanban task new Summarise the vendor
+  contracts` with a line `assignee: worker`, a line `reviewer: reviewer`, and
+  `/kanban gate add k_7gq2 test -s notes/contracts.md`.
+- **Run workflows.** A YAML file in `$MT_HOME/workflows/` turns into a graph of tasks with
+  their links, made at once. `for_each` makes one task per item of a list, and `board:` says
+  which board the tasks go on.
+  Example: `/kanban workflow start vendor-eval topic="log storage" vendors=acme,globex`
+- **Schedule cron jobs.** With `cron.enabled: true`, at its time the gateway gives a role's
+  agent a prompt and posts the answer in the chat.
+  Example: `/cron add "every weekday 09:00" worker List the open PRs and how old they are.`
+- **Wake an agent when a task ends.** With wake on, a task's outcomes (done, changes
+  requested, blocked, given up, stranded) start a turn of the agent that follows the thread. For
+  a block the agent could lift, it gets the first try before people get an Unblock button. A wake
+  can also name a role, which then gets a reaction task. Examples: a line `wake: on` on
+  `/kanban task new`, or `/kanban task wake k_7gq2 coordinator`.
+- **Watch runs live.** A progress card shows each long run's tools, the agent's latest words
+  and a Stop button. It is off by default.
+  Example: `kanban.progress.enabled: true` in the config file.
+- **Let people in, by tier.** The owner, set in the config, can do everything; operate tier
+  changes the board and answers approvals; talk tier chats and reads. Examples:
+  `/auth grant @Carol Wu talk`, and `/role list` to see who does what.
+- **Use `mt` at the terminal.** The same board, roles, workspaces, cron jobs, grants and the
+  service, plus deploys. Examples: `mt kanban task list` and `mt update`.
 
-manus-team does not implement an agent loop. It launches real vendor agent runtimes and
-speaks a structured protocol to them, while owning the things the vendors don't:
+## An example thread
 
-- **Durable sessions** that survive gateway restart, agent crash, and weeks of idleness
-- **Multi-channel access** — one session drivable from several channels simultaneously
-- **Central approvals** — the agent asks once, any bound channel can answer
-- **Isolated workspaces** — git worktree per session, checkpointed at turn boundaries
-- **Audit** — an append-only event log is the system of record
+An illustration of a task with wake on, in a group's thread. The bot's lines use the gateway's
+own wording; the task, the agent's words, the names and the times are made up, and the
+next run's own progress card is left out.
 
+```text
+Alice: /kanban task new Book the venue for the March offsite
+       assignee: worker
+       wake: on
+       Find a venue in Lisbon for 40 people, 12 to 14 March. Deposits under 3,000 EUR are fine.
+Bot:   Created k_7gq2: Book the venue for the March offsite, for role worker. This thread hears
+       when it is done, needs review, has changes requested, blocks, is retried after a failure,
+       gives up or is stranded. Its outcomes wake the agent here.
+Card:  ⚙️ Book the venue for the March offsite k_7gq2
+       worker · run 1 of 2 · running 4 min
+       ✅ Read ×3 · ⏳ Bash
+       > Two venues have the dates free; the cheaper one asks for a deposit.
+Bot:   Book the venue for the March offsite k_7gq2 is blocked (needs_input): The cheaper venue
+       wants a 2,000 EUR deposit by Friday. May I hold it?
+       /kanban task unblock k_7gq2 [comment] once it can go on.
+       The agent is looking at it first.
+Card:  (drawn final) ⏸ blocked after 6 min 12 s
+Bot:   Waking the agent for 1 board update.
+Agent: (woken by the board, as Alice) The brief allows deposits under 3,000 EUR, so I unblocked
+       k_7gq2 with "Hold it; the brief allows it."
+Bot:   (the block's notice is redrawn, ending)
+       k_7gq2: Unblocked by Alice (woken by the board) at 10:42
+Bot:   Done: Book the venue for the March offsite k_7gq2
+       > Held Casa do Rio for 12 to 14 March; deposit due Friday.
+Bot:   Waking the agent for 1 board update.
 ```
-Channels ──> Gateway ──> Driver ──> Broker ──> Agent runtime
-                │                      │
-          event log (SQLite)     detached, reattachable
-```
 
-## The core idea
+## Status and limits
 
-> A gateway session is a durable event log with an optional, reattachable agent runtime
-> bound to it.
+- **Lark is the only channel.** Other chat channels are planned, not built.
+- **Two agent drivers.** `acp` (the default) speaks the Agent Client Protocol, for agents such
+  as `claude-agent-acp`, and is the only driver with approval cards. `structured-cli` runs one
+  process per turn and reads JSON back; it is written for bytesec's `run --format json`, acts
+  with no approvals, and needs `agent.unsupervised: true`. bytesec over `structured-cli` is the
+  agent this build has been measured with in real use. The `acp` driver is tested end to end
+  against a fake agent only. See [Protocol strategy](#protocol-strategy).
+- **A restart ends live agent runs.** The broker that would keep agents alive across a gateway
+  restart is designed, not built. A board run cut short by a restart is retried quietly; a chat
+  session's history survives and resumes on the next message.
+- **The agent is not sandboxed.** It runs as the same user as the gateway, so it can read
+  anything on disk that user can. Keep credentials in the `.env` files or the environment, as
+  [Configuration](#configuration) says.
+- **Wake and progress cards are new.** Both are built and tested, and their smoke checklists
+  against a live Lark tenant are still to be run: section 15 of the
+  [wake design](docs/specs/2026-11-19-wake-design.md) and of the
+  [progress cards design](docs/specs/2026-11-24-progress-cards-design.md).
 
-ACP agents run as local subprocesses over stdio, so whoever holds the pipe owns the
-session's life. If the gateway holds it, restarting the gateway kills every session. The
-**broker sidecar** breaks that coupling: it runs detached under tmux/systemd/container,
-owns the agent's stdio, spools every event to disk, and serves `attach(from_offset)` when
-the gateway comes back.
+## Quick start
+
+1. Create a Lark app with the bot's permissions and events: [Feishu/Lark app setup](#feishulark-app-setup).
+2. Run `./install.sh` in a checkout (Node 22.12 or later): [Installing](#installing).
+3. Set `lark.appId`, `auth.owner` and a workspace in `~/.manus-team/config.yaml`, and
+   `LARK_APP_SECRET` in `~/.manus-team/.env`: [Configuration](#configuration).
+4. Make roles with `mt role create`, check them with `mt role check`, and set
+   `kanban.enabled: true` for the board: [Roles and workspaces](#roles-and-workspaces).
+5. Start it with `mt service install`, then message the bot: [Running as a service](#running-as-a-service).
+
+## Where to read more
+
+- [The board guide](docs/kanban-guide.md): a walk-through from one task to chains, review,
+  workflows, wakes and cron, with messages to paste.
+- [The cookbook](docs/examples.md): workflows and cron jobs ready to copy.
+- The specs in [docs/specs/](docs/specs/): the [Lark channel](docs/specs/2026-08-21-lark-channel-design.md),
+  the [board](docs/specs/2026-11-02-kanban-design.md), [workflows](docs/specs/2026-11-16-workflows-design.md),
+  [cron](docs/specs/2026-11-16-cron-design.md), [tier grants](docs/specs/2026-11-18-tier-grants-design.md),
+  [wake](docs/specs/2026-11-19-wake-design.md) and [progress cards](docs/specs/2026-11-24-progress-cards-design.md).
+- [The architecture](docs/architecture.md), and [Design](#design) below for the ideas behind it.
+- The rest of this README: [Running it](#running-it), [Chat commands](#chat-commands),
+  [The board from Lark](#the-board-from-lark), [Cron jobs](#cron-jobs) and [The mt command](#the-mt-command).
 
 ## Running it
 
@@ -1041,6 +1118,48 @@ It has already found two driver bugs that in-process doubles cannot reach.
 4. [`docs/testing/durability.md`](docs/testing/durability.md) — what "it works" has to mean
 5. [`docs/specs/2026-08-21-lark-channel-design.md`](docs/specs/2026-08-21-lark-channel-design.md)
    — the implemented slice, and the seams left for the deferred parts
+
+## Design
+
+The whole system is in [`docs/architecture.md`](docs/architecture.md), whose status table says
+what is built and what is only designed; the Lark channel is in
+[`docs/specs/2026-08-21-lark-channel-design.md`](docs/specs/2026-08-21-lark-channel-design.md),
+and each board feature has a spec of its own in [`docs/specs/`](docs/specs/).
+
+### What it is
+
+manus-team does not implement an agent loop. It launches real vendor agent runtimes and
+speaks a structured protocol to them, while owning the things the vendors don't. These are
+its goals, each with how far this build goes:
+
+- **Durable sessions** that survive gateway restart, agent crash, and weeks of idleness. Today
+  a session's history survives and resumes on the next message, but a restart ends a live run.
+- **Multi-channel access:** one session drivable from several channels at once. Today Lark is
+  the only channel; others, such as Telegram and Discord, are planned.
+- **Central approvals:** the agent asks once, and any bound channel can answer. Built for the
+  `acp` driver, as Lark cards.
+- **Isolated workspaces:** a directory of its own, or a git worktree, for each board task in an
+  isolated workspace. Checkpoints at turn boundaries are designed, not built.
+- **Audit:** an append-only event log is the system of record.
+
+```
+Channels ──> Gateway ──> Driver ──> Broker ──> Agent runtime
+                │                      │
+          event log (SQLite)     detached, reattachable
+```
+
+The broker in this picture is not built yet: today the gateway's driver holds the agent itself.
+
+### The core idea
+
+> A gateway session is a durable event log with an optional, reattachable agent runtime
+> bound to it.
+
+ACP agents run as local subprocesses over stdio, so whoever holds the pipe owns the
+session's life. If the gateway holds it, restarting the gateway kills every session's live
+run, which is where this build is. The **broker sidecar**, designed but not built, breaks that
+coupling: it runs detached under tmux/systemd/container, owns the agent's stdio, spools every
+event to disk, and serves `attach(from_offset)` when the gateway comes back.
 
 ## Protocol strategy
 
