@@ -119,7 +119,9 @@ Bot:   Waking the agent for 1 board update.
 
 ## Running it
 
-Requires Node 22.12+ and an ACP-capable agent on `PATH`.
+Requires Node 22.12+ and, on `PATH`, an agent the configured driver can run: an ACP agent,
+such as `claude-agent-acp`, for `acp`, or bytesec, or another CLI that writes the same JSON stream, for
+`structured-cli`.
 
 ### Installing
 
@@ -1092,7 +1094,9 @@ src/service/            the launchd plist and systemd unit mt service writes, an
 install.sh              build, make the home, put mt on PATH, optionally install the service
 schema/                 migrations; the event log is the system of record
 docs/architecture.md    full design document
-docs/specs/             the Lark channel design
+docs/specs/             the designs: the Lark channel, kanban, workflows, cron, tier grants, wake
+                        and progress cards
+docs/plans/             the implementation plans, with their smoke checklists
 docs/examples.md        workflows and cron jobs, ready to copy
 docs/testing/           crash matrix for the durability contract
 ```
