@@ -849,6 +849,29 @@ Notices are **batched**: each chat or thread gets at most one message every coup
 listing what happened in order, at most 20 notices, then "… and N more, in the next message."
 Notices due while the gateway was down are sent when it is back.
 
+### Progress cards
+
+With `kanban.progress.enabled: true` in the config file, an agent run that has gone on for
+`kanban.progress.min_seconds` (30 by default) gets one card in its task's thread, or in its direct
+message, which follows it as it works:
+
+> ⚙️ **Fix the flaky login test** `k_…`
+> implementer · run 1 of 2 · running 4 min
+> ✅ Read ×12 · ✅ Edit ×3 · ⏳ Bash
+> > Running the test suite again with the timer mocked.
+
+It is redrawn at most every 5 seconds, when something on it changed, and once a minute for its
+time. "Run 1 of 2" is the try within the task's failure limit; the attempt number is added when it
+differs. When the run ends the card is drawn once more, with how it ended and how long it took,
+"✓ completed after 14 min 3 s", and its tools; the notice follows with the summary or the reason.
+A run that ends sooner than `min_seconds` gets no card, a person's task none, and a task followed
+at a group's chat scope none, its notices going to the group as before.
+
+Everyone in the thread sees the card: every tool's title, which can hold a command line or a
+path, and what the agent is saying before it reports. The gateway masks the secrets it knows,
+its credentials, run tokens and roles' `.env` values, and nothing else: a secret the agent reads
+from a file and prints is shown as printed.
+
 ### Wakes
 
 A task with **wake** on does more than notify: when it is done, has changes requested, blocks
@@ -1033,6 +1056,11 @@ does not start again until you unblock it:
 ```
 
 > Stopped `k_…`: its run was cancelled, and the task is blocked (needs_input). `/kanban task unblock k_…` runs it again.
+
+With progress cards on, the run's card has a **Stop** button that does the same, for an operator:
+the card says "⏸ stopping, asked by" who pressed it, then "⏸ stopped after …" once the agent has
+stopped. A press without operator tier changes nothing; a press on a card whose run has ended
+draws it final, saying "This run has ended."
 
 Comment first with what to do differently, then unblock.
 

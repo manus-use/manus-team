@@ -1765,13 +1765,20 @@ export function unblock(
  *
  * The run returned still has `endedAt` null when it is an agent's: the caller
  * cancels its turn, and closes it when the turn ends.
+ *
+ * Given `runId`, the stop is for that run only (progress cards spec §8.2): a
+ * task whose open run is another refuses `run_superseded`, inside the
+ * transaction, so a press on an ended run's card never stops its retry.
  */
-export function stop(db: Db, taskId: string, by: string, now: number): Result<{ task: TaskRow; run: RunRow }> {
+export function stop(db: Db, taskId: string, by: string, now: number, runId?: string): Result<{ task: TaskRow; run: RunRow }> {
   return tx(db, (d) => {
     const task = getTask(d, taskId);
     if (task === undefined) return refuse('not_found', `no task ${taskId}`);
     const open = openRunOf(d, taskId);
     if (open === undefined) return refuse('no_open_run', `task ${taskId} has no open run to stop`);
+    if (runId !== undefined && open.runId !== runId) {
+      return refuse('run_superseded', `run ${runId} of task ${taskId} is over; its open run is ${open.runId}`);
+    }
     if (open.outcome !== null) return { ok: true, task, run: open };
     decide(d, open, 'cancelled', {}, now);
     const recurrences = enterBlocked(d, task, 'needs_input', `stopped by ${by}`);
@@ -2503,6 +2510,94 @@ export function markUnblockRedrawn(db: Db, messageId: string, lifts: ReadonlyArr
     let marked = 0;
     for (const l of lifts) marked += update.run(l.liftEvent, messageId, l.taskId).changes;
     return { ok: true, marked };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Progress cards (progress cards spec §4)
+// ---------------------------------------------------------------------------
+
+/** A run found due a progress card: this bot, the channel it goes by, and the gateway's `kanban.failure_limit`. */
+export interface ProgressCardOpening {
+  runId: string;
+  appId: string;
+  channel: string;
+  failureLimit: number;
+}
+
+/**
+ * The row of a run due a progress card, written before its first send
+ * (progress cards spec §4.1): "run N of M" read by the insert itself from the
+ * task, N its `consecutive_failures` + 1 and M its `failure_limit` or the
+ * gateway's, so the count is the database's at the insert. Only an open,
+ * undecided run gets one, and only once.
+ */
+export function openProgressCard(db: Db, o: ProgressCardOpening, now: number): Result<{ opened: boolean }> {
+  return tx(db, (d) => {
+    const { changes } = d
+      .prepare(
+        `INSERT OR IGNORE INTO kanban_progress_cards (run_id, task_id, app_id, channel, try_number, try_limit, opened_at)
+         SELECT r.run_id, r.task_id, ?, ?, t.consecutive_failures + 1, COALESCE(t.failure_limit, ?), ?
+           FROM kanban_runs r JOIN kanban_tasks t ON t.task_id = r.task_id
+          WHERE r.run_id = ? AND r.ended_at IS NULL AND r.outcome IS NULL`,
+      )
+      .run(o.appId, o.channel, o.failureLimit, now, o.runId);
+    return { ok: true, opened: changes === 1 };
+  });
+}
+
+/** A progress card's first send landed: its message, once, with what it showed and when. */
+export function progressCardSent(db: Db, runId: string, messageId: string, readSeq: number, now: number): Result<{ changed: boolean }> {
+  return tx(db, (d) => {
+    const { changes } = d
+      .prepare(
+        `UPDATE kanban_progress_cards SET message_id = ?, read_seq = ?, drawn_at = ?, failures = 0
+          WHERE run_id = ? AND state = 'open' AND message_id IS NULL`,
+      )
+      .run(messageId, readSeq, now, runId);
+    return { ok: true, changed: changes === 1 };
+  });
+}
+
+/** An update of a progress card landed. */
+export function progressCardDrawn(db: Db, runId: string, readSeq: number, now: number): Result<{ changed: boolean }> {
+  return tx(db, (d) => {
+    const { changes } = d
+      .prepare(
+        `UPDATE kanban_progress_cards SET read_seq = ?, drawn_at = ?, failures = 0
+          WHERE run_id = ? AND state = 'open' AND message_id IS NOT NULL`,
+      )
+      .run(readSeq, now, runId);
+    return { ok: true, changed: changes === 1 };
+  });
+}
+
+/** Lark refused a progress card's send or update: one more in a row. Answers the count, 0 for a row not open. */
+export function progressCardRefused(db: Db, runId: string): Result<{ failures: number }> {
+  return tx(db, (d) => {
+    d.prepare("UPDATE kanban_progress_cards SET failures = failures + 1 WHERE run_id = ? AND state = 'open'").run(runId);
+    const row = d
+      .prepare<[string], { failures: number }>("SELECT failures FROM kanban_progress_cards WHERE run_id = ? AND state = 'open'")
+      .get(runId);
+    return { ok: true, failures: row?.failures ?? 0 };
+  });
+}
+
+/** A progress card drawn final: `open` to `final`, once. */
+export function progressCardFinal(db: Db, runId: string, readSeq: number, now: number): Result<{ changed: boolean }> {
+  return tx(db, (d) => {
+    const { changes } = d
+      .prepare("UPDATE kanban_progress_cards SET state = 'final', read_seq = ?, drawn_at = ?, failures = 0 WHERE run_id = ? AND state = 'open'")
+      .run(readSeq, now, runId);
+    return { ok: true, changed: changes === 1 };
+  });
+}
+
+/** A progress card let go of: `open` to `let_go`, once. */
+export function progressCardLetGo(db: Db, runId: string): Result<{ changed: boolean }> {
+  return tx(db, (d) => {
+    const { changes } = d.prepare("UPDATE kanban_progress_cards SET state = 'let_go' WHERE run_id = ? AND state = 'open'").run(runId);
+    return { ok: true, changed: changes === 1 };
   });
 }
 

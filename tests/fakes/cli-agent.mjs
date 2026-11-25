@@ -37,6 +37,9 @@
  *               it says SLOW, and otherwise `Fired: ` and the job's prompt; each
  *               turn's PATH, its MT_CRON_FIRE if a fire's, and its
  *               MT_AGENT_SESSION, is appended to `cron-env.log` beside the log
+ *   staged      a board run that works a while: a tool running, then, once a file
+ *               `release-1` is beside the log, the tool done and a line of text,
+ *               then, once `release-2` is, `mt kanban complete`
  *   wake        in a board run, report `mt kanban complete`, or, the first time a
  *               task whose title or body says BLOCK is run, `mt kanban block` as
  *               `needs_input`; in a chat turn the board woke (its prompt starts
@@ -439,6 +442,27 @@ switch (MODE) {
   case 'weird': {
     delta('half an answer');
     summary('interrupted_by_something_new', 'half an answer');
+    break;
+  }
+
+  case 'staged': {
+    // A board run that works a while, written at once so the gateway sees each
+    // step as it comes: a tool running; once `release-1` is beside the log, the
+    // tool done and a line of text; once `release-2` is, `mt kanban complete`.
+    const beside = (name) => join(dirname(LOG ?? '.'), name);
+    const now = (type, extra) => writeSync(1, `${JSON.stringify({ type, session_id: SESSION, message_id: 'msg_1', agent_path: '/root', ...extra })}\n`);
+    const wait = (name) => {
+      const until = Date.now() + 60_000;
+      while (!existsSync(beside(name)) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    };
+    now('tool_running', { part_id: 'prt_glob', tool: 'Glob', status: 'running' });
+    wait('release-1');
+    now('tool_completed', { part_id: 'prt_glob', tool: 'Glob', status: 'completed', output: 'a.txt\nb.txt' });
+    now('text_delta', { part_id: 'prt_text', text: 'Found the two files.' });
+    wait('release-2');
+    const done = mt('complete', { summary: 'found the files' });
+    now('text_delta', { part_id: 'prt_text', text: ` complete: ${done.answer}` });
+    summary('completed', 'reported');
     break;
   }
 

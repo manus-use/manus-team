@@ -29,6 +29,7 @@ import { KanbanService } from './kanban/service.js';
 import { SESSION_MARKER } from './kanban/gates.js';
 import { writeMtShim } from './kanban/shim.js';
 import { CardPoster } from './kanban/cards.js';
+import { ProgressCards } from './kanban/progress.js';
 import { PeopleDirectory } from './kanban/people.js';
 import { KanbanSink } from './kanban/sink.js';
 import { claimSocketPath, listenWorker, lockGateway, SocketHandler, workerSocketPath, type GatewayLock, type WorkerServer } from './kanban/socket.js';
@@ -45,13 +46,13 @@ import { CronApi } from './cron/worker.js';
 import { writeGatewayZone } from './cron/zone-file.js';
 import { jobCounts } from './db/cron.js';
 import { grantCounts, tierReader } from './db/grants.js';
-import { deferredButtons, tasksWithWakeOn } from './db/kanban-read.js';
+import { countOpenProgressCards, deferredButtons, tasksWithWakeOn } from './db/kanban-read.js';
 import type { KanbanEvent, SubscriptionRow } from './kanban/types.js';
 import { Waker } from './kanban/waker.js';
 import { WakeTokens } from './kanban/wake-tokens.js';
 import { WakeApi } from './kanban/wake-api.js';
 import { showJson, wokenShowText } from './cli/plain.js';
-import type { WakeSettings } from './config.js';
+import type { ProgressSettings, WakeSettings } from './config.js';
 import { lockDatabase } from './kanban/socket.js';
 import { SinkChannel } from './kanban/sink.js';
 import { PackagesInUse } from './render/native.js';
@@ -86,6 +87,8 @@ export interface Gateway {
   readonly unblockRedraws: UnblockRedraws | undefined;
   /** What sends people their task and review cards, when `kanban.enabled` is set. */
   readonly cards: CardPoster | undefined;
+  /** What draws a live card for each long agent run a thread follows, when `kanban.enabled` and `kanban.progress.enabled` are set. */
+  readonly progress: ProgressCards | undefined;
   /** `/kanban` and the board cards' buttons, when `kanban.enabled` is set. */
   readonly chat: KanbanChat | undefined;
   /** The cron scheduler, when `cron.enabled` is set. */
@@ -104,6 +107,16 @@ export function wakeLine(wake: WakeSettings, withWakeOn: number): string | undef
     return withWakeOn === 0 ? undefined : `kanban: wakes off (kanban.wake.enabled is false); ${withWakeOn} task(s) with wake on stay notice-only`;
   }
   return `kanban: wakes on; at most ${wake.perHour} woken turns a conversation an hour, tasks up to ${wake.maxDepth - 1} woken turns deep`;
+}
+
+/**
+ * The startup line of progress cards (progress cards spec §3): on, with its
+ * `min_seconds`; off with cards still open, how many were left as they were;
+ * nothing when off with none.
+ */
+export function progressLine(progress: ProgressSettings, open: number): string | undefined {
+  if (progress.enabled) return `kanban: progress cards on, for agent runs past ${progress.minSeconds} s`;
+  return open === 0 ? undefined : `kanban: progress cards off (kanban.progress.enabled is false); ${open} card(s) left as they were`;
 }
 
 /**
@@ -392,6 +405,10 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
   let wakeApi: WakeApi | undefined;
   let unblockRedraws: UnblockRedraws | undefined;
   let cards: CardPoster | undefined;
+  // Read late, through closures, by KanbanChat's Stop press: built after it (progress cards spec §13).
+  let progress: ProgressCards | undefined;
+  // When start() began: a run started before it and closed after was closed by the boot (progress cards spec §5.3).
+  let bootedAt: number | undefined;
   let workerServer: WorkerServer | undefined;
   let lock: GatewayLock | undefined;
   let dbLock: GatewayLock | undefined;
@@ -496,6 +513,10 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       appId: config.lark.appId,
       redraw: (messageId, view) => adapter.updateCard(messageId, view),
       liftedNotice: (messageId) => redraws.redrawMessage(messageId),
+      // A progress card's Stop (progress cards spec §8): its redraws are the loop's.
+      progressRedraw: (runId) => progress?.redrawNow(runId) ?? Promise.resolve(),
+      progressEnded: (messageId, runId) => progress?.redrawEnded(messageId, runId) ?? Promise.resolve(),
+      progressRefused: (messageId, runId) => progress?.refusedTier(messageId, runId) ?? Promise.resolve(),
       // task show's Wake line, in the gateway's zone (wake spec §10).
       wake: { enabled: config.kanban.wake.enabled, zone },
       note,
@@ -531,8 +552,25 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       note,
     });
     note(`kanban: dispatching up to ${config.kanban.maxRunning} agent run(s) at once`);
+    // A live card for each long agent run a thread or a direct message follows (progress cards spec §7).
+    if (config.kanban.progress.enabled) {
+      progress = new ProgressCards({
+        db,
+        service,
+        channels: new Map<string, Channel>([[adapter.id, adapter]]),
+        appId: config.lark.appId,
+        minSeconds: config.kanban.progress.minSeconds,
+        failureLimit: config.kanban.failureLimit,
+        bootedAt: () => bootedAt,
+        nameOf: (principal) => people.chatName(principal),
+        held: (taskId) => chat.held(taskId),
+        note,
+      });
+    }
     const wakeNote = wakeLine(config.kanban.wake, tasksWithWakeOn(db));
     if (wakeNote !== undefined) note(wakeNote);
+    const progressNote = progressLine(config.kanban.progress, countOpenProgressCards(db));
+    if (progressNote !== undefined) note(progressNote);
     const isolated = Object.keys(config.isolated ?? {}).sort();
     if (isolated.length > 0) note(`kanban: each task in ${isolated.join(', ')} gets a directory of its own`);
   }
@@ -693,6 +731,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     notifier,
     unblockRedraws,
     cards,
+    progress,
     get chat() {
       return kanbanChat;
     },
@@ -700,6 +739,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     waker,
 
     async start(): Promise<void> {
+      bootedAt = systemClock.now();
       // First, the home's lock and then the worker socket's path: a second gateway
       // on this home fails here, before its reconcile or its boot touches the first
       // one's sessions and runs. The lock decides it: a busy gateway's socket can
@@ -751,6 +791,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       scheduler?.start();
       // And sends the cards of people's runs that a stop left unsent.
       cards?.start();
+      // And finishes the progress cards a restart left open: the boot has closed their runs.
+      progress?.start();
 
       // Only now, because saying it requires a connection. Failing to deliver a
       // finding must not prevent the gateway from starting -- the session is
@@ -804,6 +846,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       waker?.stop();
       unblockRedraws?.stop();
       cards?.stop();
+      progress?.stop();
       // And the gates of a report from chat, a press's or typed: killed, nothing applied,
       // as the worker socket's are below; the next report after a restart runs them again.
       kanbanChat?.stop();
@@ -822,7 +865,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       // Together, under one bound: the notices, the cards, the card presses being
       // worked on, whose redraws need the channel, and a cron fire's message being
       // posted, which a send failed by the disconnect leaves pending for the next boot.
-      const [notices, sent, pressed, , posted, redrawn, woken] = await Promise.all([
+      const [notices, sent, pressed, , posted, redrawn, woken, progressed] = await Promise.all([
         notifier?.idle(SHUTDOWN_DRAIN_MS),
         cards?.idle(SHUTDOWN_DRAIN_MS),
         kanbanChat?.idle(SHUTDOWN_DRAIN_MS),
@@ -832,6 +875,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
         unblockRedraws?.idle(SHUTDOWN_DRAIN_MS),
         // A wake's marker being sent, or its actor being made: never the turns it started (wake spec §5.5).
         waker?.idle(SHUTDOWN_DRAIN_MS),
+        // A progress card being drawn: one the stop cuts short is drawn final by the next boot.
+        progress?.idle(SHUTDOWN_DRAIN_MS),
       ]);
       // Past the bound, the database closes under whatever is still in flight: its write is dropped.
       if (notices === false) {
@@ -845,6 +890,9 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       }
       if (redrawn === false) {
         note('kanban: stopped with a notice still being redrawn; the next boot tries it again');
+      }
+      if (progressed === false) {
+        note('kanban: stopped with a progress card still being drawn; the next boot draws it final');
       }
       if (woken === false) {
         note('kanban: stopped with a wake still being sent; its batch stays pending, and the next boot goes on with it');

@@ -312,6 +312,8 @@ itself, for instance in a file it reads, is not known to the gateway and is not 
 | `kanban.wake.per_hour` | (file only) | Woken turns a conversation in any hour. Default 6, 1 to 60. |
 | `kanban.wake.max_depth` | (file only) | A task this many woken turns deep stays notice-only. Default 5, 1 to 20. |
 | `kanban.wake.hold_minutes` | (file only) | How long a block's Unblock button waits for the agent's try. Default 10, 1 to 60. |
+| `kanban.progress.enabled` | (file only) | A live card for each agent run past `min_seconds`, in the task's thread or its direct message: the task, the role, the try and the time running, each tool and its state, the tail of what the agent is saying, and a Stop button; drawn final, with the outcome and the time, when the run ends. Default off. A task followed at a group's chat scope gets no card. **What it shows:** every tool's title, which may hold a command line or a path, and the agent's words mid-run, before its report, go to everyone in the thread, talk tier or not; only the secrets the gateway knows (its credentials, run tokens, roles' `.env` values) are masked. |
+| `kanban.progress.min_seconds` | (file only) | A run gets its card once it has run this long. Default 30, 0 to 3600. |
 | `db`, `downloads` | `MT_DB`, `MT_DOWNLOAD_DIR` | `$MT_HOME/team.db` and `$MT_HOME/downloads` unless set. |
 | — | `MT_HOME` | State directory, and where the config file and the gateway's `.env` are looked for. Default `~/.manus-team`. Environment only. |
 
@@ -715,6 +717,16 @@ recipes for whole graphs of tasks: parallel branches, build, review and release,
 that writes the graph, a DAG applied from a terminal, rerouting around a failed task, and two
 boards.
 Workflows and cron jobs ready to copy are in [docs/examples.md](docs/examples.md).
+
+**Progress cards.** With `kanban.progress.enabled`, an agent run that has gone on for
+`kanban.progress.min_seconds` (30 by default) gets one card in its task's thread, or its direct
+message, redrawn every few seconds as it works: the task, the role, "run 1 of 2" and how long it
+has run, each tool and its state, and the tail of what the agent is saying. Its **Stop** button,
+for an operator, does what `/kanban task stop` does. When the run ends the card says how, ✓
+completed, ✗ failed, ⏸ stopped and so on, and how long it took; the notice follows with the
+summary or the reason. A task followed at a group's chat scope gets no card. The card shows the
+tools' titles and the agent's words to everyone in the thread, and masks only the secrets the
+gateway knows.
 
 **Workflows.** A graph of tasks the team runs again and again is written once, as a file,
 `$MT_HOME/workflows/<name>.yaml`: a list of steps, each a task to make, with `parents` between

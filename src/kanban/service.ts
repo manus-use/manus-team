@@ -1463,15 +1463,56 @@ export class KanbanService {
     return board.buttonTried(this.#db, key);
   }
 
+  /** A run found due a progress card gets its row (progress cards spec §4). */
+  openProgressCard(runId: string, appId: string, channel: string, failureLimit: number): Result<{ opened: boolean }> {
+    if (!isText(runId) || !isText(appId) || !isText(channel) || !Number.isSafeInteger(failureLimit)) {
+      return board.refuse('invalid', 'a run id, an app id and a channel are text, and a failure limit a whole number');
+    }
+    return board.openProgressCard(this.#db, { runId, appId, channel, failureLimit }, this.#clock.now());
+  }
+
+  /** A progress card's first send landed. */
+  progressCardSent(runId: string, messageId: string, readSeq: number): Result<{ changed: boolean }> {
+    if (!isText(runId) || !isText(messageId) || messageId === '' || !Number.isSafeInteger(readSeq)) {
+      return board.refuse('invalid', 'a run id and a message id are text, and a seq a whole number');
+    }
+    return board.progressCardSent(this.#db, runId, messageId, readSeq, this.#clock.now());
+  }
+
+  /** An update of a progress card landed. */
+  progressCardDrawn(runId: string, readSeq: number): Result<{ changed: boolean }> {
+    if (!isText(runId) || !Number.isSafeInteger(readSeq)) return board.refuse('invalid', 'a run id is text, and a seq a whole number');
+    return board.progressCardDrawn(this.#db, runId, readSeq, this.#clock.now());
+  }
+
+  /** Lark refused a progress card's send or update; answers how many in a row. */
+  progressCardRefused(runId: string): Result<{ failures: number }> {
+    if (!isText(runId)) return board.refuse('invalid', 'a run id is text');
+    return board.progressCardRefused(this.#db, runId);
+  }
+
+  /** A progress card drawn final. */
+  progressCardFinal(runId: string, readSeq: number): Result<{ changed: boolean }> {
+    if (!isText(runId) || !Number.isSafeInteger(readSeq)) return board.refuse('invalid', 'a run id is text, and a seq a whole number');
+    return board.progressCardFinal(this.#db, runId, readSeq, this.#clock.now());
+  }
+
+  /** A progress card let go of. */
+  progressCardLetGo(runId: string): Result<{ changed: boolean }> {
+    if (!isText(runId)) return board.refuse('invalid', 'a run id is text');
+    return board.progressCardLetGo(this.#db, runId);
+  }
+
   /** A recorded message's buttons were redrawn, or the redraw tried, for these lifts: never tried again. */
   markUnblockRedrawn(messageId: string, lifts: ReadonlyArray<{ taskId: string; liftEvent: number }>): Result<{ marked: number }> {
     return board.markUnblockRedrawn(this.#db, messageId, lifts);
   }
 
-  stop(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow }> {
-    const ids = idsRefused(taskId);
+  /** Stop the task's open run; given `runId`, only while that run is the open one (progress cards spec §8.2). */
+  stop(taskId: string, by: string, opts: { runId?: string } = {}): Result<{ task: TaskRow; run: RunRow }> {
+    const ids = opts.runId === undefined ? idsRefused(taskId) : idsRefused(taskId, opts.runId);
     if (ids !== undefined) return ids;
-    return board.stop(this.#db, taskId, by, this.#clock.now());
+    return board.stop(this.#db, taskId, by, this.#clock.now(), opts.runId);
   }
 
   archive(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {

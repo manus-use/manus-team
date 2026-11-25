@@ -77,7 +77,8 @@ export const RETRY_HINT = '_This is usually temporary. Send your message again t
 export const RETRY_AFTER_TOOLS_HINT =
   '_This is usually temporary, but the steps above already ran. Check them before sending your message again._';
 
-interface ToolLine {
+/** One tool call as a card shows it: its title, and its latest status. */
+export interface ToolLine {
   title: string;
   status: string;
 }
@@ -278,6 +279,16 @@ export function cardText(parts: CardParts): string {
  * they first came in, so a failed or still-running call keeps its own icon.
  */
 function toolSummary(tools: readonly ToolLine[]): string {
+  return toolGroups(tools).join(' · ');
+}
+
+/**
+ * The tool calls as groups: calls of one tool with one status are one group,
+ * counted, the groups in the order they first came, each its status's icon and
+ * its title escaped. What a reply card's tool line joins, and what a progress
+ * card cuts from the front (progress cards spec §6.2).
+ */
+export function toolGroupsCounted(tools: readonly ToolLine[]): Array<{ label: string; count: number }> {
   const groups = new Map<string, { label: string; count: number }>();
   for (const t of tools) {
     const label = `${statusIcon(t.status)} ${forDisplay(t.title)}`;
@@ -285,7 +296,12 @@ function toolSummary(tools: readonly ToolLine[]): string {
     if (group === undefined) groups.set(label, { label, count: 1 });
     else group.count += 1;
   }
-  return [...groups.values()].map((g) => (g.count === 1 ? g.label : `${g.label} ×${g.count}`)).join(' · ');
+  return [...groups.values()];
+}
+
+/** The groups as labels: "✅ lark-cli ×4" for four calls of one tool and status. */
+export function toolGroups(tools: readonly ToolLine[]): string[] {
+  return toolGroupsCounted(tools).map((g) => (g.count === 1 ? g.label : `${g.label} ×${g.count}`));
 }
 
 function statusIcon(status: string): string {
