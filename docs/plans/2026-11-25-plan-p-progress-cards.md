@@ -112,9 +112,9 @@ Each tied to the spec.
   - `runEndedOf` and `stoppedOf`: the latest such event of the run, not another run's.
   - `chatKindOf`: `p2p` from another subscription of the same app, channel and chat; nothing from another channel with the same conversation id, another app, or a chat no subscription knows.
   - `readEventsOfTypes`: only the types asked, in the range; `lastAgentEventAt`: the latest output event's `ts`, a later `turn_ended` and `session_state_changed` passed over, undefined for a session with none; `lastEventBefore`: the last event with `ts` below the bound.
-- [ ] **Step 2: Verify they fail**: the file fails to collect, `progressDue` not exported.
+- [ ] **Step 2: Verify they fail**: with the two modules as they were, `Tests  7 failed (7)`, `progressDue is not a function`.
 - [ ] **Step 3: Implement.** `progressDue(db, appId, startedBy)` reads `SELECT … FROM kanban_runs r WHERE r.ended_at IS NULL AND r.outcome IS NULL AND r.assignee_kind = 'role' AND r.started_at <= ? AND NOT EXISTS (SELECT 1 FROM kanban_progress_cards c WHERE c.run_id = r.run_id) ORDER BY r.started_at, r.rowid`, and keeps each run whose `subscriptionsOf(...).find((s) => s.appId === appId)` has a `threadId`, or `chatType` `p2p` or null. `chatKindOf` is §2's query with `channel = ?`. `lastAgentEventAt` takes, for each of the six output types, the latest row by `idx_events_type`, and answers the greatest `ts`.
-- [ ] **Step 4: Run everything.** Unit: `Tests  3446 passed (3446)`, thirteen new.
+- [ ] **Step 4: Run everything.** Unit: `Tests  3434 passed (3434)`, seven new.
 - [ ] **Step 5: Commit** "Read the runs due a progress card, the open cards, a chat's kind, and a session's tool events and last output".
 
 ## Task 3: The setting

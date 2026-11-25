@@ -1720,3 +1720,149 @@ export function deferredButtons(db: Db, appId: string): DeferredButtonRow[] {
     .all(appId)
     .map(decodeDeferred);
 }
+
+// ---------------------------------------------------------------------------
+// Progress cards (progress cards spec §2, §4, §5)
+// ---------------------------------------------------------------------------
+
+export type ProgressCardState = 'open' | 'final' | 'let_go';
+
+/** One board run's progress card, as `kanban_progress_cards` records it (migration 014). */
+export interface ProgressCardRow {
+  runId: string;
+  taskId: string;
+  appId: string;
+  channel: string;
+  messageId: string | null;
+  readSeq: number;
+  drawnAt: number | null;
+  failures: number;
+  state: ProgressCardState;
+  tryNumber: number;
+  tryLimit: number;
+  openedAt: number;
+}
+
+interface ProgressCardRaw {
+  run_id: string;
+  task_id: string;
+  app_id: string;
+  channel: string;
+  message_id: string | null;
+  read_seq: number;
+  drawn_at: number | null;
+  failures: number;
+  state: string;
+  try_number: number;
+  try_limit: number;
+  opened_at: number;
+}
+
+function decodeProgressCard(r: ProgressCardRaw): ProgressCardRow {
+  return {
+    runId: r.run_id,
+    taskId: r.task_id,
+    appId: r.app_id,
+    channel: r.channel,
+    messageId: r.message_id,
+    readSeq: r.read_seq,
+    drawnAt: r.drawn_at,
+    failures: r.failures,
+    state: r.state as ProgressCardState,
+    tryNumber: r.try_number,
+    tryLimit: r.try_limit,
+    openedAt: r.opened_at,
+  };
+}
+
+const PROGRESS_COLS = 'run_id, task_id, app_id, channel, message_id, read_seq, drawn_at, failures, state, try_number, try_limit, opened_at';
+
+/** A run's progress card, in any state. */
+export function progressCard(db: Db, runId: string): ProgressCardRow | undefined {
+  const r = db.prepare<[string], ProgressCardRaw>(`SELECT ${PROGRESS_COLS} FROM kanban_progress_cards WHERE run_id = ?`).get(runId);
+  return r === undefined ? undefined : decodeProgressCard(r);
+}
+
+/** This bot's progress cards still `open`, the oldest first: what each round draws. */
+export function openProgressCards(db: Db, appId: string): ProgressCardRow[] {
+  return db
+    .prepare<[string], ProgressCardRaw>(
+      `SELECT ${PROGRESS_COLS} FROM kanban_progress_cards WHERE app_id = ? AND state = 'open' ORDER BY opened_at, rowid`,
+    )
+    .all(appId)
+    .map(decodeProgressCard);
+}
+
+/** How many progress cards are still `open`, any bot's: what the startup line says is left with the switch off. */
+export function countOpenProgressCards(db: Db): number {
+  return db.prepare<[], { n: number }>("SELECT count(*) AS n FROM kanban_progress_cards WHERE state = 'open'").get()?.n ?? 0;
+}
+
+/** A run due a progress card, with the subscription of this bot its card would go to. */
+export interface ProgressDue {
+  run: RunRow;
+  sub: SubscriptionRow;
+}
+
+/**
+ * The runs due a progress card (progress cards spec §2, §7.2): open, undecided
+ * agent runs started by `startedBy`, with no row yet, oldest first, each with
+ * its task's first subscription of this bot, when that is in a thread, at chat
+ * scope in a direct message, or at chat scope with a null `chat_type`, which
+ * the loop judges through `chatKindOf`. A group's chat scope is none.
+ */
+export function progressDue(db: Db, appId: string, startedBy: number): ProgressDue[] {
+  const runs = db
+    .prepare<[number], RunRaw>(
+      `SELECT ${RUN_COLS} FROM kanban_runs r
+        WHERE r.ended_at IS NULL AND r.outcome IS NULL AND r.assignee_kind = 'role' AND r.started_at <= ?
+          AND NOT EXISTS (SELECT 1 FROM kanban_progress_cards c WHERE c.run_id = r.run_id)
+        ORDER BY r.started_at, r.rowid`,
+    )
+    .all(startedBy)
+    .map(decodeRun);
+  const due: ProgressDue[] = [];
+  for (const run of runs) {
+    const sub = subscriptionsOf(db, run.taskId).find((s) => s.appId === appId);
+    if (sub === undefined) continue;
+    if (sub.threadId !== '' || sub.chatType !== 'group') due.push({ run, sub });
+  }
+  return due;
+}
+
+/** The run's latest event of `kind`: its `run_ended`, or its `stopped`. */
+function lastEventOfRun(db: Db, taskId: string, runId: string, kind: string): KanbanEvent | undefined {
+  const r = db
+    .prepare<[string, string, string], EventRaw>(
+      `SELECT id, task_id, run_id, kind, actor, json(payload) AS payload, created_at
+         FROM kanban_events WHERE task_id = ? AND run_id = ? AND kind = ? ORDER BY id DESC LIMIT 1`,
+    )
+    .get(taskId, runId, kind);
+  return r === undefined ? undefined : decodeEvent(r);
+}
+
+/** A run's `run_ended`, which says what came after a failure: retried, or blocked, and how (spec §9.4). */
+export function runEndedOf(db: Db, taskId: string, runId: string): KanbanEvent | undefined {
+  return lastEventOfRun(db, taskId, runId, 'run_ended');
+}
+
+/** A run's `stopped`, whose actor asked for the stop. */
+export function stoppedOf(db: Db, taskId: string, runId: string): KanbanEvent | undefined {
+  return lastEventOfRun(db, taskId, runId, 'stopped');
+}
+
+/**
+ * A chat's kind, from any subscription of this bot on this channel at that chat
+ * that knows it (progress cards spec §2): for a subscription whose own
+ * `chat_type` is null. Never written back.
+ */
+export function chatKindOf(db: Db, appId: string, channel: string, conversationId: string): 'p2p' | 'group' | undefined {
+  if (!hasWakeColumns(db)) return undefined;
+  const r = db
+    .prepare<[string, string, string], { chat_type: string }>(
+      `SELECT chat_type FROM kanban_subscriptions
+        WHERE account_id = ? AND channel = ? AND conversation_id = ? AND chat_type IS NOT NULL LIMIT 1`,
+    )
+    .get(appId, channel, conversationId);
+  return r?.chat_type === 'p2p' || r?.chat_type === 'group' ? r.chat_type : undefined;
+}

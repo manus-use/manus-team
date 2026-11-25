@@ -142,6 +142,65 @@ export function lastEventAt(db: Db, sessionId: string): number | undefined {
   return row?.ts;
 }
 
+/**
+ * Events of the given types with `seq` in (afterSeq, throughSeq], through the
+ * index on (session, type, seq): a progress card's final draw reads only a run's
+ * tool events (progress cards spec §5.2).
+ */
+export function readEventsOfTypes(
+  db: Db,
+  sessionId: string,
+  types: readonly EventType[],
+  afterSeq: number,
+  throughSeq: number,
+): Event[] {
+  if (throughSeq <= afterSeq || types.length === 0) return [];
+  const rows = db
+    .prepare<unknown[], EventRowRaw>(
+      `SELECT session_id, seq, ts, generation, broker_seq, turn_id, type, actor, json(payload) AS payload
+         FROM events
+        WHERE session_id = ? AND type IN (${types.map(() => '?').join(', ')}) AND seq > ? AND seq <= ?
+        ORDER BY seq`,
+    )
+    .all(sessionId, ...types, afterSeq, throughSeq);
+  return rows.map(decode);
+}
+
+/** The agent's own output, each written with `actor = 'agent'` by the session actor. */
+export const AGENT_OUTPUT_TYPES: readonly EventType[] = [
+  'agent_message_chunk',
+  'agent_thought_chunk',
+  'tool_call',
+  'tool_call_update',
+  'plan',
+  'usage',
+];
+
+/**
+ * When the agent last said or did anything in the session, unix ms: the
+ * greatest `ts` of the latest event of each of its output types, each found by
+ * the index on (session, type, seq). Not the session's last event, which after
+ * a restart is the boot's own (progress cards spec §5.3). Undefined for none.
+ */
+export function lastAgentEventAt(db: Db, sessionId: string): number | undefined {
+  const latest = db.prepare<[string, string], { ts: number }>(
+    'SELECT ts FROM events WHERE session_id = ? AND type = ? ORDER BY seq DESC LIMIT 1',
+  );
+  let at: number | undefined;
+  for (const type of AGENT_OUTPUT_TYPES) {
+    const ts = latest.get(sessionId, type)?.ts;
+    if (ts !== undefined && (at === undefined || ts > at)) at = ts;
+  }
+  return at;
+}
+
+/** The `ts` of the session's last event from before `before`, unix ms; undefined for none. */
+export function lastEventBefore(db: Db, sessionId: string, before: number): number | undefined {
+  return db
+    .prepare<[string, number], { ts: number }>('SELECT ts FROM events WHERE session_id = ? AND ts < ? ORDER BY seq DESC LIMIT 1')
+    .get(sessionId, before)?.ts;
+}
+
 export function lastSeq(db: Db, sessionId: string): number {
   const row = db
     .prepare<[string], { last_seq: number }>('SELECT last_seq FROM sessions WHERE id = ?')
