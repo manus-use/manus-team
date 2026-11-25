@@ -121,10 +121,10 @@ Each tied to the spec.
 
 **Files:** `src/config.ts`; tests `tests/progress-config.test.ts` (new), `tests/config.test.ts`.
 
-- [ ] **Step 1: Write the tests.** Defaults `{ enabled: false, minSeconds: 30 }`; `enabled: true` and `min_seconds: 0` and `3600` read; `min_seconds: "30s"` refused with `<path>: kanban.progress.min_seconds must be a whole number, 0 or more, got "30s"`, `5000` with `<path>: kanban.progress.min_seconds must be from 0 to 3600, got 5000`, an unknown key refused, `enabled: 'yes'` refused. `tests/config.test.ts`'s defaults of the section gain `progress`.
-- [ ] **Step 2: Verify they fail**: `config.kanban.progress` undefined.
+- [ ] **Step 1: Write the tests.** Defaults `{ enabled: false, minSeconds: 30 }`; `enabled: true` and `min_seconds: 0` and `3600` read; `min_seconds: "30s"` refused with `<path>: kanban.progress.min_seconds must be a whole number, 0 or more, got "30s"`, `5000` with `<path>: kanban.progress.min_seconds must be from 0 to 3600, got 5000`, an unknown key refused, `enabled: 'yes'` refused. `tests/config.test.ts`'s two expectations of the whole section gain `progress`.
+- [ ] **Step 2: Verify they fail**: with `src/config.ts` as it was, `Tests  6 failed (6)`, `kanban.progress` undefined and `progress` an unknown setting.
 - [ ] **Step 3: Implement.** `ProgressSettings`, `PROGRESS_DEFAULTS`, `progress` in `KanbanSettings` and `KANBAN_DEFAULTS`, `'progress'` in `kanban`'s `reject`, the subsection read as `wake` is, `min_seconds` by `wholeNumber`.
-- [ ] **Step 4: Run everything.** Unit: `Tests  3452 passed (3452)`, six new.
+- [ ] **Step 4: Run everything.** Unit: `Tests  3440 passed (3440)`, six new.
 - [ ] **Step 5: Commit** "Read kanban.progress, off by default, with min_seconds".
 
 ## Task 4: The card

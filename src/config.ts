@@ -209,7 +209,26 @@ export interface KanbanSettings {
   blockRecurrenceLimit: number;
   /** `kanban.wake` (wake spec §11): a task's outcomes starting a turn. */
   wake: WakeSettings;
+  /** `kanban.progress` (progress cards spec §3): a live card for each long agent run a chat follows. */
+  progress: ProgressSettings;
 }
+
+/**
+ * The `kanban.progress` subsection (progress cards spec §3), snake case and
+ * file only, as the section's keys are. Off by default: it adds a message per
+ * long run to every thread that follows one, and an update every few seconds.
+ */
+export interface ProgressSettings {
+  /** True: a live card for each agent run a thread or a direct message follows. */
+  enabled: boolean;
+  /** A run gets its card once it has run this long, in seconds. */
+  minSeconds: number;
+}
+
+export const PROGRESS_DEFAULTS: ProgressSettings = { enabled: false, minSeconds: 30 };
+
+/** The most `kanban.progress.min_seconds` may be: an hour. */
+const PROGRESS_MIN_SECONDS_MAX = 3600;
 
 /**
  * The `kanban.wake` subsection (wake spec §11), snake case and file only, as
@@ -286,6 +305,7 @@ export const KANBAN_DEFAULTS: Omit<KanbanSettings, 'maxRunning' | 'maxRunningFro
   nudgeLimit: 2,
   blockRecurrenceLimit: 2,
   wake: WAKE_DEFAULTS,
+  progress: PROGRESS_DEFAULTS,
 };
 
 /** The section's numeric keys, as the file spells them, and the setting each sets. */
@@ -507,6 +527,7 @@ export function loadConfig(
       nudgeLimit: file.kanban.nudgeLimit ?? KANBAN_DEFAULTS.nudgeLimit,
       blockRecurrenceLimit: file.kanban.blockRecurrenceLimit ?? KANBAN_DEFAULTS.blockRecurrenceLimit,
       wake: { ...WAKE_DEFAULTS, ...file.kanban.wake },
+      progress: { ...PROGRESS_DEFAULTS, ...file.kanban.progress },
     },
     cron: {
       enabled: file.cron.enabled ?? CRON_DEFAULTS.enabled,
@@ -920,7 +941,7 @@ interface FileConfig {
     readOnlyTools: readonly string[];
     maskExempt: readonly string[];
   };
-  kanban: { enabled?: boolean; wake?: Partial<WakeSettings> } & Partial<Record<(typeof KANBAN_NUMBERS)[keyof typeof KANBAN_NUMBERS], number>>;
+  kanban: { enabled?: boolean; wake?: Partial<WakeSettings>; progress?: Partial<ProgressSettings> } & Partial<Record<(typeof KANBAN_NUMBERS)[keyof typeof KANBAN_NUMBERS], number>>;
   cron: { enabled?: boolean; maxRunning?: number; idleTimeoutS?: number; tz?: string };
 }
 
@@ -1014,9 +1035,12 @@ function parseFile(path: string, text: string): FileConfig {
     'readOnlyTools',
     'maskExempt',
   ]);
-  reject(path, 'kanban', kanbanRaw, ['enabled', ...Object.keys(KANBAN_NUMBERS), 'wake']);
+  reject(path, 'kanban', kanbanRaw, ['enabled', ...Object.keys(KANBAN_NUMBERS), 'wake', 'progress']);
   const wakeRaw = kanbanRaw['wake'] === undefined || kanbanRaw['wake'] === null ? {} : section(path, 'kanban.wake', kanbanRaw['wake']);
   reject(path, 'kanban.wake', wakeRaw, ['enabled', ...Object.keys(WAKE_NUMBERS)]);
+  const progressRaw =
+    kanbanRaw['progress'] === undefined || kanbanRaw['progress'] === null ? {} : section(path, 'kanban.progress', kanbanRaw['progress']);
+  reject(path, 'kanban.progress', progressRaw, ['enabled', 'min_seconds']);
   reject(path, 'cron', cronRaw, ['enabled', ...Object.keys(CRON_NUMBERS), 'tz']);
 
   out.workspace = str(path, 'workspace', root['workspace']);
@@ -1073,6 +1097,18 @@ function parseFile(path: string, text: string): FileConfig {
     wake[setting] = n;
   }
   if (Object.keys(wake).length > 0) out.kanban.wake = wake;
+  const progress: Partial<ProgressSettings> = {};
+  const progressEnabled = bool(path, 'kanban.progress.enabled', progressRaw['enabled']);
+  if (progressEnabled !== undefined) progress.enabled = progressEnabled;
+  // 0 is allowed, so a whole number, not a positive one.
+  const minSeconds = wholeNumber(path, 'kanban.progress.min_seconds', progressRaw['min_seconds']);
+  if (minSeconds !== undefined) {
+    if (minSeconds > PROGRESS_MIN_SECONDS_MAX) {
+      throw new ConfigError(`${path}: kanban.progress.min_seconds must be from 0 to ${PROGRESS_MIN_SECONDS_MAX}, got ${minSeconds}`);
+    }
+    progress.minSeconds = minSeconds;
+  }
+  if (Object.keys(progress).length > 0) out.kanban.progress = progress;
 
   const cronEnabled = bool(path, 'cron.enabled', cronRaw['enabled']);
   if (cronEnabled !== undefined) out.cron.enabled = cronEnabled;

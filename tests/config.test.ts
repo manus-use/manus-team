@@ -729,6 +729,7 @@ describe('loadConfig: the kanban section', () => {
       nudgeLimit: 2,
       blockRecurrenceLimit: 2,
       wake: { enabled: true, perHour: 6, maxDepth: 5, holdMinutes: 10 },
+      progress: { enabled: false, minSeconds: 30 },
     });
     expect(load({ MT_MAX_LIVE_SESSIONS: '3' }).kanban.maxRunning).toBe(3);
   });
@@ -763,6 +764,7 @@ describe('loadConfig: the kanban section', () => {
       nudgeLimit: 1,
       blockRecurrenceLimit: 3,
       wake: { enabled: true, perHour: 6, maxDepth: 5, holdMinutes: 10 },
+      progress: { enabled: false, minSeconds: 30 },
     });
   });
 
