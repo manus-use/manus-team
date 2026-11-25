@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -25,6 +26,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 const SCRIPT = new URL('../install.sh', import.meta.url).pathname;
 const EXAMPLE = new URL('../config.example.yaml', import.meta.url).pathname;
+const SKILL = new URL('../skills/mt-kanban', import.meta.url).pathname;
 
 interface Fx {
   root: string;
@@ -51,6 +53,7 @@ function fixture(): Fx {
   mkdirSync(bin);
   copyFileSync(SCRIPT, join(checkout, 'install.sh'));
   copyFileSync(EXAMPLE, join(checkout, 'config.example.yaml'));
+  cpSync(SKILL, join(checkout, 'skills', 'mt-kanban'), { recursive: true });
   symlinkSync(process.execPath, join(bin, 'node'));
   // The stub npm: records its arguments and directory; its build writes a dist/mt.js that records its own.
   writeFileSync(
@@ -236,6 +239,49 @@ describe('install.sh', () => {
     expect(r.code).toBe(1);
     expect(r.err).toMatch(/node 22\.12 or later is needed.*v20\.11\.1/);
     expect(calls(fx)).toEqual([]);
+  });
+
+  it("copies the board's skill to ~/.agents/skills/mt-kanban, with the list of its files", () => {
+    fx = fixture();
+    const r = fx.run();
+    expect(r.code).toBe(0);
+    const dest = join(fx.home, '.agents', 'skills', 'mt-kanban');
+    expect(r.out).toContain(`installed the mt-kanban skill at ${dest}\n`);
+    expect(readFileSync(join(dest, 'SKILL.md'), 'utf8')).toBe(readFileSync(join(SKILL, 'SKILL.md'), 'utf8'));
+    expect(readFileSync(join(dest, '.installed-by-manus-team'), 'utf8')).toMatch(/^# Installed by manus-team\..*\nSKILL\.md\n$/);
+  });
+
+  it('replaces its own copy on a second run: the files it lists, not a file someone added', () => {
+    fx = fixture();
+    expect(fx.run().code).toBe(0);
+    const dest = join(fx.home, '.agents', 'skills', 'mt-kanban');
+    writeFileSync(join(dest, 'SKILL.md'), 'an old version');
+    writeFileSync(join(dest, 'dropped.md'), 'a file an older version shipped');
+    writeFileSync(join(dest, '.installed-by-manus-team'), '# list\nSKILL.md\ndropped.md\n../outside.md\n');
+    writeFileSync(join(fx.home, '.agents', 'skills', 'outside.md'), 'not ours');
+    writeFileSync(join(dest, 'notes.md'), 'my own notes');
+    const r = fx.run();
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(`replaced the mt-kanban skill at ${dest}; kept a file not from manus-team: notes.md\n`);
+    expect(readFileSync(join(dest, 'SKILL.md'), 'utf8')).toBe(readFileSync(join(SKILL, 'SKILL.md'), 'utf8'));
+    expect(existsSync(join(dest, 'dropped.md'))).toBe(false);
+    expect(readFileSync(join(dest, 'notes.md'), 'utf8')).toBe('my own notes');
+    expect(existsSync(join(fx.home, '.agents', 'skills', 'outside.md'))).toBe(true);
+  });
+
+  it("leaves a skill directory it did not make, or a symlink, as it is, with a warning, and still installs", () => {
+    fx = fixture();
+    const dest = join(fx.home, '.agents', 'skills', 'mt-kanban');
+    mkdirSync(dest, { recursive: true });
+    writeFileSync(join(dest, 'SKILL.md'), 'my own mt-kanban');
+    const r = fx.run();
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(`warning: left ${dest} as it is: manus-team did not install it (it has no .installed-by-manus-team)`);
+    expect(readFileSync(join(dest, 'SKILL.md'), 'utf8')).toBe('my own mt-kanban');
+    expect(existsSync(join(fx.home, '.manus-team', 'bin', 'mt'))).toBe(true);
+    rmSync(dest, { recursive: true });
+    symlinkSync(SKILL, dest);
+    expect(fx.run().out).toContain(`warning: left ${dest} as it is: it is a symlink, not a copy manus-team made`);
   });
 
   it('refuses an unknown option', () => {

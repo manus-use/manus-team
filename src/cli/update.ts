@@ -16,6 +16,7 @@ import { parse, UsageError } from './args.js';
 import type { MtIo } from './mt.js';
 import { realServiceDeps, serviceView, unreadableHint, type RunResult, type ServiceDeps, type ServiceView } from './service.js';
 import { findNpm, mtCommand, shQuote } from './shell.js';
+import { installSkill, SKILL_NAME, skillLine, skillPlan, skillSource, skillTarget } from './skill-install.js';
 import { finishByHand, stepsBack, stepsForward, type AdvicePaths } from './update-advice.js';
 import { UNCHANGED_STEPS, UpdateLock, readUpdateLock, type UpdateLockState, type UpdateStep } from './update-lock.js';
 
@@ -32,7 +33,8 @@ import { UNCHANGED_STEPS, UpdateLock, readUpdateLock, type UpdateLockState, type
  *    and ask. `--check` stops here.
  * 4. `git merge --ff-only`, `npm ci` when the dependencies changed, the build.
  * 5. The new build's `mt service check`.
- * 6. The backup, once the pid and the version are found unchanged.
+ * 6. The backup, once the pid and the version are found unchanged; then the
+ *    board's skill copied to ~/.agents/skills, as install.sh copies it.
  * 7. `mt service restart`'s own code, and up to 60 seconds for `connected as`.
  *
  * Every git, npm and child node call goes through `UpdateDeps.run`, in a
@@ -830,9 +832,48 @@ class Update {
       }
     }
 
+    const skill = this.boardSkillTarget();
+    if (skill !== undefined) {
+      const plan = skillPlan(skill);
+      this.say(
+        plan.kind === 'foreign'
+          ? `the ${SKILL_NAME} skill is not copied: ${skill} is left as it is, as ${plan.why}`
+          : `the ${SKILL_NAME} skill is ${plan.kind === 'install' ? 'installed' : 'replaced'} at ${skill}, after the backup`,
+      );
+    }
+
     this.lock = { ...this.lock, servicePid: this.servicePid, userVersion: this.version, db: this.dbPath };
     this.writeLock('show');
     return true;
+  }
+
+  /**
+   * Where the board's skill is copied (install.sh's rule): under this shell's
+   * HOME, when the new tree has the skill, as the checkout does now or the
+   * incoming commits add it; undefined otherwise, and nothing is said of it.
+   */
+  private boardSkillTarget(): string | undefined {
+    const source = skillSource(this.checkout);
+    const has =
+      lstatSync(join(source, 'SKILL.md'), { throwIfNoEntry: false })?.isFile() === true ||
+      this.added.includes(`skills/${SKILL_NAME}/SKILL.md`);
+    return has ? skillTarget(this.shellEnv) : undefined;
+  }
+
+  /**
+   * The new tree's skill copied, after the backup, before the restart, so the
+   * new gateway's roles find it. A failure is a warning: the update is done, and
+   * install.sh or the next update copies it again.
+   */
+  private copySkill(): void {
+    const target = this.boardSkillTarget();
+    const source = skillSource(this.checkout);
+    if (target === undefined || lstatSync(join(source, 'SKILL.md'), { throwIfNoEntry: false })?.isFile() !== true) return;
+    try {
+      this.say(skillLine(installSkill(source, target)));
+    } catch (err) {
+      this.warn(`the ${SKILL_NAME} skill was not copied to ${target}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /** The question, at a terminal, unless `--yes`. */
@@ -894,6 +935,7 @@ class Update {
       }
     }
     await this.goBackIf(failed);
+    this.copySkill();
   }
 
   /** Run one of steps 4 to 6 to its end; its failure, or undefined. */
