@@ -1274,4 +1274,4 @@ there was only one implementation behind it; resuming it natively added one even
 
 ## License
 
-TBD
+MIT. See [LICENSE](LICENSE).
