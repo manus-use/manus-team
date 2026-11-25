@@ -114,6 +114,73 @@ Bot:   Waking the agent for 1 board update.
   [wake design](docs/specs/2026-11-19-wake-design.md) and of the
   [progress cards design](docs/specs/2026-11-24-progress-cards-design.md).
 
+## How it fits together
+
+```mermaid
+flowchart LR
+  subgraph Chat["Chat channels"]
+    Lark["Lark / Feishu"]
+    Future["Telegram, Discord (planned)"]:::planned
+  end
+  subgraph Gateway["manus-team gateway"]
+    Adapter["Lark adapter<br/>(the channel port)"]
+    Router["Router + tiers<br/>(owner, operate, talk,<br/>grants read from the DB)"]
+    Commands["Chat commands<br/>/kanban, /cron, /auth"]
+    Sessions["Session registry + actors<br/>(chat, run and fire sessions)"]
+    Board["Kanban service<br/>tasks, runs, workflows"]
+    Dispatcher["Dispatcher<br/>claims tasks, renders roles"]
+    Loops["Notifier, waker, person cards,<br/>progress cards, unblock redraw"]
+    Cron["Cron service + scheduler<br/>(a tick every 30 s)"]
+    Socket["Worker socket<br/>(board, cron and wake requests)"]
+    DB[("SQLite<br/>event log, board, jobs,<br/>grants, people")]
+  end
+  subgraph Agents["Agents (on the gateway's host, as its user)"]
+    Drivers["Drivers: acp, structured-cli"]
+    Runtimes["Claude Code, bytesec, ..."]
+    Work["Workspaces<br/>(named directories, or one<br/>directory or worktree per task)"]
+  end
+  Mt["Operator's mt<br/>(a terminal)"]
+  Lark <--> Adapter
+  Future -.-> Adapter
+  Adapter --> Router
+  Router -- "turns, approval answers" --> Sessions
+  Router --> Commands
+  Commands --> Board
+  Commands --> Cron
+  Commands -- "grants, people seen" --> DB
+  Dispatcher -- "claims" --> Board
+  Dispatcher -- "run sessions" --> Sessions
+  Cron -- "agent fires" --> Sessions
+  Cron -- "script fires" --> Work
+  Cron -- "fire output" --> Adapter
+  Loops -- "wake turns" --> Sessions
+  Loops -- "read events, move cursors" --> DB
+  Loops -- "notices and cards" --> Adapter
+  Sessions -- "replies, approval cards" --> Adapter
+  Sessions --> Drivers
+  Sessions -- "event log" --> DB
+  Board --> DB
+  Cron --> DB
+  Drivers --> Runtimes --> Work
+  Runtimes -- "mt kanban, mt cron, mt wake" --> Socket
+  Socket --> Board
+  Socket --> Cron
+  Mt -- "opens it directly" --> DB
+  Mt -. "nudge" .-> Socket
+  classDef planned stroke-dasharray: 5 5
+```
+
+A Lark message reaches the router through the channel adapter. The router checks the sender's
+tier, counting any grant held in the database, then hands a turn to its chat's session, or a
+command such as `/kanban`, `/cron` or `/auth` to that command's handler. Every agent runs in a
+session opened through the one session registry: a chat's, a board run's that the dispatcher
+opens for a task it claims, and a cron fire's; a run's session posts into a sink that forwards
+only a supervised agent's approval cards to the chat following its task, and a fire's posts
+nothing, the scheduler sending the fire's output itself. The board's loops read its events from
+the database and post to Lark, and the waker wakes an agent with a turn in its chat's own session.
+An agent's shell reaches the gateway through the worker socket, while the operator's `mt` opens
+the database itself and nudges the gateway over the socket after a change.
+
 ## Quick start
 
 1. Create a Lark app with the bot's permissions and events: [Feishu/Lark app setup](#feishulark-app-setup).
@@ -1140,13 +1207,10 @@ its goals, each with how far this build goes:
   isolated workspace. Checkpoints at turn boundaries are designed, not built.
 - **Audit:** an append-only event log is the system of record.
 
-```
-Channels ──> Gateway ──> Driver ──> Broker ──> Agent runtime
-                │                      │
-          event log (SQLite)     detached, reattachable
-```
-
-The broker in this picture is not built yet: today the gateway's driver holds the agent itself.
+How the parts connect today is drawn in [How it fits together](#how-it-fits-together). The one
+part that picture leaves out is the broker, which is planned, not built: it would sit between a
+driver and the agent runtime, holding the agent detached and reattachable, so that a gateway
+restart no longer ends a live run. Today the gateway's driver holds the agent itself.
 
 ### The core idea
 
