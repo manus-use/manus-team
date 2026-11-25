@@ -11,7 +11,7 @@
 - **The setting** (`src/config.ts`, Task 3): `kanban.progress.enabled` and `min_seconds`.
 - **The card** (`src/channel/render.ts`, `src/kanban/chat-render.ts`, `src/core/ids.ts`, Task 4): `toolGroups`, `renderProgressCard`, the outcome words, the times, the uuid.
 - **The loop** (`src/kanban/progress.ts`, Task 5): the fold, the round, the pace and holds, the errors, the final draw and a boot-closed run's time.
-- **Stop** (`src/db/kanban.ts`, `src/kanban/service.ts`, `src/kanban/chat.ts`, `src/kanban/progress.ts`, Task 6): `stop` bound to a run, the press, its redraws.
+- **Stop** (`src/db/kanban.ts`, `src/kanban/service.ts`, `src/kanban/chat.ts`, Task 6): `stop` bound to a run, the press; its redraws are the loop's, from Task 5.
 - **The wiring** (`src/index.ts`, `tests/fakes/cli-agent.mjs`, Task 7): built, started and stopped with the other loops, the startup line, end to end.
 - **The documents** (`README.md`, `docs/kanban-guide.md`, Task 8).
 
@@ -164,12 +164,12 @@ The loop keeps, by run, a `Live`: the fold, the markdown, state and `try` last d
 
 ## Task 6: Stop
 
-**Files:** `src/db/kanban.ts`, `src/kanban/service.ts`, `src/kanban/chat.ts`, `src/kanban/progress.ts`; test `tests/progress-stop.test.ts` (new).
+**Files:** `src/db/kanban.ts`, `src/kanban/service.ts`, `src/kanban/chat.ts`; test `tests/progress-stop.test.ts` (new).
 
 - [ ] **Step 1: Write the tests**, §14's Stop press bullet: through `KanbanChat.card` with a `ProgressCards` over the fake channel. An operator's press stops the run, blocks the task `needs_input`, cancels the turn, answers before the redraw settles, and the card says `⏸ stopping, asked by Alice`; a talk-tier press refused, the card redrawn with `try` 1, and the same person's press of the new value, once granted, stopping; two tier refusals within 5 s one redraw, and the loop's update at the pace's end landing with the second `try` and nothing else changed; a person's run refused; a stale press drawn final with `This run has ended.`, paced to one a message every 5 s; `run_superseded` and `no_open_run` taken as stale; a press on a stopping or ending run answered `That run is already ending.`; `board.stop` with another run's id refused `run_superseded`; a stop during an in-flight update: the update lands, then the stopping redraw; `redrawNow` on a closed run's row drawn final and marked final, on a `let_go` row drawn final and left.
-- [ ] **Step 2: Verify they fail**: the stop press answered `That button is not one the board knows.`
-- [ ] **Step 3: Implement.** `board.stop(db, taskId, by, now, runId?)` refuses `run_superseded` when the open run is not `runId`. `service.stop(taskId, by, opts?: { runId?: string })`. `KanbanChat.card` takes `act: 'stop'` before the person-card path; `KanbanChatDeps` gains `progressRedraw`, `progressEnded`, `progressRefused`. `ProgressCards` gains `redrawNow`, `redrawEnded`, `refusedTier`.
-- [ ] **Step 4: Run everything.** Unit: `Tests  3531 passed (3531)`, fifteen new.
+- [ ] **Step 2: Verify they fail**: with the three modules as they were, `Tests  10 failed | 1 passed (11)`, the stop press answered `That button is not one the board knows.`; the one that passes is the stale press's pace, whose second press is refused either way.
+- [ ] **Step 3: Implement.** `board.stop(db, taskId, by, now, runId?)` refuses `run_superseded` when the open run is not `runId`. `service.stop(taskId, by, opts?: { runId?: string })`. `KanbanChat.card` takes `act: 'stop'` before the person-card path; `KanbanChatDeps` gains `progressRedraw`, `progressEnded`, `progressRefused`. `ProgressCards` has had `redrawNow`, `redrawEnded`, `refusedTier` since Task 5.
+- [ ] **Step 4: Run everything.** Unit: `Tests  3500 passed (3500)`, eleven new.
 - [ ] **Step 5: Commit** "Stop a board run from its progress card, checked against the run, and redraw the card at once".
 
 ## Task 7: The wiring, end to end
@@ -179,7 +179,7 @@ The loop keeps, by run, a `Live`: the fold, the markdown, state and `try` last d
 - [ ] **Step 1: Write the tests**, through `createGateway` with the fake Lark channel and the fake CLI agent in a new `progress` mode (a tool running, then, once `release-1` is beside the log, the tool done and a line of text, then, once `release-2` is there, `mt kanban complete`): a run in a task's thread gets one card there with `min_seconds: 0`; it is updated as the tool completes; when the run completes the card is drawn final, `✓ completed`, and the notice comes after the card; a Stop pressed on the card stops the run, the card drawn final `⏸ stopped`; a task in a group at chat scope gets no card and its notice; off, nothing is sent; the startup lines.
 - [ ] **Step 2: Verify they fail**: no card is sent.
 - [ ] **Step 3: Implement.** In `createGateway`, inside `if (config.kanban.enabled)`, after `KanbanChat`, when `config.kanban.progress.enabled`, a `ProgressCards` with `held: (taskId) => chat.held(taskId)`; `KanbanChat` given the three closures through a `let progress`; the startup line of §3; `Gateway.progress`; `bootedAt` the clock at the top of `start()`; `progress?.start()` after `cards?.start()`; `progress?.stop()` after `cards?.stop()`, and `progress?.idle(SHUTDOWN_DRAIN_MS)` in the drain, with its line.
-- [ ] **Step 4: Run everything.** Unit: `Tests  3531 passed (3531)`; e2e: `Tests  187 passed (187)`, four new.
+- [ ] **Step 4: Run everything.** Unit: `Tests  3500 passed (3500)`; e2e: `Tests  187 passed (187)`, four new.
 - [ ] **Step 5: Commit** "Wire the progress cards into the gateway, started after the boot and drained before the channel closes".
 
 ## Task 8: The documents
@@ -188,7 +188,7 @@ The loop keeps, by run, a `Live`: the fold, the markdown, state and `try` last d
 
 - [ ] **Step 1: Write.** The README's configuration table gains `kanban.progress.enabled` and `kanban.progress.min_seconds`, with the exposure: the tools' titles and the agent's words mid-run go to everyone in the thread, and only the secrets the gateway knows are masked; its board section a paragraph on the card and Stop. The guide's §8 ("Watching and steering") gains "Progress cards", and §9's "Stop, assign and archive" the Stop button.
 - [ ] **Step 2: Verify.** `tests/docs-*.test.ts` pass; typecheck and `npm run build` clean.
-- [ ] **Step 3: Run everything.** Unit: `Tests  3531 passed (3531)`, 112 more than the baseline's 3419; e2e `Tests  187 passed (187)`.
+- [ ] **Step 3: Run everything.** Unit: `Tests  3500 passed (3500)`, 81 more than the baseline's 3419; e2e `Tests  187 passed (187)`.
 - [ ] **Step 4: Commit** "Document progress cards and their Stop button, and what they show the thread".
 
 ---

@@ -1508,10 +1508,11 @@ export class KanbanService {
     return board.markUnblockRedrawn(this.#db, messageId, lifts);
   }
 
-  stop(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow }> {
-    const ids = idsRefused(taskId);
+  /** Stop the task's open run; given `runId`, only while that run is the open one (progress cards spec §8.2). */
+  stop(taskId: string, by: string, opts: { runId?: string } = {}): Result<{ task: TaskRow; run: RunRow }> {
+    const ids = opts.runId === undefined ? idsRefused(taskId) : idsRefused(taskId, opts.runId);
     if (ids !== undefined) return ids;
-    return board.stop(this.#db, taskId, by, this.#clock.now());
+    return board.stop(this.#db, taskId, by, this.#clock.now(), opts.runId);
   }
 
   archive(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {

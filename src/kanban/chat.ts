@@ -49,6 +49,7 @@ import type { KanbanService, WorkflowMade } from './service.js';
 import { paramsLine } from './workflow.js';
 import {
   DEFAULT_BOARD,
+  REPORTED_OUTCOMES,
   type Assignee,
   type BoardRow,
   type ChatAt,
@@ -102,6 +103,16 @@ export interface KanbanChatDeps {
    * the unblock redraw). Bounded and never rejecting: `UnblockRedraws.redrawMessage`.
    */
   liftedNotice?: (messageId: string) => Promise<void>;
+  /**
+   * A progress card's redraws (progress cards spec §8): after a Stop press's
+   * stop, `ProgressCards.redrawNow`; for a press on an ended run,
+   * `redrawEnded`; for a press refused for operate tier, `refusedTier`, which
+   * bumps the Stop button's try. Bounded and never rejecting; absent with
+   * progress cards off, when a Stop press still stops and nothing redraws.
+   */
+  progressRedraw?: (runId: string) => Promise<void>;
+  progressEnded?: (messageId: string, runId: string) => Promise<void>;
+  progressRefused?: (messageId: string, runId: string) => Promise<void>;
   /** Metadata, masked: a press whose work in the background failed. */
   note?: (line: string) => void;
   /** How long a redraw is waited for; `REDRAW_MS` unless a test says otherwise. */
@@ -115,6 +126,9 @@ export interface KanbanChatDeps {
   /** `kanban.wake.enabled` and the gateway's zone, for `task show`'s Wake line (wake spec §10); absent, on, in the process's zone. */
   wake?: { enabled: boolean; zone: string };
 }
+
+/** A run's own report: a run decided so is still being tidied up by its agent, and may be stopped as a typed stop would (progress cards spec §8.1). */
+const REPORTED: ReadonlySet<string> = new Set(REPORTED_OUTCOMES);
 
 /** Who may run each command (spec §9.1, §10); a person's own reports check who is named, below. */
 const TIERS: Readonly<Record<KanbanCommand['verb'], Tier>> = {
@@ -824,6 +838,7 @@ export class KanbanChat {
       this.#changed();
       return `${id(taskId)} is unblocked, back to ${r.task.phase}.`;
     }
+    if (verb === 'stop') return this.#stopPress(action.messageId, taskId, ref, by, presser);
     if (verb !== 'done' && verb !== 'block' && verb !== 'approve' && verb !== 'changes') {
       return 'That button is not one the board knows.';
     }
@@ -860,6 +875,47 @@ export class KanbanChat {
     this.#busy.add(press.messageId);
     this.#track(this.#press(verb, press, by, name ?? { openId: presser.openId }, text).finally(() => this.#busy.delete(press.messageId)));
     return `${{ done: 'Completing', block: 'Blocking', approve: 'Approving', changes: 'Asking for changes on' }[verb]} ${id(taskId)}: the card shows how it goes.`;
+  }
+
+  /**
+   * A progress card's Stop (progress cards spec §8): operate tier, read live;
+   * the card's run, an agent's, of this task; then, for a run still open and
+   * not ending already, the same stop as `/kanban task stop`, bound to the run,
+   * and the card redrawn at once. A press on an ended run, or one whose run
+   * ended before the stop, draws the card final with "This run has ended."
+   * Answered at once: the redraws go on in the background.
+   */
+  #stopPress(messageId: string, taskId: string, runId: string, by: string, presser: Principal): string {
+    if (!this.#deps.hasTier(presser, 'operate')) {
+      this.#progress(() => this.#deps.progressRefused?.(messageId, runId));
+      return 'Stop changes the board, and needs operator permission.';
+    }
+    const shown = this.#deps.service.show(taskId);
+    if (!shown.ok) return refused(shown);
+    const run = shown.view.runs.find((r) => r.runId === runId);
+    if (run === undefined) return 'That button is not for a run of this task.';
+    if (run.agentConfig === null) return "That button is not for an agent's run.";
+    const ended = (): string => {
+      this.#progress(() => this.#deps.progressEnded?.(messageId, runId));
+      return `That run has ended: \`/kanban task show ${taskId}\` says where the task is.`;
+    };
+    if (run.endedAt !== null) return ended();
+    if (run.outcome !== null && !REPORTED.has(run.outcome)) return 'That run is already ending.';
+    const r = this.#deps.service.stop(taskId, by, { runId });
+    if (!r.ok) return r.code === 'run_superseded' || r.code === 'no_open_run' ? ended() : refused(r);
+    this.#decided(r.run);
+    this.#changed();
+    this.#progress(() => this.#deps.progressRedraw?.(runId));
+    return r.run.outcome === 'cancelled'
+      ? `Stopping ${id(taskId)}: the card shows how it goes.`
+      : `${id(taskId)}'s run had already reported (${forDisplay(r.run.outcome ?? 'undecided')}); it is being closed, and the task keeps that outcome.`;
+  }
+
+  /** A progress card's redraw, in the background: Lark waits about three seconds for the press's answer. */
+  #progress(redraw: () => Promise<void> | undefined): void {
+    this.#track(Promise.resolve().then(async () => {
+      await redraw();
+    }));
   }
 
   /**

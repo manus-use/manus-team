@@ -1765,13 +1765,20 @@ export function unblock(
  *
  * The run returned still has `endedAt` null when it is an agent's: the caller
  * cancels its turn, and closes it when the turn ends.
+ *
+ * Given `runId`, the stop is for that run only (progress cards spec §8.2): a
+ * task whose open run is another refuses `run_superseded`, inside the
+ * transaction, so a press on an ended run's card never stops its retry.
  */
-export function stop(db: Db, taskId: string, by: string, now: number): Result<{ task: TaskRow; run: RunRow }> {
+export function stop(db: Db, taskId: string, by: string, now: number, runId?: string): Result<{ task: TaskRow; run: RunRow }> {
   return tx(db, (d) => {
     const task = getTask(d, taskId);
     if (task === undefined) return refuse('not_found', `no task ${taskId}`);
     const open = openRunOf(d, taskId);
     if (open === undefined) return refuse('no_open_run', `task ${taskId} has no open run to stop`);
+    if (runId !== undefined && open.runId !== runId) {
+      return refuse('run_superseded', `run ${runId} of task ${taskId} is over; its open run is ${open.runId}`);
+    }
     if (open.outcome !== null) return { ok: true, task, run: open };
     decide(d, open, 'cancelled', {}, now);
     const recurrences = enterBlocked(d, task, 'needs_input', `stopped by ${by}`);
