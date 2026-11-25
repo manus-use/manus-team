@@ -71,16 +71,17 @@ Each tied to the spec.
 | `tests/progress-loop.test.ts` | new: Task 5 |
 | `tests/progress-stop.test.ts` | new: Task 6 |
 | `tests/progress-gateway.e2e.ts` | new: Task 7 |
-| eight schema tests | version 13 to 14 (Task 1) |
+| eight schema tests, `tests/gateway-startup.test.ts` | version 13 to 14 (Task 1) |
+| `tests/helpers/progress.ts` | new: a run decided or closed for a test |
 
 ---
 
 ## Task 1: Migration 014 and its writers
 
-**Files:** `schema/014_progress_cards.sql` (new), `src/db/kanban.ts`, `src/kanban/service.ts`, `src/db/WRITERS.md`; tests `tests/progress-schema.test.ts` (new), and `tests/kanban-schema.test.ts`, `tests/kanban-boards-schema.test.ts`, `tests/kanban-workflow-schema.test.ts`, `tests/kanban-worktree-schema.test.ts`, `tests/kanban-thread-roots.test.ts`, `tests/cron-schema.test.ts`, `tests/grants-writer.test.ts`, `tests/wake-schema.test.ts`.
+**Files:** `schema/014_progress_cards.sql` (new), `src/db/kanban.ts`, `src/kanban/service.ts`, `src/db/WRITERS.md`; tests `tests/progress-schema.test.ts` (new), and `tests/kanban-schema.test.ts`, `tests/kanban-boards-schema.test.ts`, `tests/kanban-workflow-schema.test.ts`, `tests/kanban-worktree-schema.test.ts`, `tests/kanban-thread-roots.test.ts`, `tests/cron-schema.test.ts`, `tests/grants-writer.test.ts`, `tests/wake-schema.test.ts`, `tests/gateway-startup.test.ts`; helper `tests/helpers/progress.ts` (new).
 
-- [ ] **Step 1: Write the tests.** `tests/progress-schema.test.ts`: the database at version 14, the table STRICT, its columns, the `state` check refusing `done`, the partial index; `openProgressCard` on an open undecided run writing `try_number` 1 and `try_limit` the gateway's 2, the task's own `failure_limit` 3 winning, `consecutive_failures` 1 giving 2; a second insert adding nothing; a decided run and a closed run given no row; `progressCardSent` writing the message once, a second call changing nothing; `progressCardDrawn` resetting `failures`; `progressCardRefused` answering 1, 2; `progressCardFinal` and `progressCardLetGo` only on an `open` row, neither moving a `final` row back. The eight schema tests' `13` becomes `14`.
-- [ ] **Step 2: Verify they fail.** `npx vitest run tests/progress-schema.test.ts`: every test fails, the database at version 13 and `openProgressCard` not a function.
+- [ ] **Step 1: Write the tests.** `tests/progress-schema.test.ts`: the database at version 14, the table STRICT, its columns, the `state` check refusing `done`, the partial index; `openProgressCard` on an open undecided run writing `try_number` 1 and `try_limit` the gateway's 2, the task's own `failure_limit` 3 winning, `consecutive_failures` 1 giving 2; a second insert adding nothing; a decided run and a closed run given no row; `progressCardSent` writing the message once, a second call changing nothing; `progressCardDrawn` resetting `failures`; `progressCardRefused` answering 1, 2; `progressCardFinal` and `progressCardLetGo` only on an `open` row, neither moving a `final` row back. The eight schema tests' `13` becomes `14`, `tests/kanban-schema.test.ts` lists the new table, and `tests/gateway-startup.test.ts`'s startup line says `schema at version 14`. The helper decides a run with no event, for the tests of what the cards read of a decided run, and closes one through `closeRun`.
+- [ ] **Step 2: Verify they fail.** `npx vitest run tests/progress-schema.test.ts` with the migration in place and the writers not: `Tests  7 failed | 1 passed (8)`, `openProgressCard` not a function.
 - [ ] **Step 3: Implement.** The migration as §4.1 writes it. In `src/db/kanban.ts`, after `markUnblockRedrawn`:
 
   ```ts
@@ -98,7 +99,7 @@ Each tied to the spec.
   ```
 
   and `progressCardSent`, `progressCardDrawn`, `progressCardRefused`, `progressCardFinal`, `progressCardLetGo`, each one `UPDATE … WHERE run_id = ? AND state = 'open'` (and `message_id IS NULL` for the send). `KanbanService` gains each, refusing a run id or message id that is not text `invalid`. WRITERS.md gains §4.2's row.
-- [ ] **Step 4: Run everything.** Unit: `Tests  3433 passed (3433)`, fourteen new.
+- [ ] **Step 4: Run everything.** Unit: `Tests  3427 passed (3427)`, eight new.
 - [ ] **Step 5: Commit** "Record each board run's progress card, in migration 014, through one writer".
 
 ## Task 2: The reads

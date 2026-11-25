@@ -63,9 +63,9 @@ function button(extra: Record<string, unknown> = {}): void {
 }
 
 describe('migration 013', () => {
-  it('is migrated to version 13, its three tables STRICT, with their indexes', () => {
-    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(13);
-    expect(h.db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 13 });
+  it('is migrated past version 13, its three tables STRICT, with their indexes', () => {
+    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(14);
+    expect(h.db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 14 });
     const strict = h.db
       .prepare<[], { name: string; strict: number }>(
         "SELECT name, strict FROM pragma_table_list WHERE name IN ('kanban_wakes', 'kanban_wake_events', 'kanban_deferred_buttons') ORDER BY name",
@@ -190,7 +190,7 @@ describe('migration 013', () => {
           `INSERT INTO kanban_unblock_buttons (message_id, channel, app_id, task_id, block_event, markdown, sent_at)
            VALUES ('om_1', 'lark', 'cli_app', 'k_old', 1, 'blocked', ?)`,
         ).run(NOW);
-        expect(migrate(d, SCHEMA_DIR)).toBe(13);
+        expect(migrate(d, SCHEMA_DIR)).toBe(14);
         expect(d.prepare('SELECT wake_by, wake_depth FROM kanban_tasks WHERE task_id = ?').get('k_old')).toEqual({ wake_by: null, wake_depth: 0 });
         expect(d.prepare('SELECT wake_cursor, chat_type FROM kanban_subscriptions WHERE task_id = ?').get('k_old')).toEqual({
           wake_cursor: 0,
