@@ -146,6 +146,8 @@ Each tied to the spec.
 
 **Files:** `src/kanban/progress.ts` (new); test `tests/progress-loop.test.ts` (new).
 
+The loop keeps, by run, a `Live`: the fold, the markdown, state and `try` last drawn, when a draw landed and was last tried, a hold, a message sent and not recorded, and `dirty`, set by a failed draw, so the cheap check never takes a card whose draw failed for unchanged.
+
 - [ ] **Step 1: Write the tests**, on a `ManualClock` with the fake channel, through `round()`:
   - which runs and where, §14's first two bullets; a held task; a channel not configured, its line once; a null `chat_type` read through `chatKindOf`, a found kind cached, a miss looked up again at the next round only, and a task typed meanwhile giving the run its card;
   - the fold: capped at 5,000 a round, the first included; no send until caught up; each read moving `throughSeq` to its bound;
@@ -155,9 +157,9 @@ Each tied to the spec.
   - the restart: open rows of runs closed by `registry.reconcileBoot()` and `Dispatcher.boot()` drawn final, `interrupted by a restart` with the time to the agent's last output; to the session's last event before the boot when the agent wrote nothing; no time with no session; a reported run with its outcome;
   - `stop()` ending a round after its current draw, and `idle()`;
   - the whole markdown masked before each send and update.
-- [ ] **Step 2: Verify they fail**: the file fails to collect, `src/kanban/progress.ts` not there.
+- [ ] **Step 2: Verify they fail**: the file fails to collect, `Cannot find module '../src/kanban/progress.js'`.
 - [ ] **Step 3: Implement** `foldProgress(p, events)` and `ProgressCards` as §7: `start`, `stop`, `idle`, `round`, the `Live` map, `#due`, `#send`, `#update`, `#final`, the chain by message, the holds, and the classification: a refusal `code !== 0 && !retryable`; gone, `CARD_GONE_CODES` or 230002; everything else held.
-- [ ] **Step 4: Run everything.** Unit: `Tests  3516 passed (3516)`, forty new.
+- [ ] **Step 4: Run everything.** Unit: `Tests  3489 passed (3489)`, twenty-eight new. The restart's three tests close runs through `dispatchHarness`'s real `registry.reconcileBoot()` and `Dispatcher.boot()`, on a database a first harness left with an open run.
 - [ ] **Step 5: Commit** "Run the progress card loop: open a card for each long run a thread follows, redraw it as it goes, and draw it final".
 
 ## Task 6: Stop
