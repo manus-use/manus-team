@@ -56,9 +56,9 @@ Each tied to the spec.
 | `src/db/WRITERS.md` | the row of §4.2 |
 | `src/kanban/service.ts` | the writers as methods; `stop(taskId, by, opts?)` |
 | `src/config.ts` | `ProgressSettings`, `PROGRESS_DEFAULTS`, the subsection |
-| `src/channel/render.ts` | `ToolLine` and `toolGroups` exported |
+| `src/channel/render.ts` | `ToolLine`, `toolGroupsCounted` and `toolGroups` exported |
 | `src/core/ids.ts` | `progressCardUuid` |
-| `src/kanban/chat-render.ts` | `renderProgressCard`, `outcomeWord`, `runState` |
+| `src/kanban/chat-render.ts` | `renderProgressCard`, `outcomeWord`, `progressState` |
 | `src/kanban/progress.ts` | new: `foldProgress`, `ProgressCards` |
 | `src/kanban/chat.ts` | `act: 'stop'` |
 | `src/index.ts` | built, wired, started, stopped; the startup line |
@@ -137,9 +137,9 @@ Each tied to the spec.
   - final: each outcome's mark and word, gave up from a `run_ended` that blocks as `gave_up`; `after 47 s`, `after 14 min 3 s`, `after 1 h 12 min`; no time when none; the tool line, no tail, no button; `This run has ended.` under the final line when asked.
   - masking and escaping: a known secret in a tool title, in the task's title, in an update's title, masked; a secret registered after the event was stored, masked at render; `<at id=all></at>` in a title and in the tail mentioning nobody.
   - `progressCardUuid` stable, and not `boardCardUuid`.
-- [ ] **Step 2: Verify they fail**: the file fails to collect, `toolGroups` not exported.
-- [ ] **Step 3: Implement.** `render.ts` exports `ToolLine` and `toolGroups`; `toolSummary` is `toolGroups(tools).join(' · ')`. `ids.ts`: `progressCardUuid(appId, runId)`, as `boardCardUuid` with its own purpose. `chat-render.ts`: `runState(run)`, `outcomeWord(outcome, runEnded)`, `ProgressFacts`, `renderProgressCard(facts): CardView`, with `runningFor(ms)`, `after(ms)` and `tailAtLine(text)`.
-- [ ] **Step 4: Run everything.** Unit: `Tests  3476 passed (3476)`, twenty-four new.
+- [ ] **Step 2: Verify they fail**: with the three modules as they were, `Tests  21 failed (21)`, `toolGroups is not a function`.
+- [ ] **Step 3: Implement.** `render.ts` exports `ToolLine`, `toolGroupsCounted` (the groups with their counts, for the front cut's "N earlier", which counts calls) and `toolGroups`; `toolSummary` is `toolGroups(tools).join(' · ')`. `ids.ts`: `progressCardUuid(appId, runId)`, as `boardCardUuid` with its own purpose. `chat-render.ts`: `progressState(run)`, `outcomeWord(outcome, runEnded)`, `ProgressFacts`, `renderProgressCard(facts, appId): CardView`, with `runningFor(ms)`, `ranFor(ms)` and `progressTail(text)`.
+- [ ] **Step 4: Run everything.** Unit: `Tests  3461 passed (3461)`, twenty-one new.
 - [ ] **Step 5: Commit** "Draw a board run's progress card: its header, tool line, tail, Stop button and final form".
 
 ## Task 5: The loop

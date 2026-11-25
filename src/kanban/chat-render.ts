@@ -3,12 +3,13 @@ import type { CardButton, CardView } from '../channel/types.js';
 import { boardCardNonce } from '../core/ids.js';
 import { formatWall, processZone } from '../cron/schedule.js';
 import type { BoardEntry, BoardSummary, ReviewRequest, TaskView } from '../db/kanban-read.js';
-import { redactKnownSecrets } from '../secrets.js';
+import { toolGroupsCounted, type ToolLine } from '../channel/render.js';
+import { redactKnownSecrets, withholdSecretPrefix } from '../secrets.js';
 import { stripControl } from '../text.js';
 import { LIST_FILTERS, USAGE } from './chat-parse.js';
 import { describeReported } from './commit.js';
 import type { DisplayStatus } from './status.js';
-import { DEFAULT_BOARD, type Assignee, type DeferredState, type DeferredWhy, type FailedGate, type GateRow, type KanbanEvent, type RunRow, type TaskRow, type Waiting } from './types.js';
+import { DEFAULT_BOARD, type Assignee, type DeferredState, type DeferredWhy, type FailedGate, type GateRow, type KanbanEvent, type RunOutcome, type RunRow, type TaskRow, type Waiting } from './types.js';
 
 /**
  * What `/kanban` says in chat (spec §9.3), and the notices a subscription hears
@@ -1221,4 +1222,206 @@ export function renderInstance(
     [...head, ...lines.slice(0, n), ...(n < lines.length ? [`… and ${lines.length - n} more lines: \`mt kanban workflow show ${instance.instanceId}\` at the terminal gives every one.`] : [])].join('\n');
   while (kept > 0 && render(kept).length >= WORKFLOW_REPLY_MAX) kept -= 1;
   return render(kept);
+}
+
+// ---------------------------------------------------------------------------
+// Progress cards (progress cards spec §5.3, §6)
+// ---------------------------------------------------------------------------
+
+/** A tool's title on a progress card, cut before the calls are grouped (spec §6.2). */
+export const PROGRESS_TITLE_CHARS = 80;
+/** The tool line's most, cut from its front (spec §6.2). */
+export const PROGRESS_TOOLS_CHARS = 1_500;
+/** The tail of the agent's text, at most (spec §6.3). */
+export const PROGRESS_TAIL_CHARS = 600;
+/** Where in the tail's first characters a line break or a space is looked for to cut at (spec §6.3). */
+const PROGRESS_TAIL_SEEK = 200;
+
+/**
+ * Where a run is, as a progress card draws it (spec §5.3): undecided; decided
+ * but still open, by its own report, by a stop, or by anything else; or ended,
+ * closed.
+ */
+export type ProgressState = 'undecided' | 'reported' | 'stopping' | 'ending' | 'ended';
+
+const REPORTED: ReadonlySet<string> = new Set(['completed', 'review_requested', 'changes_requested', 'blocked']);
+
+export function progressState(run: RunRow): ProgressState {
+  if (run.endedAt !== null) return 'ended';
+  if (run.outcome === null) return 'undecided';
+  if (REPORTED.has(run.outcome)) return 'reported';
+  return run.outcome === 'cancelled' ? 'stopping' : 'ending';
+}
+
+/** A run's outcome as a progress card says it: a mark and a word, never the raw outcome (spec §5.3). */
+export function outcomeWord(outcome: RunOutcome, runEnded?: KanbanEvent): { mark: '✓' | '✗' | '⏸'; word: string } {
+  switch (outcome) {
+    case 'completed':
+      return { mark: '✓', word: 'completed' };
+    case 'review_requested':
+      return { mark: '✓', word: 'sent for review' };
+    case 'changes_requested':
+      return { mark: '✓', word: 'changes requested' };
+    case 'blocked':
+    case 'terminal_provider':
+      return { mark: '⏸', word: 'blocked' };
+    case 'failed':
+    case 'crashed':
+    case 'timed_out':
+    case 'protocol_violation': {
+      const p = (runEnded?.payload ?? {}) as Record<string, unknown>;
+      return { mark: '✗', word: p['next'] === 'blocked' && p['blockKind'] === 'gave_up' ? 'gave up' : 'failed' };
+    }
+    case 'rate_limited':
+      return { mark: '✗', word: 'throttled' };
+    case 'cancelled':
+      return { mark: '⏸', word: 'stopped' };
+    case 'superseded':
+      return { mark: '⏸', word: 'superseded' };
+    case 'interrupted':
+      return { mark: '⏸', word: 'interrupted by a restart' };
+  }
+}
+
+/** What a progress card shows of its run, read by the loop from the board and the session. */
+export interface ProgressFacts {
+  task: TaskRow;
+  run: RunRow;
+  /** "Run N of M", fixed when the card's row was written (spec §5.4). */
+  tryNumber: number;
+  tryLimit: number;
+  /** The run's tool calls, whole run, in the order first heard of. */
+  tools: readonly ToolLine[];
+  /** The latest turn's text, as the agent said it: masked here. */
+  text: string;
+  /** An approval is waiting for a person (spec §6.4). */
+  approvalWaiting: boolean;
+  /** The run's session has events: false draws "Starting…". */
+  started: boolean;
+  now: number;
+  /** The run's `run_ended`, for "gave up" from "failed". */
+  runEnded?: KanbanEvent;
+  /** Who asked for the stop, for a stopping run: the `stopped` event's actor. */
+  stoppedBy?: string;
+  /** For an ended run: how long it ran, or null when no end is known (spec §5.3). */
+  ranMs?: number | null;
+  /** A stale press: the line "This run has ended." under the final line (spec §8.4). */
+  pressedEnded?: boolean;
+  /** The Stop button's try (spec §6.5); 0 or absent for none. */
+  attempt?: number;
+  nameOf?: NameOf;
+}
+
+/** "running 4 min", in whole minutes, so it changes once a minute (spec §6.1). */
+export function runningFor(ms: number): string {
+  const minutes = Math.floor(Math.max(0, ms) / 60_000);
+  if (minutes < 1) return 'running under a minute';
+  if (minutes < 60) return `running ${minutes} min`;
+  return `running ${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
+/** "after 14 min 3 s": to the second below an hour, to the minute above (spec §6.6). */
+export function ranFor(ms: number): string {
+  const seconds = Math.floor(Math.max(0, ms) / 1000);
+  if (seconds < 60) return `after ${seconds} s`;
+  if (seconds < 3600) return `after ${Math.floor(seconds / 60)} min ${seconds % 60} s`;
+  const minutes = Math.floor(seconds / 60);
+  return `after ${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
+/** The first `max` code points, with `…` when cut: never half an emoji. */
+function headChars(text: string, max: number): string {
+  const points = Array.from(text);
+  return points.length <= max ? text : `${points.slice(0, max - 1).join('')}…`;
+}
+
+/**
+ * The tool line (spec §6.2): each title cut to 80 characters before the calls
+ * are grouped, then cut from the front to 1,500 characters, whole groups
+ * dropped and counted by their calls, so the latest tools stay.
+ */
+function progressTools(tools: readonly ToolLine[]): string {
+  const groups = toolGroupsCounted(tools.map((t) => ({ title: headChars(t.title, PROGRESS_TITLE_CHARS), status: t.status })));
+  let from = 0;
+  let dropped = 0;
+  const line = (): string => `${from > 0 ? `… ${dropped} earlier · ` : ''}${groups.slice(from).map((g) => (g.count === 1 ? g.label : `${g.label} ×${g.count}`)).join(' · ')}`;
+  while (from < groups.length - 1 && line().length > PROGRESS_TOOLS_CHARS) {
+    dropped += groups[from]?.count ?? 0;
+    from += 1;
+  }
+  return line();
+}
+
+/**
+ * The tail of the agent's text (spec §6.3): masked whole first, a trailing
+ * prefix of a known secret withheld, then its last 600 characters, cut forward
+ * to a line break in their first 200, else to a space there, else at the
+ * character; quoted, with a line saying what was cut.
+ */
+export function progressTail(text: string): string {
+  const whole = redactKnownSecrets(withholdSecretPrefix(stripControl(text))).replace(/\r\n?/g, '\n').trim();
+  if (whole === '') return '';
+  if (whole.length <= PROGRESS_TAIL_CHARS) return quoted(whole);
+  let cut = end(whole, PROGRESS_TAIL_CHARS);
+  const seek = cut.slice(0, PROGRESS_TAIL_SEEK);
+  const nl = seek.indexOf('\n');
+  const space = seek.indexOf(' ');
+  if (nl !== -1) cut = cut.slice(nl + 1);
+  else if (space !== -1) cut = cut.slice(space + 1);
+  return quoted(`… (earlier output cut)\n${cut.trimStart()}`);
+}
+
+/**
+ * A board run's progress card (spec §6): its header, then, while the run is
+ * open, its tool line, the tail of the agent's text, the status lines and the
+ * Stop button while undecided; once ended, the final line and the tool line,
+ * with no text and no button. Every piece is masked before it is cut and
+ * escaped after; the loop masks the whole once more before it sends.
+ */
+export function renderProgressCard(f: ProgressFacts, appId: string): CardView {
+  const { task, run } = f;
+  const state = progressState(run);
+  const role = `${label(run.assignee.name, 80)}${run.kind === 'review' ? ', reviewing' : ''}`;
+  const tries = f.tryNumber > f.tryLimit ? `run ${f.tryNumber}` : `run ${f.tryNumber} of ${f.tryLimit}`;
+  const attempt = run.attempt === f.tryNumber ? '' : ` (attempt #${run.attempt})`;
+  const header = [`⚙️ **${titleText(task.title, f.nameOf)}** ${id(task.taskId)}`];
+  const tools = f.tools.length === 0 ? undefined : progressTools(f.tools);
+  if (state === 'ended') {
+    header.push(`${role} · ${tries}${attempt}`);
+    const { mark, word } = run.outcome === null ? { mark: '⏸', word: 'ended' } : outcomeWord(run.outcome, f.runEnded);
+    const out = [...header, `${mark} ${word}${f.ranMs === undefined || f.ranMs === null ? '' : ` ${ranFor(f.ranMs)}`}`];
+    if (f.pressedEnded === true) out.push('This run has ended.');
+    if (tools !== undefined) out.push(tools);
+    return { markdown: out.join('\n'), buttons: [] };
+  }
+  header.push(`${role} · ${tries}${attempt} · ${runningFor(f.now - run.startedAt)}`);
+  const out = [...header, tools ?? (f.started ? '_Working…_' : '_Starting…_')];
+  const tail = progressTail(f.text);
+  if (tail !== '') out.push(tail);
+  if (f.approvalWaiting) out.push('_Waiting for an approval: see the card in this chat._');
+  if (state === 'reported' || state === 'ending') {
+    const { word } = outcomeWord(run.outcome ?? 'completed', f.runEnded);
+    out.push(state === 'reported' ? `_Reported ${word}; finishing._` : `_Ending: ${word}._`);
+  } else if (state === 'stopping') {
+    out.push(`⏸ stopping, asked by ${f.stoppedBy === undefined ? 'someone' : personText(f.stoppedBy, f.nameOf)}`);
+  }
+  const tried = f.attempt ?? 0;
+  const buttons: CardButton[] =
+    state === 'undecided'
+      ? [
+          {
+            label: 'Stop',
+            style: 'danger',
+            value: {
+              ...(tried > 0 ? { try: String(tried) } : {}),
+              kind: 'kanban',
+              act: 'stop',
+              task: run.taskId,
+              run: run.runId,
+              nonce: boardCardNonce(appId, run.taskId, run.runId),
+            },
+          },
+        ]
+      : [];
+  return { markdown: out.join('\n'), buttons, ...(tried > 0 ? { attempt: tried } : {}) };
 }

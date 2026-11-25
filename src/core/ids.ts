@@ -154,6 +154,17 @@ export function boardCardUuid(appId: string, runId: string): string {
 }
 
 /**
+ * The `uuid` of a board run's progress card (progress cards spec §7.5): one for
+ * the run however often its send is tried, so a send that timed out and landed,
+ * sent again within Lark's hour, is one card. Its own purpose beside a person's
+ * card's, so the two are never taken for one.
+ */
+export function progressCardUuid(appId: string, runId: string): string {
+  const canonical = [appId, 'kanban-progress-card', runId].join(SEP);
+  return createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 50);
+}
+
+/**
  * The `uuid` of one message of a cron fire's delivery (the cron spec, §5.6): its
  * part, from 0, of the fire's answer, or its one line. Derived from the fire,
  * whose id is never reused, so a fire sent again after a restart is the same
