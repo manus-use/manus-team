@@ -1,8 +1,12 @@
 # manus-team configuration.
 #
+# docs/configuration.md sets it up step by step, and its section 7 is the full
+# reference: every key, its default, its limits and its environment variable.
+#
 # Copy to $MT_HOME/config.yaml (default ~/.manus-team/config.yaml), or point
-# MT_CONFIG at it. Every setting here is also settable by environment variable,
-# and the environment wins -- so an emergency override never needs a file edit.
+# MT_CONFIG at it. A setting with an environment variable can be set by it, and
+# the environment wins, so an emergency override never needs a file edit. The
+# kanban: and cron: sections are set in this file only.
 #
 # CREDENTIALS DO NOT GO IN THIS FILE. The agent runs as the same user as the
 # gateway and is not sandboxed in this build, so anything on disk it can read. A
@@ -78,11 +82,14 @@ auth:
     - ou_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb # Bob
 
   # May answer approval cards and run the mutating commands (/new, /attach).
-  # A strict subset of `talk` in most deployments.
+  # Operate needs talk: an entry here that is not also in `talk`, and holds no
+  # talk grant, gets neither tier, so list each operator in both.
   operate:
     - ou_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
-  # Chats the bot will work in. Empty means any chat it has been added to.
+  # Chats the bot will work in, by chat_id (oc_...). Empty means any chat it has
+  # been added to. A direct message is a chat too: with a non-empty list, a
+  # direct message whose chat is not listed is refused.
   chats: []
 
   # Answer direct messages without needing a mention.
@@ -141,23 +148,52 @@ agent:
   # passEnv:
   #   - ANTHROPIC_API_KEY
 
+  # Variable names whose values are long but not secret, such as a base URL, so
+  # not masked in what the gateway shows and stores.
+  # maskExempt:
+  #   - ANTHROPIC_BASE_URL
+
+  # The agent's tools that only read. A task with retry_on_crash:
+  # if-no-side-effects is retried after a crash only if every tool its run
+  # called is listed here.
+  # readOnlyTools: []
+
 # The task board. Off by default; these keys are snake_case, as the kanban
 # design spells them, and are set in this file only. Its workflows are not
 # set here: each is a file of its own, $MT_HOME/workflows/<name>.yaml, read at
 # each preview and start, and checked by mt workflow check.
+# Each value below is its default, but for max_running_per_role, which has none.
 # kanban:
 #   enabled: true
 #   # Open agent runs at once, across every board and role. Defaults to
-#   # maxLiveSessions, and may not be above it.
-#   max_running: 6
+#   # maxLiveSessions, and may not be above it; at most 256.
+#   max_running: 8
 #   # Open agent runs as any one role at once, for a role whose config.yaml sets
 #   # no max_running of its own. Unset, a role has no limit of its own. May not
 #   # be above max_running.
 #   max_running_per_role: 2
+#   # Counted failures before a task gives up and blocks, 1 to 100.
+#   failure_limit: 2
+#   # Throttled runs in a row before a task blocks, 1 to 1000, and the first
+#   # wait after one, doubling each time up to an hour, 1 to 3600 s.
+#   transient_limit: 10
+#   transient_cooldown_s: 300
+#   # A run's wall-clock limit unless its task sets one, at most 7 days.
+#   default_max_runtime_s: 14400
+#   # How often runtimes, cooldowns and stranded tasks are checked, at most
+#   # 3600 s, and how long a task nobody can take waits before it is reported
+#   # stranded, at most 30 days.
+#   sweep_interval_s: 60
+#   stranded_after_s: 1800
+#   # Reminders to a run whose turn ended with no report, 0 to 10.
+#   nudge_limit: 2
+#   # Blocks of one kind in a row at which a blocked notice suggests rewriting
+#   # the task, 1 to 100.
+#   block_recurrence_limit: 2
 #   # Wakes (docs/specs/2026-11-19-wake-design.md): a task with wake on starts
 #   # a turn of the agent in the thread that follows it when it completes, has
-#   # changes requested, is blocked by its run, or is stranded. On by default;
-#   # a wake is opt-in per task.
+#   # changes requested, is blocked by its run, gives up or is stranded. On by
+#   # default, but nothing while enabled above is off; a wake is opt-in per task.
 #   wake:
 #     enabled: true
 #     # Woken turns per conversation in any hour, 1 to 60.
@@ -166,6 +202,15 @@ agent:
 #     max_depth: 5
 #     # How long a block's Unblock button waits for the agent's try, 1 to 60.
 #     hold_minutes: 10
+#   # Progress cards (docs/specs/2026-11-24-progress-cards-design.md): a live
+#   # card for each agent run past min_seconds (0 to 3600), in its task's thread
+#   # or direct message. Off by default. Everyone in the thread sees it, talk
+#   # tier or not: each tool's title, which can hold a command line or a path,
+#   # and the agent's words mid-run. Only the secrets the gateway knows are
+#   # masked.
+#   progress:
+#     enabled: true
+#     min_seconds: 30
 
 # Cron jobs (docs/specs/2026-11-16-cron-design.md): a schedule, a role, a prompt
 # and an optional script, fired by the gateway into a fresh session of the role,
@@ -174,7 +219,8 @@ agent:
 # off. Snake case, and set in this file only.
 # cron:
 #   enabled: true
-#   # Fires at once, apart from the board's runs; from 1 to 16.
+#   # Fires at once, apart from the board's runs; from 1 to 16. A job's role
+#   # must be unsupervised: nobody watches a fire.
 #   max_running: 2
 #   # A fire's turn with no activity this long is cancelled; from 60 to 86400.
 #   idle_timeout_s: 600

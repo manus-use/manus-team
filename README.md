@@ -80,9 +80,9 @@ Bot:   Waking the agent for 1 board update.
 - **Two agent drivers.** `acp` (the default) speaks the Agent Client Protocol, for agents such
   as `claude-agent-acp`, and is the only driver with approval cards. `structured-cli` runs one
   process per turn and reads JSON back; it is written for bytesec's `run --format json`, acts
-  with no approvals, and needs `agent.unsupervised: true`. bytesec over `structured-cli` is the
-  agent this build has been measured with in real use. The `acp` driver is tested end to end
-  against a fake agent only. See [Protocol strategy](#protocol-strategy).
+  with no approvals, and needs `agent.unsupervised: true`. Both have been run in real use:
+  Claude Code (`claude-agent-acp`) over `acp`, and bytesec over `structured-cli`. The test
+  suite drives each driver end to end with a fake agent. See [Protocol strategy](#protocol-strategy).
 - **A restart ends live agent runs.** The broker that would keep agents alive across a gateway
   restart is designed, not built. A board run cut short by a restart is retried quietly; a chat
   session's history survives and resumes on the next message.
@@ -99,7 +99,7 @@ Bot:   Waking the agent for 1 board update.
 1. Create a Lark app with the bot's permissions and events: [Feishu/Lark app setup](#feishulark-app-setup).
 2. Run `./install.sh` in a checkout (Node 22.12 or later): [Installing](#installing).
 3. Set `lark.appId`, `auth.owner` and a workspace in `~/.manus-team/config.yaml`, and
-   `LARK_APP_SECRET` in `~/.manus-team/.env`: [Configuration](#configuration).
+   `LARK_APP_SECRET` in `~/.manus-team/.env`: [the configuration guide](docs/configuration.md#1-the-minimum-to-start).
 4. Make roles with `mt role create`, check them with `mt role check`, and set
    `kanban.enabled: true` for the board: [Roles and workspaces](#roles-and-workspaces).
 5. Start it with `mt service install`, then message the bot: [Running as a service](#running-as-a-service).
@@ -108,6 +108,8 @@ Bot:   Waking the agent for 1 board update.
 
 - [The board guide](docs/kanban-guide.md): a walk-through from one task to chains, review,
   workflows, wakes and cron, with messages to paste.
+- [The configuration guide](docs/configuration.md): the setup step by step, from the minimum
+  that starts to each feature turned on, and the full reference of every setting.
 - [The cookbook](docs/examples.md): workflows and cron jobs ready to copy.
 - The specs in [docs/specs/](docs/specs/): the [Lark channel](docs/specs/2026-08-21-lark-channel-design.md),
   the [board](docs/specs/2026-11-02-kanban-design.md), [workflows](docs/specs/2026-11-16-workflows-design.md),
@@ -302,7 +304,10 @@ end of docs/plans/2026-11-05-plan-d2-kanban-people.md against the live tenant fi
 ### Configuration
 
 Settings live in a YAML file; credentials live in the gateway's `.env` or the environment.
-Start from [`config.example.yaml`](config.example.yaml):
+[docs/configuration.md](docs/configuration.md) sets the gateway up goal by goal, from the
+minimum that starts to each feature turned on, and holds the full reference of every key, with
+its default, its limits and its environment variable. Start from
+[`config.example.yaml`](config.example.yaml):
 
 ```bash
 cp config.example.yaml ~/.manus-team/config.yaml
@@ -317,95 +322,57 @@ you already have one, add the line to it with an editor instead. If you set
 run `mt role check` to see the file listed, then remove the variable from the service's
 environment and restart. Until you remove it the environment's value is the one used.
 
-`MT_CONFIG` names the file if you keep it elsewhere; otherwise it is
-`$MT_HOME/config.yaml`, default `~/.manus-team/config.yaml`. A file that is named but
-missing is an error, while the default location being absent is an ordinary
-environment-only deploy.
+**Where the file lives.** `$MT_HOME/config.yaml`, default `~/.manus-team/config.yaml`, or the
+file `MT_CONFIG` names. A file that is named but missing is an error, while the default location
+being absent is an ordinary environment-only deploy.
 
-**Credentials go in the gateway's `.env`, the environment, or a role's `.env`.** The agent runs as the same
-user and is not sandboxed in this build, so anything on disk it can read. The environment
-is not airtight either — a same-uid process can read `/proc/<pid>/environ` on Linux — but
-it does not persist, is not backed up, cannot be copied into a worktree, and cannot be
+**Credentials go in the gateway's `.env`, the environment, or a role's `.env`.** The agent runs
+as the same user and is not sandboxed in this build, so it can read anything on disk. The
+environment is not airtight either (a same-uid process can read `/proc/<pid>/environ` on Linux),
+but it does not persist, is not backed up, cannot be copied into a worktree, and cannot be
 committed by accident. A key that looks like a credential (`secret`, `token`, `password`,
-`apiKey`, …) is refused at boot rather than quietly accepted, and so is `agent.env`, which
-would put values in the file rather than names. Two files hold secrets, and are checked alike: each
-must be a regular file (not a symlink) owned by the gateway's user, readable and writable only
-by its owner (for example `0600` or `0400`), or the gateway refuses to start. Both take
-`NAME=value` lines, `#` comments and one pair of optional quotes, with no `export`, no
-expansion and no control characters but the tab. A comment must be on a line of its own: an
-unquoted value keeps everything after the `=`, a ` # note` after it included, and a quoted
-value followed by one is refused.
+`apiKey`, …) is refused at boot rather than quietly accepted, and so is `agent.env`, which would
+put values in the file rather than names. Two kinds of file hold secrets, and are checked alike:
+each must be a regular file (not a symlink) owned by the gateway's user, readable and writable
+only by its owner (for example `0600` or `0400`), or the gateway refuses to start. Both take
+`NAME=value` lines, `#` comments and one pair of optional quotes, with no `export`, no expansion
+and no control characters but the tab. A comment must be on a line of its own: an unquoted value
+keeps everything after the `=`, a ` # note` after it included, and a quoted value followed by
+one is refused.
 
 - **The gateway's `.env`**, at `$MT_HOME/.env` (default `~/.manus-team/.env`), is the
-  recommended home for `LARK_APP_SECRET`. It may set any variable in the table below, and
-  `MT_AGENT_ENV_*`; any other name is refused at startup, as an unknown config key is. It may
-  not set `MT_HOME`, `MT_CONFIG` or `MT_DB`: they say where the gateway's files are, this one
-  among them, so they belong to the environment the gateway starts with. The environment wins
-  over it, name by name, so an emergency override still needs no file edit. It is optional.
-  The gateway and the `mt` commands that read its settings read it; no agent is given it, nor
-  any of its values but an `MT_AGENT_ENV_*` one, which reaches the agent as it would from the
-  environment. Only its secrets are masked, `LARK_APP_SECRET` and `MT_AGENT_ENV_*`; paths, ids
-  and limits such as `MT_WORKSPACE`, `LARK_APP_ID` and `MT_MAX_LIVE_SESSIONS` are shown as
-  written, as they are from the config file.
+  recommended home for `LARK_APP_SECRET`. It may set any variable the gateway reads its settings
+  from (the guide's [reference](docs/configuration.md#7-full-reference) lists them), and
+  `MT_AGENT_ENV_*`; any other name is refused at startup, as an unknown config key is. It may not
+  set `MT_HOME`, `MT_CONFIG` or `MT_DB`: they say where the gateway's files are, this one among
+  them, so they belong to the environment the gateway starts with. The environment wins over it,
+  name by name, so an emergency override still needs no file edit. It is optional. The gateway
+  and the `mt` commands that read its settings read it; no agent is given it, nor any of its
+  values but an `MT_AGENT_ENV_*` one, which reaches the agent as it would from the environment.
+  Only its secrets are masked, `LARK_APP_SECRET` and `MT_AGENT_ENV_*`; paths, ids and limits
+  such as `MT_WORKSPACE`, `LARK_APP_ID` and `MT_MAX_LIVE_SESSIONS` are shown as written, as they
+  are from the config file.
 - **A role's `.env`** holds that role's own secrets. It may not set `MT_*`, `LARK_*` or `PATH`.
 
-The gateway masks every secret it holds itself — the Lark app secret, the `MT_AGENT_ENV_*`
-values in its own `.env`, and every value it gives an agent from a role's `.env`, `passEnv` or `MT_AGENT_ENV_*`, except names the role lists in
-`agent.maskExempt` — as `••••` in everything it shows in chat, and in what it stores in its event
-log and approvals. A secret split by a character that shows nothing (a zero-width or bidi
-character, a direction mark) is masked too. Values shorter than 8 characters are not masked. A secret the agent finds by
-itself, for instance in a file it reads, is not known to the gateway and is not masked.
-
-| File setting | Env override | Meaning |
-|---|---|---|
-| — | `LARK_APP_SECRET` **(required)** | The app secret. Best kept in `$MT_HOME/.env` (0600); the environment wins over it. Never in the config file, and never written to the event log. |
-| `lark.appId` | `LARK_APP_ID` | App id. Required from one source or the other. |
-| `lark.domain` | `LARK_DOMAIN` | Set for Lark (`https://open.larksuite.com`); omitted means Feishu. |
-| `auth.owner` | `MT_OWNER_OPEN_ID` | Your `open_id`. Required. Always in both allowlists — an allowlist that excludes the owner locks out the only person who can fix it. |
-| `auth.talk` | `MT_ALLOW_TALK` | `open_id`s that may prompt the agent. A grant, `/auth grant @Name talk` in chat or `mt auth grant` at the terminal, adds a person beside them, kept in the database and counted at once; no command removes an entry. |
-| `auth.operate` | `MT_ALLOW_OPERATE` | `open_id`s that may answer approvals and run mutating commands. Only the owner, or the terminal, grants operate tier beside them. |
-| `auth.chats` | `MT_ALLOW_CHATS` | `chat_id`s the bot will work in. Empty means any chat it was added to. |
-| `auth.directMessages` | `MT_ALLOW_DM` | Answer direct messages without a mention. Default on. |
-| `auth.mentionAll` | `MT_ALLOW_MENTION_ALL` | Treat `@all` as addressing the bot. Default **off**: `@all` is a room-wide notification, not an instruction. |
-| `workspace` | `MT_WORKSPACE` | Absolute path the agent works in. Required unless `workspaces` is set. |
-| `workspaces` | — | Named workspaces: `name: absolute-path`. Must include `default` (or use `workspace`). |
-| `agent.driver` | `MT_AGENT_DRIVER` | `acp` (default) or `structured-cli`. See [Protocol strategy](#protocol-strategy) — the CLI driver cannot ask before acting. |
-| `agent.command` | `MT_AGENT_COMMAND` | The agent binary, e.g. `claude-agent-acp`. Required unless `roles/default/` exists. |
-| `agent.args` | `MT_AGENT_ARGS` | A list, or one string split on whitespace with quotes honoured. Not a shell: `$HOME` is not expanded, because the agent is spawned with `shell: false`. |
-| `agent.unsupervised` | `MT_AGENT_UNSUPERVISED` | Required by, and only by, `structured-cli`: a written acknowledgement that the agent acts with no approval card and no gate from `auth.operate`. Setting it alongside the `acp` driver is an error — a config must not claim a posture the gateway is not in. |
-| `agent.readOnlyTools` | — | The agent's tool names that only read. Checked at startup but not used in this build; automatic retry of a failed run will use it. |
-| `agent.maskExempt` | — | Variable names whose values are long but not secret, such as a base URL, so not masked. |
-| `agent.passEnv` | — | Variable **names** forwarded to the agent from the gateway's own environment. A name that is not set is an error, because forwarding nothing surfaces later as the agent failing to authenticate. Leave it empty for a subscription-authenticated agent: its credentials are under `$HOME`, which is forwarded already. |
-| — | `MT_AGENT_ENV_*` | Forwarded with the prefix stripped: `MT_AGENT_ENV_ANTHROPIC_API_KEY` becomes `ANTHROPIC_API_KEY`. Wins over `passEnv`. Opt-in by prefix, because an agent holding the Feishu secret could post as the bot and answer its own approvals. |
-| `maxLiveSessions` | `MT_MAX_LIVE_SESSIONS` | Concurrent agent processes. Default 8. |
-| `kanban.enabled` | — | Run the board: its dispatcher, the worker socket, `/kanban` in chat and its notices, people's cards, and forwarding supervised roles' approvals to the chat that follows a task. Default **off**, and opt-in: without it chat runs as it always did, and `/kanban` says the board is off. The `kanban:` keys are snake_case, as the kanban design spells them; the rest of the file is camelCase. They are set in the file only, and each number has a ceiling (below); a value above it is a startup error. |
-| `kanban.max_running` | — | Open agent runs at once. Default `maxLiveSessions`, and refused above it: a run is a live session. Set it lower to keep room for chat. At most 256. |
-| `kanban.max_running_per_role` | — | Open agent runs as any one role at once, for every role whose `config.yaml` sets no `max_running` of its own. Unset, a role has no limit of its own. Refused above `kanban.max_running`. At most 256. |
-| `kanban.failure_limit` | — | Counted failures before a task gives up and blocks. Default 2: a first attempt and one retry. At most 100. |
-| `kanban.transient_limit`, `kanban.transient_cooldown_s` | — | A throttled run is retried after a cooldown, 300 s by default, doubling each time up to an hour; after 10 in a row the task blocks. At most 1000 in a row, and a first cooldown of at most 3600 s. |
-| `kanban.default_max_runtime_s` | — | A run's wall-clock limit unless its task sets one. Default 4 hours, at most 7 days. |
-| `kanban.sweep_interval_s`, `kanban.stranded_after_s` | — | How often the dispatcher checks runtimes, cooldowns and stranded tasks (default 60 s), and how long a task nobody can take waits before it is reported stranded (default 30 min). At most 3600 s and 30 days. |
-| `kanban.nudge_limit` | — | Reminders sent into a run whose turn ended without a report, before the run ends as a protocol violation. Default 2; 0 sends none. At most 10. |
-| `kanban.block_recurrence_limit` | — | Blocks of the same kind in a row, unblocked in between, at which a blocked notice stops inviting another unblock and suggests rewriting the task. Default 2, at most 100. |
-| `kanban.wake.enabled` | (file only) | Wake the agent of the conversation that follows a task with wake on, for its outcomes. Default on; off, nothing is woken and a wake asked for is refused. A wake is still opt-in per task. |
-| `kanban.wake.per_hour` | (file only) | Woken turns a conversation in any hour. Default 6, 1 to 60. |
-| `kanban.wake.max_depth` | (file only) | A task this many woken turns deep stays notice-only. Default 5, 1 to 20. |
-| `kanban.wake.hold_minutes` | (file only) | How long a block's Unblock button waits for the agent's try. Default 10, 1 to 60. |
-| `kanban.progress.enabled` | (file only) | A live card for each agent run past `min_seconds`, in the task's thread or its direct message: the task, the role, the try and the time running, each tool and its state, the tail of what the agent is saying, and a Stop button; drawn final, with the outcome and the time, when the run ends. Default off. A task followed at a group's chat scope gets no card. **What it shows:** every tool's title, which may hold a command line or a path, and the agent's words mid-run, before its report, go to everyone in the thread, talk tier or not; only the secrets the gateway knows (its credentials, run tokens, roles' `.env` values) are masked. |
-| `kanban.progress.min_seconds` | (file only) | A run gets its card once it has run this long. Default 30, 0 to 3600. |
-| `db`, `downloads` | `MT_DB`, `MT_DOWNLOAD_DIR` | `$MT_HOME/team.db` and `$MT_HOME/downloads` unless set. |
-| — | `MT_HOME` | State directory, and where the config file and the gateway's `.env` are looked for. Default `~/.manus-team`. Environment only. |
+The gateway masks every secret it holds itself (the Lark app secret, the `MT_AGENT_ENV_*` values
+in its own `.env`, and every value it gives an agent from a role's `.env`, `passEnv` or
+`MT_AGENT_ENV_*`, except names the role lists in `agent.maskExempt`) as `••••` in everything it
+shows in chat, and in what it stores in its event log and approvals. A secret split by a
+character that shows nothing (a zero-width or bidi character, a direction mark) is masked too.
+Values shorter than 8 characters are not masked. A secret the agent finds by itself, for
+instance in a file it reads, is not known to the gateway and is not masked.
 
 Three rules make a mistake fail loudly instead of silently:
 
-- **The environment wins.** Every file setting has an override, so a container needs no
-  file and an emergency lockdown needs no edit. Lists are *replaced*, not merged — merging
-  would leave no way to revoke. `MT_ALLOW_TALK=` set-but-empty means the owner alone.
+- **The environment wins.** A setting with an environment variable can be set by it, and the
+  variable wins over the file, so a container needs no file and an emergency lockdown needs no
+  edit. The `kanban:` and `cron:` sections are file only. Lists are *replaced*, not merged:
+  merging would leave no way to revoke. `MT_ALLOW_TALK=` set-but-empty means the owner alone.
 - **Empty means closed.** An unset allowlist is everyone-except-the-owner, not
   no-restrictions. A grant adds a person beside a list and never removes one, and a grant
   that cannot be read counts as none.
 - **An unknown key is an error.** A typo'd setting silently taking its default is how a
-  value someone deliberately changed turns out never to have applied — and for the auth
+  value someone deliberately changed turns out never to have applied, and for the auth
   keys that failure is silent *and* permissive.
 
 Everything is validated at boot; a configuration mistake prints one line and exits 78.
@@ -473,7 +440,7 @@ gateway at startup. An imported skill is
 given to the agent exactly as the role's own are.
 
 The role `default` runs chat sessions. It is `roles/default/` if that exists, and otherwise
-the gateway's own `agent:` block (in the table above); having both, or neither, stops the
+the gateway's own `agent:` block ([the guide's reference](docs/configuration.md#agent)); having both, or neither, stops the
 gateway at startup. Role and workspace names are lowercase letters, digits and `-`, start
 with a letter, do not end with `-`, and are at most 40 characters; `acp` and `structured-cli` are reserved as
 role names. A directory under `roles/` with a reserved name stops the gateway at startup;
