@@ -102,13 +102,17 @@ describe("the guide's role wakes", () => {
 });
 
 describe("the README's wakes", () => {
-  it('lists the chat command, the terminal commands and the settings', () => {
+  it('lists the chat command and the terminal commands', () => {
     const text = read('README.md');
     expect(text).toContain('| `/kanban task wake <task> on\\|off` | talk');
     expect(text).toContain('[--chat <chat_id> [--thread <thread_id>] [--wake]] [--wake-role <role>]');
     expect(text).toContain('mt kanban task wake <task_id> on|off|<role> [--board <name>]');
     expect(text).toContain('| `/kanban task wake <task> <role>` | operate');
     expect(text).toContain('start-workflow|apply-dag|wake-show|wake-unblock> < input.json');
+  });
+
+  it('leaves the settings to docs/configuration.md, which lists them', () => {
+    const text = read('docs/configuration.md');
     for (const key of ['kanban.wake.enabled', 'kanban.wake.per_hour', 'kanban.wake.max_depth', 'kanban.wake.hold_minutes']) expect(text).toContain(`\`${key}\``);
   });
 });
