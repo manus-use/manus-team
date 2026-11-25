@@ -318,6 +318,16 @@ agent:
 - `agent` is required, with the same keys as the gateway's `agent:` block, plus `native` (false
   sends `role.md` and the skills in the task prompt instead of a bytesec agent package) and
   `skills` (skills imported by name from the user's own skill directories).
+- `agent.maxSteps` is the most agent steps (model calls, with their tool uses) one turn may take
+  before the agent stops it; a whole number from 1 to 1000. Unset, the agent's own limit applies:
+  bytesec's is 50, and a turn past it fails with "exceeded max steps". Only a bytesec role rendered
+  as an agent package takes it today, written as the package agent's `steps`. Claude Code calls
+  these turns (`maxTurns`) and is not wired yet. A role whose agent cannot apply it is refused at
+  startup, with one line: an agent no renderer takes, as
+  `agent.maxSteps: this role's agent (claude-agent-acp over acp) has no step limit the gateway can set`,
+  a role not rendered (`native: false`, or no `role.md` and no skills), and the role `default`,
+  whose chat sessions are not rendered. The `agent:` block does not take it. `mt role check` shows
+  each role's value, or whose default applies.
 - `description` is shown by `/role list` to anyone at talk tier; with none, the first line of
   `role.md` is. Keep in neither anything a talk-tier person should not read.
 - `workspace` names a configured workspace the role always works in.
@@ -656,3 +666,4 @@ File only, and snake_case.
 | `agent.maskExempt` | `[]` | variable names, from any source | |
 | `agent.native` | `true` | `true` or `false` | False sends `role.md` and the skills in the task prompt instead of a bytesec agent package. |
 | `agent.skills` | `[]` | skill names found in the user's skill directories | Skills imported by name, beside the role's own `skills/`. |
+| `agent.maxSteps` | none: the agent's own (bytesec's is 50) | a whole number from 1 to 1000; a rendered bytesec role only | The most agent steps (model calls, with their tool uses) one turn may take. Written as the bytesec package agent's `steps`; Claude Code's `maxTurns` is not wired yet. Refused at startup for a role whose agent cannot apply it: no renderer, `native: false`, nothing to render, or the role `default`. |

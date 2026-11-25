@@ -1023,7 +1023,9 @@ By default a task gets its first attempt and one retry. After that, it blocks:
 > Gave up on **Summarise the vendor contracts** `k_…`: failed 2 times; last crashed: …
 > `/kanban task unblock k_… [comment]` gives it a fresh set of attempts.
 
-Fix the cause first, then unblock; the unblock resets the count. A throttled run (rate limits,
+Fix the cause first, then unblock; the unblock resets the count. A run that failed with
+"prompt runtime exceeded max steps 50" used up its agent's steps for one turn: raise the role's
+`agent.maxSteps` in its `config.yaml` ([the configuration guide](configuration.md)). A throttled run (rate limits,
 provider errors) is not counted as a failure: the task cools down, 5 minutes and doubling up to an
 hour, and starts again by itself.
 
