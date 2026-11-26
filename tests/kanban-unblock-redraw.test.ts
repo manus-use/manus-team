@@ -592,18 +592,17 @@ describe('a redraw that did not land', () => {
     expect(redrawnFor()).toEqual([liftOf(a!), liftOf(b!)]);
   });
 
-  it('draws the message again when an older timed-out view lands after a newer one', async () => {
-    const [, b] = await lifted(['Draft the notes', 'Check the links'], ['Check the links']);
-    // The first update is held until the test lets it go; any later one lands at once.
+  it('draws the message again when an older timed-out view lands after a newer one, and tries that again should it time out', async () => {
+    const [a, b] = await lifted(['Draft the notes', 'Check the links'], ['Check the links']);
+    // The first update is held until the test lets it go, the third never answers; the others land at once.
     let release!: () => void;
     const held = new Promise<void>((resolve) => (release = resolve));
-    let first = true;
+    let calls = 0;
     const slow: Channel = Object.assign(Object.create(lark) as Channel, {
       updateCard: async (messageId: string, view: CardView) => {
-        if (first) {
-          first = false;
-          await held;
-        }
+        calls += 1;
+        if (calls === 1) await held;
+        if (calls === 3) await new Promise<never>(() => undefined);
         return lark.updateCard(messageId, view);
       },
     });
@@ -613,11 +612,77 @@ describe('a redraw that did not land', () => {
     // B's press draws both while A's older view is still out.
     await r.redrawMessage('om_text_1');
     expect(lark.cardUpdates.map((u) => u.view.buttons.length)).toEqual([0]);
+    expect(redrawnFor()).toEqual([liftOf(a!), liftOf(b!)]);
     release();
     await settle();
     await r.idle(1_000);
-    // The older view landed last, so the newer is drawn again over it.
+    // The older view landed last, marking nothing more: the newer one is sent again over it, and times out.
+    expect(lark.cardUpdates.map((u) => u.view.buttons.length)).toEqual([0, 1]);
+    expect(redrawnFor()).toEqual([liftOf(a!), liftOf(b!)]);
+    expect(calls).toBe(3);
+    // Every row marked, so not in the due list: tried again from memory after its pause.
+    clock.advance(1_999);
+    expect(await r.redrawDue()).toBe(0);
+    clock.advance(1);
+    expect(await r.redrawDue()).toBe(1);
     expect(lark.cardUpdates.map((u) => u.view.buttons.length)).toEqual([0, 1, 0]);
+    clock.advance(60_000);
+    expect(await r.redrawDue()).toBe(0);
+  });
+
+  it('is marked at once, as a refusal, when the update throws something that is no ChannelError', async () => {
+    const [a] = await lifted(['Draft the notes']);
+    lark.failNext('updateCard', new TypeError('view.buttons is not iterable'));
+    const r = redraws();
+    expect(await r.redrawDue()).toBe(1);
+    expect(notes).toContain('kanban: redrawing notice om_text_1 failed: view.buttons is not iterable');
+    expect(redrawnFor()).toEqual([liftOf(a!)]);
+    clock.advance(60_000);
+    expect(await r.redrawDue()).toBe(0);
+  });
+
+  it('ends its round at an update that timed out, the rest waiting for the next', async () => {
+    const a = create('Draft the notes');
+    const b = create('Check the links');
+    block(a, 'which wiki?');
+    await notifier().deliver();
+    block(b, 'which links?');
+    await notifier().deliver();
+    expect(service.unblock(a.taskId, 'operator:hemanth').ok).toBe(true);
+    expect(service.unblock(b.taskId, 'operator:hemanth').ok).toBe(true);
+    lark.hold();
+    const r = redraws({ redrawTimeoutMs: 20 });
+    expect(await r.redrawDue()).toBe(1);
+    expect(lark.calls.filter((c) => c === 'updateCard')).toHaveLength(1);
+    lark.release();
+    await settle();
+    expect(await r.redrawDue()).toBe(1);
+    expect(redrawnFor().every((x) => x !== null)).toBe(true);
+  });
+
+  it('marks nothing once stopped, for an update landing late or within its bound', async () => {
+    await lifted(['Draft the notes']);
+    lark.hold();
+    const late = redraws({ redrawTimeoutMs: 20 });
+    expect(await late.redrawDue()).toBe(1);
+    late.stop();
+    lark.release();
+    await settle();
+    expect(notes.some((n) => /^kanban: redrawing notice om_text_1 landed after \d+ ms$/.test(n))).toBe(true);
+    expect(redrawnFor()).toEqual([null]);
+    // And one that lands within its bound, after the stop.
+    lark.hold();
+    const within = redraws({ redrawTimeoutMs: 1_000 });
+    const round = within.redrawDue();
+    await settle();
+    within.stop();
+    lark.release();
+    expect(await round).toBe(1);
+    expect(lark.cardUpdates).toHaveLength(2);
+    expect(redrawnFor()).toEqual([null]);
+    // Nor is anything redrawn once stopped.
+    await within.redrawMessage('om_text_1');
+    expect(lark.cardUpdates).toHaveLength(2);
   });
 
   it('leaves a press redraw that timed out unmarked, for the loop to try again', async () => {

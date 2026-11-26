@@ -43,7 +43,19 @@ import type { KanbanService } from './service.js';
  * is left unmarked, and the loop tries it again after a pause, in memory, of
  * `RETRY_PAUSE_MS` doubling at each try, or the time Lark asked for when
  * longer; after `REDRAW_TRIES` in a row that did not land, it is marked, with a
- * line in the log. A press's redraw (`redrawMessage`) counts the same.
+ * line in the log. A press's redraw (`redrawMessage`) counts the same. An
+ * error that is no ChannelError is our own fault, not Lark's, and is taken as a
+ * refusal. A message whose rows are all marked already, as one redrawn again
+ * for a press or over an older view that landed late, is not in the database's
+ * due list, so the loop also tries the ones in memory whose pause is over.
+ *
+ * **A round stops at a timeout.** Once one update in a round times out, Lark
+ * is taken to be hanging, and the rest of the round waits for the next, so a
+ * round takes at most one bound, not `ROUND_REDRAWS` of them.
+ *
+ * **Once stopped**, nothing more is redrawn, and nothing is marked: an update
+ * that lands after the stop, in its bound or late, is only said, and the next
+ * boot finds its rows still due.
  *
  * **A late answer.** An update that timed out may land later: that is said
  * once, and a landing marks the lifts that update drew, and only those, passed
@@ -70,9 +82,14 @@ type Lift = { taskId: string; liftEvent: number };
 /** What came of an update within its bound. */
 type Outcome = { kind: 'drawn' } | { kind: 'failed'; err: unknown } | { kind: 'late'; ms: number };
 
-/** Lark refused it, and will again (as the card poster's and progress cards' refusal), or its card is gone. */
+/**
+ * Lark refused it, and will again (as the card poster's and progress cards' refusal), or its card
+ * is gone; or the update threw something that is no ChannelError, a fault of ours a retry would
+ * only meet again.
+ */
 function refusal(err: unknown): boolean {
-  return err instanceof ChannelError && ((err.code !== 0 && !err.retryable) || CARD_GONE_CODES.has(err.code));
+  if (!(err instanceof ChannelError)) return true;
+  return (err.code !== 0 && !err.retryable) || CARD_GONE_CODES.has(err.code);
 }
 
 export interface UnblockRedrawDeps {
@@ -107,7 +124,7 @@ export class UnblockRedraws {
    * when its turn comes, so a newer view never lands before an older one. The
    * loop passes over a message with one under way; a press waits its turn.
    */
-  readonly #chains = new Map<string, Promise<void>>();
+  readonly #chains = new Map<string, Promise<unknown>>();
   readonly #pending = new Set<Promise<unknown>>();
   /** Each message whose last redraw did not land: its tries in a row, and when it is due again. */
   readonly #retries = new Map<string, { tries: number; dueAt: number }>();
@@ -187,12 +204,18 @@ export class UnblockRedraws {
     const now = this.#clock.now();
     const passed = (messageId: string): boolean => this.#chains.has(messageId) || (this.#retries.get(messageId)?.dueAt ?? 0) > now;
     // Read past the ones passed over, so they never hold back the ones after them; at most a round is tried.
+    const due = unblockMessagesDue(this.#deps.db, this.#deps.appId, ROUND_REDRAWS + this.#retries.size + this.#chains.size);
+    // And a retry whose rows are all marked, which that list never holds: redrawn again for a press, or over an older view.
+    const inDue = new Set(due);
+    const retries = [...this.#retries.keys()].filter((m) => !inDue.has(m));
     let tried = 0;
-    for (const messageId of unblockMessagesDue(this.#deps.db, this.#deps.appId, ROUND_REDRAWS + this.#retries.size + this.#chains.size)) {
+    for (const messageId of [...due, ...retries]) {
       if (this.#stopped || tried >= ROUND_REDRAWS) break;
       if (passed(messageId)) continue;
-      await this.#redraw(messageId);
+      const timedOut = await this.#redraw(messageId);
       tried += 1;
+      // Lark is hanging: the rest wait for the next round.
+      if (timedOut) break;
     }
     return tried;
   }
@@ -204,7 +227,7 @@ export class UnblockRedraws {
    */
   redrawMessage(messageId: string): Promise<void> {
     if (this.#stopped) return Promise.resolve();
-    return this.#track(this.#redraw(messageId)).catch((err: unknown) => {
+    return this.#track(this.#redraw(messageId).then(() => undefined)).catch((err: unknown) => {
       this.#note(`kanban: redrawing notice ${messageId} failed: ${message(err)}`);
     });
   }
@@ -218,11 +241,12 @@ export class UnblockRedraws {
     return work;
   }
 
-  /** A redraw of the message, once the one before it, if any, has settled; never rejects. */
-  #redraw(messageId: string): Promise<void> {
+  /** A redraw of the message, once the one before it, if any, has settled: whether its update timed out. Never rejects. */
+  #redraw(messageId: string): Promise<boolean> {
     const before = this.#chains.get(messageId) ?? Promise.resolve();
     const step = before.then(() => this.#redrawNow(messageId)).catch((err: unknown) => {
       this.#note(`kanban: redrawing notice ${messageId} failed: ${message(err)}`);
+      return false;
     });
     this.#chains.set(messageId, step);
     void step.finally(() => {
@@ -232,18 +256,19 @@ export class UnblockRedraws {
   }
 
   /** Rebuild the message from its record and the log as they are now, redraw it within the bound, and mark it once it is done with. */
-  async #redrawNow(messageId: string): Promise<void> {
+  async #redrawNow(messageId: string): Promise<boolean> {
+    if (this.#stopped) return false;
     const read = unblockMessage(this.#deps.db, this.#deps.appId, messageId);
     if (read === undefined) {
       this.#retries.delete(messageId);
-      return;
+      return false;
     }
     const lifts = read.buttons.flatMap((b) => (b.lift === undefined ? [] : [{ taskId: b.taskId, liftEvent: b.lift.eventId }]));
     const channel = this.#deps.channels.get(read.channel);
     if (channel === undefined) {
       this.#note(`kanban: notice ${messageId} cannot be redrawn: no channel ${read.channel}`);
       this.#done(messageId, lifts);
-      return;
+      return false;
     }
     let card;
     try {
@@ -258,7 +283,7 @@ export class UnblockRedraws {
     } catch (err) {
       this.#note(`kanban: redrawing notice ${messageId} failed: ${message(err)}`);
       this.#done(messageId, lifts);
-      return;
+      return false;
     }
     const seq = ++this.#seq;
     const drawn = JSON.stringify(card);
@@ -271,18 +296,18 @@ export class UnblockRedraws {
     // An update that throws at once is a failed update, said like any other.
     const update = Promise.resolve().then(() => channel.updateCard(messageId, card));
     const outcome = await this.#bounded(update);
-    if (outcome.kind === 'drawn') {
-      this.#done(messageId, lifts);
-    } else if (outcome.kind === 'failed') {
-      const why = message(outcome.err);
-      this.#note(`kanban: redrawing notice ${messageId} failed: ${why}`);
-      if (refusal(outcome.err)) this.#done(messageId, lifts);
-      else this.#notLanded(messageId, lifts, why, outcome.err instanceof ChannelError ? outcome.err.retryAfterMs : undefined);
-    } else {
+    if (outcome.kind === 'late') {
       this.#note(`kanban: redrawing notice ${messageId} took longer than ${outcome.ms} ms; trying it again later`);
       this.#late(messageId, update, { seq, card: drawn, startedAt, lifts });
-      this.#notLanded(messageId, lifts, `took longer than ${outcome.ms} ms`);
+      if (!this.#stopped) this.#notLanded(messageId, lifts, `took longer than ${outcome.ms} ms`);
+      return true;
     }
+    if (outcome.kind === 'failed') this.#note(`kanban: redrawing notice ${messageId} failed: ${message(outcome.err)}`);
+    // Once stopped, the database may be closing: the next boot finds it still due.
+    if (this.#stopped) return false;
+    if (outcome.kind === 'drawn' || refusal(outcome.err)) this.#done(messageId, lifts);
+    else this.#notLanded(messageId, lifts, message(outcome.err), outcome.err instanceof ChannelError ? outcome.err.retryAfterMs : undefined);
+    return false;
   }
 
   /** Landed, refused, or given up on: its rows marked for the lifts drawn, and the loop done with it for them. */
@@ -294,7 +319,10 @@ export class UnblockRedraws {
   /** Not landed: tried again by the loop after its pause, or, after `REDRAW_TRIES` in a row, marked all the same. */
   #notLanded(messageId: string, lifts: readonly Lift[], why: string, retryAfterMs?: number): void {
     // Nothing lifted, nothing the loop would try it again for.
-    if (lifts.length === 0) return;
+    if (lifts.length === 0) {
+      this.#retries.delete(messageId);
+      return;
+    }
     const tries = (this.#retries.get(messageId)?.tries ?? 0) + 1;
     if (tries >= REDRAW_TRIES) {
       this.#note(`kanban: notice ${messageId} was not redrawn after ${tries} tries: ${why}`);
