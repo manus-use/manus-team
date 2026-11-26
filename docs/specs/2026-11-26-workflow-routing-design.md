@@ -252,10 +252,12 @@ not the reviewer's approval (kanban spec §4.4). Mapped to the code:
   one row an item, its ref the item's (`exposure:2`), and one row of its own, its ref the step's name,
   written only once every item has its row. A member's row names the task whose result is the
   member's, its own or a stand-in's, and every later read takes that task's result.
-- **The winner is path-independent**: of the member's own task and its stand-ins, the one done whose
-  `completed` event has the **lowest id**, whichever transaction or reconciliation writes the row
-  (§9.2). Nothing that happens afterwards, an unblock, a later stand-in, an own completion after a
-  stand-in's, an archive, changes which result is read.
+- **The winner is path-independent**: the **earliest settling fact by event id**, among the member's own task's `completed` event, each
+  of its stand-ins' `completed` events, and the own task's `archived` event whose `from` is not `done` (the member is then `archived`, skipped by archive,
+  with no result), whichever transaction or reconciliation writes the row (§9.2). Nothing that happens
+  afterwards, an unblock, a later stand-in, an own completion after a stand-in's, an archive, changes
+  which result is read. A winning stand-in's archive of the routed task (§5.2) always comes after the
+  stand-in's `completed` event, so it is never the earliest fact, and never read as a skip.
 - A value that is not of its type when read, which only a database edited by hand can hold, reads as
   missing: a clause on it is false (§3). The metadata is stored masked (`maskDeep`), so what decides
   is the masked value; an item holding a known secret was refused at the completion.
@@ -322,7 +324,9 @@ by the team check of a task made late (§7.4) is neither `blocked` for a clause 
   stand-in in its place (§5.2), or for a fan-out each item's winning task; **a winning task done and
   then archived is still given**, and linked, as the kernel treats an archived parent as finished
   (kanban spec §4.1) and its handoff is kept (`latestCompletion` reads its events whatever its phase),
-  so a child of done-then-archived parents keeps its handoffs and is never made with no link; a
+  so a child of done-then-archived parents keeps its handoffs and is never made with no link. **It
+  keeps the handoff, not the branch**: in an isolated workspace, `#upstream` (`src/kanban/worktree.ts`)
+  merges only parents whose phase is `done`, so an archived parent's branch is not merged in; a
   step skipped by its `when` or by an empty or skipped source gives, in its place, its own effective
   parents, recursively; a step skipped by archive gives none. So a child keeps its nearest settled,
   non-skipped ancestors as parents: their handoffs reach its prompt (kanban spec §7.1), their order
@@ -379,8 +383,9 @@ claim.
 - **A fan-out step is settled once every item is settled**: its task done, its task skipped by
   archive, or stood in for by a done handler (§5.2), each item by its own settled row; the step's own
   row is written then, and not before (§8). **First one wins per item**: two stand-ins of one item,
-  or an item's own completion after its stand-in's, settle that item once, by the lowest `completed`
-  event id (§2.3).
+  or an item's own completion after its stand-in's, settle that item once, by the earliest settling
+  fact (§2.3). **A fan-out whose items are all archived undone counts as skipped by archive**: its own
+  row's `how` is `archived`; with any item done or stood in for, its own row's `how` is `done`.
 - **A child of a fan-out waits for that.** It is pending (§7), decided only when its fan-out parent
   is settled (§3.2), and made with its effective parents: each item's winning task, its own or its
   stand-in, and no item archived undone.
@@ -479,24 +484,23 @@ claim.
   exactly the same outputs, name for name and type for type: **the handler's accepted completion
   settles that step for its dependents**, its outputs read in that step's place. In the same
   transaction (decided by the user, §20):
-  - the routed member's settled row (§8) is written with the winner, the lowest `completed` event id
-    among its own task and its stand-ins (§2.3). If the winner is another, an earlier stand-in or the
-    routed task's own completion, **this completion settles nothing and archives nothing** but closes its
-    own task;
+  - the routed member's settled row (§8) is written with the winner, the earliest settling fact by
+    event id (§2.3). If the winner is another, an earlier stand-in, the routed task's own completion or
+    its archive undone, **this completion settles nothing and archives nothing** but closes its own task;
   - when this stand-in wins, and only then, **the routed task is archived**, whatever phase it is in,
     `blocked`, `open` with a rerun after a handler's unblock, or `review`, through `archiveIn`
     (`db/kanban.ts`), which supersedes its undecided run and writes `from: <its actual phase>`, the
     payload gaining `workflow: "w_…"` and `standIn: "k_…"`, with a comment, not steering: `Stood in for
-    by escalate:1 (k_…), whose result is read in va's place.`. **The runs it superseded are returned**:
-    `complete` answers them in `superseded: RunRow[]`, and its caller cancels their turns and closes
-    them, as every other archive's caller does (`#decided`, `src/kanban/chat.ts`; the worker API for a
-    run's `complete`). A task already done, the loser, is archived `from: done`, its result unread;
+    by escalate:1 (k_…), whose result is read in va's place.`. **The runs it superseded are
+    cancelled** on every path (§9.5). A task already done, the loser, is archived `from: done`, its
+    result unread;
     Its chat hears no notice for the archive (an archive is none, kanban spec §9.4), but the
     `workflow_routed` notice says it stood in (§12.2). The routing does not read this archive as
     skipped by archive: the step's settled row was written first, and wins.
   - So the board is left clean, and can be archived once the instance is through (kanban spec §16.8).
 - **A handler left open** after its member was settled by the routed task's own completion (it was
-  unblocked and done first) gets, in that transaction, one comment, not steering, `va was completed by
+  unblocked and done first) gets one comment, written with the insert of the member's settled row and
+  only when that insert adds the row, so a reconciliation never writes it twice, not steering, `va was completed by
   its own task k_…; this handler's result will not be read: finish or archive it`, and a line of the
   `workflow_routed` notice. Nothing archives it: it may be mid-run, and a person decides. It keeps the
   instance running until it is done or archived (§12.4).
@@ -776,7 +780,8 @@ UPDATE schema_version SET version = 15;
   taken and changes nothing. Its winner is the facts' (§2.3), not the writer's. **`event_id` is the
   fact, not the transaction**: for `done` and `stood_in`, the winner's `completed` event; for
   `archived`, the task's `archived` event; for `skipped`, the greatest `event_id` of its parents' rows,
-  the settling that let it count; for a fan-out's own row, the greatest of its items'. So a row written
+  the settling that let it count, and so too for a step **skipped by archive spreading** (§3.2), whose
+  parents' rows are what made it so; for a fan-out's own row, the greatest of its items'. So a row written
   by a reconciliation holds the same `event_id` the gateway's transaction would have written.
 - **A route row a route**, keyed (instance, handler, event): the approved key. `over_limit` and
   `over_cap` record a route refused, so it is never tried again and its notice is said once. The index
@@ -833,12 +838,13 @@ function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, n
    or whose instance has no plan, returns at once. This is the only cost every settling transition
    pays: one primary-key lookup, `memberOf`.
 2. It **sweeps every step and member** of the instance, and writes each settled row the facts
-   justify that is not yet written (§8): each member with a done task or stand-in, by the lowest
-   `completed` event id; each member archived undone; each skipped step whose parents are now settled;
+   justify that is not yet written (§8): each member with a settling fact, its winner the earliest by
+   event id (§2.3); each skipped step whose parents are now settled;
    each fan-out whose items all have rows. Only then, for a member whose winner is a stand-in, is the
    routed task archived (§5.2). So the rows are the same whatever transition, fault or reconciliation
    came first: a stand-in's completion whose routing faulted, followed by the routed task's own
-   completion, gives the stand-in the row, as its `completed` id is lower.
+   completion, gives the stand-in the row, as its `completed` id is lower; an archive undone whose
+   routing faulted, followed by a stand-in's completion, gives `archived`, as the archive's id is lower.
 3. It reads the **facts** of the instance: every member with its task's phase, block kind, block event
    and archive's `from`; the settled rows, and each settled step's frozen result, by `latestCompletion`
    of the task its row names; the pending rows; the route rows. All within the transaction.
@@ -851,7 +857,7 @@ function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, n
    bounds the loop. A step made is a new open task, which decides nothing until it settles.
 6. It writes **one `workflow_routed` event** on the transitioning task, listing every decision of the
    transaction, for the notice (§12.2).
-7. It returns the runs it superseded (§5.2), which the transition's result carries to its caller.
+7. It returns the runs it superseded (§5.2), which the transition's result carries to its caller (§9.5).
 
 **Exactly once.** A row moves from `waiting` only by an `UPDATE … WHERE state = 'waiting'` that must
 change one row, and a settled row and a route row are `INSERT`s into their keys: a second attempt, by
@@ -903,6 +909,26 @@ decision.
     reconciles (§11) every instance with `routing_failed_at` set, at most once a minute each, and
     clears it on success. The time each was last tried is kept in the service's memory, not stored:
     after a restart every such instance is tried at the startup's reconciliation anyway (§11). The dispatcher reads no workflow table: the hook is the service's.
+
+### 9.5 Runs the routing supersedes
+
+The sweep archives a winning stand-in's routed task (§5.2), which supersedes its undecided run. Its turn
+must be cancelled and closed, as after any archive.
+
+- **Every writer that calls `routeAfter` returns them**, as `superseded: RunRow[]` in its result:
+  `complete`, `block`, `endRun`, `archive`, and the reconciliation; so do the service's
+  `reconcileWorkflow`, `reconcileAll` and `retryRouting`.
+- **The service cancels them itself**, through one new dependency, `KanbanServiceDeps.cancelRun(runId)`,
+  which the gateway gives as the dispatcher's `cancel(runId)` (`src/kanban/dispatcher.ts`), the same
+  call chat's `#decided` makes after an archive. *Why the service, not a hook on `WorkerApiDeps`*: the
+  paths are five callers, chat, the worker API, the dispatcher's own `endRun`, the boot reconciliation
+  and the retry, and two of them have no caller to hand the runs back to. One place in the service covers
+  all, and a caller that also cancels (chat's `#decided`) cancels an already-cancelled run, which
+  `cancel` answers `false` and does nothing. The results still carry `superseded`, for tests and for
+  chat's reply.
+- **The dispatcher's `#cancelDecided`**, which cancels at each pass the turns of runs decided beside the
+  gateway (a terminal's archive), stays the backstop: a terminal's `reconcile`, which has no dispatcher
+  in its process, is cancelled there, at the next pass after its nudge.
 
 ## 10. `decide(plan, facts)`
 
@@ -1188,13 +1214,13 @@ first member (§7.4), and inherit its wake (§13.3). Its answer gains `waiting` 
 - **Two stand-ins of one member, both done**, a step's or an item's: the lower `completed` id wins,
   whichever transaction wrote the row; the other settles nothing; no route is made for the member after.
 - **An item's own completion after its stand-in's**: the stand-in won (lower id) and archived the item's
-  task, its rerun superseded and its turn cancelled; if the item's task completed in the instant before,
-  it is the one archived `from: done`, unread.
+  task, its rerun superseded and its turn cancelled; if its own completion came after the stand-in's,
+  but before a sweep wrote the row (after a fault), it is archived `from: done`, unread.
 - **The routed task's own completion before its stand-in's**: the task wins; the stand-in, still open,
   gets its comment and keeps the instance running until it is finished or archived.
 - **A stand-in completing while the routed task's rerun is open** (a helper or person unblocked it): the
-  stand-in wins; the routed task is archived from `open`, its run superseded, and `complete`'s caller
-  cancels its turn.
+  stand-in wins; the routed task is archived from `open`, its run superseded, and the service cancels
+  its turn (§9.5).
 - **A fault in a stand-in's completion's routing, then the routed task's own completion, then a
   reconcile**: the own completion's sweep, or the reconcile, writes the row for the stand-in, its
   `completed` id being lower, and archives the routed task `from: done`: one winner, the same as
@@ -1270,8 +1296,9 @@ first member (§7.4), and inherit its wake (§13.3). Its answer gains `waiting` 
   step is shown, cancelling by `workflow archive`, `reconcile`, and that a handler's "Its directory"
   line helps only if the handler's agent may read outside its own worktree (its role's sandbox and
   tools, kanban spec §2.2).
-- **`src/kanban/chat.ts`, `src/kanban/worker.ts`, `src/kanban/dispatcher.ts`**: every caller of
-  `complete` cancels and closes the turns of the runs in its result's `superseded`, as for `archive`.
+- **Superseded runs** (§9.5): `superseded` in the results of `complete`, `block`, `endRun`, `archive` and
+  the reconciliations; `KanbanServiceDeps.cancelRun`, given by `src/index.ts` as the dispatcher's
+  `cancel`; `src/kanban/worker.ts` unchanged for it.
   **`docs/specs/2026-11-16-workflows-design.md`**: the notes in §0 and §17 that this document extends
   them.
 
@@ -1323,9 +1350,14 @@ task.
   included, the archive not read as a skip; a stand-in that settles nothing archiving nothing; a
   handler left open after the routed task's own completion, given its comment and notice; **a stand-in
   completing while the routed task's rerun is open**, the run superseded, returned in `superseded`, and
-  its turn cancelled by the caller; **a fault in a stand-in's completion's routing, then the routed
+  its turn cancelled by the service's `cancelRun`; **a fault in a stand-in's completion's routing, then the routed
   task's own completion, then a reconcile**, one winner, the stand-in, with the same `event_id` the
-  gateway would have written; `workflow_route_failed`'s `first: true` on the first only; a
+  gateway would have written; **an archive's routing faulting, then the stand-in completing, then a
+  reconcile**, giving `archived`, the stand-in settling nothing and archiving nothing; **a reconcile that
+  archives a routed task with an open run**, the run superseded and its turn cancelled through
+  `cancelRun`, and the same from `block`, `endRun`, `archive` and the retry; a fan-out whose items are all
+  archived undone, its own row `archived`; a done-then-archived parent linked and its branch not merged;
+  the open handler's comment written once under a reconcile repeated; `workflow_route_failed`'s `first: true` on the first only; a
   fault in the routing rolling back its savepoint only, the completion kept, `routing_failed_at` set,
   one notice for two faults, and the dispatcher's retry clearing it; **a savepoint fault after the outer
   transaction was aborted**, rethrown, nothing committed; a made task's links, subscriptions copied from
@@ -1439,10 +1471,11 @@ task.
    parent read by a true one is not linked.
 6. **Accepted results are `latestCompletion`'s metadata of a `done` task**, frozen per member in
    `kanban_workflow_settled`, keyed `(instance_id, step, ref)` with an item's ref for a fan-out's items
-   and the step's name for the step's own row (§2.3, §8). The winner is the lowest `completed` event
-   id among the member's own task and its stand-ins, written by whichever sweep finds it first, so
-   settling is path-independent; only then is a winning stand-in's routed task archived, whatever its
-   phase, its superseded runs returned to the caller to cancel. Done-then-archived parents are linked,
+   and the step's name for the step's own row (§2.3, §8). The winner is the earliest settling fact by
+   event id, among the own task's `completed`, its stand-ins' `completed` and its own archive undone,
+   written by whichever sweep finds it first, so settling is path-independent; only then is a winning
+   stand-in's routed task archived, whatever its phase, its superseded runs cancelled by the service
+   through `cancelRun` (§9.5). Done-then-archived parents are linked,
    not recursed past: the kernel takes an archived parent as finished, and the child keeps its handoff.
 7. **The outputs check is the service's, before the gates, code `invalid`** (§2.2), on work reports
    only; the cap is a reservation there, `too_large`, and the writer never refuses for it.
@@ -1522,13 +1555,14 @@ task.
 16. **Clause and enum values are not masked in the plan** (§7.3), where the stored DAG masks every text
     but its gates.
 17. **A stand-in's archive supersedes a live run** of the routed task (§5.2): when the stand-in wins
-    while the routed task was unblocked and reworking, that rework is ended, and `complete` gains
-    `superseded` for its caller to cancel the turns.
+    while the routed task was unblocked and reworking, that rework is ended, and the service cancels its
+    turn (§9.5), on every path that sweeps.
 18. **A handler left open** after the routed task won is not archived, only told (§5.2), and keeps the
     instance running.
 19. **The first completion wins, not the first stand-in.** Approved: the first stand-in wins. Written: per
-    member, the lowest `completed` event id among the routed task and its stand-ins (§2.3), so the routed
-    task's own completion before any stand-in's wins too, and the result never depends on which
+    member, the earliest settling fact by event id among the routed task's completion, its stand-ins'
+    completions and its archive undone (§2.3), so the routed task's own completion, or its archive, before
+    any stand-in's wins too, and the result never depends on which
     transaction, fault or reconciliation wrote the row.
 
 ## 22. Open questions for the user
