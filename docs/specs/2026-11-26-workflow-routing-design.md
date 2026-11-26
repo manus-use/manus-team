@@ -64,7 +64,7 @@ The vi assessment, folded into one file (bodies and contracts cut here; §18 run
 description: CVE or supply-chain assessment, routed by its intake
 board: vi
 params:
-  case: { required: true, description: a CVE id, or the absolute path of a package CSV }
+  case: { required: true, description: "a CVE id, or the absolute path of a package CSV" }
 steps:
   intake:
     title: "{{case}} · intake"
