@@ -220,7 +220,7 @@ run, as after a failing gate (kanban spec §7.7).
   cut at 80 characters, by `shown`, which `src/kanban/dag.ts` exports for this.
 - **The instance's cap is a reservation at the reporting completion.** The report whose list a
   fan-out will read is the one checked against the instance's 500 tasks (§19): the members made, plus
-  this list's items for each fan-out over it, plus one for each step this result could make, is at
+  this list's items for each fan-out over it (handlers among the members made), plus one for each step this result could make, is at
   most 500, else `too_large`: `output packages would make 63 tasks, and instance w_… has 470 of its
   500`. The check is the service's, before the gates, at that run's report, where the agent can still
   shorten the list.
@@ -244,6 +244,20 @@ not the reviewer's approval (kanban spec §4.4). Mapped to the code:
 | done, then archived | the same as when it was done: its `archived` event's payload says `from: done` (§3.1) |
 | not `done` | none |
 
+- **Only an accepted result counts as success.** `state: done`, a clause on an output, a fan-out's
+  source and a `{{step.output}}` are satisfied only by an accepted result: the original task's, or an
+  authorised stand-in's (§5.2). **An archive is never a result.** A manual archive of an undone task can
+  only resolve its member as explicitly skipped, `archived`, with no outputs: a clause on its output is
+  false, a fan-out over it is skipped, and its children are decided by §3.2. "First wins" (below)
+  chooses between an accepted result and an archive-skip, never makes an archive a result.
+- **Done, then archived, keeps its result**: a task whose completion was accepted and which was archived
+  later, its `archived` event saying `from: done`, keeps its accepted result, because the accepted
+  completion is a settling fact with an earlier event id than the archive, which comes after it and so
+  never wins; the archive only puts the task away.
+- **Every reader reads the logical step's result**: a condition, a fan-out and a template read the
+  member's settled row (§8), whose winner is the original or an authorised stand-in, never the original
+  task's own phase. A step stood in for, whose original task the stand-in archived (§5.2), reads as
+  `done` with the stand-in's outputs.
 - **A result from a run whose review asked for changes never counts**: `latestCompletion` reads the
   latest `review_requested`, which is the rework's once it asks again, and a task in `open` has no
   accepted result at all.
@@ -291,13 +305,14 @@ A step's **state**, as a clause reads it, is the phase of its tasks plus how the
 
 | State | When it is true |
 |---|---|
-| `done` | the step is settled by its task's accepted completion, or by a stand-in's (§5); a task done and then archived stays `done`, its `archived` event's payload being `from: done` (`archiveIn`, `db/kanban.ts`) |
-| `skipped` | the step was skipped (§3.2), or its task was archived before it was done, **skipped by archive** |
-| `blocked` | its task entered `blocked` from its work by a run's block, or by a run's end that blocks it, of a kind but `gave_up` (§5.1) |
-| `gave_up` | its task entered `blocked` from its work as `gave_up`, by the breaker (kanban spec §8.2) |
+| `done` | its settled row's winner is an accepted result, the original's or an authorised stand-in's (§2.3); a task done and then archived stays `done`, as its accepted completion came first |
+| `skipped` | the step was skipped (§3.2), or its settled row is an archive of its task undone, **skipped by archive**, with no outputs |
+| `blocked` | its task entered `blocked` from its work by one of `on_blocked`'s triggers (§5.1) |
+| `gave_up` | its task entered `blocked` from its work by one of `on_gave_up`'s triggers (§5.1): the breaker's `gave_up`, or the transient limit's block |
 
-`archived` is not a state a clause names. An archived task is read by its archive event's `from`:
-`from: done` is `done`, with its result; any other is skipped by archive. A gateway `blocked` written
+`archived` is not a state a clause names. A clause reads the step's settled row, never its task's
+phase: an archive of a task undone is skipped by archive; a task archived after its accepted completion
+is `done`, as its row's winner is that completion. A gateway `blocked` written
 by the team check of a task made late (§7.4) is neither `blocked` for a clause nor a route (§5.1).
 
 ### 3.2 When a clause is decided, and when a step is
@@ -334,6 +349,12 @@ by the team check of a task made late (§7.4) is neither `blocked` for a clause 
   `report` above, with `verify` skipped, is linked to `va`'s task (or its stand-in), to the exposure
   items, and to `registry`'s task if it was made. **No link goes to a task archived undone**, and every
   link goes to a task that was done.
+- **Rewiring past a skipped parent preserves ordering only.** Effective parents give the made task its
+  links, so its order, and its parents' handoffs as prompt context (kanban spec §7.1); **never
+  outputs**. A clause, a fan-out or a `{{step.output}}` on a skipped step reads that step, not the
+  ancestors it was rewired to: a clause on a skipped step's output is false, and a fan-out over it is
+  skipped. `(skipped)` (§7.4) is a **display placeholder in titles and bodies only**, never a value a
+  condition, a fan-out or anything else reads.
 - **Skipped by archive spreads.** A step **counts as skipped by archive** when its task was archived
   undone, or when it was skipped otherwise (by its `when`, its source or the cap) and every one of its
   parents counts as skipped by archive. A step whose parents all count so is **skipped by archive** too, `its parents were archived`, never
@@ -353,11 +374,14 @@ by the team check of a task made late (§7.4) is neither `blocked` for a clause 
 `packages`, in the list's order, each with `{{item}}` set to its item, as a param fan-out does
 (workflows spec §3).
 
-- **When.** Only once the named step is `done`, its review included (kanban spec §5.3), and from its
-  frozen accepted result (§2.3); and as any pending step, once its `when` holds and its parents are
-  settled (§3.2). A stood-in source is read through its stand-in's result (§5.2).
-- **A skipped or archived source skips the fan-out**, `intake was skipped` or `intake was archived`,
-  as there is no list to read. An archived source that was done (`from: done`) is read.
+- **When.** Only once the named step is settled `done`, its review included (kanban spec §5.3), and
+  from the frozen accepted result of its settled row's winner (§2.3); and as any pending step, once its
+  `when` holds and its parents are settled (§3.2).
+- **The source is the logical step, never its task's phase.** A source settled by a stand-in fans out
+  from the **stand-in's accepted list**, though its original task was archived by the stand-in (§5.2).
+  A source done and archived later fans out from its own accepted list. Only a source whose settled row
+  is `skipped` or `archived` (an archive of its task undone) **skips the fan-out**, `intake was skipped`
+  or `intake was archived`, as there is no accepted list to read.
 - **The source is an ancestor, and its output a list.** `workflow check` refuses a non-ancestor, an
   undeclared output, and an output of another type (§6).
 - **The items** are the list's values, texts as given, numbers and booleans as JSON writes them,
@@ -407,11 +431,23 @@ claim.
 - **`wait`** is today's: the task blocks, the chat hears (kanban spec §9.4), a person acts
   (workflows spec §11).
 - **`{ route: <handler> }`** also makes the handler's task, once for that transition (§5.3).
-- **Which transitions.** `on_gave_up`: the breaker's `gave_up` (`endRun` with `next` `blocked` and
-  kind `gave_up`, kanban spec §8.2). `on_blocked`: a run's own `block` of any kind but `dependency`,
-  which never sits in `blocked` (kanban spec §5.4), and a run's end that blocks the task for any other
-  kind: `capability`, `transient`, `needs_input` for a cautious retry or a directory that cannot be
-  made (`endRun`).
+- **Which transitions.** Each trigger event once, from the code (`block` and `endRun`, `db/kanban.ts`):
+
+  | Trigger | Event | Routes by |
+  |---|---|---|
+  | a run's own `block`, `needs_input`, `capability` or `transient` | `blocked`, actor `run:<run_id>`, `kind` not `dependency` | `on_blocked` |
+  | a run's end refused by the provider (`terminal_provider`) | `run_ended`, `next: blocked`, `blockKind: capability` | `on_blocked` |
+  | a cautious retry (`if-no-side-effects`, a run that may have changed things) | `run_ended`, `next: blocked`, `blockKind: needs_input` | `on_blocked` |
+  | a run whose directory cannot be made (`ending.block`) | `run_ended`, `next: blocked`, `blockKind: needs_input` | `on_blocked` |
+  | the breaker, at the failure limit after `failed`, `crashed`, `timed_out` or `protocol_violation` runs | `run_ended`, `next: blocked`, `blockKind: gave_up` | `on_gave_up` |
+  | the transient limit, `rate_limited` that many times in a row (`transientLimit`, 10) | `run_ended`, `next: blocked`, `blockKind: transient` | `on_gave_up` |
+
+  The two `on_gave_up` rows are the **terminal failure endings**: the board stopped retrying by its own
+  limit. The code has no other ending that blocks: `interrupted` retries, or blocks `needs_input` only as
+  a cautious retry (third row); a cooldown blocks nothing. A run's own `transient` block is a run's
+  report, so `on_blocked`; the transient limit's is the board giving up, so `on_gave_up`, which the
+  `state: gave_up` clause reads the same way (§3.1). A `dependency` block never sits in `blocked`
+  (kanban spec §5.4) and is no trigger.
 - **Only from the work.** A transition routes only when the task blocks from `open`, its
   `blocked_from` being `open`. A block or give-up of a **review** run waits: the work is done, the
   review is a reviewer's, and a handler standing in for the step would settle it past its own
@@ -419,8 +455,7 @@ claim.
 - **A person's block and a person's stop route nothing** (decided by the user, §20): only a run's blocks
   route; a person blocking or stopping is a person acting already, as the
   wake spec reasons for its outcomes (wake spec §2.2, §2.3). Nor does a gateway `blocked` written by
-  the team check (§7.4). The rule is read from the event: a `blocked` whose actor is `run:<run_id>`,
-  or a `run_ended` with `next` `blocked`.
+  the team check (§7.4), nor `stopped`. The table above is the whole list.
 - **No route from a member already settled.** A task whose member a stand-in has settled is archived
   by it (§5.2), so it cannot block again; and the writer routes no transition of a task whose member
   (the step, or its item) has its settled row (§8). **The first to complete wins**, per member.
@@ -447,6 +482,11 @@ claim.
   `when` or `for_each` (§6): it is no step's ancestor. Its other fields are a step's.
 - **Its ancestors**, for its `{{step.output}}` references, are the routed step's, the routed step
   itself excluded, as it has no result: so `escalate` may read `{{intake.kind}}`.
+- **Its context comes from records.** The source task's id, its step and item, and its directory are
+  read from the route row (`kanban_workflow_routes`: `from_task`, the handler's `task_id`) and the board's
+  own rows (the source's member row, its `kanban_tasks` row, its worktree row for the path). **`mt kanban
+  unblock` (§5.4), and anything else a handler is allowed, is authorised by those records alone.** The
+  paragraph below only describes them: editing a body, or a body cut at 64 KiB, changes no authority.
 - **Its body gains a fixed paragraph at the making**, after the file's, so the agent knows what it
   handles while the prompt stays workflow-agnostic (kanban spec §7.1 renders the body as it is):
 
@@ -482,8 +522,15 @@ claim.
   it was routed from (§5.4), and that task's dependents keep waiting for it, under its own rules.
 - **With `stands_in_for: <step>`**, which must be one of the steps that route to it, and declare
   exactly the same outputs, name for name and type for type: **the handler's accepted completion
-  settles that step for its dependents**, its outputs read in that step's place. In the same
-  transaction (decided by the user, §20):
+  settles that step for its dependents**, its outputs read in that step's place.
+  - **Its review is the step's.** A stand-in for a step that has a reviewer is made with that step's
+    reviewer, as the plan resolved it at the start, so its completion asks for review (kanban spec §5.3)
+    and counts, as an accepted result, only once that review passes. A stand-in handler takes no
+    `reviewer` of its own: `workflow check` refuses one (§6).
+  - **Its outputs are checked as the step's.** Its work report goes through the same output check
+    (§2.2), as its step declares the same outputs; a stand-in whose assignee is a person, which could
+    give none, is refused by the check (§2.1, §6).
+  - In the transaction of its accepted completion (decided by the user, §20):
   - the routed member's settled row (§8) is written with the winner, the earliest settling fact by
     event id (§2.3). If the winner is another, an earlier stand-in, the routed task's own completion or
     its archive undone, **this completion settles nothing and archives nothing** but closes its own task;
@@ -576,6 +623,7 @@ workflow check`, the startup lines, every preview and start. **It refuses**, eac
 | a handler routed from nowhere | `steps.escalate is a handler, and no step routes to it: add on_blocked or on_gave_up: { route: escalate } to the step it handles` |
 | a route to a step that is no handler, or to none | `steps.va.on_gave_up routes to report, which is not a handler (handler: true)` |
 | `stands_in_for` with other outputs, or naming a step that does not route to it | `steps.escalate stands in for va, and its outputs differ: va declares reachable (boolean), escalate reachable (string)` |
+| a stand-in that cannot meet the step's review or outputs: a `reviewer` of its own, or a person's assignee where the step declares outputs | `steps.escalate stands in for va, and takes va's reviewer (role assessment-reviewer): it names none of its own` |
 | a handler with `parents`, `when` or `for_each`, or a route from a handler | `steps.escalate is a handler, made with no parents when routed to: it takes no parents` |
 | a clause list with two `any` groups, an empty `any`, or a clause with two tests | `steps.verify.when has two any groups; it takes one` |
 | `{{step.output}}` in a plain step, a contract field, a name field or a gate | `steps.va.title names {{intake.kind}}, and va is made at the start, before any result` |
@@ -690,7 +738,8 @@ the same `insertTask` (`db/kanban.ts`):
 
 - **its fields** from its template, each `{{step.output}}` filled from the frozen results as text,
   once, as params are (workflows spec §2): a list as its items joined by `, `, a number as JSON writes
-  it, a boolean as `true` or `false`, a skipped step's as `(skipped)` (decided by the user, §20). `{{item}}`
+  it, a boolean as `true` or `false`, a skipped step's as `(skipped)` (decided by the user, §20), a
+  display placeholder in this text only, which nothing reads as a value (§3.2). `{{item}}`
   from the item. A handler's body gains its paragraph (§5.2). **Titles and bodies are cut** to `task new`'s limits (512
   bytes, 64 KiB) with `cutToBytes` (`src/kanban/limits.ts`), as a reaction task's are (wake spec
   §19.3): the writer must not refuse for a later step's length, and the start already refused a
@@ -888,8 +937,10 @@ decision.
 
 ### 9.4 The cap, and a failure in the routing
 
-- **The cap.** A step whose making would pass the instance's 500 tasks is skipped, `the instance has
-  500 tasks`, and a route records `over_cap` (§5.3); each is a line of the transaction's notice. The
+- **The cap.** The instance's 500 counts **every member, handlers included**. It is checked **before
+  anything is made**: a step whose making, all its tasks counted, would pass it is skipped, `the instance
+  has 500 tasks`, and a route that would records `over_cap` (§5.3); each is a line of the transaction's
+  notice. **A fan-out makes all its items in one transaction, or none**: never a partial fan-out. The
   writer never refuses the transition for it (§2.2). A step skipped so is skipped as by its `when`:
   its children are decided by their other parents, and its own children through its effective
   parents.
@@ -1044,8 +1095,7 @@ Params: case=CVE-2026-12345
   text (`src/cli/plain.ts`) print them, chat's cut to fit as today (workflows spec §10). `--json` gains
   `steps: [{"step", "state", "why", "items", "routes"}]`. An instance with no plan shows as today.
 - **`show --plan`**, at the terminal only, beside `--dag`, prints the stored plan, masked. `--dag`
-  prints the start's DAG as today, and for an instance whose plan has pending steps or routes says on
-  stderr that the DAG holds only the steps made at the start, the rest in `--plan` (§13.5).
+  prints the start's DAG as today, and for an instance with a plan says on stderr that the DAG holds only the steps made at the start, the rest in `--plan` (§13.5).
 
 ### 12.2 Notices
 
@@ -1154,11 +1204,14 @@ unchanged, and so is every DAG's hash. Why:
 - the gates rule (workflows spec §5) stands as it is: a plan's gates come from the operator's file
   alone, and `apply-dag` has no path to them.
 
-So **`preview --json` is refused only when the plan has pending steps or routes**, `invalid`:
-`workflow vi-workflow makes steps on results (when, for_each over an output) or routes blocked steps to
-handlers, and a DAG holds only a fixed graph: start it with mt kanban workflow start`. A file whose only
-new key is `outputs` previews to its DAG as today, and stderr says that an apply of it makes the tasks
-without their outputs' checks, which only a start keeps. **`show --dag`** of a routed instance prints its
+So **`preview --json` is refused for any file that uses any routing key**, `outputs` included, `invalid`:
+`workflow vi-workflow uses outputs, when, for_each over an output, on_gave_up, handler, which a DAG cannot
+carry: start it with workflow start`, the keys named as the file uses them. A DAG made without them would
+make the tasks without their checks and routes, which only a start keeps. **`apply` and `apply --dry-run`
+refuse a DAG whose `workflow` label names such a file**, with the same message, read by a light read of
+the file as `workflowBoard`'s (workflows spec §19.3), `workflowRouting(dir, name)`, after step 0 so a
+repeat is answered; a file that cannot be read checks nothing, as there. **`apply-dag`** takes no label
+at all (workflows spec §6), so it can never name such a file. **`show --dag`** of a routed instance prints its
 start's DAG with the stderr line of §12.1. A start, from chat, the terminal or a run's
 `start-workflow`, is the only way to make a routed instance.
 
@@ -1205,6 +1258,20 @@ first member (§7.4), and inherit its wake (§13.3). Its answer gains `waiting` 
 - **Cancelling a case**: `/kanban workflow archive w_…`, which skips every waiting step and makes
   nothing.
 - **A fan-out whose source was skipped or archived undone**: skipped, `intake was skipped`.
+- **A fan-out whose source was stood in for**: the source's original task was archived by the stand-in,
+  and the fan-out reads the stand-in's accepted list, never the archived task's phase.
+- **An undone task archived by hand**: its member is skipped, with no outputs; a clause on them is false,
+  a fan-out over it skipped. Archiving never stands for success.
+- **A clause on the output of a skipped step whose child was rewired to its grandparent**: false; the
+  grandparent's outputs are not read in its place, and a title shows `(skipped)`.
+- **The transient limit reached** (10 throttles in a row): routed by `on_gave_up`, as a give-up; a run's
+  own `transient` block by `on_blocked`.
+- **A stand-in for a reviewed step**: made with the step's reviewer; its completion goes to review, and
+  settles the step only once the review passes; changes requested on it settle nothing.
+- **A fan-out of 60 items when the instance has 450 members**: none of its items is made; it is skipped,
+  `the instance has 500 tasks`, with the notice. A handler counts among the 450.
+- **A terminal `apply` of a DAG labelled `vi-workflow`**, printed by `show --dag`: refused, as the file
+  uses routing keys; with the label set to `null` it applies the fixed tasks, as "(no workflow)".
 - **A plain task archived by hand, its children plain too**: as today, its children are released
   (kanban spec §4.1).
 - **`va` gives up, `on_gave_up` routes to a stand-in, the stand-in reports**: `va`'s step is settled by
@@ -1286,7 +1353,7 @@ first member (§7.4), and inherit its wake (§13.3). Its answer gains `waiting` 
   `renderStarted`'s "more steps" line. **`src/kanban/notices.ts`**: nothing but passing the events, as
   `renderNotice` decides.
 - **`src/cli/operator.ts`**: `reconcile` in `WORKFLOW_COMMANDS`; `show --plan`; `preview --json`'s
-  refusal and stderr line (§13.5); the `--dag` stderr line. **`src/cli/plain.ts`**: their text.
+  refusal, and `apply`'s for a DAG labelled with a routed file (§13.5); the `--dag` stderr line. **`src/cli/plain.ts`**: their text.
   **`src/cli/workflow.ts`**: `mt workflow check`'s step lines and counts. **`src/cli/mt.ts`**:
   `reconcile` in `SUBCOMMANDS.workflow`, and `USAGE`.
 - **`src/index.ts`**: `reconcileAll` after the migration, before the dispatcher starts, and its note.
@@ -1317,7 +1384,12 @@ task.
     `at_least` and `at_most` at, below and above the bound; each `state`, `blocked` and `gave_up` true at
     the transition from the work and false once settled without it, and a gateway `blocked` not counted;
   - `any`: one of three true, none true; with other clauses false first;
-  - skipped reads: a clause on a skipped step's output false; `state: skipped` true;
+  - skipped reads: a clause on a skipped step's output false; `state: skipped` true; a clause on a
+    skipped step rewired to a done grandparent still false, the grandparent's outputs never read in its
+    place; `(skipped)` in a title and body only, read by no clause or fan-out;
+  - archive is not success: an undone task archived resolving its member as skipped, with no outputs, for
+    `state: done`, an output clause and a fan-out's source alike; a done task archived later keeping its
+    accepted result, its completion's event id earlier than the archive's;
   - **an early skip**: a step skipped while its parent runs is not settled, and its child waits for that
     parent, then is linked to it as an effective parent; a chain of two skips linked through to the
     nearest done ancestor; effective parents empty only by archive, and the step then skipped by archive;
@@ -1325,14 +1397,21 @@ task.
     done-then-archived parents linked, the child keeping their handoffs;
   - ancestor reads: a clause on a grandparent decided when it settles, the step made only when its
     parents are;
-  - fan-out: items in order, refs `step:n`; an empty list skipped; **a skipped source and an archived
+  - fan-out: items in order, refs `step:n`; an empty list skipped; **a source settled by a stand-in
+    fanning out from the stand-in's accepted list**, its original task archived; **a skipped source and an archived
     undone source skipping the fan-out**, an archived done source read; the join's child decided only
     when every item is settled, linked to each item's winner, none to an item archived undone; the
     fan-out's own row written only after every item's;
   - **archiving**: a done ancestor archived read as done with its result; an undone root archived
     skipping by archive a child whose parents were all archived, and not a child with another parent
     done;
-  - caps: a step and a route past 500 from each path skipped and `over_cap`;
+  - caps: a step and a route past 500 from each path skipped and `over_cap`; handlers counted; a fan-out
+    that would pass 500 making none of its items, never a part;
+  - triggers: each row of §5.1's table routing by its key, the transient limit's block by `on_gave_up`
+    and a run's own `transient` block by `on_blocked`, and `stopped`, a person's block and the team
+    check's block routing nothing;
+  - stand-ins: a stand-in for a reviewed step made with that reviewer, settling only once approved, and
+    changes requested on it settling nothing; its completion's outputs checked as the step's;
   - routes and stand-ins: once per event; the fourth `over_limit`; per item; a review-phase block
     routing nothing; **the first to complete winning per member, and no route due for a member it
     settled**; **two stand-ins of one item**, the lower `completed` id winning; **an item's own
@@ -1383,9 +1462,12 @@ task.
 - **Unit, seeing it**: `workflow show`'s lines for each state, an unused handler absent, its order by
   step, the failed-routing line, `--json`'s `steps`, `--plan`; the status with waiting, skipped and
   stood-in steps; the notices' text, batched, masked, and no wake; preview's lines and first line;
-  `preview --json` refused for a plan with pending steps or routes, and taken for one with outputs only,
-  its stderr line; the start's answer's `waiting`; `reconcile`'s answers and refusals.
-- **Unit, the worker's `unblock`**: a handler's work run unblocking its routed task with a comment;
+  `preview --json` refused for a file using any routing key, `outputs` alone included, with the message
+  naming the keys; `apply` and `apply --dry-run` refusing a DAG labelled with such a file, after a repeat
+  by key is answered, and checking nothing for a file that cannot be read; the start's answer's `waiting`; `reconcile`'s answers and refusals.
+- **Unit, the worker's `unblock`**: authorised by the route row alone, a handler whose body was edited or
+  cut still allowed and one with no route row refused; a handler's work run unblocking its routed task
+  with a comment;
   **a repeat by the same run answering `ok`, `changed: false`**; refused `wrong_task` for another task,
   for a run that is no handler's, and **for a review run of the handler**; `stale` after another lifted
   the block.
@@ -1428,7 +1510,8 @@ task.
 
 ## 19. Limits
 
-- **Caps**: a fan-out at most its `max`, at most 100; an instance at most **500 tasks** in all, the
+- **Caps**: a fan-out at most its `max`, at most 100; an instance at most **500 tasks** in all, handlers included, a fan-out made
+  whole or not at all, the
   start's at most 100 as today (workflows spec §3, §5). The reporting completion whose list would pass
   either is refused, never cut (§2.2); what passes 500 later, at an approval, a stand-in or a race, is
   skipped with its reason and a notice, never refused (§9.4). *This amends workflows spec §3*: 100 is
@@ -1495,8 +1578,9 @@ task.
     fault, a fault noticed once and retried on the dispatcher's pass (§9.4).
 12. **Late tasks copy the first member's subscriptions** (§7.4); their wake is frozen in the plan, a run's
     start's inherited at the making.
-13. **Conditions are workflow starts' only** (§13.5): `preview --json` refused when the plan has pending
-    steps or routes; `show --plan` beside `--dag`.
+13. **Conditions are workflow starts' only** (§13.5): `preview --json` refused for any file using any
+    routing key, `outputs` included; `apply` refusing a DAG labelled with such a file, by a light read;
+    `apply-dag` needing nothing, as it takes no label; `show --plan` beside `--dag`.
 14. **The notices are events on the transitioning task** (§12.2), rendered from their payloads, no wake;
     there is no instance event table, as an event belongs to a task (workflows spec §7).
 15. **Reconciliation is the same helper**, at start, on the dispatcher's pass after a fault, and as `mt
@@ -1509,6 +1593,22 @@ task.
 19. **Late titles and bodies are cut**, as a reaction task's (§7.4); templates are checked at the start
     with placeholders.
 20. **Clause and enum values are stored unmasked**, and refused when they hold a known secret (§7.3).
+21. **Only an accepted result is success** (§2.3): an archive of a task undone resolves its member as
+    skipped, with no outputs; a task archived after its accepted completion keeps its result, as the
+    completion's event comes first.
+22. **Rewiring past a skipped parent is ordering only** (§3.2): links, order and handoffs as prompt
+    context, never outputs; `(skipped)` is a display placeholder, never a value.
+23. **Triggers are listed once, by event** (§5.1): the transient limit's block is a terminal failure
+    ending, `on_gave_up`, with the breaker's `gave_up`; every other run-end block and a run's own block
+    are `on_blocked`.
+24. **A handler's context and authority are the route row's and the board's rows** (§5.2); its body's
+    paragraph only describes them.
+25. **A stand-in takes its step's reviewer and output check** (§5.2), so its result is accepted as the
+    step's own would be.
+26. **The cap counts handlers, is checked before anything is made, and a fan-out is all or none**
+    (§9.4).
+27. **Every reader reads the logical step's result**, its settled row's winner (§2.3, §4.1): a stood-in
+    source fans out from the stand-in's list.
 
 ## 21. Departures from the approved design
 
@@ -1553,8 +1653,9 @@ task.
     "invalid", …}`; there is no `refused:` prefix, which the worker CLI does not print.
 13. **Late titles and bodies are cut** to their limits rather than refused (§7.4); "never cut" is kept for
     what it named, the fan-out and instance caps.
-14. **Conditions are not in DAGs** (§13.5): `preview --json` of a file whose plan has pending steps or
-    routes is refused, where every file today previews to an applicable DAG.
+14. **Routing is not in DAGs** (§13.5): `preview --json` of a file using any routing key, `outputs`
+    included, is refused, and `apply` refuses a DAG labelled with such a file, where every file today
+    previews to an applicable DAG.
 15. **Values from results do not reach the contract fields**, only titles and bodies, as approved; the
     outputs sentence the expansion adds to `outcome` (§2.1) is the file's, not a result's.
 16. **Clause and enum values are not masked in the plan** (§7.3), where the stored DAG masks every text
@@ -1568,7 +1669,15 @@ task.
     member, the earliest settling fact by event id among the routed task's completion, its stand-ins'
     completions and its archive undone (§2.3), so the routed task's own completion, or its archive, before
     any stand-in's wins too, and the result never depends on which
-    transaction, fault or reconciliation wrote the row.
+    transaction, fault or reconciliation wrote the row. An archive is never a result: it wins only as a
+    skip (§2.3).
+20. **The transient limit's block routes by `on_gave_up`**, not `on_blocked` (§5.1): approved, the
+    breaker's `gave_up` alone was a give-up; the board stopping at its throttle limit is as terminal.
+21. **A stand-in takes the step's reviewer** (§5.2), and a stand-in handler may name no reviewer of its
+    own; approved, a handler's fields were a step's, its reviewer included.
+22. **`preview --json` is refused for `outputs` alone**, and `apply` refuses a DAG labelled with a routed
+    file (§13.5); approved, the DAG paths were not discussed, and the first draft let an outputs-only file
+    preview.
 
 ## 22. Open questions for the user
 
