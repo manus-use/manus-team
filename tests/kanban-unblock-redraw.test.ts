@@ -1,18 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CardView, Channel } from '../src/channel/types.js';
+import { ChannelError, type CardView, type Channel } from '../src/channel/types.js';
 import type { InboundCardAction } from '../src/core/router.js';
 import { eventsOf, subscriptionsOf } from '../src/db/kanban-read.js';
 import { notePerson } from '../src/db/people.js';
 import { unblockButton } from '../src/kanban/chat-render.js';
 import { KanbanChat } from '../src/kanban/chat.js';
-import { Notifier } from '../src/kanban/notices.js';
+import { NOTICE_SEND_MS, Notifier } from '../src/kanban/notices.js';
 import { PeopleDirectory } from '../src/kanban/people.js';
 import { KanbanService } from '../src/kanban/service.js';
 import type { CreatedVia, KanbanEvent, TaskRow } from '../src/kanban/types.js';
-import { REDRAW_POLL_MS, UnblockRedraws } from '../src/kanban/unblock-redraw.js';
+import { REDRAW_POLL_MS, REDRAW_TRIES, ROUND_REDRAWS, REDRAW_UPDATE_MS, UnblockRedraws } from '../src/kanban/unblock-redraw.js';
 import type { Principal } from '../src/types.js';
 import { FakeChannel } from './helpers/channel.js';
-import { ManualClock, testDb, type TestDb } from './helpers/db.js';
+import { ManualClock, settle, testDb, type TestDb } from './helpers/db.js';
 import { DEFAULT_ROLES } from './helpers/dispatch.js';
 import { WORKSPACES } from './helpers/kanban.js';
 
@@ -77,6 +77,7 @@ function redraws(opts: { redrawTimeoutMs?: number; zone?: string; channel?: Chan
     nameOf: (p) => people.chatName(p),
     zone: 'UTC',
     note: (line) => notes.push(line),
+    clock,
     ...rest,
   });
 }
@@ -226,12 +227,12 @@ describe('the redraw once a block is lifted', () => {
     expect(lark.cardUpdates).toHaveLength(2);
   });
 
-  it('logs a redraw that fails, does not throw, and does not try it again', async () => {
+  it('logs a redraw Lark refused, does not throw, and does not try it again', async () => {
     const a = create('Draft the notes');
     block(a, 'which wiki?');
     await notifier().deliver();
     expect(service.unblock(a.taskId, 'operator:hemanth').ok).toBe(true);
-    lark.failNext('updateCard', new Error('card gone'));
+    lark.failNext('updateCard', new ChannelError(230011, 'card gone', false));
     const r = redraws();
     await expect(r.redrawDue()).resolves.toBe(1);
     expect(notes.some((n) => n.includes('om_text_1') && n.includes('card gone'))).toBe(true);
@@ -239,7 +240,7 @@ describe('the redraw once a block is lifted', () => {
     expect(lark.calls.filter((c) => c === 'updateCard')).toHaveLength(1);
   });
 
-  it('gives up on a redraw that takes too long, and says so', async () => {
+  it('goes on without a redraw that takes too long, and says so', async () => {
     const a = create('Draft the notes');
     block(a, 'which wiki?');
     await notifier().deliver();
@@ -247,9 +248,10 @@ describe('the redraw once a block is lifted', () => {
     lark.hold();
     const r = redraws({ redrawTimeoutMs: 20 });
     await expect(r.redrawDue()).resolves.toBe(1);
-    lark.release();
-    expect(notes.some((n) => n.includes('om_text_1') && n.includes('longer than'))).toBe(true);
+    expect(notes.some((n) => n.includes('om_text_1') && n.includes('longer than 20 ms'))).toBe(true);
+    // In its pause: not tried again yet.
     expect(await r.redrawDue()).toBe(0);
+    lark.release();
   });
 
   it('does nothing for a press on a message it has no record of', async () => {
@@ -442,5 +444,250 @@ describe('the redraw loop', () => {
     lark.release();
     await drawing;
     expect(await r.idle(1_000)).toBe(true);
+  });
+});
+
+describe('a redraw that did not land', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** One notice with an Unblock button for each title, all lifted but the ones `keep` names. */
+  async function lifted(titles: string[], keep: string[] = []): Promise<TaskRow[]> {
+    const tasks = titles.map((x) => create(x));
+    for (const task of tasks) block(task, `about ${task.title}?`);
+    await notifier().deliver();
+    expect(lark.texts).toHaveLength(1);
+    for (const task of tasks) if (!keep.includes(task.title)) expect(service.unblock(task.taskId, 'operator:hemanth').ok).toBe(true);
+    return tasks;
+  }
+
+  function redrawnFor(): Array<number | null> {
+    return t.db
+      .prepare<[], { redrawn_for: number | null }>('SELECT redrawn_for FROM kanban_unblock_buttons ORDER BY block_event')
+      .all()
+      .map((r) => r.redrawn_for);
+  }
+
+  function liftOf(task: TaskRow): number {
+    const e = eventsOf(t.db, task.taskId).findLast((x) => x.kind === 'unblocked');
+    if (e === undefined) throw new Error('not unblocked');
+    return e.id;
+  }
+
+  it('is not marked when it timed out, and is tried again by the loop after its pause, then marked once it lands', async () => {
+    const [a] = await lifted(['Draft the notes']);
+    lark.hold();
+    const r = redraws({ redrawTimeoutMs: 20 });
+    expect(await r.redrawDue()).toBe(1);
+    expect(redrawnFor()).toEqual([null]);
+    // That update never answers after all.
+    lark.failNext('updateCard', new ChannelError(0, 'socket hang up', false));
+    lark.release();
+    await settle();
+    expect(notes).toContain('kanban: redrawing notice om_text_1 failed after timing out: socket hang up (code 0)');
+    expect(redrawnFor()).toEqual([null]);
+    // Its pause, 2 s, not over yet.
+    clock.advance(1_999);
+    expect(await r.redrawDue()).toBe(0);
+    clock.advance(1);
+    expect(await r.redrawDue()).toBe(1);
+    expect(lark.cardUpdates).toHaveLength(1);
+    expect(redrawnFor()).toEqual([liftOf(a!)]);
+    expect(await r.redrawDue()).toBe(0);
+  });
+
+  it('is not marked when it got no answer, and is tried again', async () => {
+    await lifted(['Draft the notes']);
+    lark.failNext('updateCard', new ChannelError(0, 'ECONNRESET', false));
+    const r = redraws();
+    expect(await r.redrawDue()).toBe(1);
+    expect(notes).toContain('kanban: redrawing notice om_text_1 failed: ECONNRESET (code 0)');
+    expect(redrawnFor()).toEqual([null]);
+    clock.advance(2_000);
+    expect(await r.redrawDue()).toBe(1);
+    expect(lark.cardUpdates).toHaveLength(1);
+    expect(redrawnFor()).not.toEqual([null]);
+  });
+
+  it(`is marked after ${REDRAW_TRIES} timeouts in a row, the pause doubling, with one line saying it was given up on`, async () => {
+    const [a] = await lifted(['Draft the notes']);
+    lark.hold();
+    const r = redraws({ redrawTimeoutMs: 10 });
+    for (const [i, pause] of [0, 2_000, 4_000, 8_000, 16_000].entries()) {
+      if (pause > 0) {
+        clock.advance(pause - 1);
+        expect(await r.redrawDue()).toBe(0);
+        clock.advance(1);
+      }
+      expect(await r.redrawDue()).toBe(1);
+      expect(redrawnFor()).toEqual([i === REDRAW_TRIES - 1 ? liftOf(a!) : null]);
+    }
+    expect(REDRAW_TRIES).toBe(5);
+    expect(lark.calls.filter((c) => c === 'updateCard')).toHaveLength(5);
+    expect(notes.filter((n) => n.includes('was not redrawn'))).toEqual([
+      'kanban: notice om_text_1 was not redrawn after 5 tries: took longer than 10 ms',
+    ]);
+    clock.advance(60_000);
+    expect(await r.redrawDue()).toBe(0);
+    // The five land at last: each said, none drawn again.
+    lark.release();
+    await settle();
+    expect(notes.filter((n) => /^kanban: redrawing notice om_text_1 landed after \d+ ms$/.test(n))).toHaveLength(5);
+    expect(lark.calls.filter((c) => c === 'updateCard')).toHaveLength(5);
+  });
+
+  it('is marked at once when Lark refused it', async () => {
+    const [a] = await lifted(['Draft the notes']);
+    lark.failNext('updateCard', new ChannelError(230002, 'bot not in chat', false));
+    const r = redraws();
+    expect(await r.redrawDue()).toBe(1);
+    expect(notes).toContain('kanban: redrawing notice om_text_1 failed: bot not in chat (code 230002)');
+    expect(redrawnFor()).toEqual([liftOf(a!)]);
+    clock.advance(60_000);
+    expect(await r.redrawDue()).toBe(0);
+  });
+
+  it('is marked at once when its card is gone, even were it said retryable', async () => {
+    await lifted(['Draft the notes']);
+    lark.failNext('updateCard', new ChannelError(200740, 'card entity not found', true));
+    const r = redraws();
+    expect(await r.redrawDue()).toBe(1);
+    expect(redrawnFor()).not.toEqual([null]);
+    clock.advance(60_000);
+    expect(await r.redrawDue()).toBe(0);
+  });
+
+  it('waits the time Lark asked for after a retryable refusal', async () => {
+    await lifted(['Draft the notes']);
+    lark.failNext('updateCard', new ChannelError(99991400, 'rate limited', true, 5_000));
+    const r = redraws();
+    expect(await r.redrawDue()).toBe(1);
+    expect(redrawnFor()).toEqual([null]);
+    clock.advance(2_000);
+    expect(await r.redrawDue()).toBe(0);
+    clock.advance(2_999);
+    expect(await r.redrawDue()).toBe(0);
+    clock.advance(1);
+    expect(await r.redrawDue()).toBe(1);
+    expect(redrawnFor()).not.toEqual([null]);
+  });
+
+  it('marks, once a timed-out update lands late, only the lifts it drew, and the loop draws the newer one', async () => {
+    const [a, b] = await lifted(['Draft the notes', 'Check the links'], ['Check the links']);
+    lark.hold();
+    const r = redraws({ redrawTimeoutMs: 20 });
+    expect(await r.redrawDue()).toBe(1);
+    // B is unblocked while the update that drew only A is still out.
+    expect(service.unblock(b!.taskId, 'operator:hemanth').ok).toBe(true);
+    clock.advance(1_500);
+    lark.release();
+    await settle();
+    expect(notes).toContain('kanban: redrawing notice om_text_1 landed after 1500 ms');
+    expect(redrawnFor()).toEqual([liftOf(a!), null]);
+    expect(lark.cardUpdates.map((u) => u.view.buttons.length)).toEqual([1]);
+    // A's landing ended its pause: B is drawn at the next round.
+    expect(await r.redrawDue()).toBe(1);
+    expect(lark.cardUpdates.map((u) => u.view.buttons.length)).toEqual([1, 0]);
+    expect(redrawnFor()).toEqual([liftOf(a!), liftOf(b!)]);
+  });
+
+  it('draws the message again when an older timed-out view lands after a newer one', async () => {
+    const [, b] = await lifted(['Draft the notes', 'Check the links'], ['Check the links']);
+    // The first update is held until the test lets it go; any later one lands at once.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let first = true;
+    const slow: Channel = Object.assign(Object.create(lark) as Channel, {
+      updateCard: async (messageId: string, view: CardView) => {
+        if (first) {
+          first = false;
+          await held;
+        }
+        return lark.updateCard(messageId, view);
+      },
+    });
+    const r = redraws({ channel: slow, redrawTimeoutMs: 20 });
+    expect(await r.redrawDue()).toBe(1);
+    expect(service.unblock(b!.taskId, 'operator:hemanth').ok).toBe(true);
+    // B's press draws both while A's older view is still out.
+    await r.redrawMessage('om_text_1');
+    expect(lark.cardUpdates.map((u) => u.view.buttons.length)).toEqual([0]);
+    release();
+    await settle();
+    await r.idle(1_000);
+    // The older view landed last, so the newer is drawn again over it.
+    expect(lark.cardUpdates.map((u) => u.view.buttons.length)).toEqual([0, 1, 0]);
+  });
+
+  it('leaves a press redraw that timed out unmarked, for the loop to try again', async () => {
+    const [a] = await lifted(['Draft the notes']);
+    lark.hold();
+    const r = redraws({ redrawTimeoutMs: 20 });
+    await r.redrawMessage('om_text_1');
+    expect(notes).toContain('kanban: redrawing notice om_text_1 took longer than 20 ms; trying it again later');
+    lark.failNext('updateCard', new ChannelError(0, 'socket hang up', false));
+    lark.release();
+    await settle();
+    expect(redrawnFor()).toEqual([null]);
+    clock.advance(2_000);
+    expect(await r.redrawDue()).toBe(1);
+    expect(redrawnFor()).toEqual([liftOf(a!)]);
+  });
+
+  it(`waits ${REDRAW_UPDATE_MS} ms for an update, as a notice's send is waited for`, async () => {
+    expect(REDRAW_UPDATE_MS).toBe(30_000);
+    expect(REDRAW_UPDATE_MS).toBe(NOTICE_SEND_MS);
+    await lifted(['Draft the notes']);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    lark.hold();
+    const r = redraws();
+    const round = r.redrawDue();
+    await vi.advanceTimersByTimeAsync(REDRAW_UPDATE_MS - 1);
+    expect(notes.some((n) => n.includes('longer than'))).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await round).toBe(1);
+    expect(notes).toContain('kanban: redrawing notice om_text_1 took longer than 30000 ms; trying it again later');
+    vi.useRealTimers();
+    lark.release();
+  });
+
+  it("is waited for by the shutdown drain only within the drain's bound", async () => {
+    await lifted(['Draft the notes']);
+    lark.hold();
+    const r = redraws();
+    const round = r.redrawDue();
+    await settle();
+    const started = Date.now();
+    expect(await r.idle(50)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    r.stop();
+    lark.release();
+    expect(await round).toBe(1);
+    expect(await r.idle(1_000)).toBe(true);
+  });
+
+  it('takes no more than a round of redraws, passing over the ones in their pause to the ones after', async () => {
+    const tasks: TaskRow[] = [];
+    for (let i = 0; i < ROUND_REDRAWS + 2; i += 1) {
+      const task = create(`Task ${i}`);
+      block(task, 'which?');
+      await notifier().deliver();
+      tasks.push(task);
+    }
+    expect(lark.texts).toHaveLength(ROUND_REDRAWS + 2);
+    for (const task of tasks) expect(service.unblock(task.taskId, 'operator:hemanth').ok).toBe(true);
+    for (let i = 0; i < ROUND_REDRAWS; i += 1) lark.failNext('updateCard', new ChannelError(0, 'ECONNRESET', false));
+    const r = redraws();
+    expect(await r.redrawDue()).toBe(ROUND_REDRAWS);
+    expect(lark.cardUpdates).toHaveLength(0);
+    // The first ten in their pause: the two after them are drawn.
+    expect(await r.redrawDue()).toBe(2);
+    expect(lark.cardUpdates).toHaveLength(2);
+    expect(await r.redrawDue()).toBe(0);
+    clock.advance(2_000);
+    expect(await r.redrawDue()).toBe(ROUND_REDRAWS);
+    expect(new Set(lark.cardUpdates.map((u) => u.messageId)).size).toBe(ROUND_REDRAWS + 2);
+    expect(redrawnFor().every((x) => x !== null)).toBe(true);
   });
 });
