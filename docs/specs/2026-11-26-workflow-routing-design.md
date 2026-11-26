@@ -487,7 +487,9 @@ claim.
   - the routed member's settled row (§8) is written with the winner, the earliest settling fact by
     event id (§2.3). If the winner is another, an earlier stand-in, the routed task's own completion or
     its archive undone, **this completion settles nothing and archives nothing** but closes its own task;
-  - when this stand-in wins, and only then, **the routed task is archived**, whatever phase it is in,
+  - when this stand-in wins, and only then, **the routed task is archived unless it is already
+    archived** (a person archived it after its own done, which is no settling fact, §2.3; the sweep
+    then writes only the row), whatever phase it is in,
     `blocked`, `open` with a rerun after a handler's unblock, or `review`, through `archiveIn`
     (`db/kanban.ts`), which supersedes its undecided run and writes `from: <its actual phase>`, the
     payload gaining `workflow: "w_…"` and `standIn: "k_…"`, with a comment, not steering: `Stood in for
@@ -841,7 +843,7 @@ function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, n
    justify that is not yet written (§8): each member with a settling fact, its winner the earliest by
    event id (§2.3); each skipped step whose parents are now settled;
    each fan-out whose items all have rows. Only then, for a member whose winner is a stand-in, is the
-   routed task archived (§5.2). So the rows are the same whatever transition, fault or reconciliation
+   routed task archived, unless it is already archived, when the sweep writes only the row (§5.2). So the rows are the same whatever transition, fault or reconciliation
    came first: a stand-in's completion whose routing faulted, followed by the routed task's own
    completion, gives the stand-in the row, as its `completed` id is lower; an archive undone whose
    routing faulted, followed by a stand-in's completion, gives `archived`, as the archive's id is lower.
@@ -1297,8 +1299,9 @@ first member (§7.4), and inherit its wake (§13.3). Its answer gains `waiting` 
   line helps only if the handler's agent may read outside its own worktree (its role's sandbox and
   tools, kanban spec §2.2).
 - **Superseded runs** (§9.5): `superseded` in the results of `complete`, `block`, `endRun`, `archive` and
-  the reconciliations; `KanbanServiceDeps.cancelRun`, given by `src/index.ts` as the dispatcher's
-  `cancel`; `src/kanban/worker.ts` unchanged for it.
+  the reconciliations; `KanbanServiceDeps.cancelRun`, given by `src/index.ts` as a late-bound
+  closure, `(id) => dispatcher?.cancel(id) ?? false`, as `wakes: () => …` is, since the `KanbanService`
+  is built before the `Dispatcher`; `src/kanban/worker.ts` unchanged for it.
   **`docs/specs/2026-11-16-workflows-design.md`**: the notes in §0 and §17 that this document extends
   them.
 
@@ -1347,7 +1350,9 @@ task.
   written once, plain steps included, a later own completion reading the stand-in's result; **the cap
   at a reviewer's approval and at a stand-in's completion**, skipped with the notice, the transition
   committed; a stand-in archiving its routed task with the comment, from its actual phase, review
-  included, the archive not read as a skip; a stand-in that settles nothing archiving nothing; a
+  included, the archive not read as a skip; a stand-in that settles nothing archiving nothing; a stand-in winning over a routed
+  task already archived (`from: done`, archived by a person), the sweep writing only the row and no
+  second archive; a
   handler left open after the routed task's own completion, given its comment and notice; **a stand-in
   completing while the routed task's rerun is open**, the run superseded, returned in `superseded`, and
   its turn cancelled by the service's `cancelRun`; **a fault in a stand-in's completion's routing, then the routed
