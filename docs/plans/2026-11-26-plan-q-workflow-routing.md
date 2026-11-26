@@ -4,13 +4,13 @@
 
 **Goal:** Let a workflow's results decide the rest of it. A step declares the facts its run reports, its `outputs`, checked at its completion; a later step is made only when its `when` holds on them, or skipped; a step fans out over a result's list, one task an item, its children joining on every item; and a step whose run blocks or gives up can be routed to a handler, which helps, or stands in for it with the step's own reviewer, gates and contract. One file then does what several did, as the vi assessment's six files fold into one. A file using none of the new keys starts, shows and archives exactly as before.
 
-**Architecture:** five phases, each ending green and mergeable on its own.
+**Architecture:** five phases, each ending green: a checkpoint to review at, not a release. The branch merges whole, after Phase 5.
 
 - **Phase 1, the schema and the frozen plan** (Tasks 1 to 10): migration 015 with every table and column of the spec, and the reads of them, nothing of them on a database not yet migrated (Tasks 1, 2); the parse of every new key (Task 3); the checks of `workflow check` (§6), the conditions and fan-outs (Task 4), the routes and handlers (Task 5), and the step lines (Task 6); the expansion into the plain steps' DAG and a plan of every step (Task 7); the plan stored at the start, with its waiting rows, after its templates are checked (Task 8); the output check at completion (Task 9); and `preview --json` and `apply` refusing a routed file (Task 10).
-- **Phase 2, `decide()` and conditions** (Tasks 11 to 16): the pure `decide` in `src/kanban/routing.ts`, every clause and state, skipping, settling once the parents are, the effective parents, archive spreading and the cap (Task 11); the writer deciding in the transaction of each completion, archive, block and give-up, with the settled rows and the tasks made late (Task 12); the savepoint, the fault and its mark (Task 13); `workflow archive` skipping every waiting step (Task 14); the dispatcher's retry by reconciliation (Task 15); and the instance's status (Task 16).
-- **Phase 3, result-driven fan-out** (Tasks 17 and 18): the fan-out over the source's accepted list, its join, the empty list and the skipped source (Task 17); and the 500 cap, reserved at the reporting completion and skipped past later (Task 18).
-- **Phase 4, routes and handlers** (Tasks 19 to 23): the trigger table and decide's routes (Task 19); the route rows and the handler's task with its paragraph, and `routed_from` in the worker's show (Task 20); the worker's `mt kanban unblock` (Task 21); a stand-in's reviewer, gates and contract (Task 22); and the stand-in's settling, the archive of the task it stood in for, and the runs that archive supersedes cancelled through `KanbanServiceDeps.cancelRun` (Task 23).
-- **Phase 5, what people see, and reconciliation** (Tasks 24 to 29): `workflow show`'s step lines (Task 24); the notices (Task 25); the preview, the start's reply and `waiting` (Task 26); the `reconcile` command and the startup's reconciliation (Task 27); the documents (Task 28); and the end-to-end test through `createGateway` (Task 29).
+- **Phase 2, `decide()` and conditions** (Tasks 11 to 18): the pure `decide` in `src/kanban/routing.ts`, every clause and state, skipping, settling once the parents are, the effective parents, archive spreading and the cap (Task 11); the writer deciding in the transaction of each completion, archive, block and give-up, with the settled rows and the skips (Task 12), the tasks made late (Task 13) and the team check of them (Task 14); the savepoint, the fault and its mark (Task 15); `workflow archive` skipping every waiting step (Task 16); the dispatcher's retry by reconciliation (Task 17); and the instance's status (Task 18).
+- **Phase 3, result-driven fan-out** (Tasks 19 and 20): the fan-out over the source's accepted list, its join, the empty list and the skipped source (Task 19); and the 500 cap, reserved at the reporting completion and skipped past later (Task 20).
+- **Phase 4, routes and handlers** (Tasks 21 to 26): the trigger table and decide's routes (Task 21); the route rows and the handler's task with its paragraph, and `routed_from` in the worker's show (Task 22); the worker's `mt kanban unblock` (Task 23); a stand-in's reviewer, gates and contract (Task 24); the stand-in's settling and the archive of the task it stood in for (Task 25); and the runs that archive supersedes, cancelled through `KanbanServiceDeps.cancelRun` (Task 26).
+- **Phase 5, what people see, and reconciliation** (Tasks 27 to 32): `workflow show`'s step lines (Task 27); the notices (Task 28); the preview, the start's reply and `waiting` (Task 29); the `reconcile` command and the startup's reconciliation (Task 30); the documents (Task 31); and the end-to-end test through `createGateway` (Task 32).
 
 **Tech Stack:** TypeScript (Node 22, ESM/NodeNext, strict, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `noUnusedLocals`, `noUnusedParameters`), vitest, better-sqlite3 11, `yaml` 2. No new dependency. One migration, 015.
 
@@ -20,6 +20,7 @@
 
 ## Ground rules
 
+- **Merging.** The branch `workflow-routing` merges into `main` whole, once Phase 5 is done. Each phase ends green, every test passing and the typecheck clean, so it is a checkpoint to stop and review at; none is a release, and none is merged alone.
 - **Where to work.**
   - Use the worktree beside the main checkout, `/Users/x/Develop/manus/prime-gateway-wt2`, on the branch `workflow-routing`, which holds the spec and this plan, on top of `bef294b`.
   - Never edit the main checkout `/Users/x/Develop/manus/prime-gateway`, nor `/Users/x/Develop/manus/prime-gateway-work`: the live gateway runs from the first.
@@ -33,8 +34,8 @@
 - **Git in tests.** The tests that run git use the isolated configuration of `tests/helpers/git.ts` and `tests/helpers/git-setup.ts`; keep it in every test that runs git.
 - **Finding edits.** Find each edit by its quoted text, not by line number. Every quoted text is whole lines, and appears exactly once in its file at the point the step applies it. Apply a step's edits in the order given. Every step of this plan was applied in that order, from `bef294b`, in a throwaway copy, and gave the counts and failures it states: each "verify they fail" step was run with that task's test edits on the tree of the task before, and each "Run everything" step on the task's whole tree. The plan's own text was then applied in a second fresh copy, from `bef294b`, which reproduced the first copy's tree byte for byte at the end of every task.
 - **Failures that name ids.** A failure message quoted below may name a generated id: the id differs on each run.
-- **One writer.** `src/db/kanban.ts` stays the board's only writer: the plan, the pending, settled and route rows, the tasks made late and the routed task's archive are written there, inside the transitions' own transactions, and the service, chat, the worker API, the dispatcher and the terminal only call it. `src/db/WRITERS.md` says so (Tasks 1, 12).
-- **The seam.** `src/kanban/routing.ts` is pure: it imports only `./types.js`, `./limits.js`, `./dag.js` and `../secrets.js` (§9.3). The dispatcher, the claim, the prompt and the waker read no workflow table: the dispatcher calls one service hook (Task 15).
+- **One writer.** `src/db/kanban.ts` stays the board's only writer: the plan, the pending, settled and route rows, the tasks made late and the routed task's archive are written there, inside the transitions' own transactions, and the service, chat, the worker API, the dispatcher and the terminal only call it. `src/db/WRITERS.md` says so (Tasks 1, 13).
+- **The seam.** `src/kanban/routing.ts` is pure: it imports only `./types.js`, `./limits.js`, `./dag.js` and `../secrets.js` (§9.3). The dispatcher, the claim, the prompt and the waker read no workflow table: the dispatcher calls one service hook (Task 17).
 - **Words a person sees** (replies, refusals, notices, `mt` output, the log, the README and the guide) are the spec's words where it gives them, never name a plan, and do not use the long dash.
 - **No real agent.** No test runs bytesec or any agent; the end-to-end test runs the fake CLI agent of `tests/fakes/cli-agent.mjs`.
 
@@ -42,15 +43,15 @@
 
 Each has its reason, tied to the spec. Where the code and the spec disagree, the code is the fact, and the decision says which reading keeps the spec's intent; those are listed again under "Where the code forced a reading" below.
 
-1. **Five phases, one migration.** Migration 015 holds every column and table of §8, the route and settled tables Phase 4 writes included, so no later phase migrates and each phase can be merged alone.
+1. **Five phases, one migration.** Migration 015 holds every column and table of §8, the route and settled tables Phase 4 writes included, so no later phase migrates.
 2. **A database not yet at 15 reads as no routing.** The terminal opens the gateway's database without migrating it (§8): every read of a 015 column or table gives nothing there, `hasRouting(db)` reading `user_version`, and a routed start is refused with the spec's words.
 3. **A file using no routing key is untouched.** `usesRouting` (Task 6) is false for it: `expand` returns a null plan and the same DAG, byte for byte (Task 7, by its hash), the writer reads one member row and pays nothing more (Task 12), and `mt workflow check` says what it said (Task 6).
-4. **The writer decides inside each settling transaction**, in a savepoint, through `routeAfter` (Tasks 12, 13), and loops `decide` until nothing more is due, once a step of the plan at most (§9.2).
-5. **Each phase holds what is not yet built.** Phase 2's `decide` makes no route; Phase 3 adds the fan-out over a result, and until then such a step waits. A routed instance in a phase merged alone is never wrong, only incomplete.
+4. **The writer decides inside each settling transaction**, in a savepoint, through `routeAfter` (Tasks 12, 15), and loops `decide` until nothing more is due, once a step of the plan at most (§9.2).
+5. **Each phase holds what is not yet built.** Phase 2's `decide` makes no route; Phase 3 adds the fan-out over a result, and until then such a step waits. A routed instance at a phase's checkpoint is never wrong, only incomplete; the branch is merged whole after Phase 5.
 
 The decisions each task made, in its order:
 
-- **Task 1.** The migration is §8's SQL as written, with a header in the style of 009's and 014's; `WRITERS.md` gains the three tables' rows and amends `kanban_workflow_instances` and `kanban_events` here, and `kanban_workflow_tasks` and `kanban_subscriptions` in Task 12, where the routing first writes them.
+- **Task 1.** The migration is §8's SQL as written, with a header in the style of 009's and 014's; `WRITERS.md` gains the three tables' rows and amends `kanban_workflow_instances` and `kanban_events` here, and `kanban_workflow_tasks` and `kanban_subscriptions` in Task 13, where the routing first writes them.
 - **Task 2.** `hasRouting(db)` reads `user_version`, as `hasWakeColumns` does: only migration 015 adds the columns.
 - **Task 2.** `plannedMemberOf` is a read of its own, not a change to `memberOf`, whose answer `task show` and the tests compare whole.
 - **Task 3.** `paramFanOut(step)` names the list param a step fans out over, so the code that reads `forEach` as a param, the checks, `personParams`, `titleParams` and `expand`, reads it unchanged.
@@ -70,28 +71,34 @@ The decisions each task made, in its order:
 - **Task 10.** The keys are named in one order, `outputs, when, for_each over an output, on_blocked, on_gave_up, handler`, as §13.5's message lists them.
 - **Task 11.** `decide` keeps a running count of the members it makes, so two steps made in one call are counted together against the cap.
 - **Task 11.** A skipped step settles as `archived` when it was skipped by archive or every parent's row is `archived`, else `skipped`, its event id the greatest of its parents' (§8).
-- **Task 12.** `insertTask`'s copied subscription becomes a list, `copySubscriptions`, which a reaction task gives one of and a late task its first member's; given, they are the task's only subscriptions.
 - **Task 12.** `record` answers the event's id, so a transition hands its event to the routing as the decision's `cause_event`.
-- **Task 12.** The service passes the team, `#facts()`, to `complete`, `block`, `endRun` and `archive` (§9.3).
-- **Task 13.** The fault's error is masked and cut at 500 characters, as §9.4 says; the instance is found again outside the savepoint by a read that parses no JSON.
-- **Task 14.** The skip is `by: instance`, so `show` and the notice tell it from a skip by a `when`.
-- **Task 15.** A reconciliation that faults again throws, writing nothing; `retryRouting` catches it, and the mark stays for the next pass.
-- **Task 16.** An instance whose every member is archived is `archived`, whatever its pending rows say, as before.
-- **Task 17.** A result fan-out with no `when` gives its made line the why `per item of intake.packages`.
-- **Task 18.** A stand-in's report is reserved against its step's fan-outs, as its result is read in its step's place.
-- **Task 19.** A route made counts against the cap in the same call, as a made step does.
-- **Task 20.** A route is due only for the task's latest block, `latestBlockOf`, which must be the trigger: a block lifted, or a later stop, routes nothing.
-- **Task 20.** `BOARD_KEYS` gains `routedFrom` and `standIn`, so the ids are never masked as text.
-- **Task 21.** The prefix is the writer's, `(by the handler escalate:1) `, beside a woken turn's, so every path stores it alike.
-- **Task 22.** A stand-in for a fan-out item takes the item's template's fields, a list param's, or the fan-out's one template.
-- **Task 23.** The service cancels in one place, `#cancelled`, wrapped around each deciding writer's call; a caller that cancels too cancels a run already cancelled, which does nothing (§9.5).
-- **Task 24.** A handler's task's line names its ref, `escalate:1`, as §12.1's example shows.
-- **Task 25.** A fan-out's line names at most 20 items, then how many more, as the payload holds.
-- **Task 26.** `waiting` is present only for an instance with a plan, so an old file's answers are as they were.
-- **Task 27.** An instance is due with a waiting step, a skipped step not yet settled, a member blocked from its work, or a fault not reconciled; a handler, having no row, never makes one due.
-- **Task 27.** `RoutedLine` reaches the terminal through `service.ts`'s re-export, as only the service imports the writer.
-- **Task 28.** The configuration guide is unchanged: routing adds no setting.
-- **Task 29.** Every step is the default role's, so one fake agent runs them all, in the one shared workspace, one at a time.
+- **Task 12.** The sweep writes a member's row in the transaction of its own transition, and reads `entered` only for steps a `state` clause names, so a plain instance pays for no event read.
+- **Task 13.** `insertTask`'s copied subscription becomes a list, `copySubscriptions`, which a reaction task gives one of and a late task its first member's; given, they are the task's only subscriptions.
+- **Task 14.** The service passes the team, `#facts()`, to `complete`, `block`, `endRun` and `archive` (§9.3).
+- **Task 15.** A busy database is not a fault: `isBusy`, exported from `src/db/open.ts`, rethrows it out of the savepoint, so `txImmediate` retries the transition whole.
+- **Task 15.** The fault's error is masked and cut at 500 characters, as §9.4 says; the instance is found again outside the savepoint by a read that parses no JSON.
+- **Task 16.** The skip is `by: instance`, so `show` and the notice tell it from a skip by a `when`.
+- **Task 17.** A reconciliation that faults again throws, writing nothing; `retryRouting` catches it, and the mark stays for the next pass.
+- **Task 18.** An instance whose every member is archived is `archived`, whatever its pending rows say, as before.
+- **Task 19.** A result fan-out with no `when` gives its made line the why `per item of intake.packages`.
+- **Task 20.** A stand-in's report is reserved against its step's fan-outs, as its result is read in its step's place.
+- **Task 21.** A route made counts against the cap in the same call, as a made step does.
+- **Task 22.** A route on a board found archived makes nothing and writes no row, so the routed task waits as with no route (§13.1).
+- **Task 22.** A route is due only for the task's latest block, `latestBlockOf`, which must be the trigger: a block lifted, or a later stop, routes nothing.
+- **Task 22.** `BOARD_KEYS` gains `routedFrom` and `standIn`, so the ids are never masked as text.
+- **Task 23.** A handler's `stale` refusal names the handler, `the block of task k_… the handler escalate:1 was routed from has been lifted already`, not the button the old words name.
+- **Task 23.** The prefix is the writer's, `(by the handler escalate:1) `, beside a woken turn's, so every path stores it alike.
+- **Task 24.** A stand-in for a fan-out item takes the item's template's fields, a list param's, or the fan-out's one template.
+- **Task 25.** A winning stand-in's archive returns the routed task's run only when that run was undecided: one that had reported is ending its own turn.
+- **Task 26.** The service cancels in one place, `#cancelled`, wrapped around each deciding writer's call; a caller that cancels too cancels a run already cancelled, which does nothing (§9.5).
+- **Task 27.** A handler's task's line names its ref, `escalate:1`, as §12.1's example shows.
+- **Task 28.** A fan-out's line names at most 20 items, then how many more, as the payload holds.
+- **Task 29.** `waiting` is present only for an instance with a plan, so an old file's answers are as they were.
+- **Task 30.** An instance is due with a waiting step, a skipped step not yet settled, a member blocked from its work whose step routes and has a route due, or a fault not reconciled; a handler, having no row, never makes one due.
+- **Task 30.** A reconciliation that throws marks an instance not yet marked, in a transaction of its own, with one `workflow_route_failed` event, `first`, on its first member; `mt kanban workflow reconcile` answers it in one line, `the routing of w_… failed: …; the gateway tries again`.
+- **Task 30.** `RoutedLine` reaches the terminal through `service.ts`'s re-export, as only the service imports the writer.
+- **Task 31.** The configuration guide is unchanged: routing adds no setting.
+- **Task 32.** Every step is the default role's, so one fake agent runs them all, in the one shared workspace, one at a time.
 
 ## Known limitations
 
@@ -99,112 +106,118 @@ From §19, kept as it says: a fan-out at most its list's `max`, at most 100, an 
 
 ## Where the code forced a reading
 
-- **Task 3.** §1's file is not YAML as written: in `case: { required: true, description: a CVE id, or the absolute path of a package CSV }` the comma ends the flow mapping's value, and the parser reads `or the absolute path of a package CSV` as a key, which the file's check refuses as an unknown setting. The tests' copy, `tests/helpers/routing.ts`, and the guide's quote the description; the file is otherwise the spec's.
 - **Task 3.** §1 says an unknown key is an error naming its place, `steps.va.on_gave_up.rout`; the file's checks say it as `reject` says every unknown key, `unknown setting steps.va.on_gave_up.rout (known: route)`, which names that place.
-- **Task 6.** §6 says `mt workflow check <name>` prints a line a step after the workflow's line; for a file using no routing key it prints only its line, as before, so that no old file's check changes (§7.1, "Old workflows don't change").
+- **Task 6.** §6 says `mt workflow check <name>` prints a line a step after the workflow's line; for a file using no routing key it prints only its line, as before, so that no old file's check changes (§7.1, "Old workflows don't change"). The user chose to keep it so.
 - **Task 7.** §14 says a result never reaches a name field or a contract field; a result fan-out's `{{item}}`, and a handler's, is a result's, so the check refuses it in those fields too, `steps.each.outcome uses {{item}}, a result's: a result fills only a title and a body`.
 - **Task 8.** §6 fills each reference to a result with its type's widest form at the start. A text output's widest is 8 KiB and a list's a hundred of those, wider than any title's 512 bytes, so every such reference would be refused; they take `(skipped)`, the text a skipped step fills, and are cut at the making as §7.4 says. Booleans take `false`, numbers the widest JSON number, an enum its longest value, each at least as wide as `(skipped)`.
-- **Task 12.** §10's `Decision` and `StepFact` are the spec's in their meaning, with the fields the writer needs: a settled row's `eventId`, the items as a map by ref, a `fanned_out`'s `why`; and two reasons a step is skipped beyond decide's four, `board` for an archived board (§13.1) and `instance` for `workflow archive` (§9.1).
-- **Task 12.** §9.5 gives every deciding writer's result `superseded: RunRow[]`; it is present only when a routing superseded a run, so every existing caller and test of `complete`, `block`, `endRun` and `archive` sees the result it saw.
-- **Task 12.** §7.4's team check words a removed role `role verifier is not configured`; `checkTask` says it with quotes, so the writer says a role not configured itself, and any other refusal in `checkTask`'s words.
-- **Task 18.** §2.2 counts "one for each step this result could make" in the reservation; the plan counts one for each other step still waiting, the most this result could make.
-- **Task 19.** §10's `RouteFact` gains the event's block kind and reason, the item's ref, and whether the transient limit blocked it, for the handler's paragraph and the notice's words.
-- **Task 20.** §5.2 writes the paragraph's second sentence `it gave up: …` in its example and `It blocked (capability): …` and `It stopped after 10 throttles: …` beside it; the plan writes all three after the colon in lower case, as the example does. The unblock line is the same for a helper and a stand-in, the spec giving one.
-- **Task 21.** `mt kanban unblock` outside a run was answered as the old form of the operator's `mt kanban task unblock` (tests/mt.test.ts); as a worker command it is now answered as `show`, `comment` and `link` are there, `not_in_a_run` with the operator's command named.
-- **Task 22.** A stand-in declares its step's outputs (§5.2), and its own outcome would gain the outputs sentence a second time beside its step's, which the merge carries (§2.1); a stand-in's own outcome takes none.
-- **Task 24.** §12.1's lines are plain; chat's markdown escapes them as every label, so the parentheses read `\(` in the text Lark is sent and `(` on the screen. The failed-routing line says its time as `10:41 UTC`, as chat says every time in UTC.
-- **Task 24.** §12.1 names no answer for `show --plan` of an instance with no plan: it is refused `invalid`, `instance w_… has no plan: its workflow uses no routing key, and --dag prints all it made`.
-- **Task 25.** §12.2's notice head says `gave up` after the title; the payload gains `after`, the trigger's words, so the notifier reads it from the payload alone; and a stand-in left open is one more line, saying the handler is left open and why (§5.2's "a line of the `workflow_routed` notice"). The cap's line is the plan's: §5.3 gives only `the instance has 500 tasks`.
-- **Task 27.** §11's terminal answer lists decisions as `verify skipped (intake.verify is false); exposure: 3 tasks`; the plan words the other outcomes after them: `va made`, `escalate routed from va`, `escalate stands in for va`, `va over the limit of routes`, `va not routed: the instance has 500 tasks`, `escalate left open`. The startup's reconciliation runs where the service is built, after the migration and before the dispatcher exists, so before its first pass.
-- **Task 29.** §17's end-to-end test says `report` is linked to the three items and to `escalate`; with `registry` skipped, §3.2's rule links `registry`'s effective parent, the intake, in its place, and the test expects the intake too.
+- **Task 12.** §10's `Decision` and `StepFact` are the spec's in their meaning, with the fields the writer needs: a settled row's `eventId`, the items as a map by ref, a `fanned_out`'s `why`; and two reasons a step is skipped beyond decide's four, `board` for an archived board (§13.1, Task 13) and `instance` for `workflow archive` (§9.1, Task 16).
+- **Task 12.** The review asked that `entered` be read only for the steps a `state` clause names, and only for members not yet settled. The first is done. The second is not: a `state` clause holds for a task that entered the state ever (§3.2), so a member that gave up and was later settled must still read as having given up, and its events are read.
+- **Task 14.** §7.4's team check words a removed role `role verifier is not configured`; `checkTask` says it with quotes, so the writer says a role not configured itself, and any other refusal in `checkTask`'s words.
+- **Task 20.** §2.2 counts "one for each step this result could make" in the reservation; the plan counts one for each other step still waiting, the most this result could make.
+- **Task 21.** §10's `RouteFact` gains the event's block kind and reason, the item's ref, and whether the transient limit blocked it, for the handler's paragraph and the notice's words.
+- **Task 22.** §5.2 writes the paragraph's second sentence `it gave up: …` in its example and `It blocked (capability): …` and `It stopped after 10 throttles: …` beside it; the plan writes all three after the colon in lower case, as the example does. The unblock line is the same for a helper and a stand-in, the spec giving one.
+- **Task 22.** §13.1 skips a step on a board found archived, and gives a route no outcome for it: a route there makes nothing, writes no row and says nothing, and the routed task waits as with no route.
+- **Task 23.** `mt kanban unblock` outside a run was answered as the old form of the operator's `mt kanban task unblock` (tests/mt.test.ts); as a worker command it is now answered as `show`, `comment` and `link` are there, `not_in_a_run` with the operator's command named.
+- **Task 24.** A stand-in declares its step's outputs (§5.2), and its own outcome would gain the outputs sentence a second time beside its step's, which the merge carries (§2.1); a stand-in's own outcome takes none.
+- **Task 26.** §9.5 gives every deciding writer's result `superseded: RunRow[]`; it is present only when a routing superseded a run, so every existing caller and test of `complete`, `block`, `endRun` and `archive` sees the result it saw.
+- **Task 27.** §12.1's lines are plain; chat's markdown escapes them as every label, so the parentheses read `\(` in the text Lark is sent and `(` on the screen. The failed-routing line says its time as `10:41 UTC`, as chat says every time in UTC.
+- **Task 27.** §12.1 names no answer for `show --plan` of an instance with no plan: it is refused `invalid`, `instance w_… has no plan: its workflow uses no routing key, and --dag prints all it made`.
+- **Task 28.** §12.2's notice head says `gave up` after the title; the payload gains `after`, the trigger's words, so the notifier reads it from the payload alone; and a stand-in left open is one more line, saying the handler is left open and why (§5.2's "a line of the `workflow_routed` notice"). The cap's line is the plan's: §5.3 gives only `the instance has 500 tasks`.
+- **Task 30.** §11's terminal answer lists decisions as `verify skipped (intake.verify is false); exposure: 3 tasks`; the plan words the other outcomes after them: `va made`, `escalate routed from va`, `escalate stands in for va`, `va over the limit of routes`, `va not routed: the instance has 500 tasks`, `escalate left open`. The startup's reconciliation runs where the service is built, after the migration and before the dispatcher exists, so before its first pass.
+- **Task 30.** §9.4 writes a fault's event on the transitioning task. A reconciliation has none, so its fault's event goes on the instance's first member, and only when it sets the mark, so a retry that faults again every minute says nothing more.
+- **Task 32.** §17's end-to-end test says `report` is linked to the three items and to `escalate`; with `registry` skipped, §3.2's rule links `registry`'s effective parent, the intake, in its place, and the test expects the intake too.
 
 ## Left for the user to decide
 
-- §1's example is not YAML as written (its description holds a comma in a flow mapping): the plan quotes it in the tests and the guide; the spec's text could quote it too.
-- `mt workflow check <name>` of a file using no routing key prints its one line as before, rather than a line a step (Task 6): say if every named check should list its steps.
+Nothing. The two questions of the first version are answered: the spec's §1 now quotes its param's description, and `mt workflow check <name>` keeps listing steps only for a file using a routing key (Task 6).
 
 ## File map
 
 | File | Tasks |
 |---|---|
-| `README.md` (modify) | 21, 24, 27, 28 |
-| `docs/kanban-guide.md` (modify) | 28 |
+| `README.md` (modify) | 23, 27, 30, 31 |
+| `docs/kanban-guide.md` (modify) | 31 |
 | `schema/015_workflow_routing.sql` (create) | 1 |
-| `skills/mt-kanban/SKILL.md` (modify) | 28 |
-| `src/cli/mt.ts` (modify) | 24, 27 |
-| `src/cli/operator.ts` (modify) | 10, 24, 26, 27 |
-| `src/cli/plain.ts` (modify) | 24, 26 |
+| `skills/mt-kanban/SKILL.md` (modify) | 31 |
+| `src/cli/mt.ts` (modify) | 27, 30 |
+| `src/cli/operator.ts` (modify) | 10, 27, 29, 30 |
+| `src/cli/plain.ts` (modify) | 27, 29 |
 | `src/cli/workflow.ts` (modify) | 6 |
-| `src/db/WRITERS.md` (modify) | 1, 12 |
-| `src/db/kanban-read.ts` (modify) | 2, 12, 15, 16, 19, 20, 24, 27 |
-| `src/db/kanban.ts` (modify) | 8, 12, 13, 14, 15, 20, 21, 22, 23, 25, 26 |
-| `src/index.ts` (modify) | 23, 27 |
-| `src/kanban/chat-render.ts` (modify) | 24, 25, 26 |
-| `src/kanban/chat.ts` (modify) | 26 |
+| `src/db/WRITERS.md` (modify) | 1, 13 |
+| `src/db/kanban-read.ts` (modify) | 2, 12, 17, 18, 21, 22, 27, 30 |
+| `src/db/kanban.ts` (modify) | 8, 12, 13, 14, 15, 16, 17, 22, 23, 24, 25, 26, 28, 29, 30 |
+| `src/db/open.ts` (modify) | 15 |
+| `src/index.ts` (modify) | 26, 30 |
+| `src/kanban/chat-render.ts` (modify) | 27, 28, 29 |
+| `src/kanban/chat.ts` (modify) | 29 |
 | `src/kanban/dag.ts` (modify) | 9 |
-| `src/kanban/dispatcher.ts` (modify) | 15 |
-| `src/kanban/routing.ts` (create) | 2, 4, 5, 6, 8, 9, 11, 12, 17, 19, 20, 23, 24, 26 |
-| `src/kanban/service.ts` (modify) | 8, 9, 10, 12, 15, 16, 18, 21, 23, 24, 26, 27 |
-| `src/kanban/worker.ts` (modify) | 20, 21, 26 |
-| `src/kanban/workflow.ts` (modify) | 3, 4, 5, 6, 7, 10, 16, 22 |
+| `src/kanban/dispatcher.ts` (modify) | 17 |
+| `src/kanban/routing.ts` (create) | 2, 4, 5, 6, 8, 9, 11, 12, 19, 21, 22, 25, 27, 29 |
+| `src/kanban/service.ts` (modify) | 8, 9, 10, 14, 17, 18, 20, 23, 26, 27, 29, 30 |
+| `src/kanban/worker.ts` (modify) | 22, 23, 29 |
+| `src/kanban/workflow.ts` (modify) | 3, 4, 5, 6, 7, 10, 18, 24 |
 | `tests/cron-schema.test.ts` (modify) | 1 |
-| `tests/docs-examples.test.ts` (modify) | 28 |
-| `tests/docs-routing.test.ts` (create) | 28 |
-| `tests/docs-wake.test.ts` (modify) | 21 |
-| `tests/fakes/cli-agent.mjs` (modify) | 29 |
+| `tests/docs-examples.test.ts` (modify) | 31 |
+| `tests/docs-routing.test.ts` (create) | 31 |
+| `tests/docs-wake.test.ts` (modify) | 23 |
+| `tests/fakes/cli-agent.mjs` (modify) | 32 |
 | `tests/gateway-startup.test.ts` (modify) | 1 |
 | `tests/grants-writer.test.ts` (modify) | 1 |
-| `tests/helpers/routing.ts` (create) | 3, 8, 12, 20 |
+| `tests/helpers/routing.ts` (create) | 3, 8, 12, 22 |
 | `tests/kanban-boards-schema.test.ts` (modify) | 1 |
 | `tests/kanban-schema.test.ts` (modify) | 1 |
 | `tests/kanban-thread-roots.test.ts` (modify) | 1 |
-| `tests/kanban-worker.test.ts` (modify) | 21 |
+| `tests/kanban-worker.test.ts` (modify) | 23 |
 | `tests/kanban-workflow-schema.test.ts` (modify) | 1 |
 | `tests/kanban-worktree-schema.test.ts` (modify) | 1 |
-| `tests/mt-kanban-operator-tasks.test.ts` (modify) | 21 |
-| `tests/mt-kanban-workflow.test.ts` (modify) | 27 |
-| `tests/mt-kanban.test.ts` (modify) | 21 |
-| `tests/mt.test.ts` (modify) | 21 |
+| `tests/mt-kanban-operator-tasks.test.ts` (modify) | 23 |
+| `tests/mt-kanban-workflow.test.ts` (modify) | 30 |
+| `tests/mt-kanban.test.ts` (modify) | 23 |
+| `tests/mt.test.ts` (modify) | 23 |
 | `tests/progress-schema.test.ts` (modify) | 1 |
-| `tests/routing-archive-workflow.test.ts` (create) | 14 |
-| `tests/routing-cap.test.ts` (create) | 18 |
+| `tests/routing-archive-workflow.test.ts` (create) | 16 |
+| `tests/routing-cap.test.ts` (create) | 20 |
 | `tests/routing-check-handlers.test.ts` (create) | 5 |
 | `tests/routing-check-lines.test.ts` (create) | 6 |
 | `tests/routing-check.test.ts` (create) | 4 |
 | `tests/routing-dag-paths.test.ts` (create) | 10 |
-| `tests/routing-decide-fanout.test.ts` (create) | 17 |
+| `tests/routing-decide-fanout.test.ts` (create) | 19 |
 | `tests/routing-decide.test.ts` (create) | 11 |
 | `tests/routing-expand.test.ts` (create) | 7 |
-| `tests/routing-fanout-writer.test.ts` (create) | 17 |
-| `tests/routing-fault.test.ts` (create) | 13 |
+| `tests/routing-fanout-writer.test.ts` (create) | 19 |
+| `tests/routing-fault.test.ts` (create) | 15 |
 | `tests/routing-file.test.ts` (create) | 3 |
-| `tests/routing-gateway.e2e.ts` (create) | 29 |
-| `tests/routing-handler-workspace.test.ts` (create) | 23 |
-| `tests/routing-handlers.test.ts` (create) | 20 |
-| `tests/routing-notices.test.ts` (create) | 25 |
+| `tests/routing-gateway.e2e.ts` (create) | 32 |
+| `tests/routing-handler-workspace.test.ts` (create) | 22 |
+| `tests/routing-handlers.test.ts` (create) | 22 |
+| `tests/routing-notices.test.ts` (create) | 28 |
 | `tests/routing-outputs.test.ts` (create) | 9 |
-| `tests/routing-preview.test.ts` (create) | 26 |
-| `tests/routing-reconcile.test.ts` (create) | 27 |
-| `tests/routing-retry.test.ts` (create) | 15 |
+| `tests/routing-preview.test.ts` (create) | 29 |
+| `tests/routing-reconcile.test.ts` (create) | 30 |
+| `tests/routing-retry.test.ts` (create) | 17 |
 | `tests/routing-rows.test.ts` (create) | 2 |
 | `tests/routing-schema.test.ts` (create) | 1 |
-| `tests/routing-show.test.ts` (create) | 24 |
-| `tests/routing-standin-settle.test.ts` (create) | 23 |
-| `tests/routing-standin.test.ts` (create) | 22 |
+| `tests/routing-show.test.ts` (create) | 27 |
+| `tests/routing-standin-settle.test.ts` (create) | 25 |
+| `tests/routing-standin.test.ts` (create) | 24 |
 | `tests/routing-start.test.ts` (create) | 8 |
-| `tests/routing-status.test.ts` (create) | 16 |
-| `tests/routing-triggers.test.ts` (create) | 19 |
-| `tests/routing-unblock.test.ts` (create) | 21 |
-| `tests/routing-writer.test.ts` (create) | 12 |
+| `tests/routing-status.test.ts` (create) | 18 |
+| `tests/routing-superseded.test.ts` (create) | 26 |
+| `tests/routing-sweep.test.ts` (create) | 12 |
+| `tests/routing-team-check.test.ts` (create) | 14 |
+| `tests/routing-triggers.test.ts` (create) | 21 |
+| `tests/routing-unblock.test.ts` (create) | 23 |
+| `tests/routing-worktree-base.test.ts` (create) | 13 |
+| `tests/routing-writer.test.ts` (create) | 13 |
 | `tests/wake-schema.test.ts` (modify) | 1 |
 
-Running counts, unit then end to end: Task 1 3575 / 187, Task 2 3579 / 187, Task 3 3585 / 187, Task 4 3595 / 187, Task 5 3605 / 187, Task 6 3609 / 187, Task 7 3615 / 187, Task 8 3622 / 187, Task 9 3627 / 187, Task 10 3631 / 187, Task 11 3644 / 187, Task 12 3653 / 187, Task 13 3656 / 187, Task 14 3657 / 187, Task 15 3661 / 187, Task 16 3663 / 187, Task 17 3673 / 187, Task 18 3675 / 187, Task 19 3681 / 187, Task 20 3686 / 187, Task 21 3690 / 187, Task 22 3693 / 187, Task 23 3701 / 187, Task 24 3705 / 187, Task 25 3711 / 187, Task 26 3715 / 187, Task 27 3719 / 187, Task 28 3724 / 187, Task 29 3724 / 188.
+Running counts, unit then end to end: Task 1 3575 / 187, Task 2 3579 / 187, Task 3 3585 / 187, Task 4 3595 / 187, Task 5 3605 / 187, Task 6 3609 / 187, Task 7 3615 / 187, Task 8 3622 / 187, Task 9 3627 / 187, Task 10 3631 / 187, Task 11 3644 / 187, Task 12 3647 / 187, Task 13 3657 / 187, Task 14 3658 / 187, Task 15 3663 / 187, Task 16 3664 / 187, Task 17 3669 / 187, Task 18 3671 / 187, Task 19 3682 / 187, Task 20 3684 / 187, Task 21 3690 / 187, Task 22 3700 / 187, Task 23 3704 / 187, Task 24 3707 / 187, Task 25 3718 / 187, Task 26 3725 / 187, Task 27 3730 / 187, Task 28 3737 / 187, Task 29 3742 / 187, Task 30 3749 / 187, Task 31 3754 / 187, Task 32 3754 / 188.
 
 ---
 
 ## Phase 1: the schema and the frozen plan
 
-Tasks 1 to 10. Migration 015 and its reads; the routing keys read and checked, the check's step lines; the expansion into the plain steps' DAG and a frozen plan; the plan stored at the start, its templates checked; the output check at completion; and the DAG paths refusing a routed file. Nothing decides yet: a routed instance's pending steps wait. Phase 1 ends green and can be merged alone.
+Tasks 1 to 10. Migration 015 and its reads; the routing keys read and checked, the check's step lines; the expansion into the plain steps' DAG and a frozen plan; the plan stored at the start, its templates checked; the output check at completion; and the DAG paths refusing a routed file. Nothing decides yet: a routed instance's pending steps wait. Phase 1 ends green, a checkpoint to review at.
 
 ---
 
@@ -1355,7 +1368,7 @@ import { role } from './dispatch.js';
  * vi assessment of its §1, as a file, and the roles it names.
  */
 
-/** The file of workflow routing spec §1, as written there but for its param's description, quoted, as its comma would end it in a flow mapping. */
+/** The file of workflow routing spec §1, as written there. */
 export const VI_WORKFLOW = `description: CVE or supply-chain assessment, routed by its intake
 board: vi
 params:
@@ -3016,7 +3029,7 @@ git commit -m "Check a file's routes and handlers: a handler made only when rout
 - Create: `tests/routing-check-lines.test.ts`
 - Modify: `src/cli/workflow.ts`, `src/kanban/routing.ts`, `src/kanban/workflow.ts`
 
-§6. `mt workflow check <name>` of a file using a routing key prints, after its line, one line a step in §6's words, and its line, named or not, counts the steps that are plain, pending and handlers. `clauseText`, `whenText`, `stepWords` and `stepCounts` in `routing.ts` make the words, which the preview reuses (Task 26).
+§6. `mt workflow check <name>` of a file using a routing key prints, after its line, one line a step in §6's words, and its line, named or not, counts the steps that are plain, pending and handlers. `clauseText`, `whenText`, `stepWords` and `stepCounts` in `routing.ts` make the words, which the preview reuses (Task 29).
 
 - [ ] **Step 6.1: Write the tests.**
 
@@ -5284,7 +5297,7 @@ git commit -m "Refuse preview --json of a file using a routing key, and apply of
 
 ## Phase 2: decide() and conditions
 
-Tasks 11 to 16. The pure `decide`, every clause and state, skipping and settling, the effective parents and archive spreading; the writer deciding in each settling transaction, in a savepoint, with its fault mark and event; `workflow archive` cancelling a case; the dispatcher's retry; and the status. A step over a result's list waits for Phase 3; a block waits for a person, as before, for Phase 4. Phase 2 ends green and can be merged alone.
+Tasks 11 to 18. The pure `decide`, every clause and state, skipping and settling, the effective parents and archive spreading; the writer deciding in each settling transaction, settling and skipping, making a step late and checking it against the team, in a savepoint, with its fault mark and event; `workflow archive` cancelling a case; the dispatcher's retry; and the status. A step over a result's list waits for Phase 3; a block waits for a person, as before, for Phase 4. Phase 2 ends green, a checkpoint to review at.
 
 ---
 
@@ -5786,14 +5799,14 @@ git commit -m "Decide a routed instance's waiting steps from its facts: every cl
 
 ---
 
-### Task 12: The writer decides in the settling transactions
+### Task 12: The writer settles and skips in the settling transactions
 
 **Files:**
 
-- Create: `tests/routing-writer.test.ts`
-- Modify: `src/db/WRITERS.md`, `src/db/kanban-read.ts`, `src/db/kanban.ts`, `src/kanban/routing.ts`, `src/kanban/service.ts`, `tests/helpers/routing.ts`
+- Create: `tests/routing-sweep.test.ts`
+- Modify: `src/db/kanban-read.ts`, `src/db/kanban.ts`, `src/kanban/routing.ts`, `tests/helpers/routing.ts`
 
-§7.4, §9.1, §9.2. `routeAfter` runs in `complete` when the task becomes done, in `archive`, in a run's `block` from its work and in `endRun` when the task blocks from its work: the sweep writes each member's settled row, the facts are read, and each decision applied, a step's task made through `insertTask` as the start would have, with its links, its first member's subscriptions, its gates, its member row and its `created` event, its title and body cut; and one `workflow_routed` event lists the decisions. With the team, a task made for a role no longer configured is made and blocked by the gateway. Until Task 17, a step over a result's list waits.
+§9.1, §9.2. `routeAfter` runs in `complete` when the task becomes done, in `archive`, in a run's `block` from its work and in `endRun` when the task blocks from its work: the sweep writes each member's settled row, the facts are read, and each decision applied, a skip in its pending row; and one `workflow_routed` event lists the decisions. No other transition decides anything: a review request, a person's block, a stop, an unblock, changes asked, an assign. Until Task 13 a step whose parents are settled waits.
 
 - [ ] **Step 12.1: Write the tests.**
 
@@ -5822,6 +5835,839 @@ with:
     clock: new ManualClock(1_760_000_000_000),
 ```
 
+Create `tests/routing-sweep.test.ts`:
+
+```ts
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { closeRun } from '../src/db/kanban.js';
+import { eventsOf, membersOf, pendingOf, settledOf } from '../src/db/kanban-read.js';
+import type { WorkflowMade } from '../src/kanban/service.js';
+import { clearSecrets } from '../src/secrets.js';
+import { testDb, type TestDb } from './helpers/db.js';
+import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
+import { madeOf, viBoard, type ViBoard } from './helpers/routing.js';
+
+/**
+ * The writer's sweep and its hooks (workflow routing spec §8, §9.1, §9.2): a
+ * completion and an archive write each member's settled row, its winner the
+ * earliest settling fact, and decide what is due in their transaction, here the
+ * skips and the settlings, said in one workflow_routed event; a run's block and
+ * its give-up decide too; and the transitions that change nothing a step reads,
+ * a review request, a person's block, a stop, an unblock, changes asked and an
+ * assign, decide nothing.
+ */
+
+const FLOW = `board: vi
+steps:
+  intake:
+    title: intake
+    assignee: vi-coordinator
+    outputs:
+      kind: { enum: [cve, supplychain] }
+      verify: boolean
+  va:
+    title: va
+    assignee: vulnerability-analyst
+    parents: [intake]
+    when:
+      - { step: intake, output: kind, equals: cve }
+  verify:
+    title: verify
+    assignee: verifier
+    parents: [va]
+    when:
+      - { step: intake, output: verify, is: true }
+  help:
+    title: help
+    assignee: verifier
+    parents: [va]
+    when:
+      - { step: va, state: gave_up }
+`;
+
+let h: TestDb;
+let b: ViBoard;
+beforeEach(() => {
+  clearSecrets();
+  h = testDb();
+  b = viBoard(h);
+  writeFileSync(join(b.dir, 'flow.yaml'), FLOW);
+});
+afterEach(() => h.close());
+
+function start(file = FLOW): WorkflowMade {
+  writeFileSync(join(b.dir, 'flow.yaml'), file);
+  return madeOf(b.service.startWorkflow({ workflow: 'flow', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA }));
+}
+
+const routed = (taskId: string) => eventsOf(h.db, taskId).filter((e) => e.kind === 'workflow_routed').map((e) => e.payload as Record<string, unknown>);
+
+describe("the writer's sweep", () => {
+  it("settles a plain member at its completion and skips, in its transaction, every step whose when is false, settling each once its parents are", async () => {
+    const w = start();
+    const intake = w.tasks[0]?.taskId ?? '';
+    const run = claimed(h.db, intake);
+    expect((await b.service.complete(intake, { kind: 'run', runId: run.runId }, { summary: 'x', metadata: { kind: 'supplychain', verify: false } })).ok).toBe(true);
+    const completed = eventsOf(h.db, intake).find((e) => e.kind === 'completed')?.id;
+    expect(settledOf(h.db, w.instance.instanceId).map((s) => [s.step, s.how, s.taskId, s.eventId])).toEqual([
+      ['help', 'skipped', null, completed],
+      ['intake', 'done', intake, completed],
+      ['va', 'skipped', null, completed],
+      ['verify', 'skipped', null, completed],
+    ]);
+    expect(routed(intake)).toEqual([
+      {
+        workflow: w.instance.instanceId,
+        workflowName: 'flow',
+        step: 'intake',
+        cause: 'completed',
+        decisions: [
+          { step: 'va', outcome: 'skipped', why: 'intake.kind is supplychain', taskIds: [], by: 'when' },
+          { step: 'verify', outcome: 'skipped', why: 'intake.verify is false', taskIds: [], by: 'when' },
+          { step: 'help', outcome: 'skipped', why: 'va did not give up', taskIds: [], by: 'when' },
+        ],
+      },
+    ]);
+    expect(pendingOf(h.db, w.instance.instanceId).find((p) => p.step === 'va')).toMatchObject({ state: 'skipped', causeEvent: completed, decidedAt: NOW });
+  });
+
+  it("skips by archive every step below a root archived undone, in the archive's transaction", () => {
+    const w = start();
+    const intake = w.tasks[0]?.taskId ?? '';
+    expect(b.service.archive(intake, ALICE).ok).toBe(true);
+    expect(membersOf(h.db, w.instance.instanceId).length).toBe(1);
+    expect(settledOf(h.db, w.instance.instanceId).map((s) => [s.step, s.how])).toEqual([
+      ['help', 'archived'],
+      ['intake', 'archived'],
+      ['va', 'archived'],
+      ['verify', 'archived'],
+    ]);
+    expect(routed(intake)[0]).toMatchObject({ cause: 'archived' });
+    expect((routed(intake)[0]?.['decisions'] as unknown[]).length).toBe(3);
+  });
+
+  it('decides nothing at a review request, a person\'s block, a stop, an unblock, changes asked or an assign', async () => {
+    const w = start(FLOW.replace('    assignee: vi-coordinator\n', '    assignee: vi-coordinator\n    reviewer: verifier\n'));
+    const intake = w.tasks[0]?.taskId ?? '';
+    const nothing = () => {
+      expect(routed(intake)).toEqual([]);
+      expect(settledOf(h.db, w.instance.instanceId)).toEqual([]);
+      expect(membersOf(h.db, w.instance.instanceId).length).toBe(1);
+      expect(pendingOf(h.db, w.instance.instanceId).every((p) => p.state === 'waiting')).toBe(true);
+    };
+    const run = claimed(h.db, intake);
+    expect(b.service.stop(intake, ALICE).ok).toBe(true);
+    closeRun(h.db, run.runId, NOW);
+    nothing();
+    expect(b.service.unblock(intake, ALICE).ok).toBe(true);
+    expect(b.service.block(intake, { kind: 'person', principal: ALICE }, { kind: 'needs_input', reason: 'wait' }).ok).toBe(true);
+    expect(b.service.unblock(intake, ALICE).ok).toBe(true);
+    expect(b.service.assign(intake, 'verifier', ALICE).ok).toBe(true);
+    expect(b.service.assign(intake, 'vi-coordinator', ALICE).ok).toBe(true);
+    nothing();
+    const work = claimed(h.db, intake);
+    expect(await b.service.requestReview(intake, { kind: 'run', runId: work.runId }, { summary: 'x', metadata: { kind: 'cve', verify: true } })).toMatchObject({ ok: true, task: { phase: 'review' } });
+    closeRun(h.db, work.runId, NOW);
+    nothing();
+    const review = claimed(h.db, intake);
+    expect(b.service.requestChanges(intake, { kind: 'run', runId: review.runId }, 'say why').ok).toBe(true);
+    closeRun(h.db, review.runId, NOW);
+    nothing();
+  });
+});
+```
+
+- [ ] **Step 12.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-sweep.test.ts`. Expected: `Tests  2 failed | 1 passed (3)`, the first as `AssertionError: expected [] to deeply equal [ Array(4) ]`.
+
+- [ ] **Step 12.3: Implement.**
+
+In `src/db/kanban-read.ts`, replace:
+
+```ts
+
+/** One Unblock button of a recorded message, and the `unblocked` or `archived` event that lifted its block, if one has. */
+```
+
+with:
+
+```ts
+
+/**
+ * A trigger event (workflow routing spec §5.1): what blocked a task from its work
+ * by a run, read from the event, never from the task's `block_kind`. A run's own
+ * `blocked`, of a kind but `dependency`, and a run's end that blocked it are
+ * `blocked`, routed by `on_blocked`; the breaker's give-up and the transient
+ * limit's block, the board's terminal failure endings, are `gave_up`, routed by
+ * `on_gave_up`, the transient limit's `throttled`.
+ */
+export interface TriggerEvent {
+  eventId: number;
+  kind: 'blocked' | 'gave_up';
+  throttled: boolean;
+  reason: string;
+}
+
+/**
+ * A task's trigger events, oldest first (§5.1): only a work run's, so a review's
+ * block, a person's block or stop, and the gateway's own block of a task the
+ * team check refused route nothing and enter no state a clause reads.
+ */
+export function triggersOf(db: Db, taskId: string): TriggerEvent[] {
+  const rows = db
+    .prepare<[string], EventRaw & { run_kind: string | null }>(
+      `SELECT e.id, e.task_id, e.run_id, e.kind, e.actor, json(e.payload) AS payload, e.created_at, r.kind AS run_kind
+         FROM kanban_events e JOIN kanban_runs r ON r.run_id = e.run_id
+        WHERE e.task_id = ? AND (e.kind = 'blocked' OR (e.kind = 'run_ended' AND json_extract(e.payload, '$.next') = 'blocked'))
+        ORDER BY e.id`,
+    )
+    .all(taskId);
+  return rows.flatMap((r): TriggerEvent[] => {
+    if (r.run_kind !== 'work') return [];
+    const p = json(r.payload) as Record<string, unknown>;
+    const text = (key: string): string => (typeof p[key] === 'string' ? (p[key] as string) : '');
+    if (r.kind === 'blocked') {
+      if (!r.actor.startsWith('run:') || text('kind') === '' || text('kind') === 'dependency') return [];
+      return [{ eventId: r.id, kind: 'blocked', throttled: false, reason: text('reason') }];
+    }
+    const kind = text('blockKind');
+    const gaveUp = kind === 'gave_up' || kind === 'transient';
+    return [{ eventId: r.id, kind: gaveUp ? 'gave_up' : 'blocked', throttled: kind === 'transient', reason: text('blockReason') }];
+  });
+}
+
+/** A task's first event of a kind, with its payload; undefined for none. */
+export function firstEventOf(db: Db, taskId: string, kind: string): KanbanEvent | undefined {
+  const row = db
+    .prepare<[string, string], EventRaw>(
+      `SELECT id, task_id, run_id, kind, actor, json(payload) AS payload, created_at FROM kanban_events WHERE task_id = ? AND kind = ? ORDER BY id LIMIT 1`,
+    )
+    .get(taskId, kind);
+  return row === undefined ? undefined : decodeEvent(row);
+}
+
+/** One Unblock button of a recorded message, and the `unblocked` or `archived` event that lifted its block, if one has. */
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+import { maskPlan, type Plan } from '../kanban/routing.js';
+```
+
+with:
+
+```ts
+import { decide as decideRouting, INSTANCE_CAP, maskPlan, type Decision, type Facts, type Plan, type StepFact } from '../kanban/routing.js';
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+import { assignable, checkTask, type TaskFacts } from '../kanban/task-checks.js';
+```
+
+with:
+
+```ts
+import { assignable, checkTask, isRecord, type TaskFacts } from '../kanban/task-checks.js';
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  gatesOf,
+```
+
+with:
+
+```ts
+  gatesOf,
+  firstEventOf,
+  latestCompletion,
+  pendingOf,
+  plannedMemberOf,
+  settledOf,
+  triggersOf,
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  'from',
+```
+
+with:
+
+```ts
+  'from',
+  // The task a handler was routed from, and a stand-in that archived the task it stood in for (workflow routing spec §7.4, §5.2).
+  'routedFrom',
+  'standIn',
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+): void {
+  d.prepare(
+    `INSERT INTO kanban_events (task_id, run_id, kind, actor, payload, created_at)
+     VALUES (?, ?, ?, ?, jsonb(?), ?)`,
+  ).run(e.taskId, e.runId ?? null, e.kind, e.actor, JSON.stringify(redactValues(e.payload, BOARD_KEYS)), now);
+```
+
+with:
+
+```ts
+): number {
+  const { lastInsertRowid } = d
+    .prepare(
+      `INSERT INTO kanban_events (task_id, run_id, kind, actor, payload, created_at)
+       VALUES (?, ?, ?, ?, jsonb(?), ?)`,
+    )
+    .run(e.taskId, e.runId ?? null, e.kind, e.actor, JSON.stringify(redactValues(e.payload, BOARD_KEYS)), now);
+  return Number(lastInsertRowid);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    ).run(now, taskId);
+    record(
+```
+
+with:
+
+```ts
+    ).run(now, taskId);
+    const completed = record(
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+      },
+      now,
+    );
+    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+  });
+```
+
+with:
+
+```ts
+      },
+      now,
+    );
+    // Done is a settling: what its plan's steps read may have changed (workflow routing spec §9.1).
+    routeAfter(d, taskId, 'completed', completed, now);
+    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+  });
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+      const recurrences = enterBlocked(d, r.task, report.kind, report.reason);
+      record(
+```
+
+with:
+
+```ts
+      const recurrences = enterBlocked(d, r.task, report.kind, report.reason);
+      const blocked = record(
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+        now,
+      );
+    }
+    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+```
+
+with:
+
+```ts
+        now,
+      );
+      // A run's block from its work is a trigger (workflow routing spec §5.1); a person's, or a review's, routes nothing.
+      if (by.kind === 'run' && r.task.phase === 'open') routeAfter(d, taskId, 'blocked', blocked, now);
+    }
+    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    }
+    record(
+```
+
+with:
+
+```ts
+    }
+    const ended = record(
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    );
+    return { ok: true, task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next };
+```
+
+with:
+
+```ts
+    );
+    // A run's end that blocked the task from its work is a trigger (workflow routing spec §5.1).
+    if (blockAs !== undefined && before.phase === 'open') {
+      const cause: RouteCause = blockAs.kind === 'gave_up' ? 'gave_up' : blockAs.kind === 'transient' ? 'throttled' : 'blocked';
+      routeAfter(d, run.taskId, cause, ended, now);
+    }
+    return { ok: true, task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next };
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    return { ok: true, ...archiveIn(d, task, by, now) };
+```
+
+with:
+
+```ts
+    const archived = archiveIn(d, task, by, now);
+    // An archive settles: as done when it was done, or as skipped by archive (workflow routing spec §9.1).
+    routeAfter(d, taskId, 'archived', archived.eventId, now);
+    return { ok: true, task: mustGet(d, taskId), run: archived.run };
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+): { task: TaskRow; run: RunRow | undefined } {
+```
+
+with:
+
+```ts
+): { task: TaskRow; run: RunRow | undefined; eventId: number } {
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  ).run(now, task.taskId);
+  record(
+```
+
+with:
+
+```ts
+  ).run(now, task.taskId);
+  const eventId = record(
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  return { task: mustGet(d, task.taskId), run };
+```
+
+with:
+
+```ts
+  return { task: mustGet(d, task.taskId), run, eventId };
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    return { ok: true, attempts: row.attempts };
+  });
+}
+```
+
+with:
+
+```ts
+    return { ok: true, attempts: row.attempts };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Workflow routing (workflow routing spec §9)
+// ---------------------------------------------------------------------------
+
+
+/** Which transition decided, for its notice (§12.2): a completion, a block, a give-up or the transient limit's block, an archive, or a reconciliation. */
+export type RouteCause = 'completed' | 'blocked' | 'gave_up' | 'throttled' | 'archived' | 'reconciled';
+
+/** One decision of a transaction, as `workflow_routed` lists it for its notice (§12.2). */
+export interface RoutedLine {
+  step: string;
+  outcome: 'made' | 'skipped' | 'fanned_out';
+  why: string;
+  taskIds: string[];
+  items?: string[];
+  count?: number;
+  by?: string;
+}
+
+/** An instance with a plan, as the routing reads it in its transaction: the row, the plan, and its members with their tasks. */
+interface Routed {
+  instance: InstanceRow;
+  plan: Plan;
+  members: Array<MemberRow & { task: TaskRow }>;
+}
+
+/** A step's facts, read inside the transaction (§9.2 step 3): its rows, its tasks' trigger events, and its winner's accepted result. */
+function routingFacts(d: Db, r: Routed): Facts {
+  const settled = settledOf(d, r.instance.instanceId);
+  const pending = new Map(pendingOf(d, r.instance.instanceId).map((p) => [p.step, p]));
+  const steps = new Map<string, StepFact>();
+  // Only a `state` clause reads what a step's tasks entered: the others' events are not read. Every member is read,
+  // settled or not, as a state clause holds for a task that entered the state ever (§3.2).
+  const stated = new Set(
+    r.plan.steps.flatMap((s) => (s.when ?? []).flatMap((w) => ('any' in w ? w.any : [w])).flatMap((c) => ('state' in c ? [c.step] : []))),
+  );
+  for (const s of r.plan.steps) {
+    const own = settled.find((x) => x.step === s.step && x.ref === s.step);
+    const items = new Map(settled.filter((x) => x.step === s.step && x.ref !== s.step).map((x) => [x.ref, { how: x.how, taskId: x.taskId, eventId: x.eventId }]));
+    const triggers = stated.has(s.step) ? r.members.filter((m) => m.step === s.step).flatMap((m) => triggersOf(d, m.taskId)) : [];
+    const row = pending.get(s.step);
+    const winner = own?.taskId ?? null;
+    const metadata = winner === null || (own?.how !== 'done' && own?.how !== 'stood_in') ? undefined : latestCompletion(d, winner)?.metadata;
+    steps.set(s.step, {
+      step: s.step,
+      row: row?.state ?? null,
+      skippedBy: row?.reason?.by ?? null,
+      settled: own === undefined ? null : { how: own.how, taskId: own.taskId, eventId: own.eventId },
+      items,
+      entered: { blocked: triggers.some((t) => t.kind === 'blocked'), gaveUp: triggers.some((t) => t.kind === 'gave_up') },
+      result: isRecord(metadata) ? metadata : null,
+    });
+  }
+  return { steps, due: [], members: r.members.length, cap: INSTANCE_CAP };
+}
+
+/** Insert a settled row into its key (§8): a later attempt finds the key taken and changes nothing. True when it added the row. */
+function settle(d: Db, instanceId: string, step: string, ref: string, how: string, taskId: string | null, eventId: number, now: number): boolean {
+  return (
+    d
+      .prepare('INSERT OR IGNORE INTO kanban_workflow_settled (instance_id, step, ref, how, task_id, event_id, settled_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(instanceId, step, ref, how, taskId, eventId, now).changes === 1
+  );
+}
+
+/**
+ * The sweep (§9.2 step 2): each member with a settling fact gets its settled row,
+ * its winner the earliest fact by event id, its own task's `completed` event or
+ * its `archived` event when that archive was not from `done`; each fan-out
+ * whose items all have rows, its own, `archived` when every item was archived
+ * undone. Plain steps included; a handler's task is no step's member here.
+ */
+function sweep(d: Db, r: Routed, now: number): void {
+  const id = r.instance.instanceId;
+  const handlers = new Set(r.plan.steps.filter((s) => s.handler === true).map((s) => s.step));
+  const taken = new Set(settledOf(d, id).map((x) => `${x.step}\u0000${x.ref}`));
+  for (const m of r.members) {
+    if (handlers.has(m.step) || taken.has(`${m.step}\u0000${m.ref}`)) continue;
+    const completed = firstEventOf(d, m.taskId, 'completed');
+    const archived = firstEventOf(d, m.taskId, 'archived');
+    const archive = archived !== undefined && isRecord(archived.payload) && archived.payload['from'] !== 'done' ? archived : undefined;
+    const facts = [
+      ...(completed === undefined ? [] : [{ how: 'done', taskId: m.taskId as string | null, eventId: completed.id }]),
+      ...(archive === undefined ? [] : [{ how: 'archived', taskId: null, eventId: archive.id }]),
+    ].sort((a, b) => a.eventId - b.eventId);
+    const winner = facts[0];
+    if (winner === undefined) continue;
+    if (settle(d, id, m.step, m.ref, winner.how, winner.taskId, winner.eventId, now)) taken.add(`${m.step}\u0000${m.ref}`);
+  }
+  const pending = new Map(pendingOf(d, id).map((p) => [p.step, p]));
+  for (const s of r.plan.steps) {
+    if (s.for_each === undefined || taken.has(`${s.step}\u0000${s.step}`)) continue;
+    if (s.made === 'decide' && pending.get(s.step)?.state !== 'made') continue;
+    const items = settledOf(d, id).filter((x) => x.step === s.step && x.ref !== s.step);
+    const all = r.members.filter((m) => m.step === s.step);
+    if (all.length === 0 || items.length < all.length) continue;
+    const how = items.every((x) => x.how === 'archived') ? 'archived' : 'done';
+    settle(d, id, s.step, s.step, how, null, Math.max(...items.map((x) => x.eventId)), now);
+  }
+}
+
+/** A pending row moved from `waiting`, once (§9.2): false when another attempt decided it first, and then nothing is made. */
+function decided(d: Db, instanceId: string, step: string, state: 'made' | 'skipped', reason: Record<string, unknown>, causeEvent: number | null, now: number, items?: unknown): boolean {
+  const masked = Object.fromEntries(Object.entries(reason).map(([k, v]) => [k, typeof v === 'string' ? mask(v) : v]));
+  return (
+    d
+      .prepare(
+        `UPDATE kanban_workflow_pending SET state = ?, reason = ?, items = ?, cause_event = ?, decided_at = ?
+          WHERE instance_id = ? AND step = ? AND state = 'waiting'`,
+      )
+      .run(state, JSON.stringify(masked), items === undefined ? null : JSON.stringify(items), causeEvent, now, instanceId, step).changes === 1
+  );
+}
+
+/** One decision applied (§9.2 step 4); answers its line for the notice, or undefined for one that is none. */
+function apply(d: Db, r: Routed, dec: Decision, causeEvent: number | null, now: number): RoutedLine | undefined {
+  const id = r.instance.instanceId;
+  const s = r.plan.steps.find((x) => x.step === dec.step);
+  if (s === undefined) return undefined;
+  if (dec.outcome === 'settled') {
+    settle(d, id, dec.step, dec.step, dec.how, null, dec.eventId, now);
+    return undefined;
+  }
+  if (dec.outcome === 'skipped') {
+    return decided(d, id, dec.step, 'skipped', { by: dec.by, why: dec.why }, causeEvent, now) ? { step: dec.step, outcome: 'skipped', why: dec.why, taskIds: [], by: dec.by } : undefined;
+  }
+  // A step to make waits: only skips and settlings are applied yet.
+  return undefined;
+}
+
+/** An instance with a plan, its members read now. */
+function routedOf(d: Db, instance: InstanceRow): Routed | undefined {
+  return instance.plan === null ? undefined : { instance, plan: instance.plan, members: membersWithTasks(d, instance.instanceId) };
+}
+
+/**
+ * Decide what is due, until nothing more is (§9.2 steps 2 to 5): the sweep, the
+ * facts, `decide`, each decision applied, again on the new facts, at most once a
+ * step of the plan; answers the lines of every decision made.
+ */
+function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number): RoutedLine[] {
+  const lines: RoutedLine[] = [];
+  const first = routedOf(d, instance);
+  if (first === undefined) return lines;
+  for (let round = 0; round <= first.plan.steps.length; round += 1) {
+    const r = routedOf(d, instance) as Routed;
+    sweep(d, r, now);
+    const facts = routingFacts(d, r);
+    const decisions = decideRouting(r.plan, facts);
+    if (decisions.length === 0) break;
+    for (const dec of decisions) {
+      const line = apply(d, r, dec, causeEvent, now);
+      if (line !== undefined) lines.push(line);
+    }
+  }
+  return lines;
+}
+
+/**
+ * The routing of a transition (§9.2), inside its transaction, after its own rows
+ * and event: one read finds the task's member row and its instance's plan, and a
+ * task that is no member of an instance with a plan pays nothing more; then what
+ * is due is decided, and one `workflow_routed` event on the task lists the
+ * decisions, for the notice.
+ */
+function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number): void {
+  const planned = plannedMemberOf(d, taskId);
+  if (planned === undefined) return;
+  const lines = decideAll(d, planned.instance, eventId, now);
+  if (lines.length === 0) return;
+  record(
+    d,
+    {
+      taskId,
+      kind: 'workflow_routed',
+      actor: 'gateway',
+      payload: { workflow: planned.instance.instanceId, workflowName: planned.instance.name, step: planned.member.step, cause, decisions: lines },
+    },
+    now,
+  );
+}
+```
+
+In `src/kanban/routing.ts`, replace:
+
+```ts
+    if (fact.row !== 'waiting') continue;
+```
+
+with:
+
+```ts
+    if (fact.row !== 'waiting') continue;
+    // A fan-out over a result waits: this build does not yet read its source's list.
+    if (s.for_each !== undefined && 'step' in s.for_each) continue;
+```
+
+- [ ] **Step 12.4: Run them to verify they pass.** Run the same command. Expected: `Tests  3 passed (3)`.
+
+- [ ] **Step 12.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3647 passed (3647)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+
+- [ ] **Step 12.6: Commit.**
+
+```bash
+git add src/db/kanban-read.ts src/db/kanban.ts src/kanban/routing.ts tests/helpers/routing.ts tests/routing-sweep.test.ts
+git commit -m "Settle each member of a routed instance in the transaction of its completion or archive, and of a run's block and give-up, skipping the steps whose when is false"
+```
+
+---
+
+### Task 13: The writer makes a step late
+
+**Files:**
+
+- Create: `tests/routing-worktree-base.test.ts`, `tests/routing-writer.test.ts`
+- Modify: `src/db/WRITERS.md`, `src/db/kanban.ts`
+
+§3.2, §7.4. A step made is made through `insertTask` as the start would have: its title and body filled from the results and cut, its links to its effective parents, past a skipped step and to a parent done and then archived, its first member's subscriptions, its gates, its member row and its `created` event. Its worktree, in an isolated workspace, starts from its effective parents' branches, and leaves out an archived parent's. Until Task 19, a step over a result's list waits.
+
+- [ ] **Step 13.1: Write the tests.**
+
+Create `tests/routing-worktree-base.test.ts`:
+
+```ts
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { closeRun } from '../src/db/kanban.js';
+import { getTask, membersOf } from '../src/db/kanban-read.js';
+import { registerWorktree } from '../src/db/workspaces.js';
+import { TaskDirectories, type GitResult, type GitRunner } from '../src/kanban/worktree.js';
+import { clearSecrets } from '../src/secrets.js';
+import { testDb, type TestDb } from './helpers/db.js';
+import { ALICE, NOW, VIA } from './helpers/kanban.js';
+import { madeOf, viBoard, type ViBoard } from './helpers/routing.js';
+
+/**
+ * Where a step made late starts in an isolated workspace (workflow routing spec
+ * §3.2, kanban spec §18.5): from the branches of its effective parents, past a
+ * skipped step; a parent done and then archived keeps its link and its
+ * handoff, not its branch. Against a stand-in for git that answers what the
+ * board asks and records it.
+ */
+
+const FLOW = `board: vi
+steps:
+  a:
+    title: a
+    assignee: vi-coordinator
+    workspace: vi
+    outputs: { go: boolean }
+  b:
+    title: b
+    assignee: verifier
+    workspace: vi
+  s:
+    title: s
+    assignee: verifier
+    workspace: vi
+    parents: [a]
+    when: [{ step: a, output: go, is: false }]
+  c:
+    title: c
+    assignee: verifier
+    workspace: vi
+    parents: [s, b]
+`;
+
+let dir: string;
+let base: string;
+let root: string;
+let h: TestDb;
+let b: ViBoard;
+let asked: string[][];
+let refs: Map<string, string>;
+let addedAt: string | undefined;
+
+const ok = (stdout = ''): GitResult => ({ code: 0, stdout, stderr: '' });
+const no = (): GitResult => ({ code: 1, stdout: '', stderr: '' });
+
+const git: GitRunner = async (args, opts) => {
+  asked.push([...args]);
+  const [verb, ...rest] = args;
+  if (verb === 'rev-parse' && rest[0] === '--git-common-dir') return ok('.git');
+  if (verb === 'rev-parse' && rest[0] === '--verify') {
+    const commit = refs.get((rest.at(-1) ?? '').replace(/\^\{commit\}$/, ''));
+    return commit === undefined ? no() : ok(commit);
+  }
+  if (verb === 'worktree' && rest[0] === 'add') {
+    addedAt = rest.at(-1);
+    mkdirSync(rest.find((a) => a.startsWith(root)) ?? '', { recursive: true });
+    return ok();
+  }
+  if (verb === 'worktree' && rest[0] === 'list') return ok('');
+  if (verb === 'symbolic-ref') return ok(`refs/heads/mt/${opts.cwd.split('/').at(-1) ?? ''}`);
+  // Only the commit the worktree was added at is in it already: every other parent's branch is merged.
+  if (verb === 'merge-base') return refs.get(rest[1] ?? '') === addedAt ? ok() : no();
+  if (verb === 'merge') return ok();
+  throw new Error(`unexpected git ${args.join(' ')}`);
+};
+
+beforeEach(() => {
+  clearSecrets();
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'mt-routed-base-')));
+  base = join(dir, 'vi');
+  mkdirSync(join(base, '.git'), { recursive: true });
+  root = join(dir, 'worktrees');
+  asked = [];
+  refs = new Map([['HEAD', 'b'.repeat(40)]]);
+  h = testDb();
+  b = viBoard(h, { isolated: new Set(['vi']) });
+  writeFileSync(join(b.dir, 'flow.yaml'), FLOW);
+});
+afterEach(() => {
+  h.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+/** A task done in its own worktree, on its branch at `commit`. */
+async function doneOnBranch(taskId: string, commit: string, metadata: Record<string, unknown>): Promise<void> {
+  const claim = b.service.claim(taskId);
+  if (!claim.ok) throw new Error(claim.message);
+  const run = claim.run;
+  const id = getTask(h.db, taskId)?.worktree ?? '';
+  registerWorktree(h.db, { id, kind: 'git-worktree', rootPath: join(root, 'vi', taskId), repoRoot: base, branch: `mt/${taskId}` }, NOW);
+  refs.set(`refs/heads/mt/${taskId}`, commit);
+  const r = await b.service.complete(taskId, { kind: 'run', runId: run.runId }, { summary: 'did it', metadata });
+  if (!r.ok) throw new Error(`${r.code}: ${r.message}`);
+  closeRun(h.db, run.runId, NOW);
+}
+
+/** Where the task's worktree starts at its claim: the commit it is added at, and the branches merged into it. */
+async function startFrom(taskId: string): Promise<{ from: string | undefined; merged: string[] }> {
+  const claim = b.service.claim(taskId);
+  if (!claim.ok) throw new Error(claim.message);
+  const task = getTask(h.db, taskId);
+  if (task === undefined) throw new Error('no task');
+  asked = [];
+  const d = new TaskDirectories({ db: h.db, root, workspaceDirs: new Map([['vi', base]]), isolated: { vi: {} }, env: {}, git });
+  const r = await d.prepare(task);
+  if (!r.ok) throw new Error(JSON.stringify(r));
+  return { from: asked.find((a) => a[0] === 'worktree' && a[1] === 'add')?.at(-1), merged: asked.filter((a) => a[0] === 'merge').map((a) => a.at(-1) ?? '') };
+}
+
+describe("a late step's worktree", () => {
+  it("starts from its effective parents' branches, past a skipped step", async () => {
+    const w = madeOf(b.service.startWorkflow({ workflow: 'flow', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA }));
+    const [a, bb] = [w.tasks[0]?.taskId ?? '', w.tasks[1]?.taskId ?? ''];
+    await doneOnBranch(a, 'a'.repeat(40), { go: true });
+    await doneOnBranch(bb, 'c'.repeat(40), {});
+    const c = membersOf(h.db, w.instance.instanceId).find((m) => m.step === 'c')?.taskId ?? '';
+    expect(await startFrom(c)).toEqual({ from: 'a'.repeat(40), merged: [`refs/heads/mt/${bb}`] });
+  });
+
+  it('leaves out the branch of a parent done and then archived', async () => {
+    const w = madeOf(b.service.startWorkflow({ workflow: 'flow', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA }));
+    const [a, bb] = [w.tasks[0]?.taskId ?? '', w.tasks[1]?.taskId ?? ''];
+    await doneOnBranch(a, 'a'.repeat(40), { go: true });
+    expect(b.service.archive(a, ALICE).ok).toBe(true);
+    await doneOnBranch(bb, 'c'.repeat(40), {});
+    const c = membersOf(h.db, w.instance.instanceId).find((m) => m.step === 'c')?.taskId ?? '';
+    expect(await startFrom(c)).toEqual({ from: 'c'.repeat(40), merged: [] });
+  });
+});
+```
+
 Create `tests/routing-writer.test.ts`:
 
 ```ts
@@ -5834,6 +6680,7 @@ import type { WorkflowMade } from '../src/kanban/service.js';
 import { clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
 import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
+import { briefFor } from '../src/kanban/brief.js';
 import { madeOf, viBoard, type ViBoard } from './helpers/routing.js';
 
 /**
@@ -5842,9 +6689,40 @@ import { madeOf, viBoard, type ViBoard } from './helpers/routing.js';
  * due, making a step's task as the start would have, linked to its effective
  * parents, its references filled, its first member's subscriptions copied, its
  * gates, member row and created event; skipping, and settling once the parents
- * are; one workflow_routed event listing the decisions; and a task made for a
- * role no longer configured made and blocked by the gateway.
+ * are; and one workflow_routed event listing the decisions. A parent done and
+ * then archived is still a done parent, linked, its result read and its handoff
+ * in the brief; a reviewed result is the work run's that was approved last.
  */
+
+const PAIR = `board: vi
+steps:
+  a:
+    title: a
+    assignee: vi-coordinator
+    outputs: { go: boolean }
+  b:
+    title: b
+    assignee: verifier
+  c:
+    title: c
+    assignee: verifier
+    parents: [a, b]
+    when: [{ step: a, output: go, is: true }]
+`;
+
+const REVIEWED = `board: vi
+steps:
+  a:
+    title: a
+    assignee: vi-coordinator
+    reviewer: { role: verifier }
+    outputs: { go: boolean }
+  c:
+    title: c
+    assignee: verifier
+    parents: [a]
+    when: [{ step: a, output: go, is: true }]
+`;
 
 const FLOW = `board: vi
 params:
@@ -5989,22 +6867,6 @@ describe('the writer deciding at a settling', () => {
     ]);
   });
 
-  it('skips by archive every step below a root archived undone, in the archive\'s transaction', () => {
-    const w = start();
-    const intake = w.tasks[0]?.taskId ?? '';
-    expect(b.service.archive(intake, ALICE).ok).toBe(true);
-    expect(membersOf(h.db, w.instance.instanceId).length).toBe(1);
-    expect(settledOf(h.db, w.instance.instanceId).map((s) => [s.step, s.how])).toEqual([
-      ['help', 'archived'],
-      ['intake', 'archived'],
-      ['report', 'archived'],
-      ['va', 'archived'],
-      ['verify', 'archived'],
-    ]);
-    expect(routed(intake)[0]).toMatchObject({ cause: 'archived' });
-    expect((routed(intake)[0]?.['decisions'] as unknown[]).length).toBe(4);
-  });
-
   it("makes a step on its ancestor's give-up, not linked to it, the decision staying made once it is done", async () => {
     const w = start();
     const intake = w.tasks[0]?.taskId ?? '';
@@ -6022,28 +6884,6 @@ describe('the writer deciding at a settling', () => {
     expect(membersOf(h.db, w.instance.instanceId).filter((m) => m.step === 'help').length).toBe(1);
   });
 
-  it("routes nothing from a person's block, and decides nothing at a review request", async () => {
-    const w = start();
-    const intake = w.tasks[0]?.taskId ?? '';
-    expect(b.service.block(intake, { kind: 'person', principal: ALICE }, { kind: 'needs_input', reason: 'wait' }).ok).toBe(true);
-    expect(routed(intake)).toEqual([]);
-  });
-
-  it('makes a task whose role is no longer configured, blocked at once by the gateway, which routes nothing', async () => {
-    const w = start();
-    const intake = w.tasks[0]?.taskId ?? '';
-    b.roles.delete('vulnerability-analyst');
-    await done(intake, { kind: 'cve', verify: false, note: 'n' });
-    const va = member(w.instance.instanceId, 'va')?.taskId ?? '';
-    expect(getTask(h.db, va)).toMatchObject({
-      phase: 'blocked',
-      blockKind: 'needs_input',
-      blockReason: `role vulnerability-analyst is not configured, so this step's task cannot be given to it: /kanban task assign ${va} <role>`,
-    });
-    expect(eventsOf(h.db, va).at(-1)).toMatchObject({ kind: 'blocked', actor: 'gateway' });
-    expect(routed(va)).toEqual([]);
-  });
-
   it("copies the first member's subscriptions as they are at the making, in its thread", async () => {
     const w = start();
     const intake = w.tasks[0]?.taskId ?? '';
@@ -6051,6 +6891,48 @@ describe('the writer deciding at a settling', () => {
     await done(intake, { kind: 'cve', verify: false, note: 'n' });
     const va = member(w.instance.instanceId, 'va')?.taskId ?? '';
     expect(subscriptionsOf(h.db, va).map((s) => [s.conversationId, s.threadId, s.rootMessageId])).toEqual([['oc_chat', 'omt_topic', 'om_root']]);
+  });
+
+  it('makes a child of a parent done and then archived, linked to it, its clause and its handoff read', async () => {
+    writeFileSync(join(b.dir, 'pair.yaml'), PAIR);
+    const w = madeOf(b.service.startWorkflow({ workflow: 'pair', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA }));
+    const [a, bb] = [w.tasks[0]?.taskId ?? '', w.tasks[1]?.taskId ?? ''];
+    await done(a, { go: true });
+    expect(b.service.archive(a, ALICE).ok).toBe(true);
+    await done(bb, {});
+    expect(settledOf(h.db, w.instance.instanceId).find((s) => s.step === 'a')).toMatchObject({ how: 'done', taskId: a });
+    const c = member(w.instance.instanceId, 'c')?.taskId ?? '';
+    expect(parentsOf(h.db, c).map((p) => [p.taskId, p.phase])).toEqual([
+      [a, 'archived'],
+      [bb, 'done'],
+    ]);
+    expect(routed(bb)[0]?.['decisions']).toEqual([{ step: 'c', outcome: 'made', why: 'a.go is true', taskIds: [c] }]);
+    const run = claimed(h.db, c);
+    const task = getTask(h.db, c);
+    if (task === undefined) throw new Error('no task');
+    expect(briefFor(h.db, { run, task, roleMd: undefined, role: undefined }).parents).toContainEqual(
+      expect.objectContaining({ summary: 'did it', metadata: { go: true }, task: expect.objectContaining({ taskId: a }) }),
+    );
+  });
+
+  it("reads a reworked result, the run approved last, and an operator's approval reading the work run's", async () => {
+    writeFileSync(join(b.dir, 'reviewed.yaml'), REVIEWED);
+    const reviewed = () => madeOf(b.service.startWorkflow({ workflow: 'reviewed', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA }));
+    const first = reviewed();
+    const a = first.tasks[0]?.taskId ?? '';
+    await done(a, { go: true });
+    const changes = claimed(h.db, a);
+    expect(b.service.requestChanges(a, { kind: 'run', runId: changes.runId }, 'check again').ok).toBe(true);
+    closeRun(h.db, changes.runId, NOW);
+    await done(a, { go: false });
+    await done(a, {});
+    expect(getTask(h.db, a)?.phase).toBe('done');
+    expect(pendingOf(h.db, first.instance.instanceId).find((p) => p.step === 'c')).toMatchObject({ state: 'skipped', reason: { by: 'when', why: 'a.go is false' } });
+    const second = reviewed();
+    const a2 = second.tasks[0]?.taskId ?? '';
+    await done(a2, { go: true });
+    expect((await b.service.complete(a2, { kind: 'person', principal: ALICE }, { summary: 'approved' })).ok).toBe(true);
+    expect(routed(a2).at(-1)?.['decisions']).toEqual([{ step: 'c', outcome: 'made', why: 'a.go is true', taskIds: [member(second.instance.instanceId, 'c')?.taskId] }]);
   });
 
   it('cuts a title made long by a result to its limit, never refusing', async () => {
@@ -6063,9 +6945,9 @@ describe('the writer deciding at a settling', () => {
 });
 ```
 
-- [ ] **Step 12.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-writer.test.ts`. Expected: `Tests  8 failed | 1 passed (9)`, the first as `AssertionError: expected undefined to match object { ref: 'va', step: 'va', …(2) }`.
+- [ ] **Step 13.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-worktree-base.test.ts tests/routing-writer.test.ts`. Expected: `Tests  10 failed (10)`, the first as `Error: no task `.
 
-- [ ] **Step 12.3: Implement.**
+- [ ] **Step 13.3: Implement.**
 
 In `src/db/WRITERS.md`, replace:
 
@@ -6091,151 +6973,16 @@ with:
 | `kanban_workflow_tasks` | `db/kanban.ts` | Added by `applyDag`, one row a task it made, in its transaction; and, for an instance with a plan, by the routing, one row a task the plan made later, at the next position, in the transaction that decided it (workflow routing spec §7.4). Never changed or removed: a member is what the apply made, or what the instance's plan made later (workflows spec §7, as amended). `item` is masked on write. Read by the workflow commands and by `task show`'s one line, and by nothing in the kernel. |
 ```
 
-In `src/db/kanban-read.ts`, replace:
-
-```ts
-
-/** One Unblock button of a recorded message, and the `unblocked` or `archived` event that lifted its block, if one has. */
-```
-
-with:
-
-```ts
-
-/**
- * A trigger event (workflow routing spec §5.1): what blocked a task from its work
- * by a run, read from the event, never from the task's `block_kind`. A run's own
- * `blocked`, of a kind but `dependency`, and a run's end that blocked it are
- * `blocked`, routed by `on_blocked`; the breaker's give-up and the transient
- * limit's block, the board's terminal failure endings, are `gave_up`, routed by
- * `on_gave_up`, the transient limit's `throttled`.
- */
-export interface TriggerEvent {
-  eventId: number;
-  kind: 'blocked' | 'gave_up';
-  throttled: boolean;
-  reason: string;
-}
-
-/**
- * A task's trigger events, oldest first (§5.1): only a work run's, so a review's
- * block, a person's block or stop, and the gateway's own block of a task the
- * team check refused route nothing and enter no state a clause reads.
- */
-export function triggersOf(db: Db, taskId: string): TriggerEvent[] {
-  const rows = db
-    .prepare<[string], EventRaw & { run_kind: string | null }>(
-      `SELECT e.id, e.task_id, e.run_id, e.kind, e.actor, json(e.payload) AS payload, e.created_at, r.kind AS run_kind
-         FROM kanban_events e JOIN kanban_runs r ON r.run_id = e.run_id
-        WHERE e.task_id = ? AND (e.kind = 'blocked' OR (e.kind = 'run_ended' AND json_extract(e.payload, '$.next') = 'blocked'))
-        ORDER BY e.id`,
-    )
-    .all(taskId);
-  return rows.flatMap((r): TriggerEvent[] => {
-    if (r.run_kind !== 'work') return [];
-    const p = json(r.payload) as Record<string, unknown>;
-    const text = (key: string): string => (typeof p[key] === 'string' ? (p[key] as string) : '');
-    if (r.kind === 'blocked') {
-      if (!r.actor.startsWith('run:') || text('kind') === '' || text('kind') === 'dependency') return [];
-      return [{ eventId: r.id, kind: 'blocked', throttled: false, reason: text('reason') }];
-    }
-    const kind = text('blockKind');
-    const gaveUp = kind === 'gave_up' || kind === 'transient';
-    return [{ eventId: r.id, kind: gaveUp ? 'gave_up' : 'blocked', throttled: kind === 'transient', reason: text('blockReason') }];
-  });
-}
-
-/** A task's first event of a kind, with its payload; undefined for none. */
-export function firstEventOf(db: Db, taskId: string, kind: string): KanbanEvent | undefined {
-  const row = db
-    .prepare<[string, string], EventRaw>(
-      `SELECT id, task_id, run_id, kind, actor, json(payload) AS payload, created_at FROM kanban_events WHERE task_id = ? AND kind = ? ORDER BY id LIMIT 1`,
-    )
-    .get(taskId, kind);
-  return row === undefined ? undefined : decodeEvent(row);
-}
-
-/** One Unblock button of a recorded message, and the `unblocked` or `archived` event that lifted its block, if one has. */
-```
-
 In `src/db/kanban.ts`, replace:
 
 ```ts
-import { maskPlan, type Plan } from '../kanban/routing.js';
+import { decide as decideRouting, INSTANCE_CAP, maskPlan, type Decision, type Facts, type Plan, type StepFact } from '../kanban/routing.js';
 ```
 
 with:
 
 ```ts
 import { decide as decideRouting, fillText, INSTANCE_CAP, maskPlan, resultOf, SKIPPED_TEXT, valueSaid, type Decision, type Facts, type Plan, type PlanStep, type StepFact, type Template } from '../kanban/routing.js';
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-import { assignable, checkTask, type TaskFacts } from '../kanban/task-checks.js';
-```
-
-with:
-
-```ts
-import { assignable, checkTask, isRecord, type TaskFacts } from '../kanban/task-checks.js';
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-  gatesOf,
-```
-
-with:
-
-```ts
-  gatesOf,
-  firstEventOf,
-  latestCompletion,
-  pendingOf,
-  plannedMemberOf,
-  settledOf,
-  triggersOf,
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-  'from',
-```
-
-with:
-
-```ts
-  'from',
-  // The task a handler was routed from, and a stand-in that archived the task it stood in for (workflow routing spec §7.4, §5.2).
-  'routedFrom',
-  'standIn',
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-): void {
-  d.prepare(
-    `INSERT INTO kanban_events (task_id, run_id, kind, actor, payload, created_at)
-     VALUES (?, ?, ?, ?, jsonb(?), ?)`,
-  ).run(e.taskId, e.runId ?? null, e.kind, e.actor, JSON.stringify(redactValues(e.payload, BOARD_KEYS)), now);
-```
-
-with:
-
-```ts
-): number {
-  const { lastInsertRowid } = d
-    .prepare(
-      `INSERT INTO kanban_events (task_id, run_id, kind, actor, payload, created_at)
-       VALUES (?, ?, ?, ?, jsonb(?), ?)`,
-    )
-    .run(e.taskId, e.runId ?? null, e.kind, e.actor, JSON.stringify(redactValues(e.payload, BOARD_KEYS)), now);
-  return Number(lastInsertRowid);
 ```
 
 In `src/db/kanban.ts`, replace:
@@ -6301,232 +7048,6 @@ with:
 In `src/db/kanban.ts`, replace:
 
 ```ts
-  handoff: Handoff,
-  now: number,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
-```
-
-with:
-
-```ts
-  handoff: Handoff,
-  now: number,
-  team?: RouteTeam,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-    ).run(now, taskId);
-    record(
-```
-
-with:
-
-```ts
-    ).run(now, taskId);
-    const completed = record(
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-      },
-      now,
-    );
-    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
-  });
-```
-
-with:
-
-```ts
-      },
-      now,
-    );
-    // Done is a settling: what its plan's steps read may have changed (workflow routing spec §9.1).
-    routeAfter(d, taskId, 'completed', completed, now, team);
-    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
-  });
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-  report: BlockReport,
-  now: number,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
-```
-
-with:
-
-```ts
-  report: BlockReport,
-  now: number,
-  team?: RouteTeam,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-      const recurrences = enterBlocked(d, r.task, report.kind, report.reason);
-      record(
-```
-
-with:
-
-```ts
-      const recurrences = enterBlocked(d, r.task, report.kind, report.reason);
-      const blocked = record(
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-        now,
-      );
-    }
-    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
-```
-
-with:
-
-```ts
-        now,
-      );
-      // A run's block from its work is a trigger (workflow routing spec §5.1); a person's, or a review's, routes nothing.
-      if (by.kind === 'run' && r.task.phase === 'open') routeAfter(d, taskId, 'blocked', blocked, now, team);
-    }
-    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-  now: number,
-): Result<{ task: TaskRow; run: RunRow; next: NextStep }> {
-```
-
-with:
-
-```ts
-  now: number,
-  team?: RouteTeam,
-): Result<{ task: TaskRow; run: RunRow; next: NextStep }> {
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-    }
-    record(
-```
-
-with:
-
-```ts
-    }
-    const ended = record(
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-    );
-    return { ok: true, task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next };
-```
-
-with:
-
-```ts
-    );
-    // A run's end that blocked the task from its work is a trigger (workflow routing spec §5.1).
-    if (blockAs !== undefined && before.phase === 'open') {
-      const cause: RouteCause = blockAs.kind === 'gave_up' ? 'gave_up' : blockAs.kind === 'transient' ? 'throttled' : 'blocked';
-      routeAfter(d, run.taskId, cause, ended, now, team);
-    }
-    return { ok: true, task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next };
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-  taskId: string,
-  by: string,
-  now: number,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
-  return tx(db, (d) => {
-```
-
-with:
-
-```ts
-  taskId: string,
-  by: string,
-  now: number,
-  team?: RouteTeam,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
-  return tx(db, (d) => {
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-    return { ok: true, ...archiveIn(d, task, by, now) };
-```
-
-with:
-
-```ts
-    const archived = archiveIn(d, task, by, now);
-    // An archive settles: as done when it was done, or as skipped by archive (workflow routing spec §9.1).
-    routeAfter(d, taskId, 'archived', archived.eventId, now, team);
-    return { ok: true, task: mustGet(d, taskId), run: archived.run };
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-): { task: TaskRow; run: RunRow | undefined } {
-```
-
-with:
-
-```ts
-): { task: TaskRow; run: RunRow | undefined; eventId: number } {
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-  ).run(now, task.taskId);
-  record(
-```
-
-with:
-
-```ts
-  ).run(now, task.taskId);
-  const eventId = record(
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-  return { task: mustGet(d, task.taskId), run };
-```
-
-with:
-
-```ts
-  return { task: mustGet(d, task.taskId), run, eventId };
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
         ...(sub === undefined ? {} : { copySubscription: sub }),
 ```
 
@@ -6539,46 +7060,30 @@ with:
 In `src/db/kanban.ts`, replace:
 
 ```ts
-    return { ok: true, attempts: row.attempts };
-  });
+
+/** An instance with a plan, as the routing reads it in its transaction: the row, the plan, and its members with their tasks. */
+```
+
+with:
+
+```ts
+
+/** The most items a `workflow_routed` line names; its count says the rest (§12.2). */
+const ROUTED_ITEMS = 20;
+
+/** An instance with a plan, as the routing reads it in its transaction: the row, the plan, and its members with their tasks. */
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  members: Array<MemberRow & { task: TaskRow }>;
 }
 ```
 
 with:
 
 ```ts
-    return { ok: true, attempts: row.attempts };
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Workflow routing (workflow routing spec §9)
-// ---------------------------------------------------------------------------
-
-/** The team, as the service holds it, against which a task made late is checked (§7.4, §9.3); absent in the writer's own tests. */
-export type RouteTeam = TaskFacts;
-
-/** Which transition decided, for its notice (§12.2): a completion, a block, a give-up or the transient limit's block, an archive, or a reconciliation. */
-export type RouteCause = 'completed' | 'blocked' | 'gave_up' | 'throttled' | 'archived' | 'reconciled';
-
-/** One decision of a transaction, as `workflow_routed` lists it for its notice (§12.2). */
-export interface RoutedLine {
-  step: string;
-  outcome: 'made' | 'skipped' | 'fanned_out';
-  why: string;
-  taskIds: string[];
-  items?: string[];
-  count?: number;
-  by?: string;
-}
-
-/** The most items a `workflow_routed` line names; its count says the rest (§12.2). */
-const ROUTED_ITEMS = 20;
-
-/** An instance with a plan, as the routing reads it in its transaction: the row, the plan, and its members with their tasks. */
-interface Routed {
-  instance: InstanceRow;
-  plan: Plan;
   members: Array<MemberRow & { task: TaskRow }>;
 }
 
@@ -6586,82 +7091,26 @@ interface Routed {
 function assigneeOf(name: string | null): Assignee | null {
   return name === null ? null : { kind: name.includes(':') ? 'human' : 'role', name };
 }
+```
 
-/** A step's facts, read inside the transaction (§9.2 step 3): its rows, its tasks' trigger events, and its winner's accepted result. */
-function routingFacts(d: Db, r: Routed): Facts {
-  const settled = settledOf(d, r.instance.instanceId);
-  const pending = new Map(pendingOf(d, r.instance.instanceId).map((p) => [p.step, p]));
-  const steps = new Map<string, StepFact>();
-  for (const s of r.plan.steps) {
-    const own = settled.find((x) => x.step === s.step && x.ref === s.step);
-    const items = new Map(settled.filter((x) => x.step === s.step && x.ref !== s.step).map((x) => [x.ref, { how: x.how, taskId: x.taskId, eventId: x.eventId }]));
-    const triggers = r.members.filter((m) => m.step === s.step).flatMap((m) => triggersOf(d, m.taskId));
-    const row = pending.get(s.step);
-    const winner = own?.taskId ?? null;
-    const metadata = winner === null || (own?.how !== 'done' && own?.how !== 'stood_in') ? undefined : latestCompletion(d, winner)?.metadata;
-    steps.set(s.step, {
-      step: s.step,
-      row: row?.state ?? null,
-      skippedBy: row?.reason?.by ?? null,
-      settled: own === undefined ? null : { how: own.how, taskId: own.taskId, eventId: own.eventId },
-      items,
-      entered: { blocked: triggers.some((t) => t.kind === 'blocked'), gaveUp: triggers.some((t) => t.kind === 'gave_up') },
-      result: isRecord(metadata) ? metadata : null,
-    });
-  }
-  return { steps, due: [], members: r.members.length, cap: INSTANCE_CAP };
-}
+In `src/db/kanban.ts`, replace:
 
-/** Insert a settled row into its key (§8): a later attempt finds the key taken and changes nothing. True when it added the row. */
-function settle(d: Db, instanceId: string, step: string, ref: string, how: string, taskId: string | null, eventId: number, now: number): boolean {
-  return (
-    d
-      .prepare('INSERT OR IGNORE INTO kanban_workflow_settled (instance_id, step, ref, how, task_id, event_id, settled_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(instanceId, step, ref, how, taskId, eventId, now).changes === 1
-  );
-}
+```ts
 
-/**
- * The sweep (§9.2 step 2): each member with a settling fact gets its settled row,
- * its winner the earliest fact by event id, its own task's `completed` event or
- * its `archived` event when that archive was not from `done`; each fan-out
- * whose items all have rows, its own, `archived` when every item was archived
- * undone. Plain steps included; a handler's task is no step's member here.
- */
-function sweep(d: Db, r: Routed, now: number): void {
-  const id = r.instance.instanceId;
-  const handlers = new Set(r.plan.steps.filter((s) => s.handler === true).map((s) => s.step));
-  const taken = new Set(settledOf(d, id).map((x) => `${x.step}\u0000${x.ref}`));
-  for (const m of r.members) {
-    if (handlers.has(m.step) || taken.has(`${m.step}\u0000${m.ref}`)) continue;
-    const completed = firstEventOf(d, m.taskId, 'completed');
-    const archived = firstEventOf(d, m.taskId, 'archived');
-    const archive = archived !== undefined && isRecord(archived.payload) && archived.payload['from'] !== 'done' ? archived : undefined;
-    const facts = [
-      ...(completed === undefined ? [] : [{ how: 'done', taskId: m.taskId as string | null, eventId: completed.id }]),
-      ...(archive === undefined ? [] : [{ how: 'archived', taskId: null, eventId: archive.id }]),
-    ].sort((a, b) => a.eventId - b.eventId);
-    const winner = facts[0];
-    if (winner === undefined) continue;
-    if (settle(d, id, m.step, m.ref, winner.how, winner.taskId, winner.eventId, now)) taken.add(`${m.step}\u0000${m.ref}`);
-  }
-  const pending = new Map(pendingOf(d, id).map((p) => [p.step, p]));
-  for (const s of r.plan.steps) {
-    if (s.for_each === undefined || taken.has(`${s.step}\u0000${s.step}`)) continue;
-    if (s.made === 'decide' && pending.get(s.step)?.state !== 'made') continue;
-    const items = settledOf(d, id).filter((x) => x.step === s.step && x.ref !== s.step);
-    const all = r.members.filter((m) => m.step === s.step);
-    if (all.length === 0 || items.length < all.length) continue;
-    const how = items.every((x) => x.how === 'archived') ? 'archived' : 'done';
-    settle(d, id, s.step, s.step, how, null, Math.max(...items.map((x) => x.eventId)), now);
-  }
-}
+/** A pending row moved from `waiting`, once (§9.2): false when another attempt decided it first, and then nothing is made. */
+```
+
+with:
+
+```ts
 
 /** The text a template's reference to a result fills (§7.4): the step's accepted value, a list's items joined, or `(skipped)`. */
 function filled(plan: Plan, facts: Facts, text: string, item?: string): string {
   return fillText(
     text,
     (step, output) => {
+      // A step not settled at the making, as the ancestor a `when: { state: gave_up }` step is made on, has no
+      // accepted value yet: it fills `(skipped)` too, and the text is never filled again once it settles.
       const value = resultOf(plan, facts, step, output);
       return value === undefined ? SKIPPED_TEXT : valueSaid(value);
     },
@@ -6675,9 +7124,7 @@ function filled(plan: Plan, facts: Facts, text: string, item?: string): string {
  * and body cut to their limits; the instance's creator and board, and a run's
  * start's `created_from_task`; its links to its effective parents; its first
  * member's subscriptions; its gates by the instance's creator; its member row
- * at the next position; and its `created` event with the instance. With the
- * team, a task whose assignee, reviewer or workspace no longer passes is made
- * and blocked at once, by the gateway, as `needs_input`.
+ * at the next position; and its `created` event with the instance.
  */
 function makeLate(
   d: Db,
@@ -6685,7 +7132,6 @@ function makeLate(
   facts: Facts,
   made: { step: string; ref: string; item: string | null; template: Template; parents: readonly string[]; payload?: Record<string, unknown> },
   now: number,
-  team: RouteTeam | undefined,
 ): string {
   const t = made.template;
   const first = r.members[0];
@@ -6732,6 +7178,349 @@ function makeLate(
     made.item === null ? null : mask(made.item),
     position,
   );
+  return taskId;
+}
+
+/** A step's templates, one an item of its list param, or its one. */
+function templatesFor(s: PlanStep): Array<Template & { item: string | null }> {
+  return s.templates ?? (s.template === undefined ? [] : [{ ...s.template, item: null }]);
+}
+
+/** A pending row moved from `waiting`, once (§9.2): false when another attempt decided it first, and then nothing is made. */
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+function apply(d: Db, r: Routed, dec: Decision, causeEvent: number | null, now: number): RoutedLine | undefined {
+```
+
+with:
+
+```ts
+function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number | null, now: number): RoutedLine | undefined {
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  // A step to make waits: only skips and settlings are applied yet.
+  return undefined;
+```
+
+with:
+
+```ts
+  if (dec.outcome !== 'made' && dec.outcome !== 'fanned_out') return undefined;
+  // The instance's board, live: an archived one skips the step, never refusing the transition (§13.1).
+  const live = liveBoard(d, r.instance.board);
+  if (!live.ok) {
+    const why = `board ${r.instance.board} is archived`;
+    return decided(d, id, dec.step, 'skipped', { by: 'board', why }, causeEvent, now) ? { step: dec.step, outcome: 'skipped', why, taskIds: [], by: 'board' } : undefined;
+  }
+  const templates = templatesFor(s);
+  if (dec.outcome === 'made') {
+    if (!decided(d, id, dec.step, 'made', { why: dec.why }, causeEvent, now)) return undefined;
+    const t = templates[0];
+    if (t === undefined) return undefined;
+    const taskId = makeLate(d, r, facts, { step: dec.step, ref: dec.step, item: null, template: t, parents: dec.parents }, now);
+    return { step: dec.step, outcome: 'made', why: dec.why, taskIds: [taskId] };
+  }
+  const made = dec.items.map((item, n) => ({ item, ref: `${dec.step}:${n + 1}`, template: templates.find((t) => t.item === item) ?? templates[0] }));
+  if (!decided(d, id, dec.step, 'made', { why: dec.why }, causeEvent, now)) return undefined;
+  const taskIds = made.flatMap((m) =>
+    m.template === undefined ? [] : [makeLate(d, r, facts, { step: dec.step, ref: m.ref, item: m.item, template: m.template, parents: dec.parents }, now)],
+  );
+  const marker = made.map((m, n) => ({ item: mask(m.item), taskId: taskIds[n], ref: m.ref }));
+  d.prepare('UPDATE kanban_workflow_pending SET items = ? WHERE instance_id = ? AND step = ?').run(JSON.stringify(marker), id, dec.step);
+  return { step: dec.step, outcome: 'fanned_out', why: dec.why, taskIds, items: dec.items.slice(0, ROUTED_ITEMS), count: dec.items.length };
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+      const line = apply(d, r, dec, causeEvent, now);
+```
+
+with:
+
+```ts
+      const line = apply(d, r, facts, dec, causeEvent, now);
+```
+
+- [ ] **Step 13.4: Run them to verify they pass.** Run the same command. Expected: `Tests  10 passed (10)`.
+
+- [ ] **Step 13.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3657 passed (3657)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+
+- [ ] **Step 13.6: Commit.**
+
+```bash
+git add src/db/WRITERS.md src/db/kanban.ts tests/routing-worktree-base.test.ts tests/routing-writer.test.ts
+git commit -m "Make a routed instance's step as the start would have when its parents settle, linked to its effective parents, with its first member's subscriptions"
+```
+
+---
+
+### Task 14: The team check of a task made late
+
+**Files:**
+
+- Create: `tests/routing-team-check.test.ts`
+- Modify: `src/db/kanban.ts`, `src/kanban/service.ts`
+
+§7.4. The service passes the team it holds, `#facts()`, to `complete`, `block`, `endRun` and `archive`; a task made late for a role no longer configured is made, and blocked at once by the gateway, `needs_input`, in the routing's transaction.
+
+- [ ] **Step 14.1: Write the tests.**
+
+Create `tests/routing-team-check.test.ts`:
+
+```ts
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { closeRun } from '../src/db/kanban.js';
+import { eventsOf, getTask, membersOf } from '../src/db/kanban-read.js';
+import { clearSecrets } from '../src/secrets.js';
+import { testDb, type TestDb } from './helpers/db.js';
+import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
+import { madeOf, viBoard, type ViBoard } from './helpers/routing.js';
+
+/**
+ * A task made late checked against the team (workflow routing spec §7.4, §9.3):
+ * the service hands the writer the team it holds, and a step's task whose role is
+ * no longer configured is made, and blocked at once by the gateway as
+ * `needs_input`, which routes nothing and is no state a clause reads.
+ */
+
+const FLOW = `board: vi
+steps:
+  intake:
+    title: intake
+    assignee: vi-coordinator
+    outputs: { kind: { enum: [cve, supplychain] } }
+  va:
+    title: va
+    assignee: vulnerability-analyst
+    parents: [intake]
+    when: [{ step: intake, output: kind, equals: cve }]
+    on_blocked: { route: help }
+  help:
+    title: help
+    assignee: verifier
+    handler: true
+`;
+
+let h: TestDb;
+let b: ViBoard;
+beforeEach(() => {
+  clearSecrets();
+  h = testDb();
+  b = viBoard(h);
+  writeFileSync(join(b.dir, 'flow.yaml'), FLOW);
+});
+afterEach(() => h.close());
+
+describe('the team check of a task made late', () => {
+  it('makes a task whose role is no longer configured, blocked at once by the gateway, which routes nothing', async () => {
+    const w = madeOf(b.service.startWorkflow({ workflow: 'flow', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA }));
+    const intake = w.tasks[0]?.taskId ?? '';
+    b.roles.delete('vulnerability-analyst');
+    const run = claimed(h.db, intake);
+    expect((await b.service.complete(intake, { kind: 'run', runId: run.runId }, { summary: 'x', metadata: { kind: 'cve' } })).ok).toBe(true);
+    closeRun(h.db, run.runId, NOW);
+    const va = membersOf(h.db, w.instance.instanceId).find((m) => m.step === 'va')?.taskId ?? '';
+    expect(getTask(h.db, va)).toMatchObject({
+      phase: 'blocked',
+      blockKind: 'needs_input',
+      blockReason: `role vulnerability-analyst is not configured, so this step's task cannot be given to it: /kanban task assign ${va} <role>`,
+    });
+    expect(eventsOf(h.db, va).at(-1)).toMatchObject({ kind: 'blocked', actor: 'gateway' });
+    expect(eventsOf(h.db, va).some((e) => e.kind === 'workflow_routed')).toBe(false);
+    expect(membersOf(h.db, w.instance.instanceId).map((m) => m.step)).toEqual(['intake', 'va']);
+  });
+});
+```
+
+- [ ] **Step 14.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-team-check.test.ts`. Expected: `Tests  1 failed (1)`, the first as `AssertionError: expected { taskId: 'k_a3bn2x8t3bsz', …(33) } to match object { phase: 'blocked', …(2) }`.
+
+- [ ] **Step 14.3: Implement.**
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  handoff: Handoff,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+```
+
+with:
+
+```ts
+  handoff: Handoff,
+  now: number,
+  team?: RouteTeam,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    routeAfter(d, taskId, 'completed', completed, now);
+```
+
+with:
+
+```ts
+    routeAfter(d, taskId, 'completed', completed, now, team);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  report: BlockReport,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+```
+
+with:
+
+```ts
+  report: BlockReport,
+  now: number,
+  team?: RouteTeam,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+      if (by.kind === 'run' && r.task.phase === 'open') routeAfter(d, taskId, 'blocked', blocked, now);
+```
+
+with:
+
+```ts
+      if (by.kind === 'run' && r.task.phase === 'open') routeAfter(d, taskId, 'blocked', blocked, now, team);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  now: number,
+): Result<{ task: TaskRow; run: RunRow; next: NextStep }> {
+```
+
+with:
+
+```ts
+  now: number,
+  team?: RouteTeam,
+): Result<{ task: TaskRow; run: RunRow; next: NextStep }> {
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+      routeAfter(d, run.taskId, cause, ended, now);
+```
+
+with:
+
+```ts
+      routeAfter(d, run.taskId, cause, ended, now, team);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  taskId: string,
+  by: string,
+  now: number,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  return tx(db, (d) => {
+```
+
+with:
+
+```ts
+  taskId: string,
+  by: string,
+  now: number,
+  team?: RouteTeam,
+): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  return tx(db, (d) => {
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    routeAfter(d, taskId, 'archived', archived.eventId, now);
+```
+
+with:
+
+```ts
+    routeAfter(d, taskId, 'archived', archived.eventId, now, team);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+// ---------------------------------------------------------------------------
+
+
+```
+
+with:
+
+```ts
+// ---------------------------------------------------------------------------
+
+/** The team, as the service holds it, against which a task made late is checked (§7.4, §9.3); absent in the writer's own tests. */
+export type RouteTeam = TaskFacts;
+
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+ * at the next position; and its `created` event with the instance.
+```
+
+with:
+
+```ts
+ * at the next position; and its `created` event with the instance. With the
+ * team, a task whose assignee, reviewer or workspace no longer passes is made
+ * and blocked at once, by the gateway, as `needs_input`.
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  now: number,
+): string {
+```
+
+with:
+
+```ts
+  now: number,
+  team: RouteTeam | undefined,
+): string {
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  );
+  return taskId;
+```
+
+with:
+
+```ts
+  );
   if (team !== undefined) {
     const refused = lateRefused(t, title, r.instance, team);
     if (refused !== undefined) {
@@ -6739,6 +7528,21 @@ function makeLate(
       const recurrences = enterBlocked(d, mustGet(d, taskId), 'needs_input', reason);
       record(d, { taskId, kind: 'blocked', actor: 'gateway', payload: { kind: 'needs_input', reason, blockRecurrences: recurrences } }, now);
     }
+  }
+  return taskId;
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  }
+  return taskId;
+}
+```
+
+with:
+
+```ts
   }
   return taskId;
 }
@@ -6762,127 +7566,90 @@ function lateRefused(t: Template, title: string, instance: InstanceRow, team: Ro
   );
   return checked.ok ? undefined : checked.message;
 }
-
-/** A step's templates, one an item of its list param, or its one. */
-function templatesFor(s: PlanStep): Array<Template & { item: string | null }> {
-  return s.templates ?? (s.template === undefined ? [] : [{ ...s.template, item: null }]);
-}
-
-/** A pending row moved from `waiting`, once (§9.2): false when another attempt decided it first, and then nothing is made. */
-function decided(d: Db, instanceId: string, step: string, state: 'made' | 'skipped', reason: Record<string, unknown>, causeEvent: number | null, now: number, items?: unknown): boolean {
-  const masked = Object.fromEntries(Object.entries(reason).map(([k, v]) => [k, typeof v === 'string' ? mask(v) : v]));
-  return (
-    d
-      .prepare(
-        `UPDATE kanban_workflow_pending SET state = ?, reason = ?, items = ?, cause_event = ?, decided_at = ?
-          WHERE instance_id = ? AND step = ? AND state = 'waiting'`,
-      )
-      .run(state, JSON.stringify(masked), items === undefined ? null : JSON.stringify(items), causeEvent, now, instanceId, step).changes === 1
-  );
-}
-
-/** One decision applied (§9.2 step 4); answers its line for the notice, or undefined for one that is none. */
-function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number | null, now: number, team: RouteTeam | undefined): RoutedLine | undefined {
-  const id = r.instance.instanceId;
-  const s = r.plan.steps.find((x) => x.step === dec.step);
-  if (s === undefined) return undefined;
-  if (dec.outcome === 'settled') {
-    settle(d, id, dec.step, dec.step, dec.how, null, dec.eventId, now);
-    return undefined;
-  }
-  if (dec.outcome === 'skipped') {
-    return decided(d, id, dec.step, 'skipped', { by: dec.by, why: dec.why }, causeEvent, now) ? { step: dec.step, outcome: 'skipped', why: dec.why, taskIds: [], by: dec.by } : undefined;
-  }
-  if (dec.outcome !== 'made' && dec.outcome !== 'fanned_out') return undefined;
-  // The instance's board, live: an archived one skips the step, never refusing the transition (§13.1).
-  const live = liveBoard(d, r.instance.board);
-  if (!live.ok) {
-    const why = `board ${r.instance.board} is archived`;
-    return decided(d, id, dec.step, 'skipped', { by: 'board', why }, causeEvent, now) ? { step: dec.step, outcome: 'skipped', why, taskIds: [], by: 'board' } : undefined;
-  }
-  const templates = templatesFor(s);
-  if (dec.outcome === 'made') {
-    if (!decided(d, id, dec.step, 'made', { why: dec.why }, causeEvent, now)) return undefined;
-    const t = templates[0];
-    if (t === undefined) return undefined;
-    const taskId = makeLate(d, r, facts, { step: dec.step, ref: dec.step, item: null, template: t, parents: dec.parents }, now, team);
-    return { step: dec.step, outcome: 'made', why: dec.why, taskIds: [taskId] };
-  }
-  const made = dec.items.map((item, n) => ({ item, ref: `${dec.step}:${n + 1}`, template: templates.find((t) => t.item === item) ?? templates[0] }));
-  if (!decided(d, id, dec.step, 'made', { why: dec.why }, causeEvent, now)) return undefined;
-  const taskIds = made.flatMap((m) =>
-    m.template === undefined ? [] : [makeLate(d, r, facts, { step: dec.step, ref: m.ref, item: m.item, template: m.template, parents: dec.parents }, now, team)],
-  );
-  const marker = made.map((m, n) => ({ item: mask(m.item), taskId: taskIds[n], ref: m.ref }));
-  d.prepare('UPDATE kanban_workflow_pending SET items = ? WHERE instance_id = ? AND step = ?').run(JSON.stringify(marker), id, dec.step);
-  return { step: dec.step, outcome: 'fanned_out', why: dec.why, taskIds, items: dec.items.slice(0, ROUTED_ITEMS), count: dec.items.length };
-}
-
-/** An instance with a plan, its members read now. */
-function routedOf(d: Db, instance: InstanceRow): Routed | undefined {
-  return instance.plan === null ? undefined : { instance, plan: instance.plan, members: membersWithTasks(d, instance.instanceId) };
-}
-
-/**
- * Decide what is due, until nothing more is (§9.2 steps 2 to 5): the sweep, the
- * facts, `decide`, each decision applied, again on the new facts, at most once a
- * step of the plan; answers the lines of every decision made.
- */
-function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number, team: RouteTeam | undefined): RoutedLine[] {
-  const lines: RoutedLine[] = [];
-  const first = routedOf(d, instance);
-  if (first === undefined) return lines;
-  for (let round = 0; round <= first.plan.steps.length; round += 1) {
-    const r = routedOf(d, instance) as Routed;
-    sweep(d, r, now);
-    const facts = routingFacts(d, r);
-    const decisions = decideRouting(r.plan, facts);
-    if (decisions.length === 0) break;
-    for (const dec of decisions) {
-      const line = apply(d, r, facts, dec, causeEvent, now, team);
-      if (line !== undefined) lines.push(line);
-    }
-  }
-  return lines;
-}
-
-/**
- * The routing of a transition (§9.2), inside its transaction, after its own rows
- * and event: one read finds the task's member row and its instance's plan, and a
- * task that is no member of an instance with a plan pays nothing more; then what
- * is due is decided, and one `workflow_routed` event on the task lists the
- * decisions, for the notice.
- */
-function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): void {
-  const planned = plannedMemberOf(d, taskId);
-  if (planned === undefined) return;
-  const lines = decideAll(d, planned.instance, eventId, now, team);
-  if (lines.length === 0) return;
-  record(
-    d,
-    {
-      taskId,
-      kind: 'workflow_routed',
-      actor: 'gateway',
-      payload: { workflow: planned.instance.instanceId, workflowName: planned.instance.name, step: planned.member.step, cause, decisions: lines },
-    },
-    now,
-  );
-}
 ```
 
-In `src/kanban/routing.ts`, replace:
+In `src/db/kanban.ts`, replace:
 
 ```ts
-    if (fact.row !== 'waiting') continue;
+function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number | null, now: number): RoutedLine | undefined {
 ```
 
 with:
 
 ```ts
-    if (fact.row !== 'waiting') continue;
-    // A fan-out over a result waits: this build does not yet read its source's list.
-    if (s.for_each !== undefined && 'step' in s.for_each) continue;
+function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number | null, now: number, team: RouteTeam | undefined): RoutedLine | undefined {
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    const taskId = makeLate(d, r, facts, { step: dec.step, ref: dec.step, item: null, template: t, parents: dec.parents }, now);
+```
+
+with:
+
+```ts
+    const taskId = makeLate(d, r, facts, { step: dec.step, ref: dec.step, item: null, template: t, parents: dec.parents }, now, team);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    m.template === undefined ? [] : [makeLate(d, r, facts, { step: dec.step, ref: m.ref, item: m.item, template: m.template, parents: dec.parents }, now)],
+```
+
+with:
+
+```ts
+    m.template === undefined ? [] : [makeLate(d, r, facts, { step: dec.step, ref: m.ref, item: m.item, template: m.template, parents: dec.parents }, now, team)],
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number): RoutedLine[] {
+```
+
+with:
+
+```ts
+function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number, team: RouteTeam | undefined): RoutedLine[] {
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+      const line = apply(d, r, facts, dec, causeEvent, now);
+```
+
+with:
+
+```ts
+      const line = apply(d, r, facts, dec, causeEvent, now, team);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number): void {
+```
+
+with:
+
+```ts
+function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): void {
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  const lines = decideAll(d, planned.instance, eventId, now);
+```
+
+with:
+
+```ts
+  const lines = decideAll(d, planned.instance, eventId, now, team);
 ```
 
 In `src/kanban/service.ts`, replace:
@@ -6938,29 +7705,29 @@ with:
     return board.archive(this.#db, taskId, by, this.#clock.now(), this.#facts());
 ```
 
-- [ ] **Step 12.4: Run them to verify they pass.** Run the same command. Expected: `Tests  9 passed (9)`.
+- [ ] **Step 14.4: Run them to verify they pass.** Run the same command. Expected: `Tests  1 passed (1)`.
 
-- [ ] **Step 12.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3653 passed (3653)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 14.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3658 passed (3658)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 12.6: Commit.**
+- [ ] **Step 14.6: Commit.**
 
 ```bash
-git add src/db/WRITERS.md src/db/kanban-read.ts src/db/kanban.ts src/kanban/routing.ts src/kanban/service.ts tests/helpers/routing.ts tests/routing-writer.test.ts
-git commit -m "Decide a routed instance's steps in the transaction of each completion, archive, block and give-up, making each step's task as the start would have"
+git add src/db/kanban.ts src/kanban/service.ts tests/routing-team-check.test.ts
+git commit -m "Check a routed instance's task made late against the team the service holds, making one it no longer passes blocked at once by the gateway"
 ```
 
 ---
 
-### Task 13: The savepoint and the fault
+### Task 15: The savepoint and the fault
 
 **Files:**
 
 - Create: `tests/routing-fault.test.ts`
-- Modify: `src/db/kanban.ts`
+- Modify: `src/db/kanban.ts`, `src/db/open.ts`
 
-§9.4. The routing runs in a savepoint of its transition's transaction; a throw rolls the savepoint back alone, the transition commits, and the instance's `routing_failed_at` is set from null, with one `workflow_route_failed` event on the task, `first` only on the one that set it; a throw after SQLite rolled the whole transaction back is rethrown. The tests make faults with temporary triggers, `RAISE(ABORT)` for a fault and `RAISE(ROLLBACK)` for a transaction gone.
+§9.4. The routing runs in a savepoint of its transition's transaction; a throw rolls the savepoint back alone, the transition commits, and the instance's `routing_failed_at` is set from null, with one `workflow_route_failed` event on the task, `first` only on the one that set it; a throw after SQLite rolled the whole transaction back is rethrown. The tests make faults with temporary triggers, `RAISE(ABORT)` for a fault and `RAISE(ROLLBACK)` for a transaction gone. A database found busy inside the savepoint is no fault: the error is rethrown, so `txImmediate` retries the whole transition.
 
-- [ ] **Step 13.1: Write the tests.**
+- [ ] **Step 15.1: Write the tests.**
 
 Create `tests/routing-fault.test.ts`:
 
@@ -7049,13 +7816,32 @@ describe('a fault in the routing', () => {
     expect(getInstance(h.db, w.instance.instanceId)?.routingFailedAt).toBeNull();
   });
 
-  it('decides as before once the fault is gone', async () => {
+  it('lets txImmediate retry the whole transition when the routing finds the database busy, nothing marked', async () => {
     const w = start();
-    const [a, bb] = [w.tasks[0]?.taskId ?? '', w.tasks[1]?.taskId ?? ''];
-    h.db.exec("CREATE TEMP TRIGGER boom BEFORE INSERT ON kanban_workflow_settled BEGIN SELECT RAISE(ABORT, 'boom'); END;");
+    const a = w.tasks[0]?.taskId ?? '';
+    let busy = 1;
+    h.db.function('busy_once', () => {
+      if (busy-- > 0) throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+      return 0;
+    });
+    h.db.exec('CREATE TEMP TRIGGER busy BEFORE INSERT ON kanban_workflow_settled BEGIN SELECT busy_once(); END;');
     await done(a);
+    expect(eventsOf(h.db, a).filter((e) => e.kind === 'completed').length).toBe(1);
+    expect(failed(a)).toEqual([]);
+    expect(settledOf(h.db, w.instance.instanceId).map((s) => s.step)).toEqual(['a']);
+    expect(getInstance(h.db, w.instance.instanceId)?.routingFailedAt).toBeNull();
+  });
+
+  it.each([
+    ['a', 'b'],
+    ['b', 'a'],
+  ])('decides as before once the fault is gone, %s settling before %s', async (first, second) => {
+    const w = start();
+    const task = (step: string) => w.tasks[step === 'a' ? 0 : 1]?.taskId ?? '';
+    h.db.exec("CREATE TEMP TRIGGER boom BEFORE INSERT ON kanban_workflow_settled BEGIN SELECT RAISE(ABORT, 'boom'); END;");
+    await done(task(first));
     h.db.exec('DROP TRIGGER boom');
-    await done(bb);
+    await done(task(second));
     expect(settledOf(h.db, w.instance.instanceId).map((s) => [s.step, s.how])).toEqual([
       ['a', 'done'],
       ['b', 'done'],
@@ -7065,9 +7851,21 @@ describe('a fault in the routing', () => {
 });
 ```
 
-- [ ] **Step 13.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-fault.test.ts`. Expected: `Tests  2 failed | 1 passed (3)`, the first as `SqliteError: the settled rows cannot be written`.
+- [ ] **Step 15.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-fault.test.ts`. Expected: `Tests  3 failed | 2 passed (5)`, the first as `SqliteError: the settled rows cannot be written`.
 
-- [ ] **Step 13.3: Implement.**
+- [ ] **Step 15.3: Implement.**
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+import { txImmediate } from './open.js';
+```
+
+with:
+
+```ts
+import { isBusy, txImmediate } from './open.js';
+```
 
 In `src/db/kanban.ts`, replace:
 
@@ -7109,7 +7907,8 @@ with:
  * fault never loses the transition: the savepoint rolls back alone, and the
  * instance's `routing_failed_at` and one `workflow_route_failed` event say so,
  * `first` when it set the mark; unless the transaction itself is gone, as
- * SQLite rolls one back on some errors, when the error is the transition's.
+ * SQLite rolls one back on some errors, when the error is the transition's,
+ * or the database is busy, when txImmediate retries the whole transition.
 ```
 
 In `src/db/kanban.ts`, replace:
@@ -7126,7 +7925,7 @@ function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, n
   try {
     d.transaction(() => routeIn(d, taskId, cause, eventId, now, team))();
   } catch (err) {
-    if (!d.inTransaction) throw err;
+    if (!d.inTransaction || isBusy(err)) throw err;
     routingFault(d, taskId, err, now);
   }
 }
@@ -7157,20 +7956,33 @@ function routingFault(d: Db, taskId: string, err: unknown, now: number): void {
 function routeIn(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): void {
 ```
 
-- [ ] **Step 13.4: Run them to verify they pass.** Run the same command. Expected: `Tests  3 passed (3)`.
+In `src/db/open.ts`, replace:
 
-- [ ] **Step 13.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3656 passed (3656)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+```ts
+function isBusy(err: unknown): boolean {
+```
 
-- [ ] **Step 13.6: Commit.**
+with:
+
+```ts
+/** A lock another connection holds: txImmediate's to retry, whoever caught it first. */
+export function isBusy(err: unknown): boolean {
+```
+
+- [ ] **Step 15.4: Run them to verify they pass.** Run the same command. Expected: `Tests  5 passed (5)`.
+
+- [ ] **Step 15.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3663 passed (3663)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+
+- [ ] **Step 15.6: Commit.**
 
 ```bash
-git add src/db/kanban.ts tests/routing-fault.test.ts
+git add src/db/kanban.ts src/db/open.ts tests/routing-fault.test.ts
 git commit -m "Run the routing in a savepoint of its transition, so a fault marks the instance and says so once, and never loses the transition"
 ```
 
 ---
 
-### Task 14: workflow archive skips every waiting step
+### Task 16: workflow archive skips every waiting step
 
 **Files:**
 
@@ -7179,7 +7991,7 @@ git commit -m "Run the routing in a savepoint of its transition, so a fault mark
 
 §9.1. `archiveWorkflow` skips every waiting row of an instance with a plan, `the instance was archived`, in its transaction, deciding nothing and making nothing.
 
-- [ ] **Step 14.1: Write the tests.**
+- [ ] **Step 16.1: Write the tests.**
 
 Create `tests/routing-archive-workflow.test.ts`:
 
@@ -7228,9 +8040,9 @@ describe('archiving a routed instance', () => {
 });
 ```
 
-- [ ] **Step 14.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-archive-workflow.test.ts`. Expected: `Tests  1 failed (1)`, the first as `AssertionError: expected [ [ 'exposure', 'waiting' ], …(5) ] to deeply equal [ [ 'exposure', 'skipped' ], …(5) ]`.
+- [ ] **Step 16.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-archive-workflow.test.ts`. Expected: `Tests  1 failed (1)`, the first as `AssertionError: expected [ [ 'exposure', 'waiting' ], …(5) ] to deeply equal [ [ 'exposure', 'skipped' ], …(5) ]`.
 
-- [ ] **Step 14.3: Implement.**
+- [ ] **Step 16.3: Implement.**
 
 In `src/db/kanban.ts`, replace:
 
@@ -7266,11 +8078,11 @@ with:
       ).run(JSON.stringify({ by: 'instance', why: 'the instance was archived' }), now, instanceId);
 ```
 
-- [ ] **Step 14.4: Run them to verify they pass.** Run the same command. Expected: `Tests  1 passed (1)`.
+- [ ] **Step 16.4: Run them to verify they pass.** Run the same command. Expected: `Tests  1 passed (1)`.
 
-- [ ] **Step 14.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3657 passed (3657)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 16.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3664 passed (3664)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 14.6: Commit.**
+- [ ] **Step 16.6: Commit.**
 
 ```bash
 git add src/db/kanban.ts tests/routing-archive-workflow.test.ts
@@ -7279,16 +8091,16 @@ git commit -m "Skip every waiting step when a routed instance is archived, decid
 
 ---
 
-### Task 15: The dispatcher's retry
+### Task 17: The dispatcher's retry
 
 **Files:**
 
 - Create: `tests/routing-retry.test.ts`
 - Modify: `src/db/kanban-read.ts`, `src/db/kanban.ts`, `src/kanban/dispatcher.ts`, `src/kanban/service.ts`
 
-§9.4, §11. `reconcileWorkflow` in the writer is the routing given no transitioning task, in a transaction of its own, its `workflow_routed` on the latest-settled ancestor of its first decision's step, clearing the fault mark; the service's `reconcileWorkflow` and `retryRouting`, which reconciles each faulted instance at most once a minute, the times in memory; and the dispatcher's pass calling `retryRouting` once.
+§9.4, §11. `reconcileWorkflow` in the writer is the routing given no transitioning task, in a transaction of its own, its `workflow_routed` on the latest-settled ancestor of its first decision's step, clearing the fault mark; the service's `reconcileWorkflow` and `retryRouting`, which reconciles each faulted instance at most once a minute, the times in memory; and the dispatcher's pass calling `retryRouting` once. A second reconciliation writes nothing, and one whose commit finds the database busy is retried whole.
 
-- [ ] **Step 15.1: Write the tests.**
+- [ ] **Step 17.1: Write the tests.**
 
 Create `tests/routing-retry.test.ts`:
 
@@ -7372,6 +8184,31 @@ describe('retrying a faulted routing', () => {
     expect(getInstance(h.db, instanceId)?.routingFailedAt).toBeNull();
   });
 
+  it('decides nothing twice: a second reconciliation writes no row and no event, and one whose commit found the database busy is retried whole', async () => {
+    const { instanceId } = await faulted();
+    h.db.exec('DROP TRIGGER boom');
+    const count = (from: string) => (h.db.prepare(`SELECT count(*) AS n FROM ${from}`).get() as { n: number }).n;
+    const counts = () => ['kanban_tasks', 'kanban_workflow_settled', 'kanban_workflow_pending', "kanban_events WHERE kind = 'workflow_routed'", 'kanban_events'].map(count);
+    const exec = h.db.exec.bind(h.db);
+    let busy = 1;
+    const spy = vi.spyOn(h.db, 'exec').mockImplementation((sql: string) => {
+      if (sql === 'COMMIT' && busy-- > 0) throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+      return exec(sql);
+    });
+    const before = counts();
+    try {
+      expect(b.service.reconcileWorkflow(instanceId)).toMatchObject({ ok: true, decisions: [{ step: 'b', outcome: 'made' }] });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(busy).toBe(-1);
+    // One task, one settled row, one routing event: what a single reconciliation writes, the task's own created event beside it.
+    expect(counts().map((n, i) => n - (before[i] ?? 0))).toEqual([1, 1, 0, 1, 2]);
+    const after = counts();
+    expect(b.service.reconcileWorkflow(instanceId)).toMatchObject({ ok: true, decisions: [] });
+    expect(counts()).toEqual(after);
+  });
+
   it('reconciles an instance with nothing due to no decision, and refuses one that does not exist', () => {
     const w = madeOf(b.service.startWorkflow({ workflow: 'flow', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA }));
     expect(b.service.reconcileWorkflow(w.instance.instanceId)).toMatchObject({ ok: true, decisions: [] });
@@ -7394,9 +8231,9 @@ describe("the dispatcher's pass", () => {
 });
 ```
 
-- [ ] **Step 15.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-retry.test.ts`. Expected: `Tests  4 failed (4)`, the first as `TypeError: b.service.retryRouting is not a function`.
+- [ ] **Step 17.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-retry.test.ts`. Expected: `Tests  5 failed (5)`, the first as `TypeError: b.service.retryRouting is not a function`.
 
-- [ ] **Step 15.3: Implement.**
+- [ ] **Step 17.3: Implement.**
 
 In `src/db/kanban-read.ts`, replace:
 
@@ -7628,11 +8465,11 @@ with:
   /** Who the next claim is for, resolved against the team as it is now. */
 ```
 
-- [ ] **Step 15.4: Run them to verify they pass.** Run the same command. Expected: `Tests  4 passed (4)`.
+- [ ] **Step 17.4: Run them to verify they pass.** Run the same command. Expected: `Tests  5 passed (5)`.
 
-- [ ] **Step 15.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3661 passed (3661)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 17.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3669 passed (3669)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 15.6: Commit.**
+- [ ] **Step 17.6: Commit.**
 
 ```bash
 git add src/db/kanban-read.ts src/db/kanban.ts src/kanban/dispatcher.ts src/kanban/service.ts tests/routing-retry.test.ts
@@ -7641,7 +8478,7 @@ git commit -m "Retry a faulted routing on the dispatcher's pass, at most once a 
 
 ---
 
-### Task 16: The instance's status
+### Task 18: The instance's status
 
 **Files:**
 
@@ -7650,7 +8487,7 @@ git commit -m "Retry a faulted routing on the dispatcher's pass, at most once a 
 
 §12.4. `instanceStatus` takes the steps not made, a waiting step and a skipped step not yet settled one unfinished each, a skipped step settled finished; `instances` keeps its one aggregate query of phases and adds one over the pending rows, `unmadeSteps`; `instance` counts them with `unmadeOf`.
 
-- [ ] **Step 16.1: Write the tests.**
+- [ ] **Step 18.1: Write the tests.**
 
 Create `tests/routing-status.test.ts`:
 
@@ -7711,9 +8548,9 @@ describe("a routed instance's status", () => {
 });
 ```
 
-- [ ] **Step 16.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-status.test.ts`. Expected: `Tests  2 failed (2)`, the first as `AssertionError: expected { status: 'done', done: 1, …(2) } to deeply equal { status: 'running', done: 1, …(2) }`.
+- [ ] **Step 18.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-status.test.ts`. Expected: `Tests  2 failed (2)`, the first as `AssertionError: expected { status: 'done', done: 1, …(2) } to deeply equal { status: 'running', done: 1, …(2) }`.
 
-- [ ] **Step 16.3: Implement.**
+- [ ] **Step 18.3: Implement.**
 
 In `src/db/kanban-read.ts`, replace:
 
@@ -7896,11 +8733,11 @@ export function instanceStatus(phases: readonly Phase[], unmade: UnmadeSteps = N
   const done = phases.filter((p) => p === 'done' || p === 'archived').length + unmade.skippedSettled;
 ```
 
-- [ ] **Step 16.4: Run them to verify they pass.** Run the same command. Expected: `Tests  2 passed (2)`.
+- [ ] **Step 18.4: Run them to verify they pass.** Run the same command. Expected: `Tests  2 passed (2)`.
 
-- [ ] **Step 16.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3663 passed (3663)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 18.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3671 passed (3671)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 16.6: Commit.**
+- [ ] **Step 18.6: Commit.**
 
 ```bash
 git add src/db/kanban-read.ts src/kanban/service.ts src/kanban/workflow.ts tests/routing-status.test.ts
@@ -7911,20 +8748,20 @@ git commit -m "Count a routed instance's waiting and skipped steps in its status
 
 ## Phase 3: result-driven fan-out
 
-Tasks 17 and 18. The fan-out over its source's accepted list, its join, an empty list and a skipped source; and the 500 cap, reserved at the reporting completion, a fan-out past it later skipped whole. Phase 3 ends green and can be merged alone.
+Tasks 19 and 20. The fan-out over its source's accepted list, its join, an empty list and a skipped source; and the 500 cap, reserved at the reporting completion, a fan-out past it later skipped whole. Phase 3 ends green, a checkpoint to review at.
 
 ---
 
-### Task 17: Result-driven fan-out and the join
+### Task 19: Result-driven fan-out and the join
 
 **Files:**
 
 - Create: `tests/routing-decide-fanout.test.ts`, `tests/routing-fanout-writer.test.ts`
 - Modify: `src/kanban/routing.ts`
 
-§4. `decide` fans a step out over its source's accepted list, once its source and parents are settled, one item a task in the list's order, trimmed; an empty list, a list of the wrong type, or a skipped or archived source skip it; a source stood in for fans out from the stand-in's list. The writer makes every item in one transaction, refs `<step>:<n>`, the pending row its join marker, and the sweep writes the fan-out's own row once every item has its own, `archived` when every item was archived undone; the join's child is decided then, linked to each item's winner.
+§4. `decide` fans a step out over its source's accepted list, once its source and parents are settled, one item a task in the list's order, trimmed; an empty list, a list of the wrong type, or a skipped or archived source skip it; a source stood in for fans out from the stand-in's list. The writer makes every item in one transaction, refs `<step>:<n>`, the pending row its join marker, and the sweep writes the fan-out's own row once every item has its own, `archived` when every item was archived undone; the join's child is decided then, linked to each item's winner. An item done and then archived is still linked, its row done.
 
-- [ ] **Step 17.1: Write the tests.**
+- [ ] **Step 19.1: Write the tests.**
 
 Create `tests/routing-decide-fanout.test.ts`:
 
@@ -8089,7 +8926,8 @@ import { madeOf, viBoard, type ViBoard } from './helpers/routing.js';
  * the transaction that settled their source, all at once, refs `<step>:<n>`,
  * each item in its member row and its title, the pending row their join marker;
  * the fan-out's own row written only once every item has its own; and the join's
- * child made then, linked to each item's winner and to none archived undone.
+ * child made then, linked to each item's winner and to none archived undone,
+ * but to one done and then archived, its row done.
  */
 
 let h: TestDb;
@@ -8171,6 +9009,30 @@ describe('a result fan-out in the writer', () => {
     expect(parentsOf(h.db, report).map((p) => p.taskId).sort()).toEqual([intake, one, three, registry].sort());
   });
 
+  it("links the join's child to an item done and then archived, its row done", async () => {
+    const w = start();
+    const intake = w.tasks[0]?.taskId ?? '';
+    await done(intake, { ...SUPPLY, bnpm: false, packages: ['lodash', 'qs'] });
+    const id = w.instance.instanceId;
+    const [one, two] = stepOf(id, 'exposure').map((m) => m.taskId);
+    await done(one ?? '');
+    expect(b.service.archive(one ?? '', ALICE).ok).toBe(true);
+    await done(two ?? '');
+    expect(settledOf(h.db, id).filter((s) => s.step === 'exposure').map((s) => [s.ref, s.how, s.taskId])).toEqual([
+      ['exposure', 'done', null],
+      ['exposure:1', 'done', one],
+      ['exposure:2', 'done', two],
+    ]);
+    const report = stepOf(id, 'report')[0]?.taskId ?? '';
+    expect(parentsOf(h.db, report).map((p) => [p.taskId, p.phase]).sort()).toEqual(
+      [
+        [intake, 'done'],
+        [one, 'archived'],
+        [two, 'done'],
+      ].sort(),
+    );
+  });
+
   it('skips the fan-out on an empty list, and its child is linked past it', async () => {
     const w = start();
     const intake = w.tasks[0]?.taskId ?? '';
@@ -8184,9 +9046,9 @@ describe('a result fan-out in the writer', () => {
 });
 ```
 
-- [ ] **Step 17.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-decide-fanout.test.ts tests/routing-fanout-writer.test.ts`. Expected: `Tests  8 failed | 2 passed (10)`, the first as `AssertionError: expected [] to deeply equal [ { step: 'each', …(4) } ]`.
+- [ ] **Step 19.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-decide-fanout.test.ts tests/routing-fanout-writer.test.ts`. Expected: `Tests  9 failed | 2 passed (11)`, the first as `AssertionError: expected [] to deeply equal [ { step: 'each', …(4) } ]`.
 
-- [ ] **Step 17.3: Implement.**
+- [ ] **Step 19.3: Implement.**
 
 In `src/kanban/routing.ts`, replace:
 
@@ -8291,11 +9153,11 @@ with:
     if (items !== undefined) out.push({ step: s.step, outcome: 'fanned_out', items, parents, why });
 ```
 
-- [ ] **Step 17.4: Run them to verify they pass.** Run the same command. Expected: `Tests  10 passed (10)`.
+- [ ] **Step 19.4: Run them to verify they pass.** Run the same command. Expected: `Tests  11 passed (11)`.
 
-- [ ] **Step 17.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3673 passed (3673)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 19.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3682 passed (3682)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 17.6: Commit.**
+- [ ] **Step 19.6: Commit.**
 
 ```bash
 git add src/kanban/routing.ts tests/routing-decide-fanout.test.ts tests/routing-fanout-writer.test.ts
@@ -8304,7 +9166,7 @@ git commit -m "Fan out a step over its source's accepted list, skipped for an em
 
 ---
 
-### Task 18: The cap
+### Task 20: The cap
 
 **Files:**
 
@@ -8313,7 +9175,7 @@ git commit -m "Fan out a step over its source's accepted list, skipped for an em
 
 §2.2, §9.4. The service reserves the instance's 500 at the report whose list a fan-out reads, `too_large` naming the list's tasks and the instance's count; and `decide`'s cap, from Task 11, skips a fan-out whole when its making would pass 500 at an approval, the approval committed.
 
-- [ ] **Step 18.1: Write the tests.**
+- [ ] **Step 20.1: Write the tests.**
 
 Create `tests/routing-cap.test.ts`:
 
@@ -8401,9 +9263,9 @@ describe('the cap', () => {
 });
 ```
 
-- [ ] **Step 18.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-cap.test.ts`. Expected: `Tests  1 failed | 1 passed (2)`, the first as `AssertionError: expected { ok: true, task: { …(34) }, …(1) } to deeply equal { ok: false, code: 'too_large', …(1) }`.
+- [ ] **Step 20.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-cap.test.ts`. Expected: `Tests  1 failed | 1 passed (2)`, the first as `AssertionError: expected { ok: true, task: { …(34) }, …(1) } to deeply equal { ok: false, code: 'too_large', …(1) }`.
 
-- [ ] **Step 18.3: Implement.**
+- [ ] **Step 20.3: Implement.**
 
 In `src/kanban/service.ts`, replace:
 
@@ -8472,11 +9334,11 @@ with:
     return undefined;
 ```
 
-- [ ] **Step 18.4: Run them to verify they pass.** Run the same command. Expected: `Tests  2 passed (2)`.
+- [ ] **Step 20.4: Run them to verify they pass.** Run the same command. Expected: `Tests  2 passed (2)`.
 
-- [ ] **Step 18.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3675 passed (3675)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 20.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3684 passed (3684)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 18.6: Commit.**
+- [ ] **Step 20.6: Commit.**
 
 ```bash
 git add src/kanban/service.ts tests/routing-cap.test.ts
@@ -8487,11 +9349,11 @@ git commit -m "Reserve an instance's 500 tasks at the report whose list a fan-ou
 
 ## Phase 4: routes and handlers
 
-Tasks 19 to 23. The trigger table; the route rows, `over_limit` and `over_cap`; a handler's task with its paragraph, and its source in the worker's show; the worker's `mt kanban unblock`; a stand-in's reviewer, gates and contract; and its settling, the archive of the task it stood in for, and the runs that archive superseded cancelled through the service. Phase 4 ends green and can be merged alone.
+Tasks 21 to 26. The trigger table; the route rows, `over_limit` and `over_cap`; a handler's task with its paragraph, and its source in the worker's show; the worker's `mt kanban unblock`; a stand-in's reviewer, gates and contract; its settling and the archive of the task it stood in for; and the runs that archive superseded, cancelled through the service. Phase 4 ends green, a checkpoint to review at.
 
 ---
 
-### Task 19: The trigger table and the routes
+### Task 21: The trigger table and the routes
 
 **Files:**
 
@@ -8500,7 +9362,7 @@ Tasks 19 to 23. The trigger table; the route rows, `over_limit` and `over_cap`; 
 
 §5.1, §5.3, §10. `triggersOf` reads §5.1's table from the events, now with each block's kind; `decide` routes each due trigger by `on_blocked` or `on_gave_up`, by its key: `route`, standing in when the handler stands in for the step, `over_limit` once 3 were made from the task, `over_cap` at the cap, and nothing from a member already settled. `triggerWords` says a trigger as a notice does.
 
-- [ ] **Step 19.1: Write the tests.**
+- [ ] **Step 21.1: Write the tests.**
 
 Create `tests/routing-triggers.test.ts`:
 
@@ -8657,9 +9519,9 @@ describe("decide's routes", () => {
 });
 ```
 
-- [ ] **Step 19.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-triggers.test.ts`. Expected: `Tests  5 failed | 1 passed (6)`, the first as `AssertionError: expected [ { kind: 'blocked', …(2) } ] to deeply equal [ { kind: 'blocked', …(3) } ]`.
+- [ ] **Step 21.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-triggers.test.ts`. Expected: `Tests  5 failed | 1 passed (6)`, the first as `AssertionError: expected [ { kind: 'blocked', …(2) } ] to deeply equal [ { kind: 'blocked', …(3) } ]`.
 
-- [ ] **Step 19.3: Implement.**
+- [ ] **Step 21.3: Implement.**
 
 In `src/db/kanban-read.ts`, replace:
 
@@ -8775,11 +9637,11 @@ export function triggerWords(r: Pick<RouteFact, 'kind' | 'throttled'>, throttles
 }
 ```
 
-- [ ] **Step 19.4: Run them to verify they pass.** Run the same command. Expected: `Tests  6 passed (6)`.
+- [ ] **Step 21.4: Run them to verify they pass.** Run the same command. Expected: `Tests  6 passed (6)`.
 
-- [ ] **Step 19.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3681 passed (3681)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 21.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3690 passed (3690)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 19.6: Commit.**
+- [ ] **Step 21.6: Commit.**
 
 ```bash
 git add src/db/kanban-read.ts src/kanban/routing.ts tests/routing-triggers.test.ts
@@ -8788,16 +9650,16 @@ git commit -m "Read each trigger of the table by its event, and decide a due rou
 
 ---
 
-### Task 20: A handler's task
+### Task 22: A handler's task
 
 **Files:**
 
-- Create: `tests/routing-handlers.test.ts`
+- Create: `tests/routing-handler-workspace.test.ts`, `tests/routing-handlers.test.ts`
 - Modify: `src/db/kanban-read.ts`, `src/db/kanban.ts`, `src/kanban/routing.ts`, `src/kanban/worker.ts`, `tests/helpers/routing.ts`
 
-§5.2, §5.3, §8. The writer reads the routes due, each member blocked now from its work by a trigger event with no route row for it, and applies a route: its row, keyed on the event; a handler's task made as any late task but with no link, its ref `<handler>:<n>`, its item the routed item's, its body gaining its paragraph, kept whole, in the routed task's fixed workspace when its step and role name none, its `created` event naming `routedFrom`; and `over_limit` and `over_cap` rows. The worker's `show` of a handler's task gives `routed_from`, from its route row. `tests/helpers/routing.ts` gains `workerRun`.
+§5.2, §5.3, §8. The writer reads the routes due, each member blocked now from its work by a trigger event with no route row for it, and applies a route: its row, keyed on the event; a handler's task made as any late task but with no link, its ref `<handler>:<n>`, its item the routed item's, its body gaining its paragraph, kept whole, in the routed task's fixed workspace when its step and role name none, its `created` event naming `routedFrom`; and `over_limit` and `over_cap` rows. The worker's `show` of a handler's task gives `routed_from`, from its route row. `tests/helpers/routing.ts` gains `workerRun`. The transient limit's block routes by `on_gave_up`, its paragraph saying the throttles; a run's own `transient` block routes by `on_blocked`. A route on a board found archived makes nothing.
 
-- [ ] **Step 20.1: Write the tests.**
+- [ ] **Step 22.1: Write the tests.**
 
 In `tests/helpers/routing.ts`, replace:
 
@@ -8852,6 +9714,59 @@ export function workerRun(service: KanbanService, db: TestDb['db'], taskId: stri
   const runId = claimed.run.runId;
   return { runId, ask: (command, input = {}) => api.handle({ run: runId, token, command, input }) };
 }
+```
+
+Create `tests/routing-handler-workspace.test.ts`:
+
+```ts
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { closeRun } from '../src/db/kanban.js';
+import { getTask, membersOf, parentsOf } from '../src/db/kanban-read.js';
+import { clearSecrets } from '../src/secrets.js';
+import { testDb, type TestDb } from './helpers/db.js';
+import { ALICE, NOW, VIA } from './helpers/kanban.js';
+import { VI_WORKFLOW, madeOf, viBoard, type ViBoard } from './helpers/routing.js';
+
+/**
+ * A handler in an isolated workspace (workflow routing spec §5.2, §13.4): made
+ * with the routed task's fixed workspace when its step and role name none, with
+ * no parent and, from chat, no creating task, so its worktree starts from the
+ * workspace's base; its body naming the routed task's own directory.
+ */
+
+let h: TestDb;
+let b: ViBoard;
+beforeEach(() => {
+  clearSecrets();
+  h = testDb();
+  b = viBoard(h, { isolated: new Set(['vi']), limits: { failureLimit: 1, transientLimit: 10, transientCooldownS: 300 } });
+  writeFileSync(join(b.dir, 'vi-workflow.yaml'), VI_WORKFLOW.replace('    assignee: vulnerability-analyst\n', '    assignee: vulnerability-analyst\n    workspace: vi\n'));
+});
+afterEach(() => h.close());
+
+describe('a handler in an isolated workspace', () => {
+  it("is made in the routed task's workspace, with no parent and no creating task, its body naming the routed task's directory", async () => {
+    const w = madeOf(b.service.startWorkflow({ workflow: 'vi-workflow', params: { from: 'json', params: { case: 'CVE-1' } }, createdBy: ALICE, createdVia: VIA }));
+    const intake = w.tasks[0]?.taskId ?? '';
+    const ir = b.service.claim(intake);
+    if (!ir.ok) throw new Error(ir.message);
+    await b.service.complete(intake, { kind: 'run', runId: ir.run.runId }, { summary: 'x', metadata: { kind: 'cve', verify: false, patch: false, bnpm: false, packages: [] } });
+    closeRun(h.db, ir.run.runId, NOW);
+    const va = membersOf(h.db, w.instance.instanceId).find((m) => m.step === 'va')?.taskId ?? '';
+    const run = b.service.claim(va);
+    if (!run.ok) throw new Error(run.message);
+    expect(getTask(h.db, va)?.worktree).toBe(`wt:${va}`);
+    // The directory the dispatcher would make before the run's first prompt.
+    h.db.prepare("INSERT INTO workspaces (id, kind, root_path, created_at) VALUES (?, 'git-worktree', ?, ?)").run(`wt:${va}`, `/home/mt/worktrees/${va}`, NOW);
+    b.service.endRun(run.run.runId, { outcome: 'crashed' });
+    const escalate = getTask(h.db, membersOf(h.db, w.instance.instanceId).find((m) => m.step === 'escalate')?.taskId ?? '');
+    expect(escalate).toMatchObject({ workspace: 'vi', createdFromTask: null, worktree: null });
+    expect(parentsOf(h.db, escalate?.taskId ?? '')).toEqual([]);
+    expect(escalate?.body.split('\n')[1]).toBe(`Its directory: /home/mt/worktrees/${va}`);
+  });
+});
 ```
 
 Create `tests/routing-handlers.test.ts`:
@@ -8973,6 +9888,87 @@ describe('a route made', () => {
     });
   });
 
+  it("routes the transient limit's block by on_gave_up, saying it stopped after the throttles, and a run's own transient block by on_blocked", async () => {
+    b = viBoard(h, { limits: { failureLimit: 1, transientLimit: 2, transientCooldownS: 0 } });
+    writeFileSync(
+      join(b.dir, 'vi-workflow.yaml'),
+      `${VI_WORKFLOW.replace('    on_gave_up: { route: escalate }\n', '    on_gave_up: { route: escalate }\n    on_blocked: { route: help }\n')}  help:\n    title: "{{case}} · help va"\n    assignee: vi-coordinator\n    handler: true\n`,
+    );
+    const { w, va } = await vaOf();
+    for (let n = 1; n <= 2; n += 1) {
+      const run = claimed(h.db, va);
+      expect(b.service.endRun(run.runId, { outcome: 'rate_limited' }).ok).toBe(true);
+      closeRun(h.db, run.runId, NOW);
+    }
+    expect(getTask(h.db, va)).toMatchObject({ phase: 'blocked', blockKind: 'transient' });
+    const escalate = handlers(w.instance.instanceId)[0]?.taskId ?? '';
+    expect(getTask(h.db, escalate)?.body).toBe(
+      [
+        `Routed from \`${va}\` (step va): it stopped after 2 throttles: throttled 2 times in a row.`,
+        "This task stands in for it: your accepted completion is read in va's place, and archives it.",
+        `\`mt kanban unblock\` with {"task_id": "${va}", "comment": "…"} returns it to work instead.`,
+      ].join('\n'),
+    );
+    expect(b.service.unblock(va, ALICE).ok).toBe(true);
+    const run = b.service.claim(va);
+    if (!run.ok) throw new Error(run.message);
+    expect(b.service.block(va, { kind: 'run', runId: run.run.runId }, { kind: 'transient', reason: 'the registry is down' }).ok).toBe(true);
+    expect(getTask(h.db, va)).toMatchObject({ phase: 'blocked', blockKind: 'transient' });
+    const help = membersOf(h.db, w.instance.instanceId).find((m) => m.step === 'help')?.taskId ?? '';
+    expect(getTask(h.db, help)?.body.split('\n')[0]).toBe(`Routed from \`${va}\` (step va): it blocked (transient): the registry is down.`);
+    expect(routesOf(h.db, w.instance.instanceId).map((r) => [r.handler, r.outcome])).toEqual([
+      ['escalate', 'made'],
+      ['help', 'made'],
+    ]);
+  });
+
+  it("routes a fan-out's item for its own give-up, the handler made for that item", async () => {
+    writeFileSync(
+      join(b.dir, 'vi-workflow.yaml'),
+      `${VI_WORKFLOW.replace('    for_each: { step: intake, output: packages }\n', '    for_each: { step: intake, output: packages }\n    on_gave_up: { route: fix }\n')}  fix:\n    title: "{{case}} · fix {{item}}"\n    assignee: vi-coordinator\n    handler: true\n`,
+    );
+    const w = start();
+    await done(w.tasks[0]?.taskId ?? '', { ...CVE, packages: ['lodash', 'qs'] });
+    const va = membersOf(h.db, w.instance.instanceId).find((m) => m.step === 'va')?.taskId ?? '';
+    await done(va, { reachable: true });
+    const qs = membersOf(h.db, w.instance.instanceId).find((m) => m.step === 'exposure' && m.item === 'qs')?.taskId ?? '';
+    giveUp(qs);
+    const fix = membersOf(h.db, w.instance.instanceId).filter((m) => m.step === 'fix');
+    expect(fix.map((m) => [m.ref, m.item])).toEqual([['fix:1', 'qs']]);
+    expect(getTask(h.db, fix[0]?.taskId ?? '')?.title).toBe('CVE-1 · fix qs');
+    expect(routesOf(h.db, w.instance.instanceId).map((r) => [r.fromTask, r.outcome])).toEqual([[qs, 'made']]);
+  });
+
+  it('counts the handlers made in the cap: a route past 500 members records over_cap', async () => {
+    const { w, va } = await vaOf();
+    giveUp(va);
+    expect(handlers(w.instance.instanceId).length).toBe(1);
+    const task = h.db.prepare(
+      `INSERT INTO kanban_tasks (task_id, title, contract, phase, created_by, created_via, created_at, board)
+       VALUES (?, 'filler', jsonb('{}'), 'open', ?, jsonb('{"kind":"operator"}'), ?, 'vi')`,
+    );
+    const member = h.db.prepare("INSERT INTO kanban_workflow_tasks (task_id, instance_id, ref, step, item, position) VALUES (?, ?, ?, 'filler', NULL, ?)");
+    const base = membersOf(h.db, w.instance.instanceId).length;
+    // 499 members of the file's steps and one handler: the instance is at its cap.
+    for (let i = 0; i < 500 - base; i += 1) {
+      task.run(`k_fill${i}`, ALICE, NOW);
+      member.run(`k_fill${i}`, w.instance.instanceId, `filler:${i + 1}`, base + i);
+    }
+    expect(b.service.unblock(va, ALICE).ok).toBe(true);
+    giveUp(va);
+    expect(handlers(w.instance.instanceId).length).toBe(1);
+    expect(routesOf(h.db, w.instance.instanceId).map((r) => r.outcome)).toEqual(['made', 'over_cap']);
+  });
+
+  it('makes no handler on a board found archived, writing no route row', async () => {
+    const { w, va } = await vaOf();
+    h.db.prepare("UPDATE kanban_boards SET archived_at = ? WHERE name = 'vi'").run(NOW);
+    giveUp(va);
+    expect(handlers(w.instance.instanceId)).toEqual([]);
+    expect(routesOf(h.db, w.instance.instanceId)).toEqual([]);
+    expect(getTask(h.db, va)?.phase).toBe('blocked');
+  });
+
   it("keeps the paragraph whole, cutting only the file's part of a body at 64 KiB", async () => {
     const eight = Array.from({ length: 8 }, () => '{{note}}').join('');
     writeFileSync(
@@ -9005,9 +10001,9 @@ describe('a route made', () => {
 });
 ```
 
-- [ ] **Step 20.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-handlers.test.ts`. Expected: `Tests  5 failed (5)`, the first as `AssertionError: expected undefined to match object { ref: 'escalate:1', …(2) }`.
+- [ ] **Step 22.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-handler-workspace.test.ts tests/routing-handlers.test.ts`. Expected: `Tests  9 failed | 1 passed (10)`, the first as `AssertionError: expected undefined to match object { workspace: 'vi', …(2) }`.
 
-- [ ] **Step 20.3: Implement.**
+- [ ] **Step 22.3: Implement.**
 
 In `src/db/kanban-read.ts`, replace:
 
@@ -9216,7 +10212,9 @@ with:
  * no second handler; for a route made, the handler's task, made as any late
  * task but with no link, its ref `<handler>:<n>`, its item the routed item's,
  * its body gaining its paragraph, in the routed task's fixed workspace when its
- * step and role name none, its `created` event naming the routed task.
+ * step and role name none, its `created` event naming the routed task. On a
+ * board found archived nothing is made and no row written (§13.1): the board
+ * takes no new task, and the routed task waits as with no route.
  */
 function route(
   d: Db,
@@ -9239,7 +10237,7 @@ function route(
   }
   const hs = r.plan.steps.find((s) => s.step === dec.handler);
   const t = hs?.template;
-  if (hs === undefined || t === undefined) return undefined;
+  if (hs === undefined || t === undefined || !liveBoard(d, r.instance.board).ok) return undefined;
   const n = routesOf(d, id).filter((x) => x.handler === dec.handler && x.outcome === 'made').length + 1;
   // Where it works (§5.2): its step's, its role's, or else the routed task's, when that is fixed.
   const roleWorkspace = t.assignee === null || t.assignee.includes(':') ? undefined : team?.roles.get(t.assignee)?.workspace;
@@ -9361,29 +10359,29 @@ with:
         : { routed_from: { task_id: route.fromTask, step: source?.step ?? null, item: source?.item ?? null, event_id: route.eventId } }),
 ```
 
-- [ ] **Step 20.4: Run them to verify they pass.** Run the same command. Expected: `Tests  5 passed (5)`.
+- [ ] **Step 22.4: Run them to verify they pass.** Run the same command. Expected: `Tests  10 passed (10)`.
 
-- [ ] **Step 20.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3686 passed (3686)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 22.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3700 passed (3700)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 20.6: Commit.**
+- [ ] **Step 22.6: Commit.**
 
 ```bash
-git add src/db/kanban-read.ts src/db/kanban.ts src/kanban/routing.ts src/kanban/worker.ts tests/helpers/routing.ts tests/routing-handlers.test.ts
+git add src/db/kanban-read.ts src/db/kanban.ts src/kanban/routing.ts src/kanban/worker.ts tests/helpers/routing.ts tests/routing-handler-workspace.test.ts tests/routing-handlers.test.ts
 git commit -m "Make a handler's task for each due route, with no link and a paragraph naming what it was routed from, and name its source in the worker's show"
 ```
 
 ---
 
-### Task 21: The worker's unblock
+### Task 23: The worker's unblock
 
 **Files:**
 
 - Create: `tests/routing-unblock.test.ts`
 - Modify: `README.md`, `src/db/kanban.ts`, `src/kanban/service.ts`, `src/kanban/worker.ts`, `tests/docs-wake.test.ts`, `tests/kanban-worker.test.ts`, `tests/mt-kanban-operator-tasks.test.ts`, `tests/mt-kanban.test.ts`, `tests/mt.test.ts`
 
-§5.4. `unblock` is the worker API's thirteenth command, `{task_id, comment?}`: `KanbanService.unblockFromHandler` lets only a handler's work run lift the block of the task its route row names, while that block stands, its comment prefixed with the handler's ref; a repeat by the same run answers `changed: false`; anything else `wrong_task`, and `stale` once another lifted it. The usage lines, the README's list of the worker's commands, and the tests that list them gain it.
+§5.4. `unblock` is the worker API's thirteenth command, `{task_id, comment?}`: `KanbanService.unblockFromHandler` lets only a handler's work run lift the block of the task its route row names, while that block stands, its comment prefixed with the handler's ref; a repeat by the same run answers `changed: false`; anything else `wrong_task`, and `stale` once another lifted it. The usage lines, the README's list of the worker's commands, and the tests that list them gain it. A handler whose routed task's block was lifted already is refused `stale`, in words of its own.
 
-- [ ] **Step 21.1: Write the tests.**
+- [ ] **Step 23.1: Write the tests.**
 
 In `tests/docs-wake.test.ts`, replace:
 
@@ -9575,7 +10573,7 @@ describe("a handler's unblock", () => {
     const { va, escalate } = await routed();
     const run = workerRun(b.service, h.db, escalate);
     expect(b.service.unblock(va, ALICE).ok).toBe(true);
-    expect(await run.ask('unblock', { task_id: va })).toEqual({ ok: false, code: 'stale', message: `the block of task ${va} this button was for has been lifted already` });
+    expect(await run.ask('unblock', { task_id: va })).toEqual({ ok: false, code: 'stale', message: `the block of task ${va} the handler escalate:1 was routed from has been lifted already` });
     // The handler's run stopped and closed, so va's next run may take the workspace.
     expect(b.service.stop(escalate, ALICE).ok).toBe(true);
     closeRun(h.db, run.runId, NOW);
@@ -9605,9 +10603,9 @@ describe("a handler's unblock", () => {
 });
 ```
 
-- [ ] **Step 21.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/docs-wake.test.ts tests/kanban-worker.test.ts tests/mt-kanban-operator-tasks.test.ts tests/mt-kanban.test.ts tests/mt.test.ts tests/routing-unblock.test.ts`. Expected: `Tests  10 failed | 75 passed (85)`, the first as `AssertionError: expected '# manus-team\n\nmanus-team runs a tea…' to contain 'start-workflow|apply-dag|wake-show|wa…'`.
+- [ ] **Step 23.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/docs-wake.test.ts tests/kanban-worker.test.ts tests/mt-kanban-operator-tasks.test.ts tests/mt-kanban.test.ts tests/mt.test.ts tests/routing-unblock.test.ts`. Expected: `Tests  10 failed | 75 passed (85)`, the first as `AssertionError: expected '# manus-team\n\nmanus-team runs a tea…' to contain 'start-workflow|apply-dag|wake-show|wa…'`.
 
-- [ ] **Step 21.3: Implement.**
+- [ ] **Step 23.3: Implement.**
 
 In `README.md`, replace:
 
@@ -9631,6 +10629,20 @@ with:
 
 ```ts
   opts: { blockedAt?: number; wake?: number; handler?: string } = {},
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+        return refuse('stale', `the block of task ${taskId} this button was for has been lifted already`);
+```
+
+with:
+
+```ts
+        // A handler's unblock is for the block it was routed from (workflow routing spec §5.4), not a button's.
+        const whose = opts.handler === undefined ? 'this button was for' : `the handler ${opts.handler} was routed from`;
+        return refuse('stale', `the block of task ${taskId} ${whose} has been lifted already`);
 ```
 
 In `src/db/kanban.ts`, replace:
@@ -9761,11 +10773,11 @@ with:
       case 'wake-show':
 ```
 
-- [ ] **Step 21.4: Run them to verify they pass.** Run the same command. Expected: `Tests  85 passed (85)`.
+- [ ] **Step 23.4: Run them to verify they pass.** Run the same command. Expected: `Tests  85 passed (85)`.
 
-- [ ] **Step 21.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3690 passed (3690)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 23.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3704 passed (3704)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 21.6: Commit.**
+- [ ] **Step 23.6: Commit.**
 
 ```bash
 git add README.md src/db/kanban.ts src/kanban/service.ts src/kanban/worker.ts tests/docs-wake.test.ts tests/kanban-worker.test.ts tests/mt-kanban-operator-tasks.test.ts tests/mt-kanban.test.ts tests/mt.test.ts tests/routing-unblock.test.ts
@@ -9774,7 +10786,7 @@ git commit -m "Let a handler's work run unblock the task its route was made from
 
 ---
 
-### Task 22: A stand-in's fields
+### Task 24: A stand-in's fields
 
 **Files:**
 
@@ -9783,7 +10795,7 @@ git commit -m "Let a handler's work run unblock the task its route was made from
 
 §5.2, §7.3. A stand-in's task is made with its step's reviewer, its step's gates before its own, and each contract field merged as the step's and then the handler's, all from the plan frozen at the start; its work report is checked against its step's outputs.
 
-- [ ] **Step 22.1: Write the tests.**
+- [ ] **Step 24.1: Write the tests.**
 
 Create `tests/routing-standin.test.ts`:
 
@@ -9870,9 +10882,9 @@ describe('a stand-in made', () => {
 });
 ```
 
-- [ ] **Step 22.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-standin.test.ts`. Expected: `Tests  2 failed | 1 passed (3)`, the first as `AssertionError: expected null to deeply equal { kind: 'role', …(1) }`.
+- [ ] **Step 24.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-standin.test.ts`. Expected: `Tests  2 failed | 1 passed (3)`, the first as `AssertionError: expected null to deeply equal { kind: 'role', …(1) }`.
 
-- [ ] **Step 22.3: Implement.**
+- [ ] **Step 24.3: Implement.**
 
 In `src/db/kanban.ts`, replace:
 
@@ -9931,11 +10943,11 @@ with:
       if (Object.keys(s.outputs).length > 0 && !(s.handler && s.standsInFor !== undefined)) contract.outcome = outcomeWithOutputs(contract.outcome, s.outputs);
 ```
 
-- [ ] **Step 22.4: Run them to verify they pass.** Run the same command. Expected: `Tests  3 passed (3)`.
+- [ ] **Step 24.4: Run them to verify they pass.** Run the same command. Expected: `Tests  3 passed (3)`.
 
-- [ ] **Step 22.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3693 passed (3693)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 24.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3707 passed (3707)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 22.6: Commit.**
+- [ ] **Step 24.6: Commit.**
 
 ```bash
 git add src/db/kanban.ts src/kanban/workflow.ts tests/routing-standin.test.ts
@@ -9944,78 +10956,25 @@ git commit -m "Make a stand-in with its step's reviewer, its step's gates before
 
 ---
 
-### Task 23: A stand-in's settling
+### Task 25: A stand-in's settling
 
 **Files:**
 
-- Create: `tests/routing-handler-workspace.test.ts`, `tests/routing-standin-settle.test.ts`
-- Modify: `src/db/kanban.ts`, `src/index.ts`, `src/kanban/routing.ts`, `src/kanban/service.ts`
+- Create: `tests/routing-standin-settle.test.ts`
+- Modify: `src/db/kanban.ts`, `src/kanban/routing.ts`
 
-§2.3, §5.2, §9.2, §9.5. The sweep's facts for a member gain its stand-ins' completions: the earliest settling fact by event id wins, whichever transaction or reconciliation writes the row. A winning stand-in archives the routed task, unless it is already archived, from whatever phase, with its comment and the archive's `workflow` and `standIn`; a stand-in left open after the routed task's own completion is told once. The runs the archive superseded are returned as `superseded` and cancelled by the service through the new `KanbanServiceDeps.cancelRun`, which `src/index.ts` gives as a late-bound closure over the dispatcher.
+§2.3, §5.2, §9.2. The sweep's facts for a member gain its stand-ins' completions: the earliest settling fact by event id wins, whichever transaction or reconciliation writes the row. A winning stand-in archives the routed task, unless it is already archived, from whatever phase, with its comment and the archive's `workflow` and `standIn`; a stand-in left open after the routed task's own completion is told once. A stand-in failing its step's gates settles nothing; one over a fan-out's source fans it out from its own list. The cap passed at a stand-in's completion skips what it would make, the completion kept.
 
-- [ ] **Step 23.1: Write the tests.**
-
-Create `tests/routing-handler-workspace.test.ts`:
-
-```ts
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { closeRun } from '../src/db/kanban.js';
-import { getTask, membersOf, parentsOf } from '../src/db/kanban-read.js';
-import { clearSecrets } from '../src/secrets.js';
-import { testDb, type TestDb } from './helpers/db.js';
-import { ALICE, NOW, VIA } from './helpers/kanban.js';
-import { VI_WORKFLOW, madeOf, viBoard, type ViBoard } from './helpers/routing.js';
-
-/**
- * A handler in an isolated workspace (workflow routing spec §5.2, §13.4): made
- * with the routed task's fixed workspace when its step and role name none, with
- * no parent and, from chat, no creating task, so its worktree starts from the
- * workspace's base; its body naming the routed task's own directory.
- */
-
-let h: TestDb;
-let b: ViBoard;
-beforeEach(() => {
-  clearSecrets();
-  h = testDb();
-  b = viBoard(h, { isolated: new Set(['vi']), limits: { failureLimit: 1, transientLimit: 10, transientCooldownS: 300 } });
-  writeFileSync(join(b.dir, 'vi-workflow.yaml'), VI_WORKFLOW.replace('    assignee: vulnerability-analyst\n', '    assignee: vulnerability-analyst\n    workspace: vi\n'));
-});
-afterEach(() => h.close());
-
-describe('a handler in an isolated workspace', () => {
-  it("is made in the routed task's workspace, with no parent and no creating task, its body naming the routed task's directory", async () => {
-    const w = madeOf(b.service.startWorkflow({ workflow: 'vi-workflow', params: { from: 'json', params: { case: 'CVE-1' } }, createdBy: ALICE, createdVia: VIA }));
-    const intake = w.tasks[0]?.taskId ?? '';
-    const ir = b.service.claim(intake);
-    if (!ir.ok) throw new Error(ir.message);
-    await b.service.complete(intake, { kind: 'run', runId: ir.run.runId }, { summary: 'x', metadata: { kind: 'cve', verify: false, patch: false, bnpm: false, packages: [] } });
-    closeRun(h.db, ir.run.runId, NOW);
-    const va = membersOf(h.db, w.instance.instanceId).find((m) => m.step === 'va')?.taskId ?? '';
-    const run = b.service.claim(va);
-    if (!run.ok) throw new Error(run.message);
-    expect(getTask(h.db, va)?.worktree).toBe(`wt:${va}`);
-    // The directory the dispatcher would make before the run's first prompt.
-    h.db.prepare("INSERT INTO workspaces (id, kind, root_path, created_at) VALUES (?, 'git-worktree', ?, ?)").run(`wt:${va}`, `/home/mt/worktrees/${va}`, NOW);
-    b.service.endRun(run.run.runId, { outcome: 'crashed' });
-    const escalate = getTask(h.db, membersOf(h.db, w.instance.instanceId).find((m) => m.step === 'escalate')?.taskId ?? '');
-    expect(escalate).toMatchObject({ workspace: 'vi', createdFromTask: null, worktree: null });
-    expect(parentsOf(h.db, escalate?.taskId ?? '')).toEqual([]);
-    expect(escalate?.body.split('\n')[1]).toBe(`Its directory: /home/mt/worktrees/${va}`);
-  });
-});
-```
+- [ ] **Step 25.1: Write the tests.**
 
 Create `tests/routing-standin-settle.test.ts`:
 
 ```ts
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { closeRun } from '../src/db/kanban.js';
-import { commentsOf, eventsOf, getRun, getTask, membersOf, parentsOf, settledOf } from '../src/db/kanban-read.js';
+import { commentsOf, eventsOf, getRun, getTask, membersOf, parentsOf, pendingOf, settledOf } from '../src/db/kanban-read.js';
 import { clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
 import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
@@ -10025,24 +10984,23 @@ import { VI_WORKFLOW, madeOf, viBoard, type ViBoard } from './helpers/routing.js
  * A stand-in's completion (workflow routing spec §5.2, §9.2, §9.5): the member
  * settled for the earliest settling fact by event id, whichever transaction or
  * reconciliation wrote it; a winning stand-in archiving its routed task, from
- * whatever phase, with its comment, its superseded run cancelled through the
- * service; one that settles nothing archiving nothing; a stand-in left open
- * after the routed task's own completion told once; and its review the step's.
+ * whatever phase, with its comment, unless it is archived already; one that
+ * settles nothing archiving nothing; a stand-in left open after the routed
+ * task's own completion told once; its review and its gates the step's; and the
+ * cap passed at its completion skipping what it would make, the completion kept.
  */
 
 let h: TestDb;
 let b: ViBoard;
-let cancelled: string[];
+let workspace: string;
 beforeEach(() => {
   clearSecrets();
   h = testDb();
-  cancelled = [];
+  workspace = mkdtempSync(join(h.dir, 'vi-'));
   b = viBoard(h, {
     limits: { failureLimit: 1, transientLimit: 10, transientCooldownS: 300 },
-    cancelRun: (runId) => {
-      cancelled.push(runId);
-      return true;
-    },
+    // Gates run for real, in the workspace vi's directory (kanban spec §7.7).
+    checks: { workspaceDirs: new Map([['vi', workspace]]), env: process.env },
   });
 });
 afterEach(() => h.close());
@@ -10072,12 +11030,12 @@ function giveUp(taskId: string): string {
 let instance = '';
 const handlers = () => membersOf(h.db, instance).filter((m) => m.step === 'escalate').map((m) => m.taskId);
 
-async function routed(file = VI_WORKFLOW): Promise<Routed> {
+async function routed(file = VI_WORKFLOW, intakeResult: Record<string, unknown> = CVE): Promise<Routed> {
   writeFileSync(join(b.dir, 'vi-workflow.yaml'), file);
   const w = madeOf(b.service.startWorkflow({ workflow: 'vi-workflow', params: { from: 'json', params: { case: 'CVE-1' } }, createdBy: ALICE, createdVia: VIA }));
   instance = w.instance.instanceId;
   const intake = w.tasks[0]?.taskId ?? '';
-  await report(intake, CVE);
+  await report(intake, intakeResult);
   return { instanceId: instance, intake, va: membersOf(h.db, instance).find((m) => m.step === 'va')?.taskId ?? '' };
 }
 
@@ -10137,23 +11095,6 @@ describe("a stand-in's completion", () => {
     expect(getTask(h.db, va)?.phase).toBe('done');
   });
 
-  it("archives the routed task's rerun from open when the stand-in wins, its run superseded, returned and cancelled", async () => {
-    const { va } = await routed();
-    const escalate = giveUp(va);
-    expect(b.service.unblock(va, ALICE).ok).toBe(true);
-    const rerun = b.service.claim(va);
-    if (!rerun.ok) throw new Error(rerun.message);
-    // The stand-in's run, through the service: its workspace is the default's too, held by va's rerun, so it reports as a person's would not.
-    h.db.prepare("UPDATE kanban_tasks SET workspace = 'vi' WHERE task_id = ?").run(escalate);
-    const run = b.service.claim(escalate);
-    if (!run.ok) throw new Error(run.message);
-    const r = await b.service.complete(escalate, { kind: 'run', runId: run.run.runId }, { summary: 'done', metadata: { reachable: true } });
-    expect(r).toMatchObject({ ok: true, superseded: [{ runId: rerun.run.runId, outcome: 'superseded' }] });
-    expect(getRun(h.db, rerun.run.runId)?.outcome).toBe('superseded');
-    expect(eventsOf(h.db, va).find((e) => e.kind === 'archived')?.payload).toMatchObject({ from: 'open', standIn: escalate });
-    expect(cancelled).toEqual([rerun.run.runId]);
-  });
-
   it('settles a member once when two stand-ins are done, the lower completed id winning, the other archiving nothing', async () => {
     const { va } = await routed();
     const first = giveUp(va);
@@ -10192,12 +11133,145 @@ describe("a stand-in's completion", () => {
     expect(eventsOf(h.db, va).filter((e) => e.kind === 'archived').length).toBe(1);
     expect(commentsOf(h.db, va)).toEqual([]);
   });
+
+  it("settles nothing while a stand-in fails one of its step's gates, the run left undecided, and settles once it passes", async () => {
+    const file = VI_WORKFLOW.replace(
+      '    assignee: vulnerability-analyst\n',
+      '    assignee: vulnerability-analyst\n    workspace: vi\n    gates:\n      - { command: "test -s result.json", timeout_s: 30 }\n',
+    );
+    const { va } = await routed(file);
+    const vaRun = b.service.claim(va);
+    if (!vaRun.ok) throw new Error(vaRun.message);
+    b.service.endRun(vaRun.run.runId, { outcome: 'crashed' });
+    closeRun(h.db, vaRun.run.runId, NOW);
+    const escalate = handlers()[0] ?? '';
+    expect(getTask(h.db, escalate)?.workspace).toBe('vi');
+    const run = b.service.claim(escalate);
+    if (!run.ok) throw new Error(run.message);
+    const by = { kind: 'run', runId: run.run.runId } as const;
+    expect(await b.service.complete(escalate, by, { summary: 'done', metadata: { reachable: true } })).toMatchObject({ ok: false, code: 'gate_failed' });
+    expect(getRun(h.db, run.run.runId)?.outcome).toBeNull();
+    expect(vaRow()).toBeUndefined();
+    expect(getTask(h.db, va)?.phase).toBe('blocked');
+    writeFileSync(join(workspace, 'result.json'), '{"reachable": true}\n');
+    expect((await b.service.complete(escalate, by, { summary: 'done', metadata: { reachable: true } })).ok).toBe(true);
+    expect(vaRow()).toMatchObject({ how: 'stood_in', taskId: escalate });
+  });
+
+  it("settles no item while an item's stand-in fails the fan-out step's gates, and the item once they pass", async () => {
+    const file = `${VI_WORKFLOW.replace(
+      '    for_each: { step: intake, output: packages }\n',
+      '    for_each: { step: intake, output: packages }\n    workspace: vi\n    gates:\n      - { command: "test -s result.json", timeout_s: 30 }\n    on_gave_up: { route: redo }\n',
+    )}  redo:\n    title: "{{case}} · exposure of {{item}}, redone"\n    assignee: vi-coordinator\n    handler: true\n    stands_in_for: exposure\n`;
+    const { va } = await routed(file, { ...CVE, verify: false, packages: ['lodash', 'qs'] });
+    expect((await report(va, { reachable: true })).ok).toBe(true);
+    const qs = membersOf(h.db, instance).find((m) => m.step === 'exposure' && m.item === 'qs')?.taskId ?? '';
+    const run = b.service.claim(qs);
+    if (!run.ok) throw new Error(run.message);
+    b.service.endRun(run.run.runId, { outcome: 'crashed' });
+    closeRun(h.db, run.run.runId, NOW);
+    const redo = membersOf(h.db, instance).find((m) => m.step === 'redo')?.taskId ?? '';
+    const mine = b.service.claim(redo);
+    if (!mine.ok) throw new Error(mine.message);
+    const by = { kind: 'run', runId: mine.run.runId } as const;
+    const itemRow = () => settledOf(h.db, instance).find((s) => s.step === 'exposure' && s.ref === 'exposure:2');
+    expect(await b.service.complete(redo, by, { summary: 'done' })).toMatchObject({ ok: false, code: 'gate_failed' });
+    expect(getRun(h.db, mine.run.runId)?.outcome).toBeNull();
+    expect(itemRow()).toBeUndefined();
+    expect(getTask(h.db, qs)?.phase).toBe('blocked');
+    writeFileSync(join(workspace, 'result.json'), '{}\n');
+    expect((await b.service.complete(redo, by, { summary: 'done' })).ok).toBe(true);
+    expect(itemRow()).toMatchObject({ how: 'stood_in', taskId: redo });
+    expect(getTask(h.db, qs)?.phase).toBe('archived');
+  });
+
+  it('skips what a stand-in would make past the cap at its completion, the completion and its settling kept', async () => {
+    const { va } = await routed(VI_WORKFLOW, { ...CVE, verify: false, packages: ['a', 'b', 'c'] });
+    const escalate = giveUp(va);
+    // Members to one short of the cap: exposure over the intake's three packages would pass it.
+    const task = h.db.prepare(
+      `INSERT INTO kanban_tasks (task_id, title, contract, phase, created_by, created_via, created_at, board)
+       VALUES (?, 'filler', jsonb('{}'), 'open', ?, jsonb('{"kind":"operator"}'), ?, 'vi')`,
+    );
+    const member = h.db.prepare("INSERT INTO kanban_workflow_tasks (task_id, instance_id, ref, step, item, position) VALUES (?, ?, ?, 'filler', NULL, ?)");
+    const base = membersOf(h.db, instance).length;
+    for (let i = 0; i < 499 - base; i += 1) {
+      task.run(`k_fill${i}`, ALICE, NOW);
+      member.run(`k_fill${i}`, instance, `filler:${i + 1}`, base + i);
+    }
+    expect((await report(escalate, { reachable: true })).ok).toBe(true);
+    expect(vaRow()).toMatchObject({ how: 'stood_in', taskId: escalate });
+    expect(pendingOf(h.db, instance).find((p) => p.step === 'exposure')).toMatchObject({ state: 'skipped', reason: { by: 'cap', why: 'the instance has 500 tasks' } });
+    expect(membersOf(h.db, instance).filter((m) => m.step === 'exposure')).toEqual([]);
+  });
+
+  it("fans out over a stood-in source's list, each item's task linked to the stand-in, a list past the cap refused", async () => {
+    const takeover = `  takeover:
+    title: "{{case}} · intake, taken over"
+    assignee: vi-coordinator
+    handler: true
+    stands_in_for: intake
+    outputs:
+      kind: { enum: [cve, supplychain] }
+      verify: boolean
+      patch: boolean
+      bnpm: boolean
+      packages: { list: string, max: 100 }
+`;
+    writeFileSync(
+      join(b.dir, 'vi-workflow.yaml'),
+      `${VI_WORKFLOW.replace('      packages: { list: string, max: 100 }\n  va:', '      packages: { list: string, max: 100 }\n    on_gave_up: { route: takeover }\n  va:')}${takeover}`,
+    );
+    const w = madeOf(b.service.startWorkflow({ workflow: 'vi-workflow', params: { from: 'json', params: { case: 'CVE-1' } }, createdBy: ALICE, createdVia: VIA }));
+    instance = w.instance.instanceId;
+    const intake = w.tasks[0]?.taskId ?? '';
+    const run = claimed(h.db, intake);
+    b.service.endRun(run.runId, { outcome: 'crashed' });
+    closeRun(h.db, run.runId, NOW);
+    const stand = membersOf(h.db, instance).find((m) => m.step === 'takeover')?.taskId ?? '';
+    const result = { kind: 'supplychain', verify: false, patch: false, bnpm: false };
+    const fill = h.db.prepare(
+      `INSERT INTO kanban_tasks (task_id, title, contract, phase, created_by, created_via, created_at, board)
+       VALUES (?, 'filler', jsonb('{}'), 'open', ?, jsonb('{"kind":"operator"}'), ?, 'vi')`,
+    );
+    const member = h.db.prepare("INSERT INTO kanban_workflow_tasks (task_id, instance_id, ref, step, item, position) VALUES (?, ?, ?, 'filler', NULL, ?)");
+    const base = membersOf(h.db, instance).length;
+    for (let i = 0; i < 450; i += 1) {
+      fill.run(`k_fill${i}`, ALICE, NOW);
+      member.run(`k_fill${i}`, instance, `filler:${i + 1}`, base + i);
+    }
+    const mine = claimed(h.db, stand);
+    const by = { kind: 'run', runId: mine.runId } as const;
+    const many = Array.from({ length: 60 }, (_, i) => `p${i}`);
+    expect(await b.service.complete(stand, by, { summary: 'x', metadata: { ...result, packages: many } })).toMatchObject({ ok: false, code: 'too_large' });
+    expect((await b.service.complete(stand, by, { summary: 'x', metadata: { ...result, packages: ['a', 'b'] } })).ok).toBe(true);
+    const exposure = membersOf(h.db, instance).filter((m) => m.step === 'exposure');
+    expect(exposure.map((m) => getTask(h.db, m.taskId)?.title)).toEqual(['CVE-1 · exposure of a', 'CVE-1 · exposure of b']);
+    for (const m of exposure) expect(parentsOf(h.db, m.taskId).map((p) => p.taskId)).toEqual([stand]);
+    expect(eventsOf(h.db, intake).find((e) => e.kind === 'archived')?.payload).toMatchObject({ workflow: instance, standIn: stand });
+    expect(settledOf(h.db, instance).find((s) => s.step === 'intake')).toMatchObject({ how: 'stood_in', taskId: stand });
+  });
+
+  it('writes only the row for a stand-in winning over a routed task a person archived after its own done', async () => {
+    const { va } = await routed();
+    const escalate = giveUp(va);
+    h.db.exec("CREATE TEMP TRIGGER boom BEFORE INSERT ON kanban_workflow_settled WHEN NEW.step = 'va' BEGIN SELECT RAISE(ABORT, 'boom'); END;");
+    expect((await report(escalate, { reachable: true })).ok).toBe(true);
+    expect(b.service.unblock(va, ALICE).ok).toBe(true);
+    expect((await report(va, { reachable: false })).ok).toBe(true);
+    expect(b.service.archive(va, ALICE).ok).toBe(true);
+    h.db.exec('DROP TRIGGER boom');
+    expect(b.service.reconcileWorkflow(instance).ok).toBe(true);
+    expect(vaRow()).toMatchObject({ how: 'stood_in', taskId: escalate });
+    expect(eventsOf(h.db, va).filter((e) => e.kind === 'archived').map((e) => (e.payload as { from: string }).from)).toEqual(['done']);
+    expect(commentsOf(h.db, va)).toEqual([]);
+  });
 });
 ```
 
-- [ ] **Step 23.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-handler-workspace.test.ts tests/routing-standin-settle.test.ts`. Expected: `Tests  6 failed | 2 passed (8)`, the first as `AssertionError: expected undefined to match object { how: 'stood_in', …(1) }`.
+- [ ] **Step 25.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-standin-settle.test.ts`. Expected: `Tests  10 failed | 1 passed (11)`, the first as `AssertionError: expected undefined to match object { how: 'stood_in', …(1) }`.
 
-- [ ] **Step 23.3: Implement.**
+- [ ] **Step 25.3: Implement.**
 
 In `src/db/kanban.ts`, replace:
 
@@ -10210,6 +11284,502 @@ with:
 ```ts
 import { decide as decideRouting, fillText, handlerParagraph, INSTANCE_CAP, maskPlan, outputsText, resultOf, SKIPPED_TEXT, standInContract, triggerWords, valueSaid, type Decision, type Facts, type Plan, type PlanStep, type RouteFact, type StepFact, type Template } from '../kanban/routing.js';
 ```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  outcome: 'made' | 'skipped' | 'fanned_out' | 'routed' | 'over_limit' | 'over_cap';
+```
+
+with:
+
+```ts
+  outcome: 'made' | 'skipped' | 'fanned_out' | 'routed' | 'over_limit' | 'over_cap' | 'stood_in' | 'unread';
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+}
+
+/**
+ * The sweep (§9.2 step 2): each member with a settling fact gets its settled row,
+```
+
+with:
+
+```ts
+}
+
+/** What a sweep did beyond its rows (§5.2, §9.5): its lines, and the runs its stand-ins' archives superseded. */
+interface Swept {
+  lines: RoutedLine[];
+  superseded: RunRow[];
+}
+
+/**
+ * The sweep (§9.2 step 2): each member with a settling fact gets its settled row,
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+ * its winner the earliest fact by event id, its own task's `completed` event or
+ * its `archived` event when that archive was not from `done`; each fan-out
+ * whose items all have rows, its own, `archived` when every item was archived
+ * undone. Plain steps included; a handler's task is no step's member here.
+```
+
+with:
+
+```ts
+ * its winner the earliest fact by event id, among its own task's `completed`
+ * event, each of its stand-ins' `completed` events, and its own `archived`
+ * event when that archive was not from `done`; each fan-out whose items all have
+ * rows, its own, `archived` when every item was archived undone. Plain steps
+ * included; a handler's task is no step's member here. Only once a row is
+ * written for a stand-in is the routed task archived, unless it is already, its
+ * superseded run returned; and only when a row is written for the task's own
+ * completion is each stand-in left open told its result will not be read.
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+function sweep(d: Db, r: Routed, now: number): void {
+```
+
+with:
+
+```ts
+function sweep(d: Db, r: Routed, now: number): Swept {
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  const id = r.instance.instanceId;
+  const handlers = new Set(r.plan.steps.filter((s) => s.handler === true).map((s) => s.step));
+```
+
+with:
+
+```ts
+  const id = r.instance.instanceId;
+  const out: Swept = { lines: [], superseded: [] };
+  const handlers = new Map(r.plan.steps.filter((s) => s.handler === true).map((s) => [s.step, s]));
+  const routes = routesOf(d, id);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    const archive = archived !== undefined && isRecord(archived.payload) && archived.payload['from'] !== 'done' ? archived : undefined;
+```
+
+with:
+
+```ts
+    const archive = archived !== undefined && isRecord(archived.payload) && archived.payload['from'] !== 'done' ? archived : undefined;
+    // Its stand-ins: the handlers routed from its task that stand in for its step (§5.2).
+    const standIns = routes.filter((x) => x.fromTask === m.taskId && x.outcome === 'made' && x.taskId !== null && handlers.get(x.handler)?.stands_in_for === m.step);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+      ...(completed === undefined ? [] : [{ how: 'done', taskId: m.taskId as string | null, eventId: completed.id }]),
+      ...(archive === undefined ? [] : [{ how: 'archived', taskId: null, eventId: archive.id }]),
+```
+
+with:
+
+```ts
+      ...(completed === undefined ? [] : [{ how: 'done', taskId: m.taskId as string | null, eventId: completed.id, handler: undefined as string | undefined }]),
+      ...(archive === undefined ? [] : [{ how: 'archived', taskId: null, eventId: archive.id, handler: undefined }]),
+      ...standIns.flatMap((x) => {
+        const done = firstEventOf(d, x.taskId as string, 'completed');
+        return done === undefined ? [] : [{ how: 'stood_in', taskId: x.taskId, eventId: done.id, handler: x.handler }];
+      }),
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    if (settle(d, id, m.step, m.ref, winner.how, winner.taskId, winner.eventId, now)) taken.add(`${m.step}\u0000${m.ref}`);
+```
+
+with:
+
+```ts
+    if (!settle(d, id, m.step, m.ref, winner.how, winner.taskId, winner.eventId, now)) continue;
+    taken.add(`${m.step}\u0000${m.ref}`);
+    if (winner.how === 'stood_in' && winner.taskId !== null) standingIn(d, r, m, winner.taskId, winner.handler ?? '', now, out);
+    if (winner.how === 'done') {
+      for (const x of standIns) {
+        const left = getTask(d, x.taskId as string);
+        if (left === undefined || left.phase === 'done' || left.phase === 'archived') continue;
+        insertComment(d, left.taskId, 'gateway', `${m.step} was completed by its own task ${m.taskId}; this handler's result will not be read: finish or archive it`, now, false);
+        out.lines.push({ step: m.step, outcome: 'unread', why: `${m.step} was completed by its own task`, taskIds: [left.taskId], handler: x.handler });
+      }
+    }
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    settle(d, id, s.step, s.step, how, null, Math.max(...items.map((x) => x.eventId)), now);
+  }
+}
+```
+
+with:
+
+```ts
+    settle(d, id, s.step, s.step, how, null, Math.max(...items.map((x) => x.eventId)), now);
+  }
+  return out;
+}
+
+/**
+ * A stand-in won its member (§5.2): the routed task archived, unless it is
+ * already, from whatever phase it is in, its undecided run superseded, the
+ * archive naming the instance and the stand-in, with a comment that does not
+ * steer; and the line saying it stood in, with its outputs.
+ */
+function standingIn(d: Db, r: Routed, m: MemberRow & { task: TaskRow }, standIn: string, handler: string, now: number, out: Swept): void {
+  const ref = memberOf(d, standIn)?.ref ?? handler;
+  const routed = mustGet(d, m.taskId);
+  const outputs = r.plan.steps.find((s) => s.step === m.step)?.outputs ?? {};
+  const metadata = latestCompletion(d, standIn)?.metadata;
+  const said = outputsText(outputs, isRecord(metadata) ? metadata : null);
+  out.lines.push({ step: m.step, outcome: 'stood_in', why: said, taskIds: [m.taskId], handler });
+  if (routed.phase === 'archived') return;
+  // Only a run the archive itself ended: one that had reported, and is finishing, is left to end its own turn.
+  const undecided = openRunOf(d, routed.taskId)?.outcome === null;
+  const archived = archiveIn(d, routed, 'gateway', now, { workflow: r.instance.instanceId, standIn });
+  if (undecided && archived.run !== undefined) out.superseded.push(archived.run);
+  insertComment(d, m.taskId, 'gateway', `Stood in for by ${ref} (${standIn}), whose result is read in ${m.step}'s place.`, now, false);
+}
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number, team: RouteTeam | undefined): RoutedLine[] {
+  const lines: RoutedLine[] = [];
+```
+
+with:
+
+```ts
+function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number, team: RouteTeam | undefined): Swept {
+  const out: Swept = { lines: [], superseded: [] };
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  if (first === undefined) return lines;
+```
+
+with:
+
+```ts
+  if (first === undefined) return out;
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    sweep(d, r, now);
+```
+
+with:
+
+```ts
+    const swept = sweep(d, r, now);
+    out.lines.push(...swept.lines);
+    out.superseded.push(...swept.superseded);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    if (decisions.length === 0) break;
+```
+
+with:
+
+```ts
+    if (decisions.length === 0 && swept.lines.length === 0) break;
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+      if (line !== undefined) lines.push(line);
+```
+
+with:
+
+```ts
+      if (line !== undefined) out.lines.push(line);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  return lines;
+```
+
+with:
+
+```ts
+  return out;
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+  const lines = decideAll(d, planned.instance, eventId, now, team);
+```
+
+with:
+
+```ts
+  const { lines } = decideAll(d, planned.instance, eventId, now, team);
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    const decisions = decideAll(d, instance, null, now, team);
+```
+
+with:
+
+```ts
+    const { lines: decisions } = decideAll(d, instance, null, now, team);
+```
+
+In `src/kanban/routing.ts`, replace:
+
+```ts
+  ].join('\n');
+}
+```
+
+with:
+
+```ts
+  ].join('\n');
+}
+
+/**
+ * A step's accepted outputs as a line says them (§12.1, §12.2): each scalar as
+ * `name=value`, a list as its count and name, `3 packages`; missing ones left
+ * out; cut at `max` characters.
+ */
+export function outputsText(outputs: Outputs, result: Readonly<Record<string, unknown>> | null, max = 120): string {
+  const parts = Object.entries(outputs).flatMap(([name, t]) => {
+    const value = result?.[name];
+    if (!ofType(t, value)) return [];
+    return Array.isArray(value) ? [`${value.length} ${name}`] : [`${name}=${valueSaid(value)}`];
+  });
+  const text = parts.join(', ');
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+```
+
+- [ ] **Step 25.4: Run them to verify they pass.** Run the same command. Expected: `Tests  11 passed (11)`.
+
+- [ ] **Step 25.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3718 passed (3718)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+
+- [ ] **Step 25.6: Commit.**
+
+```bash
+git add src/db/kanban.ts src/kanban/routing.ts tests/routing-standin-settle.test.ts
+git commit -m "Settle a member for its earliest settling fact, archiving the task a winning stand-in stood in for with its comment"
+```
+
+---
+
+### Task 26: The runs a stand-in's archive supersedes
+
+**Files:**
+
+- Create: `tests/routing-superseded.test.ts`
+- Modify: `src/db/kanban.ts`, `src/index.ts`, `src/kanban/service.ts`
+
+§9.5. The runs a winning stand-in's archive ended `superseded` are returned as `superseded` by every deciding writer and the reconciliation, and cancelled by the service through the new `KanbanServiceDeps.cancelRun`, which `src/index.ts` gives as a late-bound closure over the dispatcher: on the stand-in's own completion, a reconciliation, the routing retry, and another member's archive, block or give-up; a run that had reported already is left to end its own turn.
+
+- [ ] **Step 26.1: Write the tests.**
+
+Create `tests/routing-superseded.test.ts`:
+
+```ts
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { closeRun } from '../src/db/kanban.js';
+import { eventsOf, getRun, membersOf, settledOf } from '../src/db/kanban-read.js';
+import { clearSecrets } from '../src/secrets.js';
+import { testDb, type TestDb } from './helpers/db.js';
+import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
+import { VI_WORKFLOW, madeOf, viBoard, type ViBoard } from './helpers/routing.js';
+
+/**
+ * The runs a winning stand-in's archive supersedes (workflow routing spec
+ * §9.5): the routed task's undecided run ended `superseded` and its turn
+ * cancelled through the service, on every path a sweep runs by, from whatever
+ * phase the routed task is in.
+ */
+
+let h: TestDb;
+let b: ViBoard;
+let cancelled: string[];
+beforeEach(() => {
+  clearSecrets();
+  h = testDb();
+  cancelled = [];
+  b = viBoard(h, {
+    limits: { failureLimit: 1, transientLimit: 10, transientCooldownS: 300 },
+    cancelRun: (runId) => {
+      cancelled.push(runId);
+      return true;
+    },
+  });
+});
+afterEach(() => h.close());
+
+// Registry is made with va, so another member is open beside it.
+const CVE = { kind: 'cve', verify: true, patch: false, bnpm: true, packages: [] };
+
+let instance = '';
+const memberOf = (step: string) => membersOf(h.db, instance).find((m) => m.step === step)?.taskId ?? '';
+const vaRow = () => settledOf(h.db, instance).find((s) => s.step === 'va');
+const BOOM = "CREATE TEMP TRIGGER boom BEFORE INSERT ON kanban_workflow_settled WHEN NEW.step = 'va' BEGIN SELECT RAISE(ABORT, 'boom'); END;";
+
+async function report(taskId: string, metadata: Record<string, unknown>) {
+  const run = claimed(h.db, taskId);
+  const r = await b.service.complete(taskId, { kind: 'run', runId: run.runId }, { summary: 'done', metadata });
+  closeRun(h.db, run.runId, NOW);
+  return r;
+}
+
+async function routed(file = VI_WORKFLOW): Promise<string> {
+  writeFileSync(join(b.dir, 'vi-workflow.yaml'), file);
+  const w = madeOf(b.service.startWorkflow({ workflow: 'vi-workflow', params: { from: 'json', params: { case: 'CVE-1' } }, createdBy: ALICE, createdVia: VIA }));
+  instance = w.instance.instanceId;
+  await report(w.tasks[0]?.taskId ?? '', CVE);
+  return memberOf('va');
+}
+
+/** va given up, its stand-in done while the routing of va faults: va's row is still to write. */
+async function stoodInUnwritten(va: string): Promise<string> {
+  const run = claimed(h.db, va);
+  b.service.endRun(run.runId, { outcome: 'crashed' });
+  closeRun(h.db, run.runId, NOW);
+  const escalate = memberOf('escalate');
+  h.db.exec(BOOM);
+  expect((await report(escalate, { reachable: true })).ok).toBe(true);
+  expect(vaRow()).toBeUndefined();
+  return escalate;
+}
+
+/** A claim of another member, in a workspace of its own: the default is held by va's rerun. */
+function claimedApart(taskId: string) {
+  h.db.prepare("UPDATE kanban_tasks SET workspace = 'vi' WHERE task_id = ?").run(taskId);
+  const run = b.service.claim(taskId);
+  if (!run.ok) throw new Error(run.message);
+  return run.run;
+}
+
+const SWEEPS: [string, () => void][] = [
+  ['its reconciliation', () => expect(b.service.reconcileWorkflow(instance).ok).toBe(true)],
+  ['the routing retry', () => expect(b.service.retryRouting()).toBe(1)],
+  ["another member's archive", () => expect(b.service.archive(memberOf('registry'), ALICE).ok).toBe(true)],
+  [
+    "a run's block of another member",
+    () => {
+      const run = claimedApart(memberOf('registry'));
+      expect(b.service.block(memberOf('registry'), { kind: 'run', runId: run.runId }, { kind: 'capability', reason: 'no network' }).ok).toBe(true);
+    },
+  ],
+  [
+    "another member's give-up",
+    () => {
+      const run = claimedApart(memberOf('registry'));
+      expect(b.service.endRun(run.runId, { outcome: 'crashed' }).ok).toBe(true);
+    },
+  ],
+];
+
+describe("a winning stand-in's superseded runs", () => {
+  it("archives the routed task's rerun from open when the stand-in wins, its run superseded, returned and cancelled", async () => {
+    const va = await routed();
+    const run = claimed(h.db, va);
+    b.service.endRun(run.runId, { outcome: 'crashed' });
+    closeRun(h.db, run.runId, NOW);
+    const escalate = memberOf('escalate');
+    expect(b.service.unblock(va, ALICE).ok).toBe(true);
+    const rerun = b.service.claim(va);
+    if (!rerun.ok) throw new Error(rerun.message);
+    // The stand-in's run, through the service: its workspace is the default's too, held by va's rerun, so it reports as a person's would not.
+    const stand = claimedApart(escalate);
+    const r = await b.service.complete(escalate, { kind: 'run', runId: stand.runId }, { summary: 'done', metadata: { reachable: true } });
+    expect(r).toMatchObject({ ok: true, superseded: [{ runId: rerun.run.runId, outcome: 'superseded' }] });
+    expect(getRun(h.db, rerun.run.runId)?.outcome).toBe('superseded');
+    expect(eventsOf(h.db, va).find((e) => e.kind === 'archived')?.payload).toMatchObject({ from: 'open', standIn: escalate });
+    expect(cancelled).toEqual([rerun.run.runId]);
+  });
+
+  it.each(SWEEPS)("ends the routed task's claimed rerun superseded and cancels its turn when %s writes the stand-in's row", async (_how, sweep) => {
+    const va = await routed();
+    const escalate = await stoodInUnwritten(va);
+    expect(b.service.unblock(va, ALICE).ok).toBe(true);
+    const rerun = b.service.claim(va);
+    if (!rerun.ok) throw new Error(rerun.message);
+    h.db.exec('DROP TRIGGER boom');
+    sweep();
+    expect(vaRow()).toMatchObject({ how: 'stood_in', taskId: escalate });
+    expect(getRun(h.db, rerun.run.runId)?.outcome).toBe('superseded');
+    expect(eventsOf(h.db, va).find((e) => e.kind === 'archived')?.payload).toMatchObject({ from: 'open', standIn: escalate });
+    expect(cancelled).toEqual([rerun.run.runId]);
+  });
+
+  it("ends the routed task's review run superseded when the stand-in wins over it in review", async () => {
+    const va = await routed(
+      VI_WORKFLOW.replace('    assignee: vulnerability-analyst\n', '    assignee: vulnerability-analyst\n    reviewer: { role: assessment-reviewer }\n'),
+    );
+    const run = claimed(h.db, va);
+    b.service.endRun(run.runId, { outcome: 'crashed' });
+    closeRun(h.db, run.runId, NOW);
+    const escalate = memberOf('escalate');
+    h.db.exec(BOOM);
+    expect(await report(escalate, { reachable: true })).toMatchObject({ ok: true, task: { phase: 'review' } });
+    const approve = claimed(h.db, escalate);
+    expect((await b.service.complete(escalate, { kind: 'run', runId: approve.runId }, { summary: 'LGTM' })).ok).toBe(true);
+    closeRun(h.db, approve.runId, NOW);
+    expect(vaRow()).toBeUndefined();
+    expect(b.service.unblock(va, ALICE).ok).toBe(true);
+    expect(await report(va, { reachable: false })).toMatchObject({ ok: true, task: { phase: 'review' } });
+    const review = b.service.claim(va);
+    if (!review.ok) throw new Error(review.message);
+    h.db.exec('DROP TRIGGER boom');
+    expect(b.service.reconcileWorkflow(instance).ok).toBe(true);
+    expect(vaRow()).toMatchObject({ how: 'stood_in', taskId: escalate });
+    expect(getRun(h.db, review.run.runId)?.outcome).toBe('superseded');
+    expect(eventsOf(h.db, va).find((e) => e.kind === 'archived')?.payload).toMatchObject({ from: 'review', standIn: escalate });
+    expect(cancelled).toEqual([review.run.runId]);
+  });
+});
+```
+
+- [ ] **Step 26.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-superseded.test.ts`. Expected: `Tests  7 failed (7)`, the first as `AssertionError: expected { ok: true, task: { …(34) }, …(1) } to match object { ok: true, superseded: [ { …(2) } ] }`.
+
+- [ ] **Step 26.3: Implement.**
 
 In `src/db/kanban.ts`, replace:
 
@@ -10384,258 +11954,6 @@ with:
 In `src/db/kanban.ts`, replace:
 
 ```ts
-  outcome: 'made' | 'skipped' | 'fanned_out' | 'routed' | 'over_limit' | 'over_cap';
-```
-
-with:
-
-```ts
-  outcome: 'made' | 'skipped' | 'fanned_out' | 'routed' | 'over_limit' | 'over_cap' | 'stood_in' | 'unread';
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-}
-
-/**
- * The sweep (§9.2 step 2): each member with a settling fact gets its settled row,
-```
-
-with:
-
-```ts
-}
-
-/** What a sweep did beyond its rows (§5.2, §9.5): its lines, and the runs its stand-ins' archives superseded. */
-interface Swept {
-  lines: RoutedLine[];
-  superseded: RunRow[];
-}
-
-/**
- * The sweep (§9.2 step 2): each member with a settling fact gets its settled row,
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
- * its winner the earliest fact by event id, its own task's `completed` event or
- * its `archived` event when that archive was not from `done`; each fan-out
- * whose items all have rows, its own, `archived` when every item was archived
- * undone. Plain steps included; a handler's task is no step's member here.
-```
-
-with:
-
-```ts
- * its winner the earliest fact by event id, among its own task's `completed`
- * event, each of its stand-ins' `completed` events, and its own `archived`
- * event when that archive was not from `done`; each fan-out whose items all have
- * rows, its own, `archived` when every item was archived undone. Plain steps
- * included; a handler's task is no step's member here. Only once a row is
- * written for a stand-in is the routed task archived, unless it is already, its
- * superseded run returned; and only when a row is written for the task's own
- * completion is each stand-in left open told its result will not be read.
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-function sweep(d: Db, r: Routed, now: number): void {
-```
-
-with:
-
-```ts
-function sweep(d: Db, r: Routed, now: number): Swept {
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-  const id = r.instance.instanceId;
-  const handlers = new Set(r.plan.steps.filter((s) => s.handler === true).map((s) => s.step));
-```
-
-with:
-
-```ts
-  const id = r.instance.instanceId;
-  const out: Swept = { lines: [], superseded: [] };
-  const handlers = new Map(r.plan.steps.filter((s) => s.handler === true).map((s) => [s.step, s]));
-  const routes = routesOf(d, id);
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-    const archive = archived !== undefined && isRecord(archived.payload) && archived.payload['from'] !== 'done' ? archived : undefined;
-```
-
-with:
-
-```ts
-    const archive = archived !== undefined && isRecord(archived.payload) && archived.payload['from'] !== 'done' ? archived : undefined;
-    // Its stand-ins: the handlers routed from its task that stand in for its step (§5.2).
-    const standIns = routes.filter((x) => x.fromTask === m.taskId && x.outcome === 'made' && x.taskId !== null && handlers.get(x.handler)?.stands_in_for === m.step);
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-      ...(completed === undefined ? [] : [{ how: 'done', taskId: m.taskId as string | null, eventId: completed.id }]),
-      ...(archive === undefined ? [] : [{ how: 'archived', taskId: null, eventId: archive.id }]),
-```
-
-with:
-
-```ts
-      ...(completed === undefined ? [] : [{ how: 'done', taskId: m.taskId as string | null, eventId: completed.id, handler: undefined as string | undefined }]),
-      ...(archive === undefined ? [] : [{ how: 'archived', taskId: null, eventId: archive.id, handler: undefined }]),
-      ...standIns.flatMap((x) => {
-        const done = firstEventOf(d, x.taskId as string, 'completed');
-        return done === undefined ? [] : [{ how: 'stood_in', taskId: x.taskId, eventId: done.id, handler: x.handler }];
-      }),
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-    if (settle(d, id, m.step, m.ref, winner.how, winner.taskId, winner.eventId, now)) taken.add(`${m.step}\u0000${m.ref}`);
-```
-
-with:
-
-```ts
-    if (!settle(d, id, m.step, m.ref, winner.how, winner.taskId, winner.eventId, now)) continue;
-    taken.add(`${m.step}\u0000${m.ref}`);
-    if (winner.how === 'stood_in' && winner.taskId !== null) standingIn(d, r, m, winner.taskId, winner.handler ?? '', now, out);
-    if (winner.how === 'done') {
-      for (const x of standIns) {
-        const left = getTask(d, x.taskId as string);
-        if (left === undefined || left.phase === 'done' || left.phase === 'archived') continue;
-        insertComment(d, left.taskId, 'gateway', `${m.step} was completed by its own task ${m.taskId}; this handler's result will not be read: finish or archive it`, now, false);
-        out.lines.push({ step: m.step, outcome: 'unread', why: `${m.step} was completed by its own task`, taskIds: [left.taskId], handler: x.handler });
-      }
-    }
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-    settle(d, id, s.step, s.step, how, null, Math.max(...items.map((x) => x.eventId)), now);
-  }
-}
-```
-
-with:
-
-```ts
-    settle(d, id, s.step, s.step, how, null, Math.max(...items.map((x) => x.eventId)), now);
-  }
-  return out;
-}
-
-/**
- * A stand-in won its member (§5.2): the routed task archived, unless it is
- * already, from whatever phase it is in, its undecided run superseded, the
- * archive naming the instance and the stand-in, with a comment that does not
- * steer; and the line saying it stood in, with its outputs.
- */
-function standingIn(d: Db, r: Routed, m: MemberRow & { task: TaskRow }, standIn: string, handler: string, now: number, out: Swept): void {
-  const ref = memberOf(d, standIn)?.ref ?? handler;
-  const routed = mustGet(d, m.taskId);
-  const outputs = r.plan.steps.find((s) => s.step === m.step)?.outputs ?? {};
-  const metadata = latestCompletion(d, standIn)?.metadata;
-  const said = outputsText(outputs, isRecord(metadata) ? metadata : null);
-  out.lines.push({ step: m.step, outcome: 'stood_in', why: said, taskIds: [m.taskId], handler });
-  if (routed.phase === 'archived') return;
-  const archived = archiveIn(d, routed, 'gateway', now, { workflow: r.instance.instanceId, standIn });
-  if (archived.run !== undefined) out.superseded.push(archived.run);
-  insertComment(d, m.taskId, 'gateway', `Stood in for by ${ref} (${standIn}), whose result is read in ${m.step}'s place.`, now, false);
-}
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number, team: RouteTeam | undefined): RoutedLine[] {
-  const lines: RoutedLine[] = [];
-```
-
-with:
-
-```ts
-function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number, team: RouteTeam | undefined): Swept {
-  const out: Swept = { lines: [], superseded: [] };
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-  if (first === undefined) return lines;
-```
-
-with:
-
-```ts
-  if (first === undefined) return out;
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-    sweep(d, r, now);
-```
-
-with:
-
-```ts
-    const swept = sweep(d, r, now);
-    out.lines.push(...swept.lines);
-    out.superseded.push(...swept.superseded);
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-    if (decisions.length === 0) break;
-```
-
-with:
-
-```ts
-    if (decisions.length === 0 && swept.lines.length === 0) break;
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-      if (line !== undefined) lines.push(line);
-```
-
-with:
-
-```ts
-      if (line !== undefined) out.lines.push(line);
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
-  return lines;
-```
-
-with:
-
-```ts
-  return out;
-```
-
-In `src/db/kanban.ts`, replace:
-
-```ts
 function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): void {
   if (!hasRouting(d)) return;
 ```
@@ -10711,7 +12029,7 @@ In `src/db/kanban.ts`, replace:
 
 ```ts
   if (planned === undefined) return;
-  const lines = decideAll(d, planned.instance, eventId, now, team);
+  const { lines } = decideAll(d, planned.instance, eventId, now, team);
   if (lines.length === 0) return;
 ```
 
@@ -10762,7 +12080,7 @@ with:
 In `src/db/kanban.ts`, replace:
 
 ```ts
-    const decisions = decideAll(d, instance, null, now, team);
+    const { lines: decisions } = decideAll(d, instance, null, now, team);
 ```
 
 with:
@@ -10795,35 +12113,6 @@ with:
       wake: { enabled: config.kanban.wake.enabled, maxDepth: config.kanban.wake.maxDepth },
       // A stand-in's archive supersedes its routed task's run; the dispatcher is built after the service (workflow routing spec §9.5).
       cancelRun: (runId) => dispatcher?.cancel(runId) ?? false,
-```
-
-In `src/kanban/routing.ts`, replace:
-
-```ts
-  ].join('\n');
-}
-```
-
-with:
-
-```ts
-  ].join('\n');
-}
-
-/**
- * A step's accepted outputs as a line says them (§12.1, §12.2): each scalar as
- * `name=value`, a list as its count and name, `3 packages`; missing ones left
- * out; cut at `max` characters.
- */
-export function outputsText(outputs: Outputs, result: Readonly<Record<string, unknown>> | null, max = 120): string {
-  const parts = Object.entries(outputs).flatMap(([name, t]) => {
-    const value = result?.[name];
-    if (!ofType(t, value)) return [];
-    return Array.isArray(value) ? [`${value.length} ${name}`] : [`${name}=${valueSaid(value)}`];
-  });
-  const text = parts.join(', ');
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
-}
 ```
 
 In `src/kanban/service.ts`, replace:
@@ -10963,26 +12252,26 @@ with:
     return this.#cancelled(board.reconcileWorkflow(this.#db, instanceId, this.#clock.now(), this.#facts()));
 ```
 
-- [ ] **Step 23.4: Run them to verify they pass.** Run the same command. Expected: `Tests  8 passed (8)`.
+- [ ] **Step 26.4: Run them to verify they pass.** Run the same command. Expected: `Tests  7 passed (7)`.
 
-- [ ] **Step 23.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3701 passed (3701)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 26.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3725 passed (3725)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 23.6: Commit.**
+- [ ] **Step 26.6: Commit.**
 
 ```bash
-git add src/db/kanban.ts src/index.ts src/kanban/routing.ts src/kanban/service.ts tests/routing-handler-workspace.test.ts tests/routing-standin-settle.test.ts
-git commit -m "Settle a member for its earliest settling fact, archiving the task a winning stand-in stood in for and cancelling the runs that archive superseded"
+git add src/db/kanban.ts src/index.ts src/kanban/service.ts tests/routing-superseded.test.ts
+git commit -m "End the runs a winning stand-in's archive superseded and cancel their turns through the service, on every path its routing runs by"
 ```
 
 ---
 
 ## Phase 5: what people see, and reconciliation
 
-Tasks 24 to 29. `workflow show`'s step lines and its terminal flags; the notices; the preview, the start's reply and `waiting`; `mt kanban workflow reconcile` and the startup's reconciliation; the documents; and the end-to-end test through `createGateway`. Phase 5 ends green and can be merged alone.
+Tasks 27 to 32. `workflow show`'s step lines and its terminal flags; the notices; the preview, the start's reply and `waiting`; `mt kanban workflow reconcile` and the startup's reconciliation; the documents; and the end-to-end test through `createGateway`. Phase 5 ends green, and the branch is merged whole.
 
 ---
 
-### Task 24: workflow show's step lines
+### Task 27: workflow show's step lines
 
 **Files:**
 
@@ -10991,7 +12280,7 @@ Tasks 24 to 29. `workflow show`'s step lines and its terminal flags; the notices
 
 §12.1. `stepLines` in `routing.ts` makes every step's line, real or pending, in the plan's order; `KanbanService.instance` reads the pending, settled and route rows and the settled steps' results for it, and the failed-routing line's error; `renderInstance` and `instanceText` print each line with its tasks under it. At the terminal, `--json` gains `steps`, `--plan` prints the plan, masked, and `--dag` of an instance with a plan says on stderr that it holds only the steps made at the start.
 
-- [ ] **Step 24.1: Write the tests.**
+- [ ] **Step 27.1: Write the tests.**
 
 Create `tests/routing-show.test.ts`:
 
@@ -11101,6 +12390,23 @@ describe('workflow show of a routed instance', () => {
     expect(anon(text).split('\n')[0]).toBe('**vi-workflow** `w_…`: running, 6 of 10 done · board: **vi**');
   });
 
+  it('says a route the transient limit made by the throttles that stopped its task', async () => {
+    const w = madeOf(service.startWorkflow({ workflow: 'vi-workflow', params: { from: 'json', params: { case: 'CVE-1' } }, createdBy: ALICE, createdVia: VIA }));
+    await done(w.tasks[0]?.taskId ?? '', { kind: 'cve', verify: false, patch: false, bnpm: false, packages: [] });
+    const va = membersOf(db, w.instance.instanceId).find((m) => m.step === 'va')?.taskId ?? '';
+    for (let n = 1; n <= 10; n += 1) {
+      // The cooldown lifted at once: the clock here does not move.
+      db.prepare('UPDATE kanban_tasks SET cooldown_until = NULL WHERE task_id = ?').run(va);
+      const run = claimed(db, va);
+      service.endRun(run.runId, { outcome: 'rate_limited' });
+      closeRun(db, run.runId, NOW);
+    }
+    const r = service.instance(w.instance.instanceId);
+    if (!r.ok) throw new Error(r.message);
+    const text = renderInstance(r.view, 'vi', () => 'x', () => undefined);
+    expect(anon(text)).toContain('↪ escalate: routed from va \\(stopped after 10 throttles\\), standing in');
+  });
+
   it('adds the failed-routing line while the fault is not reconciled', async () => {
     const w = madeOf(service.startWorkflow({ workflow: 'vi-workflow', params: { from: 'json', params: { case: 'CVE-1' } }, createdBy: ALICE, createdVia: VIA }));
     db.exec("CREATE TEMP TRIGGER boom BEFORE INSERT ON kanban_workflow_settled BEGIN SELECT RAISE(ABORT, 'cannot write'); END;");
@@ -11158,9 +12464,9 @@ describe('mt kanban workflow show of a routed instance', () => {
 });
 ```
 
-- [ ] **Step 24.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-show.test.ts`. Expected: `Tests  4 failed (4)`, the first as `AssertionError: expected [ 'Params: case: CVE-1', …(10) ] to deeply equal [ 'Params: case: CVE-1', …(14) ]`.
+- [ ] **Step 27.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-show.test.ts`. Expected: `Tests  5 failed (5)`, the first as `AssertionError: expected [ 'Params: case: CVE-1', …(10) ] to deeply equal [ 'Params: case: CVE-1', …(14) ]`.
 
-- [ ] **Step 24.3: Implement.**
+- [ ] **Step 27.3: Implement.**
 
 In `README.md`, replace:
 
@@ -11746,11 +13052,11 @@ with:
 
 ```
 
-- [ ] **Step 24.4: Run them to verify they pass.** Run the same command. Expected: `Tests  4 passed (4)`.
+- [ ] **Step 27.4: Run them to verify they pass.** Run the same command. Expected: `Tests  5 passed (5)`.
 
-- [ ] **Step 24.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3705 passed (3705)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 27.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3730 passed (3730)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 24.6: Commit.**
+- [ ] **Step 27.6: Commit.**
 
 ```bash
 git add README.md src/cli/mt.ts src/cli/operator.ts src/cli/plain.ts src/db/kanban-read.ts src/kanban/chat-render.ts src/kanban/routing.ts src/kanban/service.ts tests/routing-show.test.ts
@@ -11759,7 +13065,7 @@ git commit -m "Say every step of a routed instance in workflow show, where it is
 
 ---
 
-### Task 25: The notices
+### Task 28: The notices
 
 **Files:**
 
@@ -11768,7 +13074,7 @@ git commit -m "Say every step of a routed instance in workflow show, where it is
 
 §12.2. `renderNotice` renders `workflow_routed`, after the transition's title and its trigger, one line a decision, and `workflow_route_failed` only when `first`; both from their payloads alone. Neither wakes: `WAKE_KINDS` is unchanged.
 
-- [ ] **Step 25.1: Write the tests.**
+- [ ] **Step 28.1: Write the tests.**
 
 Create `tests/routing-notices.test.ts`:
 
@@ -11867,6 +13173,20 @@ describe('the routing notices', () => {
     ]);
   });
 
+  it('says a route after the transient limit stopped its task, by its throttles', async () => {
+    const intake = await start();
+    await report(intake, { kind: 'cve', verify: false, patch: false, bnpm: false, packages: [] });
+    const va = step('va')[0] ?? '';
+    for (let n = 1; n <= 10; n += 1) {
+      // The cooldown lifted at once: the clock here does not move.
+      h.db.prepare('UPDATE kanban_tasks SET cooldown_until = NULL WHERE task_id = ?').run(va);
+      const run = claimed(h.db, va);
+      b.service.endRun(run.runId, { outcome: 'rate_limited' });
+      closeRun(h.db, run.runId, NOW);
+    }
+    expect(notices(va)).toEqual(['After **CVE-1 · va** `k_…` stopped after 10 throttles, in vi-workflow `w_…`:\n- ↪ escalate routed from va: `k_…`, standing in']);
+  });
+
   it("says a fourth give-up over the limit, and a stand-in left open once the routed task's own completion won", async () => {
     const intake = await start();
     await report(intake, { kind: 'cve', verify: false, patch: false, bnpm: false, packages: [] });
@@ -11925,9 +13245,9 @@ describe('the routing notices', () => {
 });
 ```
 
-- [ ] **Step 25.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-notices.test.ts`. Expected: `Tests  5 failed | 1 passed (6)`, the first as `AssertionError: expected [ undefined ] to deeply equal [ Array(1) ]`.
+- [ ] **Step 28.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-notices.test.ts`. Expected: `Tests  6 failed | 1 passed (7)`, the first as `AssertionError: expected [ undefined ] to deeply equal [ Array(1) ]`.
 
-- [ ] **Step 25.3: Implement.**
+- [ ] **Step 28.3: Implement.**
 
 In `src/db/kanban.ts`, replace:
 
@@ -12054,11 +13374,11 @@ with:
     }
 ```
 
-- [ ] **Step 25.4: Run them to verify they pass.** Run the same command. Expected: `Tests  6 passed (6)`.
+- [ ] **Step 28.4: Run them to verify they pass.** Run the same command. Expected: `Tests  7 passed (7)`.
 
-- [ ] **Step 25.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3711 passed (3711)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 28.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3737 passed (3737)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 25.6: Commit.**
+- [ ] **Step 28.6: Commit.**
 
 ```bash
 git add src/db/kanban.ts src/kanban/chat-render.ts tests/routing-notices.test.ts
@@ -12067,37 +13387,44 @@ git commit -m "Say each routing decision in one notice after the transition that
 
 ---
 
-### Task 26: The preview, the start's reply and waiting
+### Task 29: The preview, the start's reply and waiting
 
 **Files:**
 
 - Create: `tests/routing-preview.test.ts`
 - Modify: `src/cli/operator.ts`, `src/cli/plain.ts`, `src/db/kanban.ts`, `src/kanban/chat-render.ts`, `src/kanban/chat.ts`, `src/kanban/routing.ts`, `src/kanban/service.ts`, `src/kanban/worker.ts`
 
-§12.3, §13.2. The preview lists the plain tasks, then each step made later in §6's words, a result fan-out with its bound, its first line counting both, the most from the lists' `max` and 3 routes a routed task, `at most 500 in all` past the cap; chat's and the terminal's alike. The start's reply says the steps to come, from chat and, by `workflow_started`'s `waiting`, from the terminal. `WorkflowMade.waiting` names the steps still waiting, in the worker's `start-workflow` answer, `--json`, and a repeat's answer.
+§12.3, §13.2. The preview lists the plain tasks, then each step made later in §6's words, a result fan-out with its bound, its first line counting both, the most from the lists' `max` and 3 routes a routed task, `at most 500 in all` past the cap; chat's and the terminal's alike. The start's reply says the steps to come, from chat and, by `workflow_started`'s `waiting`, from the terminal. `WorkflowMade.waiting` names the steps still waiting, in the worker's `start-workflow` answer, `--json`, and a repeat's answer. An instance started before migration 015 is as it was: no plan and no rows, its completions writing nothing, and no `waiting` in a repeat's answer.
 
-- [ ] **Step 26.1: Write the tests.**
+- [ ] **Step 29.1: Write the tests.**
 
 Create `tests/routing-preview.test.ts`:
 
 ```ts
+import { copyFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { closeRun } from '../src/db/kanban.js';
-import { eventsOf } from '../src/db/kanban-read.js';
+import { closeRun, createBoard } from '../src/db/kanban.js';
+import { eventsOf, getInstance } from '../src/db/kanban-read.js';
+import { migrate, openDb } from '../src/db/open.js';
+import { KanbanService } from '../src/kanban/service.js';
 import { previewLines, renderNotice, renderPreview, renderStarted, startedReply } from '../src/kanban/chat-render.js';
 import { mostLater, type Plan } from '../src/kanban/routing.js';
 import { previewText } from '../src/cli/plain.js';
 import { clearSecrets } from '../src/secrets.js';
-import { testDb, type TestDb } from './helpers/db.js';
+import { ManualClock, SCHEMA_DIR, testDb, type TestDb } from './helpers/db.js';
 import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
-import { madeOf, viBoard, workerRun, type ViBoard } from './helpers/routing.js';
+import { madeOf, viBoard, viRoles, workerRun, type ViBoard } from './helpers/routing.js';
+import { VENDOR_EVAL } from './helpers/workflow.js';
 
 /**
  * A routed file's preview and start (workflow routing spec §12.3, §13.2): the
  * plain tasks, then each step made later in the words of a check, the first line
  * counting both, at most 500 in all; the start's reply's line of steps to come;
  * `waiting` in the worker's and the terminal's answers, and a repeat's answer
- * with every member now and the steps still waiting.
+ * with every member now and the steps still waiting; an instance started before
+ * migration 015 left as it was, with no plan, and no `waiting`.
  */
 
 let h: TestDb;
@@ -12189,11 +13516,61 @@ describe('the start of a routed file', () => {
     expect(renderNotice(started, first.task, { blockRecurrenceLimit: 3 })).toContain('6 more steps are made as results come');
   });
 });
+
+describe('an instance started before migration 015', () => {
+  it('has no plan and no rows, its completions write nothing, its show, list, archive and repeat as before', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mt-routing-old-'));
+    try {
+      const only = mkdtempSync(join(dir, 'schema-'));
+      for (const f of readdirSync(SCHEMA_DIR)) {
+        if (/^01[0-4]_.*\.sql$/.test(f) || /^00[1-9]_.*\.sql$/.test(f)) copyFileSync(join(SCHEMA_DIR, f), join(only, f));
+      }
+      const d = openDb(join(dir, 'team.db'));
+      try {
+        expect(migrate(d, only)).toBe(14);
+        createBoard(d, 'vi', ALICE, NOW);
+        writeFileSync(join(b.dir, 'vendor-eval.yaml'), VENDOR_EVAL);
+        const roles = viRoles();
+        for (const name of ['worker', 'reviewer']) roles.set(name, viRoles().get('verifier') as never);
+        const service = () => new KanbanService({ db: d, roles, workspaces: new Set(['default']), supervisedRoles: true, workflowsDir: b.dir, clock: new ManualClock(NOW) });
+        const old = service();
+        const params = { from: 'json', params: { topic: 't', vendors: ['a'] } } as const;
+        const start = (s: KanbanService) => s.startWorkflow({ workflow: 'vendor-eval', params, createdBy: ALICE, createdVia: VIA, idempotencyKey: 'lark:om_old' });
+        const made = madeOf(start(old));
+        const id = made.instance.instanceId;
+        const shown = old.instance(id);
+        const listed = old.instances('default', true);
+        expect(shown.ok && listed.instances.map((i) => i.instance.instanceId)).toEqual([id]);
+        expect(migrate(d, SCHEMA_DIR)).toBe(15);
+        const now = service();
+        expect(getInstance(d, id)).toMatchObject({ plan: null, routingFailedAt: null });
+        expect(now.instance(id)).toEqual(shown);
+        expect(now.instances('default', true)).toEqual(listed);
+        const shortlist = made.tasks[0]?.taskId ?? '';
+        const run = claimed(d, shortlist);
+        expect((await now.complete(shortlist, { kind: 'run', runId: run.runId }, { summary: 'x' })).ok).toBe(true);
+        closeRun(d, run.runId, NOW);
+        expect(eventsOf(d, shortlist).filter((e) => e.kind.startsWith('workflow_route'))).toEqual([]);
+        for (const table of ['kanban_workflow_pending', 'kanban_workflow_settled', 'kanban_workflow_routes']) {
+          expect(d.prepare(`SELECT count(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
+        }
+        const again = madeOf(start(now));
+        expect(again.existing).toBe(true);
+        expect(again).not.toHaveProperty('waiting');
+        expect(now.archiveWorkflow(id, ALICE).ok).toBe(true);
+      } finally {
+        d.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 ```
 
-- [ ] **Step 26.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-preview.test.ts`. Expected: `Tests  4 failed (4)`, the first as `AssertionError: expected [ …(3) ] to deeply equal [ …(10) ]`.
+- [ ] **Step 29.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/routing-preview.test.ts`. Expected: `Tests  4 failed | 1 passed (5)`, the first as `AssertionError: expected [ …(3) ] to deeply equal [ …(10) ]`.
 
-- [ ] **Step 26.3: Implement.**
+- [ ] **Step 29.3: Implement.**
 
 In `src/cli/operator.ts`, replace:
 
@@ -12618,11 +13995,11 @@ with:
     ...(r.waiting === undefined ? {} : { waiting: r.waiting }),
 ```
 
-- [ ] **Step 26.4: Run them to verify they pass.** Run the same command. Expected: `Tests  4 passed (4)`.
+- [ ] **Step 29.4: Run them to verify they pass.** Run the same command. Expected: `Tests  5 passed (5)`.
 
-- [ ] **Step 26.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3715 passed (3715)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 29.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3742 passed (3742)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 26.6: Commit.**
+- [ ] **Step 29.6: Commit.**
 
 ```bash
 git add src/cli/operator.ts src/cli/plain.ts src/db/kanban.ts src/kanban/chat-render.ts src/kanban/chat.ts src/kanban/routing.ts src/kanban/service.ts src/kanban/worker.ts tests/routing-preview.test.ts
@@ -12631,16 +14008,16 @@ git commit -m "List a routed file's steps made later in its preview, counting wh
 
 ---
 
-### Task 27: Reconciliation
+### Task 30: Reconciliation
 
 **Files:**
 
 - Create: `tests/routing-reconcile.test.ts`
-- Modify: `README.md`, `src/cli/mt.ts`, `src/cli/operator.ts`, `src/db/kanban-read.ts`, `src/index.ts`, `src/kanban/service.ts`, `tests/mt-kanban-workflow.test.ts`
+- Modify: `README.md`, `src/cli/mt.ts`, `src/cli/operator.ts`, `src/db/kanban-read.ts`, `src/db/kanban.ts`, `src/index.ts`, `src/kanban/service.ts`, `tests/mt-kanban-workflow.test.ts`
 
-§11. `mt kanban workflow reconcile w_… [--board] [--json]` reconciles an instance, answering each decision or `nothing was due`, then the nudge; `KanbanService.reconcileAll` reconciles every instance with something due, `routingDue`, which the gateway runs once it has built the service, saying `workflows: reconciled 2 instances, 3 steps decided` when one was decided.
+§11. `mt kanban workflow reconcile w_… [--board] [--json]` reconciles an instance, answering each decision or `nothing was due`, then the nudge; `KanbanService.reconcileAll` reconciles every instance with something due, `routingDue`, which the gateway runs once it has built the service, saying `workflows: reconciled 2 instances, 3 steps decided` when one was decided. A blocked member makes its instance due only when its step routes and has a route due. A reconciliation that throws marks an instance not yet marked, says it once, and `mt` answers it in one line.
 
-- [ ] **Step 27.1: Write the tests.**
+- [ ] **Step 30.1: Write the tests.**
 
 In `tests/mt-kanban-workflow.test.ts`, replace:
 
@@ -12665,7 +14042,7 @@ import { loadConfig } from '../src/config.js';
 import { createGateway } from '../src/index.js';
 import { loadTeam } from '../src/team.js';
 import { closeRun, createBoard } from '../src/db/kanban.js';
-import { getInstance, membersOf } from '../src/db/kanban-read.js';
+import { eventsOf, getInstance, membersOf, routingDue } from '../src/db/kanban-read.js';
 import { migrate, openDb, type Db } from '../src/db/open.js';
 import { KanbanService } from '../src/kanban/service.js';
 import { clearSecrets } from '../src/secrets.js';
@@ -12678,7 +14055,8 @@ import { VI_ROLES, VI_WORKFLOW, madeOf, viRoles } from './helpers/routing.js';
  * Reconciliation (workflow routing spec §11): `mt kanban workflow reconcile`,
  * its answers, `--json`, its refusals and its nudge; and the service's startup
  * reconciliation of every instance with something due, nothing for one with
- * nothing, a handler never making one due.
+ * nothing, a handler never making one due, nor a blocked member with no route
+ * due; and a reconciliation's fault marked and said once, mt's error a line.
  */
 
 let f: MtFixture;
@@ -12736,6 +14114,21 @@ describe('mt kanban workflow reconcile', () => {
     expect(await mt(id)).toEqual({ code: 0, out: `${id}: nothing was due`, err: '' });
   });
 
+  it('answers a fault in one line, the instance marked and the fault said once', async () => {
+    const id = await faulted();
+    db.prepare('UPDATE kanban_workflow_instances SET routing_failed_at = NULL').run();
+    // Not a temporary trigger: mt opens the database on a connection of its own.
+    db.exec("CREATE TRIGGER made BEFORE INSERT ON kanban_tasks BEGIN SELECT RAISE(ABORT, 'no task can be made'); END;");
+    expect(await mt(id)).toEqual({ code: 1, out: '', err: `mt: the routing of ${id} failed: no task can be made; the gateway tries again` });
+    expect(getInstance(db, id)?.routingFailedAt).not.toBeNull();
+    expect(await mt(id)).toMatchObject({ code: 1 });
+    db.exec('DROP TRIGGER made');
+    const intake = membersOf(db, id)[0]?.taskId ?? '';
+    const failed = eventsOf(db, intake).filter((e) => e.kind === 'workflow_route_failed').map((e) => e.payload);
+    expect(failed.at(-1)).toEqual({ workflow: id, workflowName: 'vi-workflow', error: 'no task can be made', first: true });
+    expect(failed.filter((p) => (p as { first: boolean }).first).length).toBe(2);
+  });
+
   it('answers --json with each decision and its tasks, and refuses an unknown instance and another board', async () => {
     const id = await faulted();
     const r = JSON.parse((await mt(id, '--json')).out) as { ok: boolean; instance_id: string; decisions: Array<{ step: string; outcome: string; task_ids: string[] }> };
@@ -12752,6 +14145,53 @@ describe("the startup's reconciliation", () => {
     await faulted();
     expect(service.reconcileAll()).toEqual({ instances: 1, steps: 4 });
     expect(service.reconcileAll()).toEqual({ instances: 0, steps: 0 });
+  });
+
+  it('marks an instance whose reconciliation faults, and says it once', async () => {
+    const id = await faulted();
+    db.prepare('UPDATE kanban_workflow_instances SET routing_failed_at = NULL').run();
+    db.exec("CREATE TEMP TRIGGER made BEFORE INSERT ON kanban_tasks BEGIN SELECT RAISE(ABORT, 'no task can be made'); END;");
+    expect(service.reconcileAll()).toEqual({ instances: 0, steps: 0 });
+    expect(getInstance(db, id)?.routingFailedAt).toBe(NOW);
+    expect(service.retryRouting()).toBe(0);
+    const intake = membersOf(db, id)[0]?.taskId ?? '';
+    expect(eventsOf(db, intake).filter((e) => e.kind === 'workflow_route_failed' && (e.payload as { error: string }).error === 'no task can be made').length).toBe(1);
+  });
+
+  it('counts a blocked member only when its step routes and a route is due', () => {
+    writeFileSync(
+      join(f.home, 'workflows', 'blocks.yaml'),
+      `board: vi
+steps:
+  a:
+    title: a
+    assignee: vi-coordinator
+  b:
+    title: b
+    assignee: verifier
+    on_blocked: { route: h }
+  h:
+    title: h
+    assignee: vi-coordinator
+    handler: true
+`,
+    );
+    const w = madeOf(service.startWorkflow({ workflow: 'blocks', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA }));
+    const [a, bb] = [w.tasks[0]?.taskId ?? '', w.tasks[1]?.taskId ?? ''];
+    const block = (taskId: string) => {
+      const run = claimed(db, taskId);
+      expect(service.block(taskId, { kind: 'run', runId: run.runId }, { kind: 'capability', reason: 'no network' }).ok).toBe(true);
+      closeRun(db, run.runId, NOW);
+    };
+    block(a);
+    expect(routingDue(db)).toEqual([]);
+    db.exec("CREATE TEMP TRIGGER noroute BEFORE INSERT ON kanban_workflow_routes BEGIN SELECT RAISE(ABORT, 'boom'); END;");
+    block(bb);
+    db.exec('DROP TRIGGER noroute');
+    db.prepare('UPDATE kanban_workflow_instances SET routing_failed_at = NULL').run();
+    expect(routingDue(db)).toEqual([w.instance.instanceId]);
+    expect(service.reconcileAll()).toEqual({ instances: 1, steps: 1 });
+    expect(routingDue(db)).toEqual([]);
   });
 
   it("is said in one note at the gateway's start, before its dispatcher's first pass", async () => {
@@ -12788,9 +14228,9 @@ describe("the startup's reconciliation", () => {
 });
 ```
 
-- [ ] **Step 27.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-kanban-workflow.test.ts tests/routing-reconcile.test.ts`. Expected: `Tests  5 failed | 13 passed (18)`, the first as `AssertionError: expected 'mt: kanban workflow takes list, insta…' to match /^mt: kanban workflow takes list, inst…/`.
+- [ ] **Step 30.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/mt-kanban-workflow.test.ts tests/routing-reconcile.test.ts`. Expected: `Tests  8 failed | 13 passed (21)`, the first as `AssertionError: expected 'mt: kanban workflow takes list, insta…' to match /^mt: kanban workflow takes list, inst…/`.
 
-- [ ] **Step 27.3: Implement.**
+- [ ] **Step 30.3: Implement.**
 
 In `README.md`, replace:
 
@@ -12904,7 +14344,13 @@ function reconcileInstance(rest: readonly string[], io: MtIo): Promise<number> {
     (service) => {
       const guard = instanceOffBoard(service, board, instanceId);
       if (guard !== undefined) return guard;
-      const r = service.reconcileWorkflow(instanceId);
+      let r: ReturnType<KanbanService['reconcileWorkflow']>;
+      try {
+        r = service.reconcileWorkflow(instanceId);
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        return refused({ code: 'routing_failed', message: `the routing of ${instanceId} failed: ${error}; the gateway tries again` });
+      }
       if (!r.ok) return refused(r);
       const said = r.decisions.map((d) => line(decisionText(d), 400)).join('; ');
       return {
@@ -12948,14 +14394,21 @@ with:
 
 /**
  * The instances a startup reconciles (§11): with a plan, and a waiting step, a
- * skipped step not yet settled, a member blocked from its work, or a fault not
- * reconciled. A handler has no row, so it never makes an instance due.
+ * skipped step not yet settled, a member blocked from its work whose step routes
+ * and has a route due, or a fault not reconciled. A handler has no row, so it
+ * never makes an instance due.
  */
 export function routingDue(db: Db): string[] {
   if (!hasRouting(db)) return [];
   return db
-    .prepare<[], { instance_id: string }>(
-      `SELECT i.instance_id FROM kanban_workflow_instances i
+    .prepare<[], { instance_id: string; plan: string; blocked: number }>(
+      `SELECT i.instance_id, json(i.plan) AS plan, (
+          i.routing_failed_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM kanban_workflow_pending p WHERE p.instance_id = i.instance_id AND p.state = 'waiting')
+          AND NOT EXISTS (SELECT 1 FROM kanban_workflow_pending p WHERE p.instance_id = i.instance_id AND p.state = 'skipped'
+                       AND NOT EXISTS (SELECT 1 FROM kanban_workflow_settled s WHERE s.instance_id = p.instance_id AND s.step = p.step AND s.ref = p.step))
+        ) AS blocked
+         FROM kanban_workflow_instances i
         WHERE i.plan IS NOT NULL AND (
           i.routing_failed_at IS NOT NULL
           OR EXISTS (SELECT 1 FROM kanban_workflow_pending p WHERE p.instance_id = i.instance_id AND p.state = 'waiting')
@@ -12966,10 +14419,61 @@ export function routingDue(db: Db): string[] {
         ORDER BY i.created_at, i.instance_id`,
     )
     .all()
+    .filter((r) => r.blocked === 0 || routeDueIn(db, r.instance_id, JSON.parse(r.plan) as Plan))
     .map((r) => r.instance_id);
 }
 
+/** Whether a member blocked from its work has a route due (§5.1, §5.3): its latest block a trigger its step routes by, with no route row for it. */
+function routeDueIn(db: Db, instanceId: string, plan: Plan): boolean {
+  const routes = routesOf(db, instanceId);
+  return db
+    .prepare<[string], { task_id: string; step: string }>(
+      `SELECT m.task_id, m.step FROM kanban_workflow_tasks m JOIN kanban_tasks t ON t.task_id = m.task_id
+        WHERE m.instance_id = ? AND t.phase = 'blocked' AND t.blocked_from = 'open'`,
+    )
+    .all(instanceId)
+    .some((m) => {
+      const step = plan.steps.find((s) => s.step === m.step);
+      const latest = latestBlockOf(db, m.task_id);
+      const t = triggersOf(db, m.task_id).find((x) => x.eventId === latest);
+      if (step === undefined || t === undefined) return false;
+      const spec = t.kind === 'gave_up' ? step.on_gave_up : step.on_blocked;
+      return spec !== 'wait' && !routes.some((x) => x.fromTask === m.task_id && x.eventId === t.eventId);
+    });
+}
+
 /** The instances whose routing faulted and no reconciliation has cleared since, oldest fault first (§9.4). */
+```
+
+In `src/db/kanban.ts`, replace:
+
+```ts
+    return { ok: true, ...withSuperseded({ instance: getInstance(d, instanceId) as InstanceRow, decisions }, superseded) };
+  });
+}
+```
+
+with:
+
+```ts
+    return { ok: true, ...withSuperseded({ instance: getInstance(d, instanceId) as InstanceRow, decisions }, superseded) };
+  });
+}
+
+/**
+ * A reconciliation that threw (§9.4, §11), in a transaction of its own once its
+ * own rolled back: an instance not marked is marked, and one
+ * `workflow_route_failed` event, `first`, goes on its first member, so the fault
+ * is said once and retried on the dispatcher's pass. One marked already is left
+ * as it is, so a retry that faults again says nothing more.
+ */
+export function reconcileFailed(db: Db, instanceId: string, err: unknown, now: number): void {
+  txImmediate(db, (d) => {
+    if (getInstance(d, instanceId)?.routingFailedAt !== null) return;
+    const first = membersOf(d, instanceId)[0];
+    if (first !== undefined) routingFault(d, first.taskId, err, now);
+  });
+}
 ```
 
 In `src/index.ts`, replace:
@@ -13020,13 +14524,25 @@ export type { RoutedLine } from '../db/kanban.js';
 In `src/kanban/service.ts`, replace:
 
 ```ts
-  /**
-   * The dispatcher's hook (workflow routing spec §9.4): every instance whose routing
+    return this.#cancelled(board.reconcileWorkflow(this.#db, instanceId, this.#clock.now(), this.#facts()));
 ```
 
 with:
 
 ```ts
+    try {
+      return this.#cancelled(board.reconcileWorkflow(this.#db, instanceId, this.#clock.now(), this.#facts()));
+    } catch (err) {
+      // Its transaction rolled back: the fault is marked and said in one of its own, then thrown to the caller.
+      try {
+        board.reconcileFailed(this.#db, instanceId, err, this.#clock.now());
+      } catch {
+        // The database refused that too: the caller's error is the reconciliation's.
+      }
+      throw err;
+    }
+  }
+
   /**
    * The startup's reconciliation (workflow routing spec §11): every instance with a
    * plan that may have something due, a waiting step, a skipped step not yet
@@ -13045,30 +14561,26 @@ with:
           steps += r.decisions.length;
         }
       } catch {
-        // Still faulted: its mark stays, and the dispatcher's pass retries it.
+        // Marked by reconcileWorkflow, if it was not: the dispatcher's pass retries it.
       }
     }
     return { instances, steps };
-  }
-
-  /**
-   * The dispatcher's hook (workflow routing spec §9.4): every instance whose routing
 ```
 
-- [ ] **Step 27.4: Run them to verify they pass.** Run the same command. Expected: `Tests  18 passed (18)`.
+- [ ] **Step 30.4: Run them to verify they pass.** Run the same command. Expected: `Tests  21 passed (21)`.
 
-- [ ] **Step 27.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3719 passed (3719)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 30.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3749 passed (3749)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 27.6: Commit.**
+- [ ] **Step 30.6: Commit.**
 
 ```bash
-git add README.md src/cli/mt.ts src/cli/operator.ts src/db/kanban-read.ts src/index.ts src/kanban/service.ts tests/mt-kanban-workflow.test.ts tests/routing-reconcile.test.ts
+git add README.md src/cli/mt.ts src/cli/operator.ts src/db/kanban-read.ts src/db/kanban.ts src/index.ts src/kanban/service.ts tests/mt-kanban-workflow.test.ts tests/routing-reconcile.test.ts
 git commit -m "Reconcile a routed instance at the terminal with mt kanban workflow reconcile, and every instance with something due at the gateway's start"
 ```
 
 ---
 
-### Task 28: The documents
+### Task 31: The documents
 
 **Files:**
 
@@ -13077,7 +14589,7 @@ git commit -m "Reconcile a routed instance at the terminal with mt kanban workfl
 
 §16. The guide's §12 gains "Routing on results", with the folded vi file, how a step is shown, cancelling by `workflow archive`, `reconcile`, and what a handler's directory line needs; the README names the new keys, the commands and the spec; the board's skill tells an agent to report its outputs. The workflows spec already carries its two notes (§0, §17). The docs-examples home gains the vi file's roles, so the guide's file is checked as every documented one is.
 
-- [ ] **Step 28.1: Write the tests.**
+- [ ] **Step 31.1: Write the tests.**
 
 In `tests/docs-examples.test.ts`, replace:
 
@@ -13175,9 +14687,9 @@ describe('the documents of workflow routing', () => {
 });
 ```
 
-- [ ] **Step 28.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/docs-examples.test.ts tests/docs-routing.test.ts`. Expected: `Tests  4 failed | 27 passed (31)`, the first as `Error: docs/kanban-guide.md has no example workflow vi-workflow`.
+- [ ] **Step 31.2: Run them to verify they fail.** Run `npx vitest run --project unit tests/docs-examples.test.ts tests/docs-routing.test.ts`. Expected: `Tests  4 failed | 27 passed (31)`, the first as `Error: docs/kanban-guide.md has no example workflow vi-workflow`.
 
-- [ ] **Step 28.3: Implement.**
+- [ ] **Step 31.3: Implement.**
 
 In `README.md`, replace:
 
@@ -13361,11 +14873,11 @@ top-level key of "metadata", of the type it names; a completion without them is 
 report again in the same run. A good `mt kanban complete`:
 ```
 
-- [ ] **Step 28.4: Run them to verify they pass.** Run the same command. Expected: `Tests  32 passed (32)`.
+- [ ] **Step 31.4: Run them to verify they pass.** Run the same command. Expected: `Tests  32 passed (32)`.
 
-- [ ] **Step 28.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3724 passed (3724)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
+- [ ] **Step 31.5: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3754 passed (3754)`. `npx vitest run --project e2e` gives `Tests  187 passed (187)`.
 
-- [ ] **Step 28.6: Commit.**
+- [ ] **Step 31.6: Commit.**
 
 ```bash
 git add README.md docs/kanban-guide.md skills/mt-kanban/SKILL.md tests/docs-examples.test.ts tests/docs-routing.test.ts
@@ -13374,16 +14886,16 @@ git commit -m "Document routing on results in the guide, the README and the boar
 
 ---
 
-### Task 29: End to end
+### Task 32: End to end
 
 **Files:**
 
 - Create: `tests/routing-gateway.e2e.ts`
 - Modify: `tests/fakes/cli-agent.mjs`
 
-§17's end-to-end test, through `createGateway`, the fake chat and the fake CLI agent in a new `routing` mode that acts on its task's body: the intake's report without its packages refused and the next taken; verify and registry skipped and exposure fanned out in one notice; the items done; va giving up, escalate routed and standing in, va archived with its comment; report joining and reviewed; patch skipped; the instance done; and a restart in the middle deciding nothing twice. This task adds tests only, of what Tasks 1 to 28 built.
+§17's end-to-end test, through `createGateway`, the fake chat and the fake CLI agent in a new `routing` mode that acts on its task's body: the intake's report without its packages refused and the next taken; verify and registry skipped and exposure fanned out in one notice; the items done; va giving up, escalate routed and standing in, va archived with its comment; report joining and reviewed; patch skipped; the instance done; and a restart in the middle deciding nothing twice. This task adds tests only, of what Tasks 1 to 31 built.
 
-- [ ] **Step 29.1: Write the tests.**
+- [ ] **Step 32.1: Write the tests.**
 
 In `tests/fakes/cli-agent.mjs`, replace:
 
@@ -13729,11 +15241,11 @@ describe('workflow routing through createGateway', () => {
 });
 ```
 
-- [ ] **Step 29.2: Run them.** Run `npx vitest run --project e2e tests/routing-gateway.e2e.ts`. Expected: `Tests  1 passed (1)`: this task adds tests only, of what Tasks 1 to 28 built, so they pass from the start.
+- [ ] **Step 32.2: Run them.** Run `npx vitest run --project e2e tests/routing-gateway.e2e.ts`. Expected: `Tests  1 passed (1)`: this task adds tests only, of what Tasks 1 to 31 built, so they pass from the start.
 
-- [ ] **Step 29.3: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3724 passed (3724)`. `npx vitest run --project e2e` gives `Tests  188 passed (188)`.
+- [ ] **Step 32.3: Run everything.** `npm run typecheck` reports no errors. `npx vitest run --project unit` gives `Tests  3754 passed (3754)`. `npx vitest run --project e2e` gives `Tests  188 passed (188)`.
 
-- [ ] **Step 29.4: Commit.**
+- [ ] **Step 32.4: Commit.**
 
 ```bash
 git add tests/fakes/cli-agent.mjs tests/routing-gateway.e2e.ts
@@ -13741,12 +15253,11 @@ git commit -m "Route a vi-style instance end to end through createGateway, a res
 ```
 
 ---
-
 ## Before relying on it: the smoke checklist
 
 From §18, on a gateway of your own, not the live one:
 
-1. Fold the real `vi-workflow`, `-verify`, `-patch`, `-verify-patch`, `vi-supplychain` and `-supplychain-bnpm` into one file as §1 does, with their bodies and gates whole, the description quoted, and run `mt workflow check vi-workflow`: `ok`, the step lines of §6.
+1. Fold the real `vi-workflow`, `-verify`, `-patch`, `-verify-patch`, `vi-supplychain` and `-supplychain-bnpm` into one file as §1 does, with their bodies and gates whole, and run `mt workflow check vi-workflow`: `ok`, the step lines of §6.
 2. Preview it in chat: one task now, and the pending steps and the handler with their words.
 3. Start it for a CVE in the vi chat; the intake reports `verify: false`; see `verify` skipped in one notice in the thread, and `report` still waiting for `va`.
 4. Report `packages` with 101 items: refused, the agent reports again; then three items: three exposure tasks, named in one notice.
