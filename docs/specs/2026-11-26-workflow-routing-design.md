@@ -499,7 +499,12 @@ claim.
 
   The second sentence is `It blocked (capability): <reason>.` for a block; the third is `This task
   helps it: its dependents wait for it, not for you.` without `stands_in_for`. The paragraph is the
-  board's text, masked on write as the body is, and cut with it to the body's 64 KiB (§7.4).
+  board's text, masked on write as the body is, and **kept whole**: when the body would pass its 64 KiB,
+  only the file's part of it is cut (`cutToBytes`, §7.4), so the paragraph always reaches the agent. Its
+  second sentence for the transient limit is `It stopped after 10 throttles: <reason>.`
+- **The worker's `show`** of a handler's task returns `routed_from`, `{"task_id", "step", "item",
+  "event_id"}`, read from its route row and the source's member row, so an agent can read its source
+  from the records whatever its body says.
 - **Where it works.** A handler whose step names no workspace, and whose role names none, is made
   with the routed task's workspace when that is fixed: it is there to look at that task's work, and
   kanban spec §2.3's rule 3 would give it the board's, as it has no parents.
@@ -565,7 +570,8 @@ claim.
   block would route again, falls back to `wait`: no handler is made, and a route row records
   `over_limit` with that event's id, so the notice (§12.2) is said once: `` `k_…` va gave up again, and
   has been routed to escalate 3 times: it waits for a person now (/kanban task unblock k_… [comment])
-  ``.
+  ``, its first clause `va stopped after 10 throttles again` for the transient limit, and `va blocked
+  again` for an `on_blocked` trigger.
 - **At the cap.** A route that would pass the instance's 500 tasks records `over_cap` instead, and
   falls back to `wait` with its notice, `the instance has 500 tasks`, so it is never tried again for
   that event.
@@ -740,7 +746,8 @@ the same `insertTask` (`db/kanban.ts`):
   once, as params are (workflows spec §2): a list as its items joined by `, `, a number as JSON writes
   it, a boolean as `true` or `false`, a skipped step's as `(skipped)` (decided by the user, §20), a
   display placeholder in this text only, which nothing reads as a value (§3.2). `{{item}}`
-  from the item. A handler's body gains its paragraph (§5.2). **Titles and bodies are cut** to `task new`'s limits (512
+  from the item. A handler's body gains its paragraph (§5.2), kept whole, the file's part cut to fit.
+  **Titles and bodies are cut** to `task new`'s limits (512
   bytes, 64 KiB) with `cutToBytes` (`src/kanban/limits.ts`), as a reaction task's are (wake spec
   §19.3): the writer must not refuse for a later step's length, and the start already refused a
   template too long without its results (§6);
@@ -896,8 +903,9 @@ function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, n
    came first: a stand-in's completion whose routing faulted, followed by the routed task's own
    completion, gives the stand-in the row, as its `completed` id is lower; an archive undone whose
    routing faulted, followed by a stand-in's completion, gives `archived`, as the archive's id is lower.
-3. It reads the **facts** of the instance: every member with its task's phase, block kind, block event
-   and archive's `from`; the settled rows, and each settled step's frozen result, by `latestCompletion`
+3. It reads the **facts** of the instance: every member with its task's phase, its block event read
+   as a trigger by §5.1's table (a run's `blocked`, or a `run_ended` with `next: blocked`, and its
+   payload), never by the task's `block_kind`, and its archive's `from`; the settled rows, and each settled step's frozen result, by `latestCompletion`
    of the task its row names; the pending rows; the route rows. All within the transaction.
 4. It calls the pure **`decide(plan, facts)`** (§10), and applies each outcome: a `made` step's tasks
    (§7.4), with its row set `made`, `reason`, `cause_event` and `decided_at`; a `skipped` row; a
@@ -1001,6 +1009,15 @@ interface StepFact {
 }
 interface RouteFact { taskId: string; step: string; item: string | null; eventId: number; kind: 'blocked' | 'gave_up'; routes: number }
 interface Facts { steps: ReadonlyMap<string, StepFact>; due: readonly RouteFact[]; members: number; cap: number }
+```
+
+`RouteFact.kind`, `entered.blocked` and `entered.gaveUp` are set from §5.1's table by the **trigger
+event**, a run's `blocked` or a `run_ended`, and never from the task's `block_kind`: a run's own
+`transient` block and the transient limit's block both leave the task's kind `transient`, and only the
+event tells them apart (the first is a `blocked` with actor `run:<run_id>`, so `blocked`; the second a
+`run_ended` with `blockKind: transient`, so `gave_up`).
+
+```ts
 
 type Decision =
   | { step: string; outcome: 'made'; parents: string[]; why: string }
@@ -1081,7 +1098,7 @@ Params: case=CVE-2026-12345
   count and name, cut at 120 characters; `▶ <step>: running`, or for a fan-out `N items, M done`; `⏭
   <step>: skipped (<why>)`, with `, waiting for <parents>` while it is not yet settled; `⏳ <step>:
   waiting for <its unsettled parents and read ancestors>`; `⛔ <step>: blocked`; `↪ <handler>: routed
-  from <step> (<gave up|blocked>)`, with `, standing in`. **A handler never routed to shows no line**,
+  from <step> (<gave up|stopped after 10 throttles|blocked>)`, with `, standing in`. **A handler never routed to shows no line**,
   and counts in nothing. A step made late shows as a plain one once made.
 - **The order** is the plan's, the file's; tasks under their step in position order. Late members
   have later positions than the start's (§7.4), so `show` groups by step first, where today it walks
@@ -1347,7 +1364,7 @@ first member (§7.4), and inherit its wake (§13.3). Its answer gains `waiting` 
   `hasRouting(db)` for an unmigrated database; the instances due at start.
 - **`src/kanban/dispatcher.ts`**: one call of `retryRouting()` a pass (§9.4).
 - **`src/kanban/worker.ts`**: `unblock` in `WORKER_COMMANDS`, its schema `{task_id, comment?}`;
-  `madeAnswer`'s `waiting`.
+  `madeAnswer`'s `waiting`; `#show`'s `routed_from` for a handler's task, from `routeOfHandler`.
 - **`src/kanban/chat-render.ts`**: `renderInstance`'s step lines and failure line; `renderNotice`'s
   `workflow_routed` and `workflow_route_failed`; `renderPreview`'s pending steps and first line;
   `renderStarted`'s "more steps" line. **`src/kanban/notices.ts`**: nothing but passing the events, as
@@ -1465,6 +1482,10 @@ task.
   `preview --json` refused for a file using any routing key, `outputs` alone included, with the message
   naming the keys; `apply` and `apply --dry-run` refusing a DAG labelled with such a file, after a repeat
   by key is answered, and checking nothing for a file that cannot be read; the start's answer's `waiting`; `reconcile`'s answers and refusals.
+- **Unit, the handler's records**: a body of 64 KiB from the file cut so the paragraph is kept whole;
+  `show`'s `routed_from` from the route row; a run's own `transient` block read as `blocked` and the
+  transient limit's as `gave_up`, by their events, both tasks' kind `transient`, and the notice and
+  `show` saying `stopped after 10 throttles`.
 - **Unit, the worker's `unblock`**: authorised by the route row alone, a handler whose body was edited or
   cut still allowed and one with no route row refused; a handler's work run unblocking its routed task
   with a comment;
@@ -1671,8 +1692,10 @@ task.
     any stand-in's wins too, and the result never depends on which
     transaction, fault or reconciliation wrote the row. An archive is never a result: it wins only as a
     skip (§2.3).
-20. **The transient limit's block routes by `on_gave_up`**, not `on_blocked` (§5.1): approved, the
-    breaker's `gave_up` alone was a give-up; the board stopping at its throttle limit is as terminal.
+20. **The transient limit's block routes by `on_gave_up`**, not `on_blocked` (§5.1), and `state:
+    gave_up` reads true there too: approved, the breaker's `gave_up` alone was a give-up; the board
+    stopping after 10 throttles is as terminal. Both are told by the trigger event, as the task's block
+    kind is `transient` for either.
 21. **A stand-in takes the step's reviewer** (§5.2), and a stand-in handler may name no reviewer of its
     own; approved, a handler's fields were a step's, its reviewer included.
 22. **`preview --json` is refused for `outputs` alone**, and `apply` refuses a DAG labelled with a routed
