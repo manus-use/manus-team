@@ -254,10 +254,11 @@ not the reviewer's approval (kanban spec §4.4). Mapped to the code:
   later, its `archived` event saying `from: done`, keeps its accepted result, because the accepted
   completion is a settling fact with an earlier event id than the archive, which comes after it and so
   never wins; the archive only puts the task away.
-- **Every reader reads the logical step's result**: a condition, a fan-out and a template read the
-  member's settled row (§8), whose winner is the original or an authorised stand-in, never the original
+- **Every reader of a result reads the logical step's result**: an output clause, `state: done`, a
+  fan-out and a template read the member's settled row (§8), whose winner is the original or an authorised stand-in, never the original
   task's own phase. A step stood in for, whose original task the stand-in archived (§5.2), reads as
-  `done` with the stand-in's outputs.
+  `done` with the stand-in's outputs. `state: blocked` and `state: gave_up` read no result at all: they
+  read the trigger event, before any settling (§3.1).
 - **A result from a run whose review asked for changes never counts**: `latestCompletion` reads the
   latest `review_requested`, which is the rework's once it asks again, and a task in `open` has no
   accepted result at all.
@@ -310,8 +311,20 @@ A step's **state**, as a clause reads it, is the phase of its tasks plus how the
 | `blocked` | its task entered `blocked` from its work by one of `on_blocked`'s triggers (§5.1) |
 | `gave_up` | its task entered `blocked` from its work by one of `on_gave_up`'s triggers (§5.1): the breaker's `gave_up`, or the transient limit's block |
 
-`archived` is not a state a clause names. A clause reads the step's settled row, never its task's
-phase: an archive of a task undone is skipped by archive; a task archived after its accepted completion
+**What each clause reads**, side by side:
+
+| Clause | Reads | Before that |
+|---|---|---|
+| an output clause, `state: done`, a fan-out's source, a `{{step.output}}` | the ancestor's settled, accepted result: its settled row's winner (§2.3) | undecided while the ancestor is unsettled; false (a fan-out skipped, a title `(skipped)`) once it is skipped |
+| `state: skipped` | the ancestor's settled row: `skipped` or `archived` | undecided while unsettled; false once it settles `done` |
+| `state: blocked`, `state: gave_up` | the ancestor's **trigger event** by §5.1's table, at the moment it is written, before and without any settling | undecided until the event, or false once the ancestor settles without it; they could never be true if they waited for a settling, as a blocked step is unsettled |
+
+**Once decided, a decision is frozen** (§3.2): a step made because `state: blocked` held stays made,
+and the clause stays held for that decision, though the ancestor is unblocked and done later; a step
+skipped because an output clause was false stays skipped.
+
+`archived` is not a state a clause names. A result-reading clause reads the step's settled row, never
+its task's phase: an archive of a task undone is skipped by archive; a task archived after its accepted completion
 is `done`, as its row's winner is that completion. A gateway `blocked` written
 by the team check of a task made late (§7.4) is neither `blocked` for a clause nor a route (§5.1).
 
@@ -535,6 +548,25 @@ claim.
   - **Its outputs are checked as the step's.** Its work report goes through the same output check
     (§2.2), as its step declares the same outputs; a stand-in whose assignee is a person, which could
     give none, is refused by the check (§2.1, §6).
+  - **Its gates include the step's.** The stand-in's task is made with every gate of the step it stands
+    in for, as the plan holds them (§7.3), in the step's order, and then its own, each through
+    `insertGate` by the instance's creator. They run at its report (kanban spec §7.7) in its own
+    directory, as any task's gates do, so it must produce there the artifacts the step promised (for
+    `va`, `result.json` passing `vi-workflow-gate`); a gate that fails refuses the report, the run
+    undecided, and its completion counts only when every gate passes. A stand-in for a fan-out item
+    takes the fan-out step's gates.
+  - **Its contract includes the step's.** A task's contract is five text fields, stored as one JSON
+    object of masked text (`kanban_tasks.contract`, `maskContract` in `db/kanban.ts`) and rendered in
+    the prompt one labelled field at a time (kanban spec §7.1, §4.3). So the merge is per field: for each
+    of `outcome`, `verification`, `constraints`, `boundaries` and `stop_when`, when the step sets it, the
+    stand-in's field is `the step's (va): <the step's text>`; when the handler sets it too, a blank line
+    and `this handler's: <its text>` follow. A field only the handler sets is its text alone. The
+    handler's fields are added, never replacing the step's, and its reviewer, the step's, reviews
+    against both. The step's `outcome` carries its outputs sentence (§2.1), so the stand-in's does too.
+    Each merged field is held to the contract field's 8 KiB, checked at the start with the rest of the
+    templates (§6), never cut.
+  - **Frozen at the start.** The step's reviewer, outputs, gates and contract are read from the plan's
+    entry for the step (§7.3), as resolved at the start, never from the file at the making.
   - In the transaction of its accepted completion (decided by the user, §20):
   - the routed member's settled row (§8) is written with the winner, the earliest settling fact by
     event id (§2.3). If the winner is another, an earlier stand-in, the routed task's own completion or
@@ -630,6 +662,9 @@ workflow check`, the startup lines, every preview and start. **It refuses**, eac
 | a route to a step that is no handler, or to none | `steps.va.on_gave_up routes to report, which is not a handler (handler: true)` |
 | `stands_in_for` with other outputs, or naming a step that does not route to it | `steps.escalate stands in for va, and its outputs differ: va declares reachable (boolean), escalate reachable (string)` |
 | a stand-in that cannot meet the step's review or outputs: a `reviewer` of its own, or a person's assignee where the step declares outputs | `steps.escalate stands in for va, and takes va's reviewer (role assessment-reviewer): it names none of its own` |
+| a stand-in whose gates, the step's and its own together, pass `addGate`'s bounds (20 a task, 600 s together, a gate with no `timeout_s` counted as 300 s), so one of the step's would have to go | `steps.escalate stands in for va, and va's 2 gates with its own 19 are 21: a task has at most 20` |
+| a stand-in whose merged contract field passes 8 KiB | `steps.escalate stands in for va: its contract's verification with va's is 9300 bytes; at most 8192` |
+| a stand-in whose workspace, written or its role's, certainly differs from the step's (§4's `certainOf`), so the step's gates would run in another checkout | `steps.escalate stands in for va, whose gates run in workspace vi, and escalate works in ops` |
 | a handler with `parents`, `when` or `for_each`, or a route from a handler | `steps.escalate is a handler, made with no parents when routed to: it takes no parents` |
 | a clause list with two `any` groups, an empty `any`, or a clause with two tests | `steps.verify.when has two any groups; it takes one` |
 | `{{step.output}}` in a plain step, a contract field, a name field or a gate | `steps.va.title names {{intake.kind}}, and va is made at the start, before any result` |
@@ -718,7 +753,8 @@ The plan is JSON, stored in `kanban_workflow_instances.plan`, and never changed 
 }
 ```
 
-- **Every step is in it**, in the file's order, plain ones included: a plain step's outputs are what
+- **Every step is in it**, in the file's order, plain ones included, each with its resolved reviewer,
+  outputs, gates and contract, which a stand-in for it takes (§5.2): a plain step's outputs are what
   its completion is checked against (§2.2), and its routes are what its blocks are routed by. `made` is
   `start`, `decide` or `route`.
 - **A template** is a DAG task's fields (workflows spec §5) with the params already filled in, and the
@@ -1283,6 +1319,11 @@ first member (§7.4), and inherit its wake (§13.3). Its answer gains `waiting` 
   grandparent's outputs are not read in its place, and a title shows `(skipped)`.
 - **The transient limit reached** (10 throttles in a row): routed by `on_gave_up`, as a give-up; a run's
   own `transient` block by `on_blocked`.
+- **A stand-in that fails one of the step's gates**: its report is refused, `gate_failed`, the run
+  undecided; nothing settles until it reports with every gate passing, or its routed task completes
+  first.
+- **A `state: blocked` step made, then its ancestor unblocked and done**: the step stays made; the
+  decision is frozen.
 - **A stand-in for a reviewed step**: made with the step's reviewer; its completion goes to review, and
   settles the step only once the review passes; changes requested on it settle nothing.
 - **A fan-out of 60 items when the instance has 450 members**: none of its items is made; it is skipped,
@@ -1427,7 +1468,12 @@ task.
   - triggers: each row of §5.1's table routing by its key, the transient limit's block by `on_gave_up`
     and a run's own `transient` block by `on_blocked`, and `stopped`, a person's block and the team
     check's block routing nothing;
-  - stand-ins: a stand-in for a reviewed step made with that reviewer, settling only once approved, and
+  - stand-ins: **a stand-in failing one of the step's gates not settling the step**, the run left
+    undecided, and settling once it passes; **a stand-in's contract showing the step's fields**, `the
+    step's (va): …` then `this handler's: …`, in each field both set, and the step's alone where the
+    handler sets none; the step's gates made first on the stand-in's task, its own after; the step's
+    reviewer, gates and contract read from the plan after the file is edited; a `state: blocked` decision
+    staying made after the ancestor is unblocked and done; a stand-in for a reviewed step made with that reviewer, settling only once approved, and
     changes requested on it settling nothing; its completion's outputs checked as the step's;
   - routes and stand-ins: once per event; the fourth `over_limit`; per item; a review-phase block
     routing nothing; **the first to complete winning per member, and no route due for a member it
@@ -1614,9 +1660,11 @@ task.
 19. **Late titles and bodies are cut**, as a reaction task's (§7.4); templates are checked at the start
     with placeholders.
 20. **Clause and enum values are stored unmasked**, and refused when they hold a known secret (§7.3).
-21. **Only an accepted result is success** (§2.3): an archive of a task undone resolves its member as
-    skipped, with no outputs; a task archived after its accepted completion keeps its result, as the
-    completion's event comes first.
+21. **Only an accepted result is success** (§2.3), for the clauses that read a result: an archive of a
+    task undone resolves its member as skipped, with no outputs; a task archived after its accepted
+    completion keeps its result, as the completion's event comes first. `state: blocked` and `state:
+    gave_up` read no result: they read the trigger event when it is written, and a decision on them is
+    frozen like any (§3.1).
 22. **Rewiring past a skipped parent is ordering only** (§3.2): links, order and handoffs as prompt
     context, never outputs; `(skipped)` is a display placeholder, never a value.
 23. **Triggers are listed once, by event** (§5.1): the transient limit's block is a terminal failure
@@ -1624,8 +1672,10 @@ task.
     are `on_blocked`.
 24. **A handler's context and authority are the route row's and the board's rows** (§5.2); its body's
     paragraph only describes them.
-25. **A stand-in takes its step's reviewer and output check** (§5.2), so its result is accepted as the
-    step's own would be.
+25. **A stand-in takes its step's reviewer, output check, gates and contract** (§5.2), from the frozen
+    plan, so its result is accepted as the step's own would be: the step's gates first, then its own;
+    each contract field merged as `the step's (va): …` then `this handler's: …`; `workflow check`
+    refusing a stand-in whose gates, contract or workspace would weaken the step's.
 26. **The cap counts handlers, is checked before anything is made, and a fan-out is all or none**
     (§9.4).
 27. **Every reader reads the logical step's result**, its settled row's winner (§2.3, §4.1): a stood-in
@@ -1696,8 +1746,9 @@ task.
     gave_up` reads true there too: approved, the breaker's `gave_up` alone was a give-up; the board
     stopping after 10 throttles is as terminal. Both are told by the trigger event, as the task's block
     kind is `transient` for either.
-21. **A stand-in takes the step's reviewer** (§5.2), and a stand-in handler may name no reviewer of its
-    own; approved, a handler's fields were a step's, its reviewer included.
+21. **A stand-in takes the step's reviewer, gates and contract** (§5.2), and a stand-in handler may name
+    no reviewer of its own; approved, a handler's fields were a step's, its reviewer, gates and contract
+    its own alone. Its gates and contract fields are added to the step's, never replacing them.
 22. **`preview --json` is refused for `outputs` alone**, and `apply` refuses a DAG labelled with a routed
     file (§13.5); approved, the DAG paths were not discussed, and the first draft let an outputs-only file
     preview.
