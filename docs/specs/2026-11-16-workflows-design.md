@@ -30,6 +30,10 @@ on that step, such as `test -s decision.md`, guards that the decision is recorde
 can complete. The board stays the board: a branch is a task's work, reported like any other, not a
 rule the board evaluates.
 
+*Extended by docs/specs/2026-11-26-workflow-routing-design.md*: a step may declare outputs, be made
+only when conditions on its ancestors' accepted results hold, fan out over a result's list, and route
+a blocked or failed step to a handler.
+
 **Nothing in the kernel knows about workflows** (kanban spec §1). An instance and its members are
 two tables of their own (§7); `kanban_tasks`, the dispatcher, the claim, the prompt and the notices
 read neither. A workflow's tasks are ordinary tasks once made: claimed, reported, blocked,
@@ -1188,7 +1192,8 @@ A workflow's tasks resolve their workspaces at their claims, by kanban spec §2.
 ## 17. Limits
 
 - **No conditions and no loops.** A workflow is a fixed graph; branching is a deciding step's work
-  (§0).
+  (§0). *Extended by docs/specs/2026-11-26-workflow-routing-design.md*, which adds conditions,
+  result-driven fan-out and handlers, and still no loops.
 - **No item pairing.** Two for_each steps over one list are linked all to all (§3).
 - **Params are text and lists of text.** No numbers, choices or patterns; no literal `{{` in a text
   field; in chat no `"` inside a value; at the terminal no comma inside an item (the worker's JSON
