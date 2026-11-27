@@ -525,6 +525,56 @@ function payloadOf(event: KanbanEvent): Record<string, unknown> {
   return (typeof event.payload === 'object' && event.payload !== null ? event.payload : {}) as Record<string, unknown>;
 }
 
+/** How many of a fan-out's items a routing notice names; its count says the rest (workflow routing spec §12.2). */
+const ROUTED_ITEMS = 20;
+
+/** One decision of a `workflow_routed` payload as its notice's line (workflow routing spec §12.2), or undefined for one it does not know. */
+function routedLine(raw: unknown): string | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const d = raw as Record<string, unknown>;
+  const step = label(text(d, 'step'), 64);
+  const handler = label(text(d, 'handler'), 64);
+  const why = label(text(d, 'why'), 300);
+  const ids = Array.isArray(d['taskIds']) ? d['taskIds'].filter((x): x is string => typeof x === 'string') : [];
+  const first = ids[0] === undefined ? '' : id(ids[0]);
+  switch (d['outcome']) {
+    case 'made':
+      return `- ✓ ${step} made: ${first}`;
+    case 'skipped':
+      return `- ⏭ ${step} skipped: ${why}`;
+    case 'fanned_out': {
+      const items = Array.isArray(d['items']) ? d['items'].filter((x): x is string => typeof x === 'string').slice(0, ROUTED_ITEMS) : [];
+      const count = typeof d['count'] === 'number' ? d['count'] : items.length;
+      const more = count > items.length ? `, and ${count - items.length} more` : '';
+      return `- ▶ ${step} fanned out, ${count} task${count === 1 ? '' : 's'}: ${items.map((i) => label(i, 80)).join(', ')}${more}`;
+    }
+    case 'routed':
+      return `- ↪ ${handler} routed from ${step}: ${first}${d['standsIn'] === true ? ', standing in' : ''}`;
+    case 'stood_in':
+      return `- ✓ ${handler} stands in for ${step}${why === '' ? '' : `: ${why}`}; ${first} ${step} archived`;
+    case 'over_limit':
+      return `- ${first} ${step} ${why} again, and has been routed to ${handler} 3 times: it waits for a person now (/kanban task unblock ${ids[0] ?? ''} [comment])`;
+    case 'over_cap':
+      return `- ${first} ${step} ${why}, and is not routed to ${handler}: the instance has 500 tasks; it waits for a person (/kanban task unblock ${ids[0] ?? ''} [comment])`;
+    case 'unread':
+      return `- ${handler} ${first} is left open: ${why}`;
+    default:
+      return undefined;
+  }
+}
+
+/** A `workflow_routed` event's notice (workflow routing spec §12.2), from its payload alone: what the transition decided, one line a decision. */
+function routedNotice(p: Record<string, unknown>, name: string): string | undefined {
+  const lines = (Array.isArray(p['decisions']) ? p['decisions'] : []).flatMap((d) => {
+    const line = routedLine(d);
+    return line === undefined ? [] : [line];
+  });
+  if (lines.length === 0) return undefined;
+  const after = text(p, 'after');
+  const workflow = workflowName(typeof p['workflowName'] === 'string' ? p['workflowName'] : null);
+  return [`After ${name}${after === '' ? '' : ` ${label(after, 80)}`}, in ${label(workflow)} ${id(text(p, 'workflow'))}:`, ...lines].join('\n');
+}
+
 /**
  * Whether the event left the task blocked, so that its notice offers Unblock
  * (spec §9.2): a block of any kind but dependency, a stop, or a run whose end
@@ -639,6 +689,17 @@ export function renderNotice(
     case 'workflow_started':
       // A terminal start's reply (workflows spec §18.2), on its first member, whole: it may run to 3,800 characters.
       return renderStarted(startedOf(p), opts.where ?? 'chat', (a) => who(a, opts.nameOf), opts.nameOf);
+    case 'workflow_routed':
+      return routedNotice(p, name);
+    case 'workflow_route_failed': {
+      // Said once a fault (workflow routing spec §9.4): only the event that set the instance's mark is a notice.
+      if (p['first'] !== true) return undefined;
+      const workflow = text(p, 'workflow');
+      return (
+        `Routing of ${label(workflowName(typeof p['workflowName'] === 'string' ? p['workflowName'] : null))} ${id(workflow)} failed after ${name}: ` +
+        `${label(text(p, 'error'), 500)}. The gateway tries again; \`mt kanban workflow reconcile ${workflow}\` tries now.`
+      );
+    }
     case 'wake_set':
       // Only a wake refused as too deep is a notice (wake spec §3.4, §4.4): every other change is the command's answer.
       if (p['refused'] !== 'too_deep') return undefined;

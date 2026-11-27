@@ -3631,13 +3631,23 @@ function routeIn(d: Db, taskId: string, cause: RouteCause, eventId: number, now:
   if (planned === undefined) return [];
   const { lines, superseded } = decideAll(d, planned.instance, eventId, now, team);
   if (lines.length === 0) return superseded;
+  // What the transition was, for the notice's head (§12.2): `gave up`, `stopped after 10 throttles`, `blocked`.
+  const task = mustGet(d, taskId);
+  const after = cause === 'gave_up' ? 'gave up' : cause === 'throttled' ? `stopped after ${task.consecutiveTransient} throttles` : cause === 'blocked' ? 'blocked' : undefined;
   record(
     d,
     {
       taskId,
       kind: 'workflow_routed',
       actor: 'gateway',
-      payload: { workflow: planned.instance.instanceId, workflowName: planned.instance.name, step: planned.member.step, cause, decisions: lines },
+      payload: {
+        workflow: planned.instance.instanceId,
+        workflowName: planned.instance.name,
+        step: planned.member.step,
+        cause,
+        ...(after === undefined ? {} : { after }),
+        decisions: lines,
+      },
     },
     now,
   );
