@@ -109,3 +109,47 @@ export type SettledHow = 'done' | 'stood_in' | 'skipped' | 'archived';
 
 /** What a route row records (§5.3). */
 export type RouteOutcome = 'made' | 'over_limit' | 'over_cap';
+
+// ---------------------------------------------------------------------------
+// The outputs sentence (§2.1)
+// ---------------------------------------------------------------------------
+
+/** A scalar type as the outputs sentence says it. */
+function scalarWords(t: ScalarType): string {
+  if (t === 'boolean') return 'true or false';
+  if (t === 'number') return 'a number';
+  if (t === 'string') return 'text';
+  return `one of ${t.enum.join(', ')}`;
+}
+
+/** A list's items as the outputs sentence says them. */
+function itemsWords(t: ScalarType): string {
+  if (t === 'boolean') return 'true or false values';
+  if (t === 'number') return 'numbers';
+  if (t === 'string') return 'texts';
+  return `values of ${t.enum.join(', ')}`;
+}
+
+/** An output's type as the outputs sentence says it: `true or false`, `a list of at most 50 texts`. */
+export function typeWords(t: OutputType): string {
+  if (typeof t === 'object' && 'list' in t) return `a list of at most ${t.max} ${itemsWords(t.list)}`;
+  return scalarWords(t);
+}
+
+/**
+ * The one sentence the expansion adds to a step's `outcome` when it declares
+ * outputs (§2.1), so its agent knows what to report: `Report in the metadata of
+ * your completion: reachable (true or false); packages (a list of at most 50 texts).`
+ */
+export function outputsSentence(outputs: Outputs): string {
+  return `Report in the metadata of your completion: ${Object.entries(outputs)
+    .map(([name, t]) => `${name} (${typeWords(t)})`)
+    .join('; ')}.`;
+}
+
+/** A step's `outcome` with its outputs sentence after it, a blank line between; the outcome alone for a step with none. */
+export function outcomeWithOutputs(outcome: string | undefined, outputs: Outputs): string {
+  if (Object.keys(outputs).length === 0) return outcome ?? '';
+  const sentence = outputsSentence(outputs);
+  return outcome === undefined || outcome === '' ? sentence : `${outcome}\n\n${sentence}`;
+}

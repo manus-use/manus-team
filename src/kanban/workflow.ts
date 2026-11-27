@@ -6,8 +6,9 @@ import { NAME_PATTERN, nameProblem, visible } from '../names.js';
 import type { Role } from '../roles.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { DAG_FORMAT, DAG_LIMITS, titleRefused, type Dag, type DagTask, type ParamValue } from './dag.js';
+import { WORKER_LIMITS } from './limits.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
-import type { Clause, ClauseValue, OutputType, Outputs, RouteSpec, ScalarType, StepState, WhenItem } from './routing.js';
+import { outcomeWithOutputs, type Clause, type ClauseValue, type OutputType, type Outputs, type RouteSpec, type ScalarType, type StepState, type WhenItem } from './routing.js';
 import { assignable, isRecord, NO_MENTIONS, type TaskFacts } from './task-checks.js';
 import { GATE_LIMITS, type Contract, type CreatedVia, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
@@ -161,6 +162,12 @@ const HINTS = {
 /** A reference: `{{name}}`, a name in the grammar, with no spaces. */
 const REFERENCE = /^\{\{([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\}\}/;
 
+/** A reference to a result (workflow routing spec §1): `{{<step>.<output>}}`, both in the name grammar, with no spaces. */
+const RESULT_REFERENCE = /^\{\{([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\.([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\}\}/;
+
+/** Every result reference in a text, `{{<step>.<output>}}`, in order. */
+export const RESULT_REFERENCES = /\{\{([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\.([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\}\}/g;
+
 /** A file's problem, thrown inside the check and caught as its result. */
 class Problem extends Error {}
 
@@ -208,9 +215,24 @@ function nameSpec(value: unknown, place: string, path: string): NameSpec | undef
   return { value: text(map[must], `${place}.${must}`), must };
 }
 
-/** Each `{{` in a text field opens a reference to a declared param, or to `item` in a for_each step (workflows spec §2). */
-function references(value: string, place: string, params: ReadonlyMap<string, WorkflowParam>, forEach: boolean): void {
+/**
+ * Each `{{` in a text field opens a reference to a declared param, to `item` in
+ * a for_each step (workflows spec §2), or to a result, `{{<step>.<output>}}`,
+ * which `result` judges (workflow routing spec §1).
+ */
+function references(
+  value: string,
+  place: string,
+  params: ReadonlyMap<string, WorkflowParam>,
+  forEach: boolean,
+  result: (step: string, output: string) => void,
+): void {
   for (let at = value.indexOf('{{'); at !== -1; at = value.indexOf('{{', at + 2)) {
+    const r = RESULT_REFERENCE.exec(value.slice(at));
+    if (r !== null) {
+      result(r[1] ?? '', r[2] ?? '');
+      continue;
+    }
     const m = REFERENCE.exec(value.slice(at));
     if (m === null) {
       fail(`${place} has a {{ that opens no reference: write {{name}}, a param's name with no spaces; a literal {{ cannot be written`);
@@ -227,6 +249,8 @@ function references(value: string, place: string, params: ReadonlyMap<string, Wo
 /** The param a name field refers to, whole, or undefined for a name written out; a problem for anything between. */
 function referenceOf(value: string, place: string): string | undefined {
   if (!value.includes('{{')) return undefined;
+  const r = RESULT_REFERENCE.exec(value);
+  if (r !== null) fail(`${place} names ${r[0]}: a result fills only a title and a body`);
   const m = REFERENCE.exec(value);
   if (m === null || m[0] !== value) {
     fail(`${place} is a name, or one whole reference such as "{{name}}": a name is never put together from parts`);
@@ -601,6 +625,7 @@ function checkWhole(steps: readonly WorkflowStep[], params: ReadonlyMap<string, 
   }
   const cycle = cycleOf(steps);
   if (cycle !== undefined) fail(`the steps' parents make a cycle: ${cycle}`);
+  const scope = routingScope(steps);
   const seen = new Set<string>();
   for (const s of steps) {
     const place = `steps.${s.name}`;
@@ -615,11 +640,13 @@ function checkWhole(steps: readonly WorkflowStep[], params: ReadonlyMap<string, 
       if (!param.list) fail(`${place}.for_each names ${over}, a text param: for_each takes a list param`);
     }
     const forEach = s.forEach !== undefined;
-    references(s.title, `${place}.title`, params, forEach);
-    if (s.body !== undefined) references(s.body, `${place}.body`, params, forEach);
+    references(s.title, `${place}.title`, params, forEach, (step, output) => scope.result(s, step, output, `${place}.title`));
+    if (s.body !== undefined) references(s.body, `${place}.body`, params, forEach, (step, output) => scope.result(s, step, output, `${place}.body`));
     for (const [key, field] of Object.entries(TEXT_FIELDS)) {
       const v = field === undefined ? undefined : s.contract[field];
-      if (v !== undefined) references(v, `${place}.${key}`, params, forEach);
+      const at = `${place}.${key}`;
+      // Values from results fill titles and bodies only (workflow routing spec §14).
+      if (v !== undefined) references(v, at, params, forEach, (step, output) => fail(`${at} names {{${step}.${output}}}: a result fills only a title and a body`));
     }
     checkName(s.assignee, `${place}.assignee`, params, forEach, facts, 'person');
     checkName(s.reviewer, `${place}.reviewer`, params, forEach, facts, 'person');
@@ -644,6 +671,177 @@ function checkWhole(steps: readonly WorkflowStep[], params: ReadonlyMap<string, 
         );
       }
     }
+    checkRouting(s, scope);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The routing checks (workflow routing spec §6)
+// ---------------------------------------------------------------------------
+
+/** What the routing checks read of the file's steps: each by name, its ancestors, and which are pending (§7.1). */
+interface RoutingScope {
+  byName: ReadonlyMap<string, WorkflowStep>;
+  ancestors(name: string): ReadonlySet<string>;
+  pending: ReadonlySet<string>;
+  /** A `{{<step>.<output>}}` in step `s`'s title or body, at `place`, judged (§1, §6). */
+  result(s: WorkflowStep, step: string, output: string, place: string): void;
+}
+
+/**
+ * The steps that are pending (workflow routing spec §7.1): a step with `when`, a
+ * result `for_each`, or `handler: true`; a step any of whose parents is pending;
+ * and a child of a step a handler may stand in for. The others are plain.
+ */
+export function pendingSteps(steps: readonly Pick<WorkflowStep, 'name' | 'parents' | 'when' | 'forEach' | 'handler' | 'standsInFor'>[]): Set<string> {
+  const stoodIn = new Set(steps.flatMap((s) => (s.handler && s.standsInFor !== undefined ? [s.standsInFor] : [])));
+  const pending = new Set<string>();
+  const byName = new Map(steps.map((s) => [s.name, s]));
+  const memo = new Map<string, boolean>();
+  const isPending = (name: string): boolean => {
+    const known = memo.get(name);
+    if (known !== undefined) return known;
+    const s = byName.get(name);
+    memo.set(name, false);
+    const out =
+      s !== undefined &&
+      (s.when !== undefined || (s.forEach !== undefined && typeof s.forEach !== 'string') || s.handler || s.parents.some((p) => isPending(p) || stoodIn.has(p)));
+    memo.set(name, out);
+    return out;
+  };
+  for (const s of steps) if (isPending(s.name)) pending.add(s.name);
+  return pending;
+}
+
+/** A step's ancestors, transitively through its parents, memoized; the cycle check has run, so the walk ends. */
+function ancestorsOf(byName: ReadonlyMap<string, WorkflowStep>): (name: string) => ReadonlySet<string> {
+  const memo = new Map<string, Set<string>>();
+  const walk = (name: string): Set<string> => {
+    const known = memo.get(name);
+    if (known !== undefined) return known;
+    const out = new Set<string>();
+    memo.set(name, out);
+    for (const p of byName.get(name)?.parents ?? []) {
+      out.add(p);
+      for (const a of walk(p)) out.add(a);
+    }
+    return out;
+  };
+  return walk;
+}
+
+/** A type as a check names it: `a boolean`, `a number`, `text`, `an enum`, `a list`. */
+function typeWord(t: OutputType): string {
+  if (t === 'boolean') return 'a boolean';
+  if (t === 'number') return 'a number';
+  if (t === 'string') return 'text';
+  return 'enum' in t ? 'an enum' : 'a list';
+}
+
+/** A clause's value as a check names what it compares. */
+function valueWord(v: ClauseValue): string {
+  return typeof v === 'string' ? 'text' : typeof v === 'number' ? 'a number' : 'true or false';
+}
+
+/** A step's outputs as a check lists them: `reachable, score`, or `none`. */
+function declared(outputs: Outputs): string {
+  const names = Object.keys(outputs);
+  return names.length === 0 ? 'none' : names.join(', ');
+}
+
+/** Whether a step is a fan-out, of either form. */
+function isFanOut(s: WorkflowStep): boolean {
+  return s.forEach !== undefined;
+}
+
+function routingScope(steps: readonly WorkflowStep[]): RoutingScope {
+  const byName = new Map(steps.map((s) => [s.name, s]));
+  const ancestors = ancestorsOf(byName);
+  const pending = pendingSteps(steps);
+  const scope: RoutingScope = {
+    byName,
+    ancestors,
+    pending,
+    result(s, step, output, place) {
+      const ref = `{{${step}.${output}}}`;
+      if (!pending.has(s.name)) fail(`${place} names ${ref}, and ${s.name} is made at the start, before any result`);
+      readable(scope, s, step, place, 'a reference reads only steps its parents come after');
+      const target = byName.get(step) as WorkflowStep;
+      if (isFanOut(target)) fail(`${place} names ${step}, a fan-out step, whose items each have their own result`);
+      if (target.outputs[output] === undefined) fail(`${place} names ${step}.${output}, which ${step} does not declare (it declares ${declared(target.outputs)})`);
+    },
+  };
+  return scope;
+}
+
+/** A step a clause, a fan-out or a reference of `s` reads, at `place`: one of the file's, and an ancestor of `s`. */
+function readable(scope: RoutingScope, s: WorkflowStep, step: string, place: string, why: string): void {
+  if (!scope.byName.has(step)) fail(`${place} names ${q(step)}, which is no step of this file`);
+  if (!scope.ancestors(s.name).has(step)) fail(`${place} names ${step}, which is not an ancestor of ${s.name}: ${why}`);
+}
+
+/** A clause's test against the output's declared type (§6), or why it cannot compare. */
+function testProblem(c: Clause, type: OutputType, ref: string, at: string): string | undefined {
+  if (typeof type === 'object' && 'list' in type) return `${at} names ${ref}, a list: a list is read by a fan-out only`;
+  if ('is' in c) return type === 'boolean' ? undefined : `${at}: is compares true or false, and ${ref} is ${typeWord(type)}`;
+  if ('at_least' in c || 'at_most' in c) {
+    return type === 'number' ? undefined : `${at}: ${'at_least' in c ? 'at_least' : 'at_most'} compares a number, and ${ref} is ${typeWord(type)}`;
+  }
+  const test = 'equals' in c ? 'equals' : 'in';
+  const values: ClauseValue[] = 'equals' in c ? [c.equals] : 'in' in c ? c.in : [];
+  for (const v of values) {
+    if (typeof type === 'object' && 'enum' in type) {
+      if (typeof v !== 'string') return `${at}: ${test} compares ${valueWord(v)}, and ${ref} is an enum`;
+      if (!type.enum.includes(v)) return `${at}: ${test} ${v} is not one of ${ref}'s values (${type.enum.join(', ')})`;
+      continue;
+    }
+    const fits = (type === 'string' && typeof v === 'string') || (type === 'number' && typeof v === 'number') || (type === 'boolean' && typeof v === 'boolean');
+    if (!fits) return `${at}: ${test} compares ${valueWord(v)}, and ${ref} is ${typeWord(type)}`;
+  }
+  return undefined;
+}
+
+/** One clause of `s`'s `when`, at `at` (§6). */
+function checkClause(scope: RoutingScope, s: WorkflowStep, c: Clause, at: string): void {
+  readable(scope, s, c.step, at, 'a condition reads only steps its parents come after');
+  const target = scope.byName.get(c.step) as WorkflowStep;
+  if (isFanOut(target)) fail(`${at} names ${c.step}, a fan-out step, whose items each have their own result`);
+  if ('state' in c) return;
+  const type = target.outputs[c.output];
+  if (type === undefined) fail(`${at} names ${c.step}.${c.output}, which ${c.step} does not declare (it declares ${declared(target.outputs)})`);
+  const problem = testProblem(c, type as OutputType, `${c.step}.${c.output}`, at);
+  if (problem !== undefined) fail(problem);
+}
+
+/** Whether a name field is written as a person: `lark:…`, or `{ person: … }`. */
+function writtenAsPerson(spec: NameSpec | undefined): boolean {
+  return spec !== undefined && (spec.must === 'person' || (!spec.value.includes('{{') && spec.value.includes(':')));
+}
+
+/** A step's routing checks (workflow routing spec §2.1, §3, §4, §6), after its own. */
+function checkRouting(s: WorkflowStep, scope: RoutingScope): void {
+  const place = `steps.${s.name}`;
+  if (Object.keys(s.outputs).length > 0 && writtenAsPerson(s.assignee)) {
+    fail(`${place} declares outputs, which a role's run reports in its metadata, and its assignee is a person: a person's done gives none`);
+  }
+  for (const [i, item] of (s.when ?? []).entries()) {
+    if ('any' in item) for (const [n, c] of item.any.entries()) checkClause(scope, s, c, `${place}.when[${i}].any[${n}]`);
+    else checkClause(scope, s, item, `${place}.when[${i}]`);
+  }
+  if (typeof s.forEach === 'object') {
+    const { step, output } = s.forEach;
+    const at = `${place}.for_each`;
+    readable(scope, s, step, at, 'a fan-out reads only steps its parents come after');
+    const source = scope.byName.get(step) as WorkflowStep;
+    if (isFanOut(source)) fail(`${at} names ${step}, itself a fan-out: a fan-out over another fan-out's items is not supported`);
+    const type = source.outputs[output];
+    if (type === undefined) fail(`${at} names ${step}.${output}, which ${step} does not declare (it declares ${declared(source.outputs)})`);
+    if (typeof type !== 'object' || !('list' in type)) fail(`${at} names ${step}.${output}, which is no list`);
+  }
+  if (Object.keys(s.outputs).length > 0) {
+    const outcome = outcomeWithOutputs(s.contract.outcome, s.outputs);
+    const size = bytesOf(outcome);
+    if (size > WORKER_LIMITS.contractField) fail(`${place}.outcome with its outputs sentence is ${size} bytes; at most ${WORKER_LIMITS.contractField}`);
   }
 }
 
