@@ -22,9 +22,13 @@ import {
   memberPhases,
   membersWithTasks,
   phaseSince,
+  pendingOf,
   plannedMemberOf,
   reactsTo,
   routingFaulted,
+  settledOf,
+  unmadeOf,
+  unmadeSteps,
   relatedTasks,
   runsOf,
   statusOf,
@@ -2123,9 +2127,14 @@ export class KanbanService {
     const { instances, total } = instancesOn(this.#db, onBoard, INSTANCES_READ);
     // Every status from one aggregate query of the members' phases, not a read of each member.
     const phases = memberPhases(this.#db, onBoard, INSTANCES_READ);
+    // And one over the pending rows, for a routed instance's steps not made (workflow routing spec §12.4).
+    const unmade = unmadeSteps(this.#db, onBoard, INSTANCES_READ);
     const summaries = instances.map((instance) => ({
       instance,
-      ...instanceStatus((phases.get(instance.instanceId) ?? []).flatMap(({ phase, n }) => Array<Phase>(n).fill(phase))),
+      ...instanceStatus(
+        (phases.get(instance.instanceId) ?? []).flatMap(({ phase, n }) => Array<Phase>(n).fill(phase)),
+        unmade.get(instance.instanceId),
+      ),
     }));
     return {
       instances: all ? summaries : summaries.filter((s) => s.status === 'running' || s.status === 'blocked'),
@@ -2166,7 +2175,10 @@ export class KanbanService {
         members,
         related,
         relatedInstances: [...others.values()],
-        ...instanceStatus(members.map((m) => m.task.phase)),
+        ...instanceStatus(
+          members.map((m) => m.task.phase),
+          unmadeOf(pendingOf(this.#db, instanceId), settledOf(this.#db, instanceId)),
+        ),
       },
     };
   }

@@ -1161,6 +1161,42 @@ export function memberPhases(db: Db, board: string, limit: number): Map<string, 
 }
 
 /**
+ * The steps not made of a board's newest `limit` instances (workflow routing spec
+ * §12.4), as `memberPhases` reads their members, in one aggregate query over the
+ * pending rows: by instance, how many wait, and how many were skipped, settled
+ * or not. An instance with no pending row is absent; none on a database before 015.
+ */
+export function unmadeSteps(db: Db, board: string, limit: number): Map<string, { waiting: number; skippedUnsettled: number; skippedSettled: number }> {
+  const out = new Map<string, { waiting: number; skippedUnsettled: number; skippedSettled: number }>();
+  if (!hasRouting(db)) return out;
+  const rows = db
+    .prepare<[string, number], { instance_id: string; waiting: number; unsettled: number; settled: number }>(
+      `SELECT p.instance_id,
+              sum(p.state = 'waiting') AS waiting,
+              sum(p.state = 'skipped' AND s.ref IS NULL) AS unsettled,
+              sum(p.state = 'skipped' AND s.ref IS NOT NULL) AS settled
+         FROM kanban_workflow_pending p
+         LEFT JOIN kanban_workflow_settled s ON s.instance_id = p.instance_id AND s.step = p.step AND s.ref = p.step
+        WHERE p.instance_id IN (SELECT instance_id FROM kanban_workflow_instances WHERE board = ?
+                                 ORDER BY created_at DESC, rowid DESC LIMIT ?)
+        GROUP BY p.instance_id`,
+    )
+    .all(board, limit);
+  for (const r of rows) out.set(r.instance_id, { waiting: r.waiting, skippedUnsettled: r.unsettled, skippedSettled: r.settled });
+  return out;
+}
+
+/** An instance's steps not made, as `unmadeSteps` counts them, from its pending and settled rows. */
+export function unmadeOf(pending: readonly PendingRow[], settled: readonly SettledRow[]): { waiting: number; skippedUnsettled: number; skippedSettled: number } {
+  const own = new Set(settled.filter((s) => s.ref === s.step).map((s) => s.step));
+  return {
+    waiting: pending.filter((p) => p.state === 'waiting').length,
+    skippedUnsettled: pending.filter((p) => p.state === 'skipped' && !own.has(p.step)).length,
+    skippedSettled: pending.filter((p) => p.state === 'skipped' && own.has(p.step)).length,
+  };
+}
+
+/**
  * The instance a task is a member of, with the instance's workflow name, for
  * `task show`'s line (workflows spec §10); undefined for a task that is none's, and on
  * a database not yet migrated, which has no members table.

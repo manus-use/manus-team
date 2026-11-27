@@ -1651,15 +1651,28 @@ export interface InstanceState {
   blocked: number;
 }
 
+/** A routed instance's steps not made (workflow routing spec §12.4): waiting, and skipped, before and after they settled. */
+export interface UnmadeSteps {
+  waiting: number;
+  skippedUnsettled: number;
+  skippedSettled: number;
+}
+
+const NONE_UNMADE: UnmadeSteps = { waiting: 0, skippedUnsettled: 0, skippedSettled: 0 };
+
 /**
  * An instance's status, derived from its members' phases, never stored (workflows spec
  * §10): archived when every member is, done when every member is done or
  * archived, blocked when any is, and running otherwise. Blocked is checked before
- * running, as a blocked task is what a person must act on.
+ * running, as a blocked task is what a person must act on. A routed instance's
+ * steps not made count too (workflow routing spec §12.4): a waiting step, and a
+ * skipped one not yet settled, as one unfinished each, so it is never done while
+ * one is; a skipped step settled, as finished; a handler never routed to, as
+ * nothing.
  */
-export function instanceStatus(phases: readonly Phase[]): InstanceState {
-  const total = phases.length;
-  const done = phases.filter((p) => p === 'done' || p === 'archived').length;
+export function instanceStatus(phases: readonly Phase[], unmade: UnmadeSteps = NONE_UNMADE): InstanceState {
+  const total = phases.length + unmade.waiting + unmade.skippedUnsettled + unmade.skippedSettled;
+  const done = phases.filter((p) => p === 'done' || p === 'archived').length + unmade.skippedSettled;
   const blocked = phases.filter((p) => p === 'blocked').length;
   const status: InstanceStatus = phases.every((p) => p === 'archived')
     ? 'archived'
