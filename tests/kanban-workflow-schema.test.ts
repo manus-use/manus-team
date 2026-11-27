@@ -55,7 +55,7 @@ describe('migration 009', () => {
     expect(Number(h.db.pragma('user_version', { simple: true }))).toBeGreaterThanOrEqual(9);
     const rows = h.db
       .prepare<[], { name: string; strict: number; wr: number }>(
-        "SELECT name, strict, wr FROM pragma_table_list WHERE name LIKE 'kanban_workflow_%' ORDER BY name",
+        "SELECT name, strict, wr FROM pragma_table_list WHERE name IN ('kanban_workflow_instances', 'kanban_workflow_tasks') ORDER BY name",
       )
       .all();
     expect(rows).toEqual([
@@ -105,7 +105,7 @@ describe('migration 009', () => {
         const follow = newTask(d, { createdBy: `run:${run.runId}`, createdVia: { kind: 'run', runId: run.runId } });
         expect(follow.createdFromTask).toBe(task.taskId);
         const before = [getTask(d, task.taskId), getTask(d, follow.taskId)];
-        expect(migrate(d, SCHEMA_DIR)).toBe(14);
+        expect(migrate(d, SCHEMA_DIR)).toBe(15);
         expect([getTask(d, task.taskId), getTask(d, follow.taskId)]).toEqual(before);
         expect(d.prepare('SELECT task_id FROM kanban_tasks WHERE created_from_task = ?').all(task.taskId)).toEqual([{ task_id: follow.taskId }]);
         expect(d.prepare('SELECT count(*) AS n FROM kanban_workflow_instances').get()).toEqual({ n: 0 });

@@ -61,9 +61,9 @@ function agentRun(t: Parameters<typeof newTask>[1] = {}): { taskId: string; runI
 }
 
 describe('migration 014', () => {
-  it('is migrated to version 14, its table STRICT, with its columns and its partial index', () => {
-    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(14);
-    expect(h.db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 14 });
+  it('is migrated past version 14, its table STRICT, with its columns and its partial index', () => {
+    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(15);
+    expect(h.db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 15 });
     expect(h.db.prepare("SELECT strict FROM pragma_table_list WHERE name = 'kanban_progress_cards'").get()).toEqual({ strict: 1 });
     const cols = h.db
       .prepare<[], { name: string; notnull: number; dflt_value: string | null; pk: number }>("SELECT name, \"notnull\", dflt_value, pk FROM pragma_table_info('kanban_progress_cards')")

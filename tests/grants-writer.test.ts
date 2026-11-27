@@ -62,7 +62,7 @@ const count = (): number => (h.db.prepare('SELECT count(*) AS n FROM tier_grants
 
 describe('migration 011', () => {
   it('is migrated past version 11, STRICT, with its two indexes', () => {
-    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(14);
+    expect(Number(h.db.pragma('user_version', { simple: true }))).toBe(15);
     expect(h.db.prepare("SELECT strict FROM pragma_table_list WHERE name = 'tier_grants'").get()).toEqual({ strict: 1 });
     const indexes = h.db
       .prepare<[], { name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'tier_grants' AND name LIKE 'idx_%' ORDER BY name")
@@ -114,7 +114,7 @@ describe('migration 011', () => {
         const task = newTask(d);
         notePerson(d, { appId: APP, unionId: 'on_carol', openId: 'ou_carol', name: 'Carol' }, NOW);
         const before = { task: getTask(d, task.taskId), person: personOf(d, APP, 'on_carol') };
-        expect(migrate(d, SCHEMA_DIR)).toBe(14);
+        expect(migrate(d, SCHEMA_DIR)).toBe(15);
         expect({ task: getTask(d, task.taskId), person: personOf(d, APP, 'on_carol') }).toEqual(before);
         expect(d.prepare('SELECT count(*) AS n FROM tier_grants').get()).toEqual({ n: 0 });
       } finally {
