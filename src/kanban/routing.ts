@@ -788,3 +788,18 @@ export function handlerParagraph(r: Routing): string {
     `\`mt kanban unblock\` with {"task_id": "${r.taskId}", "comment": "…"} returns it to work instead.`,
   ].join('\n');
 }
+
+/**
+ * A step's accepted outputs as a line says them (§12.1, §12.2): each scalar as
+ * `name=value`, a list as its count and name, `3 packages`; missing ones left
+ * out; cut at `max` characters.
+ */
+export function outputsText(outputs: Outputs, result: Readonly<Record<string, unknown>> | null, max = 120): string {
+  const parts = Object.entries(outputs).flatMap(([name, t]) => {
+    const value = result?.[name];
+    if (!ofType(t, value)) return [];
+    return Array.isArray(value) ? [`${value.length} ${name}`] : [`${name}=${valueSaid(value)}`];
+  });
+  const text = parts.join(', ');
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}

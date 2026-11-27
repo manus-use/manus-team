@@ -5,7 +5,7 @@ import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import { canonicalDag, maskDag, type Dag } from '../kanban/dag.js';
-import { decide as decideRouting, fillText, handlerParagraph, INSTANCE_CAP, maskPlan, resultOf, SKIPPED_TEXT, standInContract, triggerWords, valueSaid, type Decision, type Facts, type Plan, type PlanStep, type RouteFact, type StepFact, type Template } from '../kanban/routing.js';
+import { decide as decideRouting, fillText, handlerParagraph, INSTANCE_CAP, maskPlan, outputsText, resultOf, SKIPPED_TEXT, standInContract, triggerWords, valueSaid, type Decision, type Facts, type Plan, type PlanStep, type RouteFact, type StepFact, type Template } from '../kanban/routing.js';
 import type { GateRun } from '../kanban/gates.js';
 import { placeName, placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
 import { worktreeId, worktreeOf } from './workspaces.js';
@@ -3127,7 +3127,7 @@ export type RouteCause = 'completed' | 'blocked' | 'gave_up' | 'throttled' | 'ar
 /** One decision of a transaction, as `workflow_routed` lists it for its notice (§12.2). */
 export interface RoutedLine {
   step: string;
-  outcome: 'made' | 'skipped' | 'fanned_out' | 'routed' | 'over_limit' | 'over_cap';
+  outcome: 'made' | 'skipped' | 'fanned_out' | 'routed' | 'over_limit' | 'over_cap' | 'stood_in' | 'unread';
   why: string;
   taskIds: string[];
   items?: string[];
@@ -3223,29 +3223,57 @@ function settle(d: Db, instanceId: string, step: string, ref: string, how: strin
   );
 }
 
+/** What a sweep did beyond its rows (§5.2, §9.5): its lines, and the runs its stand-ins' archives superseded. */
+interface Swept {
+  lines: RoutedLine[];
+  superseded: RunRow[];
+}
+
 /**
  * The sweep (§9.2 step 2): each member with a settling fact gets its settled row,
- * its winner the earliest fact by event id, its own task's `completed` event or
- * its `archived` event when that archive was not from `done`; each fan-out
- * whose items all have rows, its own, `archived` when every item was archived
- * undone. Plain steps included; a handler's task is no step's member here.
+ * its winner the earliest fact by event id, among its own task's `completed`
+ * event, each of its stand-ins' `completed` events, and its own `archived`
+ * event when that archive was not from `done`; each fan-out whose items all have
+ * rows, its own, `archived` when every item was archived undone. Plain steps
+ * included; a handler's task is no step's member here. Only once a row is
+ * written for a stand-in is the routed task archived, unless it is already, its
+ * superseded run returned; and only when a row is written for the task's own
+ * completion is each stand-in left open told its result will not be read.
  */
-function sweep(d: Db, r: Routed, now: number): void {
+function sweep(d: Db, r: Routed, now: number): Swept {
   const id = r.instance.instanceId;
-  const handlers = new Set(r.plan.steps.filter((s) => s.handler === true).map((s) => s.step));
+  const out: Swept = { lines: [], superseded: [] };
+  const handlers = new Map(r.plan.steps.filter((s) => s.handler === true).map((s) => [s.step, s]));
+  const routes = routesOf(d, id);
   const taken = new Set(settledOf(d, id).map((x) => `${x.step}\u0000${x.ref}`));
   for (const m of r.members) {
     if (handlers.has(m.step) || taken.has(`${m.step}\u0000${m.ref}`)) continue;
     const completed = firstEventOf(d, m.taskId, 'completed');
     const archived = firstEventOf(d, m.taskId, 'archived');
     const archive = archived !== undefined && isRecord(archived.payload) && archived.payload['from'] !== 'done' ? archived : undefined;
+    // Its stand-ins: the handlers routed from its task that stand in for its step (§5.2).
+    const standIns = routes.filter((x) => x.fromTask === m.taskId && x.outcome === 'made' && x.taskId !== null && handlers.get(x.handler)?.stands_in_for === m.step);
     const facts = [
-      ...(completed === undefined ? [] : [{ how: 'done', taskId: m.taskId as string | null, eventId: completed.id }]),
-      ...(archive === undefined ? [] : [{ how: 'archived', taskId: null, eventId: archive.id }]),
+      ...(completed === undefined ? [] : [{ how: 'done', taskId: m.taskId as string | null, eventId: completed.id, handler: undefined as string | undefined }]),
+      ...(archive === undefined ? [] : [{ how: 'archived', taskId: null, eventId: archive.id, handler: undefined }]),
+      ...standIns.flatMap((x) => {
+        const done = firstEventOf(d, x.taskId as string, 'completed');
+        return done === undefined ? [] : [{ how: 'stood_in', taskId: x.taskId, eventId: done.id, handler: x.handler }];
+      }),
     ].sort((a, b) => a.eventId - b.eventId);
     const winner = facts[0];
     if (winner === undefined) continue;
-    if (settle(d, id, m.step, m.ref, winner.how, winner.taskId, winner.eventId, now)) taken.add(`${m.step}\u0000${m.ref}`);
+    if (!settle(d, id, m.step, m.ref, winner.how, winner.taskId, winner.eventId, now)) continue;
+    taken.add(`${m.step}\u0000${m.ref}`);
+    if (winner.how === 'stood_in' && winner.taskId !== null) standingIn(d, r, m, winner.taskId, winner.handler ?? '', now, out);
+    if (winner.how === 'done') {
+      for (const x of standIns) {
+        const left = getTask(d, x.taskId as string);
+        if (left === undefined || left.phase === 'done' || left.phase === 'archived') continue;
+        insertComment(d, left.taskId, 'gateway', `${m.step} was completed by its own task ${m.taskId}; this handler's result will not be read: finish or archive it`, now, false);
+        out.lines.push({ step: m.step, outcome: 'unread', why: `${m.step} was completed by its own task`, taskIds: [left.taskId], handler: x.handler });
+      }
+    }
   }
   const pending = new Map(pendingOf(d, id).map((p) => [p.step, p]));
   for (const s of r.plan.steps) {
@@ -3257,6 +3285,28 @@ function sweep(d: Db, r: Routed, now: number): void {
     const how = items.every((x) => x.how === 'archived') ? 'archived' : 'done';
     settle(d, id, s.step, s.step, how, null, Math.max(...items.map((x) => x.eventId)), now);
   }
+  return out;
+}
+
+/**
+ * A stand-in won its member (§5.2): the routed task archived, unless it is
+ * already, from whatever phase it is in, its undecided run superseded, the
+ * archive naming the instance and the stand-in, with a comment that does not
+ * steer; and the line saying it stood in, with its outputs.
+ */
+function standingIn(d: Db, r: Routed, m: MemberRow & { task: TaskRow }, standIn: string, handler: string, now: number, out: Swept): void {
+  const ref = memberOf(d, standIn)?.ref ?? handler;
+  const routed = mustGet(d, m.taskId);
+  const outputs = r.plan.steps.find((s) => s.step === m.step)?.outputs ?? {};
+  const metadata = latestCompletion(d, standIn)?.metadata;
+  const said = outputsText(outputs, isRecord(metadata) ? metadata : null);
+  out.lines.push({ step: m.step, outcome: 'stood_in', why: said, taskIds: [m.taskId], handler });
+  if (routed.phase === 'archived') return;
+  // Only a run the archive itself ended: one that had reported, and is finishing, is left to end its own turn.
+  const undecided = openRunOf(d, routed.taskId)?.outcome === null;
+  const archived = archiveIn(d, routed, 'gateway', now, { workflow: r.instance.instanceId, standIn });
+  if (undecided && archived.run !== undefined) out.superseded.push(archived.run);
+  insertComment(d, m.taskId, 'gateway', `Stood in for by ${ref} (${standIn}), whose result is read in ${m.step}'s place.`, now, false);
 }
 
 /** The text a template's reference to a result fills (§7.4): the step's accepted value, a list's items joined, or `(skipped)`. */
@@ -3500,22 +3550,24 @@ function routedOf(d: Db, instance: InstanceRow): Routed | undefined {
  * facts, `decide`, each decision applied, again on the new facts, at most once a
  * step of the plan; answers the lines of every decision made.
  */
-function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number, team: RouteTeam | undefined): RoutedLine[] {
-  const lines: RoutedLine[] = [];
+function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number, team: RouteTeam | undefined): Swept {
+  const out: Swept = { lines: [], superseded: [] };
   const first = routedOf(d, instance);
-  if (first === undefined) return lines;
+  if (first === undefined) return out;
   for (let round = 0; round <= first.plan.steps.length; round += 1) {
     const r = routedOf(d, instance) as Routed;
-    sweep(d, r, now);
+    const swept = sweep(d, r, now);
+    out.lines.push(...swept.lines);
+    out.superseded.push(...swept.superseded);
     const facts = routingFacts(d, r);
     const decisions = decideRouting(r.plan, facts);
-    if (decisions.length === 0) break;
+    if (decisions.length === 0 && swept.lines.length === 0) break;
     for (const dec of decisions) {
       const line = apply(d, r, facts, dec, causeEvent, now, team);
-      if (line !== undefined) lines.push(line);
+      if (line !== undefined) out.lines.push(line);
     }
   }
-  return lines;
+  return out;
 }
 
 /** How long a fault's error may be in its event, in characters (§9.4). */
@@ -3569,7 +3621,7 @@ function routingFault(d: Db, taskId: string, err: unknown, now: number): void {
 function routeIn(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): void {
   const planned = plannedMemberOf(d, taskId);
   if (planned === undefined) return;
-  const lines = decideAll(d, planned.instance, eventId, now, team);
+  const { lines } = decideAll(d, planned.instance, eventId, now, team);
   if (lines.length === 0) return;
   record(
     d,
@@ -3625,7 +3677,7 @@ export function reconcileWorkflow(db: Db, instanceId: string, now: number, team?
     if (instance === undefined) return refuse('not_found', `no workflow instance ${instanceId}`);
     const r = routedOf(d, instance);
     if (r === undefined) return { ok: true, instance, decisions: [] };
-    const decisions = decideAll(d, instance, null, now, team);
+    const { lines: decisions } = decideAll(d, instance, null, now, team);
     const first = decisions[0];
     const on = first === undefined ? undefined : reconciledOn(d, routedOf(d, instance) as Routed, first.step);
     if (on !== undefined) {
