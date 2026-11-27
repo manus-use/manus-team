@@ -108,6 +108,31 @@ describe("the writer's sweep", () => {
     expect((routed(intake)[0]?.['decisions'] as unknown[]).length).toBe(3);
   });
 
+  it("settles a pending chain four deep below a root archived undone, every row, in the archive's transaction", () => {
+    const chain = ['b', 'c', 'd', 'e'];
+    const file = `board: vi
+steps:
+  a:
+    title: a
+    assignee: vi-coordinator
+    outputs:
+      go: boolean
+  b:
+    title: b
+    assignee: verifier
+    parents: [a]
+    when:
+      - { step: a, output: go, is: true }
+${['c', 'd', 'e'].map((n, i) => `  ${n}:\n    title: ${n}\n    assignee: verifier\n    parents: [${chain[i] ?? ''}]\n`).join('')}`;
+    const w = start(file);
+    const a = w.tasks[0]?.taskId ?? '';
+    expect(pendingOf(h.db, w.instance.instanceId).map((p) => [p.step, p.state])).toEqual(chain.map((n) => [n, 'waiting']));
+    expect(b.service.archive(a, ALICE).ok).toBe(true);
+    const archived = eventsOf(h.db, a).find((e) => e.kind === 'archived')?.id;
+    expect(pendingOf(h.db, w.instance.instanceId).map((p) => [p.step, p.state, p.causeEvent])).toEqual(chain.map((n) => [n, 'skipped', archived]));
+    expect(settledOf(h.db, w.instance.instanceId).map((s) => [s.step, s.how, s.eventId])).toEqual(['a', ...chain].map((n) => [n, 'archived', archived]));
+  });
+
   it('decides nothing at a review request, a person\'s block, a stop, an unblock, changes asked or an assign', async () => {
     const w = start(FLOW.replace('    assignee: vi-coordinator\n', '    assignee: vi-coordinator\n    reviewer: verifier\n'));
     const intake = w.tasks[0]?.taskId ?? '';

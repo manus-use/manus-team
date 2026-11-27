@@ -62,6 +62,30 @@ describe('the cap', () => {
     expect(membersOf(h.db, w.instance.instanceId).filter((m) => m.step === 'exposure').length).toBe(3);
   });
 
+  it("reserves a waiting fan-out over a list param's items, not one task", async () => {
+    // each waits on the intake's kind, and fans out over the ten vendors when made.
+    const vendors = Array.from({ length: 10 }, (_, i) => `v${i}`);
+    writeFileSync(
+      join(b.dir, 'vi-workflow.yaml'),
+      VI_WORKFLOW.replace('  case: { required', '  vendors: { list: true, required: true }\n  case: { required').replace(
+        '  registry:\n',
+        '  each:\n    title: "{{case}} · vendor {{item}}"\n    assignee: verifier\n    parents: [intake]\n    for_each: vendors\n    when:\n      - { step: intake, output: kind, equals: supplychain }\n  registry:\n',
+      ),
+    );
+    const w = madeOf(b.service.startWorkflow({ workflow: 'vi-workflow', params: { from: 'json', params: { case: 'CVE-1', vendors } }, createdBy: ALICE, createdVia: VIA }));
+    // 1 member and 470 fillers; waiting: va, verify, exposure, registry, report, patch, and each's ten.
+    fill(w.instance.instanceId, 470);
+    const intake = w.tasks[0]?.taskId ?? '';
+    const run = claimed(h.db, intake);
+    const by = { kind: 'run', runId: run.runId } as const;
+    expect(await b.service.complete(intake, by, { summary: 'x', metadata: { ...OUTPUTS, packages: packages(15) } })).toEqual({
+      ok: false,
+      code: 'too_large',
+      message: `output packages would make 15 tasks, and instance ${w.instance.instanceId} has 471 of its 500`,
+    });
+    expect((await b.service.complete(intake, by, { summary: 'x', metadata: { ...OUTPUTS, packages: packages(14) } })).ok).toBe(true);
+  });
+
   it('skips a fan-out whole past the cap at a reviewer\'s approval, with its notice, the approval committed', async () => {
     writeFileSync(join(b.dir, 'vi-workflow.yaml'), VI_WORKFLOW.replace('    assignee: vi-coordinator\n    outputs:', '    assignee: vi-coordinator\n    reviewer: verifier\n    outputs:'));
     const w = start();

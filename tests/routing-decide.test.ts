@@ -49,9 +49,11 @@ function facts(list: StepFact[], members = 1): Facts {
   return { steps: new Map(list.map((f) => [f.step, f])), due: [], members, cap: INSTANCE_CAP };
 }
 
-/** The decisions for b, given a's result and settling, with b and c waiting. */
+/** b's own decision, given a's result and settling, with b and c waiting: a skipped b's settling in the same call, and c's decision after it, are the settling tests'. */
 function decideB(whenB: WhenItem[], a: Partial<StepFact>) {
-  return decide(plan(whenB), facts([fact('a', { settled: DONE('k_a', 4), ...a }), fact('b', { row: 'waiting' }), fact('c', { row: 'waiting' })]));
+  return decide(plan(whenB), facts([fact('a', { settled: DONE('k_a', 4), ...a }), fact('b', { row: 'waiting' }), fact('c', { row: 'waiting' })])).filter(
+    (d) => d.step === 'b' && d.outcome !== 'settled',
+  );
 }
 
 const RESULT = { kind: 'cve', score: 7, go: true, note: 'hello', list: ['x', 'y'] };
@@ -84,7 +86,6 @@ describe('the clauses', () => {
     expect(decideB([{ step: 'a', state: 'skipped' }], {})).toEqual([{ step: 'b', outcome: 'skipped', by: 'when', why: 'a is done' }]);
     expect(decideB([{ step: 'a', state: 'done' }], { settled: { how: 'skipped', taskId: null, eventId: 4 } })).toEqual([
       { step: 'b', outcome: 'skipped', by: 'when', why: 'a was skipped' },
-      // c is a child of b, decided by its parent once b settles.
     ]);
     expect(decideB([{ step: 'a', state: 'skipped' }], { settled: { how: 'skipped', taskId: null, eventId: 4 } })[0]?.outcome).toBe('made');
     // Its one parent archived undone: the clause holds, and the step is skipped by archive, never made with no link.
@@ -144,6 +145,24 @@ describe('skipping, settling and the effective parents', () => {
     expect(decide(p, through)).toEqual([{ step: 'c', outcome: 'settled', how: 'skipped', eventId: 9 }]);
   });
 
+  it('settles a skipped step in the call that skips it once its parents are, so a chain below it settles in one call', () => {
+    // b, c and d wait under a, archived undone: each is skipped by archive and settled at once, the next reading it.
+    const p: Plan = { format: 1, steps: [...plan().steps, step('d', ['c'])] };
+    const archived = { how: 'archived' as const, taskId: null, eventId: 5 };
+    expect(decide(p, facts([fact('a', { settled: archived }), fact('b', { row: 'waiting' }), fact('c', { row: 'waiting' }), fact('d', { row: 'waiting' })]))).toEqual(
+      ['b', 'c', 'd'].flatMap((name) => [
+        { step: name, outcome: 'skipped', by: 'archive', why: 'its parents were archived' },
+        { step: name, outcome: 'settled', how: 'archived', eventId: 5 },
+      ]),
+    );
+    // A step skipped by its when with its parent settled settles at once, and its child is made, linked past it.
+    expect(decide(plan([{ step: 'a', output: 'go', is: false }]), facts([fact('a', { settled: DONE('k_a', 4), result: RESULT }), fact('b', { row: 'waiting' }), fact('c', { row: 'waiting' })]))).toEqual([
+      { step: 'b', outcome: 'skipped', by: 'when', why: 'a.go is true' },
+      { step: 'b', outcome: 'settled', how: 'skipped', eventId: 4 },
+      { step: 'c', outcome: 'made', parents: ['k_a'], why: 'its parents are settled' },
+    ]);
+  });
+
   it('links a child past a chain of two skips to the nearest done ancestor, never reading its outputs', () => {
     const p: Plan = { format: 1, steps: [...plan().steps, step('d', ['c'], { when: [{ step: 'c', state: 'skipped' }] })] };
     const f = facts([
@@ -161,6 +180,7 @@ describe('skipping, settling and the effective parents', () => {
     const archived = { how: 'archived' as const, taskId: null, eventId: 5 };
     expect(decide(two, facts([fact('a', { settled: archived }), fact('x', { settled: { ...archived, eventId: 6 } }), fact('b', { row: 'waiting' })]))).toEqual([
       { step: 'b', outcome: 'skipped', by: 'archive', why: 'its parents were archived' },
+      { step: 'b', outcome: 'settled', how: 'archived', eventId: 6 },
     ]);
     expect(decide(two, facts([fact('a', { settled: archived }), fact('x', { settled: DONE('k_x', 6) }), fact('b', { row: 'waiting' })]))).toEqual([
       { step: 'b', outcome: 'made', parents: ['k_x'], why: 'its parents are settled' },
@@ -197,6 +217,7 @@ describe('skipping, settling and the effective parents', () => {
     expect(decide(two, f(499))).toEqual([
       { step: 'b', outcome: 'made', parents: ['k_a'], why: 'its parents are settled' },
       { step: 'c', outcome: 'skipped', by: 'cap', why: 'the instance has 500 tasks' },
+      { step: 'c', outcome: 'settled', how: 'skipped', eventId: 4 },
     ]);
   });
 });

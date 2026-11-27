@@ -12,6 +12,8 @@
 -- before (§8).
 ALTER TABLE kanban_workflow_instances ADD COLUMN plan TEXT CHECK (plan IS NULL OR json_valid(plan));
 ALTER TABLE kanban_workflow_instances ADD COLUMN routing_failed_at INTEGER;  -- a fault not yet reconciled (§9.4)
+-- The dispatcher's retry reads the faulted instances on every pass (§9.4): few, so a partial index.
+CREATE INDEX idx_kanban_workflow_instances_faulted ON kanban_workflow_instances(routing_failed_at) WHERE routing_failed_at IS NOT NULL;
 
 CREATE TABLE kanban_workflow_pending (
   instance_id  TEXT NOT NULL REFERENCES kanban_workflow_instances(instance_id),

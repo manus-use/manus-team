@@ -62,7 +62,8 @@ describe('migration 009', () => {
       { name: 'kanban_workflow_instances', strict: 1, wr: 0 },
       { name: 'kanban_workflow_tasks', strict: 1, wr: 1 },
     ]);
-    expect(indexes('kanban_workflow_instances')).toEqual(['idx_kanban_workflow_instances_board']);
+    // Migration 015 adds its own, for the faulted instances (workflow routing spec §9.4).
+    expect(indexes('kanban_workflow_instances')).toContain('idx_kanban_workflow_instances_board');
     expect(indexes('kanban_tasks')).toContain('idx_kanban_tasks_created_from');
   });
 

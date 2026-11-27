@@ -8,7 +8,7 @@ import { redactKnownSecrets } from '../secrets.js';
 import { DAG_FORMAT, DAG_LIMITS, titleRefused, type Dag, type DagTask, type ParamValue } from './dag.js';
 import { WORKER_LIMITS } from './limits.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
-import { outcomeWithOutputs, PLAN_FORMAT, standInContract, type Plan, type PlanStep, type StepShape, type Template, type Clause, type ClauseValue, type OutputType, type Outputs, type RouteSpec, type ScalarType, type StepState, type WhenItem } from './routing.js';
+import { lateReferences, outcomeWithOutputs, PLAN_FORMAT, standInContract, type Plan, type PlanStep, type StepShape, type Template, type Clause, type ClauseValue, type OutputType, type Outputs, type RouteSpec, type ScalarType, type StepState, type WhenItem } from './routing.js';
 import { assignable, isRecord, NO_MENTIONS, type TaskFacts } from './task-checks.js';
 import { CONTRACT_FIELDS, GATE_LIMITS, type Contract, type CreatedVia, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
@@ -1585,6 +1585,18 @@ export function expand(
           wake: null,
         },
       });
+    }
+    // Nor may params, filled, make one with the braces around them, as `{{intake.kind{{p}}` with p `}}` would: its later
+    // references are exactly the file's.
+    if (!plain(s)) {
+      const written = (text: string): string => lateReferences(text).filter((r) => r !== `{{${ITEM}}}` || lateItem).join('\n');
+      for (const { template: t } of made) {
+        for (const [field, raw, filled] of [['title', s.title, t.title], ['body', s.body ?? '', t.body ?? '']] as const) {
+          if (lateReferences(filled).join('\n') !== written(raw)) {
+            return refuse('invalid', `steps.${s.name}.${field} with its params filled holds a reference its file does not, which a step made later would fill: remove the braces from its params`);
+          }
+        }
+      }
     }
     if (plain(s)) {
       const refs: string[] = [];

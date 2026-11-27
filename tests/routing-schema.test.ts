@@ -62,6 +62,8 @@ describe('migration 015', () => {
     expect(indexes('kanban_workflow_pending')).toEqual(['idx_kanban_workflow_pending_waiting']);
     expect(indexes('kanban_workflow_routes')).toEqual(['idx_kanban_workflow_routes_from', 'idx_kanban_workflow_routes_task']);
     expect(indexes('kanban_workflow_settled')).toEqual([]);
+    // The faulted instances, which the dispatcher's retry reads every pass, by a partial index.
+    expect(indexes('kanban_workflow_instances')).toContain('idx_kanban_workflow_instances_faulted');
   });
 
   it("gives an instance a plan, checked to be JSON, and a fault mark, both null unless written", () => {

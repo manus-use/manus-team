@@ -150,6 +150,17 @@ describe('the writer deciding at a settling', () => {
     ]);
   });
 
+  it('skips a step due on a board found archived, by board, never refusing the completion', async () => {
+    const w = start();
+    const intake = w.tasks[0]?.taskId ?? '';
+    h.db.prepare("UPDATE kanban_boards SET archived_at = ? WHERE name = 'vi'").run(NOW);
+    await done(intake, { kind: 'cve', verify: true, note: 'n' });
+    expect(getTask(h.db, intake)?.phase).toBe('done');
+    expect(member(w.instance.instanceId, 'va')).toBeUndefined();
+    expect(pendingOf(h.db, w.instance.instanceId).find((p) => p.step === 'va')).toMatchObject({ state: 'skipped', reason: { by: 'board', why: 'board vi is archived' } });
+    expect(routed(intake)[0]?.['decisions']).toContainEqual({ step: 'va', outcome: 'skipped', why: 'board vi is archived', taskIds: [], by: 'board' });
+  });
+
   it('skips a step at once when its when is false, holding its children until its own parents settle, then links them past it', async () => {
     const w = start();
     const intake = w.tasks[0]?.taskId ?? '';

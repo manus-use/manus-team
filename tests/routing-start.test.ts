@@ -155,6 +155,22 @@ describe('a start of a routed file', () => {
     expect(r.tasks[0]?.task.title).toContain('{{intake.kind}}');
   });
 
+  it('refuses params that, filled, make a reference the file does not have, braces and all', () => {
+    const refused = { ok: false, code: 'invalid', message: 'steps.registry.title with its params filled holds a reference its file does not, which a step made later would fill: remove the braces from its params' };
+    const file = (title: string) =>
+      writeFileSync(
+        join(b.dir, 'vi-workflow.yaml'),
+        VI_WORKFLOW.replace('  case: { required', '  p: { required: true }\n  q: { default: "" }\n  case: { required').replace('title: "{{case}} · registry"', `title: "${title}"`),
+      );
+    // No param holds "{{", but a "{" filled beside the file's own brace makes one.
+    file('{{case}} · {{p}}{intake.kind}}');
+    expect(start({ params: { from: 'json', params: { case: 'CVE-1', p: '{' } } })).toEqual(refused);
+    expect(start({ params: { from: 'json', params: { case: 'CVE-1', p: 'x' } } }).ok).toBe(true);
+    file('{{case}} · {{p}}{{q}}');
+    expect(start({ params: { from: 'json', params: { case: 'CVE-2', p: '{', q: '{intake.kind}}' } } })).toEqual(refused);
+    expect(start({ params: { from: 'json', params: { case: 'CVE-2', p: '{', q: 'x' } } }).ok).toBe(true);
+  });
+
   it('starts a file using no routing key as before: no plan and no row', () => {
     writeFileSync(join(b.dir, 'vendor-eval.yaml'), VENDOR_EVAL);
     for (const name of ['worker', 'reviewer']) b.roles.set(name, viRoles().get('verifier') as never);

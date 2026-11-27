@@ -77,6 +77,23 @@ describe('retrying a faulted routing', () => {
     expect(getInstance(h.db, instanceId)?.routingFailedAt).toBeNull();
   });
 
+  it('says a retry that fails once, not each minute, and forgets the instance once it succeeds', async () => {
+    const { instanceId } = await faulted();
+    const notes: string[] = [];
+    const note = (l: string) => notes.push(l);
+    expect(b.service.retryRouting(note)).toBe(0);
+    clock.advance(60_000);
+    expect(b.service.retryRouting(note)).toBe(0);
+    expect(notes).toEqual([`kanban: the routing of ${instanceId} failed again: boom; it is tried each minute`]);
+    h.db.exec('DROP TRIGGER boom');
+    clock.advance(60_000);
+    expect(b.service.retryRouting(note)).toBe(1);
+    // Faulted again at once: tried on the next pass, not a minute after the last try, and said again once.
+    h.db.prepare('UPDATE kanban_workflow_instances SET routing_failed_at = ? WHERE instance_id = ?').run(NOW, instanceId);
+    expect(b.service.retryRouting(note)).toBe(1);
+    expect(notes.length).toBe(1);
+  });
+
   it('decides nothing twice: a second reconciliation writes no row and no event, and one whose commit found the database busy is retried whole', async () => {
     const { instanceId } = await faulted();
     h.db.exec('DROP TRIGGER boom');

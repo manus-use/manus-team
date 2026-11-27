@@ -818,6 +818,8 @@ the same `insertTask` (`db/kanban.ts`):
 -- See docs/specs/2026-11-26-workflow-routing-design.md §8.
 ALTER TABLE kanban_workflow_instances ADD COLUMN plan TEXT CHECK (plan IS NULL OR json_valid(plan));
 ALTER TABLE kanban_workflow_instances ADD COLUMN routing_failed_at INTEGER;  -- a fault not yet reconciled (§9.4)
+-- The dispatcher's retry reads the faulted instances on every pass (§9.4): few, so a partial index.
+CREATE INDEX idx_kanban_workflow_instances_faulted ON kanban_workflow_instances(routing_failed_at) WHERE routing_failed_at IS NOT NULL;
 
 CREATE TABLE kanban_workflow_pending (
   instance_id  TEXT NOT NULL REFERENCES kanban_workflow_instances(instance_id),
@@ -914,7 +916,7 @@ pending step reads, after the transition's own rows and event:
 | `block` | a run's block from the work, of a kind but `dependency` (§5.1) |
 | `endRun` | `next` is `blocked` and the task blocked from the work |
 | `archive` | always: the task now reads as done (`from: done`) or skipped by archive (§3.1) |
-| `archiveWorkflow` | every waiting row is skipped, `the instance was archived`, and nothing is made |
+| `archiveWorkflow` | every waiting row is skipped, `the instance was archived`, and nothing is made; the members' settled rows and the skipped steps' are written in the same transaction, so the instance is never due |
 | `stop`, `unblock`, `requestChanges`, `assign`, the claim, everything else | nothing: a person's stop routes nothing (§5.1), and none of the others changes what a step reads |
 
 **Cancelling a case is `workflow archive`** (workflows spec §10): it archives every member and skips
@@ -948,8 +950,10 @@ function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, n
    fan-out's tasks and its `items`; a route's handler task and its route row; an `over_limit` or
    `over_cap` route row; a step skipped at the cap.
 5. **Until nothing more is due**: a skip, a made row or a settled row may decide another step in the same
-   transaction, so it calls `decide` again on the new facts, at most once a step of the plan, which
-   bounds the loop. A step made is a new open task, which decides nothing until it settles.
+   transaction, so it calls `decide` again on the new facts until a call changes nothing. A step
+   skipped once its parents are settled is settled in the same call, and every later step reads it, so
+   a chain of skipped steps settles in one call; `3 * steps + 1` calls is only a guard. A step made is
+   a new open task, which decides nothing until it settles.
 6. It writes **one `workflow_routed` event** on the transitioning task, listing every decision of the
    transaction, for the notice (§12.2).
 7. It returns the runs it superseded (§5.2), which the transition's result carries to its caller (§9.5).

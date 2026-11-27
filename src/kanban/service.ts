@@ -570,6 +570,8 @@ export class KanbanService {
   readonly #reporting = new Map<string, { workspace: string | null; done: Promise<unknown> }>();
   /** When each faulted instance's routing was last retried, in this process (workflow routing spec §9.4); not stored. */
   readonly #retried = new Map<string, number>();
+  /** The faulted instances whose retry has failed and been said once, until one succeeds. */
+  readonly #retryFailed = new Set<string>();
 
   constructor(deps: KanbanServiceDeps) {
     this.#db = deps.db;
@@ -1198,21 +1200,23 @@ export class KanbanService {
   /**
    * The instance's 500, reserved at the report whose list a fan-out will read
    * (workflow routing spec §2.2): its members, handlers among them, plus this
-   * list's items for each fan-out over it still waiting, plus one for each other
-   * step still waiting, at most 500, else `too_large`, while the agent can still
-   * shorten its list. The writer never refuses for the cap; what passes it later
-   * is skipped (§9.4).
+   * list's items for each fan-out over it still waiting, plus what each other
+   * step still waiting makes, a fan-out over a list param its items, any other
+   * one, at most 500, else `too_large`, while the agent can still shorten its
+   * list. The writer never refuses for the cap; what passes it later is skipped
+   * (§9.4).
    */
   #reserved(instanceId: string, plan: Plan, step: string, metadata: Record<string, unknown>): Refusal | undefined {
     const waiting = new Set(pendingOf(this.#db, instanceId).filter((p) => p.state === 'waiting').map((p) => p.step));
     const members = membersOf(this.#db, instanceId).length;
-    let others = waiting.size;
+    const makes = (s: PlanStep): number => s.templates?.length ?? 1;
+    let others = plan.steps.filter((s) => waiting.has(s.step)).reduce((n, s) => n + makes(s), 0);
     for (const s of plan.steps) {
       const f = s.for_each;
       if (f === undefined || !('step' in f) || f.step !== step || !waiting.has(s.step)) continue;
       const list = metadata[f.output];
       if (!Array.isArray(list)) continue;
-      others -= 1;
+      others -= makes(s);
       if (members + list.length + others > INSTANCE_CAP) {
         return board.refuse('too_large', `output ${f.output} would make ${list.length} tasks, and instance ${instanceId} has ${members} of its ${INSTANCE_CAP}`);
       }
@@ -2406,21 +2410,35 @@ export class KanbanService {
   /**
    * The dispatcher's hook (workflow routing spec §9.4): every instance whose routing
    * faulted reconciled, each at most once a minute; a reconciliation that faults
-   * again leaves its mark for the next. Answers how many were reconciled. The
-   * time each was last tried is this process's: after a restart, the startup's
+   * again leaves its mark for the next, its first such failure said by `note`.
+   * Answers how many were reconciled. The time each was last tried is this
+   * process's, kept only while it is faulted: after a restart, the startup's
    * reconciliation tries every one.
    */
-  retryRouting(): number {
+  retryRouting(note?: (line: string) => void): number {
     const now = this.#clock.now();
     let reconciled = 0;
-    for (const id of routingFaulted(this.#db)) {
+    const faulted = routingFaulted(this.#db);
+    // An instance no longer faulted, cleared by a reconciliation of anyone's, is forgotten.
+    const still = new Set(faulted);
+    for (const id of [...this.#retried.keys()]) if (!still.has(id)) this.#retried.delete(id);
+    for (const id of [...this.#retryFailed]) if (!still.has(id)) this.#retryFailed.delete(id);
+    for (const id of faulted) {
       const last = this.#retried.get(id);
       if (last !== undefined && now - last < RETRY_ROUTING_MS) continue;
       this.#retried.set(id, now);
       try {
-        if (this.reconcileWorkflow(id).ok) reconciled += 1;
-      } catch {
-        // Still faulted: its mark stays, and the next pass after a minute tries again.
+        if (this.reconcileWorkflow(id).ok) {
+          reconciled += 1;
+          this.#retried.delete(id);
+          this.#retryFailed.delete(id);
+        }
+      } catch (err) {
+        // Still faulted: its mark stays, and the next pass after a minute tries again; said once, not every minute.
+        if (!this.#retryFailed.has(id)) {
+          this.#retryFailed.add(id);
+          note?.(`kanban: the routing of ${id} failed again: ${redactKnownSecrets(err instanceof Error ? err.message : String(err))}; it is tried each minute`);
+        }
       }
     }
     return reconciled;

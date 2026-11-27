@@ -271,6 +271,11 @@ export function fillText(text: string, result: (step: string, output: string) =>
   });
 }
 
+/** The references `fillText` fills in a text, as written: each `{{<step>.<output>}}` and `{{item}}`, in order. */
+export function lateReferences(text: string): string[] {
+  return [...text.matchAll(LATE_REFERENCE)].flatMap((m) => (m[2] !== undefined || m[1] === 'item' ? [m[0]] : []));
+}
+
 /** The text a skipped step's output fills a title or a body with (§7.4): a display placeholder, which nothing reads as a value. */
 export const SKIPPED_TEXT = '(skipped)';
 
@@ -654,26 +659,42 @@ function latestOf(facts: Facts, steps: readonly string[]): number {
 /**
  * What is due now (§10), in the plan's order: each waiting step decided once its
  * `when` is certain, made once its parents are settled, or skipped; each skipped
- * step settled once its parents are. Pure and total: a missing result, a value of
- * the wrong type, an unknown step read as false or unsettled, never thrown.
+ * step settled once its parents are, in the same call as its skip when they are
+ * already, so a chain of skipped steps settles in one decision, every later step
+ * reading the settling. Pure and total: a missing result, a value of the wrong
+ * type, an unknown step read as false or unsettled, never thrown.
  */
-export function decide(plan: Plan, facts: Facts): Decision[] {
+export function decide(plan: Plan, input: Facts): Decision[] {
   const out: Decision[] = [];
-  let members = facts.members;
+  let members = input.members;
+  // The facts as this call has decided them: a step settled here is settled for every step after it.
+  const overlay = new Map(input.steps);
+  const facts: Facts = { ...input, steps: overlay };
+  const settledNow = (s: PlanStep, by: SkippedBy | null): void => {
+    if (!s.parents.every((p) => overlay.get(p)?.settled != null)) return;
+    const archived = by === 'archive' || (s.parents.length > 0 && s.parents.every((p) => overlay.get(p)?.settled?.how === 'archived'));
+    const how = archived ? 'archived' : 'skipped';
+    const eventId = latestOf(facts, s.parents);
+    out.push({ step: s.step, outcome: 'settled', how, eventId });
+    const fact = overlay.get(s.step);
+    if (fact !== undefined) overlay.set(s.step, { ...fact, row: 'skipped', skippedBy: by, settled: { how, taskId: null, eventId } });
+  };
+  const skip = (s: PlanStep, by: SkippedBy, why: string): void => {
+    out.push({ step: s.step, outcome: 'skipped', by, why });
+    settledNow(s, by);
+  };
   for (const s of plan.steps) {
     const fact = facts.steps.get(s.step);
     if (fact === undefined) continue;
     if (fact.row === 'skipped' && fact.settled === null) {
-      if (!s.parents.every((p) => facts.steps.get(p)?.settled != null)) continue;
-      const archived = fact.skippedBy === 'archive' || (s.parents.length > 0 && s.parents.every((p) => facts.steps.get(p)?.settled?.how === 'archived'));
-      out.push({ step: s.step, outcome: 'settled', how: archived ? 'archived' : 'skipped', eventId: latestOf(facts, s.parents) });
+      settledNow(s, fact.skippedBy);
       continue;
     }
     if (fact.row !== 'waiting') continue;
     const w = when(plan, facts, s.when);
     if (w.truth === 'undecided') continue;
     if (w.truth === 'false') {
-      out.push({ step: s.step, outcome: 'skipped', by: 'when', why: w.why });
+      skip(s, 'when', w.why);
       continue;
     }
     const stuck = stuckParents(facts, s.when);
@@ -684,24 +705,24 @@ export function decide(plan: Plan, facts: Facts): Decision[] {
     const from = source === undefined ? undefined : facts.steps.get(source.step)?.settled;
     if (source !== undefined && (from === undefined || from === null)) continue;
     if (waited.length > 0 && waited.every((p) => facts.steps.get(p)?.settled?.how === 'archived')) {
-      out.push({ step: s.step, outcome: 'skipped', by: 'archive', why: 'its parents were archived' });
+      skip(s, 'archive', 'its parents were archived');
       continue;
     }
     let items: string[] | undefined = s.templates?.map((t) => t.item);
     if (source !== undefined && from !== undefined && from !== null) {
       // The logical step's accepted list, its own task's or a stand-in's, never its task's phase (§4.1).
       if (!accepted(from)) {
-        out.push({ step: s.step, outcome: 'skipped', by: 'source', why: `${source.step} was ${from.how === 'archived' ? 'archived' : 'skipped'}` });
+        skip(s, 'source', `${source.step} was ${from.how === 'archived' ? 'archived' : 'skipped'}`);
         continue;
       }
       const list = resultOf(plan, facts, source.step, source.output);
       const ref = `${source.step}.${source.output}`;
       if (!Array.isArray(list)) {
-        out.push({ step: s.step, outcome: 'skipped', by: 'source', why: `${ref} is missing` });
+        skip(s, 'source', `${ref} is missing`);
         continue;
       }
       if (list.length === 0) {
-        out.push({ step: s.step, outcome: 'skipped', by: 'source', why: `${ref} is empty` });
+        skip(s, 'source', `${ref} is empty`);
         continue;
       }
       items = (list as Array<boolean | number | string>).map(itemText);
@@ -711,7 +732,7 @@ export function decide(plan: Plan, facts: Facts): Decision[] {
     // A fan-out is made whole or not at all (§9.4).
     const count = items?.length ?? 1;
     if (members + count > facts.cap) {
-      out.push({ step: s.step, outcome: 'skipped', by: 'cap', why: `the instance has ${facts.cap} tasks` });
+      skip(s, 'cap', `the instance has ${facts.cap} tasks`);
       continue;
     }
     members += count;

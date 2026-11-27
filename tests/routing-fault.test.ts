@@ -1,11 +1,11 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeRun } from '../src/db/kanban.js';
 import { eventsOf, getInstance, getTask, membersOf, parentsOf, pendingOf, settledOf } from '../src/db/kanban-read.js';
 import { clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
-import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
+import { ALICE, NOW, VIA, claimed, newTask } from './helpers/kanban.js';
 import { madeOf, viBoard, type ViBoard } from './helpers/routing.js';
 
 /**
@@ -69,6 +69,28 @@ describe('a fault in the routing', () => {
     expect(failed(bb)).toEqual([{ workflow: w.instance.instanceId, workflowName: 'flow', error: 'the settled rows cannot be written', first: false }]);
     expect(pendingOf(h.db, w.instance.instanceId).map((p) => p.state)).toEqual(['waiting']);
     expect(membersOf(h.db, w.instance.instanceId).length).toBe(2);
+  });
+
+  it('cuts the error at 500 characters by code points, never splitting one', async () => {
+    const w = start();
+    const a = w.tasks[0]?.taskId ?? '';
+    // 499 characters, then one outside the BMP: two UTF-16 units, which a cut by units would split.
+    h.db.exec(`CREATE TEMP TRIGGER boom BEFORE INSERT ON kanban_workflow_settled BEGIN SELECT RAISE(ABORT, '${'x'.repeat(499)}\u{1F600}tail'); END;`);
+    await done(a);
+    expect((failed(a)[0] as { error: string }).error).toBe(`${'x'.repeat(499)}\u{1F600}`);
+  });
+
+  it("opens no savepoint for a task of no planned instance, and one for a planned instance's", async () => {
+    const spy = vi.spyOn(h.db, 'transaction');
+    try {
+      const plain = newTask(h.db, { assignee: { kind: 'role', name: 'verifier' } });
+      await done(plain.taskId);
+      expect(spy).not.toHaveBeenCalled();
+      await done(start().tasks[0]?.taskId ?? '');
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('rethrows when SQLite rolled the whole transaction back, so nothing is committed', async () => {

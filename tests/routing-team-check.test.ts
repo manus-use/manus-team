@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { closeRun } from '../src/db/kanban.js';
 import { eventsOf, getTask, membersOf } from '../src/db/kanban-read.js';
+import { isOutcome } from '../src/kanban/waker.js';
 import { clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
 import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
@@ -57,8 +58,27 @@ describe('the team check of a task made late', () => {
       blockKind: 'needs_input',
       blockReason: `role vulnerability-analyst is not configured, so this step's task cannot be given to it: /kanban task assign ${va} <role>`,
     });
-    expect(eventsOf(h.db, va).at(-1)).toMatchObject({ kind: 'blocked', actor: 'gateway' });
+    const blocked = eventsOf(h.db, va).at(-1);
+    expect(blocked).toMatchObject({ kind: 'blocked', actor: 'gateway' });
+    // The gateway's block is no run's: it wakes nothing (wake spec §2.2).
+    expect(blocked !== undefined && isOutcome(blocked)).toBe(false);
     expect(eventsOf(h.db, va).some((e) => e.kind === 'workflow_routed')).toBe(false);
     expect(membersOf(h.db, w.instance.instanceId).map((m) => m.step)).toEqual(['intake', 'va']);
+  });
+
+  it('names the review command when the role refused is the reviewer', async () => {
+    writeFileSync(join(b.dir, 'flow.yaml'), FLOW.replace('    assignee: vulnerability-analyst\n', '    assignee: vulnerability-analyst\n    reviewer: assessment-reviewer\n'));
+    const w = madeOf(b.service.startWorkflow({ workflow: 'flow', params: { from: 'json', params: {} }, createdBy: ALICE, createdVia: VIA }));
+    const intake = w.tasks[0]?.taskId ?? '';
+    b.roles.delete('assessment-reviewer');
+    const run = claimed(h.db, intake);
+    expect((await b.service.complete(intake, { kind: 'run', runId: run.runId }, { summary: 'x', metadata: { kind: 'cve' } })).ok).toBe(true);
+    closeRun(h.db, run.runId, NOW);
+    const va = membersOf(h.db, w.instance.instanceId).find((m) => m.step === 'va')?.taskId ?? '';
+    expect(getTask(h.db, va)).toMatchObject({
+      phase: 'blocked',
+      blockKind: 'needs_input',
+      blockReason: `role assessment-reviewer is not configured, so this step's task cannot be reviewed by it: /kanban task review ${va}, with a line reviewer: <role or @person>`,
+    });
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decide, INSTANCE_CAP, type Facts, type Plan, type PlanStep, type SettledFact, type StepFact, type Template } from '../src/kanban/routing.js';
+import { decide, INSTANCE_CAP, type Decision, type Facts, type Plan, type PlanStep, type SettledFact, type StepFact, type Template } from '../src/kanban/routing.js';
 
 /**
  * decide's result fan-out and its join (workflow routing spec §4): one task an
@@ -51,6 +51,9 @@ function facts(list: StepFact[], members = 2): Facts {
 }
 
 /** The facts once intake settled as given, and mid is done. */
+/** A step's own decisions, its settling in the same call left out: a chain's settling is the writer's tests'. */
+const of = (name: string, ds: Decision[]): Decision[] => ds.filter((d) => d.step === name && d.outcome !== 'settled');
+
 function settledIntake(intake: Partial<StepFact>, members = 2): Facts {
   return facts([fact('intake', intake), fact('mid', { row: 'made', settled: DONE('k_mid', 9) }), fact('each', { row: 'waiting' }), fact('join', { row: 'waiting' })], members);
 }
@@ -70,16 +73,16 @@ describe("a fan-out over a result", () => {
   });
 
   it('skips on an empty list, a skipped or archived source, and a list of the wrong type', () => {
-    expect(decide(PLAN, settledIntake({ settled: DONE('k_i', 4), result: { packages: [] } }))).toEqual([
+    expect(of('each', decide(PLAN, settledIntake({ settled: DONE('k_i', 4), result: { packages: [] } })))).toEqual([
       { step: 'each', outcome: 'skipped', by: 'source', why: 'intake.packages is empty' },
     ]);
-    expect(decide(PLAN, settledIntake({ settled: { how: 'skipped', taskId: null, eventId: 4 } }))).toEqual([
+    expect(of('each', decide(PLAN, settledIntake({ settled: { how: 'skipped', taskId: null, eventId: 4 } })))).toEqual([
       { step: 'each', outcome: 'skipped', by: 'source', why: 'intake was skipped' },
     ]);
-    expect(decide(PLAN, settledIntake({ settled: { how: 'archived', taskId: null, eventId: 4 } }))).toEqual([
+    expect(of('each', decide(PLAN, settledIntake({ settled: { how: 'archived', taskId: null, eventId: 4 } })))).toEqual([
       { step: 'each', outcome: 'skipped', by: 'source', why: 'intake was archived' },
     ]);
-    expect(decide(PLAN, settledIntake({ settled: DONE('k_i', 4), result: { packages: 'lodash' } }))).toEqual([
+    expect(of('each', decide(PLAN, settledIntake({ settled: DONE('k_i', 4), result: { packages: 'lodash' } })))).toEqual([
       { step: 'each', outcome: 'skipped', by: 'source', why: 'intake.packages is missing' },
     ]);
   });
@@ -94,7 +97,7 @@ describe("a fan-out over a result", () => {
   });
 
   it('makes none of its items past the cap, never a part', () => {
-    expect(decide(PLAN, settledIntake({ settled: DONE('k_i', 4), result: { packages: Array.from({ length: 60 }, (_, i) => `p${i}`) } }, 450))).toEqual([
+    expect(of('each', decide(PLAN, settledIntake({ settled: DONE('k_i', 4), result: { packages: Array.from({ length: 60 }, (_, i) => `p${i}`) } }, 450)))).toEqual([
       { step: 'each', outcome: 'skipped', by: 'cap', why: 'the instance has 500 tasks' },
     ]);
     expect(decide(PLAN, settledIntake({ settled: DONE('k_i', 4), result: { packages: Array.from({ length: 50 }, (_, i) => `p${i}`) } }, 450))[0]?.outcome).toBe('fanned_out');
@@ -136,6 +139,9 @@ describe('the join', () => {
       fact('each', { row: 'made', settled: { how: 'archived', taskId: null, eventId: 12 }, items: items([['each:1', { how: 'archived', taskId: null, eventId: 12 }]]) }),
       fact('join', { row: 'waiting' }),
     ]);
-    expect(decide(PLAN, archived)).toEqual([{ step: 'join', outcome: 'skipped', by: 'archive', why: 'its parents were archived' }]);
+    expect(decide(PLAN, archived)).toEqual([
+      { step: 'join', outcome: 'skipped', by: 'archive', why: 'its parents were archived' },
+      { step: 'join', outcome: 'settled', how: 'archived', eventId: 12 },
+    ]);
   });
 });

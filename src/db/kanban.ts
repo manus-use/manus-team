@@ -50,7 +50,6 @@ import {
   getTask,
   getTaskByKey,
   gatesOf,
-  firstEventOf,
   latestBlockOf,
   latestCompletion,
   routesOf,
@@ -2513,6 +2512,8 @@ export function archiveWorkflow(
       d.prepare(
         `UPDATE kanban_workflow_pending SET state = 'skipped', reason = ?, decided_at = ? WHERE instance_id = ? AND state = 'waiting'`,
       ).run(JSON.stringify({ by: 'instance', why: 'the instance was archived' }), now, instanceId);
+      // Its members' rows and the skipped steps' settling, in the same transaction, so its counts are right and it is never due.
+      decideAll(d, instance, null, now, undefined);
     }
     return { ok: true, instance, archived, runs };
   });
@@ -3150,6 +3151,8 @@ interface Routed {
   instance: InstanceRow;
   plan: Plan;
   members: Array<MemberRow & { task: TaskRow }>;
+  /** The next member's position, read at the first task this round makes, then counted. */
+  nextPosition?: number;
 }
 
 /** A name a template gives, as the writer stores it: a person by their principal, else a role. */
@@ -3250,18 +3253,29 @@ function sweep(d: Db, r: Routed, now: number): Swept {
   const handlers = new Map(r.plan.steps.filter((s) => s.handler === true).map((s) => [s.step, s]));
   const routes = routesOf(d, id);
   const taken = new Set(settledOf(d, id).map((x) => `${x.step}\u0000${x.ref}`));
+  // Prepared once a sweep, not once a member.
+  const completedOf = d.prepare<[string], { id: number | null }>("SELECT min(id) AS id FROM kanban_events WHERE task_id = ? AND kind = 'completed'");
+  const archivedOf = d.prepare<[string], { id: number; came: unknown }>(
+    "SELECT id, json_extract(payload, '$.from') AS came FROM kanban_events WHERE task_id = ? AND kind = 'archived' ORDER BY id LIMIT 1",
+  );
+  const firstCompleted = (taskId: string): { id: number } | undefined => {
+    const row = completedOf.get(taskId);
+    return row?.id === null || row?.id === undefined ? undefined : { id: row.id };
+  };
   for (const m of r.members) {
     if (handlers.has(m.step) || taken.has(`${m.step}\u0000${m.ref}`)) continue;
-    const completed = firstEventOf(d, m.taskId, 'completed');
-    const archived = firstEventOf(d, m.taskId, 'archived');
-    const archive = archived !== undefined && isRecord(archived.payload) && archived.payload['from'] !== 'done' ? archived : undefined;
+    // A task neither done nor archived has neither event of its own: only its stand-ins are read (§9.2).
+    const finished = m.task.phase === 'done' || m.task.phase === 'archived';
+    const completed = finished ? firstCompleted(m.taskId) : undefined;
+    const archived = finished ? archivedOf.get(m.taskId) : undefined;
+    const archive = archived !== undefined && archived.came !== 'done' ? archived : undefined;
     // Its stand-ins: the handlers routed from its task that stand in for its step (§5.2).
     const standIns = routes.filter((x) => x.fromTask === m.taskId && x.outcome === 'made' && x.taskId !== null && handlers.get(x.handler)?.stands_in_for === m.step);
     const facts = [
       ...(completed === undefined ? [] : [{ how: 'done', taskId: m.taskId as string | null, eventId: completed.id, handler: undefined as string | undefined }]),
       ...(archive === undefined ? [] : [{ how: 'archived', taskId: null, eventId: archive.id, handler: undefined }]),
       ...standIns.flatMap((x) => {
-        const done = firstEventOf(d, x.taskId as string, 'completed');
+        const done = firstCompleted(x.taskId as string);
         return done === undefined ? [] : [{ how: 'stood_in', taskId: x.taskId, eventId: done.id, handler: x.handler }];
       }),
     ].sort((a, b) => a.eventId - b.eventId);
@@ -3280,10 +3294,12 @@ function sweep(d: Db, r: Routed, now: number): Swept {
     }
   }
   const pending = new Map(pendingOf(d, id).map((p) => [p.step, p]));
+  // Read once, after the members' rows: a fan-out's own row is no item's.
+  const rows = settledOf(d, id);
   for (const s of r.plan.steps) {
     if (s.for_each === undefined || taken.has(`${s.step}\u0000${s.step}`)) continue;
     if (s.made === 'decide' && pending.get(s.step)?.state !== 'made') continue;
-    const items = settledOf(d, id).filter((x) => x.step === s.step && x.ref !== s.step);
+    const items = rows.filter((x) => x.step === s.step && x.ref !== s.step);
     const all = r.members.filter((m) => m.step === s.step);
     if (all.length === 0 || items.length < all.length) continue;
     const how = items.every((x) => x.how === 'archived') ? 'archived' : 'done';
@@ -3385,7 +3401,9 @@ function makeLate(
     const added = insertGate(d, taskId, { command: gate.command, timeoutS: gate.timeout_s }, r.instance.createdBy, now, { workflow: r.instance.instanceId });
     if (!added.ok) throw new Error(`${made.ref}: ${added.message}`);
   }
-  const position = (d.prepare<[string], { p: number | null }>('SELECT max(position) AS p FROM kanban_workflow_tasks WHERE instance_id = ?').get(r.instance.instanceId)?.p ?? -1) + 1;
+  r.nextPosition ??= (d.prepare<[string], { p: number | null }>('SELECT max(position) AS p FROM kanban_workflow_tasks WHERE instance_id = ?').get(r.instance.instanceId)?.p ?? -1) + 1;
+  const position = r.nextPosition;
+  r.nextPosition += 1;
   d.prepare('INSERT INTO kanban_workflow_tasks (task_id, instance_id, ref, step, item, position) VALUES (?, ?, ?, ?, ?, ?)').run(
     taskId,
     r.instance.instanceId,
@@ -3397,7 +3415,10 @@ function makeLate(
   if (team !== undefined) {
     const refused = lateRefused(t, title, r.instance, team);
     if (refused !== undefined) {
-      const reason = `${refused}, so this step's task cannot be given to it: /kanban task assign ${taskId} <role>`;
+      // The command that mends it: another reviewer, named at the review, when the reviewer is the one refused.
+      const reason = refused.reviewer
+        ? `${refused.message}, so this step's task cannot be reviewed by it: /kanban task review ${taskId}, with a line reviewer: <role or @person>`
+        : `${refused.message}, so this step's task cannot be given to it: /kanban task assign ${taskId} <role>`;
       const recurrences = enterBlocked(d, mustGet(d, taskId), 'needs_input', reason);
       record(d, { taskId, kind: 'blocked', actor: 'gateway', payload: { kind: 'needs_input', reason, blockRecurrences: recurrences } }, now);
     }
@@ -3405,24 +3426,31 @@ function makeLate(
   return taskId;
 }
 
-/** Why a task made late no longer passes the team's checks (§7.4), or undefined: a role named not configured, said plainly, or `checkTask`'s words. */
-function lateRefused(t: Template, title: string, instance: InstanceRow, team: RouteTeam): string | undefined {
-  for (const name of [t.assignee, t.reviewer]) {
-    if (name !== null && !name.includes(':') && !team.roles.has(name)) return `role ${name} is not configured`;
+/**
+ * Why a task made late no longer passes the team's checks (§7.4), or undefined: a role named not configured, said plainly, or
+ * `checkTask`'s words; and whether the reviewer is the one refused.
+ */
+function lateRefused(t: Template, title: string, instance: InstanceRow, team: RouteTeam): { message: string; reviewer: boolean } | undefined {
+  for (const [name, reviewer] of [[t.assignee, false], [t.reviewer, true]] as const) {
+    if (name !== null && !name.includes(':') && !team.roles.has(name)) return { message: `role ${name} is not configured`, reviewer };
   }
-  const checked = checkTask(
-    {
-      title,
-      contract: t.contract,
-      ...(t.assignee === null ? {} : { assignee: t.assignee }),
-      ...(t.reviewer === null ? {} : { reviewer: t.reviewer }),
-      ...(t.workspace === null ? {} : { workspace: t.workspace }),
-      createdBy: instance.createdBy,
-      createdVia: instance.createdVia,
-    },
-    team,
-  );
-  return checked.ok ? undefined : checked.message;
+  const check = (withReviewer: boolean) =>
+    checkTask(
+      {
+        title,
+        contract: t.contract,
+        ...(t.assignee === null ? {} : { assignee: t.assignee }),
+        ...(t.reviewer === null || !withReviewer ? {} : { reviewer: t.reviewer }),
+        ...(t.workspace === null ? {} : { workspace: t.workspace }),
+        createdBy: instance.createdBy,
+        createdVia: instance.createdVia,
+      },
+      team,
+    );
+  const checked = check(true);
+  if (checked.ok) return undefined;
+  // The reviewer is the one refused when the task passes without it.
+  return { message: checked.message, reviewer: t.reviewer !== null && check(false).ok };
 }
 
 /** A step's templates, one an item of its list param, or its one. */
@@ -3449,7 +3477,9 @@ function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number
   const s = r.plan.steps.find((x) => x.step === dec.step);
   if (s === undefined) return undefined;
   if (dec.outcome === 'settled') {
-    settle(d, id, dec.step, dec.step, dec.how, null, dec.eventId, now);
+    // Only a step whose row is skipped settles so: in the same call as its skip, that skip applied first.
+    const row = d.prepare<[string, string], { state: string }>('SELECT state FROM kanban_workflow_pending WHERE instance_id = ? AND step = ?').get(id, dec.step);
+    if (row?.state === 'skipped') settle(d, id, dec.step, dec.step, dec.how, null, dec.eventId, now);
     return undefined;
   }
   if (dec.outcome === 'skipped') {
@@ -3551,25 +3581,30 @@ function routedOf(d: Db, instance: InstanceRow): Routed | undefined {
 
 /**
  * Decide what is due, until nothing more is (§9.2 steps 2 to 5): the sweep, the
- * facts, `decide`, each decision applied, again on the new facts, at most once a
- * step of the plan; answers the lines of every decision made.
+ * facts, `decide`, each decision applied, again on the new facts, until a round
+ * changes nothing; a chain of skipped steps settles in one `decide`, so a round
+ * a step at most is enough, and `3 * steps + 1` rounds is only a guard. Answers
+ * the lines of every decision made.
  */
 function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number, team: RouteTeam | undefined): Swept {
   const out: Swept = { lines: [], superseded: [] };
   const first = routedOf(d, instance);
   if (first === undefined) return out;
-  for (let round = 0; round <= first.plan.steps.length; round += 1) {
+  const changes = d.prepare<[], { n: number }>('SELECT total_changes() AS n');
+  for (let round = 0; round < 3 * first.plan.steps.length + 1; round += 1) {
+    const before = changes.get()?.n ?? 0;
     const r = routedOf(d, instance) as Routed;
     const swept = sweep(d, r, now);
     out.lines.push(...swept.lines);
     out.superseded.push(...swept.superseded);
     const facts = routingFacts(d, r);
     const decisions = decideRouting(r.plan, facts);
-    if (decisions.length === 0 && swept.lines.length === 0) break;
     for (const dec of decisions) {
       const line = apply(d, r, facts, dec, causeEvent, now, team);
       if (line !== undefined) out.lines.push(line);
     }
+    // Nothing written this round, as a route on an archived board writes nothing: nothing more is due.
+    if ((changes.get()?.n ?? 0) === before) break;
   }
   return out;
 }
@@ -3591,8 +3626,17 @@ const FAULT_CHARS = 500;
  */
 function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): RunRow[] {
   if (!hasRouting(d)) return [];
+  // Read before any savepoint, so a task of no planned instance opens none; a read that throws is read again inside it, and faults there.
+  let planned: Planned | undefined | null;
   try {
-    return d.transaction(() => routeIn(d, taskId, cause, eventId, now, team))();
+    planned = plannedMemberOf(d, taskId);
+  } catch {
+    planned = null;
+  }
+  if (planned === undefined) return [];
+  const known = planned;
+  try {
+    return d.transaction(() => routeIn(d, taskId, cause, eventId, now, team, known ?? undefined))();
   } catch (err) {
     if (!d.inTransaction || isBusy(err)) throw err;
     routingFault(d, taskId, err, now);
@@ -3621,15 +3665,19 @@ function routingFault(d: Db, taskId: string, err: unknown, now: number): void {
       taskId,
       kind: 'workflow_route_failed',
       actor: 'gateway',
-      payload: { workflow: row.instance_id, workflowName: row.name, error: said.length <= FAULT_CHARS ? said : said.slice(0, FAULT_CHARS), first },
+      // Cut by code points, so a character outside the BMP is never split in two (§9.4).
+      payload: { workflow: row.instance_id, workflowName: row.name, error: [...said].slice(0, FAULT_CHARS).join(''), first },
     },
     now,
   );
 }
 
+/** A task's member row and its instance with a plan, as `plannedMemberOf` reads them. */
+type Planned = NonNullable<ReturnType<typeof plannedMemberOf>>;
+
 /** The routing's body, inside its savepoint: answers the runs it superseded. */
-function routeIn(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): RunRow[] {
-  const planned = plannedMemberOf(d, taskId);
+function routeIn(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam, known?: Planned): RunRow[] {
+  const planned = known ?? plannedMemberOf(d, taskId);
   if (planned === undefined) return [];
   const { lines, superseded } = decideAll(d, planned.instance, eventId, now, team);
   if (lines.length === 0) return superseded;
