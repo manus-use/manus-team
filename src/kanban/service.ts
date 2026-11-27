@@ -22,6 +22,7 @@ import {
   memberPhases,
   membersWithTasks,
   phaseSince,
+  plannedMemberOf,
   reactsTo,
   relatedTasks,
   runsOf,
@@ -47,7 +48,7 @@ import { roleLimit, type Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
 import { checkDagShape, checkDagTasks, type Dag, type DagTask, type ShapedDag } from './dag.js';
-import { fillText, itemPlaceholderOf, placeholderOf, standInContract, type Plan, type PlanStep, type Template } from './routing.js';
+import { checkOutputs, fillText, itemPlaceholderOf, outputBounds, placeholderOf, standInContract, type Plan, type PlanStep, type Template } from './routing.js';
 import { holdsSecret } from './gate-command.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
@@ -1079,7 +1080,7 @@ export class KanbanService {
     handoff: board.Handoff,
     opts: ReportOptions = {},
   ): Promise<Result<{ task: TaskRow; run: RunRow | undefined }>> {
-    const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
+    const refused = idsRefused(taskId) ?? handoffRefused(by, handoff) ?? this.#outputsRefused(taskId, 'complete', handoff.metadata);
     if (refused !== undefined) return refused;
     return this.#report(taskId, by, 'complete', undefined, opts, (seen) =>
       board.complete(this.#db, taskId, by, { ...handoff, ...seen }, this.#clock.now()),
@@ -1096,7 +1097,7 @@ export class KanbanService {
     handoff: board.Handoff & { reviewer?: string },
     opts: ReportOptions = {},
   ): Promise<Result<{ task: TaskRow; run: RunRow | undefined }>> {
-    const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
+    const refused = idsRefused(taskId) ?? handoffRefused(by, handoff) ?? this.#outputsRefused(taskId, 'review', handoff.metadata);
     if (refused !== undefined) return refused;
     const { reviewer, ...rest } = handoff;
     let named: Assignee | undefined;
@@ -1114,6 +1115,25 @@ export class KanbanService {
         this.#clock.now(),
       ),
     );
+  }
+
+  /**
+   * A work report's outputs (workflow routing spec §2.2), before its gates: on a
+   * member of an instance with a plan whose step declares outputs, a `complete`
+   * from `open` or a `review`, never a reviewer's approval, whose metadata is
+   * checked against them, `invalid` naming the first problem, so the run
+   * reports again. A stand-in's are its step's, and held to what reads its
+   * step's. One indexed read for any task, nothing more for one with no plan.
+   */
+  #outputsRefused(taskId: string, kind: 'complete' | 'review', metadata: unknown): Refusal | undefined {
+    const planned = plannedMemberOf(this.#db, taskId);
+    const plan = planned?.instance.plan;
+    if (planned === undefined || plan === null || plan === undefined) return undefined;
+    const entry = plan.steps.find((s) => s.step === planned.member.step);
+    if (entry === undefined || Object.keys(entry.outputs).length === 0) return undefined;
+    if (kind === 'complete' && getTask(this.#db, taskId)?.phase !== 'open') return undefined;
+    const problem = checkOutputs(entry.outputs, metadata, outputBounds(plan, entry.stands_in_for ?? entry.step));
+    return problem === undefined ? undefined : board.refuse('invalid', problem);
   }
 
   /**

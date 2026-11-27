@@ -1,3 +1,5 @@
+import { redactKnownSecrets } from '../secrets.js';
+import { DAG_LIMITS, shown, titleRefused } from './dag.js';
 import { CONTRACT_FIELDS, type Contract, type RetryOnCrash } from './types.js';
 
 /**
@@ -324,4 +326,127 @@ export function maskPlan(plan: Plan, mask: (text: string) => string): Plan {
       ...(s.templates === undefined ? {} : { templates: s.templates.map((t) => ({ ...maskTemplate(t, mask), item: mask(t.item) })) }),
     })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// The check at completion (§2.2)
+// ---------------------------------------------------------------------------
+
+/** What else a step's outputs are held to, by what reads them later in the plan (§2.2, §4.1). */
+export interface OutputBounds {
+  /** The list outputs a fan-out reads: their items are a list param's (§4.1). */
+  fanned: ReadonlySet<string>;
+  /** Of those, the ones whose fan-out puts `{{item}}` in a title: each item is one line. */
+  titledItems: ReadonlySet<string>;
+  /** The outputs a later title reads by `{{step.output}}`: one line, a list's items each. */
+  titled: ReadonlySet<string>;
+}
+
+/** Every `{{<step>.<output>}}` in a text, as `[step, output]`. */
+function resultRefs(text: string): Array<[string, string]> {
+  return [...text.matchAll(LATE_REFERENCE)].flatMap((m) => (m[2] === undefined ? [] : [[m[1] ?? '', m[2]] as [string, string]]));
+}
+
+/** A step's templates, whichever it has. */
+function templatesOf(s: PlanStep): Template[] {
+  return s.templates ?? (s.template === undefined ? [] : [s.template]);
+}
+
+/** What step `step`'s outputs are held to, from the steps of the plan that read them (§2.2). */
+export function outputBounds(plan: Plan, step: string): OutputBounds {
+  const fanned = new Set<string>();
+  const titledItems = new Set<string>();
+  const titled = new Set<string>();
+  for (const s of plan.steps) {
+    const f = s.for_each;
+    if (f !== undefined && 'step' in f && f.step === step) {
+      fanned.add(f.output);
+      if (templatesOf(s).some((t) => t.title.includes('{{item}}'))) titledItems.add(f.output);
+    }
+    for (const t of templatesOf(s)) for (const [from, output] of resultRefs(t.title)) if (from === step) titled.add(output);
+  }
+  return { fanned, titledItems, titled };
+}
+
+/** A value a refusal quotes (§2.2): as JSON writes it, masked and cut at 80 characters. */
+function said(value: unknown): string {
+  if (typeof value === 'string') return shown(value);
+  const text = redactKnownSecrets(JSON.stringify(value) ?? String(value));
+  return text.length <= 80 ? text : `${text.slice(0, 80)}…`;
+}
+
+/** What a value is, as `got …` says it when it is no list. */
+function kindOf(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return 'a string';
+  if (typeof value === 'number') return 'a number';
+  if (typeof value === 'boolean') return 'a boolean';
+  return Array.isArray(value) ? 'a list' : 'an object';
+}
+
+/** A scalar's refusal, `<what> must be …; got …`, or undefined when the value is of its type. */
+function scalarRefused(what: string, t: ScalarType, value: unknown): string | undefined {
+  if (t === 'boolean') return typeof value === 'boolean' ? undefined : `${what} must be true or false; got ${said(value)}`;
+  if (t === 'number') return typeof value === 'number' && Number.isFinite(value) ? undefined : `${what} must be a number; got ${said(value)}`;
+  if (t === 'string') {
+    if (typeof value !== 'string') return `${what} must be text; got ${said(value)}`;
+    const size = Buffer.byteLength(value, 'utf8');
+    return size > DAG_LIMITS.valueBytes ? `${what} is ${size} bytes; at most ${DAG_LIMITS.valueBytes}` : undefined;
+  }
+  return typeof value === 'string' && t.enum.includes(value) ? undefined : `${what} must be one of ${t.enum.join(', ')}; got ${said(value)}`;
+}
+
+/** A list's items as its refusal names them: `strings`, `numbers`, `booleans`, or an enum's values. */
+function itemsNamed(t: ScalarType): string {
+  if (typeof t === 'object') return `values of ${t.enum.join(', ')}`;
+  return `${t}s`;
+}
+
+/** An item as the fan-out over it reads it (§4.1): text as given, numbers and booleans as JSON writes them, trimmed. */
+export function itemText(value: boolean | number | string): string {
+  return (typeof value === 'string' ? value : JSON.stringify(value)).trim();
+}
+
+/**
+ * A report's metadata against the step's declared outputs (§2.2): every output a
+ * top-level key, of its type; a list within its `max`, its items of their type;
+ * a list a fan-out reads holding items as a list param's, none empty or twice or
+ * holding a known secret, one line each when `{{item}}` lands in a title; a
+ * value a later title reads one line. The first problem, in the declared
+ * order, or undefined.
+ */
+export function checkOutputs(declared: Outputs, metadata: unknown, bounds: OutputBounds): string | undefined {
+  const reported = metadata !== null && typeof metadata === 'object' && !Array.isArray(metadata) ? (metadata as Record<string, unknown>) : {};
+  for (const [name, t] of Object.entries(declared)) {
+    const what = `output ${name}`;
+    if (!Object.hasOwn(reported, name)) return `${what} is missing`;
+    const value = reported[name];
+    if (typeof t === 'object' && 'list' in t) {
+      if (!Array.isArray(value)) return `${what} must be a list of at most ${t.max} ${itemsNamed(t.list)}; got ${kindOf(value)}`;
+      if (value.length > t.max) return `${what} must be a list of at most ${t.max} ${itemsNamed(t.list)}; got ${value.length}`;
+      for (const [i, item] of value.entries()) {
+        const bad = scalarRefused(`item ${i + 1} of ${what}`, t.list, item);
+        if (bad !== undefined) return bad;
+      }
+      const items = (value as Array<boolean | number | string>).map(itemText);
+      if (bounds.fanned.has(name)) {
+        for (const [i, item] of items.entries()) {
+          if (item === '') return `item ${i + 1} of ${what} is empty`;
+          if (items.indexOf(item) !== i) return `${what} names ${shown(item)} twice; each item labels its task`;
+          if (redactKnownSecrets(item) !== item) return `an item of ${what} holds a known secret`;
+        }
+      }
+      if (bounds.titledItems.has(name) || bounds.titled.has(name)) {
+        const n = items.findIndex((item) => titleRefused(item));
+        if (n !== -1) return `item ${n + 1} of ${what} holds a line break, a control character or a bidi control, and an item lands in a title`;
+      }
+      continue;
+    }
+    const bad = scalarRefused(what, t, value);
+    if (bad !== undefined) return bad;
+    if (bounds.titled.has(name) && typeof value === 'string' && titleRefused(value)) {
+      return `${what} holds a line break, a control character or a bidi control, and it lands in a title`;
+    }
+  }
+  return undefined;
 }

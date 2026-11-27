@@ -24,7 +24,7 @@ import { CONTRACT_FIELDS, GATE_LIMITS, type Contract, type CreatedVia, type Refu
 export const DAG_FORMAT = 1;
 
 export const DAG_LIMITS = {
-  /** Tasks in one DAG, and so in one instance. */
+  /** Tasks in one DAG, and so made at one start; an instance with a plan may make up to 500 in all. */
   tasks: 100,
   /** A ref's, and a step's, size in bytes. */
   refBytes: 64,
@@ -124,8 +124,8 @@ function bytes(text: string): number {
   return Buffer.byteLength(text, 'utf8');
 }
 
-/** A value a refusal quotes: masked, cut, and its invisible characters shown. */
-function shown(text: string, max = 80): string {
+/** A value a refusal quotes: masked, cut, and its invisible characters shown; the routing's output check quotes a value by it too (workflow routing spec §2.2). */
+export function shown(text: string, max = 80): string {
   const masked = redactKnownSecrets(text);
   return visible(JSON.stringify(masked.length <= max ? masked : `${masked.slice(0, max)}…`));
 }
