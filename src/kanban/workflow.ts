@@ -1565,8 +1565,8 @@ export function expand(
       if (!workspace.ok) return workspace;
       const contract: Contract = {};
       for (const [field, value] of Object.entries(s.contract) as [keyof Contract, string][]) contract[field] = sub(value);
-      // The agent is told what to report, in its outcome (§2.1).
-      if (Object.keys(s.outputs).length > 0) contract.outcome = outcomeWithOutputs(contract.outcome, s.outputs);
+      // The agent is told what to report, in its outcome (§2.1); a stand-in, in its step's, which its own merges with (§5.2).
+      if (Object.keys(s.outputs).length > 0 && !(s.handler && s.standsInFor !== undefined)) contract.outcome = outcomeWithOutputs(contract.outcome, s.outputs);
       const body = s.body === undefined ? null : sub(s.body);
       made.push({
         item,

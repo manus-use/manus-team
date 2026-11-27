@@ -5,7 +5,7 @@ import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import { canonicalDag, maskDag, type Dag } from '../kanban/dag.js';
-import { decide as decideRouting, fillText, handlerParagraph, INSTANCE_CAP, maskPlan, resultOf, SKIPPED_TEXT, triggerWords, valueSaid, type Decision, type Facts, type Plan, type PlanStep, type RouteFact, type StepFact, type Template } from '../kanban/routing.js';
+import { decide as decideRouting, fillText, handlerParagraph, INSTANCE_CAP, maskPlan, resultOf, SKIPPED_TEXT, standInContract, triggerWords, valueSaid, type Decision, type Facts, type Plan, type PlanStep, type RouteFact, type StepFact, type Template } from '../kanban/routing.js';
 import type { GateRun } from '../kanban/gates.js';
 import { placeName, placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
 import { worktreeId, worktreeOf } from './workspaces.js';
@@ -3462,6 +3462,13 @@ function route(
   // Where it works (§5.2): its step's, its role's, or else the routed task's, when that is fixed.
   const roleWorkspace = t.assignee === null || t.assignee.includes(':') ? undefined : team?.roles.get(t.assignee)?.workspace;
   const workspace = t.workspace ?? (roleWorkspace === undefined ? routed.workspace : null);
+  // A stand-in takes its step's reviewer, gates and contract from the frozen plan, so its result is accepted as the step's would be (§5.2).
+  const stood = dec.standsIn ? r.plan.steps.find((s) => s.step === from.step) : undefined;
+  const theirs = stood === undefined ? undefined : (stood.templates?.find((x) => x.item === from.item) ?? stood.template);
+  const fields =
+    theirs === undefined
+      ? { workspace }
+      : { workspace, reviewer: theirs.reviewer, gates: [...theirs.gates, ...t.gates], contract: standInContract(from.step, theirs.contract, t.contract) };
   const paragraph = handlerParagraph({
     taskId: from.taskId,
     step: from.step,
@@ -3475,7 +3482,7 @@ function route(
     d,
     r,
     facts,
-    { step: dec.handler, ref: `${dec.handler}:${n}`, item: from.item, template: { ...t, workspace }, parents: [], payload: { routedFrom: from.taskId }, paragraph },
+    { step: dec.handler, ref: `${dec.handler}:${n}`, item: from.item, template: { ...t, ...fields }, parents: [], payload: { routedFrom: from.taskId }, paragraph },
     now,
     team,
   );
