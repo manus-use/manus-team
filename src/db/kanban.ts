@@ -5,7 +5,7 @@ import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import { canonicalDag, maskDag, type Dag } from '../kanban/dag.js';
-import { decide as decideRouting, INSTANCE_CAP, maskPlan, type Decision, type Facts, type Plan, type StepFact } from '../kanban/routing.js';
+import { decide as decideRouting, fillText, INSTANCE_CAP, maskPlan, resultOf, SKIPPED_TEXT, valueSaid, type Decision, type Facts, type Plan, type PlanStep, type StepFact, type Template } from '../kanban/routing.js';
 import type { GateRun } from '../kanban/gates.js';
 import { placeName, placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
 import { worktreeId } from './workspaces.js';
@@ -439,8 +439,13 @@ interface TaskInsert extends NewTask {
   parents: readonly string[];
   /** A reaction task's (wake spec §19.3): its id, chosen first, and the wake that makes it. */
   reaction?: { taskId: string; wakeId: number };
-  /** A reaction task's subscription, copied from its batch's conversation's (wake spec §19.3). */
-  copySubscription?: SubscriptionRow;
+  /**
+   * Its subscriptions, copied as they are: a reaction task's one, from its batch's
+   * conversation's (wake spec §19.3); a task a workflow's plan made late, its
+   * instance's first member's (workflow routing spec §7.4). Given, they are the
+   * task's only subscriptions.
+   */
+  copySubscriptions?: readonly SubscriptionRow[];
 }
 
 /**
@@ -497,7 +502,7 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
   }
   const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
   for (const parent of parents) link.run(parent, taskId, now);
-  subscribe(d, taskId, t.createdVia, createdFromTask, now, t.follow, t.copySubscription);
+  subscribe(d, taskId, t.createdVia, createdFromTask, now, t.follow, t.copySubscriptions);
   record(
     d,
     {
@@ -595,7 +600,7 @@ function subscribe(
   createdFromTask: string | null,
   now: number,
   follow?: Follow,
-  copy?: SubscriptionRow,
+  copy?: readonly SubscriptionRow[],
 ): void {
   const wake = hasWakeColumns(d);
   const insert = d.prepare(
@@ -612,9 +617,10 @@ function subscribe(
   if (follow !== undefined) {
     run('lark', follow.appId, follow.chatId, follow.threadId, follow.threadId === '' ? null : follow.rootId, null);
   }
-  // A reaction task follows its batch's conversation, a copy of its subscription (wake spec §19.3).
-  if (via.kind === 'wake') {
-    if (copy !== undefined) run(copy.channel, copy.appId, copy.conversationId, copy.threadId, copy.rootMessageId, copy.chatType);
+  // A reaction task follows its batch's conversation, a copy of its subscription (wake spec §19.3); a late
+  // member of a workflow, its instance's first member's, as they are now (workflow routing spec §7.4).
+  if (copy !== undefined || via.kind === 'wake') {
+    for (const c of copy ?? []) run(c.channel, c.appId, c.conversationId, c.threadId, c.rootMessageId, c.chatType);
     return;
   }
   if (via.kind === 'chat') {
@@ -2874,7 +2880,7 @@ export function recordRoleWake(db: Db, batch: NewRoleWake, facts: TaskFacts, now
         parents: [],
         wake: { by: null, depth: batch.depth + 1 },
         reaction: { taskId, wakeId },
-        ...(sub === undefined ? {} : { copySubscription: sub }),
+        ...(sub === undefined ? {} : { copySubscriptions: [sub] }),
       },
       now,
     );
@@ -3108,11 +3114,19 @@ export interface RoutedLine {
   by?: string;
 }
 
+/** The most items a `workflow_routed` line names; its count says the rest (§12.2). */
+const ROUTED_ITEMS = 20;
+
 /** An instance with a plan, as the routing reads it in its transaction: the row, the plan, and its members with their tasks. */
 interface Routed {
   instance: InstanceRow;
   plan: Plan;
   members: Array<MemberRow & { task: TaskRow }>;
+}
+
+/** A name a template gives, as the writer stores it: a person by their principal, else a role. */
+function assigneeOf(name: string | null): Assignee | null {
+  return name === null ? null : { kind: name.includes(':') ? 'human' : 'role', name };
 }
 
 /** A step's facts, read inside the transaction (§9.2 step 3): its rows, its tasks' trigger events, and its winner's accepted result. */
@@ -3190,6 +3204,88 @@ function sweep(d: Db, r: Routed, now: number): void {
   }
 }
 
+/** The text a template's reference to a result fills (§7.4): the step's accepted value, a list's items joined, or `(skipped)`. */
+function filled(plan: Plan, facts: Facts, text: string, item?: string): string {
+  return fillText(
+    text,
+    (step, output) => {
+      // A step not settled at the making, as the ancestor a `when: { state: gave_up }` step is made on, has no
+      // accepted value yet: it fills `(skipped)` too, and the text is never filled again once it settles.
+      const value = resultOf(plan, facts, step, output);
+      return value === undefined ? SKIPPED_TEXT : valueSaid(value);
+    },
+    item,
+  );
+}
+
+/**
+ * Make one task of a step late (§7.4), as the start would have: through
+ * `insertTask`, its fields from its template, the references filled, its title
+ * and body cut to their limits; the instance's creator and board, and a run's
+ * start's `created_from_task`; its links to its effective parents; its first
+ * member's subscriptions; its gates by the instance's creator; its member row
+ * at the next position; and its `created` event with the instance.
+ */
+function makeLate(
+  d: Db,
+  r: Routed,
+  facts: Facts,
+  made: { step: string; ref: string; item: string | null; template: Template; parents: readonly string[]; payload?: Record<string, unknown> },
+  now: number,
+): string {
+  const t = made.template;
+  const first = r.members[0];
+  const title = cutToBytes(filled(r.plan, facts, t.title, made.item ?? undefined), WORKER_LIMITS.title);
+  const body = t.body === null ? '' : cutToBytes(filled(r.plan, facts, t.body, made.item ?? undefined), WORKER_LIMITS.body);
+  const assignee = assigneeOf(t.assignee);
+  const reviewer = assigneeOf(t.reviewer);
+  const wake = t.wake === null ? undefined : { by: t.wake.by, depth: t.wake.depth, ...(t.wake.tooDeep === true ? { tooDeep: true } : {}), ...(t.wake.role === undefined ? {} : { role: t.wake.role }) };
+  const taskId = insertTask(
+    d,
+    {
+      title,
+      ...(body === '' ? {} : { body }),
+      contract: t.contract,
+      assignee,
+      reviewer,
+      workspace: t.workspace,
+      priority: t.priority,
+      failureLimit: t.failure_limit,
+      retryOnCrash: t.retry_on_crash,
+      maxRuntimeS: t.max_runtime_s,
+      idempotencyKey: null,
+      createdBy: r.instance.createdBy,
+      createdVia: r.instance.createdVia,
+      board: r.instance.board,
+      createdFromTask: first?.task.createdFromTask ?? null,
+      parents: made.parents,
+      copySubscriptions: first === undefined ? [] : subscriptionsOf(d, first.taskId),
+      ...(wake === undefined ? {} : { wake }),
+    },
+    now,
+    { workflow: r.instance.instanceId, workflowName: r.instance.name, ref: made.ref, step: made.step, item: made.item, ...made.payload },
+  );
+  for (const gate of t.gates) {
+    const added = insertGate(d, taskId, { command: gate.command, timeoutS: gate.timeout_s }, r.instance.createdBy, now, { workflow: r.instance.instanceId });
+    if (!added.ok) throw new Error(`${made.ref}: ${added.message}`);
+  }
+  const position = (d.prepare<[string], { p: number | null }>('SELECT max(position) AS p FROM kanban_workflow_tasks WHERE instance_id = ?').get(r.instance.instanceId)?.p ?? -1) + 1;
+  d.prepare('INSERT INTO kanban_workflow_tasks (task_id, instance_id, ref, step, item, position) VALUES (?, ?, ?, ?, ?, ?)').run(
+    taskId,
+    r.instance.instanceId,
+    made.ref,
+    made.step,
+    made.item === null ? null : mask(made.item),
+    position,
+  );
+  return taskId;
+}
+
+/** A step's templates, one an item of its list param, or its one. */
+function templatesFor(s: PlanStep): Array<Template & { item: string | null }> {
+  return s.templates ?? (s.template === undefined ? [] : [{ ...s.template, item: null }]);
+}
+
 /** A pending row moved from `waiting`, once (§9.2): false when another attempt decided it first, and then nothing is made. */
 function decided(d: Db, instanceId: string, step: string, state: 'made' | 'skipped', reason: Record<string, unknown>, causeEvent: number | null, now: number, items?: unknown): boolean {
   const masked = Object.fromEntries(Object.entries(reason).map(([k, v]) => [k, typeof v === 'string' ? mask(v) : v]));
@@ -3204,7 +3300,7 @@ function decided(d: Db, instanceId: string, step: string, state: 'made' | 'skipp
 }
 
 /** One decision applied (§9.2 step 4); answers its line for the notice, or undefined for one that is none. */
-function apply(d: Db, r: Routed, dec: Decision, causeEvent: number | null, now: number): RoutedLine | undefined {
+function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number | null, now: number): RoutedLine | undefined {
   const id = r.instance.instanceId;
   const s = r.plan.steps.find((x) => x.step === dec.step);
   if (s === undefined) return undefined;
@@ -3215,8 +3311,29 @@ function apply(d: Db, r: Routed, dec: Decision, causeEvent: number | null, now: 
   if (dec.outcome === 'skipped') {
     return decided(d, id, dec.step, 'skipped', { by: dec.by, why: dec.why }, causeEvent, now) ? { step: dec.step, outcome: 'skipped', why: dec.why, taskIds: [], by: dec.by } : undefined;
   }
-  // A step to make waits: only skips and settlings are applied yet.
-  return undefined;
+  if (dec.outcome !== 'made' && dec.outcome !== 'fanned_out') return undefined;
+  // The instance's board, live: an archived one skips the step, never refusing the transition (§13.1).
+  const live = liveBoard(d, r.instance.board);
+  if (!live.ok) {
+    const why = `board ${r.instance.board} is archived`;
+    return decided(d, id, dec.step, 'skipped', { by: 'board', why }, causeEvent, now) ? { step: dec.step, outcome: 'skipped', why, taskIds: [], by: 'board' } : undefined;
+  }
+  const templates = templatesFor(s);
+  if (dec.outcome === 'made') {
+    if (!decided(d, id, dec.step, 'made', { why: dec.why }, causeEvent, now)) return undefined;
+    const t = templates[0];
+    if (t === undefined) return undefined;
+    const taskId = makeLate(d, r, facts, { step: dec.step, ref: dec.step, item: null, template: t, parents: dec.parents }, now);
+    return { step: dec.step, outcome: 'made', why: dec.why, taskIds: [taskId] };
+  }
+  const made = dec.items.map((item, n) => ({ item, ref: `${dec.step}:${n + 1}`, template: templates.find((t) => t.item === item) ?? templates[0] }));
+  if (!decided(d, id, dec.step, 'made', { why: dec.why }, causeEvent, now)) return undefined;
+  const taskIds = made.flatMap((m) =>
+    m.template === undefined ? [] : [makeLate(d, r, facts, { step: dec.step, ref: m.ref, item: m.item, template: m.template, parents: dec.parents }, now)],
+  );
+  const marker = made.map((m, n) => ({ item: mask(m.item), taskId: taskIds[n], ref: m.ref }));
+  d.prepare('UPDATE kanban_workflow_pending SET items = ? WHERE instance_id = ? AND step = ?').run(JSON.stringify(marker), id, dec.step);
+  return { step: dec.step, outcome: 'fanned_out', why: dec.why, taskIds, items: dec.items.slice(0, ROUTED_ITEMS), count: dec.items.length };
 }
 
 /** An instance with a plan, its members read now. */
@@ -3240,7 +3357,7 @@ function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now:
     const decisions = decideRouting(r.plan, facts);
     if (decisions.length === 0) break;
     for (const dec of decisions) {
-      const line = apply(d, r, dec, causeEvent, now);
+      const line = apply(d, r, facts, dec, causeEvent, now);
       if (line !== undefined) lines.push(line);
     }
   }
