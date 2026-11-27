@@ -24,10 +24,14 @@ import {
   membersWithTasks,
   phaseSince,
   pendingOf,
+  latestCompletion,
   plannedMemberOf,
   reactsTo,
+  routeFailureOf,
   routeOfHandler,
+  routesOf,
   routingFaulted,
+  triggersOf,
   settledOf,
   unmadeOf,
   unmadeSteps,
@@ -55,7 +59,7 @@ import { roleLimit, type Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
 import { checkDagShape, checkDagTasks, DAG_LIMITS, type Dag, type DagTask, type ShapedDag } from './dag.js';
-import { checkOutputs, fillText, INSTANCE_CAP, itemPlaceholderOf, maskPlan, outputBounds, placeholderOf, standInContract, type Plan, type PlanStep, type Template } from './routing.js';
+import { checkOutputs, fillText, INSTANCE_CAP, itemPlaceholderOf, maskPlan, outputBounds, placeholderOf, standInContract, stepLines, triggerWords, type Plan, type PlanStep, type RouteView, type StepLine, type Template } from './routing.js';
 import { holdsSecret } from './gate-command.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
@@ -408,6 +412,10 @@ export interface InstanceView extends InstanceState {
   related: Array<{ task: TaskRow; status: DisplayStatus }>;
   /** Other instances whose members are related to this one, as a deciding step's start makes: one line each. */
   relatedInstances: Array<{ instanceId: string; name: string | null; tasks: number }>;
+  /** For an instance with a plan, every step's line, real or pending, in the plan's order (workflow routing spec §12.1). */
+  steps?: StepLine[];
+  /** While its routing's fault is not reconciled: when, and the error (§9.4, §12.1). */
+  routingFailed?: { at: number; error: string };
 }
 
 /** How many of a board's newest instances `instances` reads (workflows spec §7). */
@@ -2273,6 +2281,8 @@ export class KanbanService {
       others.set(member.instanceId, seen);
     }
     const file = instance.name === null || this.#workflowsDir === undefined ? undefined : readWorkflow(this.#workflowsDir, instance.name, this.#workflowFacts());
+    const steps = instance.plan === null ? undefined : this.#stepLines(instance.instanceId, instance.plan, members);
+    const failed = instance.routingFailedAt === null ? undefined : { at: instance.routingFailedAt, error: routeFailureOf(this.#db, instanceId) ?? '' };
     return {
       ok: true,
       view: {
@@ -2281,12 +2291,39 @@ export class KanbanService {
         members,
         related,
         relatedInstances: [...others.values()],
+        ...(steps === undefined ? {} : { steps }),
+        ...(failed === undefined ? {} : { routingFailed: failed }),
         ...instanceStatus(
           members.map((m) => m.task.phase),
           unmadeOf(pendingOf(this.#db, instanceId), settledOf(this.#db, instanceId)),
         ),
       },
     };
+  }
+
+  /** A routed instance's step lines (workflow routing spec §12.1): from its pending, settled and route rows, and its settled steps' results. */
+  #stepLines(instanceId: string, plan: Plan, members: ReadonlyArray<MemberRow & { task: TaskRow }>): StepLine[] {
+    const settled = settledOf(this.#db, instanceId);
+    const step = new Map(members.map((m) => [m.taskId, m.step]));
+    const routes: RouteView[] = routesOf(this.#db, instanceId).map((r) => {
+      const t = triggersOf(this.#db, r.fromTask).find((x) => x.eventId === r.eventId);
+      const throttles = Number(/throttled (\d+) times/.exec(t?.reason ?? '')?.[1] ?? 0);
+      return { handler: r.handler, fromTask: r.fromTask, fromStep: step.get(r.fromTask) ?? '', outcome: r.outcome, words: t === undefined ? 'blocked' : triggerWords(t, throttles) };
+    });
+    const results = new Map<string, Readonly<Record<string, unknown>> | null>();
+    for (const s of settled) {
+      if (s.ref !== s.step || s.taskId === null || Object.keys(plan.steps.find((p) => p.step === s.step)?.outputs ?? {}).length === 0) continue;
+      const metadata = latestCompletion(this.#db, s.taskId)?.metadata;
+      results.set(s.step, isRecord(metadata) ? metadata : null);
+    }
+    return stepLines(
+      plan,
+      members.map((m) => ({ step: m.step, ref: m.ref, taskId: m.taskId, phase: m.task.phase })),
+      pendingOf(this.#db, instanceId),
+      settled,
+      routes,
+      results,
+    );
   }
 
   /**

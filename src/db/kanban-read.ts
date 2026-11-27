@@ -1495,6 +1495,17 @@ export function latestBlockOf(db: Db, taskId: string): number | undefined {
   );
 }
 
+/** The error of an instance's latest routing fault (workflow routing spec §12.1), from its `workflow_route_failed` event; undefined for none. */
+export function routeFailureOf(db: Db, instanceId: string): string | undefined {
+  const row = db
+    .prepare<[string], { error: string | null }>(
+      `SELECT json_extract(payload, '$.error') AS error FROM kanban_events
+        WHERE kind = 'workflow_route_failed' AND json_extract(payload, '$.workflow') = ? ORDER BY id DESC LIMIT 1`,
+    )
+    .get(instanceId);
+  return row?.error ?? undefined;
+}
+
 /** A task's first event of a kind, with its payload; undefined for none. */
 export function firstEventOf(db: Db, taskId: string, kind: string): KanbanEvent | undefined {
   const row = db

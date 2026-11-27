@@ -107,7 +107,7 @@ const USAGE = [
   '  mt kanban gate remove <task_id> <gate_id>',
   '  mt kanban workflow list [--json]',
   '  mt kanban workflow instances [all] [--board <name>] [--json]',
-  '  mt kanban workflow show <instance> [--board <name>] [--dag | --json]',
+  '  mt kanban workflow show <instance> [--board <name>] [--dag | --plan | --json]',
   '  mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]... [--json]',
   '  mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>]',
   '      [--chat <chat_id> [--thread <thread_id>] [--wake]] [--wake-role <role>] [--json]',

@@ -1176,13 +1176,16 @@ export function renderInstance(
   view: {
     instance: { instanceId: string; name: string | null; board: string; createdBy: string; createdVia: { kind: string }; createdAt: number; dag: { params: Readonly<Record<string, string | readonly string[]>> } };
     description: string | undefined;
-    members: readonly { step: string; item: string | null; task: TaskRow; status: DisplayStatus }[];
+    members: readonly { step: string; item: string | null; ref?: string; task: TaskRow; status: DisplayStatus }[];
     related: readonly { task: TaskRow; status: DisplayStatus }[];
     relatedInstances: readonly { instanceId: string; name: string | null; tasks: number }[];
     status: string;
     done: number;
     total: number;
     blocked: number;
+    /** A routed instance's step lines (workflow routing spec §12.1). */
+    steps?: readonly { step: string; mark: string; text: string; state: string }[];
+    routingFailed?: { at: number; error: string };
   },
   chatBoard: string,
   whom: (a: Assignee | null) => string,
@@ -1198,16 +1201,32 @@ export function renderInstance(
   ];
   const params = Object.entries(instance.dag.params);
   if (params.length > 0) head.push(paramsLine(params, nameOf));
+  if (view.routingFailed !== undefined) {
+    const at = new Date(view.routingFailed.at).toISOString().slice(11, 16);
+    head.push(`Routing failed at ${at} UTC: ${label(view.routingFailed.error, 500)}. The gateway tries again; \`mt kanban workflow reconcile ${instance.instanceId}\` tries now.`);
+  }
   const lines: string[] = [];
-  let step: string | undefined;
-  for (const m of view.members) {
-    if (m.step !== step) {
-      step = m.step;
-      lines.push(`**${label(m.step, 64)}**`);
-    }
+  const member = (m: (typeof view.members)[number], handler: boolean): string => {
+    const ref = handler && m.ref !== undefined ? ` ${label(m.ref, 64)}` : '';
     const item = m.item === null ? '' : ` ${label(m.item, 80)}:`;
     const why = m.task.phase === 'blocked' && m.task.blockKind !== null ? ` (${forDisplay(m.task.blockKind)}): ${label(m.task.blockReason ?? '', 200)}` : '';
-    lines.push(`- ${id(m.task.taskId)}${item} ${m.status}${why} · ${whom(m.task.assignee)}`);
+    return `- ${id(m.task.taskId)}${ref}${item} ${m.status}${why} · ${whom(m.task.assignee)}`;
+  };
+  if (view.steps !== undefined) {
+    // Every step, real or pending, in the plan's order, its tasks under it (workflow routing spec §12.1).
+    for (const s of view.steps) {
+      lines.push(`${s.mark} ${label(s.text, 300)}`);
+      for (const m of view.members) if (m.step === s.step) lines.push(member(m, s.state === 'routed'));
+    }
+  } else {
+    let step: string | undefined;
+    for (const m of view.members) {
+      if (m.step !== step) {
+        step = m.step;
+        lines.push(`**${label(m.step, 64)}**`);
+      }
+      lines.push(member(m, false));
+    }
   }
   if (view.related.length > 0 || view.relatedInstances.length > 0) {
     lines.push('**Related**, not members:');

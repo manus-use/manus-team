@@ -670,7 +670,7 @@ mt kanban gate list <task_id>
 mt kanban gate remove <task_id> <gate_id>
 mt kanban workflow list
 mt kanban workflow instances [all] [--board <name>]
-mt kanban workflow show <instance> [--board <name>] [--dag]
+mt kanban workflow show <instance> [--board <name>] [--dag | --plan]
 mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]... [--json]
 mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>] [--chat <chat_id> [--thread <thread_id>] [--wake]] [--wake-role <role>]
 mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--chat <chat_id> [--thread <thread_id>]]

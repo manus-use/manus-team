@@ -803,3 +803,96 @@ export function outputsText(outputs: Outputs, result: Readonly<Record<string, un
   const text = parts.join(', ');
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
+
+// ---------------------------------------------------------------------------
+// `workflow show`'s step lines (§12.1)
+// ---------------------------------------------------------------------------
+
+/** A route as `show` reads it: its handler, the step and task it was routed from, and the trigger's words. */
+export interface RouteView {
+  handler: string;
+  fromTask: string;
+  fromStep: string;
+  outcome: RouteOutcome;
+  /** `gave up`, `stopped after 10 throttles`, `blocked`. */
+  words: string;
+}
+
+/** One step's line in `show` (§12.1): its mark and words, and what `--json` says of it. */
+export interface StepLine {
+  step: string;
+  mark: string;
+  text: string;
+  state: 'done' | 'stood_in' | 'skipped' | 'archived' | 'waiting' | 'running' | 'blocked' | 'routed';
+  why: string | null;
+  /** A fan-out's items, once made. */
+  items: number | null;
+  /** A handler's routes made; a step's, the routes made from its tasks. */
+  routes: number;
+}
+
+/**
+ * Every step's line, real or pending, in the plan's order (§12.1): done, with its
+ * outputs; done, stood in for; skipped, with why, and what it still waits for
+ * while not settled; waiting, for its unsettled parents and the steps it reads;
+ * running, or a fan-out's items done; blocked; and a handler's, routed from its
+ * step, only once it was routed to.
+ */
+export function stepLines(
+  plan: Plan,
+  members: readonly { step: string; ref: string; taskId: string; phase: string }[],
+  pending: readonly { step: string; state: PendingState; reason: { why: string } | null }[],
+  settled: readonly { step: string; ref: string; how: SettledHow; taskId: string | null }[],
+  routes: readonly RouteView[],
+  results: ReadonlyMap<string, Readonly<Record<string, unknown>> | null>,
+): StepLine[] {
+  const own = (step: string) => settled.find((s) => s.step === step && s.ref === step);
+  const reads = (s: PlanStep): string[] => {
+    const read = new Set<string>(s.parents);
+    for (const item of s.when ?? []) for (const c of 'any' in item ? item.any : [item]) read.add(c.step);
+    if (s.for_each !== undefined && 'step' in s.for_each) read.add(s.for_each.step);
+    return [...read].filter((x) => own(x) === undefined);
+  };
+  const made = (step: string): number => routes.filter((r) => r.outcome === 'made' && (r.handler === step || r.fromStep === step)).length;
+  const out: StepLine[] = [];
+  for (const s of plan.steps) {
+    const mine = members.filter((m) => m.step === s.step);
+    if (s.handler === true) {
+      const routed = routes.filter((r) => r.handler === s.step && r.outcome === 'made');
+      const last = routed.at(-1);
+      if (last === undefined) continue;
+      const standing = s.stands_in_for === last.fromStep ? ', standing in' : '';
+      out.push({ step: s.step, mark: '↪', text: `${s.step}: routed from ${last.fromStep} (${last.words})${standing}`, state: 'routed', why: last.words, items: null, routes: routed.length });
+      continue;
+    }
+    const row = own(s.step);
+    const p = pending.find((x) => x.step === s.step);
+    const items = s.for_each === undefined || mine.length === 0 ? null : mine.length;
+    if (row !== undefined && (row.how === 'done' || row.how === 'stood_in')) {
+      const said = outputsText(s.outputs, results.get(s.step) ?? null);
+      const by = row.how === 'stood_in' ? routes.find((r) => r.fromStep === s.step && r.outcome === 'made')?.handler : undefined;
+      const text = `${s.step}: done${by === undefined ? '' : `, stood in for by ${by}`}${said === '' ? '' : ` (${said})`}`;
+      out.push({ step: s.step, mark: '✓', text, state: row.how, why: null, items, routes: made(s.step) });
+      continue;
+    }
+    if (row !== undefined || p?.state === 'skipped') {
+      const why = p?.reason?.why ?? (row?.how === 'archived' ? 'archived' : 'skipped');
+      const waiting = row === undefined ? s.parents.filter((x) => own(x) === undefined) : [];
+      const text = `${s.step}: skipped (${why})${waiting.length === 0 ? '' : `, waiting for ${waiting.join(', ')}`}`;
+      out.push({ step: s.step, mark: '⏭', text, state: row?.how === 'archived' ? 'archived' : 'skipped', why, items, routes: made(s.step) });
+      continue;
+    }
+    if (p?.state === 'waiting') {
+      out.push({ step: s.step, mark: '⏳', text: `${s.step}: waiting for ${reads(s).join(', ')}`, state: 'waiting', why: null, items: null, routes: 0 });
+      continue;
+    }
+    if (mine.some((m) => m.phase === 'blocked')) {
+      out.push({ step: s.step, mark: '⛔', text: `${s.step}: blocked`, state: 'blocked', why: null, items, routes: made(s.step) });
+      continue;
+    }
+    const doneItems = settled.filter((x) => x.step === s.step && x.ref !== s.step && (x.how === 'done' || x.how === 'stood_in')).length;
+    const text = items === null ? `${s.step}: running` : `${s.step}: ${items} item${items === 1 ? '' : 's'}, ${doneItems} done`;
+    out.push({ step: s.step, mark: '▶', text, state: 'running', why: null, items, routes: made(s.step) });
+  }
+  return out;
+}

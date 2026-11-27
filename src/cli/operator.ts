@@ -1314,14 +1314,19 @@ function instanceOffBoard(service: KanbanService, board: string | undefined, ins
   return undefined;
 }
 
-/** `mt kanban workflow show <instance> [--board] [--dag] [--json]` (workflows spec §10): everything, uncut; `--dag` the stored DAG. */
+/**
+ * `mt kanban workflow show <instance> [--board] [--dag | --plan] [--json]` (workflows spec §10): everything, uncut; `--dag` the
+ * stored DAG, said on stderr to hold only the steps made at the start for an instance with a plan; `--plan` the stored plan,
+ * masked (workflow routing spec §12.1).
+ */
 function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, dag: { type: 'boolean' } });
+  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, dag: { type: 'boolean' }, plan: { type: 'boolean' } });
   const [instanceId, extra] = positionals;
   if (instanceId === undefined || extra !== undefined) throw new UsageError('kanban workflow show takes an instance id');
   const board = boardFlag(values.board);
-  if (values.dag === true && values.json === true) throw new UsageError('kanban workflow show takes --dag or --json, not both');
+  if ([values.dag, values.plan, values.json].filter((v) => v === true).length > 1) throw new UsageError('kanban workflow show takes one of --dag, --plan and --json');
   let dagText: string | undefined;
+  let dagNote: string | undefined;
   return act(
     io,
     values.json === true,
@@ -1334,9 +1339,16 @@ function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
       const v = r.view;
       // What was made, masked: never the hash (workflows spec §7).
       if (values.dag === true) dagText = jsonFile(v.instance.dag);
+      if (values.dag === true && v.instance.plan !== null) {
+        dagNote = `instance ${instanceId} has a plan: its DAG holds only the steps made at the start, and mt kanban workflow show ${instanceId} --plan prints the rest`;
+      }
+      if (values.plan === true) {
+        if (v.instance.plan === null) return refused({ code: 'invalid', message: `instance ${instanceId} has no plan: its workflow uses no routing key, and --dag prints all it made` });
+        dagText = jsonFile(v.instance.plan);
+      }
       return {
         ok: true,
-        lines: values.dag === true ? [] : instanceText(v),
+        lines: values.dag === true || values.plan === true ? [] : instanceText(v),
         json: {
           instance: {
             instance_id: v.instance.instanceId,
@@ -1363,11 +1375,13 @@ function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
           })),
           related: v.related.map((x) => ({ task_id: x.task.taskId, title: x.task.title, phase: x.task.phase, status: x.status })),
           related_instances: v.relatedInstances.map((o) => ({ instance_id: o.instanceId, name: o.name, tasks: o.tasks })),
+          ...(v.steps === undefined ? {} : { steps: v.steps.map((s) => ({ step: s.step, state: s.state, why: s.why, items: s.items, routes: s.routes })) }),
         },
       };
     },
     { workflows: true },
   ).then((code) => {
+    if (code === 0 && dagNote !== undefined) io.err(`mt: ${dagNote}`);
     if (code === 0 && dagText !== undefined) io.out(dagText);
     return code;
   });

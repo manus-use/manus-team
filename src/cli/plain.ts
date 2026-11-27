@@ -395,13 +395,16 @@ export function instancesText(
 export function instanceText(view: {
   instance: { instanceId: string; name: string | null; board: string; createdBy: string; createdVia: { kind: string }; createdAt: number; dag: { params: Readonly<Record<string, string | readonly string[]>> } };
   description: string | undefined;
-  members: readonly { step: string; item: string | null; task: { taskId: string; phase: string; blockKind: string | null; blockReason: string | null; assignee: Assignee | null; createdFromTask: string | null }; status: string }[];
+  members: readonly { step: string; item: string | null; ref?: string; task: { taskId: string; phase: string; blockKind: string | null; blockReason: string | null; assignee: Assignee | null; createdFromTask: string | null }; status: string }[];
   related: readonly { task: { taskId: string; title: string }; status: string }[];
   relatedInstances: readonly { instanceId: string; name: string | null; tasks: number }[];
   status: string;
   done: number;
   total: number;
   blocked: number;
+  /** A routed instance's step lines (workflow routing spec §12.1). */
+  steps?: readonly { step: string; mark: string; text: string; state: string }[];
+  routingFailed?: { at: number; error: string };
 }): string[] {
   const { instance } = view;
   const how =
@@ -419,15 +422,30 @@ export function instanceText(view: {
   ];
   const params = Object.entries(instance.dag.params);
   if (params.length > 0) out.push(`params: ${params.map(([k, v]) => `${line(k, 40)}: ${line(typeof v === 'string' ? v : v.join(', '), 400)}`).join(' · ')}`);
-  let step: string | undefined;
-  for (const m of view.members) {
-    if (m.step !== step) {
-      step = m.step;
-      out.push(`${line(m.step, 64)}:`);
-    }
+  if (view.routingFailed !== undefined) {
+    out.push(`Routing failed at ${when(view.routingFailed.at)}: ${line(view.routingFailed.error, 500)}. The gateway tries again; mt kanban workflow reconcile ${instance.instanceId} tries now.`);
+  }
+  const member = (m: (typeof view.members)[number], handler: boolean): string => {
+    const ref = handler && m.ref !== undefined ? ` ${line(m.ref, 64)}` : '';
     const item = m.item === null ? '' : ` ${line(m.item, 200)}:`;
     const why = m.task.phase === 'blocked' && m.task.blockKind !== null ? ` (${m.task.blockKind}): ${line(m.task.blockReason ?? '', 500)}` : '';
-    out.push(`  ${m.task.taskId}${item} ${m.status}${why} · ${who(m.task.assignee)}`);
+    return `  ${m.task.taskId}${ref}${item} ${m.status}${why} · ${who(m.task.assignee)}`;
+  };
+  if (view.steps !== undefined) {
+    // Every step, real or pending, in the plan's order, its tasks under it (workflow routing spec §12.1).
+    for (const s of view.steps) {
+      out.push(`${s.mark} ${line(s.text, 400)}`);
+      for (const m of view.members) if (m.step === s.step) out.push(member(m, s.state === 'routed'));
+    }
+  } else {
+    let step: string | undefined;
+    for (const m of view.members) {
+      if (m.step !== step) {
+        step = m.step;
+        out.push(`${line(m.step, 64)}:`);
+      }
+      out.push(member(m, false));
+    }
   }
   if (view.related.length > 0 || view.relatedInstances.length > 0) {
     out.push('related, not members:');
