@@ -2474,8 +2474,10 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
 /**
  * Archive an instance (workflows spec §8, §10): every member not already archived,
  * in one transaction, through `archiveIn`, each `archived` event carrying the
- * instance. Answers the members it archived, and the runs it decided, whose
- * turns the caller cancels; none for an instance wholly archived already.
+ * instance; and, for one with a plan, every waiting step skipped, `the instance
+ * was archived`, deciding nothing (workflow routing spec §9.1). Answers the
+ * members it archived, and the runs it decided, whose turns the caller cancels;
+ * none for an instance wholly archived already.
  */
 export function archiveWorkflow(
   db: Db,
@@ -2494,6 +2496,12 @@ export function archiveWorkflow(
       const r = archiveIn(d, task, by, now, { workflow: instanceId });
       archived.push(r.task);
       if (r.run !== undefined) runs.push(r.run);
+    }
+    // Cancelling a case (workflow routing spec §9.1): every waiting step skipped, without deciding, so nothing more is made.
+    if (hasRouting(d)) {
+      d.prepare(
+        `UPDATE kanban_workflow_pending SET state = 'skipped', reason = ?, decided_at = ? WHERE instance_id = ? AND state = 'waiting'`,
+      ).run(JSON.stringify({ by: 'instance', why: 'the instance was archived' }), now, instanceId);
     }
     return { ok: true, instance, archived, runs };
   });
