@@ -457,6 +457,8 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       workflowsDir: join(config.home, 'workflows'),
       // The switch and the depth, for a wake asked for (wake spec §3.4, §5.4).
       wake: { enabled: config.kanban.wake.enabled, maxDepth: config.kanban.wake.maxDepth },
+      // A stand-in's archive supersedes its routed task's run; the dispatcher is built after the service (workflow routing spec §9.5).
+      cancelRun: (runId) => dispatcher?.cancel(runId) ?? false,
     });
     boardService = service;
     dispatcher = new Dispatcher({

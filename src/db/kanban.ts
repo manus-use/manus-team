@@ -1475,7 +1475,7 @@ export function complete(
   handoff: Handoff,
   now: number,
   team?: RouteTeam,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
+): Result<{ task: TaskRow; run: RunRow | undefined; superseded?: RunRow[] }> {
   return tx(db, (d) => {
     const r = reporting(d, taskId, by, ['open', 'review'], 'be completed', { answer: true });
     if (!r.ok) return r;
@@ -1506,8 +1506,8 @@ export function complete(
       now,
     );
     // Done is a settling: what its plan's steps read may have changed (workflow routing spec §9.1).
-    routeAfter(d, taskId, 'completed', completed, now, team);
-    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+    const superseded = routeAfter(d, taskId, 'completed', completed, now, team);
+    return { ok: true, ...withSuperseded({ task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) }, superseded) };
   });
 }
 
@@ -1681,9 +1681,10 @@ export function block(
   report: BlockReport,
   now: number,
   team?: RouteTeam,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
+): Result<{ task: TaskRow; run: RunRow | undefined; superseded?: RunRow[] }> {
   return tx(db, (d) => {
     const r = reporting(d, taskId, by, ['open', 'review'], 'be blocked');
+    let superseded: RunRow[] = [];
     if (!r.ok) return r;
     if (r.run !== undefined) decide(d, r.run, 'blocked', { summary: report.reason }, now);
     const actor = actorOf(by);
@@ -1721,9 +1722,9 @@ export function block(
         now,
       );
       // A run's block from its work is a trigger (workflow routing spec §5.1); a person's, or a review's, routes nothing.
-      if (by.kind === 'run' && r.task.phase === 'open') routeAfter(d, taskId, 'blocked', blocked, now, team);
+      if (by.kind === 'run' && r.task.phase === 'open') superseded = routeAfter(d, taskId, 'blocked', blocked, now, team);
     }
-    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+    return { ok: true, ...withSuperseded({ task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) }, superseded) };
   });
 }
 
@@ -1897,7 +1898,7 @@ export function endRun(
   limits: KanbanLimits,
   now: number,
   team?: RouteTeam,
-): Result<{ task: TaskRow; run: RunRow; next: NextStep }> {
+): Result<{ task: TaskRow; run: RunRow; next: NextStep; superseded?: RunRow[] }> {
   return tx(db, (d) => {
     const run = getRun(d, runId);
     if (run === undefined) return refuse('not_found', `no run ${runId}`);
@@ -1994,11 +1995,12 @@ export function endRun(
       now,
     );
     // A run's end that blocked the task from its work is a trigger (workflow routing spec §5.1).
+    let superseded: RunRow[] = [];
     if (blockAs !== undefined && before.phase === 'open') {
       const cause: RouteCause = blockAs.kind === 'gave_up' ? 'gave_up' : blockAs.kind === 'transient' ? 'throttled' : 'blocked';
-      routeAfter(d, run.taskId, cause, ended, now, team);
+      superseded = routeAfter(d, run.taskId, cause, ended, now, team);
     }
-    return { ok: true, task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next };
+    return { ok: true, ...withSuperseded({ task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next }, superseded) };
   });
 }
 
@@ -2117,15 +2119,15 @@ export function archive(
   by: string,
   now: number,
   team?: RouteTeam,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
+): Result<{ task: TaskRow; run: RunRow | undefined; superseded?: RunRow[] }> {
   return tx(db, (d) => {
     const task = getTask(d, taskId);
     if (task === undefined) return refuse('not_found', `no task ${taskId}`);
     if (task.phase === 'archived') return refuse('illegal_transition', `task ${taskId} is already archived`);
     const archived = archiveIn(d, task, by, now);
     // An archive settles: as done when it was done, or as skipped by archive (workflow routing spec §9.1).
-    routeAfter(d, taskId, 'archived', archived.eventId, now, team);
-    return { ok: true, task: mustGet(d, taskId), run: archived.run };
+    const superseded = routeAfter(d, taskId, 'archived', archived.eventId, now, team);
+    return { ok: true, ...withSuperseded({ task: mustGet(d, taskId), run: archived.run }, superseded) };
   });
 }
 
@@ -3585,14 +3587,20 @@ const FAULT_CHARS = 500;
  * SQLite rolls one back on some errors, when the error is the transition's,
  * or the database is busy, when txImmediate retries the whole transition.
  */
-function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): void {
-  if (!hasRouting(d)) return;
+function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): RunRow[] {
+  if (!hasRouting(d)) return [];
   try {
-    d.transaction(() => routeIn(d, taskId, cause, eventId, now, team))();
+    return d.transaction(() => routeIn(d, taskId, cause, eventId, now, team))();
   } catch (err) {
     if (!d.inTransaction || isBusy(err)) throw err;
     routingFault(d, taskId, err, now);
+    return [];
   }
+}
+
+/** A transition's result with the runs its routing superseded (§9.5), when there are any. */
+function withSuperseded<T extends object>(result: T, superseded: readonly RunRow[]): T & { superseded?: RunRow[] } {
+  return superseded.length === 0 ? result : { ...result, superseded: [...superseded] };
 }
 
 /** A routing fault recorded, outside the savepoint that rolled back (§9.4): the mark set from null, and its event, masked and cut. */
@@ -3617,12 +3625,12 @@ function routingFault(d: Db, taskId: string, err: unknown, now: number): void {
   );
 }
 
-/** The routing's body, inside its savepoint. */
-function routeIn(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): void {
+/** The routing's body, inside its savepoint: answers the runs it superseded. */
+function routeIn(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): RunRow[] {
   const planned = plannedMemberOf(d, taskId);
-  if (planned === undefined) return;
-  const { lines } = decideAll(d, planned.instance, eventId, now, team);
-  if (lines.length === 0) return;
+  if (planned === undefined) return [];
+  const { lines, superseded } = decideAll(d, planned.instance, eventId, now, team);
+  if (lines.length === 0) return superseded;
   record(
     d,
     {
@@ -3633,12 +3641,14 @@ function routeIn(d: Db, taskId: string, cause: RouteCause, eventId: number, now:
     },
     now,
   );
+  return superseded;
 }
 
-/** A reconciliation's answer (§11): the instance, and each decision it made. */
+/** A reconciliation's answer (§11): the instance, each decision it made, and the runs a stand-in's archive superseded. */
 export interface Reconciled {
   instance: InstanceRow;
   decisions: RoutedLine[];
+  superseded?: RunRow[];
 }
 
 /**
@@ -3677,7 +3687,7 @@ export function reconcileWorkflow(db: Db, instanceId: string, now: number, team?
     if (instance === undefined) return refuse('not_found', `no workflow instance ${instanceId}`);
     const r = routedOf(d, instance);
     if (r === undefined) return { ok: true, instance, decisions: [] };
-    const { lines: decisions } = decideAll(d, instance, null, now, team);
+    const { lines: decisions, superseded } = decideAll(d, instance, null, now, team);
     const first = decisions[0];
     const on = first === undefined ? undefined : reconciledOn(d, routedOf(d, instance) as Routed, first.step);
     if (on !== undefined) {
@@ -3693,6 +3703,6 @@ export function reconcileWorkflow(db: Db, instanceId: string, now: number, team?
       );
     }
     d.prepare('UPDATE kanban_workflow_instances SET routing_failed_at = NULL WHERE instance_id = ?').run(instanceId);
-    return { ok: true, instance: getInstance(d, instanceId) as InstanceRow, decisions };
+    return { ok: true, ...withSuperseded({ instance: getInstance(d, instanceId) as InstanceRow, decisions }, superseded) };
   });
 }

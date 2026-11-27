@@ -202,6 +202,13 @@ export interface KanbanServiceDeps {
    * -- tests of the board alone -- wakes are on, to `max_depth` 5.
    */
   wake?: { enabled: boolean; maxDepth: number };
+  /**
+   * Cancel a run's turn, as the dispatcher's `cancel` does (workflow routing spec
+   * §9.5): for the runs a stand-in's archive superseded, on every path that
+   * routes. Answers whether a turn was asked to stop. Absent -- tests of the
+   * board alone -- none is cancelled, and the dispatcher's pass is the backstop.
+   */
+  cancelRun?: (runId: string) => boolean;
 }
 
 /** A report's options: aborted when the gateway stops, which kills its gates and applies nothing. */
@@ -537,6 +544,7 @@ export class KanbanService {
   readonly #maxRunningPerRole: number | undefined;
   readonly #workflowsDir: string | undefined;
   readonly #wake: { enabled: boolean; maxDepth: number };
+  readonly #cancelRun: ((runId: string) => boolean) | undefined;
   /**
    * Tasks a report is running its checks for, with where the gates run -- the
    * task's own directory, by its `wt:` id, or its workspace's shared one (spec
@@ -563,6 +571,25 @@ export class KanbanService {
     this.#maxRunningPerRole = deps.maxRunningPerRole;
     this.#workflowsDir = deps.workflowsDir;
     this.#wake = deps.wake ?? { enabled: true, maxDepth: 5 };
+    this.#cancelRun = deps.cancelRun;
+  }
+
+  /**
+   * The turns of the runs a routing superseded, cancelled (workflow routing spec
+   * §9.5): one place for every caller, chat, the worker API, the dispatcher, the
+   * reconciliations; a caller that cancels too cancels an already-cancelled run,
+   * which does nothing.
+   */
+  #cancelled<T>(r: T): T {
+    const superseded = (r as { ok?: boolean; superseded?: RunRow[] }).superseded;
+    for (const run of superseded ?? []) {
+      try {
+        this.#cancelRun?.(run.runId);
+      } catch {
+        // Its turn is the dispatcher's: its pass cancels a superseded run's turn too.
+      }
+    }
+    return r;
   }
 
   /**
@@ -943,7 +970,7 @@ export class KanbanService {
    * outcome, or the dispatcher's own, recorded before it cancels the turn.
    */
   endRun(runId: string, ending: board.RunEnding): Result<{ task: TaskRow; run: RunRow; next: board.NextStep }> {
-    return board.endRun(this.#db, runId, ending, this.#limits, this.#clock.now(), this.#facts());
+    return this.#cancelled(board.endRun(this.#db, runId, ending, this.#limits, this.#clock.now(), this.#facts()));
   }
 
   /** The run's last turn has ended: it is closed, and its workspace free. */
@@ -1097,7 +1124,7 @@ export class KanbanService {
     const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
     if (refused !== undefined) return refused;
     return this.#report(taskId, by, 'complete', undefined, handoff.metadata, opts, (seen) =>
-      board.complete(this.#db, taskId, by, { ...handoff, ...seen }, this.#clock.now(), this.#facts()),
+      this.#cancelled(board.complete(this.#db, taskId, by, { ...handoff, ...seen }, this.#clock.now(), this.#facts())),
     );
   }
 
@@ -1404,13 +1431,15 @@ export class KanbanService {
     if (report.parents !== undefined && kind !== 'dependency') {
       return board.refuse('invalid', `only a dependency block names parents, not ${kind}`);
     }
-    return board.block(
-      this.#db,
-      taskId,
-      by,
-      { kind, reason: report.reason, ...(report.parents === undefined ? {} : { parents: report.parents }) },
-      this.#clock.now(),
-      this.#facts(),
+    return this.#cancelled(
+      board.block(
+        this.#db,
+        taskId,
+        by,
+        { kind, reason: report.reason, ...(report.parents === undefined ? {} : { parents: report.parents }) },
+        this.#clock.now(),
+        this.#facts(),
+      ),
     );
   }
 
@@ -1634,7 +1663,7 @@ export class KanbanService {
   archive(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
-    return board.archive(this.#db, taskId, by, this.#clock.now(), this.#facts());
+    return this.#cancelled(board.archive(this.#db, taskId, by, this.#clock.now(), this.#facts()));
   }
 
   /** The tasks a reaction task's wake carried, in event order (wake spec §19.9); null for any other task. */
@@ -2278,7 +2307,7 @@ export class KanbanService {
    */
   reconcileWorkflow(instanceId: string): Result<board.Reconciled> {
     if (!isText(instanceId)) return board.refuse('invalid', 'an instance id is text');
-    return board.reconcileWorkflow(this.#db, instanceId, this.#clock.now(), this.#facts());
+    return this.#cancelled(board.reconcileWorkflow(this.#db, instanceId, this.#clock.now(), this.#facts()));
   }
 
   /**
