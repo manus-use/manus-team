@@ -26,6 +26,7 @@ import {
   pendingOf,
   plannedMemberOf,
   reactsTo,
+  routeOfHandler,
   routingFaulted,
   settledOf,
   unmadeOf,
@@ -1426,6 +1427,34 @@ export class KanbanService {
     }
     return board.unblock(this.#db, taskId, by, comment, this.#clock.now(), opts);
   }
+  /**
+   * A handler's run's `mt kanban unblock` (workflow routing spec §5.4): only its
+   * work run, and only for the task its route was made from, found by its route
+   * row, whatever its body says; while that task is still blocked by the route's
+   * event, `stale` once anyone else lifted it. Its authority is the operator's
+   * file, with no tier. A repeat of the same run's own unblock answers
+   * `changed: false`. Its comment, if any, steers the next run, prefixed with
+   * the handler's ref.
+   */
+  unblockFromHandler(run: RunRow, taskId: string, comment?: string): Result<{ task: TaskRow; changed: boolean }> {
+    if (comment !== undefined && !isText(comment)) return board.refuse('invalid', 'a comment is text');
+    const route = routeOfHandler(this.#db, run.taskId);
+    if (route === undefined || run.kind !== 'work' || !isText(taskId) || route.fromTask !== taskId) {
+      return board.refuse('wrong_task', `run ${run.runId} may unblock only the task its handler was routed from`);
+    }
+    const lifted = this.#db
+      .prepare<[string, number], { actor: string }>("SELECT actor FROM kanban_events WHERE task_id = ? AND kind = 'unblocked' AND id > ? ORDER BY id LIMIT 1")
+      .get(taskId, route.eventId);
+    if (lifted?.actor === `run:${run.runId}`) {
+      const task = getTask(this.#db, taskId);
+      if (task === undefined) return board.refuse('not_found', `no task ${taskId}`);
+      return { ok: true, task, changed: false };
+    }
+    const ref = memberOf(this.#db, run.taskId)?.ref ?? route.handler;
+    const r = board.unblock(this.#db, taskId, `run:${run.runId}`, comment, this.#clock.now(), { blockedAt: route.eventId, handler: ref });
+    return r.ok ? { ok: true, task: r.task, changed: true } : r;
+  }
+
   /**
    * A woken turn's `task show` (wake spec §9.2), given its delivered wake: a task
    * with an event among the wake's, of any kind, while the setter has talk tier.

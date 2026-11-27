@@ -678,7 +678,7 @@ mt kanban workflow archive <instance> [--board <name>]
 mt kanban people
 
 # the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:
-mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag|wake-show|wake-unblock> < input.json
+mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag|wake-show|wake-unblock|unblock> < input.json
 ```
 
 The role, workspace and operator's board commands find the home, config file and database the

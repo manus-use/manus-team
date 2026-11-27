@@ -108,7 +108,7 @@ describe("the README's wakes", () => {
     expect(text).toContain('[--chat <chat_id> [--thread <thread_id>] [--wake]] [--wake-role <role>]');
     expect(text).toContain('mt kanban task wake <task_id> on|off|<role> [--board <name>]');
     expect(text).toContain('| `/kanban task wake <task> <role>` | operate');
-    expect(text).toContain('start-workflow|apply-dag|wake-show|wake-unblock> < input.json');
+    expect(text).toContain('start-workflow|apply-dag|wake-show|wake-unblock|unblock> < input.json');
   });
 
   it('leaves the settings to docs/configuration.md, which lists them', () => {

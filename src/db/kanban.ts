@@ -1744,7 +1744,7 @@ export function unblock(
   by: string,
   comment: string | undefined,
   now: number,
-  opts: { blockedAt?: number; wake?: number } = {},
+  opts: { blockedAt?: number; wake?: number; handler?: string } = {},
 ): Result<{ task: TaskRow }> {
   return tx(db, (d) => {
     const task = getTask(d, taskId);
@@ -1767,7 +1767,9 @@ export function unblock(
         )
         .get(taskId, opts.blockedAt);
       if (since !== undefined) {
-        return refuse('stale', `the block of task ${taskId} this button was for has been lifted already`);
+        // A handler's unblock is for the block it was routed from (workflow routing spec §5.4), not a button's.
+        const whose = opts.handler === undefined ? 'this button was for' : `the handler ${opts.handler} was routed from`;
+        return refuse('stale', `the block of task ${taskId} ${whose} has been lifted already`);
       }
     }
     if (task.phase !== 'blocked') return refuse('illegal_transition', `task ${taskId} is ${task.phase}, not blocked`);
@@ -1784,7 +1786,9 @@ export function unblock(
     // An unblock is an operator's, so its comment steers the next run; a woken
     // turn's says it was the board's, on that person's authority (wake spec §9.4).
     if (comment !== undefined && comment !== '') {
-      insertComment(d, taskId, by, opts.wake === undefined ? comment : `(woken by the board) ${comment}`, now, true);
+      // A handler's says which, on the operator's file's authority (workflow routing spec §5.4).
+      const prefix = opts.wake !== undefined ? '(woken by the board) ' : opts.handler !== undefined ? `(by the handler ${opts.handler}) ` : '';
+      insertComment(d, taskId, by, `${prefix}${comment}`, now, true);
     }
     return { ok: true, task: mustGet(d, taskId) };
   });
