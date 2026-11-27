@@ -1509,6 +1509,117 @@ refused. An agent starts a workflow from its run with `mt kanban start-workflow 
 and makes a graph of its own at once with `mt kanban apply-dag < dag.json` (recipe 3), which
 takes no gates: gates are the operator's.
 
+### Routing on results
+
+A step may report facts, and the steps after it may be made, skipped, fanned out or handed to
+someone else by what it reported. One file then does what several did, as this assessment does,
+routed by its intake:
+
+<!-- example: workflow vi-workflow -->
+```yaml
+description: CVE or supply-chain assessment, routed by its intake
+board: vi
+params:
+  case: { required: true, description: "a CVE id, or the absolute path of a package CSV" }
+steps:
+  intake:
+    title: "{{case}} · intake"
+    assignee: vi-coordinator
+    outputs:
+      kind: { enum: [cve, supplychain] }
+      verify: boolean
+      patch: boolean
+      bnpm: boolean
+      packages: { list: string, max: 100 }
+  va:
+    title: "{{case}} · va"
+    assignee: vulnerability-analyst
+    parents: [intake]
+    when:
+      - { step: intake, output: kind, equals: cve }
+    on_gave_up: { route: escalate }
+    outputs:
+      reachable: boolean
+  escalate:
+    title: "{{case}} · va, escalated"
+    assignee: vi-coordinator
+    handler: true
+    stands_in_for: va
+    outputs:
+      reachable: boolean
+  verify:
+    title: "{{case}} · verify"
+    assignee: verifier
+    parents: [va]
+    when:
+      - { step: intake, output: verify, is: true }
+      - { step: va, output: reachable, is: true }
+  exposure:
+    title: "{{case}} · exposure of {{item}}"
+    assignee: exposure-analyst
+    parents: [va]
+    for_each: { step: intake, output: packages }
+  registry:
+    title: "{{case}} · registry"
+    assignee: registry-analyst
+    parents: [intake]
+    when:
+      - { step: intake, output: bnpm, is: true }
+  report:
+    title: "{{case}} · report"
+    assignee: report-author
+    reviewer: { role: assessment-reviewer }
+    parents: [va, verify, exposure, registry]
+  patch:
+    title: "{{case}} · patch"
+    assignee: patch-author
+    parents: [report]
+    when:
+      - { step: intake, output: patch, is: true }
+```
+
+- **`outputs`** are the facts a step's run reports, each a top-level key of its completion's
+  `metadata`, of its type: `boolean`, `number`, `string`, `{ enum: [values] }`, or `{ list: <type>,
+  max: <n> }`. Every one is required; a completion missing one, or with the wrong type, is refused,
+  and the agent reports again in the same run. The step's outcome tells the agent what to report.
+  Only a role's step declares outputs: a person's done carries no metadata.
+- **`when`** makes a step only if every clause holds, and at least one of an `any` group's: a
+  clause names an ancestor's output and one test, `equals`, `in`, `is`, `at_least` or
+  `at_most`, or its state, `done`, `skipped`, `gave_up` or `blocked`. A step whose `when` is
+  false is **skipped**, said at once in the thread; its children wait until its own parents are
+  through, and are linked past it to the nearest done steps. A clause on a skipped step's output
+  is false.
+- **`for_each: { step, output }`** makes one task an item of an ancestor's list, once that
+  ancestor is done; an empty list skips the step. The steps below it wait for every item.
+- **`on_blocked` and `on_gave_up: { route: <handler> }`** hand a step whose run blocks, or gives
+  up, to a **handler**, a step with `handler: true`, made for that block alone, at most 3 times a
+  task. Its task's body ends with a paragraph naming the task it was routed from; it may unblock
+  that task with `mt kanban unblock`. With `stands_in_for`, its accepted completion settles that
+  step instead, with the step's reviewer, gates and outputs, and the stuck task is archived.
+  A handler's "Its directory" line helps only if its agent may read outside its own worktree:
+  its role's sandbox and tools decide that.
+
+A start makes the steps that need no result at once, and keeps the rest in the instance's
+**plan**, frozen: editing the file changes no running instance. `/kanban workflow preview` lists
+the steps made later, and how many tasks they could make. `/kanban workflow show w_…` lists every
+step in the file's order, with where it is and why:
+
+```
+✓ intake: done (kind=cve, verify=false, patch=false, bnpm=false, 3 packages)
+✓ va: done, stood in for by escalate (reachable=true)
+↪ escalate: routed from va (gave up), standing in
+⏭ verify: skipped (intake.verify is false)
+▶ exposure: 3 items, 1 done
+⏳ report: waiting for exposure
+```
+
+`mt kanban workflow show w_… --plan` prints the plan. To cancel a case, archive the instance,
+`/kanban workflow archive w_…`: every waiting step is skipped and nothing more is made; archiving
+its tasks one by one is not a cancel, as each archive is decided on. A routing that failed is
+said once in the thread and tried again by the gateway; `mt kanban workflow reconcile w_…` tries
+it now. `preview --json` refuses a file that uses these keys, and `apply` a DAG labelled with
+one: only a start keeps their checks and routes.
+
 ## 13. Recipes: graphs of tasks
 
 Each recipe below is a small graph of tasks (a DAG: each task waits for its parents, and nothing

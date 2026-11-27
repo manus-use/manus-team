@@ -229,7 +229,7 @@ interface Home {
 const homes: Home[] = [];
 
 /**
- * A gateway home at `<root>/.manus-team`: the roles worker, reviewer and triage,
+ * A gateway home at `<root>/.manus-team`: the roles worker, reviewer and triage, and the routed assessment's,
  * the default role from the agent block, and the workspaces the examples name,
  * two of them isolated; an owner, and Dana at talk tier, whom the bot has seen;
  * its database migrated, and the boards the docs name.
@@ -267,6 +267,8 @@ async function makeHome(): Promise<Home> {
     ].join('\n'),
   );
   const roles: Record<string, string> = { worker: 'workspace: worker\n', reviewer: '', triage: 'workspace: triage\n' };
+  // The roles of the guide's routed assessment (workflow routing spec §1).
+  for (const name of ['vi-coordinator', 'vulnerability-analyst', 'verifier', 'exposure-analyst', 'registry-analyst', 'report-author', 'assessment-reviewer', 'patch-author']) roles[name] = '';
   for (const [name, extra] of Object.entries(roles)) {
     mkdirSync(join(home, 'roles', name), { recursive: true });
     writeFileSync(join(home, 'roles', name, 'config.yaml'), `${extra}agent:\n  driver: structured-cli\n  command: bytesec\n  unsupervised: true\n`);

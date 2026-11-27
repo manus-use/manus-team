@@ -42,7 +42,8 @@ Each item has an example of what you would type. In a group, start a message wit
   `/kanban gate add k_7gq2 test -s notes/contracts.md`.
 - **Run workflows.** A YAML file in `$MT_HOME/workflows/` turns into a graph of tasks with
   their links, made at once. `for_each` makes one task per item of a list, and `board:` says
-  which board the tasks go on.
+  which board the tasks go on. A step's reported outputs can decide the rest: `when` makes or
+  skips a step, a fan-out runs over a result's list, and a step that gives up goes to a handler.
   Example: `/kanban workflow start vendor-eval topic="log storage" vendors=acme,globex`
 - **Schedule cron jobs.** With `cron.enabled: true`, at its time the gateway gives a role's
   agent a prompt and posts the answer in the chat.
@@ -204,7 +205,8 @@ the database itself and nudges the gateway over the socket after a change.
 - The specs in [docs/specs/](docs/specs/): the [Lark channel](docs/specs/2026-08-21-lark-channel-design.md),
   the [board](docs/specs/2026-11-02-kanban-design.md), [workflows](docs/specs/2026-11-16-workflows-design.md),
   [cron](docs/specs/2026-11-16-cron-design.md), [tier grants](docs/specs/2026-11-18-tier-grants-design.md),
-  [wake](docs/specs/2026-11-19-wake-design.md) and [progress cards](docs/specs/2026-11-24-progress-cards-design.md).
+  [wake](docs/specs/2026-11-19-wake-design.md), [progress cards](docs/specs/2026-11-24-progress-cards-design.md)
+  and [workflow routing](docs/specs/2026-11-26-workflow-routing-design.md).
 - [The architecture](docs/architecture.md), and [Design](#design) below for the ideas behind it.
 - The rest of this README: [Running it](#running-it), [Chat commands](#chat-commands),
   [The board from Lark](#the-board-from-lark), [Cron jobs](#cron-jobs) and [The mt command](#the-mt-command).
@@ -886,9 +888,10 @@ steps:
 
 `/kanban workflow start vendor-eval topic="log storage" vendors=acme,globex` makes all four
 tasks and their links at once, as one instance, `w_…`, or none of them; `/kanban workflow
-preview` shows what a start would make. A workflow has no conditions: one that must branch has a
-deciding step, whose agent reads its parents' handoffs and creates the branch it chose. Params
-never reach a gate. `mt workflow check` checks the files, and the gateway says at startup which
+preview` shows what a start would make. A step may declare `outputs`, which its run reports, and
+the steps after it can be made or skipped by them (`when`), fanned out over a result's list
+(`for_each: { step, output }`), or handed to a handler when it blocks or gives up; section 12 of
+the guide has the file. Params, and results, never reach a gate. `mt workflow check` checks the files, and the gateway says at startup which
 are usable, a file whose `board` is missing or archived among the unusable; a broken one does not
 stop it. At the terminal, `mt kanban workflow preview … --json` writes the DAG a start would make
 as a file, which `mt kanban workflow apply` makes, with `--dry-run` to check it first; an agent
