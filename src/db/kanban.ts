@@ -1,5 +1,5 @@
 import type { Db } from './open.js';
-import { txImmediate } from './open.js';
+import { isBusy, txImmediate } from './open.js';
 import { newRunId, newTaskId, newWorkflowId } from '../core/ids.js';
 import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
@@ -3401,14 +3401,55 @@ function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now:
   return lines;
 }
 
+/** How long a fault's error may be in its event, in characters (§9.4). */
+const FAULT_CHARS = 500;
+
 /**
  * The routing of a transition (§9.2), inside its transaction, after its own rows
- * and event: one read finds the task's member row and its instance's plan, and a
- * task that is no member of an instance with a plan pays nothing more; then what
- * is due is decided, and one `workflow_routed` event on the task lists the
- * decisions, for the notice.
+ * and event, in a savepoint of its own (§9.4): one read finds the task's member
+ * row and its instance's plan, and a task that is no member of an instance with
+ * a plan pays nothing more; then what is due is decided, and one
+ * `workflow_routed` event on the task lists the decisions, for the notice. A
+ * fault never loses the transition: the savepoint rolls back alone, and the
+ * instance's `routing_failed_at` and one `workflow_route_failed` event say so,
+ * `first` when it set the mark; unless the transaction itself is gone, as
+ * SQLite rolls one back on some errors, when the error is the transition's,
+ * or the database is busy, when txImmediate retries the whole transition.
  */
 function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): void {
+  if (!hasRouting(d)) return;
+  try {
+    d.transaction(() => routeIn(d, taskId, cause, eventId, now, team))();
+  } catch (err) {
+    if (!d.inTransaction || isBusy(err)) throw err;
+    routingFault(d, taskId, err, now);
+  }
+}
+
+/** A routing fault recorded, outside the savepoint that rolled back (§9.4): the mark set from null, and its event, masked and cut. */
+function routingFault(d: Db, taskId: string, err: unknown, now: number): void {
+  const row = d
+    .prepare<[string], { instance_id: string; name: string | null }>(
+      `SELECT m.instance_id, i.name FROM kanban_workflow_tasks m JOIN kanban_workflow_instances i ON i.instance_id = m.instance_id WHERE m.task_id = ?`,
+    )
+    .get(taskId);
+  if (row === undefined) return;
+  const first = d.prepare('UPDATE kanban_workflow_instances SET routing_failed_at = ? WHERE instance_id = ? AND routing_failed_at IS NULL').run(now, row.instance_id).changes === 1;
+  const said = mask(err instanceof Error ? err.message : String(err));
+  record(
+    d,
+    {
+      taskId,
+      kind: 'workflow_route_failed',
+      actor: 'gateway',
+      payload: { workflow: row.instance_id, workflowName: row.name, error: said.length <= FAULT_CHARS ? said : said.slice(0, FAULT_CHARS), first },
+    },
+    now,
+  );
+}
+
+/** The routing's body, inside its savepoint. */
+function routeIn(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): void {
   const planned = plannedMemberOf(d, taskId);
   if (planned === undefined) return;
   const lines = decideAll(d, planned.instance, eventId, now, team);
