@@ -1,4 +1,4 @@
-import type { Contract, RetryOnCrash } from './types.js';
+import { CONTRACT_FIELDS, type Contract, type RetryOnCrash } from './types.js';
 
 /**
  * Workflow routing (workflow routing spec): the plan an instance keeps, frozen
@@ -152,4 +152,26 @@ export function outcomeWithOutputs(outcome: string | undefined, outputs: Outputs
   if (Object.keys(outputs).length === 0) return outcome ?? '';
   const sentence = outputsSentence(outputs);
   return outcome === undefined || outcome === '' ? sentence : `${outcome}\n\n${sentence}`;
+}
+
+// ---------------------------------------------------------------------------
+// A stand-in's contract (§5.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * A stand-in's contract, merged per field (§5.2): for each field the step sets,
+ * `the step's (<step>): <its text>`, then, when the handler sets it too, a blank
+ * line and `this handler's: <its text>`; a field only the handler sets is its
+ * text alone. The step's `outcome` carries its outputs sentence already.
+ */
+export function standInContract(step: string, theirs: Contract, own: Contract): Contract {
+  const out: Contract = {};
+  for (const field of CONTRACT_FIELDS) {
+    const a = theirs[field];
+    const b = own[field];
+    if (a === undefined && b === undefined) continue;
+    if (a === undefined) out[field] = b as string;
+    else out[field] = b === undefined ? `the step's (${step}): ${a}` : `the step's (${step}): ${a}\n\nthis handler's: ${b}`;
+  }
+  return out;
 }

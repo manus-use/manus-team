@@ -8,9 +8,9 @@ import { redactKnownSecrets } from '../secrets.js';
 import { DAG_FORMAT, DAG_LIMITS, titleRefused, type Dag, type DagTask, type ParamValue } from './dag.js';
 import { WORKER_LIMITS } from './limits.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
-import { outcomeWithOutputs, type Clause, type ClauseValue, type OutputType, type Outputs, type RouteSpec, type ScalarType, type StepState, type WhenItem } from './routing.js';
+import { outcomeWithOutputs, standInContract, type Clause, type ClauseValue, type OutputType, type Outputs, type RouteSpec, type ScalarType, type StepState, type WhenItem } from './routing.js';
 import { assignable, isRecord, NO_MENTIONS, type TaskFacts } from './task-checks.js';
-import { GATE_LIMITS, type Contract, type CreatedVia, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
+import { CONTRACT_FIELDS, GATE_LIMITS, type Contract, type CreatedVia, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
 export { checkDagShape, readDag } from './dag.js';
 
@@ -639,7 +639,8 @@ function checkWhole(steps: readonly WorkflowStep[], params: ReadonlyMap<string, 
       if (param === undefined) fail(`${place}.for_each names ${q(over)}, which is no param this file declares`);
       if (!param.list) fail(`${place}.for_each names ${over}, a text param: for_each takes a list param`);
     }
-    const forEach = s.forEach !== undefined;
+    // A handler has an item when every step routing to it is a fan-out (workflow routing spec §5.2).
+    const forEach = s.forEach !== undefined || (s.handler && scope.routedFrom(s.name).length > 0 && scope.routedFrom(s.name).every(isFanOut));
     references(s.title, `${place}.title`, params, forEach, (step, output) => scope.result(s, step, output, `${place}.title`));
     if (s.body !== undefined) references(s.body, `${place}.body`, params, forEach, (step, output) => scope.result(s, step, output, `${place}.body`));
     for (const [key, field] of Object.entries(TEXT_FIELDS)) {
@@ -671,7 +672,7 @@ function checkWhole(steps: readonly WorkflowStep[], params: ReadonlyMap<string, 
         );
       }
     }
-    checkRouting(s, scope);
+    checkRouting(s, scope, facts.roles);
   }
 }
 
@@ -684,6 +685,8 @@ interface RoutingScope {
   byName: ReadonlyMap<string, WorkflowStep>;
   ancestors(name: string): ReadonlySet<string>;
   pending: ReadonlySet<string>;
+  /** The steps whose `on_blocked` or `on_gave_up` routes to a handler, in the file's order. */
+  routedFrom(handler: string): WorkflowStep[];
   /** A `{{<step>.<output>}}` in step `s`'s title or body, at `place`, judged (§1, §6). */
   result(s: WorkflowStep, step: string, output: string, place: string): void;
 }
@@ -754,14 +757,33 @@ function isFanOut(s: WorkflowStep): boolean {
   return s.forEach !== undefined;
 }
 
+/** The handlers a step routes to, by `on_blocked` then `on_gave_up`. */
+function routesOf(s: WorkflowStep): string[] {
+  return [s.onBlocked, s.onGaveUp].flatMap((r) => (r === 'wait' ? [] : [r.route]));
+}
+
+/**
+ * A handler's ancestors, for its references (workflow routing spec §5.2): those of
+ * every step routing to it, the routed step itself excluded, as it has no result.
+ */
+function handlerAncestors(routed: readonly WorkflowStep[], ancestors: (name: string) => ReadonlySet<string>): Set<string> {
+  const [first, ...rest] = routed;
+  if (first === undefined) return new Set();
+  return new Set([...ancestors(first.name)].filter((a) => rest.every((r) => ancestors(r.name).has(a))));
+}
+
 function routingScope(steps: readonly WorkflowStep[]): RoutingScope {
   const byName = new Map(steps.map((s) => [s.name, s]));
-  const ancestors = ancestorsOf(byName);
+  const plain = ancestorsOf(byName);
+  const routedFrom = (handler: string): WorkflowStep[] => steps.filter((s) => routesOf(s).includes(handler));
+  // A handler has no parents: its ancestors are its routed steps' (§5.2).
+  const ancestors = (name: string): ReadonlySet<string> => (byName.get(name)?.handler === true ? handlerAncestors(routedFrom(name), plain) : plain(name));
   const pending = pendingSteps(steps);
   const scope: RoutingScope = {
     byName,
     ancestors,
     pending,
+    routedFrom,
     result(s, step, output, place) {
       const ref = `{{${step}.${output}}}`;
       if (!pending.has(s.name)) fail(`${place} names ${ref}, and ${s.name} is made at the start, before any result`);
@@ -777,6 +799,7 @@ function routingScope(steps: readonly WorkflowStep[]): RoutingScope {
 /** A step a clause, a fan-out or a reference of `s` reads, at `place`: one of the file's, and an ancestor of `s`. */
 function readable(scope: RoutingScope, s: WorkflowStep, step: string, place: string, why: string): void {
   if (!scope.byName.has(step)) fail(`${place} names ${q(step)}, which is no step of this file`);
+  if (scope.byName.get(step)?.handler === true) fail(`${place} names ${step}, a handler, which is made only when routed to and is no step's ancestor`);
   if (!scope.ancestors(s.name).has(step)) fail(`${place} names ${step}, which is not an ancestor of ${s.name}: ${why}`);
 }
 
@@ -818,9 +841,86 @@ function writtenAsPerson(spec: NameSpec | undefined): boolean {
   return spec !== undefined && (spec.must === 'person' || (!spec.value.includes('{{') && spec.value.includes(':')));
 }
 
-/** A step's routing checks (workflow routing spec §2.1, §3, §4, §6), after its own. */
-function checkRouting(s: WorkflowStep, scope: RoutingScope): void {
+/** An output's type, as a check says it: `boolean`, `enum cve, supplychain`, `list of string, max 100`. */
+function typeShown(t: OutputType): string {
+  if (typeof t === 'string') return t;
+  if ('enum' in t) return `enum ${t.enum.join(', ')}`;
+  return `list of ${typeShown(t.list)}, max ${t.max}`;
+}
+
+/** A step's outputs as a check lists them with their types: `reachable (boolean)`, or `none`. */
+function typedOutputs(outputs: Outputs): string {
+  const all = Object.entries(outputs);
+  return all.length === 0 ? 'none' : all.map(([n, t]) => `${n} (${typeShown(t)})`).join(', ');
+}
+
+/** Whether two steps declare the same outputs, name for name and type for type. */
+function sameOutputs(a: Outputs, b: Outputs): boolean {
+  const names = Object.keys(a);
+  return names.length === Object.keys(b).length && names.every((n) => b[n] !== undefined && typeShown(a[n] as OutputType) === typeShown(b[n] as OutputType));
+}
+
+/** A reviewer as a stand-in's check names it: `role assessment-reviewer`, a person or a reference as written, or `none`. */
+function reviewerShown(spec: NameSpec | undefined): string {
+  if (spec === undefined) return 'none';
+  if (spec.must === 'person' || spec.value.includes('{{') || spec.value.includes(':')) return spec.value;
+  return `role ${spec.value}`;
+}
+
+/** A handler's checks (workflow routing spec §5, §6): made only when routed to, never chaining, and a stand-in that takes its step's review, outputs, gates, contract and checkout. */
+function checkHandler(s: WorkflowStep, scope: RoutingScope, roles: ReadonlyMap<string, Role>): void {
   const place = `steps.${s.name}`;
+  if (s.parents.length > 0) fail(`${place} is a handler, made with no parents when routed to: it takes no parents`);
+  if (s.when !== undefined) fail(`${place} is a handler, made only when routed to: it takes no when`);
+  if (s.forEach !== undefined) fail(`${place} is a handler, made only when routed to: it takes no for_each`);
+  for (const [key, r] of [['on_blocked', s.onBlocked], ['on_gave_up', s.onGaveUp]] as const) {
+    if (r !== 'wait') fail(`${place} is a handler, and a handler's blocks wait for a person: it takes no ${key}, so routes never chain`);
+  }
+  const routed = scope.routedFrom(s.name);
+  if (routed.length === 0) fail(`${place} is a handler, and no step routes to it: add on_blocked or on_gave_up: { route: ${s.name} } to the step it handles`);
+  if (s.standsInFor === undefined) return;
+  const name = s.standsInFor;
+  const step = scope.byName.get(name);
+  if (step === undefined) fail(`${place}.stands_in_for names ${q(name)}, which is no step of this file`);
+  const theirs = step as WorkflowStep;
+  if (!routed.includes(theirs)) fail(`${place} stands in for ${name}, which does not route to it`);
+  if (!sameOutputs(theirs.outputs, s.outputs)) {
+    fail(`${place} stands in for ${name}, and its outputs differ: ${name} declares ${typedOutputs(theirs.outputs)}, ${s.name} ${typedOutputs(s.outputs)}`);
+  }
+  if (s.reviewer !== undefined) fail(`${place} stands in for ${name}, and takes ${name}'s reviewer (${reviewerShown(theirs.reviewer)}): it names none of its own`);
+  // The step's gates first, then its own, as addGate would take them (§5.2).
+  const gates = [...theirs.gates, ...s.gates];
+  if (gates.length > GATE_LIMITS.perTask) {
+    fail(`${place} stands in for ${name}, and ${name}'s ${theirs.gates.length} gates with its own ${s.gates.length} are ${gates.length}: a task has at most ${GATE_LIMITS.perTask}`);
+  }
+  const total = gates.reduce((sum, g) => sum + g.timeoutS, 0);
+  if (total > GATE_LIMITS.totalTimeoutS) {
+    fail(`${place} stands in for ${name}, and ${name}'s gates with its own would take up to ${total} s together; at most ${GATE_LIMITS.totalTimeoutS} s`);
+  }
+  const merged = standInContract(name, { ...theirs.contract, ...(Object.keys(theirs.outputs).length > 0 ? { outcome: outcomeWithOutputs(theirs.contract.outcome, theirs.outputs) } : {}) }, s.contract);
+  for (const field of CONTRACT_FIELDS) {
+    const size = bytesOf(merged[field] ?? '');
+    if (size > WORKER_LIMITS.contractField) fail(`${place} stands in for ${name}: its contract's ${field} with ${name}'s is ${size} bytes; at most ${WORKER_LIMITS.contractField}`);
+  }
+  const where = certainOf(theirs, roles);
+  const own = certainOf(s, roles);
+  if (where !== undefined && own !== undefined && where !== own) fail(`${place} stands in for ${name}, whose gates run in workspace ${where}, and ${s.name} works in ${own}`);
+}
+
+/** A step's routing checks (workflow routing spec §2.1, §3, §4, §6), after its own. */
+function checkRouting(s: WorkflowStep, scope: RoutingScope, roles: ReadonlyMap<string, Role>): void {
+  const place = `steps.${s.name}`;
+  for (const p of s.parents) {
+    if (scope.byName.get(p)?.handler === true) fail(`${place}.parents names ${p}, a handler, which is made only when routed to and is no step's parent`);
+  }
+  if (s.handler) checkHandler(s, scope, roles);
+  else if (s.standsInFor !== undefined) fail(`${place} takes stands_in_for only as a handler (handler: true)`);
+  for (const [key, r] of [['on_blocked', s.onBlocked], ['on_gave_up', s.onGaveUp]] as const) {
+    if (r === 'wait' || s.handler) continue;
+    const target = scope.byName.get(r.route);
+    if (target === undefined) fail(`${place}.${key} routes to ${q(r.route)}, which is no step of this file`);
+    if (!(target as WorkflowStep).handler) fail(`${place}.${key} routes to ${r.route}, which is not a handler (handler: true)`);
+  }
   if (Object.keys(s.outputs).length > 0 && writtenAsPerson(s.assignee)) {
     fail(`${place} declares outputs, which a role's run reports in its metadata, and its assignee is a person: a person's done gives none`);
   }
