@@ -3,7 +3,9 @@ import { join } from 'node:path';
 import { createBoard } from '../../src/db/kanban.js';
 import { getBoard } from '../../src/db/kanban-read.js';
 import { KanbanService, type KanbanServiceDeps, type WorkflowMade } from '../../src/kanban/service.js';
+import { hashToken, mintToken } from '../../src/kanban/token.js';
 import type { Result } from '../../src/kanban/types.js';
+import { WorkerApi, type WorkerResponse } from '../../src/kanban/worker.js';
 import type { Role } from '../../src/roles.js';
 import { ManualClock, type TestDb } from './db.js';
 import { role } from './dispatch.js';
@@ -124,4 +126,19 @@ export function viBoard(h: TestDb, deps: Partial<KanbanServiceDeps> = {}): ViBoa
 export function madeOf(r: Result<object>): WorkflowMade {
   if (!r.ok) throw new Error(`${r.code}: ${r.message}`);
   return r as unknown as WorkflowMade;
+}
+
+/** A run of a task claimed through the service with a token, and the worker API asking as it: what an agent's `mt kanban` does. */
+export interface WorkerRun {
+  runId: string;
+  ask(command: string, input?: unknown): Promise<WorkerResponse>;
+}
+
+export function workerRun(service: KanbanService, db: TestDb['db'], taskId: string): WorkerRun {
+  const token = mintToken();
+  const claimed = service.claim(taskId, { tokenHash: hashToken(token) });
+  if (!claimed.ok) throw new Error(`${claimed.code}: ${claimed.message}`);
+  const api = new WorkerApi({ db, service });
+  const runId = claimed.run.runId;
+  return { runId, ask: (command, input = {}) => api.handle({ run: runId, token, command, input }) };
 }

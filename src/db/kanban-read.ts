@@ -1482,6 +1482,19 @@ export function triggersOf(db: Db, taskId: string): TriggerEvent[] {
   });
 }
 
+/** The event that blocked a task last (§5.3): a block of any kind but `dependency`, a stop, or a run's end that blocked it. */
+export function latestBlockOf(db: Db, taskId: string): number | undefined {
+  return (
+    db
+      .prepare<[string], { id: number | null }>(
+        `SELECT max(id) AS id FROM kanban_events
+          WHERE task_id = ? AND ((kind = 'blocked' AND json_extract(payload, '$.kind') <> 'dependency') OR kind = 'stopped'
+                                 OR (kind = 'run_ended' AND json_extract(payload, '$.next') = 'blocked'))`,
+      )
+      .get(taskId)?.id ?? undefined
+  );
+}
+
 /** A task's first event of a kind, with its payload; undefined for none. */
 export function firstEventOf(db: Db, taskId: string, kind: string): KanbanEvent | undefined {
   const row = db

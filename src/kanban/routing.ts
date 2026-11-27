@@ -748,3 +748,43 @@ export function triggerWords(r: Pick<RouteFact, 'kind' | 'throttled'>, throttles
   if (r.kind === 'blocked') return 'blocked';
   return r.throttled ? `stopped after ${throttles} throttles` : 'gave up';
 }
+
+// ---------------------------------------------------------------------------
+// A handler's paragraph (§5.2)
+// ---------------------------------------------------------------------------
+
+/** What a handler's paragraph says of the task it was routed from: read from the route row and the board's rows. */
+export interface Routing {
+  taskId: string;
+  step: string;
+  item: string | null;
+  from: Pick<RouteFact, 'kind' | 'throttled' | 'blockKind' | 'reason'>;
+  /** The transient limit's count, for its words. */
+  throttles: number;
+  /** The routed task's own directory, when it has one. */
+  dir: string | undefined;
+  standsIn: boolean;
+}
+
+/**
+ * The fixed paragraph a handler's body gains at its making, after the file's
+ * (§5.2): what it was routed from, and why; the routed task's directory when it
+ * has one of its own; whether it stands in or helps; and the unblock it may make.
+ * It only describes the records, which alone authorise anything.
+ */
+export function handlerParagraph(r: Routing): string {
+  const why =
+    r.from.kind === 'blocked'
+      ? `it blocked (${r.from.blockKind}): ${r.from.reason}`
+      : r.from.throttled
+        ? `it stopped after ${r.throttles} throttles: ${r.from.reason}`
+        : `it gave up: ${r.from.reason}`;
+  return [
+    `Routed from \`${r.taskId}\` (step ${r.step}${r.item === null ? '' : `, item ${r.item}`}): ${why}.`,
+    ...(r.dir === undefined ? [] : [`Its directory: ${r.dir}`]),
+    r.standsIn
+      ? `This task stands in for it: your accepted completion is read in ${r.step}'s place, and archives it.`
+      : 'This task helps it: its dependents wait for it, not for you.',
+    `\`mt kanban unblock\` with {"task_id": "${r.taskId}", "comment": "…"} returns it to work instead.`,
+  ].join('\n');
+}

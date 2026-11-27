@@ -5,10 +5,10 @@ import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import { canonicalDag, maskDag, type Dag } from '../kanban/dag.js';
-import { decide as decideRouting, fillText, INSTANCE_CAP, maskPlan, resultOf, SKIPPED_TEXT, valueSaid, type Decision, type Facts, type Plan, type PlanStep, type StepFact, type Template } from '../kanban/routing.js';
+import { decide as decideRouting, fillText, handlerParagraph, INSTANCE_CAP, maskPlan, resultOf, SKIPPED_TEXT, triggerWords, valueSaid, type Decision, type Facts, type Plan, type PlanStep, type RouteFact, type StepFact, type Template } from '../kanban/routing.js';
 import type { GateRun } from '../kanban/gates.js';
 import { placeName, placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
-import { worktreeId } from './workspaces.js';
+import { worktreeId, worktreeOf } from './workspaces.js';
 import { DEFAULT_BOARD, ENDED_OUTCOMES, GATE_LIMITS, REPORTED_OUTCOMES } from '../kanban/types.js';
 import { cutToBytes, WORKER_LIMITS } from '../kanban/limits.js';
 import { assignable, checkTask, isRecord, type TaskFacts } from '../kanban/task-checks.js';
@@ -51,7 +51,9 @@ import {
   getTaskByKey,
   gatesOf,
   firstEventOf,
+  latestBlockOf,
   latestCompletion,
+  routesOf,
   pendingOf,
   plannedMemberOf,
   settledOf,
@@ -3121,12 +3123,15 @@ export type RouteCause = 'completed' | 'blocked' | 'gave_up' | 'throttled' | 'ar
 /** One decision of a transaction, as `workflow_routed` lists it for its notice (§12.2). */
 export interface RoutedLine {
   step: string;
-  outcome: 'made' | 'skipped' | 'fanned_out';
+  outcome: 'made' | 'skipped' | 'fanned_out' | 'routed' | 'over_limit' | 'over_cap';
   why: string;
   taskIds: string[];
   items?: string[];
   count?: number;
   by?: string;
+  /** A route's handler, and whether it stands in. */
+  handler?: string;
+  standsIn?: boolean;
 }
 
 /** The most items a `workflow_routed` line names; its count says the rest (§12.2). */
@@ -3171,7 +3176,38 @@ function routingFacts(d: Db, r: Routed): Facts {
       result: isRecord(metadata) ? metadata : null,
     });
   }
-  return { steps, due: [], members: r.members.length, cap: INSTANCE_CAP };
+  return { steps, due: dueRoutes(d, r), members: r.members.length, cap: INSTANCE_CAP };
+}
+
+/**
+ * The routes due (§5.3): each member's task blocked now from its work by a trigger
+ * event, its latest block, with no route row for that event yet; and how many
+ * routes were made from it. A block lifted before its route was made routes
+ * nothing, as the task is no longer blocked by it.
+ */
+function dueRoutes(d: Db, r: Routed): RouteFact[] {
+  const routes = routesOf(d, r.instance.instanceId);
+  const handlers = new Set(r.plan.steps.filter((s) => s.handler === true).map((s) => s.step));
+  return r.members.flatMap((m): RouteFact[] => {
+    if (handlers.has(m.step) || m.task.phase !== 'blocked' || m.task.blockedFrom !== 'open') return [];
+    const latest = latestBlockOf(d, m.taskId);
+    const t = triggersOf(d, m.taskId).find((x) => x.eventId === latest);
+    if (t === undefined || routes.some((x) => x.fromTask === m.taskId && x.eventId === t.eventId)) return [];
+    return [
+      {
+        taskId: m.taskId,
+        step: m.step,
+        ref: m.ref,
+        item: m.item,
+        eventId: t.eventId,
+        kind: t.kind,
+        throttled: t.throttled,
+        blockKind: t.blockKind,
+        reason: t.reason,
+        routes: routes.filter((x) => x.fromTask === m.taskId && x.outcome === 'made').length,
+      },
+    ];
+  });
 }
 
 /** Insert a settled row into its key (§8): a later attempt finds the key taken and changes nothing. True when it added the row. */
@@ -3247,14 +3283,18 @@ function makeLate(
   d: Db,
   r: Routed,
   facts: Facts,
-  made: { step: string; ref: string; item: string | null; template: Template; parents: readonly string[]; payload?: Record<string, unknown> },
+  made: { step: string; ref: string; item: string | null; template: Template; parents: readonly string[]; payload?: Record<string, unknown>; paragraph?: string },
   now: number,
   team: RouteTeam | undefined,
 ): string {
   const t = made.template;
   const first = r.members[0];
   const title = cutToBytes(filled(r.plan, facts, t.title, made.item ?? undefined), WORKER_LIMITS.title);
-  const body = t.body === null ? '' : cutToBytes(filled(r.plan, facts, t.body, made.item ?? undefined), WORKER_LIMITS.body);
+  // A handler's paragraph is kept whole: only the file's part of its body is cut (§5.2).
+  const after = made.paragraph === undefined ? '' : made.paragraph;
+  const room = WORKER_LIMITS.body - (after === '' ? 0 : Buffer.byteLength(after) + (t.body === null ? 0 : 2));
+  const own = t.body === null ? '' : cutToBytes(filled(r.plan, facts, t.body, made.item ?? undefined), room);
+  const body = after === '' ? own : own === '' ? after : `${own}\n\n${after}`;
   const assignee = assigneeOf(t.assignee);
   const reviewer = assigneeOf(t.reviewer);
   const wake = t.wake === null ? undefined : { by: t.wake.by, depth: t.wake.depth, ...(t.wake.tooDeep === true ? { tooDeep: true } : {}), ...(t.wake.role === undefined ? {} : { role: t.wake.role }) };
@@ -3357,6 +3397,7 @@ function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number
   if (dec.outcome === 'skipped') {
     return decided(d, id, dec.step, 'skipped', { by: dec.by, why: dec.why }, causeEvent, now) ? { step: dec.step, outcome: 'skipped', why: dec.why, taskIds: [], by: dec.by } : undefined;
   }
+  if (dec.outcome === 'route' || dec.outcome === 'over_limit' || dec.outcome === 'over_cap') return route(d, r, facts, dec, now, team);
   if (dec.outcome !== 'made' && dec.outcome !== 'fanned_out') return undefined;
   // The instance's board, live: an archived one skips the step, never refusing the transition (§13.1).
   const live = liveBoard(d, r.instance.board);
@@ -3380,6 +3421,62 @@ function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number
   const marker = made.map((m, n) => ({ item: mask(m.item), taskId: taskIds[n], ref: m.ref }));
   d.prepare('UPDATE kanban_workflow_pending SET items = ? WHERE instance_id = ? AND step = ?').run(JSON.stringify(marker), id, dec.step);
   return { step: dec.step, outcome: 'fanned_out', why: dec.why, taskIds, items: dec.items.slice(0, ROUTED_ITEMS), count: dec.items.length };
+}
+
+/**
+ * A route applied (§5.3): its row, keyed on the trigger event, so a replay makes
+ * no second handler; for a route made, the handler's task, made as any late
+ * task but with no link, its ref `<handler>:<n>`, its item the routed item's,
+ * its body gaining its paragraph, in the routed task's fixed workspace when its
+ * step and role name none, its `created` event naming the routed task. On a
+ * board found archived nothing is made and no row written (§13.1): the board
+ * takes no new task, and the routed task waits as with no route.
+ */
+function route(
+  d: Db,
+  r: Routed,
+  facts: Facts,
+  dec: Extract<Decision, { outcome: 'route' | 'over_limit' | 'over_cap' }>,
+  now: number,
+  team: RouteTeam | undefined,
+): RoutedLine | undefined {
+  const id = r.instance.instanceId;
+  const from = dec.from;
+  const taken = d.prepare('SELECT 1 FROM kanban_workflow_routes WHERE instance_id = ? AND handler = ? AND event_id = ?').get(id, dec.handler, from.eventId);
+  if (taken !== undefined) return undefined;
+  const routed = mustGet(d, from.taskId);
+  const why = triggerWords(from, routed.consecutiveTransient);
+  const row = d.prepare('INSERT INTO kanban_workflow_routes (instance_id, handler, event_id, from_task, outcome, task_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  if (dec.outcome !== 'route') {
+    row.run(id, dec.handler, from.eventId, from.taskId, dec.outcome, null, now);
+    return { step: from.step, outcome: dec.outcome, why, taskIds: [from.taskId], handler: dec.handler };
+  }
+  const hs = r.plan.steps.find((s) => s.step === dec.handler);
+  const t = hs?.template;
+  if (hs === undefined || t === undefined || !liveBoard(d, r.instance.board).ok) return undefined;
+  const n = routesOf(d, id).filter((x) => x.handler === dec.handler && x.outcome === 'made').length + 1;
+  // Where it works (§5.2): its step's, its role's, or else the routed task's, when that is fixed.
+  const roleWorkspace = t.assignee === null || t.assignee.includes(':') ? undefined : team?.roles.get(t.assignee)?.workspace;
+  const workspace = t.workspace ?? (roleWorkspace === undefined ? routed.workspace : null);
+  const paragraph = handlerParagraph({
+    taskId: from.taskId,
+    step: from.step,
+    item: from.item,
+    from,
+    throttles: routed.consecutiveTransient,
+    dir: routed.worktree === null ? undefined : worktreeOf(d, routed.worktree)?.rootPath,
+    standsIn: dec.standsIn,
+  });
+  const taskId = makeLate(
+    d,
+    r,
+    facts,
+    { step: dec.handler, ref: `${dec.handler}:${n}`, item: from.item, template: { ...t, workspace }, parents: [], payload: { routedFrom: from.taskId }, paragraph },
+    now,
+    team,
+  );
+  row.run(id, dec.handler, from.eventId, from.taskId, 'made', taskId, now);
+  return { step: from.step, outcome: 'routed', why, taskIds: [taskId], handler: dec.handler, standsIn: dec.standsIn };
 }
 
 /** An instance with a plan, its members read now. */

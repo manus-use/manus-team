@@ -1,5 +1,5 @@
 import type { Db } from '../db/open.js';
-import { getTask, runByTokenHash, taskView, wakeOfReaction, type ReviewRequest } from '../db/kanban-read.js';
+import { getTask, memberOf, routeOfHandler, runByTokenHash, taskView, wakeOfReaction, type ReviewRequest } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { briefFor } from './brief.js';
 import { DAG_LIMITS } from './dag.js';
@@ -513,8 +513,14 @@ export class WorkerApi {
     const view = taskView(this.#db, run.taskId);
     if (task === undefined || view === undefined) return refused('not_found', `no task ${run.taskId}`);
     const brief = briefFor(this.#db, { run, task, roleMd: undefined, role: undefined });
+    // A handler's task reads its source from the records, whatever its body says (workflow routing spec §5.2).
+    const route = routeOfHandler(this.#db, task.taskId);
+    const source = route === undefined ? undefined : memberOf(this.#db, route.fromTask);
     return {
       ok: true,
+      ...(route === undefined
+        ? {}
+        : { routed_from: { task_id: route.fromTask, step: source?.step ?? null, item: source?.item ?? null, event_id: route.eventId } }),
       run: { run_id: run.runId, kind: run.kind, attempt: run.attempt, outcome: run.outcome },
       task: {
         task_id: task.taskId,
