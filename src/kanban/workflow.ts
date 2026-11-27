@@ -8,7 +8,7 @@ import { redactKnownSecrets } from '../secrets.js';
 import { DAG_FORMAT, DAG_LIMITS, titleRefused, type Dag, type DagTask, type ParamValue } from './dag.js';
 import { WORKER_LIMITS } from './limits.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
-import { outcomeWithOutputs, standInContract, type StepShape, type Clause, type ClauseValue, type OutputType, type Outputs, type RouteSpec, type ScalarType, type StepState, type WhenItem } from './routing.js';
+import { outcomeWithOutputs, PLAN_FORMAT, standInContract, type Plan, type PlanStep, type StepShape, type Template, type Clause, type ClauseValue, type OutputType, type Outputs, type RouteSpec, type ScalarType, type StepState, type WhenItem } from './routing.js';
 import { assignable, isRecord, NO_MENTIONS, type TaskFacts } from './task-checks.js';
 import { CONTRACT_FIELDS, GATE_LIMITS, type Contract, type CreatedVia, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
@@ -226,6 +226,7 @@ function references(
   params: ReadonlyMap<string, WorkflowParam>,
   forEach: boolean,
   result: (step: string, output: string) => void,
+  lateItem = false,
 ): void {
   for (let at = value.indexOf('{{'); at !== -1; at = value.indexOf('{{', at + 2)) {
     const r = RESULT_REFERENCE.exec(value.slice(at));
@@ -240,6 +241,8 @@ function references(
     const name = m[1] ?? '';
     if (name === ITEM) {
       if (!forEach) fail(`${place} uses {{item}}, which only a for_each step has`);
+      // A result fan-out's item, and a handler's, is a result's (workflow routing spec §14).
+      if (lateItem) fail(`${place} uses {{item}}, a result's: a result fills only a title and a body`);
     } else if (!params.has(name)) {
       fail(`${place} names {{${name}}}, which is no param this file declares`);
     }
@@ -641,13 +644,18 @@ function checkWhole(steps: readonly WorkflowStep[], params: ReadonlyMap<string, 
     }
     // A handler has an item when every step routing to it is a fan-out (workflow routing spec §5.2).
     const forEach = s.forEach !== undefined || (s.handler && scope.routedFrom(s.name).length > 0 && scope.routedFrom(s.name).every(isFanOut));
+    const lateItem = typeof s.forEach === 'object' || s.handler;
     references(s.title, `${place}.title`, params, forEach, (step, output) => scope.result(s, step, output, `${place}.title`));
     if (s.body !== undefined) references(s.body, `${place}.body`, params, forEach, (step, output) => scope.result(s, step, output, `${place}.body`));
     for (const [key, field] of Object.entries(TEXT_FIELDS)) {
       const v = field === undefined ? undefined : s.contract[field];
       const at = `${place}.${key}`;
       // Values from results fill titles and bodies only (workflow routing spec §14).
-      if (v !== undefined) references(v, at, params, forEach, (step, output) => fail(`${at} names {{${step}.${output}}}: a result fills only a title and a body`));
+      if (v !== undefined) references(v, at, params, forEach, (step, output) => fail(`${at} names {{${step}.${output}}}: a result fills only a title and a body`), lateItem);
+    }
+    for (const [key, spec] of [['assignee', s.assignee], ['reviewer', s.reviewer], ['workspace', s.workspace === undefined ? undefined : { value: s.workspace, must: undefined }]] as const) {
+      const at = `${place}.${key}${spec?.must === undefined ? '' : `.${spec.must}`}`;
+      if (lateItem && spec?.value === `{{${ITEM}}}`) fail(`${at} uses {{item}}, a result's: a result fills only a title and a body`);
     }
     checkName(s.assignee, `${place}.assignee`, params, forEach, facts, 'person');
     checkName(s.reviewer, `${place}.reviewer`, params, forEach, facts, 'person');
@@ -1438,7 +1446,13 @@ function nameGiven(value: string, place: string, spec: NameSpec, kind: 'person' 
  * in as written, and not read again for braces. The DAG is shaped, measured and
  * its tasks checked by the caller, as any DAG is.
  */
-export function expand(w: Workflow, given: GivenParams, board: string, personOf?: PersonOf, via?: CreatedVia['kind']): Result<{ dag: Dag }> {
+export function expand(
+  w: Workflow,
+  given: GivenParams,
+  board: string,
+  personOf?: PersonOf,
+  via?: CreatedVia['kind'],
+): Result<{ dag: Dag; plan: Plan | null }> {
   const params = paramValues(w, given, personOf, via);
   if (!params.ok) return params;
   const values = params.values;
@@ -1446,14 +1460,22 @@ export function expand(w: Workflow, given: GivenParams, board: string, personOf?
     const v = values.get(name);
     return Array.isArray(v) ? v.join(', ') : (v ?? '');
   };
+  // A file using no routing key expands exactly as before, with no plan (workflow routing spec §7.1).
+  const routing = usesRouting(w);
+  const pending = routing ? pendingSteps(w.steps) : new Set<string>();
+  const plain = (x: WorkflowStep): boolean => !x.handler && !pending.has(x.name);
   const refsOf = new Map<string, string[]>();
   const tasks: DagTask[] = [];
+  const planned: PlanStep[] = [];
   for (const s of w.steps) {
     const over = paramFanOut(s);
+    // A result fan-out's item, and a handler's, is filled when its task is made (§7.4): left in place.
+    const lateItem = typeof s.forEach === 'object' || s.handler;
     const items: Array<string | null> = over === undefined ? [null] : [...((values.get(over) as string[] | undefined) ?? [])];
-    const refs: string[] = [];
-    for (const [n, item] of items.entries()) {
-      const sub = (t: string): string => t.replace(/\{\{([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\}\}/g, (_m, name: string) => (name === ITEM ? (item ?? '') : textOf(name)));
+    const made: Array<{ item: string | null; template: Template }> = [];
+    for (const item of items) {
+      const sub = (t: string): string =>
+        t.replace(/\{\{([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\}\}/g, (m, name: string) => (name === ITEM ? (lateItem ? m : (item ?? '')) : textOf(name)));
       const name = (spec: NameSpec | undefined, place: string, kind: 'person' | 'workspace'): Result<{ value: string | null }> => {
         if (spec === undefined) return { ok: true, value: null };
         const ref = REFERENCE.exec(spec.value)?.[1];
@@ -1470,35 +1492,87 @@ export function expand(w: Workflow, given: GivenParams, board: string, personOf?
       if (!workspace.ok) return workspace;
       const contract: Contract = {};
       for (const [field, value] of Object.entries(s.contract) as [keyof Contract, string][]) contract[field] = sub(value);
-      const ref = over === undefined ? s.name : `${s.name}:${n + 1}`;
-      refs.push(ref);
+      // The agent is told what to report, in its outcome (§2.1).
+      if (Object.keys(s.outputs).length > 0) contract.outcome = outcomeWithOutputs(contract.outcome, s.outputs);
       const body = s.body === undefined ? null : sub(s.body);
-      tasks.push({
-        ref,
-        step: s.name,
+      made.push({
         item,
-        title: sub(s.title),
-        body: body === '' ? null : body,
-        assignee: assignee.value,
-        reviewer: reviewer.value,
-        workspace: workspace.value,
-        priority: s.priority ?? 0,
-        contract,
-        failure_limit: s.failureLimit ?? null,
-        retry_on_crash: s.retryOnCrash ?? 'always',
-        max_runtime_s: s.maxRuntimeS ?? null,
-        parents: s.parents.flatMap((p) => refsOf.get(p) ?? []),
-        gates: s.gates.map((g) => ({ command: g.command, timeout_s: g.timeoutS })),
-        ...(s.wake === true ? { wake: true as const } : s.wake === false ? {} : { wake: { role: s.wake.role } }),
+        template: {
+          title: sub(s.title),
+          body: body === '' ? null : body,
+          assignee: assignee.value,
+          reviewer: reviewer.value,
+          workspace: workspace.value,
+          priority: s.priority ?? 0,
+          contract,
+          failure_limit: s.failureLimit ?? null,
+          retry_on_crash: s.retryOnCrash ?? 'always',
+          max_runtime_s: s.maxRuntimeS ?? null,
+          gates: s.gates.map((g) => ({ command: g.command, timeout_s: g.timeoutS })),
+          wake: null,
+        },
       });
     }
-    refsOf.set(s.name, refs);
+    if (plain(s)) {
+      const refs: string[] = [];
+      for (const [n, { item, template: t }] of made.entries()) {
+        const ref = over === undefined ? s.name : `${s.name}:${n + 1}`;
+        refs.push(ref);
+        tasks.push({
+          ref,
+          step: s.name,
+          item,
+          title: t.title,
+          body: t.body,
+          assignee: t.assignee,
+          reviewer: t.reviewer,
+          workspace: t.workspace,
+          priority: t.priority,
+          contract: t.contract,
+          failure_limit: t.failure_limit,
+          retry_on_crash: t.retry_on_crash,
+          max_runtime_s: t.max_runtime_s,
+          parents: s.parents.flatMap((p) => refsOf.get(p) ?? []),
+          gates: t.gates,
+          ...(s.wake === true ? { wake: true as const } : s.wake === false ? {} : { wake: { role: s.wake.role } }),
+        });
+      }
+      refsOf.set(s.name, refs);
+    }
+    if (routing) planned.push(planStep(s, s.handler ? 'route' : plain(s) ? 'start' : 'decide', made, over));
     if (tasks.length > DAG_LIMITS.tasks) {
-      const total = w.steps.reduce((sum, x) => sum + (paramFanOut(x) === undefined ? 1 : ((values.get(paramFanOut(x) ?? '') as string[] | undefined)?.length ?? 0)), 0);
+      const total = w.steps
+        .filter(plain)
+        .reduce((sum, x) => sum + (paramFanOut(x) === undefined ? 1 : ((values.get(paramFanOut(x) ?? '') as string[] | undefined)?.length ?? 0)), 0);
       return refuse('invalid', `workflow ${w.name} would make ${total} tasks with these params; an instance has at most ${DAG_LIMITS.tasks}`);
     }
   }
-  return { ok: true, dag: { format: DAG_FORMAT, workflow: w.name, params: Object.fromEntries(values), board, tasks } };
+  const dag: Dag = { format: DAG_FORMAT, workflow: w.name, params: Object.fromEntries(values), board, tasks };
+  if (!routing) return { ok: true, dag, plan: null };
+  const plan: Plan = { format: PLAN_FORMAT, steps: planned };
+  // Measured as a start's DAG is (§7.3).
+  const size = bytesOf(JSON.stringify(plan));
+  if (size > DAG_LIMITS.bytes) return refuse('too_large', `workflow ${w.name}'s plan is ${size} bytes with these params; it may be at most ${DAG_LIMITS.bytes}`);
+  return { ok: true, dag, plan };
+}
+
+/** A step of the plan (workflow routing spec §7.3): what decides it, and its one template, or one an item of a list param. */
+function planStep(s: WorkflowStep, made: PlanStep['made'], built: ReadonlyArray<{ item: string | null; template: Template }>, over: string | undefined): PlanStep {
+  return {
+    step: s.name,
+    made,
+    parents: [...s.parents],
+    outputs: s.outputs,
+    ...(s.when === undefined ? {} : { when: s.when }),
+    ...(s.forEach === undefined ? {} : { for_each: typeof s.forEach === 'string' ? { param: s.forEach } : s.forEach }),
+    on_blocked: s.onBlocked,
+    on_gave_up: s.onGaveUp,
+    ...(s.handler ? { handler: true as const } : {}),
+    ...(s.standsInFor === undefined ? {} : { stands_in_for: s.standsInFor }),
+    ...(over === undefined
+      ? { template: (built[0] as { template: Template }).template }
+      : { templates: built.map((b) => ({ ...b.template, item: b.item ?? '' })) }),
+  };
 }
 
 // ---------------------------------------------------------------------------
