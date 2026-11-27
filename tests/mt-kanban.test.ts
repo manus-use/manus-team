@@ -175,7 +175,7 @@ describe('mt kanban', () => {
   it('is in the usage', async () => {
     const out: string[] = [];
     await runMt(['help'], { env: {}, out: (l) => out.push(l), err: () => undefined });
-    expect(out.join('\n')).toContain('mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag|wake-show|wake-unblock> < input.json');
+    expect(out.join('\n')).toContain('mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag|wake-show|wake-unblock|unblock> < input.json');
   });
 });
 

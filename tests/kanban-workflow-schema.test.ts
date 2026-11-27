@@ -55,14 +55,15 @@ describe('migration 009', () => {
     expect(Number(h.db.pragma('user_version', { simple: true }))).toBeGreaterThanOrEqual(9);
     const rows = h.db
       .prepare<[], { name: string; strict: number; wr: number }>(
-        "SELECT name, strict, wr FROM pragma_table_list WHERE name LIKE 'kanban_workflow_%' ORDER BY name",
+        "SELECT name, strict, wr FROM pragma_table_list WHERE name IN ('kanban_workflow_instances', 'kanban_workflow_tasks') ORDER BY name",
       )
       .all();
     expect(rows).toEqual([
       { name: 'kanban_workflow_instances', strict: 1, wr: 0 },
       { name: 'kanban_workflow_tasks', strict: 1, wr: 1 },
     ]);
-    expect(indexes('kanban_workflow_instances')).toEqual(['idx_kanban_workflow_instances_board']);
+    // Migration 015 adds its own, for the faulted instances (workflow routing spec §9.4).
+    expect(indexes('kanban_workflow_instances')).toContain('idx_kanban_workflow_instances_board');
     expect(indexes('kanban_tasks')).toContain('idx_kanban_tasks_created_from');
   });
 
@@ -105,7 +106,7 @@ describe('migration 009', () => {
         const follow = newTask(d, { createdBy: `run:${run.runId}`, createdVia: { kind: 'run', runId: run.runId } });
         expect(follow.createdFromTask).toBe(task.taskId);
         const before = [getTask(d, task.taskId), getTask(d, follow.taskId)];
-        expect(migrate(d, SCHEMA_DIR)).toBe(14);
+        expect(migrate(d, SCHEMA_DIR)).toBe(15);
         expect([getTask(d, task.taskId), getTask(d, follow.taskId)]).toEqual(before);
         expect(d.prepare('SELECT task_id FROM kanban_tasks WHERE created_from_task = ?').all(task.taskId)).toEqual([{ task_id: follow.taskId }]);
         expect(d.prepare('SELECT count(*) AS n FROM kanban_workflow_instances').get()).toEqual({ n: 0 });

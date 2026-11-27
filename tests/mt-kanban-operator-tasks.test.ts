@@ -433,14 +433,14 @@ describe('the task commands', () => {
   });
 
   it('answers the old form of a task command, without task, as an unknown command, and changes nothing', async () => {
-    for (const verb of ['new', 'list', 'assign', 'unblock', 'stop', 'archive']) {
+    for (const verb of ['new', 'list', 'assign', 'stop', 'archive']) {
       const r = await mt([verb, 'k_1']);
       expect(r.code).toBe(2);
       expect(r.out).toBe('');
       expect(r.err.split('\n')[0]).toBe(`mt: unknown command: kanban ${verb}; the operator's command is mt kanban task ${verb}`);
     }
-    // show, comment and link are the worker's names, here as in a run: outside one, they need one.
-    for (const argv of [['show', 'k_1'], ['comment', 'k_1', 'hello'], ['link', 'k_1', 'k_2'], ['show', 'k_1', '--json']]) {
+    // show, comment, link and a handler's unblock are the worker's names, here as in a run: outside one, they need one.
+    for (const argv of [['show', 'k_1'], ['comment', 'k_1', 'hello'], ['link', 'k_1', 'k_2'], ['show', 'k_1', '--json'], ['unblock', 'k_1']]) {
       const r = await mt(argv);
       expect(r.code).toBe(1);
       expect(JSON.parse(r.out)).toMatchObject({ ok: false, code: 'not_in_a_run' });
@@ -519,7 +519,8 @@ describe("in a board run's shell", () => {
   });
 
   it('answers the old form of an operator-only task command with JSON, as an unknown command', async () => {
-    for (const verb of ['new', 'list', 'assign', 'unblock', 'stop', 'archive']) {
+    // unblock is the worker's now, a handler's run's (workflow routing spec §5.4).
+    for (const verb of ['new', 'list', 'assign', 'stop', 'archive']) {
       const r = await mt([verb, 'k_1'], { env: RUN });
       expect(r.code).toBe(2);
       expect(JSON.parse(r.out)).toMatchObject({ ok: false, code: 'unknown_command' });

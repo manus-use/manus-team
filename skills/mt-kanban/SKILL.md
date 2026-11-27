@@ -46,7 +46,9 @@ ends without a report is nudged, then retried or blocked: never leave it to that
 
 **A summary someone can act on.** Say what was done, where the output is (paths in the workspace,
 a branch and commit, document links, task ids), and what is left, naming the follow-up that holds
-it. Put structured facts in "metadata". A good `mt kanban complete`:
+it. Put structured facts in "metadata". When your task's outcome names outputs, report each as a
+top-level key of "metadata", of the type it names; a completion without them is refused, and you
+report again in the same run. A good `mt kanban complete`:
 
 ```json
 {"summary": "Wrote notes/contracts.md: 14 contracts, 3 renewing before March. Left: contracts/2026/acme.pdf and brill.pdf are scans with no text, so they are not in it.", "metadata": {"files": ["notes/contracts.md"], "unread": 2}}

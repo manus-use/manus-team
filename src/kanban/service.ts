@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
-import type { Db } from '../db/open.js';
+import { isBusy, type Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
 import {
   boardList,
@@ -14,14 +14,28 @@ import {
   getRun,
   getTask,
   getTaskByKey,
+  hasRouting,
   hasWakeColumns,
   instanceByKey,
   instancesOn,
   memberOf,
   memberPhases,
+  membersOf,
   membersWithTasks,
   phaseSince,
+  pendingOf,
+  latestCompletion,
+  plannedMemberOf,
   reactsTo,
+  routeFailureOf,
+  routeOfHandler,
+  routesOf,
+  routingDue,
+  routingFaulted,
+  triggersOf,
+  settledOf,
+  unmadeOf,
+  unmadeSteps,
   relatedTasks,
   runsOf,
   statusOf,
@@ -45,7 +59,8 @@ import { redactKnownSecrets } from '../secrets.js';
 import { roleLimit, type Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
-import { checkDagShape, checkDagTasks, type Dag, type DagTask, type ShapedDag } from './dag.js';
+import { checkDagShape, checkDagTasks, DAG_LIMITS, type Dag, type DagTask, type ShapedDag } from './dag.js';
+import { checkOutputs, fillText, INSTANCE_CAP, itemPlaceholderOf, maskPlan, outputBounds, placeholderOf, standInContract, stepLines, triggerWords, type Plan, type PlanStep, type RouteView, type StepLine, type Template } from './routing.js';
 import { holdsSecret } from './gate-command.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
@@ -59,10 +74,12 @@ import {
   listWorkflows,
   missingBoardProblem,
   readWorkflow,
+  routedDagProblem,
   startBoard,
   usableMessage,
   withBoards,
   workflowBoard,
+  workflowRouting,
   type BoardPath,
   type GivenParams,
   type InstanceState,
@@ -190,6 +207,13 @@ export interface KanbanServiceDeps {
    * -- tests of the board alone -- wakes are on, to `max_depth` 5.
    */
   wake?: { enabled: boolean; maxDepth: number };
+  /**
+   * Cancel a run's turn, as the dispatcher's `cancel` does (workflow routing spec
+   * §9.5): for the runs a stand-in's archive superseded, on every path that
+   * routes. Answers whether a turn was asked to stop. Absent -- tests of the
+   * board alone -- none is cancelled, and the dispatcher's pass is the backstop.
+   */
+  cancelRun?: (runId: string) => boolean;
 }
 
 /** A report's options: aborted when the gateway stops, which kills its gates and applies nothing. */
@@ -223,6 +247,24 @@ export interface WakeJudge {
 /** A woken turn's show of a task outside its wake (wake spec §9.2): the same words whether the task exists or not. */
 export const NOT_IN_WAKE = 'a woken turn reads only the tasks whose events woke it';
 
+/**
+ * A member's wake, as a start resolves it (wake spec §3.1): every member's with
+ * `all`, else only one whose step, or DAG task, asks, `ask`; the start's role,
+ * else the member's own step's (§19.1), else the chat session; with no chat to
+ * follow it, a member that would wake the chat session is notice-only (§19.16).
+ */
+function memberWake(ask: DagTask['wake'], wake: StartWakeOf | undefined): board.NewWake | undefined {
+  if (wake === undefined || (!wake.all && ask === undefined)) return wake === undefined ? undefined : { by: null, depth: wake.depth };
+  const role = wake.role ?? (typeof ask === 'object' ? ask.role : undefined);
+  if (role === undefined && wake.rolesOnly === true) return { by: null, depth: wake.depth };
+  return {
+    by: wake.by,
+    depth: wake.depth,
+    ...(wake.tooDeep === true ? { tooDeep: true } : {}),
+    ...(role === undefined ? {} : { role }),
+  };
+}
+
 /** A refusal unless a new task's wake is a principal, or none, and a whole depth (wake spec §3.1). */
 function wakeShapeRefused(wake: unknown): Refusal | undefined {
   if (wake === undefined) return undefined;
@@ -255,6 +297,9 @@ function verdict(r: GateResult, timeoutS: number): string {
 
 /** A task to create: in types.ts, so the checks need nothing of the service; exported here too, as its callers name it. */
 export type { CreateRequest } from './types.js';
+
+/** A routing decision as the writer records it (workflow routing spec §12.2): exported here, as only the service reaches the writer. */
+export type { RoutedLine } from '../db/kanban.js';
 
 /** A workflow to start (workflows spec §6), as chat, the terminal or a run asks for it. Nothing is checked yet. */
 export interface StartRequest {
@@ -345,6 +390,8 @@ export interface WorkflowMade {
   existing: boolean;
   /** `STEPS_NOTICE_ONLY`, for a start whose steps asked for a wake while wakes are off (wake spec §3.4), or `NO_CHAT_NOTICE_ONLY`, with no chat to follow them (§19.16). */
   wakeNote?: string;
+  /** For an instance with a plan, the steps still waiting to be made, by name, handlers not among them (workflow routing spec §12.3, §13.2). */
+  waiting?: string[];
 }
 
 /** A dry run's answer (workflows spec §6): what the apply would make, or the instance its key already made; nothing written. */
@@ -371,10 +418,17 @@ export interface InstanceView extends InstanceState {
   related: Array<{ task: TaskRow; status: DisplayStatus }>;
   /** Other instances whose members are related to this one, as a deciding step's start makes: one line each. */
   relatedInstances: Array<{ instanceId: string; name: string | null; tasks: number }>;
+  /** For an instance with a plan, every step's line, real or pending, in the plan's order (workflow routing spec §12.1). */
+  steps?: StepLine[];
+  /** While its routing's fault is not reconciled: when, and the error (§9.4, §12.1). */
+  routingFailed?: { at: number; error: string };
 }
 
 /** How many of a board's newest instances `instances` reads (workflows spec §7). */
 export const INSTANCES_READ = 200;
+
+/** How often a faulted instance's routing is retried, at most (workflow routing spec §9.4). */
+export const RETRY_ROUTING_MS = 60_000;
 
 /** How long `unknown_workflow`'s message may be, in bytes: a gate refusal's output's size (workflows spec §6). */
 export const WORKFLOW_MESSAGE_BYTES = 4 * 1024;
@@ -504,6 +558,7 @@ export class KanbanService {
   readonly #maxRunningPerRole: number | undefined;
   readonly #workflowsDir: string | undefined;
   readonly #wake: { enabled: boolean; maxDepth: number };
+  readonly #cancelRun: ((runId: string) => boolean) | undefined;
   /**
    * Tasks a report is running its checks for, with where the gates run -- the
    * task's own directory, by its `wt:` id, or its workspace's shared one (spec
@@ -513,6 +568,10 @@ export class KanbanService {
    * agent in a checkout being tested.
    */
   readonly #reporting = new Map<string, { workspace: string | null; done: Promise<unknown> }>();
+  /** When each faulted instance's routing was last retried, in this process (workflow routing spec §9.4); not stored. */
+  readonly #retried = new Map<string, number>();
+  /** The faulted instances whose retry has failed and been said once, until one succeeds. */
+  readonly #retryFailed = new Set<string>();
 
   constructor(deps: KanbanServiceDeps) {
     this.#db = deps.db;
@@ -528,6 +587,25 @@ export class KanbanService {
     this.#maxRunningPerRole = deps.maxRunningPerRole;
     this.#workflowsDir = deps.workflowsDir;
     this.#wake = deps.wake ?? { enabled: true, maxDepth: 5 };
+    this.#cancelRun = deps.cancelRun;
+  }
+
+  /**
+   * The turns of the runs a routing superseded, cancelled (workflow routing spec
+   * §9.5): one place for every caller, chat, the worker API, the dispatcher, the
+   * reconciliations; a caller that cancels too cancels an already-cancelled run,
+   * which does nothing.
+   */
+  #cancelled<T>(r: T): T {
+    const superseded = (r as { ok?: boolean; superseded?: RunRow[] }).superseded;
+    for (const run of superseded ?? []) {
+      try {
+        this.#cancelRun?.(run.runId);
+      } catch {
+        // Its turn is the dispatcher's: its pass cancels a superseded run's turn too.
+      }
+    }
+    return r;
   }
 
   /**
@@ -908,7 +986,7 @@ export class KanbanService {
    * outcome, or the dispatcher's own, recorded before it cancels the turn.
    */
   endRun(runId: string, ending: board.RunEnding): Result<{ task: TaskRow; run: RunRow; next: board.NextStep }> {
-    return board.endRun(this.#db, runId, ending, this.#limits, this.#clock.now());
+    return this.#cancelled(board.endRun(this.#db, runId, ending, this.#limits, this.#clock.now(), this.#facts()));
   }
 
   /** The run's last turn has ended: it is closed, and its workspace free. */
@@ -1061,8 +1139,8 @@ export class KanbanService {
   ): Promise<Result<{ task: TaskRow; run: RunRow | undefined }>> {
     const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
     if (refused !== undefined) return refused;
-    return this.#report(taskId, by, 'complete', undefined, opts, (seen) =>
-      board.complete(this.#db, taskId, by, { ...handoff, ...seen }, this.#clock.now()),
+    return this.#report(taskId, by, 'complete', undefined, handoff.metadata, opts, (seen) =>
+      this.#cancelled(board.complete(this.#db, taskId, by, { ...handoff, ...seen }, this.#clock.now(), this.#facts())),
     );
   }
 
@@ -1085,7 +1163,7 @@ export class KanbanService {
       if (!who.ok) return who;
       named = who.assignee;
     }
-    return this.#report(taskId, by, 'review', named, opts, (seen) =>
+    return this.#report(taskId, by, 'review', named, rest.metadata, opts, (seen) =>
       board.requestReview(
         this.#db,
         taskId,
@@ -1094,6 +1172,62 @@ export class KanbanService {
         this.#clock.now(),
       ),
     );
+  }
+
+  /**
+   * A work report's outputs (workflow routing spec §2.2), after the board's own
+   * check of the report, so another run's is refused as ever, and before its
+   * gates: on a member of an instance with a plan whose step declares outputs, a
+   * `complete` from `open` or a `review`, never a reviewer's approval, whose
+   * metadata is checked against them, `invalid` naming the first problem, so the
+   * run reports again. A stand-in's are its step's, and held to what reads its
+   * step's. One indexed read for any task, nothing more for one with no plan.
+   */
+  #outputsRefused(task: TaskRow, kind: 'complete' | 'review', metadata: unknown): Refusal | undefined {
+    const taskId = task.taskId;
+    const planned = plannedMemberOf(this.#db, taskId);
+    const plan = planned?.instance.plan;
+    if (planned === undefined || plan === null || plan === undefined) return undefined;
+    const entry = plan.steps.find((s) => s.step === planned.member.step);
+    if (entry === undefined || Object.keys(entry.outputs).length === 0) return undefined;
+    if (kind === 'complete' && task.phase !== 'open') return undefined;
+    // A handler stands in only for the step it was routed from: helping another, its result is its own step's (§5.2).
+    let read = entry.step;
+    if (entry.handler === true && entry.stands_in_for !== undefined) {
+      const route = routeOfHandler(this.#db, taskId);
+      if (route !== undefined && memberOf(this.#db, route.fromTask)?.step === entry.stands_in_for) read = entry.stands_in_for;
+    }
+    const problem = checkOutputs(entry.outputs, metadata, outputBounds(plan, read));
+    if (problem !== undefined) return board.refuse('invalid', problem);
+    return this.#reserved(planned.instance.instanceId, plan, read, metadata as Record<string, unknown>);
+  }
+
+  /**
+   * The instance's 500, reserved at the report whose list a fan-out will read
+   * (workflow routing spec §2.2): its members, handlers among them, plus this
+   * list's items for each fan-out over it still waiting, plus what each other
+   * step still waiting makes, a fan-out over a list param its items, any other
+   * one, at most 500, else `too_large`, while the agent can still shorten its
+   * list. The writer never refuses for the cap; what passes it later is skipped
+   * (§9.4).
+   */
+  #reserved(instanceId: string, plan: Plan, step: string, metadata: Record<string, unknown>): Refusal | undefined {
+    const waiting = new Set(pendingOf(this.#db, instanceId).filter((p) => p.state === 'waiting').map((p) => p.step));
+    const members = membersOf(this.#db, instanceId).length;
+    const makes = (s: PlanStep): number => s.templates?.length ?? 1;
+    let others = plan.steps.filter((s) => waiting.has(s.step)).reduce((n, s) => n + makes(s), 0);
+    for (const s of plan.steps) {
+      const f = s.for_each;
+      if (f === undefined || !('step' in f) || f.step !== step || !waiting.has(s.step)) continue;
+      const list = metadata[f.output];
+      if (!Array.isArray(list)) continue;
+      others -= makes(s);
+      if (members + list.length + others > INSTANCE_CAP) {
+        return board.refuse('too_large', `output ${f.output} would make ${list.length} tasks, and instance ${instanceId} has ${members} of its ${INSTANCE_CAP}`);
+      }
+      others += list.length;
+    }
+    return undefined;
   }
 
   /**
@@ -1110,6 +1244,7 @@ export class KanbanService {
     by: Reporter,
     kind: 'complete' | 'review',
     reviewer: Assignee | undefined,
+    metadata: unknown,
     opts: ReportOptions,
     apply: (seen: { reportedCommit?: string | null; reportedDirty?: boolean | null }) => Result<T>,
   ): Promise<Result<T>> {
@@ -1118,6 +1253,8 @@ export class KanbanService {
     }
     const now = board.reportCheck(this.#db, taskId, by, kind, reviewer);
     if (!now.ok) return now;
+    const outputs = this.#outputsRefused(now.task, kind, metadata);
+    if (outputs !== undefined) return outputs;
     // A complete the board will take as a review request runs the gates as one.
     const checkedAs = kind === 'complete' && board.completeAsksReview(now.task) ? 'review' : kind;
     // One report's checks in a checkout at a time: two reports' gates in one would trip over each other.
@@ -1317,12 +1454,15 @@ export class KanbanService {
     if (report.parents !== undefined && kind !== 'dependency') {
       return board.refuse('invalid', `only a dependency block names parents, not ${kind}`);
     }
-    return board.block(
-      this.#db,
-      taskId,
-      by,
-      { kind, reason: report.reason, ...(report.parents === undefined ? {} : { parents: report.parents }) },
-      this.#clock.now(),
+    return this.#cancelled(
+      board.block(
+        this.#db,
+        taskId,
+        by,
+        { kind, reason: report.reason, ...(report.parents === undefined ? {} : { parents: report.parents }) },
+        this.#clock.now(),
+        this.#facts(),
+      ),
     );
   }
 
@@ -1339,6 +1479,34 @@ export class KanbanService {
     }
     return board.unblock(this.#db, taskId, by, comment, this.#clock.now(), opts);
   }
+  /**
+   * A handler's run's `mt kanban unblock` (workflow routing spec §5.4): only its
+   * work run, and only for the task its route was made from, found by its route
+   * row, whatever its body says; while that task is still blocked by the route's
+   * event, `stale` once anyone else lifted it. Its authority is the operator's
+   * file, with no tier. A repeat of the same run's own unblock answers
+   * `changed: false`. Its comment, if any, steers the next run, prefixed with
+   * the handler's ref.
+   */
+  unblockFromHandler(run: RunRow, taskId: string, comment?: string): Result<{ task: TaskRow; changed: boolean }> {
+    if (comment !== undefined && !isText(comment)) return board.refuse('invalid', 'a comment is text');
+    const route = routeOfHandler(this.#db, run.taskId);
+    if (route === undefined || run.kind !== 'work' || !isText(taskId) || route.fromTask !== taskId) {
+      return board.refuse('wrong_task', `run ${run.runId} may unblock only the task its handler was routed from`);
+    }
+    const lifted = this.#db
+      .prepare<[string, number], { actor: string }>("SELECT actor FROM kanban_events WHERE task_id = ? AND kind = 'unblocked' AND id > ? ORDER BY id LIMIT 1")
+      .get(taskId, route.eventId);
+    if (lifted?.actor === `run:${run.runId}`) {
+      const task = getTask(this.#db, taskId);
+      if (task === undefined) return board.refuse('not_found', `no task ${taskId}`);
+      return { ok: true, task, changed: false };
+    }
+    const ref = memberOf(this.#db, run.taskId)?.ref ?? route.handler;
+    const r = board.unblock(this.#db, taskId, `run:${run.runId}`, comment, this.#clock.now(), { blockedAt: route.eventId, handler: ref });
+    return r.ok ? { ok: true, task: r.task, changed: true } : r;
+  }
+
   /**
    * A woken turn's `task show` (wake spec §9.2), given its delivered wake: a task
    * with an event among the wake's, of any kind, while the setter has talk tier.
@@ -1518,7 +1686,7 @@ export class KanbanService {
   archive(taskId: string, by: string): Result<{ task: TaskRow; run: RunRow | undefined }> {
     const ids = idsRefused(taskId);
     if (ids !== undefined) return ids;
-    return board.archive(this.#db, taskId, by, this.#clock.now());
+    return this.#cancelled(board.archive(this.#db, taskId, by, this.#clock.now(), this.#facts()));
   }
 
   /** The tasks a reaction task's wake carried, in event order (wake spec §19.9); null for any other task. */
@@ -1706,19 +1874,7 @@ export class KanbanService {
   /** The writer's members of a checked DAG: each task's fields, its parents as earlier positions, its gates. */
   #members(dag: Dag, wake?: StartWakeOf): board.NewMember[] {
     const at = new Map(dag.tasks.map((t, i) => [t.ref, i]));
-    const wakeOf = (t: DagTask): board.NewWake | undefined => {
-      if (wake === undefined || (!wake.all && t.wake === undefined)) return wake === undefined ? undefined : { by: null, depth: wake.depth };
-      // The start's role, else the member's own step's (wake spec §19.1), else the chat session.
-      const role = wake.role ?? (typeof t.wake === 'object' ? t.wake.role : undefined);
-      // With no chat to follow it, a member that would wake the chat session is notice-only (§19.16).
-      if (role === undefined && wake.rolesOnly === true) return { by: null, depth: wake.depth };
-      return {
-        by: wake.by,
-        depth: wake.depth,
-        ...(wake.tooDeep === true ? { tooDeep: true } : {}),
-        ...(role === undefined ? {} : { role }),
-      };
-    };
+    const wakeOf = (t: DagTask): board.NewWake | undefined => memberWake(t.wake, wake);
     const as = (name: string | null): Assignee | null => (name === null ? null : { kind: name.includes(':') ? 'human' : 'role', name });
     return dag.tasks.map((t) => ({
       task: {
@@ -1743,7 +1899,7 @@ export class KanbanService {
   }
 
   /** A start's expansion (workflows spec §6 step 1): the file read now, its params, the DAG made, shaped and measured. */
-  #expanded(req: StartRequest, onBoard: string): Result<ShapedDag & { workflow: Workflow; board: string; fromFile: boolean }> {
+  #expanded(req: StartRequest, onBoard: string): Result<ShapedDag & { workflow: Workflow; board: string; fromFile: boolean; plan: Plan | null }> {
     if (!isRecord(req)) return board.refuse('invalid', 'a start is an object');
     if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
     const read = this.#workflow(req.workflow);
@@ -1758,7 +1914,91 @@ export class KanbanService {
     if (!expanded.ok) return expanded;
     const shaped = checkDagShape(expanded.dag, 'expansion');
     if (!shaped.ok) return shaped;
-    return { ...shaped, workflow: read.workflow, board: routed.board, fromFile: routed.fromFile };
+    return { ...shaped, workflow: read.workflow, board: routed.board, fromFile: routed.fromFile, plan: expanded.plan };
+  }
+
+  /**
+   * What a start checks of its plan beyond the file (workflow routing spec §6, §8):
+   * a database migrated to 015; no step with outputs whose assignee, as the
+   * params named it, is a person (§2.1); and each template of a step made later
+   * checked as `create` would check it, every reference to a result filled with
+   * its type's widest form, a stand-in with its step's reviewer, gates and
+   * contract (§5.2), so a template too long already is refused now, not cut later.
+   */
+  #checkPlan(plan: Plan | null, createdBy: string, createdVia: CreatedVia): Refusal | undefined {
+    if (plan === null) return undefined;
+    if (!hasRouting(this.#db)) return board.refuse('invalid', board.ROUTING_NOT_MIGRATED);
+    const byName = new Map(plan.steps.map((s) => [s.step, s]));
+    const templatesOf = (s: PlanStep): Array<Template & { item: string | null }> => s.templates ?? (s.template === undefined ? [] : [{ ...s.template, item: null }]);
+    const tasks: DagTask[] = [];
+    for (const s of plan.steps) {
+      for (const t of templatesOf(s)) {
+        if (Object.keys(s.outputs).length > 0 && t.assignee !== null && t.assignee.includes(':')) {
+          return board.refuse('invalid', `steps.${s.step} declares outputs, which a role's run reports in its metadata, and its assignee is a person: a person's done gives none`);
+        }
+      }
+      if (s.made === 'start') continue;
+      const source = s.for_each !== undefined && 'step' in s.for_each ? byName.get(s.for_each.step)?.outputs[s.for_each.output] : undefined;
+      const item = s.for_each !== undefined && 'step' in s.for_each ? itemPlaceholderOf(source) : s.handler === true ? itemPlaceholderOf(undefined) : undefined;
+      const fill = (text: string): string => fillText(text, (step, output) => placeholderOf(byName.get(step)?.outputs[output]), item);
+      // A stand-in is checked with each template of its step: its reviewer, its gates before its own, its contract merged (§5.2).
+      const stood = s.stands_in_for === undefined ? undefined : byName.get(s.stands_in_for);
+      const against: Array<Template | undefined> = stood === undefined ? [undefined] : templatesOf(stood);
+      for (const [n, t] of templatesOf(s).entries()) {
+        for (const theirs of against) {
+          tasks.push({
+            ref: templatesOf(s).length > 1 ? `${s.step}:${n + 1}` : s.step,
+            step: s.step,
+            item: t.item,
+            title: fill(t.title),
+            body: t.body === null ? null : fill(t.body),
+            assignee: t.assignee,
+            reviewer: theirs === undefined ? t.reviewer : theirs.reviewer,
+            workspace: t.workspace,
+            priority: t.priority,
+            contract: theirs === undefined ? t.contract : standInContract(s.stands_in_for ?? '', theirs.contract, t.contract),
+            failure_limit: t.failure_limit,
+            retry_on_crash: t.retry_on_crash,
+            max_runtime_s: t.max_runtime_s,
+            parents: [],
+            gates: theirs === undefined ? t.gates : [...theirs.gates, ...t.gates],
+          });
+        }
+      }
+    }
+    if (tasks.length === 0) return undefined;
+    return checkDagTasks({ format: 1, workflow: null, params: {}, board: null, tasks }, { facts: this.#facts(), createdBy, createdVia });
+  }
+
+  /** The wakes the steps made later ask for (wake spec §3.1, §19.1), one a step: the DAG holds only the plain steps', and a start checks these as it checks theirs. */
+  #plannedAsks(plan: Plan | null, w: Workflow): Array<true | { role: string } | undefined> {
+    if (plan === null) return [];
+    const later = new Set(plan.steps.filter((s) => s.made !== 'start').map((s) => s.step));
+    return w.steps.filter((s) => later.has(s.name)).map((s) => (s.wake === true ? (true as const) : s.wake === false ? undefined : { role: s.wake.role }));
+  }
+
+  /** The plan with each template's wake, as the start resolved it for its step (workflow routing spec §7.3); a run's start's late members inherit theirs at the making. */
+  #plannedWakes(plan: Plan | null, w: Workflow, wake: StartWakeOf | undefined): Plan | null {
+    if (plan === null) return null;
+    const asks = new Map(w.steps.map((s) => [s.name, s.wake === true ? (true as const) : s.wake === false ? undefined : { role: s.wake.role }]));
+    const withWake = <T extends Template>(t: T, step: string): T => {
+      const resolved = memberWake(asks.get(step), wake);
+      return {
+        ...t,
+        wake:
+          resolved === undefined
+            ? null
+            : { by: resolved.by, depth: resolved.depth, ...(resolved.tooDeep === true ? { tooDeep: true as const } : {}), ...(resolved.role === undefined ? {} : { role: resolved.role }) },
+      };
+    };
+    return {
+      ...plan,
+      steps: plan.steps.map((s) => ({
+        ...s,
+        ...(s.template === undefined ? {} : { template: withWake(s.template, s.step) }),
+        ...(s.templates === undefined ? {} : { templates: s.templates.map((t) => withWake(t, s.step)) }),
+      })),
+    };
   }
 
   /**
@@ -1766,14 +2006,16 @@ export class KanbanService {
    * makes before its transaction, the board's and the people's included, but
    * not the key's, as a preview has none of its own.
    */
-  previewWorkflow(req: StartRequest): Result<{ dag: Dag; workflow: Workflow }> {
+  previewWorkflow(req: StartRequest): Result<{ dag: Dag; workflow: Workflow; plan: Plan | null }> {
     const on = this.#boardFor(req.createdVia, req.board);
     if (!on.ok) return on;
     const shaped = this.#expanded(req, on.board);
     if (!shaped.ok) return shaped;
-    const refused = this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined);
+    const refused =
+      this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined) ??
+      this.#checkPlan(shaped.plan, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
-    return { ok: true, dag: shaped.dag, workflow: shaped.workflow };
+    return { ok: true, dag: shaped.dag, workflow: shaped.workflow, plan: shaped.plan };
   }
 
   /**
@@ -1797,11 +2039,20 @@ export class KanbanService {
     if (repeat !== undefined) return repeat;
     const shaped = this.#expanded(req, on.board);
     if (!shaped.ok) return shaped;
-    const refused = this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined);
+    const refused =
+      this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined) ??
+      this.#checkPlan(shaped.plan, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
-    const wake = this.#startWake(req, shaped.dag);
+    const wake = this.#startWake(req, [...shaped.dag.tasks.map((t) => t.wake), ...this.#plannedAsks(shaped.plan, shaped.workflow)]);
     if (!wake.ok) return wake;
+    const plan = this.#plannedWakes(shaped.plan, shaped.workflow, wake.wake);
+    // The expansion measured the plan as it filled it; the stored form, masked and with its wakes, is measured again (§7.3).
+    const size = plan === null ? 0 : Buffer.byteLength(JSON.stringify(maskPlan(plan, redactKnownSecrets)), 'utf8');
+    if (size > DAG_LIMITS.bytes) {
+      return board.refuse('too_large', `workflow ${shaped.workflow.name}'s plan is ${size} bytes with these params; it may be at most ${DAG_LIMITS.bytes}`);
+    }
     return this.#write(shaped, {
+      plan,
       ...(wake.wake === undefined ? {} : { wake: wake.wake }),
       ...(wake.wakeNote === undefined ? {} : { wakeNote: wake.wakeNote }),
       name: shaped.workflow.name,
@@ -1844,6 +2095,11 @@ export class KanbanService {
       if (!repeat.ok || req.dryRun !== true) return repeat;
       return { ok: true, dryRun: true, existing: true, instanceId: repeat.instance.instanceId, board: on.board, tasks: shaped.dag.tasks };
     }
+    // A DAG labelled with a file that uses routing keys is refused: only a start keeps its checks and routes (workflow routing spec §13.5).
+    if (req.createdVia?.kind !== 'run' && shaped.dag.workflow !== null && this.#workflowsDir !== undefined) {
+      const routed = workflowRouting(this.#workflowsDir, shaped.dag.workflow);
+      if (routed.file === 'read' && routed.keys.length > 0) return board.refuse('invalid', routedDagProblem(shaped.dag.workflow, routed.keys));
+    }
     // A DAG that names a workflow whose file names a board is held to it, by the file as it is now (workflows spec §19.3).
     let fromFile: string | undefined;
     if (req.createdVia?.kind !== 'run' && shaped.dag.workflow !== null) {
@@ -1858,7 +2114,7 @@ export class KanbanService {
     }
     const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia, fromFile);
     if (refused !== undefined) return refused;
-    const wake = this.#startWake(req, shaped.dag);
+    const wake = this.#startWake(req, shaped.dag.tasks.map((t) => t.wake));
     if (!wake.ok) return wake;
     if (req.dryRun === true) return { ok: true, dryRun: true, existing: false, instanceId: null, board: on.board, tasks: shaped.dag.tasks };
     return this.#write(shaped, {
@@ -1886,7 +2142,14 @@ export class KanbanService {
       if (read.file === 'unreadable' || read.board === keyed.instance.board) refused = board.keyRefused(keyed, { ...want, board: keyed.instance.board });
     }
     if (refused !== undefined) return refused;
-    return { ok: true, instance: keyed.instance, tasks: membersWithTasks(this.#db, keyed.instance.instanceId), existing: true };
+    return { ok: true, instance: keyed.instance, tasks: membersWithTasks(this.#db, keyed.instance.instanceId), existing: true, ...this.#waitingOf(keyed.instance) };
+  }
+
+  /** An instance's steps still waiting, for one with a plan (workflow routing spec §12.3). */
+  #waitingOf(instance: InstanceRow): { waiting?: string[] } {
+    if (instance.plan === null) return {};
+    const waiting = new Set(pendingOf(this.#db, instance.instanceId).filter((p) => p.state === 'waiting').map((p) => p.step));
+    return { waiting: instance.plan.steps.filter((s) => waiting.has(s.step)).map((s) => s.step) };
   }
 
   /**
@@ -1895,15 +2158,16 @@ export class KanbanService {
    * chat to follow them; a start whose steps ask for one while wakes are off,
    * or at the terminal with no chat (§19.16), still starts, those members
    * notice-only, with the note. A run's members
-   * inherit its task's in the writer, so nothing is asked for them.
+   * inherit its task's in the writer, so nothing is asked for them. `asks` is
+   * every member's ask, a routed start's steps made later included.
    */
-  #startWake(req: StartRequest | ApplyRequest, dag: Dag): Result<{ wake?: StartWakeOf; wakeNote?: string }> {
+  #startWake(req: StartRequest | ApplyRequest, asks: ReadonlyArray<true | { role: string } | undefined>): Result<{ wake?: StartWakeOf; wakeNote?: string }> {
     const w = req.wake;
     if (w === undefined || req.createdVia?.kind === 'run') return { ok: true };
     const shape = wakeShapeRefused({ by: w.by, depth: w.depth });
     if (shape !== undefined) return shape;
     // A woken shell's members that ask for none keep its depth alone (§9.1); a null setter with asking steps is an owner not yet seen.
-    const asked = w.all || dag.tasks.some((t) => t.wake !== undefined);
+    const asked = w.all || asks.some((a) => a !== undefined);
     if (!asked) return { ok: true, wake: { by: null, depth: w.depth, all: false } };
     if (!this.#wake.enabled) {
       if (w.all) return board.refuse('wake_off', WAKES_OFF);
@@ -1914,16 +2178,16 @@ export class KanbanService {
     if (chatless && w.all && w.role === undefined) return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
     // An owner the terminal could not name: the members that ask are notice-only, with one note (§19.16), which wins over the no-chat note.
     if (w.by === null) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: w.note ?? OWNER_UNSEEN_NOTICE_ONLY };
-    const sessionSteps = chatless && !w.all && dag.tasks.some((t) => t.wake === true);
+    const sessionSteps = chatless && !w.all && asks.some((a) => a === true);
     const chatlessOf = chatless ? { rolesOnly: true } : {};
     const noChatNote = sessionSteps ? { wakeNote: NO_CHAT_NOTICE_ONLY } : {};
     const role = this.#wakeRole(w.role);
     if (!role.ok) return role;
     // A step's own role is checked as the start's is, when its member will wake (wake spec §19.1).
     if (w.role === undefined) {
-      for (const t of dag.tasks) {
-        if (typeof t.wake !== 'object') continue;
-        const own = this.#wakeRole(t.wake.role);
+      for (const a of asks) {
+        if (typeof a !== 'object') continue;
+        const own = this.#wakeRole(a.role);
         if (!own.ok) return own;
       }
     }
@@ -1947,6 +2211,7 @@ export class KanbanService {
       follow?: Follow;
       wake?: StartWakeOf;
       wakeNote?: string;
+      plan?: Plan | null;
     },
   ): Result<WorkflowMade> {
     const r = board.applyDag(
@@ -1961,12 +2226,20 @@ export class KanbanService {
         createdVia: i.createdVia,
         idempotencyKey: i.key,
         ...(i.follow === undefined ? {} : { follow: i.follow }),
+        ...(i.plan === undefined || i.plan === null ? {} : { plan: i.plan }),
       },
       this.#members(shaped.dag, i.wake),
       this.#clock.now(),
     );
     if (!r.ok) return r;
-    return { ok: true, instance: r.instance, tasks: r.members, existing: r.existing, ...(i.wakeNote === undefined ? {} : { wakeNote: i.wakeNote }) };
+    return {
+      ok: true,
+      instance: r.instance,
+      tasks: r.members,
+      existing: r.existing,
+      ...(i.wakeNote === undefined ? {} : { wakeNote: i.wakeNote }),
+      ...this.#waitingOf(r.instance),
+    };
   }
 
   /** A workflow file's board alone, by the light read (workflows spec §19.3); unreadable with no directory. */
@@ -1997,9 +2270,14 @@ export class KanbanService {
     const { instances, total } = instancesOn(this.#db, onBoard, INSTANCES_READ);
     // Every status from one aggregate query of the members' phases, not a read of each member.
     const phases = memberPhases(this.#db, onBoard, INSTANCES_READ);
+    // And one over the pending rows, for a routed instance's steps not made (workflow routing spec §12.4).
+    const unmade = unmadeSteps(this.#db, onBoard, INSTANCES_READ);
     const summaries = instances.map((instance) => ({
       instance,
-      ...instanceStatus((phases.get(instance.instanceId) ?? []).flatMap(({ phase, n }) => Array<Phase>(n).fill(phase))),
+      ...instanceStatus(
+        (phases.get(instance.instanceId) ?? []).flatMap(({ phase, n }) => Array<Phase>(n).fill(phase)),
+        unmade.get(instance.instanceId),
+      ),
     }));
     return {
       instances: all ? summaries : summaries.filter((s) => s.status === 'running' || s.status === 'blocked'),
@@ -2032,6 +2310,8 @@ export class KanbanService {
       others.set(member.instanceId, seen);
     }
     const file = instance.name === null || this.#workflowsDir === undefined ? undefined : readWorkflow(this.#workflowsDir, instance.name, this.#workflowFacts());
+    const steps = instance.plan === null ? undefined : this.#stepLines(instance.instanceId, instance.plan, members);
+    const failed = instance.routingFailedAt === null ? undefined : { at: instance.routingFailedAt, error: routeFailureOf(this.#db, instanceId) ?? '' };
     return {
       ok: true,
       view: {
@@ -2040,9 +2320,46 @@ export class KanbanService {
         members,
         related,
         relatedInstances: [...others.values()],
-        ...instanceStatus(members.map((m) => m.task.phase)),
+        ...(steps === undefined ? {} : { steps }),
+        ...(failed === undefined ? {} : { routingFailed: failed }),
+        ...instanceStatus(
+          members.map((m) => m.task.phase),
+          unmadeOf(pendingOf(this.#db, instanceId), settledOf(this.#db, instanceId)),
+        ),
       },
     };
+  }
+
+  /** A routed instance's step lines (workflow routing spec §12.1): from its pending, settled and route rows, and its settled steps' results. */
+  #stepLines(instanceId: string, plan: Plan, members: ReadonlyArray<MemberRow & { task: TaskRow }>): StepLine[] {
+    const settled = settledOf(this.#db, instanceId);
+    const step = new Map(members.map((m) => [m.taskId, m.step]));
+    const routes: RouteView[] = routesOf(this.#db, instanceId).map((r) => {
+      const t = triggersOf(this.#db, r.fromTask).find((x) => x.eventId === r.eventId);
+      const throttles = Number(/throttled (\d+) times/.exec(t?.reason ?? '')?.[1] ?? 0);
+      return {
+        handler: r.handler,
+        fromTask: r.fromTask,
+        fromStep: step.get(r.fromTask) ?? '',
+        outcome: r.outcome,
+        taskId: r.taskId,
+        words: t === undefined ? 'blocked' : triggerWords(t, throttles),
+      };
+    });
+    const results = new Map<string, Readonly<Record<string, unknown>> | null>();
+    for (const s of settled) {
+      if (s.ref !== s.step || s.taskId === null || Object.keys(plan.steps.find((p) => p.step === s.step)?.outputs ?? {}).length === 0) continue;
+      const metadata = latestCompletion(this.#db, s.taskId)?.metadata;
+      results.set(s.step, isRecord(metadata) ? metadata : null);
+    }
+    return stepLines(
+      plan,
+      members.map((m) => ({ step: m.step, ref: m.ref, taskId: m.taskId, phase: m.task.phase })),
+      pendingOf(this.#db, instanceId),
+      settled,
+      routes,
+      results,
+    );
   }
 
   /**
@@ -2055,6 +2372,96 @@ export class KanbanService {
     if (!isText(instanceId)) return board.refuse('invalid', 'an instance id is text');
     if (!isText(by) || by.trim() === '') return board.refuse('invalid', 'who archives is text, not blank');
     return board.archiveWorkflow(this.#db, instanceId, by, this.#clock.now());
+  }
+
+  /**
+   * Reconcile an instance (workflow routing spec §11): what is due decided and
+   * made, in a transaction of its own, against the team as it is now.
+   */
+  reconcileWorkflow(instanceId: string): Result<board.Reconciled> {
+    if (!isText(instanceId)) return board.refuse('invalid', 'an instance id is text');
+    try {
+      return this.#cancelled(board.reconcileWorkflow(this.#db, instanceId, this.#clock.now(), this.#facts()));
+    } catch (err) {
+      // A database busy past txImmediate's retries is no fault (§9.4): nothing is marked, and the caller may try again.
+      if (isBusy(err)) throw err;
+      // Its transaction rolled back: the fault is marked and said in one of its own, then thrown to the caller.
+      try {
+        board.reconcileFailed(this.#db, instanceId, err, this.#clock.now());
+      } catch {
+        // The database refused that too: the caller's error is the reconciliation's.
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * The startup's reconciliation (workflow routing spec §11): every instance with a
+   * plan that may have something due, a waiting step, a skipped step not yet
+   * settled, a blocked member, or a fault not reconciled, reconciled once; a
+   * handler never makes an instance due. Answers how many instances had a
+   * decision, and how many decisions; one that faults keeps its mark.
+   */
+  reconcileAll(note?: (line: string) => void): { instances: number; steps: number } {
+    let instances = 0;
+    let steps = 0;
+    // An instance whose plan cannot be read stops no start: it is said, and nothing is reconciled.
+    let due: string[];
+    try {
+      due = routingDue(this.#db);
+    } catch (err) {
+      note?.(`workflows: reading the instances to reconcile failed: ${redactKnownSecrets(err instanceof Error ? err.message : String(err))}`);
+      return { instances, steps };
+    }
+    for (const id of due) {
+      try {
+        const r = this.reconcileWorkflow(id);
+        if (r.ok && r.decisions.length > 0) {
+          instances += 1;
+          steps += r.decisions.length;
+        }
+      } catch {
+        // Marked by reconcileWorkflow, if it was not: the dispatcher's pass retries it.
+      }
+    }
+    return { instances, steps };
+  }
+
+  /**
+   * The dispatcher's hook (workflow routing spec §9.4): every instance whose routing
+   * faulted reconciled, each at most once a minute; a reconciliation that faults
+   * again leaves its mark for the next, its first such failure said by `note`.
+   * Answers how many were reconciled. The time each was last tried is this
+   * process's, kept only while it is faulted: after a restart, the startup's
+   * reconciliation tries every one.
+   */
+  retryRouting(note?: (line: string) => void): number {
+    const now = this.#clock.now();
+    let reconciled = 0;
+    const faulted = routingFaulted(this.#db);
+    // An instance no longer faulted, cleared by a reconciliation of anyone's, is forgotten.
+    const still = new Set(faulted);
+    for (const id of [...this.#retried.keys()]) if (!still.has(id)) this.#retried.delete(id);
+    for (const id of [...this.#retryFailed]) if (!still.has(id)) this.#retryFailed.delete(id);
+    for (const id of faulted) {
+      const last = this.#retried.get(id);
+      if (last !== undefined && now - last < RETRY_ROUTING_MS) continue;
+      this.#retried.set(id, now);
+      try {
+        if (this.reconcileWorkflow(id).ok) {
+          reconciled += 1;
+          this.#retried.delete(id);
+          this.#retryFailed.delete(id);
+        }
+      } catch (err) {
+        // Still faulted: its mark stays, and the next pass after a minute tries again; said once, not every minute.
+        if (!this.#retryFailed.has(id)) {
+          this.#retryFailed.add(id);
+          note?.(`kanban: the routing of ${id} failed again: ${redactKnownSecrets(err instanceof Error ? err.message : String(err))}; it is tried each minute`);
+        }
+      }
+    }
+    return reconciled;
   }
 
   /** Who the next claim is for, resolved against the team as it is now. */

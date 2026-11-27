@@ -1,5 +1,5 @@
 import type { Db } from '../db/open.js';
-import { getTask, runByTokenHash, taskView, wakeOfReaction, type ReviewRequest } from '../db/kanban-read.js';
+import { getTask, memberOf, routeOfHandler, runByTokenHash, taskView, wakeOfReaction, type ReviewRequest } from '../db/kanban-read.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { briefFor } from './brief.js';
 import { DAG_LIMITS } from './dag.js';
@@ -34,7 +34,9 @@ import {
  *   `run_superseded`.
  *
  * It can report on its own task, comment on any task, create tasks, and link
- * the tasks its own task created. It cannot move any other task.
+ * the tasks its own task created. It cannot move any other task, but for a
+ * handler's work run, which may unblock the task its route was made from
+ * (workflow routing spec §5.4).
  *
  * **Input is strict.** Each command has its own fields, each with a type and a
  * size; an unknown field is refused, not ignored, since an agent that misspells
@@ -58,6 +60,7 @@ export const WORKER_COMMANDS = [
   'apply-dag',
   'wake-show',
   'wake-unblock',
+  'unblock',
 ] as const;
 export type WorkerCommand = (typeof WORKER_COMMANDS)[number];
 
@@ -149,6 +152,8 @@ const SCHEMAS: Record<WorkerCommand, Readonly<Record<string, Field>>> = {
   // A reaction task's run's scope (wake spec §19.8): the tasks its wake carried.
   'wake-show': { task_id: name() },
   'wake-unblock': { task_id: name(), comment: text(WORKER_LIMITS.comment, false) },
+  // A handler's run's scope (workflow routing spec §5.4): the task its route was made from.
+  unblock: { task_id: name(), comment: text(WORKER_LIMITS.comment, false) },
 };
 
 const ENVELOPE = ['run', 'token', 'command', 'input'];
@@ -461,6 +466,10 @@ export class WorkerApi {
         });
         return r.ok ? madeAnswer(r) : refusal(r);
       }
+      case 'unblock': {
+        const r = this.#service.unblockFromHandler(run, str('task_id') ?? '', str('comment'));
+        return r.ok ? { ok: true, task_id: r.task.taskId, phase: r.task.phase, changed: r.changed } : refusal(r);
+      }
       case 'wake-show':
       case 'wake-unblock': {
         const scope = this.#wakes();
@@ -513,8 +522,14 @@ export class WorkerApi {
     const view = taskView(this.#db, run.taskId);
     if (task === undefined || view === undefined) return refused('not_found', `no task ${run.taskId}`);
     const brief = briefFor(this.#db, { run, task, roleMd: undefined, role: undefined });
+    // A handler's task reads its source from the records, whatever its body says (workflow routing spec §5.2).
+    const route = routeOfHandler(this.#db, task.taskId);
+    const source = route === undefined ? undefined : memberOf(this.#db, route.fromTask);
     return {
       ok: true,
+      ...(route === undefined
+        ? {}
+        : { routed_from: { task_id: route.fromTask, step: source?.step ?? null, item: source?.item ?? null, event_id: route.eventId } }),
       run: { run_id: run.runId, kind: run.kind, attempt: run.attempt, outcome: run.outcome },
       task: {
         task_id: task.taskId,
@@ -608,6 +623,8 @@ function madeAnswer(r: WorkflowMade): WorkerResponse {
     existing: r.existing,
     board: r.instance.board,
     tasks: r.tasks.map((t) => ({ task_id: t.taskId, ref: t.ref, step: t.step, item: t.item })),
+    // The steps made as results come (workflow routing spec §12.3).
+    ...(r.waiting === undefined ? {} : { waiting: r.waiting }),
   };
 }
 

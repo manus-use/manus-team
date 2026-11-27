@@ -23,7 +23,7 @@ describe('mt', () => {
     expect(usage).toContain('  mt kanban board list [all] [--json]');
     expect(usage).toContain('  mt kanban gate list <task_id>');
     expect(usage).toContain("the worker's commands, which work only in a board run's shell");
-    expect(usage).toContain('  mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag|wake-show|wake-unblock> < input.json');
+    expect(usage).toContain('  mt kanban <show|complete|review|changes|block|comment|create|link|start-workflow|apply-dag|wake-show|wake-unblock|unblock> < input.json');
   });
 
   it('refuses an unknown command with the usage, exit 2', async () => {
@@ -77,12 +77,16 @@ describe('mt', () => {
 
   it("answers the old form of an operator's task command as unknown, naming the command it now is, and runs nothing", async () => {
     fx = mtFixture();
-    for (const verb of ['new', 'list', 'assign', 'unblock', 'stop', 'archive']) {
+    for (const verb of ['new', 'list', 'assign', 'stop', 'archive']) {
       const r = await fx.run(['kanban', verb, 'k_1']);
       expect(r.code).toBe(2);
       expect(r.out).toBe('');
       expect(r.err.split('\n')[0]).toBe(`mt: unknown command: kanban ${verb}; the operator's command is mt kanban task ${verb}`);
     }
+    // A handler's run's unblock is the worker's now (workflow routing spec §5.4): outside a run it says so, as show does.
+    const unblock = await fx.run(['kanban', 'unblock', 'k_1']);
+    expect(unblock.code).toBe(1);
+    expect(JSON.parse(unblock.out)).toMatchObject({ ok: false, code: 'not_in_a_run', message: expect.stringMatching(/; the operator's is mt kanban task unblock$/) });
     const other = await fx.run(['kanban', 'finish']);
     expect(other.err.split('\n')[0]).toBe('mt: unknown command: kanban finish');
   });

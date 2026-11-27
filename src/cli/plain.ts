@@ -14,6 +14,7 @@ import {
   type PreviewLine,
   type WakeShow,
 } from '../kanban/chat-render.js';
+import { laterCount, laterLines, type Plan } from '../kanban/routing.js';
 import type { DisplayStatus } from '../kanban/status.js';
 import type { Assignee, GateRow, TaskRow, Waiting } from '../kanban/types.js';
 import { redactKnownSecrets } from '../secrets.js';
@@ -293,7 +294,7 @@ function named(name: string | null): string {
  * preview says it, a line a task with its ref, its title, its assignee, its
  * parents' refs and how many gates it has, and that nothing was made.
  */
-export function previewText(name: string, board: string, lines: readonly PreviewLine[]): string[] {
+export function previewText(name: string, board: string, lines: readonly PreviewLine[], plan: Plan | null = null): string[] {
   const n = lines.length;
   const rows = lines.map((t) => [
     line(t.ref, 64),
@@ -302,16 +303,24 @@ export function previewText(name: string, board: string, lines: readonly Preview
     t.parents.length === 0 ? '' : `after ${t.parents.map((p) => line(p, 64)).join(', ')}`,
     t.gates === 0 ? '' : `${t.gates} gate${t.gates === 1 ? '' : 's'}`,
   ]);
+  // A routed file's steps made later, in the words of a check, and how many it could make (workflow routing spec §12.3).
+  const later = plan === null ? [] : laterLines(plan).map((l) => `  ${line(l.step, 64)}: ${line(l.words, 400)}`);
   return [
-    `${line(name, 80)} would make ${n} task${n === 1 ? '' : 's'}, on board ${line(board, 80)}:`,
+    `${line(name, 80)} would make ${plan === null ? `${n} task${n === 1 ? '' : 's'}` : laterCount(plan, n)}, on board ${line(board, 80)}:`,
     ...table(rows).map((r) => `  ${r}`),
+    ...later,
     `nothing was made: mt kanban workflow start ${line(name, 80)}, with these params, makes it`,
   ];
 }
 
 /** A start's or an apply's answer (workflows spec §6): the instance, then every task, uncut, with its ref, title and assignee. */
 export function madeText(
-  made: { instance: { instanceId: string; name: string | null; board: string; source: string }; tasks: readonly { taskId: string; ref: string; task: { title: string; assignee: Assignee | null } }[]; existing: boolean },
+  made: {
+    instance: { instanceId: string; name: string | null; board: string; source: string };
+    tasks: readonly { taskId: string; ref: string; task: { title: string; assignee: Assignee | null } }[];
+    existing: boolean;
+    waiting?: readonly string[];
+  },
 ): string[] {
   const { instance } = made;
   const n = made.tasks.length;
@@ -320,7 +329,9 @@ export function madeText(
     ? `already made, as ${instance.instanceId}, on board ${line(instance.board, 80)}, ${n} task${n === 1 ? '' : 's'}; nothing new was made`
     : `${what} as ${instance.instanceId}, on board ${line(instance.board, 80)}, ${n} task${n === 1 ? '' : 's'}`;
   const rows = made.tasks.map((t) => [t.taskId, line(t.ref, 64), line(t.task.title, 200), who(t.task.assignee)]);
-  return [head, ...table(rows).map((r) => `  ${r}`)];
+  const w = made.waiting?.length ?? 0;
+  const later = w === 0 ? [] : [`${w} more step${w === 1 ? ' is' : 's are'} made as results come: mt kanban workflow show ${instance.instanceId} follows them`];
+  return [head, ...table(rows).map((r) => `  ${r}`), ...later];
 }
 
 /** `apply --dry-run`'s answer (workflows spec §6): what the apply would make, a line a task in preview's columns, each followed by its gates' commands, masked; or the instance its key made. */
@@ -395,13 +406,16 @@ export function instancesText(
 export function instanceText(view: {
   instance: { instanceId: string; name: string | null; board: string; createdBy: string; createdVia: { kind: string }; createdAt: number; dag: { params: Readonly<Record<string, string | readonly string[]>> } };
   description: string | undefined;
-  members: readonly { step: string; item: string | null; task: { taskId: string; phase: string; blockKind: string | null; blockReason: string | null; assignee: Assignee | null; createdFromTask: string | null }; status: string }[];
+  members: readonly { step: string; item: string | null; ref?: string; task: { taskId: string; phase: string; blockKind: string | null; blockReason: string | null; assignee: Assignee | null; createdFromTask: string | null }; status: string }[];
   related: readonly { task: { taskId: string; title: string }; status: string }[];
   relatedInstances: readonly { instanceId: string; name: string | null; tasks: number }[];
   status: string;
   done: number;
   total: number;
   blocked: number;
+  /** A routed instance's step lines (workflow routing spec §12.1). */
+  steps?: readonly { step: string; mark: string; text: string; state: string }[];
+  routingFailed?: { at: number; error: string };
 }): string[] {
   const { instance } = view;
   const how =
@@ -419,15 +433,30 @@ export function instanceText(view: {
   ];
   const params = Object.entries(instance.dag.params);
   if (params.length > 0) out.push(`params: ${params.map(([k, v]) => `${line(k, 40)}: ${line(typeof v === 'string' ? v : v.join(', '), 400)}`).join(' · ')}`);
-  let step: string | undefined;
-  for (const m of view.members) {
-    if (m.step !== step) {
-      step = m.step;
-      out.push(`${line(m.step, 64)}:`);
-    }
+  if (view.routingFailed !== undefined) {
+    out.push(`Routing failed at ${when(view.routingFailed.at)}: ${line(view.routingFailed.error, 500)}. The gateway tries again; mt kanban workflow reconcile ${instance.instanceId} tries now.`);
+  }
+  const member = (m: (typeof view.members)[number], handler: boolean): string => {
+    const ref = handler && m.ref !== undefined ? ` ${line(m.ref, 64)}` : '';
     const item = m.item === null ? '' : ` ${line(m.item, 200)}:`;
     const why = m.task.phase === 'blocked' && m.task.blockKind !== null ? ` (${m.task.blockKind}): ${line(m.task.blockReason ?? '', 500)}` : '';
-    out.push(`  ${m.task.taskId}${item} ${m.status}${why} · ${who(m.task.assignee)}`);
+    return `  ${m.task.taskId}${ref}${item} ${m.status}${why} · ${who(m.task.assignee)}`;
+  };
+  if (view.steps !== undefined) {
+    // Every step, real or pending, in the plan's order, its tasks under it (workflow routing spec §12.1).
+    for (const s of view.steps) {
+      out.push(`${s.mark} ${line(s.text, 400)}`);
+      for (const m of view.members) if (m.step === s.step) out.push(member(m, s.state === 'routed'));
+    }
+  } else {
+    let step: string | undefined;
+    for (const m of view.members) {
+      if (m.step !== step) {
+        step = m.step;
+        out.push(`${line(m.step, 64)}:`);
+      }
+      out.push(member(m, false));
+    }
   }
   if (view.related.length > 0 || view.relatedInstances.length > 0) {
     out.push('related, not members:');

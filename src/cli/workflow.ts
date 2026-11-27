@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { ConfigError, loadTeamSettings, type Env } from '../config.js';
 import { readGatewayEnv, withGatewayEnv } from '../gateway-env.js';
 import { nameProblem } from '../names.js';
-import { listWorkflows, paramsLine, readWorkflow, type Workflow, type WorkflowFacts, type WorkflowList } from '../kanban/workflow.js';
+import { listWorkflows, paramsLine, readWorkflow, stepShapes, usesRouting, type Workflow, type WorkflowFacts, type WorkflowList } from '../kanban/workflow.js';
+import { stepCounts, stepWords } from '../kanban/routing.js';
 import { addSecrets, redactKnownSecrets } from '../secrets.js';
 import { loadTeam, teamSecrets } from '../team.js';
 import { refuse } from './args.js';
@@ -33,7 +34,26 @@ function noFile(path: string): boolean {
 
 function okLine(w: Workflow): string {
   const board = w.board === undefined ? '' : `; board ${w.board}`;
-  return `${w.name}: ok, ${w.steps.length} step${w.steps.length === 1 ? '' : 's'}; params: ${paramsLine(w)}${board}`;
+  return `${w.name}: ok, ${stepsCounted(w)}; params: ${paramsLine(w)}${board}`;
+}
+
+/**
+ * A workflow's steps, counted (workflow routing spec §6): `3 steps`, and for a file
+ * using a routing key how many are plain, pending and handlers:
+ * `8 steps (1 always, 6 on results, 1 handler)`.
+ */
+function stepsCounted(w: Workflow): string {
+  const n = `${w.steps.length} step${w.steps.length === 1 ? '' : 's'}`;
+  if (!usesRouting(w)) return n;
+  const c = stepCounts(stepShapes(w));
+  return `${n} (${c.always} always, ${c.onResults} on results, ${c.handlers} handler${c.handlers === 1 ? '' : 's'})`;
+}
+
+/** What `mt workflow check <name>` says of each step of a file using a routing key, after its line (§6): `  va: when intake.kind is cve`. */
+function stepLines(w: Workflow): string[] {
+  if (!usesRouting(w)) return [];
+  const shapes = stepShapes(w);
+  return shapes.map((s) => `  ${s.step}: ${stepWords(shapes, s)}`);
 }
 
 /** Said once when a workflow checked names a board, which this check, opening no database, cannot see (workflows spec §19.4). */
@@ -80,6 +100,7 @@ export function workflowCheck(only: string | undefined, io: MtIo): number {
     const r = readWorkflow(dir, only, facts);
     if (r.ok) {
       say(okLine(r.workflow));
+      for (const l of stepLines(r.workflow)) say(l);
       if (r.workflow.board !== undefined) say(BOARDS_NOTE);
       return 0;
     }

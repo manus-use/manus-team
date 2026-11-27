@@ -539,7 +539,7 @@ export class KanbanChat {
           board: board.name,
         });
         if (!r.ok) return refused(r);
-        return renderPreview(command.name, r.dag, (name) => this.#whom({ kind: name.includes(':') ? 'human' : 'role', name }), this.#nameOf, board.name);
+        return renderPreview(command.name, r.dag, (name) => this.#whom({ kind: name.includes(':') ? 'human' : 'role', name }), this.#nameOf, board.name, r.plan);
       }
       default:
         return renderHelp();

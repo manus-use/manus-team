@@ -127,7 +127,8 @@ const MAX_RETRIES = 15;
 const MIN_BACKOFF_MS = 20;
 const MAX_BACKOFF_MS = 150;
 
-function isBusy(err: unknown): boolean {
+/** A lock another connection holds: txImmediate's to retry, whoever caught it first. */
+export function isBusy(err: unknown): boolean {
   const code = (err as { code?: string } | null)?.code;
   return code === 'SQLITE_BUSY' || code === 'SQLITE_BUSY_SNAPSHOT';
 }

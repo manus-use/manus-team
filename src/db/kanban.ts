@@ -1,16 +1,17 @@
 import type { Db } from './open.js';
-import { txImmediate } from './open.js';
+import { isBusy, txImmediate } from './open.js';
 import { newRunId, newTaskId, newWorkflowId } from '../core/ids.js';
 import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import { canonicalDag, maskDag, type Dag } from '../kanban/dag.js';
+import { decide as decideRouting, fillText, handlerParagraph, INSTANCE_CAP, maskPlan, outputsText, resultOf, SKIPPED_TEXT, standInContract, triggerWords, valueSaid, type Decision, type Facts, type Plan, type PlanStep, type RouteFact, type StepFact, type Template } from '../kanban/routing.js';
 import type { GateRun } from '../kanban/gates.js';
 import { placeName, placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
-import { worktreeId } from './workspaces.js';
+import { worktreeId, worktreeOf } from './workspaces.js';
 import { DEFAULT_BOARD, ENDED_OUTCOMES, GATE_LIMITS, REPORTED_OUTCOMES } from '../kanban/types.js';
 import { cutToBytes, WORKER_LIMITS } from '../kanban/limits.js';
-import { assignable, checkTask, type TaskFacts } from '../kanban/task-checks.js';
+import { assignable, checkTask, isRecord, type TaskFacts } from '../kanban/task-checks.js';
 import type {
   ActivePhase,
   AgentSnapshot,
@@ -49,9 +50,18 @@ import {
   getTask,
   getTaskByKey,
   gatesOf,
+  latestBlockOf,
+  latestCompletion,
+  routesOf,
+  pendingOf,
+  plannedMemberOf,
+  settledOf,
+  triggersOf,
+  hasRouting,
   hasWakeColumns,
   instanceByKey,
   membersWithTasks,
+  memberOf,
   isFinished,
   membersOf,
   openAgentRunIn,
@@ -98,6 +108,9 @@ class Rollback extends Error {
     super(refusal.message);
   }
 }
+
+/** Why a routed start is refused on a database the gateway has not yet migrated (workflow routing spec §8). */
+export const ROUTING_NOT_MIGRATED = 'the database is not yet migrated to version 15: start the gateway once, so it is migrated';
 
 /** Why a wake is refused on a database the gateway has not yet migrated (wake spec §4.1). */
 const NOT_MIGRATED = 'the database is not yet migrated to version 13: start the gateway once, so it is migrated';
@@ -160,6 +173,9 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'role',
   // The task an inherited wake came from (wake spec §9.1).
   'from',
+  // The task a handler was routed from, and a stand-in that archived the task it stood in for (workflow routing spec §7.4, §5.2).
+  'routedFrom',
+  'standIn',
 ]);
 
 /** One row of the board's log, masked value by value. */
@@ -167,11 +183,14 @@ function record(
   d: Db,
   e: { taskId: string; runId?: string | null; kind: string; actor: string; payload: Record<string, unknown> },
   now: number,
-): void {
-  d.prepare(
-    `INSERT INTO kanban_events (task_id, run_id, kind, actor, payload, created_at)
-     VALUES (?, ?, ?, ?, jsonb(?), ?)`,
-  ).run(e.taskId, e.runId ?? null, e.kind, e.actor, JSON.stringify(redactValues(e.payload, BOARD_KEYS)), now);
+): number {
+  const { lastInsertRowid } = d
+    .prepare(
+      `INSERT INTO kanban_events (task_id, run_id, kind, actor, payload, created_at)
+       VALUES (?, ?, ?, ?, jsonb(?), ?)`,
+    )
+    .run(e.taskId, e.runId ?? null, e.kind, e.actor, JSON.stringify(redactValues(e.payload, BOARD_KEYS)), now);
+  return Number(lastInsertRowid);
 }
 
 const mask = redactKnownSecrets;
@@ -422,8 +441,13 @@ interface TaskInsert extends NewTask {
   parents: readonly string[];
   /** A reaction task's (wake spec §19.3): its id, chosen first, and the wake that makes it. */
   reaction?: { taskId: string; wakeId: number };
-  /** A reaction task's subscription, copied from its batch's conversation's (wake spec §19.3). */
-  copySubscription?: SubscriptionRow;
+  /**
+   * Its subscriptions, copied as they are: a reaction task's one, from its batch's
+   * conversation's (wake spec §19.3); a task a workflow's plan made late, its
+   * instance's first member's (workflow routing spec §7.4). Given, they are the
+   * task's only subscriptions.
+   */
+  copySubscriptions?: readonly SubscriptionRow[];
 }
 
 /**
@@ -480,7 +504,7 @@ function insertTask(d: Db, t: TaskInsert, now: number, payload: Record<string, u
   }
   const link = d.prepare('INSERT INTO kanban_links (parent_id, child_id, created_at) VALUES (?, ?, ?)');
   for (const parent of parents) link.run(parent, taskId, now);
-  subscribe(d, taskId, t.createdVia, createdFromTask, now, t.follow, t.copySubscription);
+  subscribe(d, taskId, t.createdVia, createdFromTask, now, t.follow, t.copySubscriptions);
   record(
     d,
     {
@@ -578,7 +602,7 @@ function subscribe(
   createdFromTask: string | null,
   now: number,
   follow?: Follow,
-  copy?: SubscriptionRow,
+  copy?: readonly SubscriptionRow[],
 ): void {
   const wake = hasWakeColumns(d);
   const insert = d.prepare(
@@ -595,9 +619,10 @@ function subscribe(
   if (follow !== undefined) {
     run('lark', follow.appId, follow.chatId, follow.threadId, follow.threadId === '' ? null : follow.rootId, null);
   }
-  // A reaction task follows its batch's conversation, a copy of its subscription (wake spec §19.3).
-  if (via.kind === 'wake') {
-    if (copy !== undefined) run(copy.channel, copy.appId, copy.conversationId, copy.threadId, copy.rootMessageId, copy.chatType);
+  // A reaction task follows its batch's conversation, a copy of its subscription (wake spec §19.3); a late
+  // member of a workflow, its instance's first member's, as they are now (workflow routing spec §7.4).
+  if (copy !== undefined || via.kind === 'wake') {
+    for (const c of copy ?? []) run(c.channel, c.appId, c.conversationId, c.threadId, c.rootMessageId, c.chatType);
     return;
   }
   if (via.kind === 'chat') {
@@ -1448,7 +1473,8 @@ export function complete(
   by: Reporter,
   handoff: Handoff,
   now: number,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  team?: RouteTeam,
+): Result<{ task: TaskRow; run: RunRow | undefined; superseded?: RunRow[] }> {
   return tx(db, (d) => {
     const r = reporting(d, taskId, by, ['open', 'review'], 'be completed', { answer: true });
     if (!r.ok) return r;
@@ -1467,7 +1493,7 @@ export function complete(
               block_recurrences = 0, cooldown_until = NULL
         WHERE task_id = ?`,
     ).run(now, taskId);
-    record(
+    const completed = record(
       d,
       {
         taskId,
@@ -1478,7 +1504,9 @@ export function complete(
       },
       now,
     );
-    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+    // Done is a settling: what its plan's steps read may have changed (workflow routing spec §9.1).
+    const superseded = routeAfter(d, taskId, 'completed', completed, now, team);
+    return { ok: true, ...withSuperseded({ task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) }, superseded) };
   });
 }
 
@@ -1651,9 +1679,11 @@ export function block(
   by: Reporter,
   report: BlockReport,
   now: number,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  team?: RouteTeam,
+): Result<{ task: TaskRow; run: RunRow | undefined; superseded?: RunRow[] }> {
   return tx(db, (d) => {
     const r = reporting(d, taskId, by, ['open', 'review'], 'be blocked');
+    let superseded: RunRow[] = [];
     if (!r.ok) return r;
     if (r.run !== undefined) decide(d, r.run, 'blocked', { summary: report.reason }, now);
     const actor = actorOf(by);
@@ -1679,7 +1709,7 @@ export function block(
       );
     } else {
       const recurrences = enterBlocked(d, r.task, report.kind, report.reason);
-      record(
+      const blocked = record(
         d,
         {
           taskId,
@@ -1690,8 +1720,10 @@ export function block(
         },
         now,
       );
+      // A run's block from its work is a trigger (workflow routing spec §5.1); a person's, or a review's, routes nothing.
+      if (by.kind === 'run' && r.task.phase === 'open') superseded = routeAfter(d, taskId, 'blocked', blocked, now, team);
     }
-    return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
+    return { ok: true, ...withSuperseded({ task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) }, superseded) };
   });
 }
 
@@ -1712,7 +1744,7 @@ export function unblock(
   by: string,
   comment: string | undefined,
   now: number,
-  opts: { blockedAt?: number; wake?: number } = {},
+  opts: { blockedAt?: number; wake?: number; handler?: string } = {},
 ): Result<{ task: TaskRow }> {
   return tx(db, (d) => {
     const task = getTask(d, taskId);
@@ -1735,7 +1767,9 @@ export function unblock(
         )
         .get(taskId, opts.blockedAt);
       if (since !== undefined) {
-        return refuse('stale', `the block of task ${taskId} this button was for has been lifted already`);
+        // A handler's unblock is for the block it was routed from (workflow routing spec §5.4), not a button's.
+        const whose = opts.handler === undefined ? 'this button was for' : `the handler ${opts.handler} was routed from`;
+        return refuse('stale', `the block of task ${taskId} ${whose} has been lifted already`);
       }
     }
     if (task.phase !== 'blocked') return refuse('illegal_transition', `task ${taskId} is ${task.phase}, not blocked`);
@@ -1752,7 +1786,9 @@ export function unblock(
     // An unblock is an operator's, so its comment steers the next run; a woken
     // turn's says it was the board's, on that person's authority (wake spec §9.4).
     if (comment !== undefined && comment !== '') {
-      insertComment(d, taskId, by, opts.wake === undefined ? comment : `(woken by the board) ${comment}`, now, true);
+      // A handler's says which, on the operator's file's authority (workflow routing spec §5.4).
+      const prefix = opts.wake !== undefined ? '(woken by the board) ' : opts.handler !== undefined ? `(by the handler ${opts.handler}) ` : '';
+      insertComment(d, taskId, by, `${prefix}${comment}`, now, true);
     }
     return { ok: true, task: mustGet(d, taskId) };
   });
@@ -1860,7 +1896,8 @@ export function endRun(
   ending: RunEnding,
   limits: KanbanLimits,
   now: number,
-): Result<{ task: TaskRow; run: RunRow; next: NextStep }> {
+  team?: RouteTeam,
+): Result<{ task: TaskRow; run: RunRow; next: NextStep; superseded?: RunRow[] }> {
   return tx(db, (d) => {
     const run = getRun(d, runId);
     if (run === undefined) return refuse('not_found', `no run ${runId}`);
@@ -1937,7 +1974,7 @@ export function endRun(
       recurrences = enterBlocked(d, mustGet(d, run.taskId), blockAs.kind, blockAs.reason);
       next = 'blocked';
     }
-    record(
+    const ended = record(
       d,
       {
         taskId: run.taskId,
@@ -1956,7 +1993,13 @@ export function endRun(
       },
       now,
     );
-    return { ok: true, task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next };
+    // A run's end that blocked the task from its work is a trigger (workflow routing spec §5.1).
+    let superseded: RunRow[] = [];
+    if (blockAs !== undefined && before.phase === 'open') {
+      const cause: RouteCause = blockAs.kind === 'gave_up' ? 'gave_up' : blockAs.kind === 'transient' ? 'throttled' : 'blocked';
+      superseded = routeAfter(d, run.taskId, cause, ended, now, team);
+    }
+    return { ok: true, ...withSuperseded({ task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next }, superseded) };
   });
 }
 
@@ -2074,12 +2117,16 @@ export function archive(
   taskId: string,
   by: string,
   now: number,
-): Result<{ task: TaskRow; run: RunRow | undefined }> {
+  team?: RouteTeam,
+): Result<{ task: TaskRow; run: RunRow | undefined; superseded?: RunRow[] }> {
   return tx(db, (d) => {
     const task = getTask(d, taskId);
     if (task === undefined) return refuse('not_found', `no task ${taskId}`);
     if (task.phase === 'archived') return refuse('illegal_transition', `task ${taskId} is already archived`);
-    return { ok: true, ...archiveIn(d, task, by, now) };
+    const archived = archiveIn(d, task, by, now);
+    // An archive settles: as done when it was done, or as skipped by archive (workflow routing spec §9.1).
+    const superseded = routeAfter(d, taskId, 'archived', archived.eventId, now, team);
+    return { ok: true, ...withSuperseded({ task: mustGet(d, taskId), run: archived.run }, superseded) };
   });
 }
 
@@ -2095,18 +2142,18 @@ function archiveIn(
   by: string,
   now: number,
   payload: Record<string, unknown> = {},
-): { task: TaskRow; run: RunRow | undefined } {
+): { task: TaskRow; run: RunRow | undefined; eventId: number } {
   const run = supersede(d, openRunOf(d, task.taskId), now);
   d.prepare(
     `UPDATE kanban_tasks SET phase = 'archived', blocked_from = NULL, closed_at = coalesce(closed_at, ?)
       WHERE task_id = ?`,
   ).run(now, task.taskId);
-  record(
+  const eventId = record(
     d,
     { taskId: task.taskId, runId: run?.runId ?? null, kind: 'archived', actor: by, payload: { from: task.phase, ...payload } },
     now,
   );
-  return { task: mustGet(d, task.taskId), run };
+  return { task: mustGet(d, task.taskId), run, eventId };
 }
 
 /**
@@ -2245,6 +2292,8 @@ export interface NewInstance {
   idempotencyKey: string | null;
   /** The chat a terminal named to follow every member (workflows spec §18.1), beside the DAG, not in it. */
   follow?: Follow;
+  /** Its plan (workflow routing spec §7.3), for a start of a file using a routing key; absent or null for none. */
+  plan?: Plan | null;
 }
 
 /** The members a `workflow_started` payload lists: the start's reply lists at most 30 (workflows spec §9, §18.2). */
@@ -2339,6 +2388,8 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
       const unmigrated = unmigratedWake(d, m.task.wake, instance.createdVia);
       if (unmigrated !== undefined) return unmigrated;
     }
+    const plan = instance.plan ?? null;
+    if (plan !== null && !hasRouting(d)) return refuse('invalid', ROUTING_NOT_MIGRATED);
     const instanceId = newWorkflowId();
     d.prepare(
       `INSERT INTO kanban_workflow_instances
@@ -2356,6 +2407,12 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
       instance.idempotencyKey,
       now,
     );
+    if (plan !== null) {
+      // The plan, frozen, masked but for what decides and what runs; one waiting row a pending step, none a handler (workflow routing spec §7.2, §7.3).
+      d.prepare('UPDATE kanban_workflow_instances SET plan = ? WHERE instance_id = ?').run(JSON.stringify(maskPlan(plan, mask)), instanceId);
+      const waiting = d.prepare("INSERT INTO kanban_workflow_pending (instance_id, step, state) VALUES (?, ?, 'waiting')");
+      for (const s of plan.steps) if (s.made === 'decide') waiting.run(instanceId, s.step);
+    }
     const member = d.prepare(
       'INSERT INTO kanban_workflow_tasks (task_id, instance_id, ref, step, item, position) VALUES (?, ?, ?, ?, ?, ?)',
     );
@@ -2405,6 +2462,8 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
             by: instance.createdBy,
             count: members.length,
             people: members.some((m) => human(m.task.assignee) || human(m.task.reviewer)),
+            // The steps made as results come, for the reply's line (workflow routing spec §12.3).
+            ...(plan === null ? {} : { waiting: plan.steps.filter((s) => s.made === 'decide').length }),
             tasks: members.slice(0, STARTED_TASKS).map((m, i) => ({
               taskId: ids[i],
               title: m.task.title,
@@ -2425,8 +2484,10 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
 /**
  * Archive an instance (workflows spec §8, §10): every member not already archived,
  * in one transaction, through `archiveIn`, each `archived` event carrying the
- * instance. Answers the members it archived, and the runs it decided, whose
- * turns the caller cancels; none for an instance wholly archived already.
+ * instance; and, for one with a plan, every waiting step skipped, `the instance
+ * was archived`, deciding nothing (workflow routing spec §9.1). Answers the
+ * members it archived, and the runs it decided, whose turns the caller cancels;
+ * none for an instance wholly archived already.
  */
 export function archiveWorkflow(
   db: Db,
@@ -2445,6 +2506,14 @@ export function archiveWorkflow(
       const r = archiveIn(d, task, by, now, { workflow: instanceId });
       archived.push(r.task);
       if (r.run !== undefined) runs.push(r.run);
+    }
+    // Cancelling a case (workflow routing spec §9.1): every waiting step skipped, without deciding, so nothing more is made.
+    if (hasRouting(d)) {
+      d.prepare(
+        `UPDATE kanban_workflow_pending SET state = 'skipped', reason = ?, decided_at = ? WHERE instance_id = ? AND state = 'waiting'`,
+      ).run(JSON.stringify({ by: 'instance', why: 'the instance was archived' }), now, instanceId);
+      // Its members' rows and the skipped steps' settling, in the same transaction, so its counts are right and it is never due.
+      decideAll(d, instance, null, now, undefined);
     }
     return { ok: true, instance, archived, runs };
   });
@@ -2835,7 +2904,7 @@ export function recordRoleWake(db: Db, batch: NewRoleWake, facts: TaskFacts, now
         parents: [],
         wake: { by: null, depth: batch.depth + 1 },
         reaction: { taskId, wakeId },
-        ...(sub === undefined ? {} : { copySubscription: sub }),
+        ...(sub === undefined ? {} : { copySubscriptions: [sub] }),
       },
       now,
     );
@@ -3047,5 +3116,668 @@ export function buttonTried(db: Db, key: DeferredKey): Result<{ attempts: number
       .get(key.subscriptionId, key.eventId);
     if (row === undefined) return refuse('not_found', `no deferred button for subscription ${key.subscriptionId} and event ${key.eventId}`);
     return { ok: true, attempts: row.attempts };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Workflow routing (workflow routing spec §9)
+// ---------------------------------------------------------------------------
+
+/** The team, as the service holds it, against which a task made late is checked (§7.4, §9.3); absent in the writer's own tests. */
+export type RouteTeam = TaskFacts;
+
+/** Which transition decided, for its notice (§12.2): a completion, a block, a give-up or the transient limit's block, an archive, or a reconciliation. */
+export type RouteCause = 'completed' | 'blocked' | 'gave_up' | 'throttled' | 'archived' | 'reconciled';
+
+/** One decision of a transaction, as `workflow_routed` lists it for its notice (§12.2). */
+export interface RoutedLine {
+  step: string;
+  outcome: 'made' | 'skipped' | 'fanned_out' | 'routed' | 'over_limit' | 'over_cap' | 'stood_in' | 'unread';
+  why: string;
+  taskIds: string[];
+  items?: string[];
+  count?: number;
+  by?: string;
+  /** A route's handler, and whether it stands in. */
+  handler?: string;
+  standsIn?: boolean;
+}
+
+/** The most items a `workflow_routed` line names; its count says the rest (§12.2). */
+const ROUTED_ITEMS = 20;
+
+/** An instance with a plan, as the routing reads it in its transaction: the row, the plan, and its members with their tasks. */
+interface Routed {
+  instance: InstanceRow;
+  plan: Plan;
+  members: Array<MemberRow & { task: TaskRow }>;
+  /** The next member's position, read at the first task this round makes, then counted. */
+  nextPosition?: number;
+}
+
+/** A name a template gives, as the writer stores it: a person by their principal, else a role. */
+function assigneeOf(name: string | null): Assignee | null {
+  return name === null ? null : { kind: name.includes(':') ? 'human' : 'role', name };
+}
+
+/** A step's facts, read inside the transaction (§9.2 step 3): its rows, its tasks' trigger events, and its winner's accepted result. */
+function routingFacts(d: Db, r: Routed): Facts {
+  const settled = settledOf(d, r.instance.instanceId);
+  const pending = new Map(pendingOf(d, r.instance.instanceId).map((p) => [p.step, p]));
+  const steps = new Map<string, StepFact>();
+  // Only a `state` clause reads what a step's tasks entered: the others' events are not read. Every member is read,
+  // settled or not, as a state clause holds for a task that entered the state ever (§3.2).
+  const stated = new Set(
+    r.plan.steps.flatMap((s) => (s.when ?? []).flatMap((w) => ('any' in w ? w.any : [w])).flatMap((c) => ('state' in c ? [c.step] : []))),
+  );
+  for (const s of r.plan.steps) {
+    const own = settled.find((x) => x.step === s.step && x.ref === s.step);
+    const items = new Map(settled.filter((x) => x.step === s.step && x.ref !== s.step).map((x) => [x.ref, { how: x.how, taskId: x.taskId, eventId: x.eventId }]));
+    const triggers = stated.has(s.step) ? r.members.filter((m) => m.step === s.step).flatMap((m) => triggersOf(d, m.taskId)) : [];
+    const row = pending.get(s.step);
+    const winner = own?.taskId ?? null;
+    const metadata = winner === null || (own?.how !== 'done' && own?.how !== 'stood_in') ? undefined : latestCompletion(d, winner)?.metadata;
+    steps.set(s.step, {
+      step: s.step,
+      row: row?.state ?? null,
+      skippedBy: row?.reason?.by ?? null,
+      settled: own === undefined ? null : { how: own.how, taskId: own.taskId, eventId: own.eventId },
+      items,
+      entered: { blocked: triggers.some((t) => t.kind === 'blocked'), gaveUp: triggers.some((t) => t.kind === 'gave_up') },
+      result: isRecord(metadata) ? metadata : null,
+    });
+  }
+  return { steps, due: dueRoutes(d, r), members: r.members.length, cap: INSTANCE_CAP };
+}
+
+/**
+ * The routes due (§5.3): each member's task blocked now from its work by a trigger
+ * event, its latest block, with no route row for that event yet; and how many
+ * routes were made from it. A block lifted before its route was made routes
+ * nothing, as the task is no longer blocked by it.
+ */
+function dueRoutes(d: Db, r: Routed): RouteFact[] {
+  const routes = routesOf(d, r.instance.instanceId);
+  const handlers = new Set(r.plan.steps.filter((s) => s.handler === true).map((s) => s.step));
+  return r.members.flatMap((m): RouteFact[] => {
+    if (handlers.has(m.step) || m.task.phase !== 'blocked' || m.task.blockedFrom !== 'open') return [];
+    const latest = latestBlockOf(d, m.taskId);
+    const t = triggersOf(d, m.taskId).find((x) => x.eventId === latest);
+    if (t === undefined || routes.some((x) => x.fromTask === m.taskId && x.eventId === t.eventId)) return [];
+    return [
+      {
+        taskId: m.taskId,
+        step: m.step,
+        ref: m.ref,
+        item: m.item,
+        eventId: t.eventId,
+        kind: t.kind,
+        throttled: t.throttled,
+        blockKind: t.blockKind,
+        reason: t.reason,
+        routes: routes.filter((x) => x.fromTask === m.taskId && x.outcome === 'made').length,
+      },
+    ];
+  });
+}
+
+/** Insert a settled row into its key (§8): a later attempt finds the key taken and changes nothing. True when it added the row. */
+function settle(d: Db, instanceId: string, step: string, ref: string, how: string, taskId: string | null, eventId: number, now: number): boolean {
+  return (
+    d
+      .prepare('INSERT OR IGNORE INTO kanban_workflow_settled (instance_id, step, ref, how, task_id, event_id, settled_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(instanceId, step, ref, how, taskId, eventId, now).changes === 1
+  );
+}
+
+/** What a sweep did beyond its rows (§5.2, §9.5): its lines, and the runs its stand-ins' archives superseded. */
+interface Swept {
+  lines: RoutedLine[];
+  superseded: RunRow[];
+}
+
+/**
+ * The sweep (§9.2 step 2): each member with a settling fact gets its settled row,
+ * its winner the earliest fact by event id, among its own task's `completed`
+ * event, each of its stand-ins' `completed` events, and its own `archived`
+ * event when that archive was not from `done`; each fan-out whose items all have
+ * rows, its own, `archived` when every item was archived undone. Plain steps
+ * included; a handler's task is no step's member here. Only once a row is
+ * written for a stand-in is the routed task archived, unless it is already, its
+ * superseded run returned; and only when a row is written for the task's own
+ * completion is each stand-in left open told its result will not be read.
+ */
+function sweep(d: Db, r: Routed, now: number): Swept {
+  const id = r.instance.instanceId;
+  const out: Swept = { lines: [], superseded: [] };
+  const handlers = new Map(r.plan.steps.filter((s) => s.handler === true).map((s) => [s.step, s]));
+  const routes = routesOf(d, id);
+  const taken = new Set(settledOf(d, id).map((x) => `${x.step}\u0000${x.ref}`));
+  // Prepared once a sweep, not once a member.
+  const completedOf = d.prepare<[string], { id: number | null }>("SELECT min(id) AS id FROM kanban_events WHERE task_id = ? AND kind = 'completed'");
+  const archivedOf = d.prepare<[string], { id: number; came: unknown }>(
+    "SELECT id, json_extract(payload, '$.from') AS came FROM kanban_events WHERE task_id = ? AND kind = 'archived' ORDER BY id LIMIT 1",
+  );
+  const firstCompleted = (taskId: string): { id: number } | undefined => {
+    const row = completedOf.get(taskId);
+    return row?.id === null || row?.id === undefined ? undefined : { id: row.id };
+  };
+  for (const m of r.members) {
+    if (handlers.has(m.step) || taken.has(`${m.step}\u0000${m.ref}`)) continue;
+    // A task neither done nor archived has neither event of its own: only its stand-ins are read (§9.2).
+    const finished = m.task.phase === 'done' || m.task.phase === 'archived';
+    const completed = finished ? firstCompleted(m.taskId) : undefined;
+    const archived = finished ? archivedOf.get(m.taskId) : undefined;
+    const archive = archived !== undefined && archived.came !== 'done' ? archived : undefined;
+    // Its stand-ins: the handlers routed from its task that stand in for its step (§5.2).
+    const standIns = routes.filter((x) => x.fromTask === m.taskId && x.outcome === 'made' && x.taskId !== null && handlers.get(x.handler)?.stands_in_for === m.step);
+    const facts = [
+      ...(completed === undefined ? [] : [{ how: 'done', taskId: m.taskId as string | null, eventId: completed.id, handler: undefined as string | undefined }]),
+      ...(archive === undefined ? [] : [{ how: 'archived', taskId: null, eventId: archive.id, handler: undefined }]),
+      ...standIns.flatMap((x) => {
+        const done = firstCompleted(x.taskId as string);
+        return done === undefined ? [] : [{ how: 'stood_in', taskId: x.taskId, eventId: done.id, handler: x.handler }];
+      }),
+    ].sort((a, b) => a.eventId - b.eventId);
+    const winner = facts[0];
+    if (winner === undefined) continue;
+    if (!settle(d, id, m.step, m.ref, winner.how, winner.taskId, winner.eventId, now)) continue;
+    taken.add(`${m.step}\u0000${m.ref}`);
+    if (winner.how === 'stood_in' && winner.taskId !== null) standingIn(d, r, m, winner.taskId, winner.handler ?? '', now, out);
+    if (winner.how === 'done') {
+      for (const x of standIns) {
+        const left = getTask(d, x.taskId as string);
+        if (left === undefined || left.phase === 'done' || left.phase === 'archived') continue;
+        insertComment(d, left.taskId, 'gateway', `${m.step} was completed by its own task ${m.taskId}; this handler's result will not be read: finish or archive it`, now, false);
+        out.lines.push({ step: m.step, outcome: 'unread', why: `${m.step} was completed by its own task`, taskIds: [left.taskId], handler: x.handler });
+      }
+    }
+  }
+  const pending = new Map(pendingOf(d, id).map((p) => [p.step, p]));
+  // Read once, after the members' rows: a fan-out's own row is no item's.
+  const rows = settledOf(d, id);
+  for (const s of r.plan.steps) {
+    if (s.for_each === undefined || taken.has(`${s.step}\u0000${s.step}`)) continue;
+    if (s.made === 'decide' && pending.get(s.step)?.state !== 'made') continue;
+    const items = rows.filter((x) => x.step === s.step && x.ref !== s.step);
+    const all = r.members.filter((m) => m.step === s.step);
+    if (all.length === 0 || items.length < all.length) continue;
+    const how = items.every((x) => x.how === 'archived') ? 'archived' : 'done';
+    settle(d, id, s.step, s.step, how, null, Math.max(...items.map((x) => x.eventId)), now);
+  }
+  return out;
+}
+
+/**
+ * A stand-in won its member (§5.2): the routed task archived, unless it is
+ * already, from whatever phase it is in, its undecided run superseded, the
+ * archive naming the instance and the stand-in, with a comment that does not
+ * steer; and the line saying it stood in, with its outputs.
+ */
+function standingIn(d: Db, r: Routed, m: MemberRow & { task: TaskRow }, standIn: string, handler: string, now: number, out: Swept): void {
+  const ref = memberOf(d, standIn)?.ref ?? handler;
+  const routed = mustGet(d, m.taskId);
+  const outputs = r.plan.steps.find((s) => s.step === m.step)?.outputs ?? {};
+  const metadata = latestCompletion(d, standIn)?.metadata;
+  const said = outputsText(outputs, isRecord(metadata) ? metadata : null);
+  out.lines.push({ step: m.step, outcome: 'stood_in', why: said, taskIds: [m.taskId], handler });
+  if (routed.phase === 'archived') return;
+  // Only a run the archive itself ended: one that had reported, and is finishing, is left to end its own turn.
+  const undecided = openRunOf(d, routed.taskId)?.outcome === null;
+  const archived = archiveIn(d, routed, 'gateway', now, { workflow: r.instance.instanceId, standIn });
+  if (undecided && archived.run !== undefined) out.superseded.push(archived.run);
+  insertComment(d, m.taskId, 'gateway', `Stood in for by ${ref} (${standIn}), whose result is read in ${m.step}'s place.`, now, false);
+}
+
+/** The text a template's reference to a result fills (§7.4): the step's accepted value, a list's items joined, or `(skipped)`. */
+function filled(plan: Plan, facts: Facts, text: string, item?: string): string {
+  return fillText(
+    text,
+    (step, output) => {
+      // A step not settled at the making, as the ancestor a `when: { state: gave_up }` step is made on, has no
+      // accepted value yet: it fills `(skipped)` too, and the text is never filled again once it settles.
+      const value = resultOf(plan, facts, step, output);
+      return value === undefined ? SKIPPED_TEXT : valueSaid(value);
+    },
+    item,
+  );
+}
+
+/**
+ * Make one task of a step late (§7.4), as the start would have: through
+ * `insertTask`, its fields from its template, the references filled, its title
+ * and body cut to their limits; the instance's creator and board, and a run's
+ * start's `created_from_task`; its links to its effective parents; its first
+ * member's subscriptions; its gates by the instance's creator; its member row
+ * at the next position; and its `created` event with the instance. With the
+ * team, a task whose assignee, reviewer or workspace no longer passes is made
+ * and blocked at once, by the gateway, as `needs_input`.
+ */
+function makeLate(
+  d: Db,
+  r: Routed,
+  facts: Facts,
+  made: { step: string; ref: string; item: string | null; template: Template; parents: readonly string[]; payload?: Record<string, unknown>; paragraph?: string },
+  now: number,
+  team: RouteTeam | undefined,
+): string {
+  const t = made.template;
+  const first = r.members[0];
+  const title = cutToBytes(filled(r.plan, facts, t.title, made.item ?? undefined), WORKER_LIMITS.title);
+  // A handler's paragraph is kept whole: only the file's part of its body is cut (§5.2).
+  const after = made.paragraph === undefined ? '' : made.paragraph;
+  const room = WORKER_LIMITS.body - (after === '' ? 0 : Buffer.byteLength(after) + (t.body === null ? 0 : 2));
+  const own = t.body === null ? '' : cutToBytes(filled(r.plan, facts, t.body, made.item ?? undefined), room);
+  const body = after === '' ? own : own === '' ? after : `${own}\n\n${after}`;
+  const assignee = assigneeOf(t.assignee);
+  const reviewer = assigneeOf(t.reviewer);
+  const wake = t.wake === null ? undefined : { by: t.wake.by, depth: t.wake.depth, ...(t.wake.tooDeep === true ? { tooDeep: true } : {}), ...(t.wake.role === undefined ? {} : { role: t.wake.role }) };
+  const taskId = insertTask(
+    d,
+    {
+      title,
+      ...(body === '' ? {} : { body }),
+      contract: t.contract,
+      assignee,
+      reviewer,
+      workspace: t.workspace,
+      priority: t.priority,
+      failureLimit: t.failure_limit,
+      retryOnCrash: t.retry_on_crash,
+      maxRuntimeS: t.max_runtime_s,
+      idempotencyKey: null,
+      createdBy: r.instance.createdBy,
+      createdVia: r.instance.createdVia,
+      board: r.instance.board,
+      createdFromTask: first?.task.createdFromTask ?? null,
+      parents: made.parents,
+      copySubscriptions: first === undefined ? [] : subscriptionsOf(d, first.taskId),
+      ...(wake === undefined ? {} : { wake }),
+    },
+    now,
+    { workflow: r.instance.instanceId, workflowName: r.instance.name, ref: made.ref, step: made.step, item: made.item, ...made.payload },
+  );
+  for (const gate of t.gates) {
+    const added = insertGate(d, taskId, { command: gate.command, timeoutS: gate.timeout_s }, r.instance.createdBy, now, { workflow: r.instance.instanceId });
+    if (!added.ok) throw new Error(`${made.ref}: ${added.message}`);
+  }
+  r.nextPosition ??= (d.prepare<[string], { p: number | null }>('SELECT max(position) AS p FROM kanban_workflow_tasks WHERE instance_id = ?').get(r.instance.instanceId)?.p ?? -1) + 1;
+  const position = r.nextPosition;
+  r.nextPosition += 1;
+  d.prepare('INSERT INTO kanban_workflow_tasks (task_id, instance_id, ref, step, item, position) VALUES (?, ?, ?, ?, ?, ?)').run(
+    taskId,
+    r.instance.instanceId,
+    made.ref,
+    made.step,
+    made.item === null ? null : mask(made.item),
+    position,
+  );
+  if (team !== undefined) {
+    const refused = lateRefused(t, title, r.instance, team);
+    if (refused !== undefined) {
+      // The command that mends it: another reviewer, named at the review, when the reviewer is the one refused.
+      const reason = refused.reviewer
+        ? `${refused.message}, so this step's task cannot be reviewed by it: /kanban task review ${taskId}, with a line reviewer: <role or @person>`
+        : `${refused.message}, so this step's task cannot be given to it: /kanban task assign ${taskId} <role>`;
+      const recurrences = enterBlocked(d, mustGet(d, taskId), 'needs_input', reason);
+      record(d, { taskId, kind: 'blocked', actor: 'gateway', payload: { kind: 'needs_input', reason, blockRecurrences: recurrences } }, now);
+    }
+  }
+  return taskId;
+}
+
+/**
+ * Why a task made late no longer passes the team's checks (§7.4), or undefined: a role named not configured, said plainly, or
+ * `checkTask`'s words; and whether the reviewer is the one refused.
+ */
+function lateRefused(t: Template, title: string, instance: InstanceRow, team: RouteTeam): { message: string; reviewer: boolean } | undefined {
+  for (const [name, reviewer] of [[t.assignee, false], [t.reviewer, true]] as const) {
+    if (name !== null && !name.includes(':') && !team.roles.has(name)) return { message: `role ${name} is not configured`, reviewer };
+  }
+  const check = (withReviewer: boolean) =>
+    checkTask(
+      {
+        title,
+        contract: t.contract,
+        ...(t.assignee === null ? {} : { assignee: t.assignee }),
+        ...(t.reviewer === null || !withReviewer ? {} : { reviewer: t.reviewer }),
+        ...(t.workspace === null ? {} : { workspace: t.workspace }),
+        createdBy: instance.createdBy,
+        createdVia: instance.createdVia,
+      },
+      team,
+    );
+  const checked = check(true);
+  if (checked.ok) return undefined;
+  // The reviewer is the one refused when the task passes without it.
+  return { message: checked.message, reviewer: t.reviewer !== null && check(false).ok };
+}
+
+/** A step's templates, one an item of its list param, or its one. */
+function templatesFor(s: PlanStep): Array<Template & { item: string | null }> {
+  return s.templates ?? (s.template === undefined ? [] : [{ ...s.template, item: null }]);
+}
+
+/** A pending row moved from `waiting`, once (§9.2): false when another attempt decided it first, and then nothing is made. */
+function decided(d: Db, instanceId: string, step: string, state: 'made' | 'skipped', reason: Record<string, unknown>, causeEvent: number | null, now: number, items?: unknown): boolean {
+  const masked = Object.fromEntries(Object.entries(reason).map(([k, v]) => [k, typeof v === 'string' ? mask(v) : v]));
+  return (
+    d
+      .prepare(
+        `UPDATE kanban_workflow_pending SET state = ?, reason = ?, items = ?, cause_event = ?, decided_at = ?
+          WHERE instance_id = ? AND step = ? AND state = 'waiting'`,
+      )
+      .run(state, JSON.stringify(masked), items === undefined ? null : JSON.stringify(items), causeEvent, now, instanceId, step).changes === 1
+  );
+}
+
+/** One decision applied (§9.2 step 4); answers its line for the notice, or undefined for one that is none. */
+function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number | null, now: number, team: RouteTeam | undefined): RoutedLine | undefined {
+  const id = r.instance.instanceId;
+  const s = r.plan.steps.find((x) => x.step === dec.step);
+  if (s === undefined) return undefined;
+  if (dec.outcome === 'settled') {
+    // Only a step whose row is skipped settles so: in the same call as its skip, that skip applied first.
+    const row = d.prepare<[string, string], { state: string }>('SELECT state FROM kanban_workflow_pending WHERE instance_id = ? AND step = ?').get(id, dec.step);
+    if (row?.state === 'skipped') settle(d, id, dec.step, dec.step, dec.how, null, dec.eventId, now);
+    return undefined;
+  }
+  if (dec.outcome === 'skipped') {
+    return decided(d, id, dec.step, 'skipped', { by: dec.by, why: dec.why }, causeEvent, now) ? { step: dec.step, outcome: 'skipped', why: dec.why, taskIds: [], by: dec.by } : undefined;
+  }
+  if (dec.outcome === 'route' || dec.outcome === 'over_limit' || dec.outcome === 'over_cap') return route(d, r, facts, dec, now, team);
+  if (dec.outcome !== 'made' && dec.outcome !== 'fanned_out') return undefined;
+  // The instance's board, live: an archived one skips the step, never refusing the transition (§13.1).
+  const live = liveBoard(d, r.instance.board);
+  if (!live.ok) {
+    const why = `board ${r.instance.board} is archived`;
+    return decided(d, id, dec.step, 'skipped', { by: 'board', why }, causeEvent, now) ? { step: dec.step, outcome: 'skipped', why, taskIds: [], by: 'board' } : undefined;
+  }
+  const templates = templatesFor(s);
+  if (dec.outcome === 'made') {
+    if (!decided(d, id, dec.step, 'made', { why: dec.why }, causeEvent, now)) return undefined;
+    const t = templates[0];
+    if (t === undefined) return undefined;
+    const taskId = makeLate(d, r, facts, { step: dec.step, ref: dec.step, item: null, template: t, parents: dec.parents }, now, team);
+    return { step: dec.step, outcome: 'made', why: dec.why, taskIds: [taskId] };
+  }
+  const made = dec.items.map((item, n) => ({ item, ref: `${dec.step}:${n + 1}`, template: templates.find((t) => t.item === item) ?? templates[0] }));
+  if (!decided(d, id, dec.step, 'made', { why: dec.why }, causeEvent, now)) return undefined;
+  const taskIds = made.flatMap((m) =>
+    m.template === undefined ? [] : [makeLate(d, r, facts, { step: dec.step, ref: m.ref, item: m.item, template: m.template, parents: dec.parents }, now, team)],
+  );
+  const marker = made.map((m, n) => ({ item: mask(m.item), taskId: taskIds[n], ref: m.ref }));
+  d.prepare('UPDATE kanban_workflow_pending SET items = ? WHERE instance_id = ? AND step = ?').run(JSON.stringify(marker), id, dec.step);
+  return { step: dec.step, outcome: 'fanned_out', why: dec.why, taskIds, items: dec.items.slice(0, ROUTED_ITEMS), count: dec.items.length };
+}
+
+/**
+ * A route applied (§5.3): its row, keyed on the trigger event, so a replay makes
+ * no second handler; for a route made, the handler's task, made as any late
+ * task but with no link, its ref `<handler>:<n>`, its item the routed item's,
+ * its body gaining its paragraph, in the routed task's fixed workspace when its
+ * step and role name none, its `created` event naming the routed task. On a
+ * board found archived nothing is made and no row written (§13.1): the board
+ * takes no new task, and the routed task waits as with no route.
+ */
+function route(
+  d: Db,
+  r: Routed,
+  facts: Facts,
+  dec: Extract<Decision, { outcome: 'route' | 'over_limit' | 'over_cap' }>,
+  now: number,
+  team: RouteTeam | undefined,
+): RoutedLine | undefined {
+  const id = r.instance.instanceId;
+  const from = dec.from;
+  const taken = d.prepare('SELECT 1 FROM kanban_workflow_routes WHERE instance_id = ? AND handler = ? AND event_id = ?').get(id, dec.handler, from.eventId);
+  if (taken !== undefined) return undefined;
+  const routed = mustGet(d, from.taskId);
+  const why = triggerWords(from, routed.consecutiveTransient);
+  const row = d.prepare('INSERT INTO kanban_workflow_routes (instance_id, handler, event_id, from_task, outcome, task_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  if (dec.outcome !== 'route') {
+    row.run(id, dec.handler, from.eventId, from.taskId, dec.outcome, null, now);
+    return { step: from.step, outcome: dec.outcome, why, taskIds: [from.taskId], handler: dec.handler };
+  }
+  const hs = r.plan.steps.find((s) => s.step === dec.handler);
+  const t = hs?.template;
+  if (hs === undefined || t === undefined || !liveBoard(d, r.instance.board).ok) return undefined;
+  const n = routesOf(d, id).filter((x) => x.handler === dec.handler && x.outcome === 'made').length + 1;
+  // Where it works (§5.2): its step's, its role's, or else the routed task's, when that is fixed.
+  const roleWorkspace = t.assignee === null || t.assignee.includes(':') ? undefined : team?.roles.get(t.assignee)?.workspace;
+  const workspace = t.workspace ?? (roleWorkspace === undefined ? routed.workspace : null);
+  // A stand-in takes its step's reviewer, gates and contract from the frozen plan, so its result is accepted as the step's would be (§5.2).
+  const stood = dec.standsIn ? r.plan.steps.find((s) => s.step === from.step) : undefined;
+  const theirs = stood === undefined ? undefined : (stood.templates?.find((x) => x.item === from.item) ?? stood.template);
+  const fields =
+    theirs === undefined
+      ? { workspace }
+      : { workspace, reviewer: theirs.reviewer, gates: [...theirs.gates, ...t.gates], contract: standInContract(from.step, theirs.contract, t.contract) };
+  const paragraph = handlerParagraph({
+    taskId: from.taskId,
+    step: from.step,
+    item: from.item,
+    from,
+    throttles: routed.consecutiveTransient,
+    dir: routed.worktree === null ? undefined : worktreeOf(d, routed.worktree)?.rootPath,
+    standsIn: dec.standsIn,
+  });
+  const taskId = makeLate(
+    d,
+    r,
+    facts,
+    { step: dec.handler, ref: `${dec.handler}:${n}`, item: from.item, template: { ...t, ...fields }, parents: [], payload: { routedFrom: from.taskId }, paragraph },
+    now,
+    team,
+  );
+  row.run(id, dec.handler, from.eventId, from.taskId, 'made', taskId, now);
+  return { step: from.step, outcome: 'routed', why, taskIds: [taskId], handler: dec.handler, standsIn: dec.standsIn };
+}
+
+/** An instance with a plan, its members read now. */
+function routedOf(d: Db, instance: InstanceRow): Routed | undefined {
+  return instance.plan === null ? undefined : { instance, plan: instance.plan, members: membersWithTasks(d, instance.instanceId) };
+}
+
+/**
+ * Decide what is due, until nothing more is (§9.2 steps 2 to 5): the sweep, the
+ * facts, `decide`, each decision applied, again on the new facts, until a round
+ * changes nothing; a chain of skipped steps settles in one `decide`, so a round
+ * a step at most is enough, and `3 * steps + 1` rounds is only a guard. Answers
+ * the lines of every decision made.
+ */
+function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number, team: RouteTeam | undefined): Swept {
+  const out: Swept = { lines: [], superseded: [] };
+  const first = routedOf(d, instance);
+  if (first === undefined) return out;
+  const changes = d.prepare<[], { n: number }>('SELECT total_changes() AS n');
+  for (let round = 0; round < 3 * first.plan.steps.length + 1; round += 1) {
+    const before = changes.get()?.n ?? 0;
+    const r = routedOf(d, instance) as Routed;
+    const swept = sweep(d, r, now);
+    out.lines.push(...swept.lines);
+    out.superseded.push(...swept.superseded);
+    const facts = routingFacts(d, r);
+    const decisions = decideRouting(r.plan, facts);
+    for (const dec of decisions) {
+      const line = apply(d, r, facts, dec, causeEvent, now, team);
+      if (line !== undefined) out.lines.push(line);
+    }
+    // Nothing written this round, as a route on an archived board writes nothing: nothing more is due.
+    if ((changes.get()?.n ?? 0) === before) break;
+  }
+  return out;
+}
+
+/** How long a fault's error may be in its event, in characters (§9.4). */
+const FAULT_CHARS = 500;
+
+/**
+ * The routing of a transition (§9.2), inside its transaction, after its own rows
+ * and event, in a savepoint of its own (§9.4): one read finds the task's member
+ * row and its instance's plan, and a task that is no member of an instance with
+ * a plan pays nothing more; then what is due is decided, and one
+ * `workflow_routed` event on the task lists the decisions, for the notice. A
+ * fault never loses the transition: the savepoint rolls back alone, and the
+ * instance's `routing_failed_at` and one `workflow_route_failed` event say so,
+ * `first` when it set the mark; unless the transaction itself is gone, as
+ * SQLite rolls one back on some errors, when the error is the transition's,
+ * or the database is busy, when txImmediate retries the whole transition.
+ */
+function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): RunRow[] {
+  if (!hasRouting(d)) return [];
+  // Read before any savepoint, so a task of no planned instance opens none; a read that throws is read again inside it, and faults there.
+  let planned: Planned | undefined | null;
+  try {
+    planned = plannedMemberOf(d, taskId);
+  } catch {
+    planned = null;
+  }
+  if (planned === undefined) return [];
+  const known = planned;
+  try {
+    return d.transaction(() => routeIn(d, taskId, cause, eventId, now, team, known ?? undefined))();
+  } catch (err) {
+    if (!d.inTransaction || isBusy(err)) throw err;
+    routingFault(d, taskId, err, now);
+    return [];
+  }
+}
+
+/** A transition's result with the runs its routing superseded (§9.5), when there are any. */
+function withSuperseded<T extends object>(result: T, superseded: readonly RunRow[]): T & { superseded?: RunRow[] } {
+  return superseded.length === 0 ? result : { ...result, superseded: [...superseded] };
+}
+
+/** A routing fault recorded, outside the savepoint that rolled back (§9.4): the mark set from null, and its event, masked and cut. */
+function routingFault(d: Db, taskId: string, err: unknown, now: number): void {
+  const row = d
+    .prepare<[string], { instance_id: string; name: string | null }>(
+      `SELECT m.instance_id, i.name FROM kanban_workflow_tasks m JOIN kanban_workflow_instances i ON i.instance_id = m.instance_id WHERE m.task_id = ?`,
+    )
+    .get(taskId);
+  if (row === undefined) return;
+  const first = d.prepare('UPDATE kanban_workflow_instances SET routing_failed_at = ? WHERE instance_id = ? AND routing_failed_at IS NULL').run(now, row.instance_id).changes === 1;
+  const said = mask(err instanceof Error ? err.message : String(err));
+  record(
+    d,
+    {
+      taskId,
+      kind: 'workflow_route_failed',
+      actor: 'gateway',
+      // Cut by code points, so a character outside the BMP is never split in two (§9.4).
+      payload: { workflow: row.instance_id, workflowName: row.name, error: [...said].slice(0, FAULT_CHARS).join(''), first },
+    },
+    now,
+  );
+}
+
+/** A task's member row and its instance with a plan, as `plannedMemberOf` reads them. */
+type Planned = NonNullable<ReturnType<typeof plannedMemberOf>>;
+
+/** The routing's body, inside its savepoint: answers the runs it superseded. */
+function routeIn(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam, known?: Planned): RunRow[] {
+  const planned = known ?? plannedMemberOf(d, taskId);
+  if (planned === undefined) return [];
+  const { lines, superseded } = decideAll(d, planned.instance, eventId, now, team);
+  if (lines.length === 0) return superseded;
+  // What the transition was, for the notice's head (§12.2): `gave up`, `stopped after 10 throttles`, `blocked`.
+  const task = mustGet(d, taskId);
+  const after = cause === 'gave_up' ? 'gave up' : cause === 'throttled' ? `stopped after ${task.consecutiveTransient} throttles` : cause === 'blocked' ? 'blocked' : undefined;
+  record(
+    d,
+    {
+      taskId,
+      kind: 'workflow_routed',
+      actor: 'gateway',
+      payload: {
+        workflow: planned.instance.instanceId,
+        workflowName: planned.instance.name,
+        step: planned.member.step,
+        cause,
+        ...(after === undefined ? {} : { after }),
+        decisions: lines,
+      },
+    },
+    now,
+  );
+  return superseded;
+}
+
+/** A reconciliation's answer (§11): the instance, each decision it made, and the runs a stand-in's archive superseded. */
+export interface Reconciled {
+  instance: InstanceRow;
+  decisions: RoutedLine[];
+  superseded?: RunRow[];
+}
+
+/**
+ * The member a reconciliation's `workflow_routed` goes on (§11): the
+ * latest-settled ancestor its first decision's step reads, so the notice reaches
+ * the instance's chat as any would; the first member when none has a task.
+ */
+function reconciledOn(d: Db, r: Routed, step: string): string | undefined {
+  const parents = new Map(r.plan.steps.map((s) => [s.step, s.parents]));
+  const ancestors = new Set<string>();
+  const walk = (name: string): void => {
+    for (const p of parents.get(name) ?? []) {
+      if (ancestors.has(p)) continue;
+      ancestors.add(p);
+      walk(p);
+    }
+  };
+  walk(step);
+  const latest = settledOf(d, r.instance.instanceId)
+    .filter((x) => ancestors.has(x.step) && x.taskId !== null)
+    .sort((a, b) => b.eventId - a.eventId)[0];
+  return latest?.taskId ?? r.members[0]?.taskId;
+}
+
+/**
+ * Reconcile an instance (§11): the routing given no transitioning task, in one
+ * transaction of its own, deciding what is due and making it, its
+ * `workflow_routed` on the member whose settling decided the first decision;
+ * and its fault mark cleared, as it succeeded. The keys of §9.2 make one that
+ * races the gateway decide nothing twice. A fault is thrown: nothing is written,
+ * and the mark stays.
+ */
+export function reconcileWorkflow(db: Db, instanceId: string, now: number, team?: RouteTeam): Result<Reconciled> {
+  return tx(db, (d) => {
+    const instance = getInstance(d, instanceId);
+    if (instance === undefined) return refuse('not_found', `no workflow instance ${instanceId}`);
+    const r = routedOf(d, instance);
+    if (r === undefined) return { ok: true, instance, decisions: [] };
+    const { lines: decisions, superseded } = decideAll(d, instance, null, now, team);
+    const first = decisions[0];
+    const on = first === undefined ? undefined : reconciledOn(d, routedOf(d, instance) as Routed, first.step);
+    if (on !== undefined) {
+      record(
+        d,
+        {
+          taskId: on,
+          kind: 'workflow_routed',
+          actor: 'gateway',
+          payload: { workflow: instanceId, workflowName: instance.name, step: memberOf(d, on)?.step ?? null, cause: 'reconciled', decisions },
+        },
+        now,
+      );
+    }
+    d.prepare('UPDATE kanban_workflow_instances SET routing_failed_at = NULL WHERE instance_id = ?').run(instanceId);
+    return { ok: true, ...withSuperseded({ instance: getInstance(d, instanceId) as InstanceRow, decisions }, superseded) };
+  });
+}
+
+/**
+ * A reconciliation that threw (§9.4, §11), in a transaction of its own once its
+ * own rolled back: an instance not marked is marked, and one
+ * `workflow_route_failed` event, `first`, goes on its first member, so the fault
+ * is said once and retried on the dispatcher's pass. One marked already is left
+ * as it is, so a retry that faults again says nothing more.
+ */
+export function reconcileFailed(db: Db, instanceId: string, err: unknown, now: number): void {
+  txImmediate(db, (d) => {
+    if (getInstance(d, instanceId)?.routingFailedAt !== null) return;
+    const first = membersOf(d, instanceId)[0];
+    if (first !== undefined) routingFault(d, first.taskId, err, now);
   });
 }

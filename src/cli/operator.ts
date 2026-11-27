@@ -5,8 +5,8 @@ import { boardSetting, LIST_FILTERS, tooBig, type NewTaskCommand } from '../kanb
 import { CHAT_ID, NEEDS_BOT, THREAD_ID, chatRefused } from '../core/lark-ids.js';
 import { DAG_LIMITS, checkDagShape, checkDagTasks, dagFile } from '../kanban/dag.js';
 import { NO_MENTIONS } from '../kanban/task-checks.js';
-import { WAKES_OFF, WORKFLOW_MESSAGE_BYTES, type KanbanService, type StartWake, type WorkflowMade } from '../kanban/service.js';
-import { archivedBoardProblem, expand, listWorkflows, missingBoardProblem, paramsLine, readWorkflow, startBoard, usableMessage, withBoards } from '../kanban/workflow.js';
+import { WAKES_OFF, WORKFLOW_MESSAGE_BYTES, type KanbanService, type RoutedLine, type StartWake, type WorkflowMade } from '../kanban/service.js';
+import { archivedBoardProblem, expand, listWorkflows, missingBoardProblem, paramsLine, readWorkflow, routedDagProblem, routingKeys, startBoard, usableMessage, withBoards } from '../kanban/workflow.js';
 import { boardsAt } from '../db/boards-at.js';
 import { maskAll, NUDGE, workerSocketPath } from '../kanban/socket.js';
 import { DEFAULT_BOARD, type BoardRow, type Contract, type CreatedVia, type Follow, type Refusal, type WakeRow } from '../kanban/types.js';
@@ -971,7 +971,7 @@ export async function operatorCommand(command: string, rest: readonly string[], 
 // ---------------------------------------------------------------------------
 
 /** The verbs of `mt kanban workflow`. */
-export const WORKFLOW_COMMANDS: readonly string[] = ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive'];
+export const WORKFLOW_COMMANDS: readonly string[] = ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive', 'reconcile'];
 
 /** `--param key=value`, repeated, each split at its first `=` (workflows spec §6); the shell has already removed the quotes. */
 function paramPairs(values: readonly string[] | undefined): { key: string; value: string }[] {
@@ -1005,6 +1005,7 @@ function madeJson(made: WorkflowMade): Record<string, unknown> {
     existing: made.existing,
     board: made.instance.board,
     tasks: made.tasks.map((t) => ({ task_id: t.taskId, ref: t.ref, step: t.step, item: t.item })),
+    ...(made.waiting === undefined ? {} : { waiting: made.waiting }),
     // Nothing made, so the gateway was not asked to look.
     ...(made.existing ? { nudged: false } : {}),
   };
@@ -1052,6 +1053,9 @@ function preview(rest: readonly string[], io: MtIo): number {
     const boards = list.usable.some((w) => w.board !== undefined) ? boardsOrSaid() : undefined;
     return no(read.code, usableMessage(read.message, (boards === undefined ? list : withBoards(list, boards)).usable, WORKFLOW_MESSAGE_BYTES));
   }
+  // A DAG is a fixed graph: a file using routing keys has no DAG to give (workflow routing spec §13.5).
+  const keys = routingKeys(read.workflow);
+  if (json && keys.length > 0) return no('invalid', routedDagProblem(name, keys));
   const routed = startBoard(read.workflow, { kind: 'terminal', board: asked });
   if (!routed.ok) return no(routed.code, routed.message);
   const boardName = routed.board;
@@ -1072,7 +1076,7 @@ function preview(rest: readonly string[], io: MtIo): number {
     io.err(`mt: ${line(person, 200)} is checked at the start, against the people this gateway knows; mt kanban workflow apply --dry-run on this preview's --json checks it now`);
   }
   if (json) io.out(jsonFile(JSON.parse(dagFile(shaped.dag))));
-  else for (const l of previewText(name, boardName, previewLines(shaped.dag))) io.out(l);
+  else for (const l of previewText(name, boardName, previewLines(shaped.dag), expanded.plan)) io.out(l);
   return 0;
 }
 
@@ -1311,14 +1315,19 @@ function instanceOffBoard(service: KanbanService, board: string | undefined, ins
   return undefined;
 }
 
-/** `mt kanban workflow show <instance> [--board] [--dag] [--json]` (workflows spec §10): everything, uncut; `--dag` the stored DAG. */
+/**
+ * `mt kanban workflow show <instance> [--board] [--dag | --plan] [--json]` (workflows spec §10): everything, uncut; `--dag` the
+ * stored DAG, said on stderr to hold only the steps made at the start for an instance with a plan; `--plan` the stored plan,
+ * masked (workflow routing spec §12.1).
+ */
 function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
-  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, dag: { type: 'boolean' } });
+  const { values, positionals } = parse(rest, { ...BOARD_FLAGS, dag: { type: 'boolean' }, plan: { type: 'boolean' } });
   const [instanceId, extra] = positionals;
   if (instanceId === undefined || extra !== undefined) throw new UsageError('kanban workflow show takes an instance id');
   const board = boardFlag(values.board);
-  if (values.dag === true && values.json === true) throw new UsageError('kanban workflow show takes --dag or --json, not both');
+  if ([values.dag, values.plan, values.json].filter((v) => v === true).length > 1) throw new UsageError('kanban workflow show takes one of --dag, --plan and --json');
   let dagText: string | undefined;
+  let dagNote: string | undefined;
   return act(
     io,
     values.json === true,
@@ -1331,9 +1340,16 @@ function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
       const v = r.view;
       // What was made, masked: never the hash (workflows spec §7).
       if (values.dag === true) dagText = jsonFile(v.instance.dag);
+      if (values.dag === true && v.instance.plan !== null) {
+        dagNote = `instance ${instanceId} has a plan: its DAG holds only the steps made at the start, and mt kanban workflow show ${instanceId} --plan prints the rest`;
+      }
+      if (values.plan === true) {
+        if (v.instance.plan === null) return refused({ code: 'invalid', message: `instance ${instanceId} has no plan: its workflow uses no routing key, and --dag prints all it made` });
+        dagText = jsonFile(v.instance.plan);
+      }
       return {
         ok: true,
-        lines: values.dag === true ? [] : instanceText(v),
+        lines: values.dag === true || values.plan === true ? [] : instanceText(v),
         json: {
           instance: {
             instance_id: v.instance.instanceId,
@@ -1360,11 +1376,13 @@ function showInstance(rest: readonly string[], io: MtIo): Promise<number> {
           })),
           related: v.related.map((x) => ({ task_id: x.task.taskId, title: x.task.title, phase: x.task.phase, status: x.status })),
           related_instances: v.relatedInstances.map((o) => ({ instance_id: o.instanceId, name: o.name, tasks: o.tasks })),
+          ...(v.steps === undefined ? {} : { steps: v.steps.map((s) => ({ step: s.step, state: s.state, why: s.why, items: s.items, routes: s.routes })) }),
         },
       };
     },
     { workflows: true },
   ).then((code) => {
+    if (code === 0 && dagNote !== undefined) io.err(`mt: ${dagNote}`);
     if (code === 0 && dagText !== undefined) io.out(dagText);
     return code;
   });
@@ -1398,6 +1416,65 @@ function archiveInstance(rest: readonly string[], io: MtIo): Promise<number> {
   );
 }
 
+/** A reconciliation's decision as its answer says it (workflow routing spec §11): `verify skipped (intake.verify is false)`, `exposure: 3 tasks`. */
+function decisionText(d: RoutedLine): string {
+  switch (d.outcome) {
+    case 'made':
+      return `${d.step} made`;
+    case 'skipped':
+      return `${d.step} skipped (${d.why})`;
+    case 'fanned_out':
+      return `${d.step}: ${d.count ?? d.taskIds.length} task${(d.count ?? d.taskIds.length) === 1 ? '' : 's'}`;
+    case 'routed':
+      return `${d.handler ?? ''} routed from ${d.step}`;
+    case 'stood_in':
+      return `${d.handler ?? ''} stands in for ${d.step}`;
+    case 'over_limit':
+      return `${d.step} over the limit of routes`;
+    case 'over_cap':
+      return `${d.step} not routed: the instance has 500 tasks`;
+    case 'unread':
+      return `${d.handler ?? ''} left open`;
+  }
+}
+
+/**
+ * `mt kanban workflow reconcile <instance> [--board] [--json]` (workflow routing spec §11): the routing given no
+ * transitioning task, deciding and making what is due, in one transaction; then the nudge, as after a start. Safe
+ * against the gateway, whose keys make a reconciliation that races it decide nothing twice.
+ */
+function reconcileInstance(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
+  const [instanceId, extra] = positionals;
+  if (instanceId === undefined || extra !== undefined) throw new UsageError('kanban workflow reconcile takes an instance id');
+  const board = boardFlag(values.board);
+  return act(
+    io,
+    values.json === true,
+    'mt kanban workflow reconcile',
+    (service) => {
+      const guard = instanceOffBoard(service, board, instanceId);
+      if (guard !== undefined) return guard;
+      let r: ReturnType<KanbanService['reconcileWorkflow']>;
+      try {
+        r = service.reconcileWorkflow(instanceId);
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        return refused({ code: 'routing_failed', message: `the routing of ${instanceId} failed: ${error}; the gateway tries again` });
+      }
+      if (!r.ok) return refused(r);
+      const said = r.decisions.map((d) => line(decisionText(d), 400)).join('; ');
+      return {
+        ok: true,
+        lines: [r.decisions.length === 0 ? `${instanceId}: nothing was due` : `reconciled ${instanceId}: ${said}`],
+        json: { instance_id: instanceId, decisions: r.decisions.map((d) => ({ step: d.step, outcome: d.outcome, task_ids: d.taskIds })) },
+        nudge: r.decisions.length > 0,
+      };
+    },
+    { workflows: true },
+  );
+}
+
 /** `mt kanban workflow <verb> …`. */
 function workflow(args: readonly string[], io: MtIo): Promise<number> {
   const [verb, ...rest] = args;
@@ -1416,6 +1493,8 @@ function workflow(args: readonly string[], io: MtIo): Promise<number> {
       return applyFile(rest, io);
     case 'archive':
       return archiveInstance(rest, io);
+    case 'reconcile':
+      return reconcileInstance(rest, io);
     default:
       throw new UsageError(`kanban workflow takes ${WORKFLOW_COMMANDS.slice(0, -1).join(', ')} or ${WORKFLOW_COMMANDS.at(-1)}`);
   }

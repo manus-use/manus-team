@@ -394,6 +394,12 @@ export class Dispatcher {
   pass(): void {
     if (this.#stopped) return;
     this.#cancelDecided();
+    // The routing's one hook (workflow routing spec §9.4): the dispatcher reads no workflow table itself.
+    try {
+      this.#deps.service.retryRouting((line) => this.#note(line));
+    } catch (err) {
+      this.#note(`kanban: retrying a workflow's routing failed: ${message(err)}`);
+    }
     let queues: Array<ReturnType<typeof claimableTasks>>;
     let limits: Map<string, number | null>;
     try {
