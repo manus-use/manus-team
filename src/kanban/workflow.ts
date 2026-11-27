@@ -7,6 +7,7 @@ import type { Role } from '../roles.js';
 import { redactKnownSecrets } from '../secrets.js';
 import { DAG_FORMAT, DAG_LIMITS, titleRefused, type Dag, type DagTask, type ParamValue } from './dag.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
+import type { Clause, ClauseValue, OutputType, Outputs, RouteSpec, ScalarType, StepState, WhenItem } from './routing.js';
 import { assignable, isRecord, NO_MENTIONS, type TaskFacts } from './task-checks.js';
 import { GATE_LIMITS, type Contract, type CreatedVia, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
@@ -64,7 +65,19 @@ export interface WorkflowStep {
   maxRuntimeS: number | undefined;
   gates: WorkflowGate[];
   parents: string[];
-  forEach: string | undefined;
+  /** A list param's name, or an ancestor's list output (workflow routing spec §4): told apart by their YAML type. */
+  forEach: string | { step: string; output: string } | undefined;
+  /** Its declared outputs (workflow routing spec §2), in the file's order; empty for none. */
+  outputs: Outputs;
+  /** Its conditions (workflow routing spec §3), or undefined for none. */
+  when: WhenItem[] | undefined;
+  /** `wait`, the default, or a route to a handler (workflow routing spec §5.1). */
+  onBlocked: RouteSpec;
+  onGaveUp: RouteSpec;
+  /** Made only when routed to (workflow routing spec §5.2). */
+  handler: boolean;
+  /** On a handler: the step whose dependents its accepted completion settles. */
+  standsInFor: string | undefined;
   /**
    * `wake: true` (wake spec §3.1): its task's outcomes wake whoever starts it;
    * `wake: { role: <name> }` (§19.1), a reaction task for that role; default false.
@@ -128,6 +141,12 @@ const STEP_KEYS = [
   'parents',
   'for_each',
   'wake',
+  'outputs',
+  'when',
+  'on_blocked',
+  'on_gave_up',
+  'handler',
+  'stands_in_for',
 ] as const;
 
 /** The for_each item's name, which no param may take (workflows spec §1). */
@@ -294,9 +313,185 @@ function stepOf(name: string, value: unknown, path: string): WorkflowStep {
     maxRuntimeS: whole(map['max_runtime_s'], `${place}.max_runtime_s`, 1),
     gates,
     parents: [...(parentsRaw as string[])],
-    forEach: optionalText(map['for_each'], `${place}.for_each`),
+    forEach: forEachOf(map['for_each'], place),
     wake,
+    outputs: outputsOf(map['outputs'], place, path),
+    when: whenOf(map['when'], place, path),
+    onBlocked: routeOf(map['on_blocked'], `${place}.on_blocked`, path),
+    onGaveUp: routeOf(map['on_gave_up'], `${place}.on_gave_up`, path),
+    handler: flag(map['handler'], `${place}.handler`),
+    standsInFor: map['stands_in_for'] === undefined || map['stands_in_for'] === null ? undefined : stepName(map['stands_in_for'], `${place}.stands_in_for`),
   };
+}
+
+// ---------------------------------------------------------------------------
+// The routing keys (workflow routing spec §1 to §5)
+// ---------------------------------------------------------------------------
+
+/** The most values an enum takes, and the size of each (workflow routing spec §2.1). */
+const ENUM_LIMITS = { values: 50, valueBytes: 256 } as const;
+
+/** The most items a list output may be declared to hold (workflow routing spec §2.1). */
+export const LIST_MAX = 100;
+
+/** Whether a text holds a known secret: an enum's or a clause's value is stored as written (workflow routing spec §7.3). */
+function secretIn(value: string): boolean {
+  return redactKnownSecrets(value) !== value;
+}
+
+/** True or false, absent false. */
+function flag(value: unknown, place: string): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value !== 'boolean') fail(`${place} is true or false`);
+  return value as boolean;
+}
+
+/** A step's name as a key names one: text, checked against the steps once they are all read. */
+function stepName(value: unknown, place: string): string {
+  if (typeof value !== 'string' || value === '') fail(`${place} is a step's name`);
+  return value as string;
+}
+
+/** `for_each`: a list param's name, as text, or `{ step, output }` (workflow routing spec §1). */
+function forEachOf(value: unknown, place: string): WorkflowStep['forEach'] {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string') return value;
+  const bad = `${place}.for_each is a list param's name, or { step, output } naming an ancestor's list output`;
+  if (!isRecord(value)) fail(bad);
+  const map = value as Record<string, unknown>;
+  const keys = Object.keys(map).sort();
+  if (keys.length !== 2 || keys[0] !== 'output' || keys[1] !== 'step' || typeof map['step'] !== 'string' || typeof map['output'] !== 'string') fail(bad);
+  return { step: map['step'] as string, output: map['output'] as string };
+}
+
+/** A scalar type: a bare word, or `{ enum: [values] }` (workflow routing spec §2.1). */
+function scalarOf(value: unknown, place: string, path: string): ScalarType | undefined {
+  if (value === 'boolean' || value === 'number' || value === 'string') return value;
+  if (!isRecord(value) || !('enum' in value)) return undefined;
+  reject(path, place, value, ['enum'], HINTS);
+  const values = value['enum'];
+  if (!Array.isArray(values) || values.length === 0 || values.length > ENUM_LIMITS.values) fail(`${place}: an enum has 1 to ${ENUM_LIMITS.values} values`);
+  for (const [n, v] of (values as unknown[]).entries()) {
+    if (typeof v !== 'string' || v === '' || bytesOf(v) > ENUM_LIMITS.valueBytes || titleRefused(v)) {
+      fail(`${place}: an enum's values are text of 1 to ${ENUM_LIMITS.valueBytes} bytes, on one line`);
+    }
+    if (secretIn(v)) fail(`${place}: an enum value holds a known secret, and an enum value is stored as written`);
+    if ((values as unknown[]).indexOf(v) !== n) fail(`${place}: an enum names ${q(v)} twice`);
+  }
+  return { enum: [...(values as string[])] };
+}
+
+/** An output's type (workflow routing spec §2.1): a scalar, or `{ list: <scalar>, max: <n> }`. */
+function outputTypeOf(value: unknown, place: string, path: string): OutputType {
+  const scalar = scalarOf(value, place, path);
+  if (scalar !== undefined) return scalar;
+  if (isRecord(value) && 'list' in value) {
+    reject(path, place, value, ['list', 'max'], HINTS);
+    const item = scalarOf(value['list'], `${place}.list`, path);
+    if (item === undefined) fail(`${place}: a list's items are boolean, number, string or { enum: [values] }`);
+    const max = value['max'];
+    if (!Number.isSafeInteger(max) || (max as number) < 1 || (max as number) > LIST_MAX) fail(`${place}: a list needs its max, from 1 to ${LIST_MAX}`);
+    return { list: item as ScalarType, max: max as number };
+  }
+  return fail(`${place} is boolean, number, string, { enum: [values] } or { list: <type>, max: <n> }`);
+}
+
+/** A step's `outputs` (workflow routing spec §2.1): names in the param grammar, each with its type, in the file's order. */
+function outputsOf(value: unknown, place: string, path: string): Outputs {
+  if (value === undefined || value === null) return {};
+  const map = section(path, `${place}.outputs`, value);
+  const out: Outputs = {};
+  for (const [name, type] of Object.entries(map)) {
+    if (!NAME_PATTERN.test(name)) {
+      fail(`${place}.outputs: output name ${visible(JSON.stringify(name))} must be lowercase letters, digits and '-', start with a letter, not end with '-', and be at most 40 characters`);
+    }
+    out[name] = outputTypeOf(type, `${place}.outputs.${name}`, path);
+  }
+  return out;
+}
+
+/** The tests a clause on an output takes, one of them (workflow routing spec §3). */
+const TESTS = ['equals', 'in', 'is', 'at_least', 'at_most'] as const;
+
+/** The states a clause reads (workflow routing spec §3.1). */
+const STATES: readonly StepState[] = ['done', 'skipped', 'gave_up', 'blocked'];
+
+/** A value a clause compares with: text, a number or true or false, holding no known secret. */
+function clauseValue(value: unknown, place: string): ClauseValue {
+  if (typeof value === 'string') {
+    if (secretIn(value)) fail(`${place} holds a known secret, and a clause's value is stored as written`);
+    return value;
+  }
+  if ((typeof value === 'number' && Number.isFinite(value)) || typeof value === 'boolean') return value;
+  return fail(`${place} is text, a number, true or false`);
+}
+
+/** One clause (workflow routing spec §3): `step` and either `output` with one test, or `state`. */
+function clauseOf(value: unknown, place: string, path: string): Clause {
+  if (!isRecord(value)) fail(`${place} is a clause: { step, output, <test> } or { step, state }`);
+  const map = value as Record<string, unknown>;
+  reject(path, place, map, ['step', 'output', 'state', ...TESTS], HINTS);
+  const step = stepName(map['step'], `${place}.step`);
+  const tests = TESTS.filter((t) => map[t] !== undefined);
+  if (map['state'] !== undefined) {
+    if (map['output'] !== undefined || tests.length > 0) fail(`${place} reads a state or an output, not both`);
+    const state = map['state'];
+    if (!STATES.includes(state as StepState)) fail(`${place}.state is ${STATES.slice(0, -1).join(', ')} or ${STATES.at(-1) ?? ''}`);
+    return { step, state: state as StepState };
+  }
+  if (typeof map['output'] !== 'string' || map['output'] === '') fail(`${place} names an output and one test, or a state`);
+  const output = map['output'] as string;
+  if (tests.length === 0) fail(`${place} names an output and one test, or a state`);
+  if (tests.length > 1) fail(`${place} has two tests, ${tests[0] ?? ''} and ${tests[1] ?? ''}; a clause takes one`);
+  const test = tests[0] as (typeof TESTS)[number];
+  const raw = map[test];
+  const at = `${place}.${test}`;
+  switch (test) {
+    case 'equals':
+      return { step, output, equals: clauseValue(raw, at) };
+    case 'in':
+      if (!Array.isArray(raw) || raw.length === 0) fail(`${at} is a list of text, numbers, true or false`);
+      return { step, output, in: (raw as unknown[]).map((v, i) => clauseValue(v, `${at}[${i}]`)) };
+    case 'is':
+      if (typeof raw !== 'boolean') fail(`${at} is true or false`);
+      return { step, output, is: raw as boolean };
+    case 'at_least':
+    case 'at_most':
+      if (typeof raw !== 'number' || !Number.isFinite(raw)) fail(`${at} is a number`);
+      return test === 'at_least' ? { step, output, at_least: raw as number } : { step, output, at_most: raw as number };
+  }
+}
+
+/** A step's `when` (workflow routing spec §3): clauses, every one of which must hold, and at most one `any` group. */
+function whenOf(value: unknown, place: string, path: string): WhenItem[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.length === 0) fail(`${place}.when is a list of clauses, at least one`);
+  let anys = 0;
+  return (value as unknown[]).map((item, i): WhenItem => {
+    const at = `${place}.when[${i}]`;
+    if (isRecord(item) && 'any' in item) {
+      anys += 1;
+      if (anys > 1) fail(`${place}.when has two any groups; it takes one`);
+      reject(path, at, item, ['any'], HINTS);
+      const group = item['any'];
+      if (!Array.isArray(group) || group.length === 0) fail(`${at}.any is a list of clauses, at least one`);
+      return {
+        any: (group as unknown[]).map((c, n) => {
+          if (isRecord(c) && 'any' in c) fail(`${at}.any[${n}] is a clause: an any group holds no other group`);
+          return clauseOf(c, `${at}.any[${n}]`, path);
+        }),
+      };
+    }
+    return clauseOf(item, at, path);
+  });
+}
+
+/** `on_blocked` and `on_gave_up` (workflow routing spec §5.1): `wait`, the default, or `{ route: <handler step> }`. */
+function routeOf(value: unknown, place: string, path: string): RouteSpec {
+  if (value === undefined || value === null || value === 'wait') return 'wait';
+  if (!isRecord(value)) fail(`${place} is wait or { route: <handler step> }`);
+  reject(path, place, value as Record<string, unknown>, ['route'], HINTS);
+  return { route: stepName((value as Record<string, unknown>)['route'], `${place}.route`) };
 }
 
 /** A step's `wake`: true or false, or `{ role: <name> }` (wake spec §3.1, §19.1), checked as the other fields are. */
@@ -308,6 +503,11 @@ function stepWake(path: string, place: string, raw: unknown): boolean | { role: 
   const role = map['role'];
   if (typeof role !== 'string' || role.trim() === '') fail(`${place}.wake.role is a role's name`);
   return { role: role as string };
+}
+
+/** The list param a step fans out over, or undefined for none and for a result's fan-out (workflow routing spec §1). */
+export function paramFanOut(step: Pick<WorkflowStep, 'forEach'>): string | undefined {
+  return typeof step.forEach === 'string' ? step.forEach : undefined;
 }
 
 /** A cycle among the steps, as `a -> b -> a`, or undefined: a walk of the parents (workflows spec §4). */
@@ -408,10 +608,11 @@ function checkWhole(steps: readonly WorkflowStep[], params: ReadonlyMap<string, 
     const later = s.parents.find((p) => !seen.has(p));
     if (later !== undefined) fail(`${place}.parents names ${later}, which is written after it: write a step below its parents`);
     seen.add(s.name);
-    if (s.forEach !== undefined) {
-      const param = params.get(s.forEach);
-      if (param === undefined) fail(`${place}.for_each names ${q(s.forEach)}, which is no param this file declares`);
-      if (!param.list) fail(`${place}.for_each names ${s.forEach}, a text param: for_each takes a list param`);
+    const over = paramFanOut(s);
+    if (over !== undefined) {
+      const param = params.get(over);
+      if (param === undefined) fail(`${place}.for_each names ${q(over)}, which is no param this file declares`);
+      if (!param.list) fail(`${place}.for_each names ${over}, a text param: for_each takes a list param`);
     }
     const forEach = s.forEach !== undefined;
     references(s.title, `${place}.title`, params, forEach);
@@ -765,7 +966,7 @@ function personParams(w: Workflow): Set<string> {
     for (const spec of [s.assignee, s.reviewer]) {
       if (spec === undefined || spec.must === 'role') continue;
       const ref = REFERENCE.exec(spec.value)?.[1];
-      if (ref === ITEM && s.forEach !== undefined) out.add(s.forEach);
+      if (ref === ITEM && paramFanOut(s) !== undefined) out.add(paramFanOut(s) ?? '');
       else if (ref !== undefined && ref !== ITEM) out.add(ref);
     }
   }
@@ -778,7 +979,7 @@ function titleParams(w: Workflow): Set<string> {
   for (const s of w.steps) {
     for (const m of s.title.matchAll(/\{\{([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\}\}/g)) {
       const name = m[1] ?? '';
-      if (name === ITEM && s.forEach !== undefined) out.add(s.forEach);
+      if (name === ITEM && paramFanOut(s) !== undefined) out.add(paramFanOut(s) ?? '');
       else if (name !== ITEM) out.add(name);
     }
   }
@@ -924,7 +1125,8 @@ export function expand(w: Workflow, given: GivenParams, board: string, personOf?
   const refsOf = new Map<string, string[]>();
   const tasks: DagTask[] = [];
   for (const s of w.steps) {
-    const items: Array<string | null> = s.forEach === undefined ? [null] : [...((values.get(s.forEach) as string[] | undefined) ?? [])];
+    const over = paramFanOut(s);
+    const items: Array<string | null> = over === undefined ? [null] : [...((values.get(over) as string[] | undefined) ?? [])];
     const refs: string[] = [];
     for (const [n, item] of items.entries()) {
       const sub = (t: string): string => t.replace(/\{\{([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\}\}/g, (_m, name: string) => (name === ITEM ? (item ?? '') : textOf(name)));
@@ -933,7 +1135,7 @@ export function expand(w: Workflow, given: GivenParams, board: string, personOf?
         const ref = REFERENCE.exec(spec.value)?.[1];
         if (ref === undefined || REFERENCE.exec(spec.value)?.[0] !== spec.value) return { ok: true, value: spec.value };
         const value = ref === ITEM ? (item ?? '') : textOf(ref);
-        const bad = nameGiven(value, place, spec, kind, ref === ITEM ? (s.forEach ?? ITEM) : ref);
+        const bad = nameGiven(value, place, spec, kind, ref === ITEM ? (over ?? ITEM) : ref);
         return bad ?? { ok: true, value };
       };
       const assignee = name(s.assignee, `steps.${s.name}.assignee`, 'person');
@@ -944,7 +1146,7 @@ export function expand(w: Workflow, given: GivenParams, board: string, personOf?
       if (!workspace.ok) return workspace;
       const contract: Contract = {};
       for (const [field, value] of Object.entries(s.contract) as [keyof Contract, string][]) contract[field] = sub(value);
-      const ref = s.forEach === undefined ? s.name : `${s.name}:${n + 1}`;
+      const ref = over === undefined ? s.name : `${s.name}:${n + 1}`;
       refs.push(ref);
       const body = s.body === undefined ? null : sub(s.body);
       tasks.push({
@@ -968,7 +1170,7 @@ export function expand(w: Workflow, given: GivenParams, board: string, personOf?
     }
     refsOf.set(s.name, refs);
     if (tasks.length > DAG_LIMITS.tasks) {
-      const total = w.steps.reduce((sum, x) => sum + (x.forEach === undefined ? 1 : ((values.get(x.forEach) as string[] | undefined)?.length ?? 0)), 0);
+      const total = w.steps.reduce((sum, x) => sum + (paramFanOut(x) === undefined ? 1 : ((values.get(paramFanOut(x) ?? '') as string[] | undefined)?.length ?? 0)), 0);
       return refuse('invalid', `workflow ${w.name} would make ${total} tasks with these params; an instance has at most ${DAG_LIMITS.tasks}`);
     }
   }
