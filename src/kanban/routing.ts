@@ -896,3 +896,42 @@ export function stepLines(
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Preview (§12.3)
+// ---------------------------------------------------------------------------
+
+/** A result fan-out's bound, its source's list `max`; undefined for any other step. */
+export function fanOutMax(plan: Plan, s: StepShape): number | undefined {
+  const f = s.for_each;
+  if (f === undefined || !('step' in f)) return undefined;
+  const t = plan.steps.find((x) => x.step === f.step)?.outputs[f.output];
+  return t !== undefined && typeof t === 'object' && 'list' in t ? t.max : undefined;
+}
+
+/**
+ * The most tasks a plan could make after its start (§12.3): each pending step's,
+ * a result fan-out's list `max`, a list param's items, else one; and 3 routes
+ * for each task a handler is routed from.
+ */
+export function mostLater(plan: Plan): number {
+  const tasks = (s: PlanStep): number => fanOutMax(plan, s) ?? s.templates?.length ?? 1;
+  let most = 0;
+  for (const s of plan.steps) {
+    if (s.made === 'decide') most += tasks(s);
+    if (s.handler === true) for (const from of routedFrom(plan.steps, s.step)) most += ROUTES_PER_TASK * tasks(plan.steps.find((x) => x.step === from) as PlanStep);
+  }
+  return most;
+}
+
+/** A preview's lines of the steps made later (§12.3): each pending step and handler, in the words of §6, a fan-out with its bound. */
+export function laterLines(plan: Plan): Array<{ step: string; words: string }> {
+  return plan.steps.filter((s) => s.made !== 'start').map((s) => ({ step: s.step, words: stepWords(plan.steps, s, (x) => fanOutMax(plan, x)) }));
+}
+
+/** A preview's head for a plan (§12.3): `1 task now, and up to 108 more as results come`, and past the cap `, at most 500 in all`. */
+export function laterCount(plan: Plan, now: number): string {
+  const more = mostLater(plan);
+  const capped = now + more > INSTANCE_CAP ? `, at most ${INSTANCE_CAP} in all` : '';
+  return `${now} task${now === 1 ? '' : 's'} now, and up to ${more} more as results come${capped}`;
+}

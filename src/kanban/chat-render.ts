@@ -8,6 +8,7 @@ import { redactKnownSecrets, withholdSecretPrefix } from '../secrets.js';
 import { stripControl } from '../text.js';
 import { LIST_FILTERS, USAGE } from './chat-parse.js';
 import { describeReported } from './commit.js';
+import { laterCount, laterLines, type Plan } from './routing.js';
 import type { DisplayStatus } from './status.js';
 import { DEFAULT_BOARD, REPORTED_OUTCOMES, type Assignee, type DeferredState, type DeferredWhy, type FailedGate, type GateRow, type KanbanEvent, type RunOutcome, type RunRow, type TaskRow, type Waiting } from './types.js';
 
@@ -1034,13 +1035,17 @@ export function workflowName(name: string | null): string {
   return name ?? '(no workflow)';
 }
 
-/** `/kanban workflow preview` (workflows spec §9): what a start would make, one line a task, and that nothing was made. */
+/**
+ * `/kanban workflow preview` (workflows spec §9): what a start would make, one line a task, and that nothing was made;
+ * for a routed file (workflow routing spec §12.3), then each step made later, in the words of a check, and how many it could make.
+ */
 export function renderPreview(
   name: string,
   dag: { board: string | null; tasks: readonly { ref: string; title: string; assignee: string | null; parents: readonly string[]; gates: readonly unknown[] }[] },
   whom: (name: string) => string,
   nameOf?: NameOf,
   chatBoard?: string,
+  plan?: Plan | null,
 ): string {
   // Named when not default, or not the chat's (workflows spec §19.3).
   const on = dag.board ?? DEFAULT_BOARD;
@@ -1051,9 +1056,11 @@ export function renderPreview(
     const gates = t.gates === 0 ? '' : `, ${t.gates} gate${t.gates === 1 ? '' : 's'}`;
     return `- \`${label(t.ref, 64)}\` ${titleText(t.title, nameOf, WORKFLOW_TITLE_MAX)}, for ${t.assignee === null ? 'nobody yet' : whom(t.assignee)}${after}${gates}`;
   });
+  const later = plan === undefined || plan === null ? [] : laterLines(plan).map((l) => `- ${label(l.step, 64)}: ${label(l.words, 300)}`);
+  const counted = plan === undefined || plan === null ? `${n} task${n === 1 ? '' : 's'}` : laterCount(plan, n);
   return fitted(
-    [`${label(name)} would make ${n} task${n === 1 ? '' : 's'}${board}:`],
-    lines,
+    [`${label(name)} would make ${counted}${board}:`],
+    [...lines, ...later],
     [`Nothing was made: \`/kanban workflow start ${label(name)}\`, with these params, makes it.`],
     (more) => `… and ${more} more.`,
   );
@@ -1078,15 +1085,18 @@ export interface StartedReply {
   people: boolean;
   /** Who started it at a terminal, as nobody in the chat typed it; absent for a chat's own start. */
   by?: string;
+  /** How many steps wait to be made as results come (workflow routing spec §12.3). */
+  waiting?: number;
 }
 
 /** A start's reply from what the start made, as chat's start builds it. */
-export function startedReply(made: { instance: { instanceId: string; name: string | null; board: string }; tasks: readonly { task: TaskRow }[] }): StartedReply {
+export function startedReply(made: { instance: { instanceId: string; name: string | null; board: string }; tasks: readonly { task: TaskRow }[]; waiting?: readonly string[] }): StartedReply {
   return {
     instance: made.instance,
     tasks: made.tasks.map(({ task }) => ({ taskId: task.taskId, title: task.title, assignee: task.assignee?.name ?? null, assigneeKind: task.assignee?.kind ?? null })),
     count: made.tasks.length,
     people: made.tasks.some(({ task }) => task.assignee?.kind === 'human' || task.reviewer?.kind === 'human'),
+    ...(made.waiting === undefined || made.waiting.length === 0 ? {} : { waiting: made.waiting.length }),
   };
 }
 
@@ -1104,6 +1114,7 @@ function startedOf(p: Record<string, unknown>): StartedReply {
     count: typeof p['count'] === 'number' ? p['count'] : tasks.length,
     people: p['people'] === true,
     by: text(p, 'by') || 'the operator',
+    ...(typeof p['waiting'] === 'number' && p['waiting'] > 0 ? { waiting: p['waiting'] } : {}),
   };
 }
 
@@ -1130,10 +1141,13 @@ export function renderStarted(reply: StartedReply, where: 'thread' | 'chat', who
       : where === 'thread'
         ? " A person's card comes in this thread when their task is ready, or by direct message if they are not in this group."
         : ' A person is sent their card by direct message once their task is ready.';
+  const w = reply.waiting ?? 0;
+  const later = w === 0 ? [] : [`${w} more step${w === 1 ? ' is' : 's are'} made as results come: \`/kanban workflow show ${instance.instanceId}\` follows them.`];
   return fitted(
     [`${head}, ${n} task${n === 1 ? '' : 's'}${board}:`],
     lines,
     [
+      ...later,
       ...pointer,
       `${where === 'thread' ? 'This thread' : 'This chat'} hears when each task is done, needs review, has changes requested, blocks, is retried after a failure, gives up or is stranded.${cards}`,
     ],

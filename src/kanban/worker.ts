@@ -623,6 +623,8 @@ function madeAnswer(r: WorkflowMade): WorkerResponse {
     existing: r.existing,
     board: r.instance.board,
     tasks: r.tasks.map((t) => ({ task_id: t.taskId, ref: t.ref, step: t.step, item: t.item })),
+    // The steps made as results come (workflow routing spec §12.3).
+    ...(r.waiting === undefined ? {} : { waiting: r.waiting }),
   };
 }
 

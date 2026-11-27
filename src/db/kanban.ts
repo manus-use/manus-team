@@ -2463,6 +2463,8 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
             by: instance.createdBy,
             count: members.length,
             people: members.some((m) => human(m.task.assignee) || human(m.task.reviewer)),
+            // The steps made as results come, for the reply's line (workflow routing spec §12.3).
+            ...(plan === null ? {} : { waiting: plan.steps.filter((s) => s.made === 'decide').length }),
             tasks: members.slice(0, STARTED_TASKS).map((m, i) => ({
               taskId: ids[i],
               title: m.task.title,

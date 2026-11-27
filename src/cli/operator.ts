@@ -1005,6 +1005,7 @@ function madeJson(made: WorkflowMade): Record<string, unknown> {
     existing: made.existing,
     board: made.instance.board,
     tasks: made.tasks.map((t) => ({ task_id: t.taskId, ref: t.ref, step: t.step, item: t.item })),
+    ...(made.waiting === undefined ? {} : { waiting: made.waiting }),
     // Nothing made, so the gateway was not asked to look.
     ...(made.existing ? { nudged: false } : {}),
   };
@@ -1075,7 +1076,7 @@ function preview(rest: readonly string[], io: MtIo): number {
     io.err(`mt: ${line(person, 200)} is checked at the start, against the people this gateway knows; mt kanban workflow apply --dry-run on this preview's --json checks it now`);
   }
   if (json) io.out(jsonFile(JSON.parse(dagFile(shaped.dag))));
-  else for (const l of previewText(name, boardName, previewLines(shaped.dag))) io.out(l);
+  else for (const l of previewText(name, boardName, previewLines(shaped.dag), expanded.plan)) io.out(l);
   return 0;
 }
 

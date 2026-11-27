@@ -14,6 +14,7 @@ import {
   type PreviewLine,
   type WakeShow,
 } from '../kanban/chat-render.js';
+import { laterCount, laterLines, type Plan } from '../kanban/routing.js';
 import type { DisplayStatus } from '../kanban/status.js';
 import type { Assignee, GateRow, TaskRow, Waiting } from '../kanban/types.js';
 import { redactKnownSecrets } from '../secrets.js';
@@ -293,7 +294,7 @@ function named(name: string | null): string {
  * preview says it, a line a task with its ref, its title, its assignee, its
  * parents' refs and how many gates it has, and that nothing was made.
  */
-export function previewText(name: string, board: string, lines: readonly PreviewLine[]): string[] {
+export function previewText(name: string, board: string, lines: readonly PreviewLine[], plan: Plan | null = null): string[] {
   const n = lines.length;
   const rows = lines.map((t) => [
     line(t.ref, 64),
@@ -302,16 +303,24 @@ export function previewText(name: string, board: string, lines: readonly Preview
     t.parents.length === 0 ? '' : `after ${t.parents.map((p) => line(p, 64)).join(', ')}`,
     t.gates === 0 ? '' : `${t.gates} gate${t.gates === 1 ? '' : 's'}`,
   ]);
+  // A routed file's steps made later, in the words of a check, and how many it could make (workflow routing spec §12.3).
+  const later = plan === null ? [] : laterLines(plan).map((l) => `  ${line(l.step, 64)}: ${line(l.words, 400)}`);
   return [
-    `${line(name, 80)} would make ${n} task${n === 1 ? '' : 's'}, on board ${line(board, 80)}:`,
+    `${line(name, 80)} would make ${plan === null ? `${n} task${n === 1 ? '' : 's'}` : laterCount(plan, n)}, on board ${line(board, 80)}:`,
     ...table(rows).map((r) => `  ${r}`),
+    ...later,
     `nothing was made: mt kanban workflow start ${line(name, 80)}, with these params, makes it`,
   ];
 }
 
 /** A start's or an apply's answer (workflows spec §6): the instance, then every task, uncut, with its ref, title and assignee. */
 export function madeText(
-  made: { instance: { instanceId: string; name: string | null; board: string; source: string }; tasks: readonly { taskId: string; ref: string; task: { title: string; assignee: Assignee | null } }[]; existing: boolean },
+  made: {
+    instance: { instanceId: string; name: string | null; board: string; source: string };
+    tasks: readonly { taskId: string; ref: string; task: { title: string; assignee: Assignee | null } }[];
+    existing: boolean;
+    waiting?: readonly string[];
+  },
 ): string[] {
   const { instance } = made;
   const n = made.tasks.length;
@@ -320,7 +329,9 @@ export function madeText(
     ? `already made, as ${instance.instanceId}, on board ${line(instance.board, 80)}, ${n} task${n === 1 ? '' : 's'}; nothing new was made`
     : `${what} as ${instance.instanceId}, on board ${line(instance.board, 80)}, ${n} task${n === 1 ? '' : 's'}`;
   const rows = made.tasks.map((t) => [t.taskId, line(t.ref, 64), line(t.task.title, 200), who(t.task.assignee)]);
-  return [head, ...table(rows).map((r) => `  ${r}`)];
+  const w = made.waiting?.length ?? 0;
+  const later = w === 0 ? [] : [`${w} more step${w === 1 ? ' is' : 's are'} made as results come: mt kanban workflow show ${instance.instanceId} follows them`];
+  return [head, ...table(rows).map((r) => `  ${r}`), ...later];
 }
 
 /** `apply --dry-run`'s answer (workflows spec §6): what the apply would make, a line a task in preview's columns, each followed by its gates' commands, masked; or the instance its key made. */

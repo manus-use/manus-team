@@ -386,6 +386,8 @@ export interface WorkflowMade {
   existing: boolean;
   /** `STEPS_NOTICE_ONLY`, for a start whose steps asked for a wake while wakes are off (wake spec §3.4), or `NO_CHAT_NOTICE_ONLY`, with no chat to follow them (§19.16). */
   wakeNote?: string;
+  /** For an instance with a plan, the steps still waiting to be made, by name, handlers not among them (workflow routing spec §12.3, §13.2). */
+  waiting?: string[];
 }
 
 /** A dry run's answer (workflows spec §6): what the apply would make, or the instance its key already made; nothing written. */
@@ -2127,7 +2129,14 @@ export class KanbanService {
       if (read.file === 'unreadable' || read.board === keyed.instance.board) refused = board.keyRefused(keyed, { ...want, board: keyed.instance.board });
     }
     if (refused !== undefined) return refused;
-    return { ok: true, instance: keyed.instance, tasks: membersWithTasks(this.#db, keyed.instance.instanceId), existing: true };
+    return { ok: true, instance: keyed.instance, tasks: membersWithTasks(this.#db, keyed.instance.instanceId), existing: true, ...this.#waitingOf(keyed.instance) };
+  }
+
+  /** An instance's steps still waiting, for one with a plan (workflow routing spec §12.3). */
+  #waitingOf(instance: InstanceRow): { waiting?: string[] } {
+    if (instance.plan === null) return {};
+    const waiting = new Set(pendingOf(this.#db, instance.instanceId).filter((p) => p.state === 'waiting').map((p) => p.step));
+    return { waiting: instance.plan.steps.filter((s) => waiting.has(s.step)).map((s) => s.step) };
   }
 
   /**
@@ -2210,7 +2219,14 @@ export class KanbanService {
       this.#clock.now(),
     );
     if (!r.ok) return r;
-    return { ok: true, instance: r.instance, tasks: r.members, existing: r.existing, ...(i.wakeNote === undefined ? {} : { wakeNote: i.wakeNote }) };
+    return {
+      ok: true,
+      instance: r.instance,
+      tasks: r.members,
+      existing: r.existing,
+      ...(i.wakeNote === undefined ? {} : { wakeNote: i.wakeNote }),
+      ...this.#waitingOf(r.instance),
+    };
   }
 
   /** A workflow file's board alone, by the light read (workflows spec §19.3); unreadable with no directory. */
