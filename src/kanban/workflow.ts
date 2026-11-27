@@ -1171,6 +1171,67 @@ export function workflowBoard(dir: string, name: string): WorkflowBoardRead {
   return { file: 'read', board: typeof b === 'string' && nameProblem('board', b) === undefined ? b : undefined };
 }
 
+/** The routing keys, as a refusal of a DAG path names them, in this order (workflow routing spec §13.5). */
+const ROUTING_KEYS = ['outputs', 'when', 'for_each over an output', 'on_blocked', 'on_gave_up', 'handler'] as const;
+
+/** Which routing keys a step uses, read from its YAML mapping as written: the same rules as `usesRouting`. */
+function keysUsed(step: Record<string, unknown>): Set<string> {
+  const used = new Set<string>();
+  const set = (v: unknown): boolean => v !== undefined && v !== null;
+  if (isRecord(step['outputs']) && Object.keys(step['outputs']).length > 0) used.add('outputs');
+  if (set(step['when'])) used.add('when');
+  if (isRecord(step['for_each'])) used.add('for_each over an output');
+  if (set(step['on_blocked']) && step['on_blocked'] !== 'wait') used.add('on_blocked');
+  if (set(step['on_gave_up']) && step['on_gave_up'] !== 'wait') used.add('on_gave_up');
+  if (step['handler'] === true) used.add('handler');
+  return used;
+}
+
+/** What the light read of a file's routing keys finds (workflow routing spec §13.5). */
+export type WorkflowRoutingRead = { file: 'unreadable' } | { file: 'read'; keys: string[] };
+
+/**
+ * A workflow file's routing keys alone (workflow routing spec §13.5), by the light
+ * read `workflowBoard` makes (workflows spec §19.3): the entry, the YAML parsed,
+ * no team check; the keys its steps use, in the order a refusal names them.
+ * Unreadable as `workflowBoard` finds one.
+ */
+export function workflowRouting(dir: string, name: string): WorkflowRoutingRead {
+  if (typeof name !== 'string' || !NAME_PATTERN.test(name)) return { file: 'unreadable' };
+  const entry = `${name}.yaml`;
+  if (statOf(join(dir, entry)) === undefined || notAWorkflow(dir, entry) !== undefined) return { file: 'unreadable' };
+  const read = readFile(join(dir, entry));
+  if (!read.ok) return { file: 'unreadable' };
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(read.text, { logLevel: 'error' });
+  } catch {
+    return { file: 'unreadable' };
+  }
+  const steps = isRecord(parsed) && isRecord(parsed['steps']) ? Object.values(parsed['steps']) : [];
+  const used = new Set(steps.flatMap((st) => (isRecord(st) ? [...keysUsed(st)] : [])));
+  return { file: 'read', keys: ROUTING_KEYS.filter((k) => used.has(k)) };
+}
+
+/** Why a DAG path refuses a file that uses routing keys (workflow routing spec §13.5): a DAG is a fixed graph. */
+export function routedDagProblem(name: string, keys: readonly string[]): string {
+  return `workflow ${name} uses ${keys.join(', ')}, which a DAG cannot carry: start it with workflow start`;
+}
+
+/** The routing keys a parsed file uses, in the order a refusal names them (workflow routing spec §13.5). */
+export function routingKeys(w: Workflow): string[] {
+  const used = new Set<string>();
+  for (const s of w.steps) {
+    if (Object.keys(s.outputs).length > 0) used.add('outputs');
+    if (s.when !== undefined) used.add('when');
+    if (typeof s.forEach === 'object') used.add('for_each over an output');
+    if (s.onBlocked !== 'wait') used.add('on_blocked');
+    if (s.onGaveUp !== 'wait') used.add('on_gave_up');
+    if (s.handler) used.add('handler');
+  }
+  return ROUTING_KEYS.filter((k) => used.has(k));
+}
+
 /** Why a workflow is not usable when its board does not exist (workflows spec §19.4). */
 export function missingBoardProblem(board: string): string {
   return `its board ${board} does not exist (create it with /kanban board create ${board}, or mt kanban board create ${board})`;

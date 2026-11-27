@@ -6,7 +6,7 @@ import { CHAT_ID, NEEDS_BOT, THREAD_ID, chatRefused } from '../core/lark-ids.js'
 import { DAG_LIMITS, checkDagShape, checkDagTasks, dagFile } from '../kanban/dag.js';
 import { NO_MENTIONS } from '../kanban/task-checks.js';
 import { WAKES_OFF, WORKFLOW_MESSAGE_BYTES, type KanbanService, type StartWake, type WorkflowMade } from '../kanban/service.js';
-import { archivedBoardProblem, expand, listWorkflows, missingBoardProblem, paramsLine, readWorkflow, startBoard, usableMessage, withBoards } from '../kanban/workflow.js';
+import { archivedBoardProblem, expand, listWorkflows, missingBoardProblem, paramsLine, readWorkflow, routedDagProblem, routingKeys, startBoard, usableMessage, withBoards } from '../kanban/workflow.js';
 import { boardsAt } from '../db/boards-at.js';
 import { maskAll, NUDGE, workerSocketPath } from '../kanban/socket.js';
 import { DEFAULT_BOARD, type BoardRow, type Contract, type CreatedVia, type Follow, type Refusal, type WakeRow } from '../kanban/types.js';
@@ -1052,6 +1052,9 @@ function preview(rest: readonly string[], io: MtIo): number {
     const boards = list.usable.some((w) => w.board !== undefined) ? boardsOrSaid() : undefined;
     return no(read.code, usableMessage(read.message, (boards === undefined ? list : withBoards(list, boards)).usable, WORKFLOW_MESSAGE_BYTES));
   }
+  // A DAG is a fixed graph: a file using routing keys has no DAG to give (workflow routing spec §13.5).
+  const keys = routingKeys(read.workflow);
+  if (json && keys.length > 0) return no('invalid', routedDagProblem(name, keys));
   const routed = startBoard(read.workflow, { kind: 'terminal', board: asked });
   if (!routed.ok) return no(routed.code, routed.message);
   const boardName = routed.board;

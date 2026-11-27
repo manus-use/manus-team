@@ -62,10 +62,12 @@ import {
   listWorkflows,
   missingBoardProblem,
   readWorkflow,
+  routedDagProblem,
   startBoard,
   usableMessage,
   withBoards,
   workflowBoard,
+  workflowRouting,
   type BoardPath,
   type GivenParams,
   type InstanceState,
@@ -1953,6 +1955,11 @@ export class KanbanService {
     if (repeat !== undefined) {
       if (!repeat.ok || req.dryRun !== true) return repeat;
       return { ok: true, dryRun: true, existing: true, instanceId: repeat.instance.instanceId, board: on.board, tasks: shaped.dag.tasks };
+    }
+    // A DAG labelled with a file that uses routing keys is refused: only a start keeps its checks and routes (workflow routing spec §13.5).
+    if (req.createdVia?.kind !== 'run' && shaped.dag.workflow !== null && this.#workflowsDir !== undefined) {
+      const routed = workflowRouting(this.#workflowsDir, shaped.dag.workflow);
+      if (routed.file === 'read' && routed.keys.length > 0) return board.refuse('invalid', routedDagProblem(shaped.dag.workflow, routed.keys));
     }
     // A DAG that names a workflow whose file names a board is held to it, by the file as it is now (workflows spec §19.3).
     let fromFile: string | undefined;
