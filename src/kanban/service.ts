@@ -53,8 +53,8 @@ import { redactKnownSecrets } from '../secrets.js';
 import { roleLimit, type Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
-import { checkDagShape, checkDagTasks, type Dag, type DagTask, type ShapedDag } from './dag.js';
-import { checkOutputs, fillText, INSTANCE_CAP, itemPlaceholderOf, outputBounds, placeholderOf, standInContract, type Plan, type PlanStep, type Template } from './routing.js';
+import { checkDagShape, checkDagTasks, DAG_LIMITS, type Dag, type DagTask, type ShapedDag } from './dag.js';
+import { checkOutputs, fillText, INSTANCE_CAP, itemPlaceholderOf, maskPlan, outputBounds, placeholderOf, standInContract, type Plan, type PlanStep, type Template } from './routing.js';
 import { holdsSecret } from './gate-command.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
@@ -1093,9 +1093,9 @@ export class KanbanService {
     handoff: board.Handoff,
     opts: ReportOptions = {},
   ): Promise<Result<{ task: TaskRow; run: RunRow | undefined }>> {
-    const refused = idsRefused(taskId) ?? handoffRefused(by, handoff) ?? this.#outputsRefused(taskId, 'complete', handoff.metadata);
+    const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
     if (refused !== undefined) return refused;
-    return this.#report(taskId, by, 'complete', undefined, opts, (seen) =>
+    return this.#report(taskId, by, 'complete', undefined, handoff.metadata, opts, (seen) =>
       board.complete(this.#db, taskId, by, { ...handoff, ...seen }, this.#clock.now(), this.#facts()),
     );
   }
@@ -1110,7 +1110,7 @@ export class KanbanService {
     handoff: board.Handoff & { reviewer?: string },
     opts: ReportOptions = {},
   ): Promise<Result<{ task: TaskRow; run: RunRow | undefined }>> {
-    const refused = idsRefused(taskId) ?? handoffRefused(by, handoff) ?? this.#outputsRefused(taskId, 'review', handoff.metadata);
+    const refused = idsRefused(taskId) ?? handoffRefused(by, handoff);
     if (refused !== undefined) return refused;
     const { reviewer, ...rest } = handoff;
     let named: Assignee | undefined;
@@ -1119,7 +1119,7 @@ export class KanbanService {
       if (!who.ok) return who;
       named = who.assignee;
     }
-    return this.#report(taskId, by, 'review', named, opts, (seen) =>
+    return this.#report(taskId, by, 'review', named, rest.metadata, opts, (seen) =>
       board.requestReview(
         this.#db,
         taskId,
@@ -1131,20 +1131,22 @@ export class KanbanService {
   }
 
   /**
-   * A work report's outputs (workflow routing spec §2.2), before its gates: on a
-   * member of an instance with a plan whose step declares outputs, a `complete`
-   * from `open` or a `review`, never a reviewer's approval, whose metadata is
-   * checked against them, `invalid` naming the first problem, so the run
-   * reports again. A stand-in's are its step's, and held to what reads its
+   * A work report's outputs (workflow routing spec §2.2), after the board's own
+   * check of the report, so another run's is refused as ever, and before its
+   * gates: on a member of an instance with a plan whose step declares outputs, a
+   * `complete` from `open` or a `review`, never a reviewer's approval, whose
+   * metadata is checked against them, `invalid` naming the first problem, so the
+   * run reports again. A stand-in's are its step's, and held to what reads its
    * step's. One indexed read for any task, nothing more for one with no plan.
    */
-  #outputsRefused(taskId: string, kind: 'complete' | 'review', metadata: unknown): Refusal | undefined {
+  #outputsRefused(task: TaskRow, kind: 'complete' | 'review', metadata: unknown): Refusal | undefined {
+    const taskId = task.taskId;
     const planned = plannedMemberOf(this.#db, taskId);
     const plan = planned?.instance.plan;
     if (planned === undefined || plan === null || plan === undefined) return undefined;
     const entry = plan.steps.find((s) => s.step === planned.member.step);
     if (entry === undefined || Object.keys(entry.outputs).length === 0) return undefined;
-    if (kind === 'complete' && getTask(this.#db, taskId)?.phase !== 'open') return undefined;
+    if (kind === 'complete' && task.phase !== 'open') return undefined;
     const read = entry.stands_in_for ?? entry.step;
     const problem = checkOutputs(entry.outputs, metadata, outputBounds(plan, read));
     if (problem !== undefined) return board.refuse('invalid', problem);
@@ -1191,6 +1193,7 @@ export class KanbanService {
     by: Reporter,
     kind: 'complete' | 'review',
     reviewer: Assignee | undefined,
+    metadata: unknown,
     opts: ReportOptions,
     apply: (seen: { reportedCommit?: string | null; reportedDirty?: boolean | null }) => Result<T>,
   ): Promise<Result<T>> {
@@ -1199,6 +1202,8 @@ export class KanbanService {
     }
     const now = board.reportCheck(this.#db, taskId, by, kind, reviewer);
     if (!now.ok) return now;
+    const outputs = this.#outputsRefused(now.task, kind, metadata);
+    if (outputs !== undefined) return outputs;
     // A complete the board will take as a review request runs the gates as one.
     const checkedAs = kind === 'complete' && board.completeAsksReview(now.task) ? 'review' : kind;
     // One report's checks in a checkout at a time: two reports' gates in one would trip over each other.
@@ -1884,6 +1889,13 @@ export class KanbanService {
     return checkDagTasks({ format: 1, workflow: null, params: {}, board: null, tasks }, { facts: this.#facts(), createdBy, createdVia });
   }
 
+  /** The wakes the steps made later ask for (wake spec §3.1, §19.1), one a step: the DAG holds only the plain steps', and a start checks these as it checks theirs. */
+  #plannedAsks(plan: Plan | null, w: Workflow): Array<true | { role: string } | undefined> {
+    if (plan === null) return [];
+    const later = new Set(plan.steps.filter((s) => s.made !== 'start').map((s) => s.step));
+    return w.steps.filter((s) => later.has(s.name)).map((s) => (s.wake === true ? (true as const) : s.wake === false ? undefined : { role: s.wake.role }));
+  }
+
   /** The plan with each template's wake, as the start resolved it for its step (workflow routing spec §7.3); a run's start's late members inherit theirs at the making. */
   #plannedWakes(plan: Plan | null, w: Workflow, wake: StartWakeOf | undefined): Plan | null {
     if (plan === null) return null;
@@ -1950,10 +1962,16 @@ export class KanbanService {
       this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined) ??
       this.#checkPlan(shaped.plan, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
-    const wake = this.#startWake(req, shaped.dag);
+    const wake = this.#startWake(req, [...shaped.dag.tasks.map((t) => t.wake), ...this.#plannedAsks(shaped.plan, shaped.workflow)]);
     if (!wake.ok) return wake;
+    const plan = this.#plannedWakes(shaped.plan, shaped.workflow, wake.wake);
+    // The expansion measured the plan as it filled it; the stored form, masked and with its wakes, is measured again (§7.3).
+    const size = plan === null ? 0 : Buffer.byteLength(JSON.stringify(maskPlan(plan, redactKnownSecrets)), 'utf8');
+    if (size > DAG_LIMITS.bytes) {
+      return board.refuse('too_large', `workflow ${shaped.workflow.name}'s plan is ${size} bytes with these params; it may be at most ${DAG_LIMITS.bytes}`);
+    }
     return this.#write(shaped, {
-      plan: this.#plannedWakes(shaped.plan, shaped.workflow, wake.wake),
+      plan,
       ...(wake.wake === undefined ? {} : { wake: wake.wake }),
       ...(wake.wakeNote === undefined ? {} : { wakeNote: wake.wakeNote }),
       name: shaped.workflow.name,
@@ -2015,7 +2033,7 @@ export class KanbanService {
     }
     const refused = this.#checkDag(shaped.dag, on.board, req.createdBy, req.createdVia, fromFile);
     if (refused !== undefined) return refused;
-    const wake = this.#startWake(req, shaped.dag);
+    const wake = this.#startWake(req, shaped.dag.tasks.map((t) => t.wake));
     if (!wake.ok) return wake;
     if (req.dryRun === true) return { ok: true, dryRun: true, existing: false, instanceId: null, board: on.board, tasks: shaped.dag.tasks };
     return this.#write(shaped, {
@@ -2052,15 +2070,16 @@ export class KanbanService {
    * chat to follow them; a start whose steps ask for one while wakes are off,
    * or at the terminal with no chat (§19.16), still starts, those members
    * notice-only, with the note. A run's members
-   * inherit its task's in the writer, so nothing is asked for them.
+   * inherit its task's in the writer, so nothing is asked for them. `asks` is
+   * every member's ask, a routed start's steps made later included.
    */
-  #startWake(req: StartRequest | ApplyRequest, dag: Dag): Result<{ wake?: StartWakeOf; wakeNote?: string }> {
+  #startWake(req: StartRequest | ApplyRequest, asks: ReadonlyArray<true | { role: string } | undefined>): Result<{ wake?: StartWakeOf; wakeNote?: string }> {
     const w = req.wake;
     if (w === undefined || req.createdVia?.kind === 'run') return { ok: true };
     const shape = wakeShapeRefused({ by: w.by, depth: w.depth });
     if (shape !== undefined) return shape;
     // A woken shell's members that ask for none keep its depth alone (§9.1); a null setter with asking steps is an owner not yet seen.
-    const asked = w.all || dag.tasks.some((t) => t.wake !== undefined);
+    const asked = w.all || asks.some((a) => a !== undefined);
     if (!asked) return { ok: true, wake: { by: null, depth: w.depth, all: false } };
     if (!this.#wake.enabled) {
       if (w.all) return board.refuse('wake_off', WAKES_OFF);
@@ -2071,16 +2090,16 @@ export class KanbanService {
     if (chatless && w.all && w.role === undefined) return board.refuse('invalid', 'a wake needs a chat that follows the task: add --chat');
     // An owner the terminal could not name: the members that ask are notice-only, with one note (§19.16), which wins over the no-chat note.
     if (w.by === null) return { ok: true, wake: { by: null, depth: w.depth, all: false }, wakeNote: w.note ?? OWNER_UNSEEN_NOTICE_ONLY };
-    const sessionSteps = chatless && !w.all && dag.tasks.some((t) => t.wake === true);
+    const sessionSteps = chatless && !w.all && asks.some((a) => a === true);
     const chatlessOf = chatless ? { rolesOnly: true } : {};
     const noChatNote = sessionSteps ? { wakeNote: NO_CHAT_NOTICE_ONLY } : {};
     const role = this.#wakeRole(w.role);
     if (!role.ok) return role;
     // A step's own role is checked as the start's is, when its member will wake (wake spec §19.1).
     if (w.role === undefined) {
-      for (const t of dag.tasks) {
-        if (typeof t.wake !== 'object') continue;
-        const own = this.#wakeRole(t.wake.role);
+      for (const a of asks) {
+        if (typeof a !== 'object') continue;
+        const own = this.#wakeRole(a.role);
         if (!own.ok) return own;
       }
     }

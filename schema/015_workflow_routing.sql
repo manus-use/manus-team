@@ -18,7 +18,7 @@ CREATE TABLE kanban_workflow_pending (
   step         TEXT NOT NULL,
   state        TEXT NOT NULL CHECK (state IN ('waiting', 'made', 'skipped')),
   reason       TEXT CHECK (reason IS NULL OR json_valid(reason)),  -- why it was made or skipped, masked
-  items        TEXT CHECK (items IS NULL OR json_valid(items)),    -- a fan-out's join marker: [{item, task_id, ref}]
+  items        TEXT CHECK (items IS NULL OR json_valid(items)),    -- a fan-out's join marker: [{item, taskId, ref}]
   cause_event  INTEGER,                                            -- the event whose transaction decided it
   decided_at   INTEGER,
   PRIMARY KEY (instance_id, step),

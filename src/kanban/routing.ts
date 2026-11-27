@@ -1,5 +1,5 @@
 import { redactKnownSecrets } from '../secrets.js';
-import { DAG_LIMITS, shown, titleRefused } from './dag.js';
+import { DAG_LIMITS, shown, titleRefused, visible } from './dag.js';
 import { CONTRACT_FIELDS, type Contract, type RetryOnCrash } from './types.js';
 
 /**
@@ -368,11 +368,11 @@ export function outputBounds(plan: Plan, step: string): OutputBounds {
   return { fanned, titledItems, titled };
 }
 
-/** A value a refusal quotes (§2.2): as JSON writes it, masked and cut at 80 characters. */
+/** A value a refusal quotes (§2.2): as JSON writes it, masked, cut at 80 characters, and its invisible characters shown. */
 function said(value: unknown): string {
   if (typeof value === 'string') return shown(value);
   const text = redactKnownSecrets(JSON.stringify(value) ?? String(value));
-  return text.length <= 80 ? text : `${text.slice(0, 80)}…`;
+  return visible(text.length <= 80 ? text : `${text.slice(0, 80)}…`);
 }
 
 /** What a value is, as `got …` says it when it is no list. */

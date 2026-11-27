@@ -5,11 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createBoard } from '../src/db/kanban.js';
 import { getInstance, pendingOf } from '../src/db/kanban-read.js';
 import { migrate, openDb } from '../src/db/open.js';
-import { KanbanService } from '../src/kanban/service.js';
+import { KanbanService, NO_CHAT_NOTICE_ONLY, STEPS_NOTICE_ONLY, WAKES_OFF } from '../src/kanban/service.js';
 import type { CreatedVia } from '../src/kanban/types.js';
 import { MASK, addSecrets, clearSecrets } from '../src/secrets.js';
 import { SCHEMA_DIR, testDb, type TestDb } from './helpers/db.js';
-import { ALICE, NOW, VIA } from './helpers/kanban.js';
+import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
 import { VI_WORKFLOW, madeOf, viBoard, viRoles, type ViBoard } from './helpers/routing.js';
 import { VENDOR_EVAL } from './helpers/workflow.js';
 
@@ -88,8 +88,35 @@ describe('a start of a routed file', () => {
     const plan = getInstance(h.db, r.instance.instanceId)?.plan;
     expect(plan?.steps.find((s) => s.step === 'verify')?.template?.wake).toEqual({ by: ALICE, depth: 0 });
     expect(plan?.steps.find((s) => s.step === 'escalate')?.template?.wake).toEqual({ by: ALICE, depth: 0 });
-    const none = madeOf(start({ idempotencyKey: 'lark:om_2' }));
+    // A run's start: its members inherit its task's wake at the making, so the plan stores none, whatever the start asks.
+    const run = claimed(h.db, r.tasks[0]?.taskId ?? '');
+    const none = madeOf(start({ createdBy: `run:${run.runId}`, createdVia: { kind: 'run', runId: run.runId }, wake: { by: ALICE, depth: 0, all: true } }));
     expect(getInstance(h.db, none.instance.instanceId)?.plan?.steps.find((s) => s.step === 'verify')?.template?.wake).toBeNull();
+  });
+
+  it('checks and resolves the wake a step made later asks for, as a plain step\'s', () => {
+    const asking = (wake: string) => VI_WORKFLOW.replace('    assignee: verifier\n', `    assignee: verifier\n    wake: ${wake}\n`);
+    // Only verify, a pending step, asks: its role is checked, and its template's wake resolved with it.
+    writeFileSync(join(b.dir, 'vi-workflow.yaml'), asking('{ role: verifier }'));
+    const r = madeOf(start({ wake: { by: ALICE, depth: 0, all: false } }));
+    expect(r.wakeNote).toBeUndefined();
+    const plan = getInstance(h.db, r.instance.instanceId)?.plan;
+    expect(plan?.steps.find((s) => s.step === 'verify')?.template?.wake).toEqual({ by: ALICE, depth: 0, role: 'verifier' });
+    expect(plan?.steps.find((s) => s.step === 'va')?.template?.wake).toEqual({ by: null, depth: 0 });
+    b.roles.delete('patch-author');
+    writeFileSync(join(b.dir, 'vi-workflow.yaml'), asking('{ role: patch-author }').replace('    assignee: patch-author\n', '    assignee: verifier\n'));
+    expect(start({ wake: { by: ALICE, depth: 0, all: false } })).toMatchObject({ ok: false, code: 'invalid', message: expect.stringContaining('patch-author') });
+  });
+
+  it('says a step made later that asks for a wake is notice-only while wakes are off, refusing a wake for every member, and with no chat', () => {
+    const off = viBoard(h, { wake: { enabled: false, maxDepth: 5 } });
+    writeFileSync(join(b.dir, 'vi-workflow.yaml'), VI_WORKFLOW.replace('    assignee: verifier\n', '    assignee: verifier\n    wake: true\n'));
+    const offStart = (wake: { by: string; depth: number; all: boolean }) =>
+      off.service.startWorkflow({ workflow: 'vi-workflow', params: CASE, createdBy: ALICE, createdVia: VIA, wake });
+    expect(offStart({ by: ALICE, depth: 0, all: false })).toMatchObject({ ok: true, wakeNote: STEPS_NOTICE_ONLY });
+    expect(offStart({ by: ALICE, depth: 0, all: true })).toEqual({ ok: false, code: 'wake_off', message: WAKES_OFF });
+    const chatless = madeOf(start({ createdVia: { kind: 'operator' }, wake: { by: ALICE, depth: 0, all: false } }));
+    expect(chatless.wakeNote).toBe(NO_CHAT_NOTICE_ONLY);
   });
 
   it('checks each template as create would, references filled with their widest form, refusing a title too long already', () => {
@@ -112,6 +139,20 @@ describe('a start of a routed file', () => {
       code: 'invalid',
       message: "steps.va declares outputs, which a role's run reports in its metadata, and its assignee is a person: a person's done gives none",
     });
+  });
+
+  it('refuses a param holding "{{" that a step made later would fill again, and leaves a plain file\'s params alone', () => {
+    expect(start({ params: { from: 'json', params: { case: '{{intake.kind}}' } } })).toEqual({
+      ok: false,
+      code: 'invalid',
+      message: 'param case holds "{{", which a step made later would read as a reference: remove it',
+    });
+    writeFileSync(join(b.dir, 'vendor-eval.yaml'), VENDOR_EVAL);
+    for (const name of ['worker', 'reviewer']) b.roles.set(name, viRoles().get('verifier') as never);
+    const r = madeOf(
+      b.service.startWorkflow({ workflow: 'vendor-eval', params: { from: 'json', params: { topic: '{{intake.kind}}', vendors: ['a'] } }, createdBy: ALICE, createdVia: VIA }),
+    );
+    expect(r.tasks[0]?.task.title).toContain('{{intake.kind}}');
   });
 
   it('starts a file using no routing key as before: no plan and no row', () => {

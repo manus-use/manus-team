@@ -1533,6 +1533,18 @@ export function expand(
     // A result fan-out's item, and a handler's, is filled when its task is made (§7.4): left in place.
     const lateItem = typeof s.forEach === 'object' || s.handler;
     const items: Array<string | null> = over === undefined ? [null] : [...((values.get(over) as string[] | undefined) ?? [])];
+    // A step made later has its title and body filled again then (workflow routing spec §7.4): a param's "{{" would read as a reference.
+    if (!plain(s)) {
+      for (const text of [s.title, s.body ?? '']) {
+        for (const [, ref] of text.matchAll(/\{\{([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)\}\}/g)) {
+          const param = ref === ITEM ? (lateItem ? undefined : over) : ref;
+          const v = param === undefined ? undefined : values.get(param);
+          if (param !== undefined && (Array.isArray(v) ? v.some((x) => x.includes('{{')) : (v ?? '').includes('{{'))) {
+            return refuse('invalid', `param ${param} holds "{{", which a step made later would read as a reference: remove it`);
+          }
+        }
+      }
+    }
     const made: Array<{ item: string | null; template: Template }> = [];
     for (const item of items) {
       const sub = (t: string): string =>

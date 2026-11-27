@@ -8,6 +8,9 @@ import { WORKER_LIMITS } from './limits.js';
 import { checkTask, isRecord, NO_MENTIONS, type TaskFacts } from './task-checks.js';
 import { CONTRACT_FIELDS, GATE_LIMITS, type Contract, type CreatedVia, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
+/** Re-exported for the routing, whose imports stay within the board's own modules (workflow routing spec §9.3). */
+export { visible } from '../names.js';
+
 /**
  * The DAG (workflows spec §5): the tasks a start or an apply makes, and their links, as
  * one JSON document. Whatever path made it -- a workflow's expansion, a file at

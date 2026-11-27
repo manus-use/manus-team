@@ -6,7 +6,7 @@ import { getRun, getTask } from '../src/db/kanban-read.js';
 import { checkOutputs, type OutputBounds } from '../src/kanban/routing.js';
 import { addSecrets, clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
-import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
+import { ALICE, NOW, VIA, claimed, newTask } from './helpers/kanban.js';
 import { VI_WORKFLOW, madeOf, viBoard, type ViBoard } from './helpers/routing.js';
 
 /**
@@ -35,6 +35,8 @@ describe('checkOutputs', () => {
     expect(checkOutputs(list, { packages: ['a', 'b', 'c', 7] }, NONE)).toBe('item 4 of output packages must be text; got 7');
     expect(checkOutputs({ reachable: 'boolean', score: 'number' }, { score: 'x', reachable: 'y' }, NONE)).toBe('output reachable must be true or false; got "y"');
     expect(checkOutputs({ reachable: 'boolean', packages: list.packages }, { reachable: false, packages: [], other: { free: true } }, NONE)).toBeUndefined();
+    // A value that is no text shows its invisible characters too.
+    expect(checkOutputs({ note: 'string' }, { note: ['a\u200bb'] }, NONE)).toBe('output note must be text; got ["a\\u200bb"]');
   });
 
   it('holds a list a fan-out reads to a list param\'s rules, and its items and a titled text to one line', () => {
@@ -108,6 +110,17 @@ describe('a completion checked against its outputs', () => {
     closeRun(h.db, run.runId, NOW);
     const review = claimed(h.db, taskId);
     expect(await b.service.complete(taskId, { kind: 'run', runId: review.runId }, { summary: 'LGTM' })).toMatchObject({ ok: true, task: { phase: 'done' } });
+  });
+
+  it("gives a run that is no longer the task's the board's own refusal, before its outputs are read", async () => {
+    const taskId = intake();
+    const other = newTask(h.db);
+    const run = claimed(h.db, other.taskId);
+    expect(await b.service.complete(taskId, { kind: 'run', runId: run.runId }, { summary: 'x', metadata: { kind: 'library' } })).toEqual({
+      ok: false,
+      code: 'wrong_task',
+      message: `run ${run.runId} is on task ${other.taskId}, not ${taskId}`,
+    });
   });
 
   it("refuses a person's done on a step with outputs, as it carries no metadata", async () => {

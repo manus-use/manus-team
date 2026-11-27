@@ -2,7 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { closeRun } from '../src/db/kanban.js';
-import { eventsOf, getInstance, getTask, membersOf, pendingOf, settledOf } from '../src/db/kanban-read.js';
+import { eventsOf, getInstance, getTask, membersOf, parentsOf, pendingOf, settledOf } from '../src/db/kanban-read.js';
 import { clearSecrets } from '../src/secrets.js';
 import { testDb, type TestDb } from './helpers/db.js';
 import { ALICE, NOW, VIA, claimed } from './helpers/kanban.js';
@@ -112,6 +112,10 @@ describe('a fault in the routing', () => {
       ['a', 'done'],
       ['b', 'done'],
     ]);
-    expect(membersOf(h.db, w.instance.instanceId).map((m) => m.step)).toEqual(['a', 'b', 'c']);
+    const members = membersOf(h.db, w.instance.instanceId);
+    expect(members.map((m) => m.step)).toEqual(['a', 'b', 'c']);
+    const c = members.find((m) => m.step === 'c')?.taskId ?? '';
+    expect(parentsOf(h.db, c).map((p) => p.taskId)).toEqual([task('a'), task('b')]);
+    expect(pendingOf(h.db, w.instance.instanceId).find((p) => p.step === 'c')).toMatchObject({ state: 'made', reason: { why: 'a.go is true' } });
   });
 });
