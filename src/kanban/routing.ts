@@ -649,11 +649,6 @@ function latestOf(facts: Facts, steps: readonly string[]): number {
   return steps.reduce((most, s) => Math.max(most, facts.steps.get(s)?.settled?.eventId ?? 0), 0);
 }
 
-/** How many tasks a pending step's making is: its list param's items, or one. */
-function tasksOf(s: PlanStep): number {
-  return s.templates?.length ?? 1;
-}
-
 /**
  * What is due now (§10), in the plan's order: each waiting step decided once its
  * `when` is certain, made once its parents are settled, or skipped; each skipped
@@ -673,8 +668,6 @@ export function decide(plan: Plan, facts: Facts): Decision[] {
       continue;
     }
     if (fact.row !== 'waiting') continue;
-    // A fan-out over a result waits: this build does not yet read its source's list.
-    if (s.for_each !== undefined && 'step' in s.for_each) continue;
     const w = when(plan, facts, s.when);
     if (w.truth === 'undecided') continue;
     if (w.truth === 'false') {
@@ -684,19 +677,43 @@ export function decide(plan: Plan, facts: Facts): Decision[] {
     const stuck = stuckParents(facts, s.when);
     const waited = s.parents.filter((p) => !stuck.has(p));
     if (!waited.every((p) => facts.steps.get(p)?.settled != null)) continue;
+    // A fan-out over a result waits for its source too, which may be an ancestor above its parents (§4.1).
+    const source = s.for_each !== undefined && 'step' in s.for_each ? s.for_each : undefined;
+    const from = source === undefined ? undefined : facts.steps.get(source.step)?.settled;
+    if (source !== undefined && (from === undefined || from === null)) continue;
     if (waited.length > 0 && waited.every((p) => facts.steps.get(p)?.settled?.how === 'archived')) {
       out.push({ step: s.step, outcome: 'skipped', by: 'archive', why: 'its parents were archived' });
       continue;
     }
-    const why = s.when === undefined ? 'its parents are settled' : whenText(s.when);
+    let items: string[] | undefined = s.templates?.map((t) => t.item);
+    if (source !== undefined && from !== undefined && from !== null) {
+      // The logical step's accepted list, its own task's or a stand-in's, never its task's phase (§4.1).
+      if (!accepted(from)) {
+        out.push({ step: s.step, outcome: 'skipped', by: 'source', why: `${source.step} was ${from.how === 'archived' ? 'archived' : 'skipped'}` });
+        continue;
+      }
+      const list = resultOf(plan, facts, source.step, source.output);
+      const ref = `${source.step}.${source.output}`;
+      if (!Array.isArray(list)) {
+        out.push({ step: s.step, outcome: 'skipped', by: 'source', why: `${ref} is missing` });
+        continue;
+      }
+      if (list.length === 0) {
+        out.push({ step: s.step, outcome: 'skipped', by: 'source', why: `${ref} is empty` });
+        continue;
+      }
+      items = (list as Array<boolean | number | string>).map(itemText);
+    }
+    const why = s.when === undefined ? (source === undefined ? 'its parents are settled' : `per item of ${source.step}.${source.output}`) : whenText(s.when);
     const parents = effectiveParents(plan, facts, waited);
-    const count = tasksOf(s);
+    // A fan-out is made whole or not at all (§9.4).
+    const count = items?.length ?? 1;
     if (members + count > facts.cap) {
       out.push({ step: s.step, outcome: 'skipped', by: 'cap', why: `the instance has ${facts.cap} tasks` });
       continue;
     }
     members += count;
-    if (s.templates !== undefined) out.push({ step: s.step, outcome: 'fanned_out', items: s.templates.map((t) => t.item), parents, why });
+    if (items !== undefined) out.push({ step: s.step, outcome: 'fanned_out', items, parents, why });
     else out.push({ step: s.step, outcome: 'made', parents, why });
   }
   return out;
