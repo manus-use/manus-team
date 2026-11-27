@@ -20,6 +20,7 @@ import {
   instancesOn,
   memberOf,
   memberPhases,
+  membersOf,
   membersWithTasks,
   phaseSince,
   pendingOf,
@@ -53,7 +54,7 @@ import { roleLimit, type Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
 import { checkDagShape, checkDagTasks, type Dag, type DagTask, type ShapedDag } from './dag.js';
-import { checkOutputs, fillText, itemPlaceholderOf, outputBounds, placeholderOf, standInContract, type Plan, type PlanStep, type Template } from './routing.js';
+import { checkOutputs, fillText, INSTANCE_CAP, itemPlaceholderOf, outputBounds, placeholderOf, standInContract, type Plan, type PlanStep, type Template } from './routing.js';
 import { holdsSecret } from './gate-command.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
@@ -1144,8 +1145,36 @@ export class KanbanService {
     const entry = plan.steps.find((s) => s.step === planned.member.step);
     if (entry === undefined || Object.keys(entry.outputs).length === 0) return undefined;
     if (kind === 'complete' && getTask(this.#db, taskId)?.phase !== 'open') return undefined;
-    const problem = checkOutputs(entry.outputs, metadata, outputBounds(plan, entry.stands_in_for ?? entry.step));
-    return problem === undefined ? undefined : board.refuse('invalid', problem);
+    const read = entry.stands_in_for ?? entry.step;
+    const problem = checkOutputs(entry.outputs, metadata, outputBounds(plan, read));
+    if (problem !== undefined) return board.refuse('invalid', problem);
+    return this.#reserved(planned.instance.instanceId, plan, read, metadata as Record<string, unknown>);
+  }
+
+  /**
+   * The instance's 500, reserved at the report whose list a fan-out will read
+   * (workflow routing spec §2.2): its members, handlers among them, plus this
+   * list's items for each fan-out over it still waiting, plus one for each other
+   * step still waiting, at most 500, else `too_large`, while the agent can still
+   * shorten its list. The writer never refuses for the cap; what passes it later
+   * is skipped (§9.4).
+   */
+  #reserved(instanceId: string, plan: Plan, step: string, metadata: Record<string, unknown>): Refusal | undefined {
+    const waiting = new Set(pendingOf(this.#db, instanceId).filter((p) => p.state === 'waiting').map((p) => p.step));
+    const members = membersOf(this.#db, instanceId).length;
+    let others = waiting.size;
+    for (const s of plan.steps) {
+      const f = s.for_each;
+      if (f === undefined || !('step' in f) || f.step !== step || !waiting.has(s.step)) continue;
+      const list = metadata[f.output];
+      if (!Array.isArray(list)) continue;
+      others -= 1;
+      if (members + list.length + others > INSTANCE_CAP) {
+        return board.refuse('too_large', `output ${f.output} would make ${list.length} tasks, and instance ${instanceId} has ${members} of its ${INSTANCE_CAP}`);
+      }
+      others += list.length;
+    }
+    return undefined;
   }
 
   /**
