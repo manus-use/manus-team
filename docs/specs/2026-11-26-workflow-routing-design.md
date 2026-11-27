@@ -1431,7 +1431,9 @@ first member (§7.4), and inherit its wake (§13.3). Its answer gains `waiting` 
   them.
 
 **What stays.** `PHASES`, `REPORTED_OUTCOMES`, `BLOCK_KINDS` and `RefusalCode` (`src/kanban/types.ts`)
-are unchanged: no phase, outcome, block kind or refusal code is added. The dispatcher (but its one
+are unchanged: no phase, outcome, block kind or refusal code is added. `mt kanban workflow reconcile`
+answers a reconciliation that failed with a code of the terminal's own, `routing_failed`, as `mt`
+answers `no_bot` and `not_in_a_run`; it is no `RefusalCode`. The dispatcher (but its one
 hook), the claim, the prompt, the waker, the progress cards and the tiers are unchanged, and work per
 task.
 
