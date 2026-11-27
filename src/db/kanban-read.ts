@@ -1392,6 +1392,59 @@ export function plannedMemberOf(db: Db, taskId: string): { member: MemberRow; in
   return row === undefined ? undefined : { member: decodeMember(row), instance: decodeInstance(row) };
 }
 
+/**
+ * A trigger event (workflow routing spec §5.1): what blocked a task from its work
+ * by a run, read from the event, never from the task's `block_kind`. A run's own
+ * `blocked`, of a kind but `dependency`, and a run's end that blocked it are
+ * `blocked`, routed by `on_blocked`; the breaker's give-up and the transient
+ * limit's block, the board's terminal failure endings, are `gave_up`, routed by
+ * `on_gave_up`, the transient limit's `throttled`.
+ */
+export interface TriggerEvent {
+  eventId: number;
+  kind: 'blocked' | 'gave_up';
+  throttled: boolean;
+  reason: string;
+}
+
+/**
+ * A task's trigger events, oldest first (§5.1): only a work run's, so a review's
+ * block, a person's block or stop, and the gateway's own block of a task the
+ * team check refused route nothing and enter no state a clause reads.
+ */
+export function triggersOf(db: Db, taskId: string): TriggerEvent[] {
+  const rows = db
+    .prepare<[string], EventRaw & { run_kind: string | null }>(
+      `SELECT e.id, e.task_id, e.run_id, e.kind, e.actor, json(e.payload) AS payload, e.created_at, r.kind AS run_kind
+         FROM kanban_events e JOIN kanban_runs r ON r.run_id = e.run_id
+        WHERE e.task_id = ? AND (e.kind = 'blocked' OR (e.kind = 'run_ended' AND json_extract(e.payload, '$.next') = 'blocked'))
+        ORDER BY e.id`,
+    )
+    .all(taskId);
+  return rows.flatMap((r): TriggerEvent[] => {
+    if (r.run_kind !== 'work') return [];
+    const p = json(r.payload) as Record<string, unknown>;
+    const text = (key: string): string => (typeof p[key] === 'string' ? (p[key] as string) : '');
+    if (r.kind === 'blocked') {
+      if (!r.actor.startsWith('run:') || text('kind') === '' || text('kind') === 'dependency') return [];
+      return [{ eventId: r.id, kind: 'blocked', throttled: false, reason: text('reason') }];
+    }
+    const kind = text('blockKind');
+    const gaveUp = kind === 'gave_up' || kind === 'transient';
+    return [{ eventId: r.id, kind: gaveUp ? 'gave_up' : 'blocked', throttled: kind === 'transient', reason: text('blockReason') }];
+  });
+}
+
+/** A task's first event of a kind, with its payload; undefined for none. */
+export function firstEventOf(db: Db, taskId: string, kind: string): KanbanEvent | undefined {
+  const row = db
+    .prepare<[string, string], EventRaw>(
+      `SELECT id, task_id, run_id, kind, actor, json(payload) AS payload, created_at FROM kanban_events WHERE task_id = ? AND kind = ? ORDER BY id LIMIT 1`,
+    )
+    .get(taskId, kind);
+  return row === undefined ? undefined : decodeEvent(row);
+}
+
 /** One Unblock button of a recorded message, and the `unblocked` or `archived` event that lifted its block, if one has. */
 export interface UnblockButtonReading {
   taskId: string;

@@ -5,13 +5,13 @@ import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import { canonicalDag, maskDag, type Dag } from '../kanban/dag.js';
-import { maskPlan, type Plan } from '../kanban/routing.js';
+import { decide as decideRouting, INSTANCE_CAP, maskPlan, type Decision, type Facts, type Plan, type StepFact } from '../kanban/routing.js';
 import type { GateRun } from '../kanban/gates.js';
 import { placeName, placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
 import { worktreeId } from './workspaces.js';
 import { DEFAULT_BOARD, ENDED_OUTCOMES, GATE_LIMITS, REPORTED_OUTCOMES } from '../kanban/types.js';
 import { cutToBytes, WORKER_LIMITS } from '../kanban/limits.js';
-import { assignable, checkTask, type TaskFacts } from '../kanban/task-checks.js';
+import { assignable, checkTask, isRecord, type TaskFacts } from '../kanban/task-checks.js';
 import type {
   ActivePhase,
   AgentSnapshot,
@@ -50,6 +50,12 @@ import {
   getTask,
   getTaskByKey,
   gatesOf,
+  firstEventOf,
+  latestCompletion,
+  pendingOf,
+  plannedMemberOf,
+  settledOf,
+  triggersOf,
   hasRouting,
   hasWakeColumns,
   instanceByKey,
@@ -165,6 +171,9 @@ const BOARD_KEYS: ReadonlySet<string> = new Set([
   'role',
   // The task an inherited wake came from (wake spec §9.1).
   'from',
+  // The task a handler was routed from, and a stand-in that archived the task it stood in for (workflow routing spec §7.4, §5.2).
+  'routedFrom',
+  'standIn',
 ]);
 
 /** One row of the board's log, masked value by value. */
@@ -172,11 +181,14 @@ function record(
   d: Db,
   e: { taskId: string; runId?: string | null; kind: string; actor: string; payload: Record<string, unknown> },
   now: number,
-): void {
-  d.prepare(
-    `INSERT INTO kanban_events (task_id, run_id, kind, actor, payload, created_at)
-     VALUES (?, ?, ?, ?, jsonb(?), ?)`,
-  ).run(e.taskId, e.runId ?? null, e.kind, e.actor, JSON.stringify(redactValues(e.payload, BOARD_KEYS)), now);
+): number {
+  const { lastInsertRowid } = d
+    .prepare(
+      `INSERT INTO kanban_events (task_id, run_id, kind, actor, payload, created_at)
+       VALUES (?, ?, ?, ?, jsonb(?), ?)`,
+    )
+    .run(e.taskId, e.runId ?? null, e.kind, e.actor, JSON.stringify(redactValues(e.payload, BOARD_KEYS)), now);
+  return Number(lastInsertRowid);
 }
 
 const mask = redactKnownSecrets;
@@ -1472,7 +1484,7 @@ export function complete(
               block_recurrences = 0, cooldown_until = NULL
         WHERE task_id = ?`,
     ).run(now, taskId);
-    record(
+    const completed = record(
       d,
       {
         taskId,
@@ -1483,6 +1495,8 @@ export function complete(
       },
       now,
     );
+    // Done is a settling: what its plan's steps read may have changed (workflow routing spec §9.1).
+    routeAfter(d, taskId, 'completed', completed, now);
     return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
   });
 }
@@ -1684,7 +1698,7 @@ export function block(
       );
     } else {
       const recurrences = enterBlocked(d, r.task, report.kind, report.reason);
-      record(
+      const blocked = record(
         d,
         {
           taskId,
@@ -1695,6 +1709,8 @@ export function block(
         },
         now,
       );
+      // A run's block from its work is a trigger (workflow routing spec §5.1); a person's, or a review's, routes nothing.
+      if (by.kind === 'run' && r.task.phase === 'open') routeAfter(d, taskId, 'blocked', blocked, now);
     }
     return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
   });
@@ -1942,7 +1958,7 @@ export function endRun(
       recurrences = enterBlocked(d, mustGet(d, run.taskId), blockAs.kind, blockAs.reason);
       next = 'blocked';
     }
-    record(
+    const ended = record(
       d,
       {
         taskId: run.taskId,
@@ -1961,6 +1977,11 @@ export function endRun(
       },
       now,
     );
+    // A run's end that blocked the task from its work is a trigger (workflow routing spec §5.1).
+    if (blockAs !== undefined && before.phase === 'open') {
+      const cause: RouteCause = blockAs.kind === 'gave_up' ? 'gave_up' : blockAs.kind === 'transient' ? 'throttled' : 'blocked';
+      routeAfter(d, run.taskId, cause, ended, now);
+    }
     return { ok: true, task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next };
   });
 }
@@ -2084,7 +2105,10 @@ export function archive(
     const task = getTask(d, taskId);
     if (task === undefined) return refuse('not_found', `no task ${taskId}`);
     if (task.phase === 'archived') return refuse('illegal_transition', `task ${taskId} is already archived`);
-    return { ok: true, ...archiveIn(d, task, by, now) };
+    const archived = archiveIn(d, task, by, now);
+    // An archive settles: as done when it was done, or as skipped by archive (workflow routing spec §9.1).
+    routeAfter(d, taskId, 'archived', archived.eventId, now);
+    return { ok: true, task: mustGet(d, taskId), run: archived.run };
   });
 }
 
@@ -2100,18 +2124,18 @@ function archiveIn(
   by: string,
   now: number,
   payload: Record<string, unknown> = {},
-): { task: TaskRow; run: RunRow | undefined } {
+): { task: TaskRow; run: RunRow | undefined; eventId: number } {
   const run = supersede(d, openRunOf(d, task.taskId), now);
   d.prepare(
     `UPDATE kanban_tasks SET phase = 'archived', blocked_from = NULL, closed_at = coalesce(closed_at, ?)
       WHERE task_id = ?`,
   ).run(now, task.taskId);
-  record(
+  const eventId = record(
     d,
     { taskId: task.taskId, runId: run?.runId ?? null, kind: 'archived', actor: by, payload: { from: task.phase, ...payload } },
     now,
   );
-  return { task: mustGet(d, task.taskId), run };
+  return { task: mustGet(d, task.taskId), run, eventId };
 }
 
 /**
@@ -3063,4 +3087,186 @@ export function buttonTried(db: Db, key: DeferredKey): Result<{ attempts: number
     if (row === undefined) return refuse('not_found', `no deferred button for subscription ${key.subscriptionId} and event ${key.eventId}`);
     return { ok: true, attempts: row.attempts };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Workflow routing (workflow routing spec §9)
+// ---------------------------------------------------------------------------
+
+
+/** Which transition decided, for its notice (§12.2): a completion, a block, a give-up or the transient limit's block, an archive, or a reconciliation. */
+export type RouteCause = 'completed' | 'blocked' | 'gave_up' | 'throttled' | 'archived' | 'reconciled';
+
+/** One decision of a transaction, as `workflow_routed` lists it for its notice (§12.2). */
+export interface RoutedLine {
+  step: string;
+  outcome: 'made' | 'skipped' | 'fanned_out';
+  why: string;
+  taskIds: string[];
+  items?: string[];
+  count?: number;
+  by?: string;
+}
+
+/** An instance with a plan, as the routing reads it in its transaction: the row, the plan, and its members with their tasks. */
+interface Routed {
+  instance: InstanceRow;
+  plan: Plan;
+  members: Array<MemberRow & { task: TaskRow }>;
+}
+
+/** A step's facts, read inside the transaction (§9.2 step 3): its rows, its tasks' trigger events, and its winner's accepted result. */
+function routingFacts(d: Db, r: Routed): Facts {
+  const settled = settledOf(d, r.instance.instanceId);
+  const pending = new Map(pendingOf(d, r.instance.instanceId).map((p) => [p.step, p]));
+  const steps = new Map<string, StepFact>();
+  // Only a `state` clause reads what a step's tasks entered: the others' events are not read. Every member is read,
+  // settled or not, as a state clause holds for a task that entered the state ever (§3.2).
+  const stated = new Set(
+    r.plan.steps.flatMap((s) => (s.when ?? []).flatMap((w) => ('any' in w ? w.any : [w])).flatMap((c) => ('state' in c ? [c.step] : []))),
+  );
+  for (const s of r.plan.steps) {
+    const own = settled.find((x) => x.step === s.step && x.ref === s.step);
+    const items = new Map(settled.filter((x) => x.step === s.step && x.ref !== s.step).map((x) => [x.ref, { how: x.how, taskId: x.taskId, eventId: x.eventId }]));
+    const triggers = stated.has(s.step) ? r.members.filter((m) => m.step === s.step).flatMap((m) => triggersOf(d, m.taskId)) : [];
+    const row = pending.get(s.step);
+    const winner = own?.taskId ?? null;
+    const metadata = winner === null || (own?.how !== 'done' && own?.how !== 'stood_in') ? undefined : latestCompletion(d, winner)?.metadata;
+    steps.set(s.step, {
+      step: s.step,
+      row: row?.state ?? null,
+      skippedBy: row?.reason?.by ?? null,
+      settled: own === undefined ? null : { how: own.how, taskId: own.taskId, eventId: own.eventId },
+      items,
+      entered: { blocked: triggers.some((t) => t.kind === 'blocked'), gaveUp: triggers.some((t) => t.kind === 'gave_up') },
+      result: isRecord(metadata) ? metadata : null,
+    });
+  }
+  return { steps, due: [], members: r.members.length, cap: INSTANCE_CAP };
+}
+
+/** Insert a settled row into its key (§8): a later attempt finds the key taken and changes nothing. True when it added the row. */
+function settle(d: Db, instanceId: string, step: string, ref: string, how: string, taskId: string | null, eventId: number, now: number): boolean {
+  return (
+    d
+      .prepare('INSERT OR IGNORE INTO kanban_workflow_settled (instance_id, step, ref, how, task_id, event_id, settled_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(instanceId, step, ref, how, taskId, eventId, now).changes === 1
+  );
+}
+
+/**
+ * The sweep (§9.2 step 2): each member with a settling fact gets its settled row,
+ * its winner the earliest fact by event id, its own task's `completed` event or
+ * its `archived` event when that archive was not from `done`; each fan-out
+ * whose items all have rows, its own, `archived` when every item was archived
+ * undone. Plain steps included; a handler's task is no step's member here.
+ */
+function sweep(d: Db, r: Routed, now: number): void {
+  const id = r.instance.instanceId;
+  const handlers = new Set(r.plan.steps.filter((s) => s.handler === true).map((s) => s.step));
+  const taken = new Set(settledOf(d, id).map((x) => `${x.step}\u0000${x.ref}`));
+  for (const m of r.members) {
+    if (handlers.has(m.step) || taken.has(`${m.step}\u0000${m.ref}`)) continue;
+    const completed = firstEventOf(d, m.taskId, 'completed');
+    const archived = firstEventOf(d, m.taskId, 'archived');
+    const archive = archived !== undefined && isRecord(archived.payload) && archived.payload['from'] !== 'done' ? archived : undefined;
+    const facts = [
+      ...(completed === undefined ? [] : [{ how: 'done', taskId: m.taskId as string | null, eventId: completed.id }]),
+      ...(archive === undefined ? [] : [{ how: 'archived', taskId: null, eventId: archive.id }]),
+    ].sort((a, b) => a.eventId - b.eventId);
+    const winner = facts[0];
+    if (winner === undefined) continue;
+    if (settle(d, id, m.step, m.ref, winner.how, winner.taskId, winner.eventId, now)) taken.add(`${m.step}\u0000${m.ref}`);
+  }
+  const pending = new Map(pendingOf(d, id).map((p) => [p.step, p]));
+  for (const s of r.plan.steps) {
+    if (s.for_each === undefined || taken.has(`${s.step}\u0000${s.step}`)) continue;
+    if (s.made === 'decide' && pending.get(s.step)?.state !== 'made') continue;
+    const items = settledOf(d, id).filter((x) => x.step === s.step && x.ref !== s.step);
+    const all = r.members.filter((m) => m.step === s.step);
+    if (all.length === 0 || items.length < all.length) continue;
+    const how = items.every((x) => x.how === 'archived') ? 'archived' : 'done';
+    settle(d, id, s.step, s.step, how, null, Math.max(...items.map((x) => x.eventId)), now);
+  }
+}
+
+/** A pending row moved from `waiting`, once (§9.2): false when another attempt decided it first, and then nothing is made. */
+function decided(d: Db, instanceId: string, step: string, state: 'made' | 'skipped', reason: Record<string, unknown>, causeEvent: number | null, now: number, items?: unknown): boolean {
+  const masked = Object.fromEntries(Object.entries(reason).map(([k, v]) => [k, typeof v === 'string' ? mask(v) : v]));
+  return (
+    d
+      .prepare(
+        `UPDATE kanban_workflow_pending SET state = ?, reason = ?, items = ?, cause_event = ?, decided_at = ?
+          WHERE instance_id = ? AND step = ? AND state = 'waiting'`,
+      )
+      .run(state, JSON.stringify(masked), items === undefined ? null : JSON.stringify(items), causeEvent, now, instanceId, step).changes === 1
+  );
+}
+
+/** One decision applied (§9.2 step 4); answers its line for the notice, or undefined for one that is none. */
+function apply(d: Db, r: Routed, dec: Decision, causeEvent: number | null, now: number): RoutedLine | undefined {
+  const id = r.instance.instanceId;
+  const s = r.plan.steps.find((x) => x.step === dec.step);
+  if (s === undefined) return undefined;
+  if (dec.outcome === 'settled') {
+    settle(d, id, dec.step, dec.step, dec.how, null, dec.eventId, now);
+    return undefined;
+  }
+  if (dec.outcome === 'skipped') {
+    return decided(d, id, dec.step, 'skipped', { by: dec.by, why: dec.why }, causeEvent, now) ? { step: dec.step, outcome: 'skipped', why: dec.why, taskIds: [], by: dec.by } : undefined;
+  }
+  // A step to make waits: only skips and settlings are applied yet.
+  return undefined;
+}
+
+/** An instance with a plan, its members read now. */
+function routedOf(d: Db, instance: InstanceRow): Routed | undefined {
+  return instance.plan === null ? undefined : { instance, plan: instance.plan, members: membersWithTasks(d, instance.instanceId) };
+}
+
+/**
+ * Decide what is due, until nothing more is (§9.2 steps 2 to 5): the sweep, the
+ * facts, `decide`, each decision applied, again on the new facts, at most once a
+ * step of the plan; answers the lines of every decision made.
+ */
+function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number): RoutedLine[] {
+  const lines: RoutedLine[] = [];
+  const first = routedOf(d, instance);
+  if (first === undefined) return lines;
+  for (let round = 0; round <= first.plan.steps.length; round += 1) {
+    const r = routedOf(d, instance) as Routed;
+    sweep(d, r, now);
+    const facts = routingFacts(d, r);
+    const decisions = decideRouting(r.plan, facts);
+    if (decisions.length === 0) break;
+    for (const dec of decisions) {
+      const line = apply(d, r, dec, causeEvent, now);
+      if (line !== undefined) lines.push(line);
+    }
+  }
+  return lines;
+}
+
+/**
+ * The routing of a transition (§9.2), inside its transaction, after its own rows
+ * and event: one read finds the task's member row and its instance's plan, and a
+ * task that is no member of an instance with a plan pays nothing more; then what
+ * is due is decided, and one `workflow_routed` event on the task lists the
+ * decisions, for the notice.
+ */
+function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number): void {
+  const planned = plannedMemberOf(d, taskId);
+  if (planned === undefined) return;
+  const lines = decideAll(d, planned.instance, eventId, now);
+  if (lines.length === 0) return;
+  record(
+    d,
+    {
+      taskId,
+      kind: 'workflow_routed',
+      actor: 'gateway',
+      payload: { workflow: planned.instance.instanceId, workflowName: planned.instance.name, step: planned.member.step, cause, decisions: lines },
+    },
+    now,
+  );
 }

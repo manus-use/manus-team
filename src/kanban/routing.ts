@@ -673,6 +673,8 @@ export function decide(plan: Plan, facts: Facts): Decision[] {
       continue;
     }
     if (fact.row !== 'waiting') continue;
+    // A fan-out over a result waits: this build does not yet read its source's list.
+    if (s.for_each !== undefined && 'step' in s.for_each) continue;
     const w = when(plan, facts, s.when);
     if (w.truth === 'undecided') continue;
     if (w.truth === 'false') {

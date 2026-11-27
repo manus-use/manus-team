@@ -5,7 +5,7 @@ import { getBoard } from '../../src/db/kanban-read.js';
 import { KanbanService, type KanbanServiceDeps, type WorkflowMade } from '../../src/kanban/service.js';
 import type { Result } from '../../src/kanban/types.js';
 import type { Role } from '../../src/roles.js';
-import type { TestDb } from './db.js';
+import { ManualClock, type TestDb } from './db.js';
 import { role } from './dispatch.js';
 
 /**
@@ -114,6 +114,7 @@ export function viBoard(h: TestDb, deps: Partial<KanbanServiceDeps> = {}): ViBoa
     people: { canTalk: (p) => talks.has(p) },
     supervisedRoles: true,
     workflowsDir: dir,
+    clock: new ManualClock(1_760_000_000_000),
     ...deps,
   });
   return { service, dir, roles, talks };
