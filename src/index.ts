@@ -461,6 +461,11 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
       cancelRun: (runId) => dispatcher?.cancel(runId) ?? false,
     });
     boardService = service;
+    // What a stop left due, decided now, before the dispatcher's first pass (workflow routing spec §11).
+    const reconciled = service.reconcileAll();
+    if (reconciled.instances > 0) {
+      note(`workflows: reconciled ${reconciled.instances} instance${reconciled.instances === 1 ? '' : 's'}, ${reconciled.steps} step${reconciled.steps === 1 ? '' : 's'} decided`);
+    }
     dispatcher = new Dispatcher({
       db,
       service,

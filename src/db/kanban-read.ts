@@ -1409,6 +1409,56 @@ export function routeOfHandler(db: Db, taskId: string): RouteRow | undefined {
   return row === undefined ? undefined : decodeRoute(row);
 }
 
+/**
+ * The instances a startup reconciles (§11): with a plan, and a waiting step, a
+ * skipped step not yet settled, a member blocked from its work whose step routes
+ * and has a route due, or a fault not reconciled. A handler has no row, so it
+ * never makes an instance due.
+ */
+export function routingDue(db: Db): string[] {
+  if (!hasRouting(db)) return [];
+  return db
+    .prepare<[], { instance_id: string; plan: string; blocked: number }>(
+      `SELECT i.instance_id, json(i.plan) AS plan, (
+          i.routing_failed_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM kanban_workflow_pending p WHERE p.instance_id = i.instance_id AND p.state = 'waiting')
+          AND NOT EXISTS (SELECT 1 FROM kanban_workflow_pending p WHERE p.instance_id = i.instance_id AND p.state = 'skipped'
+                       AND NOT EXISTS (SELECT 1 FROM kanban_workflow_settled s WHERE s.instance_id = p.instance_id AND s.step = p.step AND s.ref = p.step))
+        ) AS blocked
+         FROM kanban_workflow_instances i
+        WHERE i.plan IS NOT NULL AND (
+          i.routing_failed_at IS NOT NULL
+          OR EXISTS (SELECT 1 FROM kanban_workflow_pending p WHERE p.instance_id = i.instance_id AND p.state = 'waiting')
+          OR EXISTS (SELECT 1 FROM kanban_workflow_pending p WHERE p.instance_id = i.instance_id AND p.state = 'skipped'
+                       AND NOT EXISTS (SELECT 1 FROM kanban_workflow_settled s WHERE s.instance_id = p.instance_id AND s.step = p.step AND s.ref = p.step))
+          OR EXISTS (SELECT 1 FROM kanban_workflow_tasks m JOIN kanban_tasks t ON t.task_id = m.task_id
+                      WHERE m.instance_id = i.instance_id AND t.phase = 'blocked' AND t.blocked_from = 'open'))
+        ORDER BY i.created_at, i.instance_id`,
+    )
+    .all()
+    .filter((r) => r.blocked === 0 || routeDueIn(db, r.instance_id, JSON.parse(r.plan) as Plan))
+    .map((r) => r.instance_id);
+}
+
+/** Whether a member blocked from its work has a route due (§5.1, §5.3): its latest block a trigger its step routes by, with no route row for it. */
+function routeDueIn(db: Db, instanceId: string, plan: Plan): boolean {
+  const routes = routesOf(db, instanceId);
+  return db
+    .prepare<[string], { task_id: string; step: string }>(
+      `SELECT m.task_id, m.step FROM kanban_workflow_tasks m JOIN kanban_tasks t ON t.task_id = m.task_id
+        WHERE m.instance_id = ? AND t.phase = 'blocked' AND t.blocked_from = 'open'`,
+    )
+    .all(instanceId)
+    .some((m) => {
+      const step = plan.steps.find((s) => s.step === m.step);
+      const latest = latestBlockOf(db, m.task_id);
+      const t = triggersOf(db, m.task_id).find((x) => x.eventId === latest);
+      if (step === undefined || t === undefined) return false;
+      const spec = t.kind === 'gave_up' ? step.on_gave_up : step.on_blocked;
+      return spec !== 'wait' && !routes.some((x) => x.fromTask === m.task_id && x.eventId === t.eventId);
+    });
+}
+
 /** The instances whose routing faulted and no reconciliation has cleared since, oldest fault first (§9.4). */
 export function routingFaulted(db: Db): string[] {
   if (!hasRouting(db)) return [];

@@ -675,6 +675,7 @@ mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]... [-
 mt kanban workflow start <name> [--board <name>] [--param <key>=<value>]... [--key <key>] [--chat <chat_id> [--thread <thread_id>] [--wake]] [--wake-role <role>]
 mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--chat <chat_id> [--thread <thread_id>]]
 mt kanban workflow archive <instance> [--board <name>]
+mt kanban workflow reconcile <instance> [--board <name>]
 mt kanban people
 
 # the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:

@@ -3718,3 +3718,18 @@ export function reconcileWorkflow(db: Db, instanceId: string, now: number, team?
     return { ok: true, ...withSuperseded({ instance: getInstance(d, instanceId) as InstanceRow, decisions }, superseded) };
   });
 }
+
+/**
+ * A reconciliation that threw (§9.4, §11), in a transaction of its own once its
+ * own rolled back: an instance not marked is marked, and one
+ * `workflow_route_failed` event, `first`, goes on its first member, so the fault
+ * is said once and retried on the dispatcher's pass. One marked already is left
+ * as it is, so a retry that faults again says nothing more.
+ */
+export function reconcileFailed(db: Db, instanceId: string, err: unknown, now: number): void {
+  txImmediate(db, (d) => {
+    if (getInstance(d, instanceId)?.routingFailedAt !== null) return;
+    const first = membersOf(d, instanceId)[0];
+    if (first !== undefined) routingFault(d, first.taskId, err, now);
+  });
+}

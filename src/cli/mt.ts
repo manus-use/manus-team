@@ -113,6 +113,7 @@ const USAGE = [
   '      [--chat <chat_id> [--thread <thread_id>] [--wake]] [--wake-role <role>] [--json]',
   '  mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--chat <chat_id> [--thread <thread_id>]] [--json]',
   '  mt kanban workflow archive <instance> [--board <name>] [--json]',
+  '  mt kanban workflow reconcile <instance> [--board <name>] [--json]',
   '  mt kanban people [--json]',
   "the worker's commands, which work only in a board run's shell, where the gateway sets MT_KANBAN_RUN, MT_KANBAN_TOKEN and MT_KANBAN_SOCKET:",
   `  mt kanban <${WORKER_COMMANDS.join('|')}> < input.json`,
@@ -162,7 +163,7 @@ const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
   task: TASK_COMMANDS,
   board: ['list', 'create', 'set', 'archive', 'use'],
   gate: ['add', 'list', 'remove'],
-  workflow: ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive'],
+  workflow: ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive', 'reconcile'],
   people: [],
 };
 

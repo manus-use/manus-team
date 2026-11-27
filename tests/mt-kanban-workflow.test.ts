@@ -311,7 +311,7 @@ describe("mt's usage", () => {
     expect(usage).toContain('  mt workflow check [<name>]');
     expect(usage).toContain('  mt kanban workflow preview <name> [--board <name>] [--param <key>=<value>]... [--json]');
     expect(usage).toContain('  mt kanban workflow apply <dag.json|-> [--key <key>] [--dry-run] [--chat <chat_id> [--thread <thread_id>]] [--json]');
-    expect((await mt(['nonsense'])).err).toMatch(/^mt: kanban workflow takes list, instances, show, preview, start, apply or archive/);
+    expect((await mt(['nonsense'])).err).toMatch(/^mt: kanban workflow takes list, instances, show, preview, start, apply, archive or reconcile/);
   });
 });
 

@@ -5,7 +5,7 @@ import { boardSetting, LIST_FILTERS, tooBig, type NewTaskCommand } from '../kanb
 import { CHAT_ID, NEEDS_BOT, THREAD_ID, chatRefused } from '../core/lark-ids.js';
 import { DAG_LIMITS, checkDagShape, checkDagTasks, dagFile } from '../kanban/dag.js';
 import { NO_MENTIONS } from '../kanban/task-checks.js';
-import { WAKES_OFF, WORKFLOW_MESSAGE_BYTES, type KanbanService, type StartWake, type WorkflowMade } from '../kanban/service.js';
+import { WAKES_OFF, WORKFLOW_MESSAGE_BYTES, type KanbanService, type RoutedLine, type StartWake, type WorkflowMade } from '../kanban/service.js';
 import { archivedBoardProblem, expand, listWorkflows, missingBoardProblem, paramsLine, readWorkflow, routedDagProblem, routingKeys, startBoard, usableMessage, withBoards } from '../kanban/workflow.js';
 import { boardsAt } from '../db/boards-at.js';
 import { maskAll, NUDGE, workerSocketPath } from '../kanban/socket.js';
@@ -971,7 +971,7 @@ export async function operatorCommand(command: string, rest: readonly string[], 
 // ---------------------------------------------------------------------------
 
 /** The verbs of `mt kanban workflow`. */
-export const WORKFLOW_COMMANDS: readonly string[] = ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive'];
+export const WORKFLOW_COMMANDS: readonly string[] = ['list', 'instances', 'show', 'preview', 'start', 'apply', 'archive', 'reconcile'];
 
 /** `--param key=value`, repeated, each split at its first `=` (workflows spec §6); the shell has already removed the quotes. */
 function paramPairs(values: readonly string[] | undefined): { key: string; value: string }[] {
@@ -1416,6 +1416,65 @@ function archiveInstance(rest: readonly string[], io: MtIo): Promise<number> {
   );
 }
 
+/** A reconciliation's decision as its answer says it (workflow routing spec §11): `verify skipped (intake.verify is false)`, `exposure: 3 tasks`. */
+function decisionText(d: RoutedLine): string {
+  switch (d.outcome) {
+    case 'made':
+      return `${d.step} made`;
+    case 'skipped':
+      return `${d.step} skipped (${d.why})`;
+    case 'fanned_out':
+      return `${d.step}: ${d.count ?? d.taskIds.length} task${(d.count ?? d.taskIds.length) === 1 ? '' : 's'}`;
+    case 'routed':
+      return `${d.handler ?? ''} routed from ${d.step}`;
+    case 'stood_in':
+      return `${d.handler ?? ''} stands in for ${d.step}`;
+    case 'over_limit':
+      return `${d.step} over the limit of routes`;
+    case 'over_cap':
+      return `${d.step} not routed: the instance has 500 tasks`;
+    case 'unread':
+      return `${d.handler ?? ''} left open`;
+  }
+}
+
+/**
+ * `mt kanban workflow reconcile <instance> [--board] [--json]` (workflow routing spec §11): the routing given no
+ * transitioning task, deciding and making what is due, in one transaction; then the nudge, as after a start. Safe
+ * against the gateway, whose keys make a reconciliation that races it decide nothing twice.
+ */
+function reconcileInstance(rest: readonly string[], io: MtIo): Promise<number> {
+  const { values, positionals } = parse(rest, BOARD_FLAGS);
+  const [instanceId, extra] = positionals;
+  if (instanceId === undefined || extra !== undefined) throw new UsageError('kanban workflow reconcile takes an instance id');
+  const board = boardFlag(values.board);
+  return act(
+    io,
+    values.json === true,
+    'mt kanban workflow reconcile',
+    (service) => {
+      const guard = instanceOffBoard(service, board, instanceId);
+      if (guard !== undefined) return guard;
+      let r: ReturnType<KanbanService['reconcileWorkflow']>;
+      try {
+        r = service.reconcileWorkflow(instanceId);
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        return refused({ code: 'routing_failed', message: `the routing of ${instanceId} failed: ${error}; the gateway tries again` });
+      }
+      if (!r.ok) return refused(r);
+      const said = r.decisions.map((d) => line(decisionText(d), 400)).join('; ');
+      return {
+        ok: true,
+        lines: [r.decisions.length === 0 ? `${instanceId}: nothing was due` : `reconciled ${instanceId}: ${said}`],
+        json: { instance_id: instanceId, decisions: r.decisions.map((d) => ({ step: d.step, outcome: d.outcome, task_ids: d.taskIds })) },
+        nudge: r.decisions.length > 0,
+      };
+    },
+    { workflows: true },
+  );
+}
+
 /** `mt kanban workflow <verb> …`. */
 function workflow(args: readonly string[], io: MtIo): Promise<number> {
   const [verb, ...rest] = args;
@@ -1434,6 +1493,8 @@ function workflow(args: readonly string[], io: MtIo): Promise<number> {
       return applyFile(rest, io);
     case 'archive':
       return archiveInstance(rest, io);
+    case 'reconcile':
+      return reconcileInstance(rest, io);
     default:
       throw new UsageError(`kanban workflow takes ${WORKFLOW_COMMANDS.slice(0, -1).join(', ')} or ${WORKFLOW_COMMANDS.at(-1)}`);
   }

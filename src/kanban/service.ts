@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
-import type { Db } from '../db/open.js';
+import { isBusy, type Db } from '../db/open.js';
 import * as board from '../db/kanban.js';
 import {
   boardList,
@@ -30,6 +30,7 @@ import {
   routeFailureOf,
   routeOfHandler,
   routesOf,
+  routingDue,
   routingFaulted,
   triggersOf,
   settledOf,
@@ -296,6 +297,9 @@ function verdict(r: GateResult, timeoutS: number): string {
 
 /** A task to create: in types.ts, so the checks need nothing of the service; exported here too, as its callers name it. */
 export type { CreateRequest } from './types.js';
+
+/** A routing decision as the writer records it (workflow routing spec §12.2): exported here, as only the service reaches the writer. */
+export type { RoutedLine } from '../db/kanban.js';
 
 /** A workflow to start (workflows spec §6), as chat, the terminal or a run asks for it. Nothing is checked yet. */
 export interface StartRequest {
@@ -2360,7 +2364,43 @@ export class KanbanService {
    */
   reconcileWorkflow(instanceId: string): Result<board.Reconciled> {
     if (!isText(instanceId)) return board.refuse('invalid', 'an instance id is text');
-    return this.#cancelled(board.reconcileWorkflow(this.#db, instanceId, this.#clock.now(), this.#facts()));
+    try {
+      return this.#cancelled(board.reconcileWorkflow(this.#db, instanceId, this.#clock.now(), this.#facts()));
+    } catch (err) {
+      // A database busy past txImmediate's retries is no fault (§9.4): nothing is marked, and the caller may try again.
+      if (isBusy(err)) throw err;
+      // Its transaction rolled back: the fault is marked and said in one of its own, then thrown to the caller.
+      try {
+        board.reconcileFailed(this.#db, instanceId, err, this.#clock.now());
+      } catch {
+        // The database refused that too: the caller's error is the reconciliation's.
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * The startup's reconciliation (workflow routing spec §11): every instance with a
+   * plan that may have something due, a waiting step, a skipped step not yet
+   * settled, a blocked member, or a fault not reconciled, reconciled once; a
+   * handler never makes an instance due. Answers how many instances had a
+   * decision, and how many decisions; one that faults keeps its mark.
+   */
+  reconcileAll(): { instances: number; steps: number } {
+    let instances = 0;
+    let steps = 0;
+    for (const id of routingDue(this.#db)) {
+      try {
+        const r = this.reconcileWorkflow(id);
+        if (r.ok && r.decisions.length > 0) {
+          instances += 1;
+          steps += r.decisions.length;
+        }
+      } catch {
+        // Marked by reconcileWorkflow, if it was not: the dispatcher's pass retries it.
+      }
+    }
+    return { instances, steps };
   }
 
   /**
