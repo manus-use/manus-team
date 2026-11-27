@@ -496,6 +496,8 @@ export interface RouteFact {
   kind: 'blocked' | 'gave_up';
   /** The transient limit's block, a `gave_up` the board's throttling stopped (§5.3's wording). */
   throttled: boolean;
+  /** The block's kind, as the event recorded it: `capability`, `needs_input`, `transient`, `gave_up`. */
+  blockKind: string;
   /** The block's reason, as the event recorded it. */
   reason: string;
   /** The routes made from the task so far (§5.3). */
@@ -716,5 +718,33 @@ export function decide(plan: Plan, facts: Facts): Decision[] {
     if (items !== undefined) out.push({ step: s.step, outcome: 'fanned_out', items, parents, why });
     else out.push({ step: s.step, outcome: 'made', parents, why });
   }
+  for (const r of facts.due) {
+    const s = plan.steps.find((x) => x.step === r.step);
+    if (s === undefined) continue;
+    const spec = r.kind === 'gave_up' ? s.on_gave_up : s.on_blocked;
+    if (spec === 'wait') continue;
+    const handler = plan.steps.find((x) => x.step === spec.route && x.handler === true);
+    if (handler === undefined) continue;
+    // No route from a member already settled: the first to complete wins (§5.1).
+    const fact = facts.steps.get(r.step);
+    const settled = r.ref === r.step ? fact?.settled : fact?.items.get(r.ref);
+    if (settled !== undefined && settled !== null) continue;
+    if (r.routes >= ROUTES_PER_TASK) {
+      out.push({ step: r.step, outcome: 'over_limit', handler: handler.step, from: r });
+      continue;
+    }
+    if (members + 1 > facts.cap) {
+      out.push({ step: r.step, outcome: 'over_cap', handler: handler.step, from: r });
+      continue;
+    }
+    members += 1;
+    out.push({ step: r.step, outcome: 'route', handler: handler.step, from: r, standsIn: handler.stands_in_for === r.step });
+  }
   return out;
+}
+
+/** What a routed task's transition was, as a notice and `show` say it (§5.3, §12): `gave up`, `stopped after 10 throttles`, `blocked`. */
+export function triggerWords(r: Pick<RouteFact, 'kind' | 'throttled'>, throttles: number): string {
+  if (r.kind === 'blocked') return 'blocked';
+  return r.throttled ? `stopped after ${throttles} throttles` : 'gave up';
 }

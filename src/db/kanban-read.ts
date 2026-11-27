@@ -1449,6 +1449,8 @@ export interface TriggerEvent {
   eventId: number;
   kind: 'blocked' | 'gave_up';
   throttled: boolean;
+  /** The block's kind, as the event recorded it. */
+  blockKind: string;
   reason: string;
 }
 
@@ -1472,11 +1474,11 @@ export function triggersOf(db: Db, taskId: string): TriggerEvent[] {
     const text = (key: string): string => (typeof p[key] === 'string' ? (p[key] as string) : '');
     if (r.kind === 'blocked') {
       if (!r.actor.startsWith('run:') || text('kind') === '' || text('kind') === 'dependency') return [];
-      return [{ eventId: r.id, kind: 'blocked', throttled: false, reason: text('reason') }];
+      return [{ eventId: r.id, kind: 'blocked', throttled: false, blockKind: text('kind'), reason: text('reason') }];
     }
     const kind = text('blockKind');
     const gaveUp = kind === 'gave_up' || kind === 'transient';
-    return [{ eventId: r.id, kind: gaveUp ? 'gave_up' : 'blocked', throttled: kind === 'transient', reason: text('blockReason') }];
+    return [{ eventId: r.id, kind: gaveUp ? 'gave_up' : 'blocked', throttled: kind === 'transient', blockKind: kind, reason: text('blockReason') }];
   });
 }
 
