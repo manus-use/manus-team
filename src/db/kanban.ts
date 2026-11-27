@@ -1471,6 +1471,7 @@ export function complete(
   by: Reporter,
   handoff: Handoff,
   now: number,
+  team?: RouteTeam,
 ): Result<{ task: TaskRow; run: RunRow | undefined }> {
   return tx(db, (d) => {
     const r = reporting(d, taskId, by, ['open', 'review'], 'be completed', { answer: true });
@@ -1502,7 +1503,7 @@ export function complete(
       now,
     );
     // Done is a settling: what its plan's steps read may have changed (workflow routing spec §9.1).
-    routeAfter(d, taskId, 'completed', completed, now);
+    routeAfter(d, taskId, 'completed', completed, now, team);
     return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
   });
 }
@@ -1676,6 +1677,7 @@ export function block(
   by: Reporter,
   report: BlockReport,
   now: number,
+  team?: RouteTeam,
 ): Result<{ task: TaskRow; run: RunRow | undefined }> {
   return tx(db, (d) => {
     const r = reporting(d, taskId, by, ['open', 'review'], 'be blocked');
@@ -1716,7 +1718,7 @@ export function block(
         now,
       );
       // A run's block from its work is a trigger (workflow routing spec §5.1); a person's, or a review's, routes nothing.
-      if (by.kind === 'run' && r.task.phase === 'open') routeAfter(d, taskId, 'blocked', blocked, now);
+      if (by.kind === 'run' && r.task.phase === 'open') routeAfter(d, taskId, 'blocked', blocked, now, team);
     }
     return { ok: true, task: mustGet(d, taskId), run: r.run === undefined ? undefined : mustGetRun(d, r.run.runId) };
   });
@@ -1887,6 +1889,7 @@ export function endRun(
   ending: RunEnding,
   limits: KanbanLimits,
   now: number,
+  team?: RouteTeam,
 ): Result<{ task: TaskRow; run: RunRow; next: NextStep }> {
   return tx(db, (d) => {
     const run = getRun(d, runId);
@@ -1986,7 +1989,7 @@ export function endRun(
     // A run's end that blocked the task from its work is a trigger (workflow routing spec §5.1).
     if (blockAs !== undefined && before.phase === 'open') {
       const cause: RouteCause = blockAs.kind === 'gave_up' ? 'gave_up' : blockAs.kind === 'transient' ? 'throttled' : 'blocked';
-      routeAfter(d, run.taskId, cause, ended, now);
+      routeAfter(d, run.taskId, cause, ended, now, team);
     }
     return { ok: true, task: mustGet(d, run.taskId), run: mustGetRun(d, runId), next };
   });
@@ -2106,6 +2109,7 @@ export function archive(
   taskId: string,
   by: string,
   now: number,
+  team?: RouteTeam,
 ): Result<{ task: TaskRow; run: RunRow | undefined }> {
   return tx(db, (d) => {
     const task = getTask(d, taskId);
@@ -2113,7 +2117,7 @@ export function archive(
     if (task.phase === 'archived') return refuse('illegal_transition', `task ${taskId} is already archived`);
     const archived = archiveIn(d, task, by, now);
     // An archive settles: as done when it was done, or as skipped by archive (workflow routing spec §9.1).
-    routeAfter(d, taskId, 'archived', archived.eventId, now);
+    routeAfter(d, taskId, 'archived', archived.eventId, now, team);
     return { ok: true, task: mustGet(d, taskId), run: archived.run };
   });
 }
@@ -3099,6 +3103,8 @@ export function buttonTried(db: Db, key: DeferredKey): Result<{ attempts: number
 // Workflow routing (workflow routing spec §9)
 // ---------------------------------------------------------------------------
 
+/** The team, as the service holds it, against which a task made late is checked (§7.4, §9.3); absent in the writer's own tests. */
+export type RouteTeam = TaskFacts;
 
 /** Which transition decided, for its notice (§12.2): a completion, a block, a give-up or the transient limit's block, an archive, or a reconciliation. */
 export type RouteCause = 'completed' | 'blocked' | 'gave_up' | 'throttled' | 'archived' | 'reconciled';
@@ -3224,7 +3230,9 @@ function filled(plan: Plan, facts: Facts, text: string, item?: string): string {
  * and body cut to their limits; the instance's creator and board, and a run's
  * start's `created_from_task`; its links to its effective parents; its first
  * member's subscriptions; its gates by the instance's creator; its member row
- * at the next position; and its `created` event with the instance.
+ * at the next position; and its `created` event with the instance. With the
+ * team, a task whose assignee, reviewer or workspace no longer passes is made
+ * and blocked at once, by the gateway, as `needs_input`.
  */
 function makeLate(
   d: Db,
@@ -3232,6 +3240,7 @@ function makeLate(
   facts: Facts,
   made: { step: string; ref: string; item: string | null; template: Template; parents: readonly string[]; payload?: Record<string, unknown> },
   now: number,
+  team: RouteTeam | undefined,
 ): string {
   const t = made.template;
   const first = r.members[0];
@@ -3278,7 +3287,35 @@ function makeLate(
     made.item === null ? null : mask(made.item),
     position,
   );
+  if (team !== undefined) {
+    const refused = lateRefused(t, title, r.instance, team);
+    if (refused !== undefined) {
+      const reason = `${refused}, so this step's task cannot be given to it: /kanban task assign ${taskId} <role>`;
+      const recurrences = enterBlocked(d, mustGet(d, taskId), 'needs_input', reason);
+      record(d, { taskId, kind: 'blocked', actor: 'gateway', payload: { kind: 'needs_input', reason, blockRecurrences: recurrences } }, now);
+    }
+  }
   return taskId;
+}
+
+/** Why a task made late no longer passes the team's checks (§7.4), or undefined: a role named not configured, said plainly, or `checkTask`'s words. */
+function lateRefused(t: Template, title: string, instance: InstanceRow, team: RouteTeam): string | undefined {
+  for (const name of [t.assignee, t.reviewer]) {
+    if (name !== null && !name.includes(':') && !team.roles.has(name)) return `role ${name} is not configured`;
+  }
+  const checked = checkTask(
+    {
+      title,
+      contract: t.contract,
+      ...(t.assignee === null ? {} : { assignee: t.assignee }),
+      ...(t.reviewer === null ? {} : { reviewer: t.reviewer }),
+      ...(t.workspace === null ? {} : { workspace: t.workspace }),
+      createdBy: instance.createdBy,
+      createdVia: instance.createdVia,
+    },
+    team,
+  );
+  return checked.ok ? undefined : checked.message;
 }
 
 /** A step's templates, one an item of its list param, or its one. */
@@ -3300,7 +3337,7 @@ function decided(d: Db, instanceId: string, step: string, state: 'made' | 'skipp
 }
 
 /** One decision applied (§9.2 step 4); answers its line for the notice, or undefined for one that is none. */
-function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number | null, now: number): RoutedLine | undefined {
+function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number | null, now: number, team: RouteTeam | undefined): RoutedLine | undefined {
   const id = r.instance.instanceId;
   const s = r.plan.steps.find((x) => x.step === dec.step);
   if (s === undefined) return undefined;
@@ -3323,13 +3360,13 @@ function apply(d: Db, r: Routed, facts: Facts, dec: Decision, causeEvent: number
     if (!decided(d, id, dec.step, 'made', { why: dec.why }, causeEvent, now)) return undefined;
     const t = templates[0];
     if (t === undefined) return undefined;
-    const taskId = makeLate(d, r, facts, { step: dec.step, ref: dec.step, item: null, template: t, parents: dec.parents }, now);
+    const taskId = makeLate(d, r, facts, { step: dec.step, ref: dec.step, item: null, template: t, parents: dec.parents }, now, team);
     return { step: dec.step, outcome: 'made', why: dec.why, taskIds: [taskId] };
   }
   const made = dec.items.map((item, n) => ({ item, ref: `${dec.step}:${n + 1}`, template: templates.find((t) => t.item === item) ?? templates[0] }));
   if (!decided(d, id, dec.step, 'made', { why: dec.why }, causeEvent, now)) return undefined;
   const taskIds = made.flatMap((m) =>
-    m.template === undefined ? [] : [makeLate(d, r, facts, { step: dec.step, ref: m.ref, item: m.item, template: m.template, parents: dec.parents }, now)],
+    m.template === undefined ? [] : [makeLate(d, r, facts, { step: dec.step, ref: m.ref, item: m.item, template: m.template, parents: dec.parents }, now, team)],
   );
   const marker = made.map((m, n) => ({ item: mask(m.item), taskId: taskIds[n], ref: m.ref }));
   d.prepare('UPDATE kanban_workflow_pending SET items = ? WHERE instance_id = ? AND step = ?').run(JSON.stringify(marker), id, dec.step);
@@ -3346,7 +3383,7 @@ function routedOf(d: Db, instance: InstanceRow): Routed | undefined {
  * facts, `decide`, each decision applied, again on the new facts, at most once a
  * step of the plan; answers the lines of every decision made.
  */
-function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number): RoutedLine[] {
+function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now: number, team: RouteTeam | undefined): RoutedLine[] {
   const lines: RoutedLine[] = [];
   const first = routedOf(d, instance);
   if (first === undefined) return lines;
@@ -3357,7 +3394,7 @@ function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now:
     const decisions = decideRouting(r.plan, facts);
     if (decisions.length === 0) break;
     for (const dec of decisions) {
-      const line = apply(d, r, facts, dec, causeEvent, now);
+      const line = apply(d, r, facts, dec, causeEvent, now, team);
       if (line !== undefined) lines.push(line);
     }
   }
@@ -3371,10 +3408,10 @@ function decideAll(d: Db, instance: InstanceRow, causeEvent: number | null, now:
  * is due is decided, and one `workflow_routed` event on the task lists the
  * decisions, for the notice.
  */
-function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number): void {
+function routeAfter(d: Db, taskId: string, cause: RouteCause, eventId: number, now: number, team?: RouteTeam): void {
   const planned = plannedMemberOf(d, taskId);
   if (planned === undefined) return;
-  const lines = decideAll(d, planned.instance, eventId, now);
+  const lines = decideAll(d, planned.instance, eventId, now, team);
   if (lines.length === 0) return;
   record(
     d,
