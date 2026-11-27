@@ -1,4 +1,11 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createBoard } from '../../src/db/kanban.js';
+import { getBoard } from '../../src/db/kanban-read.js';
+import { KanbanService, type KanbanServiceDeps, type WorkflowMade } from '../../src/kanban/service.js';
+import type { Result } from '../../src/kanban/types.js';
 import type { Role } from '../../src/roles.js';
+import type { TestDb } from './db.js';
 import { role } from './dispatch.js';
 
 /**
@@ -83,4 +90,37 @@ export const VI_ROLES: readonly string[] = [
 /** The roles, as a team holds them. */
 export function viRoles(): Map<string, Role> {
   return new Map(VI_ROLES.map((name) => [name, role(name)]));
+}
+
+/** A service over a test database, reading a workflows directory that holds the vi file, on a board `vi` made for it. */
+export interface ViBoard {
+  service: KanbanService;
+  dir: string;
+  roles: Map<string, Role>;
+  talks: Set<string>;
+}
+
+export function viBoard(h: TestDb, deps: Partial<KanbanServiceDeps> = {}): ViBoard {
+  const dir = join(h.dir, 'workflows');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'vi-workflow.yaml'), VI_WORKFLOW);
+  if (getBoard(h.db, 'vi') === undefined) createBoard(h.db, 'vi', 'lark:on_alice', 1_760_000_000_000);
+  const roles = viRoles();
+  const talks = new Set<string>(['lark:on_bob']);
+  const service = new KanbanService({
+    db: h.db,
+    roles,
+    workspaces: new Set(['default', 'vi']),
+    people: { canTalk: (p) => talks.has(p) },
+    supervisedRoles: true,
+    workflowsDir: dir,
+    ...deps,
+  });
+  return { service, dir, roles, talks };
+}
+
+/** A start's answer, or a thrown refusal. */
+export function madeOf(r: Result<object>): WorkflowMade {
+  if (!r.ok) throw new Error(`${r.code}: ${r.message}`);
+  return r as unknown as WorkflowMade;
 }

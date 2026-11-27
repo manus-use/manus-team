@@ -248,3 +248,80 @@ export function stepCounts(steps: readonly StepShape[]): { always: number; onRes
     handlers: steps.filter((s) => s.made === 'route').length,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Templates: masking, and the references filled (§7.3, §7.4)
+// ---------------------------------------------------------------------------
+
+/** Every `{{<step>.<output>}}` and `{{item}}` in a template's text. */
+const LATE_REFERENCE = /\{\{([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)(?:\.([a-z](?:[a-z0-9-]{0,38}[a-z0-9])?))?\}\}/g;
+
+/**
+ * A template's text with its references to results filled, once, as params are
+ * (§7.4): each `{{<step>.<output>}}` by `result`, and `{{item}}` by `item` when
+ * given. A param's reference was filled at the start, so none is left; any
+ * other `{{` is left as written.
+ */
+export function fillText(text: string, result: (step: string, output: string) => string, item?: string): string {
+  return text.replace(LATE_REFERENCE, (m, name: string, output: string | undefined) => {
+    if (output !== undefined) return result(name, output);
+    return name === 'item' && item !== undefined ? item : m;
+  });
+}
+
+/** The text a skipped step's output fills a title or a body with (§7.4): a display placeholder, which nothing reads as a value. */
+export const SKIPPED_TEXT = '(skipped)';
+
+/** The widest JSON number, as `JSON.stringify` writes one: what a start checks a number's reference with. */
+const WIDEST_NUMBER = '-1.7976931348623157e+308';
+
+/**
+ * What a start fills a reference with to check a template (§6): its type's widest
+ * form where that is bounded, a boolean's `false`, a number's widest, an enum's
+ * longest value, or `(skipped)` where that is wider; text and lists, whose widest
+ * would pass every title's bound, `(skipped)`, as they are cut at the making.
+ */
+export function placeholderOf(t: OutputType | undefined): string {
+  const widest = (s: ScalarType): string => {
+    if (s === 'boolean') return 'false';
+    if (s === 'number') return WIDEST_NUMBER;
+    if (s === 'string') return SKIPPED_TEXT;
+    return s.enum.reduce((a, b) => (Buffer.byteLength(b) > Buffer.byteLength(a) ? b : a), '');
+  };
+  if (t === undefined || (typeof t === 'object' && 'list' in t)) return SKIPPED_TEXT;
+  const w = widest(t);
+  return Buffer.byteLength(w) > Buffer.byteLength(SKIPPED_TEXT) ? w : SKIPPED_TEXT;
+}
+
+/** A list output's item as a start checks a template with it: its item type's widest bounded form. */
+export function itemPlaceholderOf(t: OutputType | undefined): string {
+  if (t !== undefined && typeof t === 'object' && 'list' in t) return placeholderOf(t.list);
+  return SKIPPED_TEXT;
+}
+
+/** A template with each text masked, as the stored DAG's are (§7.3); its gates as written. */
+function maskTemplate<T extends Template>(t: T, mask: (text: string) => string): T {
+  const contract: Contract = {};
+  for (const field of CONTRACT_FIELDS) {
+    const v = t.contract[field];
+    if (v !== undefined) contract[field] = mask(v);
+  }
+  return { ...t, title: mask(t.title), body: t.body === null ? null : mask(t.body), contract };
+}
+
+/**
+ * The plan as an instance stores it (§7.3): its templates' text masked, value by
+ * value, titles, bodies, contract fields and items, as the stored DAG's are; but
+ * not its gates' commands, nor the clause and enum values, which a reported value
+ * must still equal.
+ */
+export function maskPlan(plan: Plan, mask: (text: string) => string): Plan {
+  return {
+    ...plan,
+    steps: plan.steps.map((s) => ({
+      ...s,
+      ...(s.template === undefined ? {} : { template: maskTemplate(s.template, mask) }),
+      ...(s.templates === undefined ? {} : { templates: s.templates.map((t) => ({ ...maskTemplate(t, mask), item: mask(t.item) })) }),
+    })),
+  };
+}

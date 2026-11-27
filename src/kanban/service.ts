@@ -14,6 +14,7 @@ import {
   getRun,
   getTask,
   getTaskByKey,
+  hasRouting,
   hasWakeColumns,
   instanceByKey,
   instancesOn,
@@ -46,6 +47,7 @@ import { roleLimit, type Role } from '../roles.js';
 import { systemClock, type Clock } from '../time.js';
 import { commitReader, type CommitReader } from './commit.js';
 import { checkDagShape, checkDagTasks, type Dag, type DagTask, type ShapedDag } from './dag.js';
+import { fillText, itemPlaceholderOf, placeholderOf, standInContract, type Plan, type PlanStep, type Template } from './routing.js';
 import { holdsSecret } from './gate-command.js';
 import { gateEnv, runGates, spawnGate, type GateResult, type GateRunner } from './gates.js';
 import { assignable, checkTask, isRecord, isText, isTextList, type TaskFacts } from './task-checks.js';
@@ -222,6 +224,24 @@ export interface WakeJudge {
 
 /** A woken turn's show of a task outside its wake (wake spec §9.2): the same words whether the task exists or not. */
 export const NOT_IN_WAKE = 'a woken turn reads only the tasks whose events woke it';
+
+/**
+ * A member's wake, as a start resolves it (wake spec §3.1): every member's with
+ * `all`, else only one whose step, or DAG task, asks, `ask`; the start's role,
+ * else the member's own step's (§19.1), else the chat session; with no chat to
+ * follow it, a member that would wake the chat session is notice-only (§19.16).
+ */
+function memberWake(ask: DagTask['wake'], wake: StartWakeOf | undefined): board.NewWake | undefined {
+  if (wake === undefined || (!wake.all && ask === undefined)) return wake === undefined ? undefined : { by: null, depth: wake.depth };
+  const role = wake.role ?? (typeof ask === 'object' ? ask.role : undefined);
+  if (role === undefined && wake.rolesOnly === true) return { by: null, depth: wake.depth };
+  return {
+    by: wake.by,
+    depth: wake.depth,
+    ...(wake.tooDeep === true ? { tooDeep: true } : {}),
+    ...(role === undefined ? {} : { role }),
+  };
+}
 
 /** A refusal unless a new task's wake is a principal, or none, and a whole depth (wake spec §3.1). */
 function wakeShapeRefused(wake: unknown): Refusal | undefined {
@@ -1706,19 +1726,7 @@ export class KanbanService {
   /** The writer's members of a checked DAG: each task's fields, its parents as earlier positions, its gates. */
   #members(dag: Dag, wake?: StartWakeOf): board.NewMember[] {
     const at = new Map(dag.tasks.map((t, i) => [t.ref, i]));
-    const wakeOf = (t: DagTask): board.NewWake | undefined => {
-      if (wake === undefined || (!wake.all && t.wake === undefined)) return wake === undefined ? undefined : { by: null, depth: wake.depth };
-      // The start's role, else the member's own step's (wake spec §19.1), else the chat session.
-      const role = wake.role ?? (typeof t.wake === 'object' ? t.wake.role : undefined);
-      // With no chat to follow it, a member that would wake the chat session is notice-only (§19.16).
-      if (role === undefined && wake.rolesOnly === true) return { by: null, depth: wake.depth };
-      return {
-        by: wake.by,
-        depth: wake.depth,
-        ...(wake.tooDeep === true ? { tooDeep: true } : {}),
-        ...(role === undefined ? {} : { role }),
-      };
-    };
+    const wakeOf = (t: DagTask): board.NewWake | undefined => memberWake(t.wake, wake);
     const as = (name: string | null): Assignee | null => (name === null ? null : { kind: name.includes(':') ? 'human' : 'role', name });
     return dag.tasks.map((t) => ({
       task: {
@@ -1743,7 +1751,7 @@ export class KanbanService {
   }
 
   /** A start's expansion (workflows spec §6 step 1): the file read now, its params, the DAG made, shaped and measured. */
-  #expanded(req: StartRequest, onBoard: string): Result<ShapedDag & { workflow: Workflow; board: string; fromFile: boolean }> {
+  #expanded(req: StartRequest, onBoard: string): Result<ShapedDag & { workflow: Workflow; board: string; fromFile: boolean; plan: Plan | null }> {
     if (!isRecord(req)) return board.refuse('invalid', 'a start is an object');
     if (!isText(req.workflow)) return board.refuse('invalid', "a workflow is a workflow's name, as text");
     const read = this.#workflow(req.workflow);
@@ -1758,7 +1766,84 @@ export class KanbanService {
     if (!expanded.ok) return expanded;
     const shaped = checkDagShape(expanded.dag, 'expansion');
     if (!shaped.ok) return shaped;
-    return { ...shaped, workflow: read.workflow, board: routed.board, fromFile: routed.fromFile };
+    return { ...shaped, workflow: read.workflow, board: routed.board, fromFile: routed.fromFile, plan: expanded.plan };
+  }
+
+  /**
+   * What a start checks of its plan beyond the file (workflow routing spec §6, §8):
+   * a database migrated to 015; no step with outputs whose assignee, as the
+   * params named it, is a person (§2.1); and each template of a step made later
+   * checked as `create` would check it, every reference to a result filled with
+   * its type's widest form, a stand-in with its step's reviewer, gates and
+   * contract (§5.2), so a template too long already is refused now, not cut later.
+   */
+  #checkPlan(plan: Plan | null, createdBy: string, createdVia: CreatedVia): Refusal | undefined {
+    if (plan === null) return undefined;
+    if (!hasRouting(this.#db)) return board.refuse('invalid', board.ROUTING_NOT_MIGRATED);
+    const byName = new Map(plan.steps.map((s) => [s.step, s]));
+    const templatesOf = (s: PlanStep): Array<Template & { item: string | null }> => s.templates ?? (s.template === undefined ? [] : [{ ...s.template, item: null }]);
+    const tasks: DagTask[] = [];
+    for (const s of plan.steps) {
+      for (const t of templatesOf(s)) {
+        if (Object.keys(s.outputs).length > 0 && t.assignee !== null && t.assignee.includes(':')) {
+          return board.refuse('invalid', `steps.${s.step} declares outputs, which a role's run reports in its metadata, and its assignee is a person: a person's done gives none`);
+        }
+      }
+      if (s.made === 'start') continue;
+      const source = s.for_each !== undefined && 'step' in s.for_each ? byName.get(s.for_each.step)?.outputs[s.for_each.output] : undefined;
+      const item = s.for_each !== undefined && 'step' in s.for_each ? itemPlaceholderOf(source) : s.handler === true ? itemPlaceholderOf(undefined) : undefined;
+      const fill = (text: string): string => fillText(text, (step, output) => placeholderOf(byName.get(step)?.outputs[output]), item);
+      // A stand-in is checked with each template of its step: its reviewer, its gates before its own, its contract merged (§5.2).
+      const stood = s.stands_in_for === undefined ? undefined : byName.get(s.stands_in_for);
+      const against: Array<Template | undefined> = stood === undefined ? [undefined] : templatesOf(stood);
+      for (const [n, t] of templatesOf(s).entries()) {
+        for (const theirs of against) {
+          tasks.push({
+            ref: templatesOf(s).length > 1 ? `${s.step}:${n + 1}` : s.step,
+            step: s.step,
+            item: t.item,
+            title: fill(t.title),
+            body: t.body === null ? null : fill(t.body),
+            assignee: t.assignee,
+            reviewer: theirs === undefined ? t.reviewer : theirs.reviewer,
+            workspace: t.workspace,
+            priority: t.priority,
+            contract: theirs === undefined ? t.contract : standInContract(s.stands_in_for ?? '', theirs.contract, t.contract),
+            failure_limit: t.failure_limit,
+            retry_on_crash: t.retry_on_crash,
+            max_runtime_s: t.max_runtime_s,
+            parents: [],
+            gates: theirs === undefined ? t.gates : [...theirs.gates, ...t.gates],
+          });
+        }
+      }
+    }
+    if (tasks.length === 0) return undefined;
+    return checkDagTasks({ format: 1, workflow: null, params: {}, board: null, tasks }, { facts: this.#facts(), createdBy, createdVia });
+  }
+
+  /** The plan with each template's wake, as the start resolved it for its step (workflow routing spec §7.3); a run's start's late members inherit theirs at the making. */
+  #plannedWakes(plan: Plan | null, w: Workflow, wake: StartWakeOf | undefined): Plan | null {
+    if (plan === null) return null;
+    const asks = new Map(w.steps.map((s) => [s.name, s.wake === true ? (true as const) : s.wake === false ? undefined : { role: s.wake.role }]));
+    const withWake = <T extends Template>(t: T, step: string): T => {
+      const resolved = memberWake(asks.get(step), wake);
+      return {
+        ...t,
+        wake:
+          resolved === undefined
+            ? null
+            : { by: resolved.by, depth: resolved.depth, ...(resolved.tooDeep === true ? { tooDeep: true as const } : {}), ...(resolved.role === undefined ? {} : { role: resolved.role }) },
+      };
+    };
+    return {
+      ...plan,
+      steps: plan.steps.map((s) => ({
+        ...s,
+        ...(s.template === undefined ? {} : { template: withWake(s.template, s.step) }),
+        ...(s.templates === undefined ? {} : { templates: s.templates.map((t) => withWake(t, s.step)) }),
+      })),
+    };
   }
 
   /**
@@ -1766,14 +1851,16 @@ export class KanbanService {
    * makes before its transaction, the board's and the people's included, but
    * not the key's, as a preview has none of its own.
    */
-  previewWorkflow(req: StartRequest): Result<{ dag: Dag; workflow: Workflow }> {
+  previewWorkflow(req: StartRequest): Result<{ dag: Dag; workflow: Workflow; plan: Plan | null }> {
     const on = this.#boardFor(req.createdVia, req.board);
     if (!on.ok) return on;
     const shaped = this.#expanded(req, on.board);
     if (!shaped.ok) return shaped;
-    const refused = this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined);
+    const refused =
+      this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined) ??
+      this.#checkPlan(shaped.plan, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
-    return { ok: true, dag: shaped.dag, workflow: shaped.workflow };
+    return { ok: true, dag: shaped.dag, workflow: shaped.workflow, plan: shaped.plan };
   }
 
   /**
@@ -1797,11 +1884,14 @@ export class KanbanService {
     if (repeat !== undefined) return repeat;
     const shaped = this.#expanded(req, on.board);
     if (!shaped.ok) return shaped;
-    const refused = this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined);
+    const refused =
+      this.#checkDag(shaped.dag, shaped.board, req.createdBy, req.createdVia, shaped.fromFile ? shaped.workflow.name : undefined) ??
+      this.#checkPlan(shaped.plan, req.createdBy, req.createdVia);
     if (refused !== undefined) return refused;
     const wake = this.#startWake(req, shaped.dag);
     if (!wake.ok) return wake;
     return this.#write(shaped, {
+      plan: this.#plannedWakes(shaped.plan, shaped.workflow, wake.wake),
       ...(wake.wake === undefined ? {} : { wake: wake.wake }),
       ...(wake.wakeNote === undefined ? {} : { wakeNote: wake.wakeNote }),
       name: shaped.workflow.name,
@@ -1947,6 +2037,7 @@ export class KanbanService {
       follow?: Follow;
       wake?: StartWakeOf;
       wakeNote?: string;
+      plan?: Plan | null;
     },
   ): Result<WorkflowMade> {
     const r = board.applyDag(
@@ -1961,6 +2052,7 @@ export class KanbanService {
         createdVia: i.createdVia,
         idempotencyKey: i.key,
         ...(i.follow === undefined ? {} : { follow: i.follow }),
+        ...(i.plan === undefined || i.plan === null ? {} : { plan: i.plan }),
       },
       this.#members(shaped.dag, i.wake),
       this.#clock.now(),

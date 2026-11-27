@@ -5,6 +5,7 @@ import { isResumableProviderId } from '../provider-id.js';
 import { NAME_PATTERN, RESERVED_BOARD_NAMES, visible } from '../names.js';
 import { redactKnownSecrets, redactValues } from '../secrets.js';
 import { canonicalDag, maskDag, type Dag } from '../kanban/dag.js';
+import { maskPlan, type Plan } from '../kanban/routing.js';
 import type { GateRun } from '../kanban/gates.js';
 import { placeName, placeOf, resolveTaskWorkspace } from '../kanban/workspace.js';
 import { worktreeId } from './workspaces.js';
@@ -49,6 +50,7 @@ import {
   getTask,
   getTaskByKey,
   gatesOf,
+  hasRouting,
   hasWakeColumns,
   instanceByKey,
   membersWithTasks,
@@ -98,6 +100,9 @@ class Rollback extends Error {
     super(refusal.message);
   }
 }
+
+/** Why a routed start is refused on a database the gateway has not yet migrated (workflow routing spec §8). */
+export const ROUTING_NOT_MIGRATED = 'the database is not yet migrated to version 15: start the gateway once, so it is migrated';
 
 /** Why a wake is refused on a database the gateway has not yet migrated (wake spec §4.1). */
 const NOT_MIGRATED = 'the database is not yet migrated to version 13: start the gateway once, so it is migrated';
@@ -2245,6 +2250,8 @@ export interface NewInstance {
   idempotencyKey: string | null;
   /** The chat a terminal named to follow every member (workflows spec §18.1), beside the DAG, not in it. */
   follow?: Follow;
+  /** Its plan (workflow routing spec §7.3), for a start of a file using a routing key; absent or null for none. */
+  plan?: Plan | null;
 }
 
 /** The members a `workflow_started` payload lists: the start's reply lists at most 30 (workflows spec §9, §18.2). */
@@ -2339,6 +2346,8 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
       const unmigrated = unmigratedWake(d, m.task.wake, instance.createdVia);
       if (unmigrated !== undefined) return unmigrated;
     }
+    const plan = instance.plan ?? null;
+    if (plan !== null && !hasRouting(d)) return refuse('invalid', ROUTING_NOT_MIGRATED);
     const instanceId = newWorkflowId();
     d.prepare(
       `INSERT INTO kanban_workflow_instances
@@ -2356,6 +2365,12 @@ export function applyDag(db: Db, instance: NewInstance, members: readonly NewMem
       instance.idempotencyKey,
       now,
     );
+    if (plan !== null) {
+      // The plan, frozen, masked but for what decides and what runs; one waiting row a pending step, none a handler (workflow routing spec §7.2, §7.3).
+      d.prepare('UPDATE kanban_workflow_instances SET plan = ? WHERE instance_id = ?').run(JSON.stringify(maskPlan(plan, mask)), instanceId);
+      const waiting = d.prepare("INSERT INTO kanban_workflow_pending (instance_id, step, state) VALUES (?, ?, 'waiting')");
+      for (const s of plan.steps) if (s.made === 'decide') waiting.run(instanceId, s.step);
+    }
     const member = d.prepare(
       'INSERT INTO kanban_workflow_tasks (task_id, instance_id, ref, step, item, position) VALUES (?, ?, ?, ?, ?, ?)',
     );
