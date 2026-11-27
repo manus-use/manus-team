@@ -1,5 +1,6 @@
 import type { Db } from './open.js';
 import type { Dag } from '../kanban/dag.js';
+import type { PendingState, Plan, RouteOutcome, SettledHow, SkippedBy } from '../kanban/routing.js';
 import { displayStatus, type DisplayStatus } from '../kanban/status.js';
 import { openTurns } from './turns.js';
 import { worktreeOf } from './workspaces.js';
@@ -1005,6 +1006,10 @@ export interface InstanceRow {
   createdVia: CreatedVia;
   idempotencyKey: string | null;
   createdAt: number;
+  /** Its frozen plan (workflow routing spec §7.3); null for an instance with none, and on a database before 015. */
+  plan: Plan | null;
+  /** When its routing last faulted, while no reconciliation has succeeded since (§9.4); null otherwise. */
+  routingFailedAt: number | null;
 }
 
 /** A task an instance made: its ref and step in the DAG, its item, and its place in the DAG's array. */
@@ -1028,6 +1033,8 @@ interface InstanceRaw {
   created_via: string;
   idempotency_key: string | null;
   created_at: number;
+  plan: string | null;
+  routing_failed_at: number | null;
 }
 
 interface MemberRaw {
@@ -1039,7 +1046,22 @@ interface MemberRaw {
   position: number;
 }
 
-const INSTANCE_COLS = 'instance_id, name, dag, dag_sha256, source, board, created_by, created_via, idempotency_key, created_at';
+const INSTANCE_BASE_COLS = 'instance_id, name, dag, dag_sha256, source, board, created_by, created_via, idempotency_key, created_at';
+
+/**
+ * Whether the database has migration 015's tables and columns (workflow routing
+ * spec §8). The terminal opens the gateway's database without migrating it: on
+ * one before 015, every instance reads with no plan, and the routing reads find
+ * no row. Read from the file's header, as `hasWakeColumns` is.
+ */
+export function hasRouting(db: Db): boolean {
+  return Number(db.pragma('user_version', { simple: true })) >= 15;
+}
+
+/** An instance's columns: the plan's, or what a database before 015 has for them. */
+function instanceCols(db: Db): string {
+  return hasRouting(db) ? `${INSTANCE_BASE_COLS}, plan, routing_failed_at` : `${INSTANCE_BASE_COLS}, NULL AS plan, NULL AS routing_failed_at`;
+}
 const MEMBER_COLS = 'task_id, instance_id, ref, step, item, position';
 
 /**
@@ -1063,6 +1085,8 @@ function decodeInstance(r: InstanceRaw): InstanceRow {
     createdVia: JSON.parse(r.created_via) as CreatedVia,
     idempotencyKey: r.idempotency_key,
     createdAt: r.created_at,
+    plan: r.plan === null ? null : (JSON.parse(r.plan) as Plan),
+    routingFailedAt: r.routing_failed_at,
   };
 }
 
@@ -1076,13 +1100,13 @@ export function hasWorkflows(db: Db): boolean {
 }
 
 export function getInstance(db: Db, instanceId: string): InstanceRow | undefined {
-  const row = db.prepare<[string], InstanceRaw>(`SELECT ${INSTANCE_COLS} FROM kanban_workflow_instances WHERE instance_id = ?`).get(instanceId);
+  const row = db.prepare<[string], InstanceRaw>(`SELECT ${instanceCols(db)} FROM kanban_workflow_instances WHERE instance_id = ?`).get(instanceId);
   return row === undefined ? undefined : decodeInstance(row);
 }
 
 export function instanceByKey(db: Db, idempotencyKey: string): KeyedInstance | undefined {
   const row = db
-    .prepare<[string], InstanceRaw>(`SELECT ${INSTANCE_COLS} FROM kanban_workflow_instances WHERE idempotency_key = ?`)
+    .prepare<[string], InstanceRaw>(`SELECT ${instanceCols(db)} FROM kanban_workflow_instances WHERE idempotency_key = ?`)
     .get(idempotencyKey);
   return row === undefined ? undefined : { instance: decodeInstance(row), dagSha256: row.dag_sha256 };
 }
@@ -1157,7 +1181,7 @@ export function memberOf(db: Db, taskId: string): (MemberRow & { name: string | 
 export function instancesOn(db: Db, board: string, limit: number): { instances: InstanceRow[]; total: number } {
   const instances = db
     .prepare<[string, number], InstanceRaw>(
-      `SELECT ${INSTANCE_COLS} FROM kanban_workflow_instances WHERE board = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+      `SELECT ${instanceCols(db)} FROM kanban_workflow_instances WHERE board = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
     )
     .all(board, limit)
     .map(decodeInstance);
@@ -1181,6 +1205,191 @@ export function relatedTasks(db: Db, instanceId: string): TaskRow[] {
     )
     .all(instanceId, instanceId, instanceId)
     .map(decodeTask);
+}
+
+// ---------------------------------------------------------------------------
+// Workflow routing (workflow routing spec §8)
+// ---------------------------------------------------------------------------
+
+/** Why a pending step was made or skipped (§8), as stored: masked. */
+export interface PendingReason {
+  /** For a skip: by its `when`, its source, the cap, an archive, its board, or the instance's archive. */
+  by?: SkippedBy;
+  why: string;
+}
+
+/** One task of a fan-out's join marker (§4.2): its item, masked, its task and its ref. */
+export interface FanItem {
+  item: string;
+  taskId: string;
+  ref: string;
+}
+
+/** A pending step's row (§8): `waiting`, then `made` or `skipped`, once. */
+export interface PendingRow {
+  instanceId: string;
+  step: string;
+  state: PendingState;
+  reason: PendingReason | null;
+  items: FanItem[] | null;
+  causeEvent: number | null;
+  decidedAt: number | null;
+}
+
+/** A member's settling (§8): its step and ref, how, its winner, and the fact that settled it. */
+export interface SettledRow {
+  instanceId: string;
+  step: string;
+  ref: string;
+  how: SettledHow;
+  taskId: string | null;
+  eventId: number;
+  settledAt: number;
+}
+
+/** A route of a trigger event (§5.3, §8): its handler, the event, the routed task, and the handler's task when made. */
+export interface RouteRow {
+  instanceId: string;
+  handler: string;
+  eventId: number;
+  fromTask: string;
+  outcome: RouteOutcome;
+  taskId: string | null;
+  createdAt: number;
+}
+
+interface PendingRaw {
+  instance_id: string;
+  step: string;
+  state: string;
+  reason: string | null;
+  items: string | null;
+  cause_event: number | null;
+  decided_at: number | null;
+}
+
+interface SettledRaw {
+  instance_id: string;
+  step: string;
+  ref: string;
+  how: string;
+  task_id: string | null;
+  event_id: number;
+  settled_at: number;
+}
+
+interface RouteRaw {
+  instance_id: string;
+  handler: string;
+  event_id: number;
+  from_task: string;
+  outcome: string;
+  task_id: string | null;
+  created_at: number;
+}
+
+function decodePending(r: PendingRaw): PendingRow {
+  return {
+    instanceId: r.instance_id,
+    step: r.step,
+    state: r.state as PendingState,
+    reason: r.reason === null ? null : (JSON.parse(r.reason) as PendingReason),
+    items: r.items === null ? null : (JSON.parse(r.items) as FanItem[]),
+    causeEvent: r.cause_event,
+    decidedAt: r.decided_at,
+  };
+}
+
+function decodeSettled(r: SettledRaw): SettledRow {
+  return {
+    instanceId: r.instance_id,
+    step: r.step,
+    ref: r.ref,
+    how: r.how as SettledHow,
+    taskId: r.task_id,
+    eventId: r.event_id,
+    settledAt: r.settled_at,
+  };
+}
+
+function decodeRoute(r: RouteRaw): RouteRow {
+  return {
+    instanceId: r.instance_id,
+    handler: r.handler,
+    eventId: r.event_id,
+    fromTask: r.from_task,
+    outcome: r.outcome as RouteOutcome,
+    taskId: r.task_id,
+    createdAt: r.created_at,
+  };
+}
+
+const ROUTE_COLS = 'instance_id, handler, event_id, from_task, outcome, task_id, created_at';
+
+/** An instance's pending rows, by step; none on a database before 015. */
+export function pendingOf(db: Db, instanceId: string): PendingRow[] {
+  if (!hasRouting(db)) return [];
+  return db
+    .prepare<[string], PendingRaw>(
+      'SELECT instance_id, step, state, reason, items, cause_event, decided_at FROM kanban_workflow_pending WHERE instance_id = ? ORDER BY step',
+    )
+    .all(instanceId)
+    .map(decodePending);
+}
+
+/** An instance's settled rows, by step and ref; none on a database before 015. */
+export function settledOf(db: Db, instanceId: string): SettledRow[] {
+  if (!hasRouting(db)) return [];
+  return db
+    .prepare<[string], SettledRaw>(
+      'SELECT instance_id, step, ref, how, task_id, event_id, settled_at FROM kanban_workflow_settled WHERE instance_id = ? ORDER BY step, ref',
+    )
+    .all(instanceId)
+    .map(decodeSettled);
+}
+
+/** An instance's route rows, oldest first; none on a database before 015. */
+export function routesOf(db: Db, instanceId: string): RouteRow[] {
+  if (!hasRouting(db)) return [];
+  return db
+    .prepare<[string], RouteRaw>(`SELECT ${ROUTE_COLS} FROM kanban_workflow_routes WHERE instance_id = ? ORDER BY event_id, handler`)
+    .all(instanceId)
+    .map(decodeRoute);
+}
+
+/** The routes made from a task, by the index on `from_task`, oldest first. */
+export function routesFrom(db: Db, taskId: string): RouteRow[] {
+  if (!hasRouting(db)) return [];
+  return db
+    .prepare<[string], RouteRaw>(`SELECT ${ROUTE_COLS} FROM kanban_workflow_routes WHERE from_task = ? ORDER BY event_id, handler`)
+    .all(taskId)
+    .map(decodeRoute);
+}
+
+/** The route a handler's task was made by (§5.2, §5.4), by the index on `task_id`; undefined for any other task. */
+export function routeOfHandler(db: Db, taskId: string): RouteRow | undefined {
+  if (!hasRouting(db)) return undefined;
+  const row = db.prepare<[string], RouteRaw>(`SELECT ${ROUTE_COLS} FROM kanban_workflow_routes WHERE task_id = ?`).get(taskId);
+  return row === undefined ? undefined : decodeRoute(row);
+}
+
+/**
+ * A task's member row and its instance, for an instance with a plan (§9.2 step
+ * 1): one lookup by the members' primary key, joined to the instance. Undefined
+ * for a task that is no member, for an instance with no plan, and on a database
+ * before 015, which costs no read.
+ */
+export function plannedMemberOf(db: Db, taskId: string): { member: MemberRow; instance: InstanceRow } | undefined {
+  if (!hasRouting(db)) return undefined;
+  const row = db
+    .prepare<[string], MemberRaw & InstanceRaw>(
+      `SELECT m.task_id, m.ref, m.step, m.item, m.position, i.instance_id, i.name, i.dag, i.dag_sha256, i.source, i.board, i.created_by,
+              i.created_via, i.idempotency_key, i.created_at, i.plan, i.routing_failed_at
+         FROM kanban_workflow_tasks m JOIN kanban_workflow_instances i ON i.instance_id = m.instance_id
+        WHERE m.task_id = ? AND i.plan IS NOT NULL`,
+    )
+    .get(taskId);
+  return row === undefined ? undefined : { member: decodeMember(row), instance: decodeInstance(row) };
 }
 
 /** One Unblock button of a recorded message, and the `unblocked` or `archived` event that lifted its block, if one has. */
