@@ -81,6 +81,54 @@ describe('a stand-in made', () => {
     });
   });
 
+  it('holds a handler helping another step to its own step, not the one it stands in for', async () => {
+    // takeover stands in for intake, and helps va when va blocks.
+    const takeover = `  takeover:
+    title: "{{case}} · intake, taken over"
+    assignee: vi-coordinator
+    handler: true
+    stands_in_for: intake
+    outputs:
+      kind: { enum: [cve, supplychain] }
+      verify: boolean
+      patch: boolean
+      bnpm: boolean
+      packages: { list: string, max: 100 }
+`;
+    writeFileSync(
+      join(b.dir, 'vi-workflow.yaml'),
+      `${VI_WORKFLOW.replace('      packages: { list: string, max: 100 }\n  va:', '      packages: { list: string, max: 100 }\n    on_gave_up: { route: takeover }\n  va:').replace(
+        '    on_gave_up: { route: escalate }\n',
+        '    on_gave_up: { route: escalate }\n    on_blocked: { route: takeover }\n',
+      )}${takeover}`,
+    );
+    const w = madeOf(b.service.startWorkflow({ workflow: 'vi-workflow', params: { from: 'json', params: { case: 'CVE-1' } }, createdBy: ALICE, createdVia: VIA }));
+    const id = w.instance.instanceId;
+    const intake = w.tasks[0]?.taskId ?? '';
+    const ir = claimed(h.db, intake);
+    expect((await b.service.complete(intake, { kind: 'run', runId: ir.runId }, { summary: 'x', metadata: { ...CVE, packages: ['a'] } })).ok).toBe(true);
+    closeRun(h.db, ir.runId, NOW);
+    // Members to 450: were takeover read as intake, exposure's waiting fan-out over its 60 packages would pass the cap.
+    const task = h.db.prepare(
+      `INSERT INTO kanban_tasks (task_id, title, contract, phase, created_by, created_via, created_at, board)
+       VALUES (?, 'filler', jsonb('{}'), 'open', ?, jsonb('{"kind":"operator"}'), ?, 'vi')`,
+    );
+    const member = h.db.prepare("INSERT INTO kanban_workflow_tasks (task_id, instance_id, ref, step, item, position) VALUES (?, ?, ?, 'filler', NULL, ?)");
+    const base = membersOf(h.db, id).length;
+    for (let i = 0; i < 450 - base; i += 1) {
+      task.run(`k_fill${i}`, ALICE, NOW);
+      member.run(`k_fill${i}`, id, `filler:${i + 1}`, base + i);
+    }
+    const va = membersOf(h.db, id).find((m) => m.step === 'va')?.taskId ?? '';
+    const vr = claimed(h.db, va);
+    expect(b.service.block(va, { kind: 'run', runId: vr.runId }, { kind: 'capability', reason: 'no network' }).ok).toBe(true);
+    closeRun(h.db, vr.runId, NOW);
+    const helper = membersOf(h.db, id).find((m) => m.step === 'takeover')?.taskId ?? '';
+    const run = claimed(h.db, helper);
+    const packages = Array.from({ length: 60 }, (_, i) => `p${i}`);
+    expect((await b.service.complete(helper, { kind: 'run', runId: run.runId }, { summary: 'helped', metadata: { ...CVE, packages } })).ok).toBe(true);
+  });
+
   it("counts a stand-in's outputs sentence once, the start agreeing with the check at the limit and one byte past it", () => {
     // escalate's own outcome merged after va's, which carries the outputs sentence: exactly the limit, then one byte more.
     const theirs = { outcome: outcomeWithOutputs(undefined, { reachable: 'boolean' }) };

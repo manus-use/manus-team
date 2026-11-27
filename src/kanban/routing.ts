@@ -835,6 +835,8 @@ export interface RouteView {
   fromTask: string;
   fromStep: string;
   outcome: RouteOutcome;
+  /** The handler's task, for a route made. */
+  taskId: string | null;
   /** `gave up`, `stopped after 10 throttles`, `blocked`. */
   words: string;
 }
@@ -891,7 +893,8 @@ export function stepLines(
     const items = s.for_each === undefined || mine.length === 0 ? null : mine.length;
     if (row !== undefined && (row.how === 'done' || row.how === 'stood_in')) {
       const said = outputsText(s.outputs, results.get(s.step) ?? null);
-      const by = row.how === 'stood_in' ? routes.find((r) => r.fromStep === s.step && r.outcome === 'made')?.handler : undefined;
+      // The stand-in that won, by its task: a helper routed from the same step earlier is not it.
+      const by = row.how === 'stood_in' ? routes.find((r) => r.taskId !== null && r.taskId === row.taskId)?.handler : undefined;
       const text = `${s.step}: done${by === undefined ? '' : `, stood in for by ${by}`}${said === '' ? '' : ` (${said})`}`;
       out.push({ step: s.step, mark: '✓', text, state: row.how, why: null, items, routes: made(s.step) });
       continue;

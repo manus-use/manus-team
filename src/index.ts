@@ -462,7 +462,7 @@ export async function createGateway(config: GatewayConfig, team: Team, startup: 
     });
     boardService = service;
     // What a stop left due, decided now, before the dispatcher's first pass (workflow routing spec §11).
-    const reconciled = service.reconcileAll();
+    const reconciled = service.reconcileAll(note);
     if (reconciled.instances > 0) {
       note(`workflows: reconciled ${reconciled.instances} instance${reconciled.instances === 1 ? '' : 's'}, ${reconciled.steps} step${reconciled.steps === 1 ? '' : 's'} decided`);
     }

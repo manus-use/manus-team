@@ -43,7 +43,7 @@ Each item has an example of what you would type. In a group, start a message wit
 - **Run workflows.** A YAML file in `$MT_HOME/workflows/` turns into a graph of tasks with
   their links, made at once. `for_each` makes one task per item of a list, and `board:` says
   which board the tasks go on. A step's reported outputs can decide the rest: `when` makes or
-  skips a step, a fan-out runs over a result's list, and a step that gives up goes to a handler.
+  skips a step, a fan-out runs over a result's list, and a step that blocks or gives up can go to a handler.
   Example: `/kanban workflow start vendor-eval topic="log storage" vendors=acme,globex`
 - **Schedule cron jobs.** With `cron.enabled: true`, at its time the gateway gives a role's
   agent a prompt and posts the answer in the chat.

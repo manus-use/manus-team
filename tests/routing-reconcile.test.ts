@@ -180,6 +180,17 @@ steps:
     expect(routingDue(db)).toEqual([]);
   });
 
+  it('says a plan it cannot read, and reconciles nothing, never throwing', async () => {
+    await faulted();
+    // A plan no JSON reader takes, as only a damaged file could hold.
+    db.pragma('ignore_check_constraints = ON');
+    db.prepare("UPDATE kanban_workflow_instances SET plan = 'not json'").run();
+    db.pragma('ignore_check_constraints = OFF');
+    const notes: string[] = [];
+    expect(service.reconcileAll((l) => notes.push(l))).toEqual({ instances: 0, steps: 0 });
+    expect(notes).toEqual([expect.stringMatching(/^workflows: reading the instances to reconcile failed: /)]);
+  });
+
   it("is said in one note at the gateway's start, before its dispatcher's first pass", async () => {
     const id = await faulted();
     db.close();

@@ -1191,7 +1191,12 @@ export class KanbanService {
     const entry = plan.steps.find((s) => s.step === planned.member.step);
     if (entry === undefined || Object.keys(entry.outputs).length === 0) return undefined;
     if (kind === 'complete' && task.phase !== 'open') return undefined;
-    const read = entry.stands_in_for ?? entry.step;
+    // A handler stands in only for the step it was routed from: helping another, its result is its own step's (§5.2).
+    let read = entry.step;
+    if (entry.handler === true && entry.stands_in_for !== undefined) {
+      const route = routeOfHandler(this.#db, taskId);
+      if (route !== undefined && memberOf(this.#db, route.fromTask)?.step === entry.stands_in_for) read = entry.stands_in_for;
+    }
     const problem = checkOutputs(entry.outputs, metadata, outputBounds(plan, read));
     if (problem !== undefined) return board.refuse('invalid', problem);
     return this.#reserved(planned.instance.instanceId, plan, read, metadata as Record<string, unknown>);
@@ -2332,7 +2337,14 @@ export class KanbanService {
     const routes: RouteView[] = routesOf(this.#db, instanceId).map((r) => {
       const t = triggersOf(this.#db, r.fromTask).find((x) => x.eventId === r.eventId);
       const throttles = Number(/throttled (\d+) times/.exec(t?.reason ?? '')?.[1] ?? 0);
-      return { handler: r.handler, fromTask: r.fromTask, fromStep: step.get(r.fromTask) ?? '', outcome: r.outcome, words: t === undefined ? 'blocked' : triggerWords(t, throttles) };
+      return {
+        handler: r.handler,
+        fromTask: r.fromTask,
+        fromStep: step.get(r.fromTask) ?? '',
+        outcome: r.outcome,
+        taskId: r.taskId,
+        words: t === undefined ? 'blocked' : triggerWords(t, throttles),
+      };
     });
     const results = new Map<string, Readonly<Record<string, unknown>> | null>();
     for (const s of settled) {
@@ -2390,10 +2402,18 @@ export class KanbanService {
    * handler never makes an instance due. Answers how many instances had a
    * decision, and how many decisions; one that faults keeps its mark.
    */
-  reconcileAll(): { instances: number; steps: number } {
+  reconcileAll(note?: (line: string) => void): { instances: number; steps: number } {
     let instances = 0;
     let steps = 0;
-    for (const id of routingDue(this.#db)) {
+    // An instance whose plan cannot be read stops no start: it is said, and nothing is reconciled.
+    let due: string[];
+    try {
+      due = routingDue(this.#db);
+    } catch (err) {
+      note?.(`workflows: reading the instances to reconcile failed: ${redactKnownSecrets(err instanceof Error ? err.message : String(err))}`);
+      return { instances, steps };
+    }
+    for (const id of due) {
       try {
         const r = this.reconcileWorkflow(id);
         if (r.ok && r.decisions.length > 0) {

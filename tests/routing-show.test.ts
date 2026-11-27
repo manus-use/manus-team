@@ -103,6 +103,31 @@ describe('workflow show of a routed instance', () => {
     expect(anon(text).split('\n')[0]).toBe('**vi-workflow** `w_…`: running, 6 of 10 done · board: **vi**');
   });
 
+  it('names the stand-in that won by its task, not a helper routed from the step before it', async () => {
+    writeFileSync(
+      join(f.home, 'workflows', 'vi-workflow.yaml'),
+      `${VI_WORKFLOW.replace('    on_gave_up: { route: escalate }\n', '    on_gave_up: { route: escalate }\n    on_blocked: { route: help }\n')}  help:\n    title: "{{case}} · help va"\n    assignee: vi-coordinator\n    handler: true\n`,
+    );
+    const w = madeOf(service.startWorkflow({ workflow: 'vi-workflow', params: { from: 'json', params: { case: 'CVE-1' } }, createdBy: ALICE, createdVia: VIA }));
+    const id = w.instance.instanceId;
+    await done(w.tasks[0]?.taskId ?? '', { kind: 'cve', verify: false, patch: false, bnpm: false, packages: [] });
+    const step = (s: string) => membersOf(db, id).find((m) => m.step === s)?.taskId ?? '';
+    const va = step('va');
+    // The helper first, for a block; then the stand-in, for a give-up.
+    const blocked = claimed(db, va);
+    expect(service.block(va, { kind: 'run', runId: blocked.runId }, { kind: 'capability', reason: 'no network' }).ok).toBe(true);
+    closeRun(db, blocked.runId, NOW);
+    expect(step('help')).not.toBe('');
+    expect(service.unblock(va, ALICE).ok).toBe(true);
+    const crashed = claimed(db, va);
+    service.endRun(crashed.runId, { outcome: 'crashed' });
+    closeRun(db, crashed.runId, NOW);
+    await done(step('escalate'), { reachable: true });
+    const r = service.instance(id);
+    if (!r.ok) throw new Error(r.message);
+    expect(r.view.steps?.find((l) => l.step === 'va')?.text).toBe('va: done, stood in for by escalate (reachable=true)');
+  });
+
   it('says a route the transient limit made by the throttles that stopped its task', async () => {
     const w = madeOf(service.startWorkflow({ workflow: 'vi-workflow', params: { from: 'json', params: { case: 'CVE-1' } }, createdBy: ALICE, createdVia: VIA }));
     await done(w.tasks[0]?.taskId ?? '', { kind: 'cve', verify: false, patch: false, bnpm: false, packages: [] });
