@@ -37,6 +37,11 @@
  *               it says SLOW, and otherwise `Fired: ` and the job's prompt; each
  *               turn's PATH, its MT_CRON_FIRE if a fire's, and its
  *               MT_AGENT_SESSION, is appended to `cron-env.log` beside the log
+ *   routing     a board run that reads its task with `mt kanban show` and acts on its
+ *               body's lines: CRASH exits without finishing; each `REPORT {…}` is
+ *               a `mt kanban complete` input, tried in order until one is taken,
+ *               each answer appended to `routing.log` beside the log; with none, a
+ *               plain complete; a review run approves with `LGTM`
  *   staged      a board run that works a while: a tool running, then, once a file
  *               `release-1` is beside the log, the tool done and a line of text,
  *               then, once `release-2` is, `mt kanban complete`
@@ -442,6 +447,49 @@ switch (MODE) {
   case 'weird': {
     delta('half an answer');
     summary('interrupted_by_something_new', 'half an answer');
+    break;
+  }
+
+  case 'routing': {
+    const beside = (name) => join(dirname(LOG ?? '.'), name);
+    const shown = mt('show');
+    let view = {};
+    try {
+      view = JSON.parse(shown.answer);
+    } catch {
+      process.stderr.write(`mt kanban show failed: ${shown.error} ${shown.answer}\n`);
+    }
+    const task = view.task ?? {};
+    const body = task.body ?? '';
+    if (view.run?.kind === 'review') {
+      const approved = mt('complete', { summary: 'LGTM' });
+      delta(`approve: ${approved.answer}`);
+      summary('completed', 'approved');
+      break;
+    }
+    if (body.split('\n').some((l) => l.trim() === 'CRASH')) {
+      delta('starting');
+      process.stderr.write('fake agent is going down mid-turn\n');
+      process.exit(7);
+    }
+    const reports = body
+      .split('\n')
+      .filter((l) => l.startsWith('REPORT '))
+      .map((l) => JSON.parse(l.slice('REPORT '.length)));
+    let answer = '';
+    for (const report of reports.length > 0 ? reports : [{ summary: `did: ${task.title}` }]) {
+      answer = mt('complete', report).answer;
+      appendFileSync(beside('routing.log'), `${JSON.stringify({ task: task.task_id, title: task.title, report, answer })}\n`);
+      let ok = false;
+      try {
+        ok = JSON.parse(answer).ok === true;
+      } catch {
+        // An answer that is no JSON is a failure: the next report is tried.
+      }
+      if (ok) break;
+    }
+    delta(`complete: ${answer}`);
+    summary('completed', 'reported');
     break;
   }
 
