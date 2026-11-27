@@ -175,3 +175,76 @@ export function standInContract(step: string, theirs: Contract, own: Contract): 
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// What a check, a preview and `show` say of a step (§6, §12)
+// ---------------------------------------------------------------------------
+
+/** What the words of a step read: a plan's step, or a file's as the check sees it. */
+export type StepShape = Pick<PlanStep, 'step' | 'made' | 'when' | 'for_each' | 'on_blocked' | 'on_gave_up' | 'handler' | 'stands_in_for'>;
+
+/** A clause's value as words say it: text as written, numbers and booleans as JSON writes them. */
+function valueText(v: ClauseValue): string {
+  return typeof v === 'string' ? v : JSON.stringify(v);
+}
+
+/** A clause in words (§6): `va.reachable is true`, `intake.kind is one of cve, ghsa`, `va gave up`. */
+export function clauseText(c: Clause): string {
+  if ('state' in c) {
+    if (c.state === 'gave_up') return `${c.step} gave up`;
+    if (c.state === 'blocked') return `${c.step} blocked`;
+    return `${c.step} is ${c.state}`;
+  }
+  const ref = `${c.step}.${c.output}`;
+  if ('equals' in c) return `${ref} is ${valueText(c.equals)}`;
+  if ('in' in c) return `${ref} is one of ${c.in.map(valueText).join(', ')}`;
+  if ('is' in c) return `${ref} is ${c.is}`;
+  if ('at_least' in c) return `${ref} is at least ${c.at_least}`;
+  return `${ref} is at most ${c.at_most}`;
+}
+
+/** A `when` in words: its clauses joined by `and`, the `any` group in parentheses joined by `or`. */
+export function whenText(when: readonly WhenItem[]): string {
+  return when.map((item) => ('any' in item ? `(${item.any.map(clauseText).join(' or ')})` : clauseText(item))).join(' and ');
+}
+
+/** The steps that route to a handler, in the plan's order. */
+export function routedFrom(steps: readonly StepShape[], handler: string): string[] {
+  return steps.filter((s) => [s.on_blocked, s.on_gave_up].some((r) => r !== 'wait' && r.route === handler)).map((s) => s.step);
+}
+
+/**
+ * What a check and a preview say of a step (§6): `always` for a plain step;
+ * `per item of <step>.<output>` or `per item of <param>`, and `when <clauses>`,
+ * for a pending one, or `when its parents are settled` with neither; `handler
+ * for <steps>`, with `, standing in`; then its routes. With `max`, a result
+ * fan-out says its list's bound, as a preview does (§12.3).
+ */
+export function stepWords(steps: readonly StepShape[], s: StepShape, max?: (fanOut: StepShape) => number | undefined): string {
+  if (s.handler === true) return `handler for ${routedFrom(steps, s.step).join(', ')}${s.stands_in_for === undefined ? '' : ', standing in'}`;
+  const parts: string[] = [];
+  if (s.made === 'start') parts.push('always');
+  else {
+    const f = s.for_each;
+    if (f !== undefined) {
+      const bound = 'step' in f ? max?.(s) : undefined;
+      parts.push(`per item of ${'step' in f ? `${f.step}.${f.output}` : f.param}${bound === undefined ? '' : `, at most ${bound}`}`);
+    }
+    if (s.when !== undefined) parts.push(`when ${whenText(s.when)}`);
+    if (parts.length === 0) parts.push('when its parents are settled');
+  }
+  const routes = [
+    ...(s.on_blocked === 'wait' ? [] : [`on blocked, routed to ${s.on_blocked.route}`]),
+    ...(s.on_gave_up === 'wait' ? [] : [`on gave up, routed to ${s.on_gave_up.route}`]),
+  ];
+  return [parts.join(', '), ...routes].join('; ');
+}
+
+/** How many steps are plain, pending and handlers, as a check's line counts them (§6). */
+export function stepCounts(steps: readonly StepShape[]): { always: number; onResults: number; handlers: number } {
+  return {
+    always: steps.filter((s) => s.made === 'start').length,
+    onResults: steps.filter((s) => s.made === 'decide').length,
+    handlers: steps.filter((s) => s.made === 'route').length,
+  };
+}

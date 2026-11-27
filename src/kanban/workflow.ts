@@ -8,7 +8,7 @@ import { redactKnownSecrets } from '../secrets.js';
 import { DAG_FORMAT, DAG_LIMITS, titleRefused, type Dag, type DagTask, type ParamValue } from './dag.js';
 import { WORKER_LIMITS } from './limits.js';
 import { gateProblem, gatesProblem } from './gate-command.js';
-import { outcomeWithOutputs, standInContract, type Clause, type ClauseValue, type OutputType, type Outputs, type RouteSpec, type ScalarType, type StepState, type WhenItem } from './routing.js';
+import { outcomeWithOutputs, standInContract, type StepShape, type Clause, type ClauseValue, type OutputType, type Outputs, type RouteSpec, type ScalarType, type StepState, type WhenItem } from './routing.js';
 import { assignable, isRecord, NO_MENTIONS, type TaskFacts } from './task-checks.js';
 import { CONTRACT_FIELDS, GATE_LIMITS, type Contract, type CreatedVia, type Phase, type Refusal, type Result, type RetryOnCrash } from './types.js';
 
@@ -714,6 +714,32 @@ export function pendingSteps(steps: readonly Pick<WorkflowStep, 'name' | 'parent
   };
   for (const s of steps) if (isPending(s.name)) pending.add(s.name);
   return pending;
+}
+
+/**
+ * Whether a file uses any routing key (workflow routing spec §7.1): outputs, a
+ * `when`, a result fan-out, a route or a handler. A file using none expands
+ * exactly as before, with no plan, and its check says what it said.
+ */
+export function usesRouting(w: Workflow): boolean {
+  return w.steps.some(
+    (s) => Object.keys(s.outputs).length > 0 || s.when !== undefined || typeof s.forEach === 'object' || s.onBlocked !== 'wait' || s.onGaveUp !== 'wait' || s.handler,
+  );
+}
+
+/** A file's steps as the words of a check read them (§6): each with what makes it, plain, pending or a handler. */
+export function stepShapes(w: Workflow): StepShape[] {
+  const pending = pendingSteps(w.steps);
+  return w.steps.map((s) => ({
+    step: s.name,
+    made: s.handler ? 'route' : pending.has(s.name) ? 'decide' : 'start',
+    ...(s.when === undefined ? {} : { when: s.when }),
+    ...(s.forEach === undefined ? {} : { for_each: typeof s.forEach === 'string' ? { param: s.forEach } : s.forEach }),
+    on_blocked: s.onBlocked,
+    on_gave_up: s.onGaveUp,
+    ...(s.handler ? { handler: true as const } : {}),
+    ...(s.standsInFor === undefined ? {} : { stands_in_for: s.standsInFor }),
+  }));
 }
 
 /** A step's ancestors, transitively through its parents, memoized; the cycle check has run, so the walk ends. */
