@@ -24,6 +24,7 @@ import {
   phaseSince,
   plannedMemberOf,
   reactsTo,
+  routingFaulted,
   relatedTasks,
   runsOf,
   statusOf,
@@ -399,6 +400,9 @@ export interface InstanceView extends InstanceState {
 /** How many of a board's newest instances `instances` reads (workflows spec §7). */
 export const INSTANCES_READ = 200;
 
+/** How often a faulted instance's routing is retried, at most (workflow routing spec §9.4). */
+export const RETRY_ROUTING_MS = 60_000;
+
 /** How long `unknown_workflow`'s message may be, in bytes: a gate refusal's output's size (workflows spec §6). */
 export const WORKFLOW_MESSAGE_BYTES = 4 * 1024;
 
@@ -536,6 +540,8 @@ export class KanbanService {
    * agent in a checkout being tested.
    */
   readonly #reporting = new Map<string, { workspace: string | null; done: Promise<unknown> }>();
+  /** When each faulted instance's routing was last retried, in this process (workflow routing spec §9.4); not stored. */
+  readonly #retried = new Map<string, number>();
 
   constructor(deps: KanbanServiceDeps) {
     this.#db = deps.db;
@@ -2175,6 +2181,38 @@ export class KanbanService {
     if (!isText(instanceId)) return board.refuse('invalid', 'an instance id is text');
     if (!isText(by) || by.trim() === '') return board.refuse('invalid', 'who archives is text, not blank');
     return board.archiveWorkflow(this.#db, instanceId, by, this.#clock.now());
+  }
+
+  /**
+   * Reconcile an instance (workflow routing spec §11): what is due decided and
+   * made, in a transaction of its own, against the team as it is now.
+   */
+  reconcileWorkflow(instanceId: string): Result<board.Reconciled> {
+    if (!isText(instanceId)) return board.refuse('invalid', 'an instance id is text');
+    return board.reconcileWorkflow(this.#db, instanceId, this.#clock.now(), this.#facts());
+  }
+
+  /**
+   * The dispatcher's hook (workflow routing spec §9.4): every instance whose routing
+   * faulted reconciled, each at most once a minute; a reconciliation that faults
+   * again leaves its mark for the next. Answers how many were reconciled. The
+   * time each was last tried is this process's: after a restart, the startup's
+   * reconciliation tries every one.
+   */
+  retryRouting(): number {
+    const now = this.#clock.now();
+    let reconciled = 0;
+    for (const id of routingFaulted(this.#db)) {
+      const last = this.#retried.get(id);
+      if (last !== undefined && now - last < RETRY_ROUTING_MS) continue;
+      this.#retried.set(id, now);
+      try {
+        if (this.reconcileWorkflow(id).ok) reconciled += 1;
+      } catch {
+        // Still faulted: its mark stays, and the next pass after a minute tries again.
+      }
+    }
+    return reconciled;
   }
 
   /** Who the next claim is for, resolved against the team as it is now. */

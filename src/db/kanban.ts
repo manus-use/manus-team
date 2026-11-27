@@ -60,6 +60,7 @@ import {
   hasWakeColumns,
   instanceByKey,
   membersWithTasks,
+  memberOf,
   isFinished,
   membersOf,
   openAgentRunIn,
@@ -3472,4 +3473,66 @@ function routeIn(d: Db, taskId: string, cause: RouteCause, eventId: number, now:
     },
     now,
   );
+}
+
+/** A reconciliation's answer (§11): the instance, and each decision it made. */
+export interface Reconciled {
+  instance: InstanceRow;
+  decisions: RoutedLine[];
+}
+
+/**
+ * The member a reconciliation's `workflow_routed` goes on (§11): the
+ * latest-settled ancestor its first decision's step reads, so the notice reaches
+ * the instance's chat as any would; the first member when none has a task.
+ */
+function reconciledOn(d: Db, r: Routed, step: string): string | undefined {
+  const parents = new Map(r.plan.steps.map((s) => [s.step, s.parents]));
+  const ancestors = new Set<string>();
+  const walk = (name: string): void => {
+    for (const p of parents.get(name) ?? []) {
+      if (ancestors.has(p)) continue;
+      ancestors.add(p);
+      walk(p);
+    }
+  };
+  walk(step);
+  const latest = settledOf(d, r.instance.instanceId)
+    .filter((x) => ancestors.has(x.step) && x.taskId !== null)
+    .sort((a, b) => b.eventId - a.eventId)[0];
+  return latest?.taskId ?? r.members[0]?.taskId;
+}
+
+/**
+ * Reconcile an instance (§11): the routing given no transitioning task, in one
+ * transaction of its own, deciding what is due and making it, its
+ * `workflow_routed` on the member whose settling decided the first decision;
+ * and its fault mark cleared, as it succeeded. The keys of §9.2 make one that
+ * races the gateway decide nothing twice. A fault is thrown: nothing is written,
+ * and the mark stays.
+ */
+export function reconcileWorkflow(db: Db, instanceId: string, now: number, team?: RouteTeam): Result<Reconciled> {
+  return tx(db, (d) => {
+    const instance = getInstance(d, instanceId);
+    if (instance === undefined) return refuse('not_found', `no workflow instance ${instanceId}`);
+    const r = routedOf(d, instance);
+    if (r === undefined) return { ok: true, instance, decisions: [] };
+    const decisions = decideAll(d, instance, null, now, team);
+    const first = decisions[0];
+    const on = first === undefined ? undefined : reconciledOn(d, routedOf(d, instance) as Routed, first.step);
+    if (on !== undefined) {
+      record(
+        d,
+        {
+          taskId: on,
+          kind: 'workflow_routed',
+          actor: 'gateway',
+          payload: { workflow: instanceId, workflowName: instance.name, step: memberOf(d, on)?.step ?? null, cause: 'reconciled', decisions },
+        },
+        now,
+      );
+    }
+    d.prepare('UPDATE kanban_workflow_instances SET routing_failed_at = NULL WHERE instance_id = ?').run(instanceId);
+    return { ok: true, instance: getInstance(d, instanceId) as InstanceRow, decisions };
+  });
 }

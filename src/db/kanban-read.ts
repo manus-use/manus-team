@@ -1373,6 +1373,15 @@ export function routeOfHandler(db: Db, taskId: string): RouteRow | undefined {
   return row === undefined ? undefined : decodeRoute(row);
 }
 
+/** The instances whose routing faulted and no reconciliation has cleared since, oldest fault first (§9.4). */
+export function routingFaulted(db: Db): string[] {
+  if (!hasRouting(db)) return [];
+  return db
+    .prepare<[], { instance_id: string }>('SELECT instance_id FROM kanban_workflow_instances WHERE routing_failed_at IS NOT NULL ORDER BY routing_failed_at, instance_id')
+    .all()
+    .map((r) => r.instance_id);
+}
+
 /**
  * A task's member row and its instance, for an instance with a plan (§9.2 step
  * 1): one lookup by the members' primary key, joined to the instance. Undefined
