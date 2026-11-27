@@ -450,3 +450,252 @@ export function checkOutputs(declared: Outputs, metadata: unknown, bounds: Outpu
   }
   return undefined;
 }
+
+// ---------------------------------------------------------------------------
+// decide(plan, facts) (§10)
+// ---------------------------------------------------------------------------
+
+/** The instance's most tasks, handlers included (§9.4, §19). */
+export const INSTANCE_CAP = 500;
+
+/** At most this many routes a routed task, counting only those made (§5.3). */
+export const ROUTES_PER_TASK = 3;
+
+/** A member's settling, as decide reads it: how, its winner, and the fact that settled it. */
+export interface SettledFact {
+  how: SettledHow;
+  taskId: string | null;
+  eventId: number;
+}
+
+/** One step, as the writer read it inside its transaction (§9.2 step 3). */
+export interface StepFact {
+  step: string;
+  /** A pending step's row; null for a plain step or a handler. */
+  row: PendingState | null;
+  /** Why its row was skipped, when it was. */
+  skippedBy: SkippedBy | null;
+  /** The step's own settled row: its one member's, or a fan-out's own. */
+  settled: SettledFact | null;
+  /** A fan-out's item rows, by ref. */
+  items: ReadonlyMap<string, SettledFact>;
+  /** Whether its task entered `blocked` from its work, ever, by `on_blocked`'s or `on_gave_up`'s triggers (§3.2, §5.1). */
+  entered: { blocked: boolean; gaveUp: boolean };
+  /** Its settled winner's accepted metadata, as stored; null with no accepted result. */
+  result: Readonly<Record<string, unknown>> | null;
+}
+
+/** A trigger event of a member's task, a route due for it (§5.1, §5.3). */
+export interface RouteFact {
+  taskId: string;
+  step: string;
+  ref: string;
+  item: string | null;
+  eventId: number;
+  /** By §5.1's table, from the event: `blocked` routes by `on_blocked`, `gave_up` by `on_gave_up`. */
+  kind: 'blocked' | 'gave_up';
+  /** The transient limit's block, a `gave_up` the board's throttling stopped (§5.3's wording). */
+  throttled: boolean;
+  /** The block's reason, as the event recorded it. */
+  reason: string;
+  /** The routes made from the task so far (§5.3). */
+  routes: number;
+}
+
+/** What decide reads (§10). */
+export interface Facts {
+  steps: ReadonlyMap<string, StepFact>;
+  due: readonly RouteFact[];
+  /** The instance's members, handlers included. */
+  members: number;
+  cap: number;
+}
+
+/** What decide finds due now (§10); waiting is the absence of a decision. */
+export type Decision =
+  | { step: string; outcome: 'made'; parents: string[]; why: string }
+  | { step: string; outcome: 'skipped'; by: SkippedBy; why: string }
+  | { step: string; outcome: 'fanned_out'; items: string[]; parents: string[]; why: string }
+  | { step: string; outcome: 'settled'; how: 'skipped' | 'archived'; eventId: number }
+  | { step: string; outcome: 'route'; handler: string; from: RouteFact; standsIn: boolean }
+  | { step: string; outcome: 'over_limit' | 'over_cap'; handler: string; from: RouteFact };
+
+type Truth = 'true' | 'false' | 'undecided';
+
+/** A value as a reason says it: text as given, numbers and booleans as JSON writes them, a list as its items. */
+export function valueSaid(value: unknown): string {
+  if (Array.isArray(value)) return value.map((v) => valueSaid(v)).join(', ');
+  return typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
+}
+
+/** Whether a stored value is of its declared type (§2.3): anything else reads as missing. */
+export function ofType(t: OutputType | undefined, value: unknown): boolean {
+  if (t === undefined) return false;
+  const scalar = (s: ScalarType, v: unknown): boolean => {
+    if (s === 'boolean') return typeof v === 'boolean';
+    if (s === 'number') return typeof v === 'number' && Number.isFinite(v);
+    if (s === 'string') return typeof v === 'string';
+    return typeof v === 'string' && s.enum.includes(v);
+  };
+  if (typeof t === 'object' && 'list' in t) return Array.isArray(value) && value.length <= t.max && value.every((v) => scalar(t.list, v));
+  return scalar(t, value);
+}
+
+/** Whether a settled row is an accepted result (§2.3): its own task's or a stand-in's completion. */
+function accepted(s: SettledFact | null): boolean {
+  return s !== null && (s.how === 'done' || s.how === 'stood_in');
+}
+
+/** A step's accepted value of one output, of its declared type; undefined for none (§2.3, §3). */
+export function resultOf(plan: Plan, facts: Facts, step: string, output: string): unknown {
+  const fact = facts.steps.get(step);
+  if (fact === undefined || !accepted(fact.settled) || fact.result === null) return undefined;
+  const value = fact.result[output];
+  const type = plan.steps.find((s) => s.step === step)?.outputs[output];
+  return ofType(type, value) ? value : undefined;
+}
+
+/** One clause, as the facts decide it now (§3.1, §3.2), and why it is false when it is. */
+function clause(plan: Plan, facts: Facts, c: Clause): { truth: Truth; why: string } {
+  const fact = facts.steps.get(c.step);
+  // A step decide does not know is unsettled: never an exception (§10).
+  if (fact === undefined) return { truth: 'undecided', why: '' };
+  const settled = fact.settled;
+  if ('state' in c) {
+    if (c.state === 'blocked' || c.state === 'gave_up') {
+      const entered = c.state === 'blocked' ? fact.entered.blocked : fact.entered.gaveUp;
+      if (entered) return { truth: 'true', why: '' };
+      return settled === null ? { truth: 'undecided', why: '' } : { truth: 'false', why: c.state === 'blocked' ? `${c.step} did not block` : `${c.step} did not give up` };
+    }
+    if (settled === null) return { truth: 'undecided', why: '' };
+    const done = accepted(settled);
+    if (c.state === 'done') return done ? { truth: 'true', why: '' } : { truth: 'false', why: `${c.step} was ${settled.how === 'archived' ? 'archived' : 'skipped'}` };
+    return done ? { truth: 'false', why: `${c.step} is done` } : { truth: 'true', why: '' };
+  }
+  if (settled === null) return { truth: 'undecided', why: '' };
+  if (!accepted(settled)) return { truth: 'false', why: `${c.step} was ${settled.how === 'archived' ? 'archived' : 'skipped'}` };
+  const ref = `${c.step}.${c.output}`;
+  const value = resultOf(plan, facts, c.step, c.output);
+  if (value === undefined) return { truth: 'false', why: `${ref} is missing` };
+  const why = `${ref} is ${valueSaid(value)}`;
+  let holds: boolean;
+  if ('equals' in c) holds = value === c.equals;
+  else if ('in' in c) holds = c.in.includes(value as ClauseValue);
+  else if ('is' in c) holds = value === c.is;
+  else if ('at_least' in c) holds = typeof value === 'number' && value >= c.at_least;
+  else holds = typeof value === 'number' && value <= c.at_most;
+  return holds ? { truth: 'true', why: '' } : { truth: 'false', why };
+}
+
+/** A step's `when`, decided now (§3.2): certainly false at its first false clause, true once every clause holds. */
+function when(plan: Plan, facts: Facts, items: readonly WhenItem[] | undefined): { truth: Truth; why: string } {
+  if (items === undefined) return { truth: 'true', why: '' };
+  let undecided = false;
+  for (const item of items) {
+    if ('any' in item) {
+      const each = item.any.map((c) => clause(plan, facts, c));
+      if (each.some((r) => r.truth === 'true')) continue;
+      if (each.every((r) => r.truth === 'false')) return { truth: 'false', why: each[0]?.why ?? '' };
+      undecided = true;
+      continue;
+    }
+    const r = clause(plan, facts, item);
+    if (r.truth === 'false') return r;
+    if (r.truth === 'undecided') undecided = true;
+  }
+  return undecided ? { truth: 'undecided', why: '' } : { truth: 'true', why: '' };
+}
+
+/** The steps a `when` reads by a `state: blocked` or `state: gave_up` clause that holds now: not waited for, not linked (§3.2). */
+function stuckParents(facts: Facts, items: readonly WhenItem[] | undefined): Set<string> {
+  const out = new Set<string>();
+  for (const item of items ?? []) {
+    for (const c of 'any' in item ? item.any : [item]) {
+      if (!('state' in c) || (c.state !== 'blocked' && c.state !== 'gave_up')) continue;
+      const f = facts.steps.get(c.step);
+      if (f !== undefined && (c.state === 'blocked' ? f.entered.blocked : f.entered.gaveUp)) out.add(c.step);
+    }
+  }
+  return out;
+}
+
+/**
+ * A step's effective parents (§3.2), as task ids: a done step's winning task, a
+ * fan-out's items' winners, none archived undone; a step skipped otherwise, its
+ * own effective parents, recursively; a step skipped by archive, none.
+ */
+export function effectiveParents(plan: Plan, facts: Facts, steps: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const walk = (name: string): void => {
+    if (seen.has(name)) return;
+    seen.add(name);
+    const fact = facts.steps.get(name);
+    const settled = fact?.settled ?? null;
+    if (fact === undefined || settled === null || settled.how === 'archived') return;
+    if (settled.how === 'skipped') {
+      for (const p of plan.steps.find((s) => s.step === name)?.parents ?? []) walk(p);
+      return;
+    }
+    const winners = fact.items.size > 0 ? [...fact.items.values()].filter(accepted).map((i) => i.taskId) : [settled.taskId];
+    for (const id of winners) if (id !== null && !out.includes(id)) out.push(id);
+  };
+  for (const s of steps) walk(s);
+  return out;
+}
+
+/** The greatest event id of the steps' settled rows: the settling that let a skipped step count (§8). */
+function latestOf(facts: Facts, steps: readonly string[]): number {
+  return steps.reduce((most, s) => Math.max(most, facts.steps.get(s)?.settled?.eventId ?? 0), 0);
+}
+
+/** How many tasks a pending step's making is: its list param's items, or one. */
+function tasksOf(s: PlanStep): number {
+  return s.templates?.length ?? 1;
+}
+
+/**
+ * What is due now (§10), in the plan's order: each waiting step decided once its
+ * `when` is certain, made once its parents are settled, or skipped; each skipped
+ * step settled once its parents are. Pure and total: a missing result, a value of
+ * the wrong type, an unknown step read as false or unsettled, never thrown.
+ */
+export function decide(plan: Plan, facts: Facts): Decision[] {
+  const out: Decision[] = [];
+  let members = facts.members;
+  for (const s of plan.steps) {
+    const fact = facts.steps.get(s.step);
+    if (fact === undefined) continue;
+    if (fact.row === 'skipped' && fact.settled === null) {
+      if (!s.parents.every((p) => facts.steps.get(p)?.settled != null)) continue;
+      const archived = fact.skippedBy === 'archive' || (s.parents.length > 0 && s.parents.every((p) => facts.steps.get(p)?.settled?.how === 'archived'));
+      out.push({ step: s.step, outcome: 'settled', how: archived ? 'archived' : 'skipped', eventId: latestOf(facts, s.parents) });
+      continue;
+    }
+    if (fact.row !== 'waiting') continue;
+    const w = when(plan, facts, s.when);
+    if (w.truth === 'undecided') continue;
+    if (w.truth === 'false') {
+      out.push({ step: s.step, outcome: 'skipped', by: 'when', why: w.why });
+      continue;
+    }
+    const stuck = stuckParents(facts, s.when);
+    const waited = s.parents.filter((p) => !stuck.has(p));
+    if (!waited.every((p) => facts.steps.get(p)?.settled != null)) continue;
+    if (waited.length > 0 && waited.every((p) => facts.steps.get(p)?.settled?.how === 'archived')) {
+      out.push({ step: s.step, outcome: 'skipped', by: 'archive', why: 'its parents were archived' });
+      continue;
+    }
+    const why = s.when === undefined ? 'its parents are settled' : whenText(s.when);
+    const parents = effectiveParents(plan, facts, waited);
+    const count = tasksOf(s);
+    if (members + count > facts.cap) {
+      out.push({ step: s.step, outcome: 'skipped', by: 'cap', why: `the instance has ${facts.cap} tasks` });
+      continue;
+    }
+    members += count;
+    if (s.templates !== undefined) out.push({ step: s.step, outcome: 'fanned_out', items: s.templates.map((t) => t.item), parents, why });
+    else out.push({ step: s.step, outcome: 'made', parents, why });
+  }
+  return out;
+}
